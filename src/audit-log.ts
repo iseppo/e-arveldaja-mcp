@@ -15,6 +15,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
+import { randomUUID } from "crypto";
 import { join } from "path";
 import { z } from "zod";
 import {
@@ -61,6 +62,8 @@ export const AUDIT_ACTIONS = [
   "DELETE_FAILED",
   "CONNECTION_SWITCH_INTERRUPTED",
   "MUTATION_INDETERMINATE",
+  // Tombstone written by clear_session_log
+  "LOG_CLEARED",
 ] as const;
 
 export const AuditEntityType = z.enum(AUDIT_ENTITY_TYPES);
@@ -459,8 +462,8 @@ function getLang(): Lang {
 }
 
 const ACTION_LABELS: Record<Lang, Record<string, string>> = {
-  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud", DELETE_FAILED: "Kustutamine ebaõnnestus", CONNECTION_SWITCH_INTERRUPTED: "Ühenduse vahetus katkestatud", MUTATION_INDETERMINATE: "Mutatsiooni tulemus määramatu" },
-  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent", DELETE_FAILED: "Delete failed", CONNECTION_SWITCH_INTERRUPTED: "Connection switch interrupted", MUTATION_INDETERMINATE: "Mutation outcome indeterminate" },
+  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud", DELETE_FAILED: "Kustutamine ebaõnnestus", CONNECTION_SWITCH_INTERRUPTED: "Ühenduse vahetus katkestatud", MUTATION_INDETERMINATE: "Mutatsiooni tulemus määramatu", LOG_CLEARED: "Logi tühjendatud" },
+  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent", DELETE_FAILED: "Delete failed", CONNECTION_SWITCH_INTERRUPTED: "Connection switch interrupted", MUTATION_INDETERMINATE: "Mutation outcome indeterminate", LOG_CLEARED: "Log cleared" },
 };
 
 const ENTITY_LABELS: Record<Lang, Record<string, string>> = {
@@ -830,7 +833,14 @@ export function logAudit(
     // relabel (which holds the same lock for its whole transaction) and makes the
     // append target the CURRENT label — so it can never land on, or recreate, a
     // file the relabel just migrated away.
+    const lockStartedAt = Date.now();
     withAuditLogLock(() => {
+      const waitedMs = Date.now() - lockStartedAt;
+      if (waitedMs >= AUDIT_LOCK_SLOW_WAIT_MS) {
+        process.stderr.write(
+          `[audit] waited ${waitedMs}ms for the audit-log lock ${describeAuditEntry(entry)}\n`,
+        );
+      }
       loadAuditLabelMap();
       const filePath = opts?.connectionName
         ? getLogFilePathForConnection(opts.connectionName)
@@ -838,10 +848,25 @@ export function logAudit(
       appendPrivateTextFile(filePath, md);
     });
     return true;
-  } catch {
-    // Audit logging is best-effort — do not crash the server
+  } catch (error) {
+    // Audit logging must not crash the server, but a lost audit record must
+    // never be silent: report it on stderr (captured by the stderr tee / MCP
+    // host log) with the operation's identity, and return false so a caller
+    // can surface it. A lock timeout (default 30s) lands here too.
+    process.stderr.write(
+      `[audit] FAILED to write audit entry ${describeAuditEntry(entry)}: ` +
+      `${error instanceof Error ? error.message : String(error)}\n`,
+    );
     return false;
   }
+}
+
+/** Waits at/above this are reported on stderr even when the append succeeds. */
+const AUDIT_LOCK_SLOW_WAIT_MS = 5_000;
+
+function describeAuditEntry(entry: Omit<AuditEntry, "timestamp">): string {
+  const id = entry.entity_id !== undefined ? ` id=${entry.entity_id}` : "";
+  return `tool="${entry.tool}" action="${entry.action}" entity="${entry.entity_type}"${id}`;
 }
 
 export interface AuditLogFilter {
@@ -961,13 +986,56 @@ export function getAuditLog(filter?: AuditLogFilter): string {
   return getAuditLogFromFile(getLogFilePath(), filter);
 }
 
-/** Clear the current connection's audit log file. */
-export function clearAuditLog(): void {
-  const filePath = getLogFilePath();
+/**
+ * Clear the current connection's audit log file, leaving a TOMBSTONE entry
+ * (when, which connection/process, how many entries were removed) instead of an
+ * empty file — so a cleared log is never indistinguishable from "nothing ever
+ * happened". The read-count-replace runs under the shared audit lock so a
+ * concurrent append cannot be lost between the count and the rewrite.
+ */
+export function clearAuditLog(): { cleared: boolean; entries_removed: number } {
   try {
-    writePrivateTextFile(filePath, "");
-  } catch {
-    // best-effort
+    ensureLogsDir();
+    return withAuditLogLock(() => {
+      loadAuditLabelMap();
+      const filePath = getLogFilePath();
+      const previous = existsSync(filePath) ? readFileSync(filePath, "utf-8") : "";
+      const entriesRemoved = splitAuditSections(previous).length;
+      const tombstone: AuditEntry = {
+        timestamp: new Date().toISOString(),
+        tool: "clear_session_log",
+        action: "LOG_CLEARED",
+        entity_type: "tool_execution",
+        summary: `Audit log cleared: ${entriesRemoved} entr${entriesRemoved === 1 ? "y" : "ies"} removed`,
+        details: {
+          entries_removed: entriesRemoved,
+          connection: activeConnectionNameGetter(),
+          process_id: process.pid,
+        },
+      };
+      // Write the tombstone to a private O_EXCL temp file and rename it over the
+      // log: a failed write leaves the original log intact instead of a
+      // truncated one while reporting `cleared: false`.
+      const tempPath = `${filePath}.tmp-${randomUUID()}`;
+      try {
+        writeFileSync(tempPath, renderEntry(tombstone) + ENTRY_SEPARATOR, {
+          encoding: "utf-8",
+          mode: PRIVATE_FILE_MODE,
+          flag: "wx",
+        });
+        enforcePrivateFileMode(tempPath);
+        renameSync(tempPath, filePath);
+      } catch (error) {
+        try { unlinkSync(tempPath); } catch { /* best-effort */ }
+        throw error;
+      }
+      return { cleared: true, entries_removed: entriesRemoved };
+    });
+  } catch (error) {
+    process.stderr.write(
+      `[audit] FAILED to clear the audit log: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return { cleared: false, entries_removed: 0 };
   }
 }
 

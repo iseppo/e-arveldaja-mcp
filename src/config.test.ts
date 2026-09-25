@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { maskApiKeyId, serializeEnvFile } from "./config.js";
@@ -1366,6 +1366,118 @@ describe("credential preview/commit split (P18)", () => {
       const result = commitRemoveStoredCredential({ projection, workingDir: workDir });
       expect(result.removedTarget).toBe("primary");
       expect(readFileSync(localEnvFile, "utf8")).not.toContain("EARVELDAJA_API_KEY_ID=preview-key-id");
+    } finally {
+      process.chdir(ORIGINAL_CWD);
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("writePrivateFile temp-file hardening (M1)", () => {
+  it("never writes the secret through a symlink planted at the legacy predictable temp path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earveldaja-wpf-"));
+    try {
+      const target = join(dir, ".env");
+      const attackerFile = join(dir, "attacker-owned");
+      writeFileSync(attackerFile, "attacker\n");
+      symlinkSync(attackerFile, `${target}.tmp-${process.pid}`);
+      const { writePrivateFile } = await importFreshConfig();
+      writePrivateFile(target, "EARVELDAJA_API_PASSWORD=secret\n");
+      expect(readFileSync(attackerFile, "utf-8")).toBe("attacker\n");
+      expect(readFileSync(target, "utf-8")).toBe("EARVELDAJA_API_PASSWORD=secret\n");
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed (O_EXCL) when the temp path already exists, leaving the planted entry untouched", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earveldaja-wpf-excl-"));
+    try {
+      vi.resetModules();
+      vi.doMock("node:crypto", async (importOriginal) => {
+        const actual = await importOriginal<typeof import("node:crypto")>();
+        return { ...actual, randomBytes: (n: number) => Buffer.alloc(n, 0xab) };
+      });
+      const target = join(dir, ".env");
+      const attackerFile = join(dir, "attacker-owned");
+      writeFileSync(attackerFile, "attacker\n");
+      const predicted = `${target}.tmp-${process.pid}-${"ab".repeat(16)}`;
+      symlinkSync(attackerFile, predicted);
+      const { writePrivateFile } = await import("./config.js");
+      expect(() => writePrivateFile(target, "EARVELDAJA_API_PASSWORD=secret\n")).toThrow(/EEXIST/);
+      expect(readFileSync(attackerFile, "utf-8")).toBe("attacker\n");
+      expect(existsSync(target)).toBe(false);
+      // The planted symlink is not ours: cleanup must not have removed it.
+      expect(lstatSync(predicted).isSymbolicLink()).toBe(true);
+    } finally {
+      vi.doUnmock("node:crypto");
+      vi.resetModules();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("serializeEnvFile dotenv round-trip (L3)", () => {
+  const base = {
+    EARVELDAJA_SERVER: "live",
+    EARVELDAJA_API_KEY_ID: "kid",
+    EARVELDAJA_API_PUBLIC_VALUE: "pub",
+  };
+
+  it.each([
+    "'quote-wrapped'",
+    "\"double-wrapped\"",
+    "`backtick-wrapped`",
+    "literal\\nbackslash-n",
+    "literal\\rbackslash-r",
+    "real\nnewline",
+    "real\nnewline with literal \\n too",
+    "hash#inside",
+    "  padded  ",
+    "mix'\"#both",
+    "$dollar\\back",
+  ])("emits a form dotenv parses back to exactly %j", async (password) => {
+    const dotenv = (await import("dotenv")).default;
+    const env = { ...base, EARVELDAJA_API_PASSWORD: password, OTHER_SETTING: password };
+    const out = serializeEnvFile(env);
+    expect(dotenv.parse(out)).toEqual(env);
+  });
+
+  it("refuses a value that no dotenv form can represent instead of writing a corrupted file", () => {
+    // Contains every quote character AND a real newline next to a literal \n:
+    // no candidate form round-trips.
+    const password = "a'b\"c`d\ne\\nf";
+    expect(() => serializeEnvFile({ ...base, EARVELDAJA_API_PASSWORD: password }))
+      .toThrow(/round-trip/i);
+  });
+});
+
+describe("loadAllConfigs unique connection names (L2)", () => {
+  it("suffixes duplicate derived names deterministically so the #61 name guard stays unambiguous", async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "earveldaja-config-dupname-"));
+    for (const key of CONFIG_ENV_KEYS) delete process.env[key];
+    process.env.EARVELDAJA_SERVER = "live";
+    const write = (file: string, id: string) => {
+      const p = join(tempDir, file);
+      writeFileSync(p, [`ApiKey ID: ${id}`, `ApiKey public value: pub-${id}`, `Password: pw-${id}`, ""].join("\n"));
+      chmodSync(p, 0o600);
+    };
+    // apikey.txt and apikey.TXT differ only in extension case and derive the same name.
+    write("apikey.txt", "key-lower");
+    write("apikey.TXT", "key-upper");
+    write("apikey-2.txt", "key-dash");
+    process.chdir(tempDir);
+    try {
+      const { loadAllConfigs } = await importFreshConfig();
+      const names = loadAllConfigs().map((c) => [c.name, c.config.apiKeyId]);
+      // readdir().sort(): "apikey-2.txt" < "apikey.TXT" < "apikey.txt"
+      expect(names).toEqual([
+        ["apikey-2", "key-dash"],
+        ["apikey", "key-upper"],
+        ["apikey-3", "key-lower"],
+      ]);
+      expect(new Set(names.map(([n]) => n)).size).toBe(names.length);
     } finally {
       process.chdir(ORIGINAL_CWD);
       rmSync(tempDir, { recursive: true, force: true });

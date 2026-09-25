@@ -9,7 +9,8 @@ import type { ReceiptClientAlignmentCore } from "./receipt-client-alignment.js";
 // wraps the SAME fields the granular reporters wrap (month-end journal title /
 // tx description / invoice client_name, aging client/supplier names). The
 // balances themselves (chart-of-accounts reference data) are trusted and
-// emitted raw. Compact is the default projection; `detail="full"` returns every
+// emitted raw. Ops return EVERY line (no pre-slicing); the façade applies the
+// compact cap. Compact is the default projection; `detail="full"` returns every
 // line inline (reports are read-only and bounded — NO plan handle, NO mutation).
 
 export type AccountingReportType =
@@ -77,6 +78,9 @@ export interface AgingBucketRow {
   readonly amount: number;
   readonly payment_status: string;
   readonly days_overdue: number;
+  /** Set only on a foreign-currency invoice with no base_gross_price: `amount` is in this currency and excluded from every EUR total. */
+  readonly currency?: string;
+  readonly excluded_from_eur_totals?: true;
 }
 export interface AgingBucket {
   readonly label: string;
@@ -121,6 +125,15 @@ export interface MonthEndInvoiceRow {
   readonly gross: number;
   readonly payment_status: string;
 }
+export interface MonthEndDueInvoiceRow extends MonthEndInvoiceRow {
+  /** Set only on a foreign-currency invoice with no base_gross_price: `gross` is in this currency and excluded from `total`. */
+  readonly currency?: string;
+  readonly excluded_from_eur_totals?: true;
+  readonly due_date: string;
+  /** Days past due as of `overdue_as_of`; present on overdue_* rows only. */
+  readonly days_overdue?: number;
+}
+export interface MonthEndDueList { count: number; total: number; items: readonly MonthEndDueInvoiceRow[] }
 export interface MonthEndResult {
   readonly report: "month_end";
   readonly month: string;
@@ -128,8 +141,13 @@ export interface MonthEndResult {
   readonly unconfirmed_transactions: MonthEndCountedItems<MonthEndTxRow>;
   readonly unconfirmed_sale_invoices?: MonthEndCountedItems<MonthEndInvoiceRow>;
   readonly unconfirmed_purchase_invoices: MonthEndCountedItems<MonthEndInvoiceRow>;
-  readonly overdue_receivables?: { count: number; total: number; items: readonly MonthEndInvoiceRow[] };
-  readonly overdue_payables: { count: number; total: number; items: readonly MonthEndInvoiceRow[] };
+  /** Date overdue_* were evaluated against: month-end, or today while the month is still open. */
+  readonly overdue_as_of: string;
+  readonly overdue_receivables?: MonthEndDueList;
+  readonly overdue_payables: MonthEndDueList;
+  /** Open month only: not yet due today, but due before month-end. */
+  readonly due_before_month_end_receivables?: MonthEndDueList;
+  readonly due_before_month_end_payables?: MonthEndDueList;
   readonly summary: { issues_found: number; ready_to_close: boolean };
   readonly warnings: readonly string[];
 }

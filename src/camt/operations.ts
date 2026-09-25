@@ -90,14 +90,25 @@ class CamtOperationsImpl implements CamtOperations {
     await assertStatementAccountMatchesDimension(this.api, loaded.statement_metadata.iban, accountsDimensionsId);
 
     const projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo);
-    const statementBalanceCheck = loaded.statement_metadata.closing_balance
+    const closingBalance = loaded.statement_metadata.closing_balance;
+    const balanceDate = closingBalance?.date ?? loaded.statement_metadata.period.to;
+    // Project the rows this import would create (dated within the balance
+    // window) so the dry run can already show a closing-balance mismatch.
+    const pendingImportAmount = balanceDate === undefined
+      ? undefined
+      : projection.descriptors
+        .filter(descriptor => descriptor.entry.date <= balanceDate)
+        .reduce((sum, descriptor) =>
+          sum + (descriptor.entry.direction === "CRDT" ? descriptor.entry.amount : -descriptor.entry.amount), 0);
+    const statementBalanceCheck = closingBalance
       ? await runStatementBalanceCheck(
           this.api,
-          loaded.statement_metadata.closing_balance,
+          closingBalance,
           loaded.statement_metadata.period.to,
           accountsDimensionsId,
           false,   // dry run: compute + report, never persist
-          false,   // dry run: defer the tolerance warning (rows not booked yet)
+          false,   // dry run: rows are not booked yet
+          pendingImportAmount,
         )
       : undefined;
     const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);

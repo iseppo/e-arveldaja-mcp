@@ -1,7 +1,7 @@
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
-import { computeRecurringClone, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
+import { computeRecurringClone, recurringPreviewSourceBinding, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -67,8 +67,16 @@ function parseRecurringParams(payload: Record<string, unknown> | undefined): Rec
  * normalized to a canonical boolean (absent === false) so an unchanged run
  * still matches, while flipping it to true drifts. NOT an invoice id (recurring
  * has none).
+ *
+ * It ALSO binds `sources`: the exact would-create set of the reviewed dry-run
+ * preview (source id + gross + sale_invoice_type + the SHA-256 of the complete
+ * clone create payload, see recurringPreviewSourceBinding). The params alone are not the reviewed effect —
+ * computeRecurringClone re-lists invoices at execute, so a source invoice
+ * confirmed/edited after the preview (or a clone deleted since) would otherwise
+ * be created/registered without ever having been shown. Execute recomputes the
+ * preview and refuses with plan_drift when the set or any amount differs.
  */
-function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
+function recurringNormalizedArgs(params: RecurringCloneParams, sources: Array<Record<string, string | number | null>>): PlanRecord {
   return {
     action: "recurring",
     source_month: params.source_month,
@@ -76,6 +84,7 @@ function recurringNormalizedArgs(params: RecurringCloneParams): PlanRecord {
     target_journal_date: params.target_journal_date,
     auto_confirm: params.auto_confirm === true,
     ...(params.invoice_ids !== undefined ? { invoice_ids: params.invoice_ids } : {}),
+    sources,
   };
 }
 
@@ -399,11 +408,12 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // PREVIEW: run the shared clone core with dryRun=true. This is the projection
     // the operator reviews before approving.
     const preview = await computeRecurringClone(this.api, params, { dryRun: true });
-    const normalizedArgs = recurringNormalizedArgs(params);
+    const sources = recurringPreviewSourceBinding(preview);
+    const normalizedArgs = recurringNormalizedArgs(params, sources);
     const planSnapshot: PlanRecord = { ...normalizedArgs, destructive: false };
     const planInput: ExecutionPlanInput = {
       normalizedArgs,
-      sourceIdentities: [],
+      sourceIdentities: sources,
       liveSnapshot: planSnapshot,
       commands: [{ id: "sale-invoice-recurring", category: "sale_invoice_recurring", reviewProjection: planSnapshot }],
       counts: {},
@@ -462,8 +472,17 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // api.saleInvoices.* call.
     // For recurring, the plan binds the reviewed clone PARAMS (not an invoice id).
     let boundArgs: PlanRecord;
+    let recurringSourceIds: ReadonlySet<number> | undefined;
+    let recurringPayloadDigests: ReadonlyMap<number, string> | undefined;
     if (input.action === "recurring") {
-      boundArgs = recurringNormalizedArgs(recurringParams!);
+      // Recompute the reviewed preview (read-only dry run) so the bound
+      // would-create set is compared against what execute would do NOW.
+      const livePreview = await computeRecurringClone(this.api, recurringParams!, { dryRun: true });
+      const liveSources = recurringPreviewSourceBinding(livePreview);
+      boundArgs = recurringNormalizedArgs(recurringParams!, liveSources);
+      recurringSourceIds = new Set(liveSources.flatMap(row => (typeof row.source_id === "number" ? [row.source_id] : [])));
+      recurringPayloadDigests = new Map(liveSources.flatMap(row =>
+        typeof row.source_id === "number" && typeof row.clone_payload_sha256 === "string" ? [[row.source_id, row.clone_payload_sha256] as const] : []));
     } else if (input.action === "create" || input.action === "update" || input.action === "send") {
       // Recompute the SAME payload fingerprint bound at prepare so a changed
       // create/update/send payload drift-rejects here, before any api call.
@@ -487,7 +506,14 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       case "invalidate": return this.executeSimple("invalidate", input.id!, () => this.api.saleInvoices.invalidate(input.id!));
       case "send": return this.executeSend(input);
       case "recurring": {
-        const result = await computeRecurringClone(this.api, recurringParams!, { dryRun: false });
+        // Clone EXACTLY the reviewed (and just re-verified) source ids and
+        // payloads: a source that appears, or whose clone payload changes,
+        // between the drift check and this run is not cloned.
+        const result = await computeRecurringClone(this.api, recurringParams!, {
+          dryRun: false,
+          onlySourceIds: recurringSourceIds!,
+          expectedPayloadDigests: recurringPayloadDigests!,
+        });
         return ok({ mode: "execute", action: "recurring", result });
       }
       default:

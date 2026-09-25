@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { camtResultRow, renderCamtImportCompact, type CamtImportRenderData } from "./presenter.js";
+import {
+  camtResultRow,
+  renderCamtImportCompact,
+  renderCamtImportPayload,
+  renderCamtParsePayload,
+  type CamtImportRenderData,
+} from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
 import type { CamtCreateDescriptor, CamtImportProjection, ParsedCamtEntry } from "./types.js";
@@ -111,5 +117,43 @@ describe("renderCamtImportCompact", () => {
     expect(summary.blockers?.[0]!.severity).toBe("blocker");
     expect(summary.details?.tool).toBe("get_operation_result_page");
     expect(summary.details?.args.operation_handle).toBe("op-handle-123");
+  });
+});
+
+describe("CAMT full-envelope untrusted-text wrapping", () => {
+  const OCR = /^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\n/;
+
+  it("wraps end_to_end_id, counterparty_iban and counterparty_reg_code on parse output", () => {
+    const entry = { ...cleanEntry(1), end_to_end_id: "E2E-1", counterparty_reg_code: "12345678" };
+    const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);
+    const rendered = (payload.entries as Array<Record<string, unknown>>)[0]!;
+    expect(rendered.end_to_end_id).toMatch(OCR);
+    expect(rendered.counterparty_iban).toMatch(OCR);
+    expect(rendered.counterparty_reg_code).toMatch(OCR);
+  });
+
+  it("wraps existing-match ref_number and every suggested_patch value", () => {
+    const data = makeData(1);
+    const payload = renderCamtImportPayload({
+      mode: "DRY_RUN",
+      ...data,
+      possibleDuplicates: [{
+        date: "2026-02-01", amount: 11, currency: "EUR", type: "D", source_direction: "CRDT",
+        counterparty: "Vendor", bank_reference: "REF", ref_number: "RF1",
+        existing_transactions: [{
+          id: 9, status: "CONFIRMED", counterparty: "Vendor", description: "d", ref_number: "RF-EXIST",
+          match_reasons: ["counterparty_name"],
+          suggested_patch_missing_fields: { bank_ref_number: "REF", ref_number: "RF1", bank_account_no: "EE47", bank_account_name: "Vendor", description: "desc" },
+        }],
+        recommended_default_action: "link_confirmed_transaction_then_delete_new_project_transaction",
+        recommendation_note: "n",
+      }],
+    });
+    const needsReview = ((payload.execution as Record<string, unknown>).needs_review as Array<Record<string, unknown>>)[0]!;
+    const match = (needsReview.existing_transactions as Array<Record<string, unknown>>)[0]!;
+    expect(match.ref_number).toMatch(OCR);
+    for (const value of Object.values(match.suggested_patch_missing_fields as Record<string, unknown>)) {
+      expect(value).toMatch(OCR);
+    }
   });
 });

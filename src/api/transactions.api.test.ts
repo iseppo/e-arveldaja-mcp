@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { LinkedInvoiceClientMismatchError, TransactionsApi } from "./transactions.api.js";
+import {
+  LinkedInvoiceClientMismatchError,
+  LinkedInvoiceClientsAmbiguousError,
+  StoredTypeDirectionMismatchError,
+  TransactionsApi,
+} from "./transactions.api.js";
 import { cache } from "./base-resource.js";
 import type { HttpClient } from "../http-client.js";
 import { HttpError } from "../http-client.js";
@@ -691,7 +696,7 @@ describe("TransactionsApi.confirm linked-invoice client guard", () => {
     ]);
   });
 
-  it("does not block when the linked invoices disagree about the client", async () => {
+  it("refuses before any mutation when the linked invoices belong to different clients, even with reassignment", async () => {
     const { client, patchCalls } = makeClient({
       getById: (path) => {
         if (path === "/transactions/24") return { id: 24, clients_id: 2309260 };
@@ -702,16 +707,39 @@ describe("TransactionsApi.confirm linked-invoice client guard", () => {
     });
     const api = new TransactionsApi(client);
 
-    await api.confirm(24, [
+    const distribution = [
       { related_table: "sale_invoices", related_id: 77, amount: 1000 },
       { related_table: "sale_invoices", related_id: 78, amount: 488 },
-    ]);
+    ];
 
-    // One journal has one client, so a split-client distribution has no
-    // satisfiable expectation — it must not be refused.
-    expect(patchCalls).toEqual([
-      { path: "/transactions/24/register", body: expect.any(Array) },
-    ]);
+    // One journal has one client (the transaction's), so invoice 78's receipt
+    // would land in client 2309260's sub-ledger — whichever client is set.
+    await expect(api.confirm(24, distribution)).rejects.toMatchObject({
+      name: "LinkedInvoiceClientsAmbiguousError",
+      category: "linked_invoice_clients_ambiguous",
+      invoice_clients_ids: [2327264, 999],
+    });
+    await expect(api.confirm(24, distribution, { reassignClientToInvoice: true }))
+      .rejects.toBeInstanceOf(LinkedInvoiceClientsAmbiguousError);
+    expect(patchCalls).toEqual([]);
+  });
+
+  it("refuses when a client-less invoice sits next to another client's invoice", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/26") return { id: 26, clients_id: 2309260 };
+        if (path === "/sale_invoices/77") return { id: 77, clients_id: null };
+        if (path === "/sale_invoices/78") return { id: 78, clients_id: 999 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(26, [
+      { related_table: "sale_invoices", related_id: 77, amount: 10 },
+      { related_table: "sale_invoices", related_id: 78, amount: 20 },
+    ])).rejects.toMatchObject({ name: "LinkedInvoiceClientMismatchError", invoice_id: 78 });
+    expect(patchCalls).toEqual([]);
   });
 
   it("does not block when the linked invoice carries no client of its own", async () => {
@@ -742,5 +770,88 @@ describe("TransactionsApi.confirm linked-invoice client guard", () => {
     expect(patchCalls).toEqual([
       { path: "/transactions/26/register", body: expect.any(Array) },
     ]);
+  });
+});
+
+describe("TransactionsApi.confirm stored-type direction guard", () => {
+  beforeEach(() => cache.invalidate());
+
+  const accountDist = [{ related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 }];
+
+  it.each([
+    ["CAMT CRDT stored as C", "C", "Salary\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]", "incoming"],
+    ["Wise OUT stored as D", "D", "WISE:T1 Vendor [source_direction=OUT]", "outgoing"],
+  ])("refuses to register %s before any mutation, on every distribution kind", async (_label, type, description, direction) => {
+    for (const options of [undefined, { autoFixClientsId: false }]) {
+      cache.invalidate();
+      const { client, patchCalls } = makeClient({
+        getById: (path) => (path === "/transactions/40" ? { id: 40, clients_id: null, type, description } : undefined),
+      });
+      const api = new TransactionsApi(client);
+      const outcome = api.confirm(40, accountDist, options);
+      await expect(outcome).rejects.toBeInstanceOf(StoredTypeDirectionMismatchError);
+      await expect(outcome).rejects.toMatchObject({
+        category: "stored_type_direction_mismatch",
+        transaction_id: 40,
+        stored_type: type,
+        signed_direction: direction,
+      });
+      expect(patchCalls).toEqual([]);
+    }
+  });
+
+  it.each([
+    ["signed CRDT stored as D", "D", "x\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]"],
+    ["signed OUT stored as C", "C", "WISE:T2 Vendor [source_direction=OUT]"],
+    ["legacy unsigned C", "C", "card payment"],
+    ["unsigned lookalike", "C", "note source_direction=IN"],
+  ])("registers a consistent or unsigned row (%s)", async (_label, type, description) => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => (path === "/transactions/41" ? { id: 41, clients_id: 5, type, description } : undefined),
+    });
+    const api = new TransactionsApi(client);
+    await api.confirm(41, accountDist, { autoFixClientsId: false });
+    expect(patchCalls.map(c => c.path)).toEqual(["/transactions/41/register"]);
+  });
+});
+
+describe("TransactionsApi.confirm client auto-fix safety", () => {
+  beforeEach(() => cache.invalidate());
+
+  it("never writes clients_id null when the linked invoice has no client", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/50") return { id: 50, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: null };
+        if (path === "/purchase_invoices/89") return { id: 89, clients_id: 42 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+    await api.confirm(50, [
+      { related_table: "purchase_invoices", related_id: 88, amount: 10 },
+      { related_table: "purchase_invoices", related_id: 89, amount: 15 },
+    ]);
+    expect(patchCalls.map(c => c.body)).not.toContainEqual({ clients_id: null });
+    expect(patchCalls[0]).toEqual({ path: "/transactions/50", body: { clients_id: 42 } });
+  });
+
+  it("refuses instead of picking the first client when invoices belong to several clients", async () => {
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/51") return { id: 51, clients_id: null };
+        if (path === "/sale_invoices/77") return { id: 77, clients_id: 1 };
+        if (path === "/sale_invoices/78") return { id: 78, clients_id: 2 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+    const outcome = api.confirm(51, [
+      { related_table: "sale_invoices", related_id: 77, amount: 10 },
+      { related_table: "sale_invoices", related_id: 78, amount: 15 },
+    ]);
+    await expect(outcome).rejects.toBeInstanceOf(LinkedInvoiceClientsAmbiguousError);
+    await expect(outcome).rejects.toMatchObject({ category: "linked_invoice_clients_ambiguous", invoice_clients_ids: [1, 2] });
+    expect(patchCalls).toEqual([]);
   });
 });

@@ -7,7 +7,7 @@ import { createBankTransaction } from "../bank-transaction-create.js";
 import { decodeApiResponseCritical } from "../api/critical-codecs.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { checkStatementClosingBalance } from "../statement-balance-check.js";
-import { appendStatementBalance, readStatementBalances } from "../statement-balance-store.js";
+import { appendStatementBalance, getStatementBalanceIdentityWarning, readStatementBalances } from "../statement-balance-store.js";
 import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
 import { captureFileInputSnapshot, FileInputSnapshotError, type FileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
@@ -24,6 +24,7 @@ import {
   type CamtPlanReviewCommand,
 } from "../tools/camt-plan.js";
 import {
+  addToDuplicateLookup,
   buildDuplicateLookup,
   findDuplicateTransactionIds,
 } from "./duplicate-identity.js";
@@ -46,6 +47,7 @@ import type {
   ImportRejectedField,
   ParsedCamtEntry,
   StatementBalanceCheckResult,
+  Transaction,
 } from "./types.js";
 
 const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -385,6 +387,8 @@ export async function runStatementBalanceCheck(
   accountsDimensionsId: number,
   persist: boolean,
   isExecute: boolean,
+  /** Dry run: signed sum of the would-create entries, so the tripwire can fire before execute. */
+  pendingImportAmount?: number,
 ): Promise<StatementBalanceCheckResult | undefined> {
   const balanceDate = closing.date ?? fallbackDate;
   if (!balanceDate) return undefined;   // no anchor date → cannot reconcile
@@ -409,6 +413,7 @@ export async function runStatementBalanceCheck(
         ...(closing.currency ? { currency: closing.currency } : {}),
       },
       fallbackDate: balanceDate,
+      ...(!isExecute && pendingImportAmount !== undefined ? { pendingImportAmount } : {}),
     });
   } catch (error) {
     return { persisted: false, notes: [`closing-balance check could not run: ${(error as Error).message}`] };
@@ -422,7 +427,14 @@ export async function runStatementBalanceCheck(
   // real discrepancy. Suppress the tolerance warning on dry-run and replace it
   // with an explicit deferral note; all numeric figures are retained. On
   // execute the warning fires as-is when genuinely out of tolerance.
-  if (!isExecute && check.warnings.length > 0) {
+  // With the would-create entries projected in, the dry-run comparison IS the
+  // post-import comparison, so the tolerance warning fires as-is.
+  if (!isExecute && pendingImportAmount !== undefined) {
+    notes.push(
+      "Dry-run projection: the expected balance includes the entries this import would create " +
+      `(net ${check.pending_import_amount?.toFixed(2)}).`,
+    );
+  } else if (!isExecute && check.warnings.length > 0) {
     check.warnings = [];
     notes.push(
       "Closing-balance reconciliation is deferred until execute: the statement's own entries " +
@@ -433,7 +445,12 @@ export async function runStatementBalanceCheck(
   let persisted = false;
   if (persist) {
     try {
-      if (readStatementBalances() === null) {
+      const history = readStatementBalances();
+      // Records written by another connection sharing this bundle are ignored;
+      // say so, since the persisted history the operator sees is partial.
+      const identityWarning = getStatementBalanceIdentityWarning();
+      if (identityWarning) check.warnings.push(identityWarning);
+      if (history === null) {
         notes.push(
           "Statement-balance history is not persisted in single-file rules mode (EARVELDAJA_RULES_FILE); " +
           "the closing-balance comparison ran but was not stored.",
@@ -544,14 +561,19 @@ export async function executeCamtImport(
 
   const createdApiIdByIndex = new Map<number, number>();
   const completedIndices = new Set<number>();
+  // ONE fresh ledger read right before the first write; each row this run
+  // creates is appended to the in-memory lookup, so later rows still see it
+  // without re-reading the whole ledger per row.
+  const lookup = buildDuplicateLookup(
+    (await api.transactions.listAll()).filter(isNonVoidTransaction),
+    accountsDimensionsId,
+  );
   const executionReport = await executeCamtCommands({
     count: projection.descriptors.length,
     prepareIndex: async index => {
-      // Recheck this command's duplicate precondition against a fresh ledger
-      // read immediately before its own mutate.
+      // Recheck this command's duplicate precondition immediately before its
+      // own mutate.
       const descriptor = projection.descriptors[index]!;
-      const freshLedger = (await api.transactions.listAll()).filter(isNonVoidTransaction);
-      const lookup = buildDuplicateLookup(freshLedger, accountsDimensionsId);
       const duplicateIds = findDuplicateTransactionIds(
         descriptor.entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
       );
@@ -571,6 +593,10 @@ export async function executeCamtImport(
         details: { date: descriptor.entry.date, amount: descriptor.entry.amount, type: direction === "incoming" ? "D" : "C", source_direction: descriptor.entry.direction, description: descriptor.entry.description, counterparty: descriptor.entry.counterparty_name, bank_reference: descriptor.entry.bank_reference },
       });
       completedIndices.add(index);
+      // The row exists now whether or not a usable id came back; -1 stands in
+      // for an unknown id (the lookup only needs a truthy id to hold a key).
+      const knownId = typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0 ? createdId : -1;
+      addToDuplicateLookup(lookup, { ...descriptor.payload, id: knownId, status: "PROJECT" } as Transaction, accountsDimensionsId);
       if (typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0) {
         createdApiIdByIndex.set(index, createdId);
         return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: createdId, outcome: "created" }] };

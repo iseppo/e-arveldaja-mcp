@@ -133,17 +133,28 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
     if (contentLength > 64 * 1024) return null;
     const text = await response.text();
     if (text.length > 64 * 1024) return null;
-    const data: unknown = JSON.parse(text);
-    if (!Array.isArray(data) || data.length === 0) return null;
-    const entry = data[0] as Record<string, unknown> | undefined;
-    if (!entry || typeof entry !== "object") return null;
+    // Live shape: { status, data: [{ reg_code (number), name, legal_address, status }] }.
+    // Autocomplete is a prefix search, so require an exact reg_code match.
+    const payload: unknown = JSON.parse(text);
+    const entries = payload !== null && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data)
+      ? (payload as { data: unknown[] }).data
+      : undefined;
+    if (!entries) return null;
+    const entry = entries.find((candidate): candidate is Record<string, unknown> =>
+      candidate !== null && typeof candidate === "object" && String((candidate as Record<string, unknown>).reg_code) === regCode);
+    if (!entry) return null;
 
-    const name = entry.company_name ?? entry.nimi ?? fallbackName ?? "";
-    const address = entry.address ?? entry.aadress ?? "";
+    const name = entry.name ?? fallbackName ?? "";
+    const address = entry.legal_address ?? "";
+    // Register status code: R registered, L in liquidation, N bankrupt, K deleted.
+    // Constrained to the known codes so no free text rides on this field.
+    const rawStatus = typeof entry.status === "string" ? entry.status.trim().toUpperCase() : "";
+    const status = /^[RLNK]$/.test(rawStatus) ? rawStatus : "unknown";
     return {
       name: typeof name === "string" ? name : String(name),
       reg_code: regCode,
       address: typeof address === "string" ? address : String(address),
+      status,
     };
   } catch {
     return null;
@@ -174,6 +185,9 @@ export async function resolveSupplierInternal(
   const matchOutcome = matchSupplier(clients, fields, options);
   if (matchOutcome.kind === "matched") {
     return { found: true, created: false, match_type: matchOutcome.match_type, client: matchOutcome.client };
+  }
+  if (matchOutcome.kind === "ambiguous") {
+    return { found: false, created: false, requires_manual_review: true, reason: matchOutcome.reason };
   }
   if (matchOutcome.kind === "conflict") {
     return {
@@ -255,6 +269,20 @@ export async function resolveSupplierInternal(
     bank_account_no: fields.supplier_iban,
     address_text: registryData?.address !== undefined ? desandboxText(registryData.address) : undefined,
   };
+
+  // A company deleted from the business register (status K) must not be
+  // auto-created or booked as a new supplier without operator review.
+  if (registryData?.status === "K") {
+    return {
+      found: false,
+      created: false,
+      preview_client: previewClient,
+      registry_data: registryData,
+      requires_manual_review: true,
+      reason: `Registry code ${registryData.reg_code} belongs to a company deleted from the Estonian business register (status K). Verify the supplier before creating it or booking against it.`,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
+  }
 
   if (!execute) {
     return {

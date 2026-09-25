@@ -9,8 +9,10 @@ import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { buildBankAccountLookups } from "./inter-account-utils.js";
+import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
+import { BookingGuard } from "../booking-guard.js";
 
 /** Known fee/charge patterns for expense detection */
 const EXPENSE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
@@ -24,6 +26,16 @@ const EXPENSE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 // Small-expense threshold in EUR. EUR-centric: foreign-currency transactions are compared
 // by their nominal amount, which may differ from the EUR equivalent.
 const MAX_EXPENSE_AMOUNT = 50;
+
+// ±days around the transaction date searched for an already-booked journal
+// (booking vs value date can differ by a day between the bank and the ledger).
+// Also the Lane B window for own-account transfers — the reconcile default.
+const DUPLICATE_DATE_WINDOW_DAYS = 1;
+const MS_PER_DAY = 86_400_000;
+
+function shiftDate(date: string, days: number): string {
+  return new Date(toUtcDay(date) + days * MS_PER_DAY).toISOString().slice(0, 10);
+}
 
 interface Suggestion {
   transaction_id: number;
@@ -85,13 +97,16 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         unconfirmed = unconfirmed.filter(tx => tx.accounts_dimensions_id === accounts_dimensions_id);
       }
 
-      // Open invoices
-      const openSales = allSales.filter((inv: SaleInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-      );
-      const openPurchases = allPurchases.filter((inv: PurchaseInvoice) =>
-        inv.payment_status !== "PAID" && inv.status === "CONFIRMED"
-      );
+      // Open invoices — the same fail-closed decode as the reconcile paths: a
+      // malformed payment_status must not let a settled invoice look open.
+      const openSales = allSales.filter((inv: SaleInvoice) => {
+        const critical = decodeInvoiceStatusCritical(inv);
+        return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+      });
+      const openPurchases = allPurchases.filter((inv: PurchaseInvoice) => {
+        const critical = decodeInvoiceStatusCritical(inv);
+        return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
+      });
       const saleIndex = buildInvoiceIndex(openSales);
       const purchaseIndex = buildInvoiceIndex(openPurchases);
 
@@ -133,6 +148,10 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         }
       }
 
+      // Lane B snapshot: an own-account transfer is only suggested for
+      // confirmation when no inter-account journal already covers it.
+      const guard = await BookingGuard.load(api, { ownDimensionIds });
+
       const suggestions: Suggestion[] = [];
       const total = unconfirmed.length;
 
@@ -141,15 +160,29 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         await reportProgress(i, total);
 
         const txDim = tx.accounts_dimensions_id;
-        const txType = tx.type;
+        // The bank-posting side comes from the statement direction (signed
+        // marker first), not the raw stored type: incoming debits the bank.
+        const direction = bankTransactionDirection(tx);
+        const postingSide: "D" | "C" | undefined =
+          direction === "incoming" ? "D" : direction === "outgoing" ? "C" : undefined;
         const txDuplicateAmount = Math.round(((tx.base_amount ?? tx.amount) as number) * 100) / 100;
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 
-        // --- 1. Duplicate detection: journal already exists for this amount/date/bank account ---
-        const dupMatches =
-          txType === "D" || txType === "C"
-            ? bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, txType, txDuplicateAmount, tx.date))
-            : undefined;
+        // --- 1. Duplicate detection: journal already exists for this amount/bank account within the date window ---
+        let dupMatches: JournalMatch[] | undefined;
+        if (postingSide) {
+          const found: JournalMatch[] = [];
+          // Exact date first, then outward, so the nearest journal leads.
+          for (let offset = 0; offset <= DUPLICATE_DATE_WINDOW_DAYS; offset++) {
+            const dates = offset === 0 ? [tx.date] : [shiftDate(tx.date, -offset), shiftDate(tx.date, offset)];
+            for (const date of dates) {
+              for (const match of bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, postingSide, txDuplicateAmount, date)) ?? []) {
+                if (!found.some(existing => existing.journal_id === match.journal_id)) found.push(match);
+              }
+            }
+          }
+          dupMatches = found;
+        }
         if (dupMatches && dupMatches.length > 0) {
           // A shared bank reference promotes the suggestion from "possibly a duplicate"
           // to "this is clearly a re-import of the transaction that produced this journal".
@@ -185,7 +218,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               bank_account_name: tx.bank_account_name,
               suggested_action: "reimport_duplicate",
               confidence: 95,
-              reason: `Bank reference ${safeRef} already booked as journal #${match.journal_id} on ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
+              reason: `Bank reference ${safeRef} already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
               duplicate_journal_id: match.journal_id,
               duplicate_journal_ids: dupJournalIds,
             });
@@ -210,7 +243,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             bank_account_name: tx.bank_account_name,
             suggested_action: "likely_duplicate",
             confidence,
-            reason: `Journal #${dupJournalId} already exists with amount ${txDuplicateAmount} on ${tx.date} in ${bankTitle}${ambiguitySuffix}.${refSuffix}`,
+            reason: `Journal #${dupJournalId} already exists with amount ${txDuplicateAmount} within ${DUPLICATE_DATE_WINDOW_DAYS} day(s) of ${tx.date} in ${bankTitle}${ambiguitySuffix}.${refSuffix}`,
             duplicate_journal_id: dupJournalId,
             duplicate_journal_ids: dupJournalIds,
           });
@@ -218,6 +251,44 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         }
 
         // --- 2. Inter-account detection ---
+        // Before suggesting a transfer confirm, ask Lane B whether an
+        // inter-account journal already covers it (e.g. the mirror leg was
+        // confirmed first). Returns a replacement suggestion, or undefined.
+        const alreadyBookedTransfer = (targetDim: number): Suggestion | undefined => {
+          const resolution = guard.resolveInterAccount({
+            sourceDim: txDim,
+            targetDim,
+            amount: txDuplicateAmount,
+            date: tx.date,
+            maxGapDays: DUPLICATE_DATE_WINDOW_DAYS,
+            reference: tx.bank_ref_number ?? tx.ref_number,
+          }, { consume: false });
+          if (resolution.status === "none") return undefined;
+          const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
+          const base = {
+            transaction_id: tx.id!,
+            date: tx.date,
+            amount: tx.amount,
+            currency: tx.cl_currencies_id,
+            description: tx.description,
+            bank_account_name: tx.bank_account_name,
+          };
+          if (resolution.status === "matched") {
+            return {
+              ...base,
+              suggested_action: "likely_duplicate",
+              confidence: 70,
+              reason: `Own-account transfer ${bankTitle} <-> "${targetTitle}" is already booked as journal #${resolution.journal_id} (within ${DUPLICATE_DATE_WINDOW_DAYS} day). Do not confirm; this PROJECT row is likely the mirror leg — delete it after verifying.`,
+              duplicate_journal_id: resolution.journal_id,
+              duplicate_journal_ids: [resolution.journal_id],
+            };
+          }
+          return {
+            ...base,
+            suggested_action: "manual_review",
+            reason: `A same-amount own-account transfer ${bankTitle} <-> "${targetTitle}" collides with an existing journal that its reference cannot disambiguate; verify before confirming.`,
+          };
+        };
         const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
         const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
         let isInterAccount = false;
@@ -225,7 +296,11 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         // Check counterparty IBAN matches own bank account
         if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
           const targetDim = ownIbanToDimension.get(counterpartyIban)!;
-          if (targetDim !== txDim) {
+          const booked = targetDim !== txDim ? alreadyBookedTransfer(targetDim) : undefined;
+          if (booked) {
+            suggestions.push(booked);
+            isInterAccount = true;
+          } else if (targetDim !== txDim) {
             const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
             const accountsId = dimensionToAccountsId.get(targetDim);
             suggestions.push({
@@ -243,7 +318,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
                   related_table: "accounts",
                   related_id: accountsId,
                   related_sub_id: targetDim,
-                  amount: tx.amount,
+                  amount: txDuplicateAmount,
                 },
               } : {}),
             });
@@ -255,7 +330,11 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         if (!isInterAccount && companyName.length >= 4 && counterpartyName.length >= 4) {
           if (counterpartyName.includes(companyName) || companyName.includes(counterpartyName)) {
             const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== txDim);
-            if (otherDimensions.length === 1) {
+            const booked = otherDimensions.length === 1 ? alreadyBookedTransfer(otherDimensions[0]!) : undefined;
+            if (booked) {
+              suggestions.push(booked);
+              isInterAccount = true;
+            } else if (otherDimensions.length === 1) {
               const targetDim = otherDimensions[0]!;
               const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
               const accountsId = dimensionToAccountsId.get(targetDim);
@@ -274,7 +353,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
                     related_table: "accounts",
                     related_id: accountsId,
                     related_sub_id: targetDim,
-                    amount: tx.amount,
+                    amount: txDuplicateAmount,
                   },
                 } : {}),
               });

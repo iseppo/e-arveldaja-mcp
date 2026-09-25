@@ -10,6 +10,7 @@ import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accountin
 import { clearRuntimeCaches } from "../cache-control.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import type { ToolExposureConfig } from "../config.js";
+import { createReportingOperations } from "../reporting/operations.js";
 
 vi.mock("../cache-control.js", () => ({
   clearRuntimeCaches: vi.fn(() => ({
@@ -1012,6 +1013,82 @@ describe("month_end_close_checklist", () => {
     expect(payload.overdue_receivables.items[0]!.id).toBe(10);
   });
 
+  describe("open month vs closed month (overdue_as_of)", () => {
+    // Invoice 2026-09-12 + 14 days => due 2026-09-26, month-end 2026-09-30.
+    const invoice = () => makeSaleInvoice({
+      id: 15,
+      number: "2026_15",
+      client_name: "Inkubaator",
+      create_date: "2026-09-12",
+      journal_date: "2026-09-12",
+      term_days: 14,
+      gross_price: 620,
+      status: "CONFIRMED",
+      payment_status: "NOT_PAID",
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("mid-month: an invoice not yet due today is listed as due_before_month_end, not overdue", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [invoice()] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_as_of).toBe("2026-09-25");
+      expect(payload.overdue_receivables.count).toBe(0);
+      expect(payload.due_before_month_end_receivables.count).toBe(1);
+      expect(payload.due_before_month_end_receivables.total).toBe(620);
+      expect(payload.due_before_month_end_receivables.items[0]).toMatchObject({ id: 15, due_date: "2026-09-26" });
+      expect(payload.due_before_month_end_receivables.items[0]).not.toHaveProperty("days_overdue");
+      expect(payload.due_before_month_end_payables.count).toBe(0);
+      expect(payload.summary.issues_found).toBe(0);
+      expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("Month 2026-09 has not ended yet (today 2026-09-25)")]));
+    });
+
+    it("mid-month: an invoice already past due today stays overdue with days_overdue as of today", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-28T10:00:00Z"));
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [invoice()] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_as_of).toBe("2026-09-28");
+      expect(payload.overdue_receivables.items[0]).toMatchObject({ id: 15, due_date: "2026-09-26", days_overdue: 2 });
+      expect(payload.due_before_month_end_receivables.count).toBe(0);
+    });
+
+    it("uses the Tallinn calendar date: just after local midnight the invoice is already overdue", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      // 2026-09-27 00:30 in Tallinn, still 2026-09-26 in UTC.
+      vi.setSystemTime(new Date("2026-09-26T21:30:00Z"));
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [invoice()] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_as_of).toBe("2026-09-27");
+      expect(payload.overdue_receivables.items[0]).toMatchObject({ id: 15, days_overdue: 1 });
+    });
+
+    it("closed month: evaluates as of month-end, with no due_before_month_end lists or open-month warning", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-10-02T10:00:00Z"));
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [invoice()] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_as_of).toBe("2026-09-30");
+      expect(payload.overdue_receivables.count).toBe(1);
+      expect(payload.overdue_receivables.items[0]).toMatchObject({ due_date: "2026-09-26", days_overdue: 4 });
+      expect(payload).not.toHaveProperty("due_before_month_end_receivables");
+      expect(payload).not.toHaveProperty("due_before_month_end_payables");
+      expect(payload.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("has not ended yet")]));
+    });
+  });
+
   it("does not include paid receivables in overdue list", async () => {
     const handler = setupTool("month_end_close_checklist", {
       saleInvoices: [
@@ -1246,5 +1323,296 @@ describe("month_end_close_checklist", () => {
     expect(payload.warnings).toEqual(expect.arrayContaining([
       expect.stringContaining("had no term_days"),
     ]));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reporting-surface review findings (P&L after year-end close, opening-balance
+// warning parity, date defaults/validation, month-end credit/FX handling)
+// ---------------------------------------------------------------------------
+
+type ToolResult = { isError?: boolean; content: Array<{ text: string }> };
+
+describe("compute_profit_and_loss after year-end close", () => {
+  const REVENUE = 3000;
+  const EXPENSE = 5000;
+  const PROFIT_2990 = 2990;
+  const journals = [
+    makeJournal("2025-03-01", [makePosting(1000, "D", 1000), makePosting(REVENUE, "C", 1000)], { id: 1 }),
+    makeJournal("2025-04-01", [makePosting(EXPENSE, "D", 400), makePosting(1000, "C", 400)], { id: 2 }),
+    // execute_year_end_close: zero Tulud/Kulud into equity.
+    makeJournal("2025-12-31", [
+      makePosting(REVENUE, "D", 1000),
+      makePosting(EXPENSE, "C", 400),
+      makePosting(PROFIT_2990, "C", 600),
+    ], { id: 3, document_number: "YECL-2025", title: "Aasta lõppkanne 2025" }),
+  ];
+  const accounts = [
+    makeAccount(1000, "D", "Varad", "Pank"),
+    makeAccount(REVENUE, "C", "Tulud", "Müügitulu"),
+    makeAccount(EXPENSE, "D", "Kulud", "Kulu"),
+    makeAccount(PROFIT_2990, "C", "Omakapital", "Aruandeaasta kasum"),
+  ];
+
+  it("excludes the YECL closing journal so the closed year still shows its revenue and expenses", async () => {
+    const handler = setupTool("compute_profit_and_loss", { accounts, journals });
+    const payload = parseMcpResponse((await handler({ date_from: "2025-01-01", date_to: "2025-12-31" })).content[0]!.text);
+    expect(payload.revenue.total).toBe(1000);
+    expect(payload.expenses.total).toBe(400);
+    expect(payload.net_profit).toBe(600);
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("1 year-end closing journal(s) excluded")]));
+  });
+
+  it("the run_accounting_report profit_and_loss op excludes it too", async () => {
+    const outcome = await createReportingOperations(createApi({ accounts, journals }), true)
+      .run({ report: "profit_and_loss", period: { from: "2025-01-01", to: "2025-12-31" } });
+    expect(outcome.ok && outcome.value.report === "profit_and_loss" && outcome.value.net_profit).toBe(600);
+  });
+
+  it("the balance sheet keeps the closing journal (a real posting there)", async () => {
+    const handler = setupTool("compute_balance_sheet", { accounts, journals });
+    const payload = parseMcpResponse((await handler({ date_to: "2025-12-31" })).content[0]!.text);
+    expect(payload.current_year_pl.net_profit).toBe(0);
+    expect(payload.equity.total).toBe(600);
+    expect(payload.check.balanced).toBe(true);
+  });
+});
+
+describe("compute_profit_and_loss after the RIK year-end close (9000 excluded)", () => {
+  // Real e-arveldaja chart numbers. RIK entry 1 (D 9000 / K 2970) leaves the
+  // revenue/expense accounts open; 9000 must not count as (negative) revenue.
+  const accounts = [
+    makeAccount(1020, "D", "Varad", "Pangakonto"),
+    makeAccount(2970, "C", "Omakapital", "Aruandeaasta kasum (kahjum)"),
+    makeAccount(3620, "C", "Tulud", "Teenuste eksport (KM0%)"),
+    makeAccount(5990, "D", "Kulud", "Muud mitmesugused tegevuskulud"),
+    makeAccount(9000, "D", "Tulud", "Arvestuslik koondtulemus"),
+  ];
+  const journals = [
+    makeJournal("2025-03-01", [makePosting(1020, "D", 1000), makePosting(3620, "C", 1000)], { id: 1 }),
+    makeJournal("2025-04-01", [makePosting(5990, "D", 400), makePosting(1020, "C", 400)], { id: 2 }),
+    makeJournal("2025-12-31", [makePosting(9000, "D", 600), makePosting(2970, "C", 600)], { id: 3, title: "Majandusaasta lõpetamine" }),
+  ];
+
+  it("reports the real result and discloses the excluded 9000 balance", async () => {
+    const handler = setupTool("compute_profit_and_loss", { accounts, journals });
+    const payload = parseMcpResponse((await handler({ date_from: "2025-01-01", date_to: "2025-12-31" })).content[0]!.text);
+    expect(payload.revenue.total).toBe(1000);
+    expect(payload.revenue.items.map((item: { id: number }) => item.id)).toEqual([3620]);
+    expect(payload.expenses.total).toBe(400);
+    expect(payload.net_profit).toBe(600);
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("Account 9000")]));
+  });
+
+  it("the run_accounting_report profit_and_loss op excludes 9000 too", async () => {
+    const outcome = await createReportingOperations(createApi({ accounts, journals }), true)
+      .run({ report: "profit_and_loss", period: { from: "2025-01-01", to: "2025-12-31" } });
+    expect(outcome.ok && outcome.value.report === "profit_and_loss" && outcome.value.net_profit).toBe(600);
+  });
+
+  it("the balance sheet keeps 9000 in open P&L so it still balances (result sits in 2970)", async () => {
+    const handler = setupTool("compute_balance_sheet", { accounts, journals });
+    const payload = parseMcpResponse((await handler({ date_to: "2025-12-31" })).content[0]!.text);
+    expect(payload.current_year_pl.net_profit).toBe(0);
+    expect(payload.equity.total).toBe(600);
+    expect(payload.check.balanced).toBe(true);
+  });
+});
+
+describe("statement date defaults and validation", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const accounts = [makeAccount(1000, "D", "Varad", "Pank"), makeAccount(2900, "C", "Omakapital", "Kapital")];
+  const journals = [
+    makeJournal("2026-09-01", [makePosting(1000, "D", 100), makePosting(2900, "C", 100)], { id: 1 }),
+    makeJournal("2026-12-01", [makePosting(1000, "D", 50), makePosting(2900, "C", 50)], { id: 2 }),
+  ];
+
+  it("compute_balance_sheet without date_to reports as of today (Tallinn) and excludes future-dated journals", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+    const payload = parseMcpResponse((await setupTool("compute_balance_sheet", { accounts, journals })({})).content[0]!.text);
+    expect(payload.date).toBe("2026-09-25");
+    expect(payload.assets.total).toBe(100);
+  });
+
+  it("the balance_sheet op uses the same default and reports the concrete date", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+    const outcome = await createReportingOperations(createApi({ accounts, journals }), true).run({ report: "balance_sheet", period: {} });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok || outcome.value.report !== "balance_sheet") return;
+    expect(outcome.value.date).toBe("2026-09-25");
+    expect(outcome.value.assets.total).toBe(100);
+  });
+
+  it("compute_trial_balance without date_to keeps every posting and labels the end 'unbounded'", async () => {
+    const payload = parseMcpResponse((await setupTool("compute_trial_balance", { accounts, journals })({})).content[0]!.text);
+    expect(payload.period).toEqual({ from: "inception", to: "unbounded" });
+    expect(payload.totals.debit).toBe(150);
+  });
+
+  it.each([
+    ["compute_trial_balance", { date_from: "2026-02-31" }],
+    ["compute_trial_balance", { date_to: "yesterday" }],
+    ["compute_trial_balance", { date_from: "2026-12-31", date_to: "2026-01-01" }],
+    ["compute_balance_sheet", { date_to: "2026-13-01" }],
+    ["compute_profit_and_loss", { date_from: "2026-1-1", date_to: "2026-12-31" }],
+    ["compute_profit_and_loss", { date_from: "2026-12-31", date_to: "2026-01-01" }],
+  ])("%s rejects invalid dates %j", async (tool, args) => {
+    const result = await setupTool(tool, { accounts, journals })(args) as ToolResult;
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text).category).toBe("invalid_date");
+  });
+});
+
+describe("opening-balance warning parity (standalone tools vs run_accounting_report ops)", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-parity-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [
+          { code: "1020", name: "Pank", debit: 1000, credit: 0, dimension: ["Unknown bank"] },
+          { code: "9999", name: "Missing", debit: 0, credit: 0 },
+          { code: "2900", name: "Kapital", debit: 0, credit: 1000 },
+        ],
+        totals: { debit: 1000, credit: 1000 },
+        rawText: "n/a",
+      },
+      "2024-12-12T00:00:00.000Z",
+    );
+  });
+
+  afterEach(() => {
+    delete process.env.EARVELDAJA_RULES_DIR;
+    resetOpeningBalanceCache();
+    rmSync(dir, { recursive: true, force: true });
+    vi.useRealTimers();
+  });
+
+  function parityApi(): ApiContext {
+    const api = createApi({
+      accounts: [makeAccount(1020, "D", "Varad", "Pank"), makeAccount(2900, "C", "Omakapital", "Kapital")],
+      journals: [],
+    });
+    // Two dimensions on 1020, neither matching "Unknown bank" → unmappedDimensions.
+    (api.readonly as unknown as { getAccountDimensions: unknown }).getAccountDimensions = vi.fn().mockResolvedValue([
+      { id: 1, accounts_id: 1020, title_est: "LHV" },
+      { id: 2, accounts_id: 1020, title_est: "Wise" },
+    ]);
+    return api;
+  }
+
+  async function toolWarnings(api: ApiContext, tool: string, args: Record<string, unknown>): Promise<string[]> {
+    const server = { registerTool: vi.fn() } as any;
+    registerFinancialStatementTools(server, api);
+    const handler = server.registerTool.mock.calls.find(([name]: [string]) => name === tool)[2];
+    return parseMcpResponse((await handler(args)).content[0]!.text).warnings;
+  }
+
+  it.each([
+    ["trial_balance", "compute_trial_balance", { date_from: "2025-01-01", date_to: "2025-12-31" }],
+    ["trial_balance", "compute_trial_balance", {}],
+    ["balance_sheet", "compute_balance_sheet", { date_to: "2025-06-30" }],
+    ["balance_sheet", "compute_balance_sheet", {}],
+    ["profit_and_loss", "compute_profit_and_loss", { date_from: "2024-01-01", date_to: "2024-12-31" }],
+  ] as const)("%s op emits the same warnings as %s %j", async (report, tool, args) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+    const api = parityApi();
+    const expected = await toolWarnings(api, tool, args);
+    const period = {
+      ...("date_from" in args ? { from: args.date_from } : {}),
+      ...("date_to" in args ? { to: args.date_to } : {}),
+    };
+    const outcome = await createReportingOperations(api, true).run({ report, period });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok || !("warnings" in outcome.value)) return;
+    // The sandbox markers carry a per-call random nonce; compare text modulo it.
+    const stripNonce = (ws: readonly string[]) => ws.map(w => w.replace(/[0-9a-f]{32}/g, "<nonce>"));
+    expect(stripNonce(outcome.value.warnings)).toEqual(stripNonce(expected));
+    expect(expected.some(w => w.startsWith("Opening balances"))).toBe(true);
+    // The dimension warning can fire now that unmappedDimensions is passed through.
+    expect(expected.some(w => w.includes("dimension label could not be resolved"))).toBe(true);
+    expect(expected.some(w => w.includes("not in the chart were skipped: 9999"))).toBe(true);
+  });
+});
+
+describe("month_end credit invoices, foreign currency, missing create_date, truncation", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("excludes unpaid CREDIT_INVOICE sale invoices from overdue receivables and warns", async () => {
+    const handler = setupTool("month_end_close_checklist", {
+      saleInvoices: [
+        makeSaleInvoice({ id: 1, number: "A-1", create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 500 }),
+        makeSaleInvoice({ id: 2, number: "K-1", sale_invoice_type: "CREDIT_INVOICE", create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 200 }),
+      ],
+    });
+    const payload = parseMcpResponse((await handler({ month: "2024-03" })).content[0]!.text);
+    expect(payload.overdue_receivables.count).toBe(1);
+    expect(payload.overdue_receivables.total).toBe(500);
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("1 unpaid credit invoice(s) excluded")]));
+  });
+
+  it("keeps a foreign-currency invoice without base_gross_price out of the EUR total, flagged, with a warning", async () => {
+    const handler = setupTool("month_end_close_checklist", {
+      purchaseInvoices: [
+        makePurchaseInvoice({ id: 1, create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 100 }),
+        makePurchaseInvoice({ id: 2, create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 1000, cl_currencies_id: "USD" }),
+        makePurchaseInvoice({ id: 3, create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 50, base_gross_price: 45, cl_currencies_id: "USD" }),
+      ],
+    });
+    const payload = parseMcpResponse((await handler({ month: "2024-03" })).content[0]!.text);
+    expect(payload.overdue_payables.count).toBe(3);
+    expect(payload.overdue_payables.total).toBe(145);
+    expect(payload.overdue_payables.items.find((r: { id: number }) => r.id === 2)).toMatchObject({ gross: 1000, currency: "USD", excluded_from_eur_totals: true });
+    expect(payload.overdue_payables.items.find((r: { id: number }) => r.id === 3)).not.toHaveProperty("excluded_from_eur_totals");
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("1 listed foreign-currency invoice(s) have no base_gross_price")]));
+  });
+
+  it("does not crash on an open invoice with an empty or missing create_date", async () => {
+    const handler = setupTool("month_end_close_checklist", {
+      purchaseInvoices: [
+        makePurchaseInvoice({ id: 1, create_date: "", journal_date: "2024-03-01", term_days: 5, gross_price: 100 }),
+        makePurchaseInvoice({ id: 2, create_date: undefined as unknown as string, journal_date: "2024-03-01", term_days: 5, gross_price: 100 }),
+      ],
+    });
+    const payload = parseMcpResponse((await handler({ month: "2024-03" })).content[0]!.text);
+    expect(payload.overdue_payables.count).toBe(0);
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("2 open invoice(s) have no create_date")]));
+  });
+
+  it("counts PARTIALLY_PAID invoices in the due_before_month_end lists too", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+    const handler = setupTool("month_end_close_checklist", {
+      purchaseInvoices: [
+        makePurchaseInvoice({ id: 1, create_date: "2026-09-20", journal_date: "2026-09-20", term_days: 7, gross_price: 100, payment_status: "PARTIALLY_PAID" }),
+      ],
+    });
+    const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+    expect(payload.due_before_month_end_payables.count).toBe(1);
+    expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("1 listed payable(s) are PARTIALLY_PAID")]));
+  });
+
+  it("standalone tool caps a due list at 10 rows and marks it truncated; count/total cover every row", async () => {
+    const handler = setupTool("month_end_close_checklist", {
+      purchaseInvoices: Array.from({ length: 12 }, (_, i) =>
+        makePurchaseInvoice({ id: i + 1, create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, gross_price: 10 })),
+    });
+    const payload = parseMcpResponse((await handler({ month: "2024-03" })).content[0]!.text);
+    expect(payload.overdue_payables.count).toBe(12);
+    expect(payload.overdue_payables.total).toBe(120);
+    expect(payload.overdue_payables.items).toHaveLength(10);
+    expect(payload.overdue_payables.truncated).toBe(true);
   });
 });

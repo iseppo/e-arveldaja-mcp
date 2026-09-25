@@ -1887,3 +1887,33 @@ describe("M23 connection-scoped accounting-rule storage", () => {
     );
   });
 });
+
+describe("accounting-rules bundle file permissions (L6)", () => {
+  it("creates bundle directories 0700 and concept/index/log files 0600", () => {
+    const root = mkdtempSync(join(tmpdir(), "earv-rules-perm-"));
+    const bundleDir = join(root, "company", "accounting-rules");
+    delete process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_DIR = bundleDir;
+    resetAccountingRulesCache();
+    const previousUmask = process.umask(0o002); // a permissive umask must not leak into the bundle
+    try {
+      const result = saveAutoBookingRule({ match: "permcheck", category: "saas_subscriptions", purchase_account_id: 5230 });
+      const mode = (p: string) => statSync(p).mode & 0o777;
+      expect(mode(join(root, "company"))).toBe(0o700);
+      expect(mode(bundleDir)).toBe(0o700);
+      const files: string[] = [];
+      const walk = (d: string) => {
+        for (const entry of readdirSync(d, { withFileTypes: true })) {
+          const p = join(d, entry.name);
+          if (entry.isDirectory()) { expect(mode(p)).toBe(0o700); walk(p); } else files.push(p);
+        }
+      };
+      walk(bundleDir);
+      expect(files).toEqual(expect.arrayContaining([join(bundleDir, "index.md"), join(bundleDir, "log.md"), result.path]));
+      for (const file of files) expect({ file, mode: mode(file) }).toEqual({ file, mode: 0o600 });
+    } finally {
+      process.umask(previousUmask);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

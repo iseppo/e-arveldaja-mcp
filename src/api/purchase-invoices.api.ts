@@ -4,6 +4,7 @@ import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, A
 import type { CreatePurchaseInvoiceRequest, UpdatePurchaseInvoiceRequest } from "../types/mutations.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
+import { applyPurchaseItemStructuralDefaults } from "../tools/purchase-vat-defaults.js";
 
 export class InvoiceCreationError extends Error {
   constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions) {
@@ -137,6 +138,32 @@ function normalizeItemsForNonVat(
 ) : PurchaseInvoiceItem[] {
   if (!items || isVatRegistered) return items;
 
+  // Multi-item invoice with a known invoice gross: distribute that gross across
+  // the items pro rata to their net, cent-exact with the remainder on the last
+  // item. Non-VAT defaults force vat_rate_dropdown "-", so a per-item rate
+  // cannot be derived and the gross would otherwise collapse to net.
+  if (items.length > 1 && grossPrice !== undefined && items.every(item => item.project_no_vat_gross_price == null)) {
+    const nets = items.map(item => item.total_net_price
+      ?? (item.unit_net_price !== undefined && item.amount !== undefined
+        ? roundMoney(item.unit_net_price * item.amount)
+        : undefined));
+    if (nets.every((net): net is number => net !== undefined)) {
+      const netCents = nets.map(net => Math.round(net * 100));
+      const totalNetCents = netCents.reduce((sum, cents) => sum + cents, 0);
+      if (totalNetCents !== 0) {
+        const grossCents = Math.round(grossPrice * 100);
+        let allocated = 0;
+        return items.map((item, idx) => {
+          const share = idx === items.length - 1
+            ? grossCents - allocated
+            : Math.round(grossCents * netCents[idx]! / totalNetCents);
+          allocated += share;
+          return { ...item, project_no_vat_gross_price: share / 100 };
+        });
+      }
+    }
+  }
+
   return items.map(item => {
     // Preserve caller-provided value
     if (item.project_no_vat_gross_price != null) return item;
@@ -247,18 +274,32 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       // Merge API-returned item IDs back into our original items (preserving
       // cl_fringe_benefits_id and other fields the API GET doesn't return).
       // If the API items have different count (shouldn't happen), fall back to API items.
-      const patchItems = apiItems && apiItems.length === normalizedItems.length
+      // Both branches go through the #62 structural defaults: the API requires
+      // cl_fringe_benefits_id/amount on every PATCH row but does not echo them.
+      const patchItems = (apiItems && apiItems.length === normalizedItems.length
         ? normalizedItems.map((orig, idx) => ({
             ...orig,
             id: apiItems[idx]!.id,
             // Let the API recompute vat_amount from our fields
           }))
-        : apiItems;
+        : apiItems)?.map(applyPurchaseItemStructuralDefaults);
 
       // When explicit VAT differs from item-computed VAT (rounding), adjust
       // project_no_vat_gross_price on items so the API computes matching totals.
       if (patchItems && patchItems.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
         const vatDiff = roundMoney(vatPrice - itemVat);
+        // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
+        // A larger gap means the explicit totals disagree with the items; the
+        // reverse-charge path (item VAT ≠ invoice VAT by design) keeps the
+        // pre-existing behaviour.
+        const isReverseCharge = patchItems.some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null);
+        if (!isReverseCharge && Math.abs(vatDiff) > roundMoney(0.01 * patchItems.length) + 1e-9) {
+          throw new Error(
+            `Purchase invoice totals mismatch: explicit vat_price ${vatPrice} differs from the item-computed VAT ${itemVat} ` +
+            `by ${vatDiff}, more than the ${roundMoney(0.01 * patchItems.length)} rounding tolerance for ${patchItems.length} item(s). ` +
+            "Fix the item net amounts / VAT rates or the invoice totals.",
+          );
+        }
         // Apply the rounding difference to the last item's gross
         const lastItem = patchItems[patchItems.length - 1]!;
         const currentGross = lastItem.project_no_vat_gross_price
@@ -275,8 +316,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       if (isForeignCurrency) {
         const rate = data.currency_rate!;
         const net = roundMoney(itemNet);
-        const baseNet = data.base_net_price ?? roundMoney(net * rate);
         const baseGross = data.base_gross_price ?? roundMoney(gross * rate);
+        // With an explicit EUR gross (actual settlement), split it in the
+        // invoice's own net/gross proportion rather than re-deriving net from
+        // the nominal rate — otherwise a 0-VAT invoice gets a phantom base VAT.
+        const baseNet = data.base_net_price ?? (
+          data.base_gross_price !== undefined && gross !== 0
+            ? roundMoney(net * baseGross / gross)
+            : roundMoney(net * rate)
+        );
         // Derive base_vat as the residual of base_gross − base_net so the trio
         // reconciles exactly (base_net + base_vat === base_gross). Rounding net,
         // vat, and gross independently against the rate can leave them off by a
@@ -415,7 +463,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       await this.update(id, {
         vat_price: freshPreview.proposed_vat_price,
         gross_price: freshPreview.proposed_gross_price,
-        items: invoice.items,
+        items: invoice.items?.map(applyPurchaseItemStructuralDefaults),
       });
     }
     return this.confirm(id);

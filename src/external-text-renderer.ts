@@ -66,7 +66,13 @@ export function desandboxText(text: string | null | undefined): string | null | 
   for (let stripped = unwrapUntrustedOcr(out); stripped !== out; stripped = unwrapUntrustedOcr(out)) {
     out = stripped;
   }
-  return out.replace(SANDBOX_MARKER_RE, "");
+  // Strip residual markers to a FIXPOINT: a single pass over a nested token
+  // such as `<<UNTRUSTED_OCR_<<UNTRUSTED_OCR_START:ab>>START:cd>>` would splice
+  // the outer halves back into a well-formed marker.
+  for (let stripped = out.replace(SANDBOX_MARKER_RE, ""); stripped !== out; stripped = out.replace(SANDBOX_MARKER_RE, "")) {
+    out = stripped;
+  }
+  return out;
 }
 
 interface TextPolicy {

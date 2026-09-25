@@ -313,39 +313,46 @@ function storedBankAccountNo(transaction: Pick<Transaction,
 }
 
 export function buildDuplicateLookup(transactions: Transaction[], selectedDimensionId: number): DuplicateLookup {
-  const byBankRef = new Map<string, number[]>();
-  const byEntryKey = new Map<string, number[]>();
-
+  const lookup: DuplicateLookup = { byBankRef: new Map(), byEntryKey: new Map() };
   for (const transaction of transactions) {
-    if (!transaction.id) continue;
-    if (
-      typeof transaction.accounts_dimensions_id !== "number" ||
-      !Number.isSafeInteger(transaction.accounts_dimensions_id) ||
-      transaction.accounts_dimensions_id <= 0 ||
-      transaction.accounts_dimensions_id !== selectedDimensionId
-    ) {
-      continue;
-    }
+    addToDuplicateLookup(lookup, transaction, selectedDimensionId);
+  }
+  return lookup;
+}
 
-    const entryKey = buildExistingTransactionDuplicateKey(transaction, selectedDimensionId);
-    if (entryKey) {
-      const exactExisting = byEntryKey.get(entryKey) ?? [];
-      exactExisting.push(transaction.id);
-      byEntryKey.set(entryKey, exactExisting);
-    }
-
-    const directBankRefKey = dimensionScopedBankReferenceLookupKey(
-      directBankReferenceLookupKey(transaction),
-      selectedDimensionId,
-    );
-    if (!directBankRefKey) continue;
-
-    const existing = byBankRef.get(directBankRefKey) ?? [];
-    existing.push(transaction.id);
-    byBankRef.set(directBankRefKey, existing);
+/** Index one more ledger row (e.g. one just created) into an existing lookup. */
+export function addToDuplicateLookup(
+  lookup: DuplicateLookup,
+  transaction: Transaction,
+  selectedDimensionId: number,
+): void {
+  const { byBankRef, byEntryKey } = lookup;
+  if (!transaction.id) return;
+  if (
+    typeof transaction.accounts_dimensions_id !== "number" ||
+    !Number.isSafeInteger(transaction.accounts_dimensions_id) ||
+    transaction.accounts_dimensions_id <= 0 ||
+    transaction.accounts_dimensions_id !== selectedDimensionId
+  ) {
+    return;
   }
 
-  return { byBankRef, byEntryKey };
+  const entryKey = buildExistingTransactionDuplicateKey(transaction, selectedDimensionId);
+  if (entryKey) {
+    const exactExisting = byEntryKey.get(entryKey) ?? [];
+    exactExisting.push(transaction.id);
+    byEntryKey.set(entryKey, exactExisting);
+  }
+
+  const directBankRefKey = dimensionScopedBankReferenceLookupKey(
+    directBankReferenceLookupKey(transaction),
+    selectedDimensionId,
+  );
+  if (!directBankRefKey) return;
+
+  const existing = byBankRef.get(directBankRefKey) ?? [];
+  existing.push(transaction.id);
+  byBankRef.set(directBankRefKey, existing);
 }
 
 export function buildPossibleDuplicateLookup(

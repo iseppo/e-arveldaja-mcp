@@ -1,5 +1,6 @@
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import type { PurchaseInvoice, Transaction } from "../types/api.js";
+import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import type { InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { scoreTransactionToInvoice } from "./receipt-extraction.js";
 import type { InvoiceDuplicateMatch, TransactionMatchCandidate } from "./receipt-inbox-types.js";
@@ -55,13 +56,12 @@ export function findDuplicateInvoice(
   createDate: string,
   grossPrice: number,
 ): InvoiceDuplicateMatch | undefined {
-  const normalizedNumber = invoiceNumber.trim().toLowerCase();
+  const normalizedNumber = normalizeInvoiceNumberForComparison(invoiceNumber);
 
   const sameNumber = invoices.find(invoice =>
     invoice.clients_id === clientsId &&
-    invoice.status !== "DELETED" &&
-    invoice.status !== "INVALIDATED" &&
-    invoice.number.trim().toLowerCase() === normalizedNumber
+    !isInvalidatedPurchaseInvoice(invoice) &&
+    normalizeInvoiceNumberForComparison(invoice.number) === normalizedNumber
   );
   if (sameNumber?.id) {
     return {
@@ -75,8 +75,7 @@ export function findDuplicateInvoice(
 
   const sameAmountDate = invoices.find(invoice =>
     invoice.clients_id === clientsId &&
-    invoice.status !== "DELETED" &&
-    invoice.status !== "INVALIDATED" &&
+    !isInvalidatedPurchaseInvoice(invoice) &&
     invoice.create_date === createDate &&
     Math.abs((invoice.gross_price ?? 0) - grossPrice) < 0.01 &&
     (!invoice.number?.trim() || !normalizedNumber)

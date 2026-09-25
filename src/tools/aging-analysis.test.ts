@@ -406,3 +406,66 @@ describe("missing term_days", () => {
     expect(warnings?.some(w => w.includes("term_days"))).toBe(true);
   });
 });
+
+describe("as_of_date validation", () => {
+  it.each(["2024-02-31", "yesterday", "2024-1-5", ""])("rejects %j instead of bucketing everything as 90+", async (asOf) => {
+    const handler = setupReceivables([invoice({ id: 1 })]);
+    const result = await handler({ as_of_date: asOf }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parse(result.content[0]!.text).category).toBe("invalid_date");
+  });
+
+  it("validates compute_payables_aging as_of_date too", async () => {
+    setupReceivables([]);
+    const result = await capturedHandlers["compute_payables_aging"]!({ as_of_date: "2024-13-01" }) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("empty create_date", () => {
+  it("does not throw a RangeError; the invoice is aged from as_of_date", async () => {
+    const handler = setupReceivables([invoice({ id: 1, create_date: "", term_days: 0, gross_price: 70 })]);
+    const data = parse((await handler({ as_of_date: "2024-03-01" })).content[0]!.text);
+    expect(data.total_unpaid_face_value).toBe(70);
+    expect((data.aging_buckets as Array<{ label: string }>)[0]!.label).toBe("current");
+  });
+});
+
+describe("foreign-currency invoices without base_gross_price", () => {
+  it("are excluded from every EUR total, kept (flagged) in the rows, and warned about", async () => {
+    const handler = setupReceivables([
+      invoice({ id: 1, gross_price: 100 }),
+      invoice({ id: 2, gross_price: 5000, cl_currencies_id: "USD", clients_id: null as unknown as number }),
+      invoice({ id: 3, gross_price: 50, base_gross_price: 46, cl_currencies_id: "USD" }),
+    ]);
+    const data = parse((await handler({ as_of_date: "2024-06-01" })).content[0]!.text);
+    expect(data.total_invoices).toBe(3);
+    expect(data.total_unpaid_face_value).toBe(146);
+    const bucket = (data.aging_buckets as Array<{ total: number; count: number; invoices: Array<Record<string, unknown>> }>)[0]!;
+    expect(bucket.count).toBe(3);
+    expect(bucket.total).toBe(146);
+    expect(bucket.invoices.find(r => r.id === 2)).toMatchObject({ amount: 5000, currency: "USD", excluded_from_eur_totals: true });
+    expect(data.top_debtors).toEqual([expect.objectContaining({ total: 146 })]);
+    expect(data.unmatched_client_invoices).toMatchObject({ count: 1, total: 0 });
+    expect(data.warnings as string[]).toEqual(expect.arrayContaining([expect.stringContaining("1 foreign-currency invoice(s) have no base_gross_price")]));
+  });
+});
+
+describe("standalone list caps are flagged", () => {
+  it("caps a bucket and the debtor list at 10 and says so; the shared core keeps every row", async () => {
+    const invoices = Array.from({ length: 12 }, (_, i) => invoice({ id: i + 1, clients_id: i + 1, client_name: `C${i}` }));
+    const data = parse((await setupReceivables(invoices)({ as_of_date: "2024-06-01" })).content[0]!.text);
+    const bucket = (data.aging_buckets as Array<{ count: number; invoices: unknown[]; truncated?: boolean }>)[0]!;
+    expect(bucket.count).toBe(12);
+    expect(bucket.invoices).toHaveLength(10);
+    expect(bucket.truncated).toBe(true);
+    expect(data.top_debtors as unknown[]).toHaveLength(10);
+    expect(data.top_debtors_truncated).toBe(true);
+    expect(data.debtor_count).toBe(12);
+
+    const { computeAgingBuckets } = await import("./aging-analysis.js");
+    const core = computeAgingBuckets(invoices, "2024-06-01");
+    expect(core.aging_buckets[0]!.invoices).toHaveLength(12);
+    expect(core.top_parties).toHaveLength(12);
+  });
+});

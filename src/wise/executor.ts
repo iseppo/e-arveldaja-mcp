@@ -24,6 +24,7 @@ import { clearRuntimeCaches } from "../cache-control.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { roundMoney } from "../money.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
+import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { buildInterAccountJournalIndex, findMatchingJournal } from "../tools/inter-account-utils.js";
 import {
   bankIdentitiesByDimension,
@@ -589,6 +590,7 @@ async function runWiseImport(
               booked_currency: command.booked_currency,
             });
           } catch (error) {
+            if (isMutationIndeterminate(error)) throw error;
             const errorMessage = error instanceof Error ? error.message : String(error);
             skipped.push({
               wise_id: command.wise_id,
@@ -694,6 +696,7 @@ async function runWiseImport(
               ownership_basis: command.ownership_basis,
             });
           } catch (error) {
+            if (isMutationIndeterminate(error)) throw error;
             const errorMessage = error instanceof Error ? error.message : String(error);
             skipped.push({
               wise_id: command.wise_id,
@@ -740,6 +743,24 @@ async function runWiseImport(
           },
         });
       } catch (err) {
+        if (isMutationIndeterminate(err)) {
+          // The write may or may not have committed. Reporting it as a plain
+          // skip/failure would invite a re-run that double-books, and carrying
+          // on would build later commands on an unknown state — so stop here,
+          // like the CAMT importer, and name every command left unattempted.
+          skipped.push({
+            wise_id: command.wise_id,
+            reason: `Outcome unknown (${command.action}): the API call for Wise row ${command.wise_id} may or may not have been applied. ` +
+              "Import stopped; verify with list_transactions / list_journals before re-running.",
+          });
+          for (const remaining of commands.slice(commands.indexOf(command) + 1)) {
+            skipped.push({
+              wise_id: remaining.wise_id,
+              reason: "Not attempted: import stopped after an indeterminate mutation",
+            });
+          }
+          break;
+        }
         skipped.push({
           wise_id: command.wise_id,
           reason: err instanceof Error ? err.message : String(err),

@@ -343,7 +343,7 @@ describe("formatDuplicatePostingWarnings", () => {
     expect(lines[0]).toContain("journal 10");
     expect(lines[0]).toContain("[Payment]");
     expect(lines[0]).toContain("2024-06-15");
-    expect(lines[0]).toContain("doc DOC-1");
+    expect(lines[0]).toContain("doc [DOC-1]");
   });
 
   it("uses 'inflow' wording for D-direction candidates and omits the doc fragment when document_number is null", () => {

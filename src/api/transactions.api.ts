@@ -4,6 +4,7 @@ import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource } from "./base-resource.js";
+import { signedBankTransactionDirection, storedTypeContradictsSignedDirection } from "../bank-transaction-direction.js";
 
 function isHttpMethod(value: unknown): value is HttpMethod {
   return value === "GET" || value === "POST" || value === "PUT" ||
@@ -75,6 +76,61 @@ export class LinkedInvoiceClientMismatchError extends Error {
   }
 }
 
+/**
+ * The signed importer marker on the transaction (CAMT CRDT/DBIT, Wise IN/OUT)
+ * proves a direction its stored `type` contradicts. The backend books the cash
+ * leg from `type`, so registering would post the bank side backwards. Thrown
+ * before any mutation, on every confirm path.
+ */
+export class StoredTypeDirectionMismatchError extends Error {
+  readonly category = "stored_type_direction_mismatch";
+  readonly transaction_id: number;
+  readonly stored_type: string;
+  readonly signed_direction: "incoming" | "outgoing";
+  readonly next_action =
+    "Do not confirm this row: its stored type would book the bank leg on the wrong side. Delete it and " +
+    "re-import the statement line (the importers set type from the signed direction), or book it manually.";
+
+  constructor(details: { transactionId: number; storedType: string; signedDirection: "incoming" | "outgoing" }) {
+    super(
+      `Transaction ${details.transactionId} is stored as type ${details.storedType}, but its signed statement ` +
+      `marker says the money was ${details.signedDirection}. Confirming would book the bank leg backwards.`,
+    );
+    this.name = "StoredTypeDirectionMismatchError";
+    this.transaction_id = details.transactionId;
+    this.stored_type = details.storedType;
+    this.signed_direction = details.signedDirection;
+  }
+}
+
+/**
+ * The linked invoices belong to different clients. One journal has one client
+ * (copied from the transaction), so whichever client the transaction carries —
+ * auto-filled or already set — the other invoices' receipts would land in the
+ * wrong sub-ledger. Thrown before any mutation; the payment must be split into
+ * one transaction per client.
+ */
+export class LinkedInvoiceClientsAmbiguousError extends Error {
+  readonly category = "linked_invoice_clients_ambiguous";
+  readonly transaction_id: number;
+  readonly invoice_clients_ids: number[];
+  readonly next_action =
+    "Split the payment into one bank transaction per client (one journal carries one client), then confirm " +
+    "each against its own client's invoices; setting clients_id cannot make a mixed-client distribution valid.";
+
+  constructor(details: { transactionId: number; invoiceClientsIds: number[]; transactionClientsId?: number | null }) {
+    super(
+      `Transaction ${details.transactionId} ` +
+      (typeof details.transactionClientsId === "number" ? `is booked to client ${details.transactionClientsId}` : "has no client") +
+      ` and its linked invoices belong to different clients (${details.invoiceClientsIds.join(", ")}); ` +
+      `one journal has one client, so refusing to confirm.`,
+    );
+    this.name = "LinkedInvoiceClientsAmbiguousError";
+    this.transaction_id = details.transactionId;
+    this.invoice_clients_ids = details.invoiceClientsIds;
+  }
+}
+
 interface LinkedInvoiceClient {
   table: string;
   id: number;
@@ -104,16 +160,13 @@ export class TransactionsApi extends BaseResource<Transaction> {
   }
 
   /**
-   * Resolve the single client shared by every invoice in a distribution.
-   *
-   * Returns `undefined` when there is no invoice row, when an invoice carries no
-   * client (it cannot pin the journal's sub-ledger), or when the invoices
-   * disagree — one journal has one client, so a split-client distribution has no
-   * satisfiable expectation and must not be blocked.
+   * Resolve the client of every linked invoice in a distribution. Invoices that
+   * carry no client of their own cannot pin the journal's sub-ledger and are
+   * left out.
    */
-  private async resolveLinkedInvoiceClient(
+  private async resolveLinkedInvoiceClients(
     body: TransactionDistribution[],
-  ): Promise<LinkedInvoiceClient | undefined> {
+  ): Promise<LinkedInvoiceClient[]> {
     const resolved: LinkedInvoiceClient[] = [];
     for (const dist of body) {
       if (!dist.related_id) continue;
@@ -122,13 +175,10 @@ export class TransactionsApi extends BaseResource<Transaction> {
         ? await this.client.get<PurchaseInvoice>(`/purchase_invoices/${dist.related_id}`)
         : await this.client.get<SaleInvoice>(`/sale_invoices/${dist.related_id}`);
       const clientsId = invoice?.clients_id;
-      if (typeof clientsId !== "number") return undefined;
+      if (typeof clientsId !== "number") continue;
       resolved.push({ table: dist.related_table, id: dist.related_id, clientsId });
     }
-    const first = resolved[0];
-    if (!first) return undefined;
-    if (resolved.some(r => r.clientsId !== first.clientsId)) return undefined;
-    return first;
+    return resolved;
   }
 
   /**
@@ -163,31 +213,58 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Value to restore if the register call fails after we touched clients_id
     // (`undefined` = we did not touch it, so there is nothing to roll back).
     let clientsIdRollbackValue: number | null | undefined;
-    if (body.length > 0 && (autoFixClientsId || hasInvoiceDistribution)) {
-      const tx = await this.get(id);
+    // Read on every path: the direction guard below applies to all confirms,
+    // whatever the distribution.
+    const tx = await this.get(id);
+    if (tx && storedTypeContradictsSignedDirection(tx)) {
+      throw new StoredTypeDirectionMismatchError({
+        transactionId: id,
+        storedType: String(tx.type),
+        signedDirection: signedBankTransactionDirection(tx)!,
+      });
+    }
+    if (tx && body.length > 0 && (autoFixClientsId || hasInvoiceDistribution)) {
       if (!tx.clients_id) {
         // Auto-fix missing clients_id from linked invoice
         if (autoFixClientsId) {
-          let clientsId: number | undefined;
-
+          // Only a real client id is ever written (never null), and only when
+          // every linked invoice agrees on it.
+          const invoiceClientsIds = new Set<number>();
           for (const dist of body) {
+            let inv: PurchaseInvoice | SaleInvoice | undefined;
             if (dist.related_table === "purchase_invoices" && dist.related_id) {
-              const inv = await this.client.get<PurchaseInvoice>(`/purchase_invoices/${dist.related_id}`);
-              clientsId = inv?.clients_id;
+              inv = await this.client.get<PurchaseInvoice>(`/purchase_invoices/${dist.related_id}`);
             } else if (dist.related_table === "sale_invoices" && dist.related_id) {
-              const inv = await this.client.get<SaleInvoice>(`/sale_invoices/${dist.related_id}`);
-              clientsId = inv?.clients_id;
+              inv = await this.client.get<SaleInvoice>(`/sale_invoices/${dist.related_id}`);
             }
-            if (clientsId !== undefined) break;
+            if (typeof inv?.clients_id === "number") invoiceClientsIds.add(inv.clients_id);
           }
 
+          if (invoiceClientsIds.size > 1) {
+            throw new LinkedInvoiceClientsAmbiguousError({
+              transactionId: id,
+              invoiceClientsIds: [...invoiceClientsIds],
+            });
+          }
+          const [clientsId] = invoiceClientsIds;
           if (clientsId !== undefined) {
             await this.update(id, { clients_id: clientsId });
             clientsIdRollbackValue = null;
           }
         }
       } else if (hasInvoiceDistribution) {
-        const invoice = await this.resolveLinkedInvoiceClient(body);
+        const invoices = await this.resolveLinkedInvoiceClients(body);
+        const invoiceClientsIds = [...new Set(invoices.map(r => r.clientsId))];
+        if (invoiceClientsIds.length > 1) {
+          // Mixed clients: whatever client the journal carries, some invoice's
+          // receipt lands in the wrong sub-ledger — reassignment cannot fix it.
+          throw new LinkedInvoiceClientsAmbiguousError({
+            transactionId: id,
+            transactionClientsId: tx.clients_id,
+            invoiceClientsIds,
+          });
+        }
+        const invoice = invoices[0];
         if (invoice && invoice.clientsId !== tx.clients_id) {
           if (options?.reassignClientToInvoice === true) {
             await this.update(id, { clients_id: invoice.clientsId });

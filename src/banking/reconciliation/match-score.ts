@@ -2,7 +2,7 @@ import type { Transaction } from "../../types/api.js";
 import { roundMoney } from "../../money.js";
 import { type Cents, centsEqual, toCents } from "../../money-cents.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { bankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { getComparableBaseInvoiceAmount } from "./invoice-index.js";
 
 // ---------------------------------------------------------------------------
@@ -148,6 +148,17 @@ export function getInvoiceMatchEligibility(
     return {
       allowSaleInvoices: true,
       allowPurchaseInvoices: false,
+    };
+  }
+
+  // A signed importer marker (CAMT DBIT / Wise OUT) proves the cash left the
+  // account, so it can only settle a payable — never a receivable. The
+  // sale-invoice fallback below exists only for legacy rows whose stored `C`
+  // may be the 0.22.0 forced-`C` artefact rather than a real outgoing payment.
+  if (signedBankTransactionDirection(tx) === "outgoing") {
+    return {
+      allowSaleInvoices: false,
+      allowPurchaseInvoices: true,
     };
   }
 

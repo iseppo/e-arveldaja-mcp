@@ -297,7 +297,8 @@ export async function checkIntakeCashDuplicates(
 /**
  * Render one warning line per suspect plus (when the scan degraded) one
  * line carrying `scan_note`. `wrapTitle` sandboxes untrusted journal titles
- * at the call site (`wrapUntrustedOcr`) — this module stays MCP-free.
+ * and document numbers at the call site (`wrapUntrustedOcr`) — this module
+ * stays MCP-free.
  */
 export function formatDuplicatePostingWarnings(
   result: DuplicatePostingScanResult,
@@ -308,7 +309,8 @@ export function formatDuplicatePostingWarnings(
   const directionWord = candidate.direction === "C" ? "outflow" : "inflow";
   const amount = roundMoney(candidate.amount);
   for (const suspect of result.suspects) {
-    const docPart = suspect.document_number ? `, doc ${suspect.document_number}` : "";
+    // document_number is upstream free text too — sandbox it like the title.
+    const docPart = suspect.document_number ? `, doc ${wrapTitle(suspect.document_number)}` : "";
     lines.push(
       `POSSIBLE duplicate: this ${amount} € ${directionWord} may already be booked by journal ${suspect.journal_id} "${wrapTitle(suspect.journal_title)}" (${suspect.date}${docPart}). Verify before proceeding — two legitimate identical payments are possible.`,
     );

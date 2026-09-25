@@ -780,6 +780,8 @@ describe("audit log labels", () => {
 
       expect(auditLog.AuditAction.parse("MUTATION_INDETERMINATE"))
         .toBe("MUTATION_INDETERMINATE");
+      // clear_session_log's tombstone must be filterable via get_session_log's action enum.
+      expect(auditLog.AuditAction.parse("LOG_CLEARED")).toBe("LOG_CLEARED");
       expect(auditLog.logAudit({
         tool: "update_client",
         action: "MUTATION_INDETERMINATE",
@@ -1346,5 +1348,91 @@ describe("audit default read limit (M18)", () => {
     expect(newest2).toContain("FORGED-TAIL");
     expect(newest2).toContain(marker(3));
     expect(newest2).not.toContain(marker(1));
+  });
+});
+
+describe("clear_session_log tombstone (L7) and audit-failure visibility (L4)", () => {
+  let tempDir: string | undefined;
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (tempDir) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = undefined;
+    }
+  });
+
+  const entry = (id: number) => ({
+    tool: "create_journal",
+    action: "CREATED",
+    entity_type: "journal",
+    entity_id: id,
+    summary: `Entry ${id}`,
+    details: {},
+  });
+
+  it("replaces the cleared log with a single tombstone recording when/which connection/how many", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-clear-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+    auditLog.logAudit(entry(1));
+    auditLog.logAudit(entry(2));
+    auditLog.logAudit(entry(3));
+
+    expect(auditLog.clearAuditLog()).toEqual({ cleared: true, entries_removed: 3 });
+    const content = auditLog.getAuditLog();
+    expect(content).not.toContain("Entry 1");
+    expect(content).toContain('"t":"clear_session_log"');
+    expect(content).toMatch(/"a":"LOG_CLEARED"/);
+    expect(content).toMatch(/3 entries removed/);
+    expect(content).toContain("acme");
+    expect(auditLog.listAuditLogs().find(l => l.connection === "acme")?.entries).toBe(1);
+    expect((await stat(join(tempDir, "logs", "acme.audit.md"))).mode & 0o777).toBe(0o600);
+
+    // A second clear counts the tombstone itself.
+    expect(auditLog.clearAuditLog()).toEqual({ cleared: true, entries_removed: 1 });
+  });
+
+  it("leaves the original log intact when writing the tombstone fails", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-clear-fail-"));
+    const actualFs = await vi.importActual<typeof import("fs")>("fs");
+    const auditLog = await loadAuditLogModule(tempDir, {
+      writeFileSync: ((path: Parameters<typeof actualFs.writeFileSync>[0], data: string, options?: Parameters<typeof actualFs.writeFileSync>[2]) => {
+        if (typeof data === "string" && data.includes("LOG_CLEARED")) {
+          // Simulate a torn write (e.g. ENOSPC): the target is created/truncated, then the write fails.
+          actualFs.writeFileSync(path, "", options);
+          throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+        }
+        return actualFs.writeFileSync(path, data, options);
+      }) as typeof actualFs.writeFileSync,
+    });
+    auditLog.initAuditLog(() => "acme");
+    auditLog.logAudit(entry(1));
+    auditLog.logAudit(entry(2));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    expect(auditLog.clearAuditLog()).toEqual({ cleared: false, entries_removed: 0 });
+    stderr.mockRestore();
+    const content = auditLog.getAuditLog();
+    expect(content).toContain("Entry 1");
+    expect(content).toContain("Entry 2");
+    expect(content).not.toContain("LOG_CLEARED");
+    expect((await readdir(join(tempDir, "logs"))).filter(f => f.includes(".tmp-"))).toEqual([]);
+  });
+
+  it("reports a failed audit append on stderr with the operation identity and returns false", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-fail-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+    auditLog.setAuditLogLockOptionsForTesting({ timeoutMs: 50, pollMs: 10 });
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      // Hold the audit lock from "another owner" so the append times out.
+      const ok = withOwnedFileLockSync(join(tempDir, "logs", ".audit-log.lock"), () => auditLog.logAudit(entry(42)));
+      expect(ok).toBe(false);
+      const written = stderr.mock.calls.map(c => String(c[0])).join("");
+      expect(written).toMatch(/\[audit\] FAILED to write audit entry tool="create_journal" action="CREATED" entity="journal" id=42/);
+    } finally {
+      auditLog.setAuditLogLockOptionsForTesting(undefined);
+    }
   });
 });

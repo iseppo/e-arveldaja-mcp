@@ -64,7 +64,15 @@ export function canonicalBusinessText(value: unknown): string {
   // delimiters are server-generated nonce markers that never occur in genuine
   // business text, so removing them guarantees no `UNTRUSTED_OCR_*` marker can
   // reach a persisted or matched value.
-  text = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "");
+  // Loop to a fixpoint: one pass over a NESTED token (a marker embedded inside
+  // another marker's prefix) would splice the outer halves into a new marker.
+  for (
+    let stripped = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "");
+    stripped !== text;
+    stripped = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "")
+  ) {
+    text = stripped;
+  }
   return text.trim().replace(/\s+/g, " ");
 }
 

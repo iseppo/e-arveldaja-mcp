@@ -35,7 +35,9 @@ export const DATE_VALUE_SOURCE =
 
 const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
 const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
-const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|summa km-ta|summa eurodes\s*\(km-ta\)|summa\s*\(km-ta\)|käibemaksuta|without vat|total net)/i;
+// Net (pre-VAT) total labels. A net-labelled line is never a gross candidate,
+// even when it also carries a TOTAL word ("Kokku km-ta 50,00", "Total excl. VAT").
+const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|km-ta\b|\(km-ta\)|ilma\s+(?:km|käibemaks)|käibemaksuta|without\s+(?:vat|tax)|excl(?:\.|uding)?\s*(?:vat|tax)|\bex\.?\s+vat\b|total\s+net|net\s+total)/i;
 const RECEIPT_REFERENCE_LINE_RE =
   /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|tax\s*id|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
 const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service fee|vahesumma|subtotal|handling)/i;
@@ -254,6 +256,8 @@ export interface ExtractedReceiptFields {
   rejected_candidates?: RejectedCandidate[];
   field_provenance?: FieldProvenance[];
   extraction_notes?: string[];
+  /** Layout and text extraction disagreed on the gross total; creation is gated to review. */
+  total_gross_conflict?: boolean;
 }
 
 export interface TransactionGroupClassificationInput {
@@ -404,6 +408,8 @@ interface ExtractedAmounts {
 export interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   provenance: AmountProvenanceMetadata[];
   extraction_notes?: string[];
+  /** Layout and text extraction produced different gross totals — the gross is not trustworthy for auto-booking. */
+  total_gross_conflict?: boolean;
 }
 
 interface LayoutRow {
@@ -674,13 +680,21 @@ function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate):
     (candidate.likely_year_amount ? 10 : 0);
 }
 
-function scoreExplicitGrossCandidate(line: string, hasCurrencyKeyword: boolean, hasTotalLikeLabel: boolean): number {
-  const lineLower = line.toLowerCase();
+function scoreExplicitGrossCandidate(
+  inspectionLine: string,
+  ownLine: string,
+  hasCurrencyKeyword: boolean,
+  hasTotalLikeLabel: boolean,
+): number {
+  const lineLower = inspectionLine.toLowerCase();
   return (hasTotalLikeLabel ? 4 : 0) +
     (hasCurrencyKeyword ? 2 : 0) +
-    (/\b(?:including|incl\.?|sisaldab)\b/i.test(line) ? 4 : 0) +
+    (/\b(?:including|incl\.?|sisaldab)\b/i.test(inspectionLine) ? 4 : 0) +
     (/\b(?:grand total|amount due|payable|km-ga|charged|makstud summa|paid amount)\b/i.test(lineLower) ? 4 : 0) +
-    (RECEIPT_VAT_LABEL_RE.test(lineLower) ? 2 : 0);
+    // VAT-word bonus from the line's OWN text only: the inspection window
+    // appends the next line, so a following "KM 24% 12,00" must not lift a
+    // preceding net line over the real gross line.
+    (RECEIPT_VAT_LABEL_RE.test(ownLine.toLowerCase()) ? 2 : 0);
 }
 
 function isVatAmountLine(line: string): boolean {
@@ -840,9 +854,25 @@ const REVERSE_CHARGE_PHRASES_RE =
  * automatically (issue #18). Phrase coverage is the high-precision signal;
  * a foreign-supplier heuristic can be applied separately as a backstop.
  */
+// A reverse-charge phrase that is negated on its own line ("not subject to
+// reverse charge", "ei kuulu pöördmaksustamisele", "reverse charge: not
+// applicable") states the opposite and must not trigger auto-detection.
+// The negation must sit directly before the phrase (allowing only filler such
+// as "subject to"), so "VAT not charged – reverse charge" still counts.
+const REVERSE_CHARGE_NEGATION_BEFORE_RE = /\b(?:not|no|non|without|ei|mitte|pole|kein(?:e|er)?|nicht|pas)[\s-]+(?:(?:subject|liable)\s+to\s+|applicable\s+|a\s+|the\s+|kuulu\s+|ole\s+|de\s+)?$/i;
+const REVERSE_CHARGE_NEGATION_AFTER_RE = /^[^.\n]{0,30}\b(?:does\s+not\s+apply|not\s+applicable|n\/a|ei\s+(?:kohaldata|kohaldu|rakendata))\b/i;
+
 export function detectReverseChargeFromText(text: string | undefined): boolean {
   if (!text) return false;
-  return REVERSE_CHARGE_PHRASES_RE.test(text);
+  const pattern = new RegExp(REVERSE_CHARGE_PHRASES_RE.source, "gi");
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const before = text.slice(Math.max(0, start - 40), start);
+    const after = text.slice(start + match[0].length, start + match[0].length + 40);
+    if (REVERSE_CHARGE_NEGATION_BEFORE_RE.test(before) || REVERSE_CHARGE_NEGATION_AFTER_RE.test(after)) continue;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -1024,7 +1054,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
     ? lastVatCandidate
     : undefined;
   const score = !blockedAsReference && hasTotalLikeLabel
-    ? scoreExplicitGrossCandidate(inspectionLine, hasCurrencyKeyword, hasTotalLikeLabel)
+    ? scoreExplicitGrossCandidate(inspectionLine, line, hasCurrencyKeyword, hasTotalLikeLabel)
     : 0;
 
   return {
@@ -1547,6 +1577,7 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     vat_explicit: totalVat !== undefined && (layoutAmounts.vat_explicit || textAmounts.vat_explicit === true),
     provenance: mergedProvenance,
     ...(extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
+    ...(grossValuesDisagree ? { total_gross_conflict: true } : {}),
   };
 }
 
@@ -1590,7 +1621,8 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
 
     if (
       !classified.blockedAsReference &&
-      classified.hasTotalLikeLabel
+      classified.hasTotalLikeLabel &&
+      !classified.hasNetLikeLabel
     ) {
       if (!bestExplicitGrossCandidate || classified.score > bestExplicitGrossCandidate.score || (classified.score === bestExplicitGrossCandidate.score && classified.pickedGross > bestExplicitGrossCandidate.amount)) {
         bestExplicitGrossCandidate = { amount: classified.pickedGross, score: classified.score, lineIndex };
@@ -2065,28 +2097,72 @@ export function extractSupplierName(
   return extractSupplierNameWithNotes(text, fallbackFileName, textItems).name;
 }
 
+// Invoice-number candidates must carry a digit and must not be a real
+// calendar date ("12.03.2024", "2024-03-12", "12/03/24") captured after a
+// "No." / "Nr" label. Date-shaped invoice numbers that are not valid dates in
+// those layouts ("2025-09-012", "2024-12-0005", "25-10-100") are kept.
+const CALENDAR_DATE_TOKEN_LAYOUTS: ReadonlyArray<{ re: RegExp; order: "ymd" | "dmy" }> = [
+  { re: /^(\d{4})-(\d{2})-(\d{2})$/, order: "ymd" },
+  { re: /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/, order: "dmy" },
+  { re: /^(\d{1,2})-(\d{1,2})-(\d{4})$/, order: "dmy" },
+  { re: /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/, order: "dmy" },
+];
+
+function isCalendarDateToken(token: string): boolean {
+  for (const { re, order } of CALENDAR_DATE_TOKEN_LAYOUTS) {
+    const match = re.exec(token);
+    if (!match) continue;
+    const [a, b, c] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    let [year, month, day] = order === "ymd" ? [a, b, c] : [c, b, a];
+    if (match[3]!.length === 2 && order === "dmy") year += 2000;
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+  }
+  return false;
+}
+// Lines whose "nr"/"no" label names something other than the invoice:
+// registry/VAT ids, payment references, bank accounts, phone numbers.
+const NON_INVOICE_NUMBER_LINE_RE =
+  /\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|viite(?:number|nr)?|viitenr|reference|ref\.?\s*(?:nr|no)|konto|account|a\/a|iban|swift|bic|tel|telefon|phone|mob(?:iil)?|fax)\b/i;
+
+function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefined {
+  const candidate = raw?.trim();
+  if (!candidate || !/\d/.test(candidate) || isCalendarDateToken(candidate)) return undefined;
+  return candidate;
+}
+
 export function extractInvoiceNumber(text: string, fileName: string): string {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
     .filter(Boolean);
-  const invoiceNumberPatterns = [
-    /(?:arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?)|tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\s.-]*([A-Z0-9/_-]{3,})/i,
-    /\b(?:invoice|arve(?:-saateleht)?|receipt)\s+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
+  // Ranked tiers, each matched line by line (never across a newline): an
+  // invoice/arve label outranks an order/booking/ticket label wherever the two
+  // appear in the document.
+  const invoiceNumberTiers: RegExp[][] = [
+    [
+      /(?:arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*([A-Z0-9/_-]{3,})/i,
+      /\b(?:invoice|arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
+    ],
+    [
+      /(?:tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\t .-]*([A-Z0-9/_-]{3,})/i,
+    ],
   ];
 
-  for (const pattern of invoiceNumberPatterns) {
-    const match = text.match(pattern);
-    const candidate = match?.[1]?.trim();
-    if (candidate) return candidate;
+  for (const tier of invoiceNumberTiers) {
+    for (const line of lines) {
+      for (const pattern of tier) {
+        const candidate = acceptInvoiceNumberCandidate(line.match(pattern)?.[1]);
+        if (candidate) return candidate;
+      }
+    }
   }
 
   for (const line of lines) {
-    if (/\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id)\b/i.test(line)) {
+    if (NON_INVOICE_NUMBER_LINE_RE.test(line)) {
       continue;
     }
-    const match = line.match(/(?:number|nr|no\.?)[:#\s-]*([A-Z0-9/_-]{3,})/i);
-    const candidate = match?.[1]?.trim();
+    const candidate = acceptInvoiceNumberCandidate(line.match(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/i)?.[1]);
     if (candidate) return candidate;
   }
 
@@ -2095,13 +2171,19 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
 }
 
 export function extractDates(text: string): { invoice_date?: string; due_date?: string } {
+  const dateValue = `(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`;
+  // Ranked: explicit invoice-date labels first, then receipt/purchase/paid
+  // dates, then a generic "date"/"kuupäev" that is NOT the tail of a due /
+  // delivery / order / payment label, and only then an order date.
   const invoiceDate = extractDateByLabels(text, [
-    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
-    new RegExp(`(?:receipt\\s*date|purchase\\s*date)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|issue\\s*date|date\\s*of\\s*issue|date\\s*issued|väljastamise\\s*kuupäev|koostamise\\s*kuupäev)[:\\s-]*${dateValue}`, "iu"),
+    new RegExp(`(?:receipt\\s*date|purchase\\s*date|date\\s*paid)[:\\s-]*${dateValue}`, "iu"),
+    new RegExp(`(?<!(?:due|delivery|order|payment|shipping|service|supply|tarne|tellimuse|makse|maksmise|teenuse|üleandmise)[\\s-]*)(?:\\bkuupäev|\\bdate)(?![ \\t]*(?:due|paid)\\b)[:\\s-]*${dateValue}`, "iu"),
+    new RegExp(`(?:tellimuse\\s*kuupäev|order\\s*date)[:\\s-]*${dateValue}`, "iu"),
   ]);
 
   const dueDate = extractDateByLabels(text, [
-    new RegExp(`(?:due\\s*date|date\\s*due|maksetähtaeg|tähtaeg)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+    new RegExp(`(?:due\\s*date|date\\s*due|maksetähtaeg|tähtaeg)[:\\s-]*${dateValue}`, "iu"),
   ]);
 
   if (invoiceDate || dueDate) {
@@ -2403,6 +2485,19 @@ export function categorizeTransactionGroup(input: TransactionGroupClassification
       recurring: false,
       similar_amounts: false,
       reasons: ["no_transactions"],
+    };
+  }
+
+  // The rules below read the direction off `sample`; a group mixing incoming
+  // and outgoing rows cannot be classified from one row.
+  const sampleDirection = bankTransactionDirection(sample);
+  if (input.transactions.some(transaction => bankTransactionDirection(transaction) !== sampleDirection)) {
+    return {
+      category: "unknown",
+      apply_mode: "review_only",
+      recurring,
+      similar_amounts: similarAmounts,
+      reasons: ["mixed_transaction_directions"],
     };
   }
 
@@ -2908,5 +3003,8 @@ export function buildKeywordSuggestion(
 export function computeTermDays(invoiceDate?: string, dueDate?: string): number {
   if (!invoiceDate || !dueDate) return 0;
   const diff = dayDiff(invoiceDate, dueDate);
-  return diff === undefined ? 0 : Math.max(0, diff);
+  // dayDiff is unsigned: a due date BEFORE the invoice date (OCR swap/misread)
+  // must clamp to 0, not become a positive term. Callers surface the warning.
+  if (diff === undefined || dueDate < invoiceDate) return 0;
+  return diff;
 }

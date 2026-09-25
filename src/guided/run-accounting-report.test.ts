@@ -186,4 +186,74 @@ describe("run_accounting_report façade", () => {
     expect(fullBalance.truncated).toBeUndefined();
     expect(fullBalance.assets.truncated).toBeUndefined();
   });
+
+  // The shared cores used to pre-slice (top 10 per aging bucket / party list /
+  // month-end due list), so detail='full' silently dropped rows and compact
+  // never flagged them.
+  it("aging: compact caps buckets and parties with truncated flags; full returns every row", async () => {
+    const purchases = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1, number: `P-${i}`, client_name: `S${i}`, clients_id: i + 1, create_date: "2026-01-01", term_days: 0,
+      status: "CONFIRMED", payment_status: "NOT_PAID", gross_price: 10, cl_currencies_id: "EUR",
+    }));
+    const handler = setup(makeApi({ purchaseInvoices: { listAll: vi.fn().mockResolvedValue(purchases) } }), false);
+
+    const compact = parse(await handler({ report: "aging", as_of_date: "2026-06-15" }));
+    expect(compact.payables.aging_buckets[0].count).toBe(30);
+    expect(compact.payables.aging_buckets[0].invoices).toHaveLength(25);
+    expect(compact.payables.aging_buckets[0].truncated).toBe(true);
+    expect(compact.payables.top_parties).toHaveLength(25);
+    expect(compact.payables.top_parties_truncated).toBe(true);
+    expect(compact.payables.party_count).toBe(30);
+
+    const full = parse(await handler({ report: "aging", as_of_date: "2026-06-15", detail: "full" }));
+    expect(full.payables.aging_buckets[0].invoices).toHaveLength(30);
+    expect(full.payables.aging_buckets[0].truncated).toBeUndefined();
+    expect(full.payables.top_parties).toHaveLength(30);
+    expect(full.payables.top_parties_truncated).toBeUndefined();
+  });
+
+  it("month_end: compact caps due and unconfirmed lists with truncated flags; full returns every row", async () => {
+    const overdue = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1, number: `P-${i}`, client_name: "S", clients_id: 3, create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5,
+      status: "CONFIRMED", payment_status: "NOT_PAID", gross_price: 10, cl_currencies_id: "EUR",
+    }));
+    const drafts = Array.from({ length: 30 }, (_, i) => ({ id: 100 + i, is_deleted: false, registered: false, effective_date: "2024-03-10", title: `D${i}` }));
+    const handler = setup(makeApi({
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(overdue) },
+      journals: { listAll: vi.fn().mockResolvedValue(drafts), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    }), false);
+
+    const compact = parse(await handler({ report: "month_end", month: "2024-03" }));
+    expect(compact.overdue_payables.count).toBe(30);
+    expect(compact.overdue_payables.total).toBe(300);
+    expect(compact.overdue_payables.items).toHaveLength(25);
+    expect(compact.overdue_payables.truncated).toBe(true);
+    expect(compact.unconfirmed_journals.items).toHaveLength(25);
+    expect(compact.unconfirmed_journals.truncated).toBe(true);
+
+    const full = parse(await handler({ report: "month_end", month: "2024-03", detail: "full" }));
+    expect(full.overdue_payables.items).toHaveLength(30);
+    expect(full.overdue_payables.truncated).toBeUndefined();
+    expect(full.unconfirmed_journals.items).toHaveLength(30);
+    expect(full.unconfirmed_journals.truncated).toBeUndefined();
+  });
+
+  it("month_end op leaves unpaid credit invoices and no-EUR foreign invoices out of the receivables totals", async () => {
+    const base = { clients_id: 3, client_name: "C", create_date: "2024-03-01", journal_date: "2024-03-01", term_days: 5, status: "CONFIRMED", payment_status: "NOT_PAID" };
+    const handler = setup(makeApi({
+      saleInvoices: { listAll: vi.fn().mockResolvedValue([
+        { ...base, id: 1, number: "A-1", sale_invoice_type: "INVOICE", gross_price: 500, cl_currencies_id: "EUR" },
+        { ...base, id: 2, number: "K-1", sale_invoice_type: "CREDIT_INVOICE", gross_price: 200, cl_currencies_id: "EUR" },
+        { ...base, id: 3, number: "U-1", sale_invoice_type: "INVOICE", gross_price: 900, cl_currencies_id: "USD" },
+      ]) },
+    }));
+    const payload = parse(await handler({ report: "month_end", month: "2024-03" }));
+    expect(payload.overdue_receivables.count).toBe(2);
+    expect(payload.overdue_receivables.total).toBe(500);
+    expect(payload.overdue_receivables.items.find((r: { id: number }) => r.id === 3)).toMatchObject({ currency: "USD", excluded_from_eur_totals: true });
+    expect(payload.warnings).toEqual(expect.arrayContaining([
+      expect.stringContaining("1 unpaid credit invoice(s) excluded"),
+      expect.stringContaining("1 listed foreign-currency invoice(s) have no base_gross_price"),
+    ]));
+  });
 });

@@ -72,6 +72,14 @@ export const RESERVE_CAPITAL_ACCOUNT = 2940;
 /** Current year profit/loss (Aruandeaasta kasum/kahjum) */
 export const CURRENT_YEAR_PROFIT_ACCOUNT = 2970;
 
+/**
+ * Calculated result (Arvestuslik koondtulemus), standard chart 9000 — class
+ * Tulud, balance type D. Under RIK's e-arveldaja year-end method it is the
+ * counter-account of the result entry (profit: D 9000 / K 2970) and is NOT
+ * part of the income statement. Name-resolved first.
+ */
+export const CALCULATED_RESULT_ACCOUNT = 9000;
+
 /** Other financial expenses (Muud finantskulud) */
 export const DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT = 8610;
 

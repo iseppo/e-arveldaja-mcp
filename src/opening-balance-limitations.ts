@@ -1,4 +1,5 @@
 import { wrapUntrustedOcr } from "./mcp-json.js";
+import { getOpeningBalanceIdentityWarning } from "./opening-balance-store.js";
 
 // Each `unmappedDimensions` entry embeds raw pasted operator content
 // (the algbilanss dimension label), so wrap every label individually in the
@@ -22,6 +23,10 @@ export function withOpeningBalanceStatus(
   const out = [...warnings];
   if (!opts.captured) {
     if (!out.includes(OPENING_BALANCE_ACTIONABLE_WARNING)) out.push(OPENING_BALANCE_ACTIONABLE_WARNING);
+    // A stored algbilanss ignored because it belongs to another connection (a
+    // shared bundle) must not look like "nothing captured" without explanation.
+    const identityWarning = getOpeningBalanceIdentityWarning();
+    if (identityWarning && !out.includes(identityWarning)) out.push(identityWarning);
     return out;
   }
   const date = opts.openingDate ? ` (as of ${opts.openingDate})` : "";

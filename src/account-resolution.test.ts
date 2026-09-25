@@ -12,6 +12,9 @@ import {
   resolveFxAccount,
   resolveSecuritiesIncomeAccount,
   resolveSecuritiesExpenseAccount,
+  resolveCurrentYearProfitAccount,
+  resolveCalculatedResultAccount,
+  resolveReserveCapitalAccount,
 } from "./account-resolution.js";
 
 // Minimal account factory — only the fields the resolvers read.
@@ -39,6 +42,7 @@ const STANDARD_CHART: Account[] = [
   acct(8500, "Kasum/kahjum valuutakursi muutustest"),
   acct(8600, "Muud finantstulud"),
   acct(8610, "Muud finantskulud"),
+  acct(9000, "Arvestuslik koondtulemus"),
 ];
 
 describe("findAccountByName / resolveAccountByName", () => {
@@ -111,6 +115,25 @@ describe("named resolvers against the standard chart", () => {
     expect(resolveFxAccount(STANDARD_CHART)).toBe(8500);
     expect(resolveSecuritiesIncomeAccount(STANDARD_CHART)).toBe(8330);
     expect(resolveSecuritiesExpenseAccount(STANDARD_CHART)).toBe(8335);
+  });
+
+  it("current-year profit resolver picks 'Aruandeaasta kasum (kahjum)', excludes suffixed siblings, falls back to 2970", () => {
+    expect(resolveCurrentYearProfitAccount(STANDARD_CHART)).toBe(2970);
+    expect(resolveCurrentYearProfitAccount([acct(2971, "Aruandeaasta kasum")])).toBe(2971);
+    expect(resolveCurrentYearProfitAccount([acct(2975, "Aruandeaasta kasum erikonto")])).toBe(2970);
+    expect(resolveCurrentYearProfitAccount(STANDARD_CHART, 2999)).toBe(2999);
+  });
+
+  it("year-end close resolvers: 9000 'Arvestuslik koondtulemus' and posting-target 2940 reserve, with fallbacks", () => {
+    expect(resolveCalculatedResultAccount(STANDARD_CHART)).toBe(9000);
+    expect(resolveCalculatedResultAccount([acct(9010, "Arvestuslik koondtulemus")])).toBe(9010);
+    expect(resolveCalculatedResultAccount([acct(9010, "Arvestuslik koondtulemus (vana)")])).toBe(9000);
+    expect(resolveCalculatedResultAccount([])).toBe(9000);
+    expect(resolveCalculatedResultAccount(STANDARD_CHART, 9999)).toBe(9999);
+    expect(resolveReserveCapitalAccount(STANDARD_CHART)).toBe(2940);
+    expect(resolveReserveCapitalAccount([acct(2945, "Kohustuslik reservkapital"), acct(2941, "Vabatahtlik reservkapital")])).toBe(2945);
+    expect(resolveReserveCapitalAccount([acct(2945, "Kohustuslik reservkapital", false)])).toBe(2940);
+    expect(resolveReserveCapitalAccount(STANDARD_CHART, 2941)).toBe(2941);
   });
 
   it("dividend CIT resolver picks 2656, not the viitvõlg/intressivõlg siblings", () => {

@@ -67,6 +67,12 @@ export interface ExtractionConfidenceSignals {
    * lost), but not trusted as firmly coordinate-confirmed.
    */
   supplier_identifier_echo_unconfirmed?: boolean;
+  /**
+   * Layout (coordinate) and text extraction produced different gross totals.
+   * Whichever one was kept, the payable amount is unverified — routed to review
+   * and gated from automatic creation in every mode.
+   */
+  total_gross_conflict?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -162,6 +168,7 @@ export function summarizeInvoiceExtraction(
   if (signals?.partial_ocr_failure) mediumSignals.push("partial_ocr_failure");
   if (signals?.low_ocr_confidence) mediumSignals.push("low_ocr_confidence");
   if (signals?.supplier_identifier_echo_unconfirmed) mediumSignals.push("supplier_identifier_echo_unconfirmed");
+  if (signals?.total_gross_conflict) mediumSignals.push("total_gross_conflict");
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.

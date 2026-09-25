@@ -2,11 +2,18 @@ import type { OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
-import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
-import { computeAllBalances, sumCategory, gatherMonthEndScan } from "../tools/financial-statements.js";
-import { computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
+import {
+  computeTrialBalanceReport,
+  computeBalanceSheetReport,
+  computeProfitAndLossReport,
+  gatherMonthEndScan,
+  buildMonthEndDueList,
+  monthEndWarnings,
+} from "../tools/financial-statements.js";
+import { computeAgingBuckets, missingEurAmountWarning, type AgingInvoiceInput } from "../tools/aging-analysis.js";
 import { computeMissingDocuments } from "../tools/document-audit.js";
 import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
+import { todayInTallinn } from "../local-date.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -38,6 +45,8 @@ function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string,
   if (c.unmatched.count > 0) {
     warnings.push(`${c.unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(c.unmatched.total)} EUR). Investigate and link to a ${party} for accurate reports.`);
   }
+  const missingEur = missingEurAmountWarning(c.missing_eur_amount);
+  if (missingEur) warnings.push(missingEur);
 
   return {
     total_unpaid_face_value: c.total_unpaid_face_value,
@@ -85,71 +94,14 @@ class ReportingOperationsImpl implements ReportingOperations {
     }
   }
 
-  private async loadJournals() {
-    const [opening, journalsFromApi] = await Promise.all([
-      loadOpeningBalanceJournal(this.api),
-      this.api.journals.listAllWithPostings(),
-    ]);
-    return [...(opening ? [opening.journal] : []), ...journalsFromApi];
-  }
-
+  // The three statement ops route through the same cores as the standalone
+  // compute_* tools (opening-balance warnings, date defaults, YECL exclusion).
   private async trialBalance(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
-    const from = input.period?.from;
-    const to = input.period?.to;
-    const allJournals = await this.loadJournals();
-    const balances = await computeAllBalances(this.api, from, to, { preloadedJournals: allJournals });
-    return ok({
-      report: "trial_balance",
-      period: { from: from ?? "inception", to: to ?? "now" },
-      accounts: balances,
-      account_count: balances.length,
-      totals: {
-        debit: roundMoney(balances.totalDebit),
-        credit: roundMoney(balances.totalCredit),
-        difference: roundMoney(balances.totalDebit - balances.totalCredit),
-      },
-      warnings: [],
-    });
+    return ok({ report: "trial_balance", ...await computeTrialBalanceReport(this.api, input.period?.from, input.period?.to) });
   }
 
   private async balanceSheet(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
-    const to = input.period?.to;
-    const allJournals = await this.loadJournals();
-    const balances = await computeAllBalances(this.api, undefined, to, { preloadedJournals: allJournals });
-
-    const assets = balances.filter(b => b.account_type_est === "Varad");
-    const liabilities = balances.filter(b => b.account_type_est === "Kohustused");
-    const equity = balances.filter(b => b.account_type_est === "Omakapital");
-    const revenue = balances.filter(b => b.account_type_est === "Tulud");
-    const expenses = balances.filter(b => b.account_type_est === "Kulud");
-
-    const totalAssets = sumCategory(assets, "D");
-    const totalLiabilities = sumCategory(liabilities, "C");
-    const totalEquity = sumCategory(equity, "C");
-    const totalRevenue = sumCategory(revenue, "C");
-    const totalExpenses = sumCategory(expenses, "D");
-    const currentYearPL = totalRevenue - totalExpenses;
-    const totalEquityWithPL = totalEquity + currentYearPL;
-
-    const warnings: string[] = [];
-    if (Math.abs(currentYearPL) > 0.01) {
-      warnings.push(`Open P&L accounts show ${roundMoney(currentYearPL)} EUR net profit, included in equity for the balance check and normally closed into equity at year-end.`);
-    }
-
-    return ok({
-      report: "balance_sheet",
-      date: to ?? "current",
-      assets: { items: assets.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })), total: roundMoney(totalAssets) },
-      liabilities: { items: liabilities.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })), total: roundMoney(totalLiabilities) },
-      equity: { items: equity.map(a => ({ id: a.account_id, name: a.name_est, balance: a.balance })), total: roundMoney(totalEquityWithPL) },
-      current_year_pl: { revenue: roundMoney(totalRevenue), expenses: roundMoney(totalExpenses), net_profit: roundMoney(currentYearPL) },
-      check: {
-        assets: roundMoney(totalAssets),
-        liabilities_plus_equity: roundMoney(totalLiabilities + totalEquityWithPL),
-        balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithPL) < 0.01,
-      },
-      warnings,
-    });
+    return ok({ report: "balance_sheet", ...await computeBalanceSheetReport(this.api, input.period?.to) });
   }
 
   private async profitAndLoss(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
@@ -158,24 +110,11 @@ class ReportingOperationsImpl implements ReportingOperations {
     if (from === undefined || to === undefined) {
       return fail("period_required", "profit_and_loss requires period.from and period.to (YYYY-MM-DD).");
     }
-    const allJournals = await this.loadJournals();
-    const balances = await computeAllBalances(this.api, from, to, { preloadedJournals: allJournals });
-    const revenue = balances.filter(b => b.account_type_est === "Tulud");
-    const expenses = balances.filter(b => b.account_type_est === "Kulud");
-    const totalRevenue = sumCategory(revenue, "C");
-    const totalExpenses = sumCategory(expenses, "D");
-    return ok({
-      report: "profit_and_loss",
-      period: { from, to },
-      revenue: { items: revenue.map(a => ({ id: a.account_id, name: a.name_est, amount: a.balance })), total: roundMoney(totalRevenue) },
-      expenses: { items: expenses.map(a => ({ id: a.account_id, name: a.name_est, amount: a.balance })), total: roundMoney(totalExpenses) },
-      net_profit: roundMoney(totalRevenue - totalExpenses),
-      warnings: [],
-    });
+    return ok({ report: "profit_and_loss", ...await computeProfitAndLossReport(this.api, from, to) });
   }
 
   private async aging(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
-    const actualToday = new Date().toISOString().split("T")[0]!;
+    const actualToday = todayInTallinn();
     const today = input.asOfDate ?? actualToday;
     const [allSales, allPurchases] = await Promise.all([
       this.enableSales ? this.api.saleInvoices.listAll() : Promise.resolve([] as SaleInvoice[]),
@@ -207,6 +146,15 @@ class ReportingOperationsImpl implements ReportingOperations {
       this.api.purchaseInvoices.listAll(),
     ]);
 
+    const scan = gatherMonthEndScan({
+      journals: allJournals,
+      transactions: allTx,
+      saleInvoices: allSales,
+      purchaseInvoices: allPurchases,
+      dateFrom,
+      dateTo,
+      today: todayInTallinn(),
+    });
     const {
       unconfirmedJournals,
       unconfirmedTransactions: unconfirmedTx,
@@ -214,17 +162,11 @@ class ReportingOperationsImpl implements ReportingOperations {
       unconfirmedPurchases,
       overdueReceivables,
       overduePayables,
-      missingTermDays,
-      partiallyPaidReceivables,
-      partiallyPaidPayables,
-    } = gatherMonthEndScan({
-      journals: allJournals,
-      transactions: allTx,
-      saleInvoices: allSales,
-      purchaseInvoices: allPurchases,
-      dateFrom,
-      dateTo,
-    });
+      dueBeforeMonthEndReceivables,
+      dueBeforeMonthEndPayables,
+      overdueAsOf,
+      monthOpen,
+    } = scan;
 
     const invRow = (inv: SaleInvoice | PurchaseInvoice): MonthEndInvoiceRow => ({
       id: inv.id!,
@@ -233,11 +175,11 @@ class ReportingOperationsImpl implements ReportingOperations {
       gross: effectiveGross(inv),
       payment_status: inv.payment_status ?? "NOT_PAID",
     });
+    // Full lists — the façade applies the compact cap.
+    const dueList = (invs: ReadonlyArray<SaleInvoice | PurchaseInvoice>, withDaysOverdue: boolean) =>
+      buildMonthEndDueList(invs, scan, withDaysOverdue);
 
-    const warnings: string[] = [];
-    if (partiallyPaidReceivables > 0) warnings.push(`${partiallyPaidReceivables} overdue receivable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
-    if (partiallyPaidPayables > 0) warnings.push(`${partiallyPaidPayables} overdue payable(s) are PARTIALLY_PAID and shown at full invoice amount; remaining balance may be lower.`);
-    if (missingTermDays.length > 0) warnings.push(`${missingTermDays.length} invoice(s) had no term_days; treated as 0-day terms for the overdue check.`);
+    const warnings = monthEndWarnings(scan, month, dateTo);
 
     const issuesFound = unconfirmedJournals.length + unconfirmedTx.length + unconfirmedSales.length + unconfirmedPurchases.length + overdueReceivables.length + overduePayables.length;
 
@@ -248,8 +190,11 @@ class ReportingOperationsImpl implements ReportingOperations {
       unconfirmed_transactions: { count: unconfirmedTx.length, items: unconfirmedTx.map(tx => ({ id: tx.id!, date: tx.date, amount: tx.amount, description: tx.description ?? "" })) },
       ...(this.enableSales ? { unconfirmed_sale_invoices: { count: unconfirmedSales.length, items: unconfirmedSales.map(invRow) } } : {}),
       unconfirmed_purchase_invoices: { count: unconfirmedPurchases.length, items: unconfirmedPurchases.map(invRow) },
-      ...(this.enableSales ? { overdue_receivables: { count: overdueReceivables.length, total: roundMoney(overdueReceivables.reduce((s: number, inv: SaleInvoice) => s + effectiveGross(inv), 0)), items: overdueReceivables.slice(0, 10).map(invRow) } } : {}),
-      overdue_payables: { count: overduePayables.length, total: roundMoney(overduePayables.reduce((s: number, inv: PurchaseInvoice) => s + effectiveGross(inv), 0)), items: overduePayables.slice(0, 10).map(invRow) },
+      overdue_as_of: overdueAsOf,
+      ...(this.enableSales ? { overdue_receivables: dueList(overdueReceivables, true) } : {}),
+      overdue_payables: dueList(overduePayables, true),
+      ...(monthOpen && this.enableSales ? { due_before_month_end_receivables: dueList(dueBeforeMonthEndReceivables, false) } : {}),
+      ...(monthOpen ? { due_before_month_end_payables: dueList(dueBeforeMonthEndPayables, false) } : {}),
       summary: {
         issues_found: issuesFound,
         ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 && unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
@@ -270,7 +215,7 @@ class ReportingOperationsImpl implements ReportingOperations {
   // then defers every judgement to the pure core. No mutating API method is
   // reachable from here.
   private async receiptClientAlignment(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
-    const to = input.period?.to ?? new Date().toISOString().split("T")[0]!;
+    const to = input.period?.to ?? todayInTallinn();
     const defaulted = input.period?.from === undefined;
     const from = input.period?.from ?? shiftMonths(to, -RECEIPT_ALIGNMENT_WINDOW_MONTHS);
 

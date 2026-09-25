@@ -9,6 +9,7 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { HttpError } from "../http-client.js";
 // canonicalBusinessText strips the display sandbox to recover the EXECUTABLE
 // business value (M10). It is NOT wrapUntrustedOcr — the operation never wraps
@@ -558,6 +559,13 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         }
 
         for (const transaction of freshTransactions) {
+          // A classification group may still carry an incoming row (refund,
+          // chargeback) — never book it as a purchase invoice and confirm it.
+          const direction = bankTransactionDirection(transaction);
+          if (direction !== "outgoing") {
+            notes.push(`Transaction ${transaction.id} is not an outgoing payment (direction: ${direction}); skipped — only outgoing payments are booked as purchase invoices.`);
+            continue;
+          }
           const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);
           const supplier = supplierResolution.client;
           const supplierId = supplier?.id;

@@ -228,6 +228,9 @@ async function scanBoundReceiptDirectory(
 
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isFile()) continue;
+    // Dot-files are OS/sync metadata (".DS_Store", "._receipt.pdf" AppleDouble
+    // forks, ".~lock" files), never receipts.
+    if (entry.name.startsWith(".")) continue;
 
     const extension = extname(entry.name).toLowerCase();
     if (!allowedExtensions.includes(extension)) continue;

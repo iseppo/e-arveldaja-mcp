@@ -1,3 +1,4 @@
+import type { AsyncLocalStorage } from "node:async_hooks";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
@@ -7,6 +8,7 @@ import { readOnly, mutate, destructive } from "../annotations.js";
 import { isRecord } from "../record-utils.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { PlanStoreError } from "../plan-store.js";
+import { captureSnapshot, type ConnectionSnapshot, type ConnectionState } from "../connection-safety.js";
 import type { ToolProfile } from "../tool-profile.js";
 import {
   commitApiKeyCredentialImport,
@@ -125,6 +127,24 @@ export async function persistCredentialImportViaPlan(
     workingDir: options.workingDir,
     globalConfigDir: options.globalConfigDir,
   });
+}
+
+/**
+ * Startup sole-candidate import. Startup runs OUTSIDE any MCP tool invocation,
+ * but the plan store derives its scope from the AsyncLocalStorage invocation
+ * snapshot and (deliberately) has no active-connection fallback — so
+ * `planStore.issue` threw "Runtime safety scope is unavailable outside an MCP
+ * invocation" and the startup import always failed. Run it inside a freshly
+ * captured invocation snapshot, exactly like a tool handler.
+ */
+export function persistStartupCredentialImport(
+  invocationStorage: AsyncLocalStorage<ConnectionSnapshot>,
+  connectionState: ConnectionState,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  options: ImportApiKeyCredentialsOptions,
+): Promise<ImportApiKeyCredentialsResult> {
+  const snapshot = captureSnapshot(connectionState, { toolName: "startup_credential_import", isReadOnly: false });
+  return invocationStorage.run(snapshot, () => persistCredentialImportViaPlan(runtimeSafetyContext, options));
 }
 
 export function registerCredentialTools(

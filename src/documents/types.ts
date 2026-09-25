@@ -54,6 +54,10 @@ export interface AccountingDocumentBookingFields {
   readonly baseVatPrice?: number;
   readonly baseGrossPrice?: number;
   readonly blockOnDuplicate?: boolean;
+  /** Explicit acknowledgement that the supplier reuses this invoice number
+   * (e.g. across years): an exact live supplier+number match becomes a warning
+   * instead of a blocker. Bound into the plan fingerprint. Default false. */
+  readonly allowDuplicateInvoiceNumber?: boolean;
 }
 
 export interface PrepareAccountingDocumentInput {

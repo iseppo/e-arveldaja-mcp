@@ -100,4 +100,27 @@ describe("ReportingOperations.run", () => {
     expect(outcome.value.unconfirmed_transactions.items[0]!.description).toBe("PAYME <inject>");
     expect(outcome.value.summary.ready_to_close).toBe(false);
   });
+
+  it("month_end splits overdue from due-before-month-end while the month is open", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+    try {
+      const api = makeApi({
+        purchaseInvoices: { listAll: vi.fn().mockResolvedValue([
+          { id: 1, number: "P-due", client_name: "S", clients_id: 3, create_date: "2026-09-12", journal_date: "2026-09-12", term_days: 14, status: "CONFIRMED", payment_status: "NOT_PAID", gross_price: 620 },
+          { id: 2, number: "P-late", client_name: "S", clients_id: 3, create_date: "2026-09-01", journal_date: "2026-09-01", term_days: 7, status: "CONFIRMED", payment_status: "NOT_PAID", gross_price: 100 },
+        ]) },
+      });
+      const outcome = await createReportingOperations(api, false).run({ report: "month_end", month: "2026-09" });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok || outcome.value.report !== "month_end") return;
+      expect(outcome.value.overdue_as_of).toBe("2026-09-25");
+      expect(outcome.value.overdue_payables.items).toEqual([expect.objectContaining({ id: 2, due_date: "2026-09-08", days_overdue: 17 })]);
+      expect(outcome.value.due_before_month_end_payables!.items).toEqual([expect.objectContaining({ id: 1, due_date: "2026-09-26" })]);
+      expect(outcome.value.due_before_month_end_receivables).toBeUndefined();
+      expect(outcome.value.warnings.some(w => w.includes("has not ended yet"))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

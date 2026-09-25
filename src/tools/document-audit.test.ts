@@ -115,7 +115,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       items: [expect.objectContaining({
         id: 1,
         supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:\1>>$/),
-        invoice_number: "INV-1",
+        invoice_number: expect.stringMatching(/^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nINV-1\n<<UNTRUSTED_OCR_END:\1>>$/),
         gross: 124,
       })],
     });
@@ -124,7 +124,7 @@ describe("detect_duplicate_purchase_invoice", () => {
       items: [expect.objectContaining({
         id: 1,
         supplier: expect.stringMatching(/^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nAcme Ltd\n<<UNTRUSTED_OCR_END:\1>>$/),
-        invoice_number: "INV-1",
+        invoice_number: expect.stringMatching(/^<<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nINV-1\n<<UNTRUSTED_OCR_END:\1>>$/),
         gross: 124,
       })],
     });
@@ -179,5 +179,39 @@ describe("detect_duplicate_purchase_invoice", () => {
         supplier_id: 10,
       }),
     ]);
+  });
+});
+
+describe("detectDuplicatePurchaseInvoice — status, number normalization, date window, wrapping", () => {
+  const row = (overrides: Record<string, unknown>) => ({
+    id: 1, clients_id: 10, client_name: "Acme Ltd", number: "INV-1", create_date: "2026-03-10", gross_price: 124, status: "CONFIRMED", ...overrides,
+  });
+
+  it("treats a VOID (invalidated) invoice as not live but reports it as an invalidated candidate", async () => {
+    const payload = parseMcpResponse((await setupDuplicateTool([row({ status: "VOID" })])({ invoice_number: "INV-1" })).content[0]!.text);
+    expect(payload.candidate_invoice_number_matches.count).toBe(0);
+    expect(payload.candidate_invalidated_matches.count).toBe(1);
+  });
+
+  it("matches invoice numbers ignoring spaces, dashes and case", async () => {
+    const payload = parseMcpResponse((await setupDuplicateTool([row({})])({ invoice_number: "inv 1" })).content[0]!.text);
+    expect(payload.candidate_invoice_number_matches.count).toBe(1);
+  });
+
+  it("groups exact duplicates across number spelling variants", async () => {
+    const payload = parseMcpResponse((await setupDuplicateTool([row({}), row({ id: 2, number: "inv 1" })])({})).content[0]!.text);
+    expect(payload.exact_duplicates.count).toBe(1);
+  });
+
+  it("limits same-amount candidates to a ±7 day window around invoice_date", async () => {
+    const handler = setupDuplicateTool([row({ id: 1, create_date: "2026-03-12" }), row({ id: 2, number: "X-9", create_date: "2025-11-01" })]);
+    const payload = parseMcpResponse((await handler({ gross_price: 124, invoice_date: "2026-03-10" })).content[0]!.text);
+    expect(payload.candidate_same_amount_date_matches.items.map((item: any) => item.id)).toEqual([1]);
+  });
+
+  it("wraps nested invoice numbers in the suspicious same-amount/date section", async () => {
+    const handler = setupDuplicateTool([row({ id: 1, number: "A-1" }), row({ id: 2, number: "B-2" })]);
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suspicious_same_amount_date.items[0].invoices[0].number).toMatch(/^<<UNTRUSTED_OCR_START:/);
   });
 });

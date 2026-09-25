@@ -3,6 +3,7 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { checkIntakeCashDuplicates, formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
+import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
@@ -71,6 +72,73 @@ function buildSyntheticItem(
   );
 }
 
+function numericVatRate(dropdown: string | undefined | null): number | undefined {
+  if (dropdown === undefined || dropdown === null) return undefined;
+  const parsed = Number(String(dropdown).replace(",", ".").replace("%", "").trim());
+  return String(dropdown).trim() !== "" && String(dropdown).trim() !== "-" && Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * VAT rate for the synthetic receipt item, derived from the extracted totals
+ * and the invoice date — never copied blindly from history (a 22% history row
+ * on a 24% receipt) or defaulted to "-" when VAT was charged (keyword path).
+ * Returns `review` when the extracted VAT does not snap to the standard rate in
+ * force on the invoice date or a valid reduced rate.
+ */
+export function resolveReceiptVatRateDropdown(
+  extracted: Pick<ExtractedReceiptFields, "total_vat" | "invoice_date">,
+  netAmount: number,
+  suggestionItem: Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id">,
+): { rate?: string; review?: string } {
+  const standardRate = standardVatRateOn(extracted.invoice_date);
+  const isReverseCharge = suggestionItem.reversed_vat_id !== undefined && suggestionItem.reversed_vat_id !== null;
+  if (extracted.total_vat === undefined) return {};
+  if (extracted.total_vat === 0) {
+    if (!isReverseCharge) return { rate: "-" };
+    // Reverse charge: the supplier charges no VAT but the buyer self-assesses
+    // at the real rate — "-" would drop the self-assessment.
+    // The history rate is kept only when it is a reduced rate in force on the
+    // invoice date; a history standard rate (20/22 from before a rate change)
+    // is replaced by the standard rate in force on the invoice date.
+    if (standardRate === null) {
+      return { review: "Reverse-charge receipt has no valid invoice date to derive the self-assessed VAT rate." };
+    }
+    const historyRate = numericVatRate(suggestionItem.vat_rate_dropdown);
+    if (historyRate === undefined || historyRate <= 0
+      || STANDARD_VAT_RATE_TIMELINE.some(period => period.rate === historyRate)) {
+      return { rate: String(standardRate) };
+    }
+    const reverseChargeDate = extracted.invoice_date ?? "";
+    if (REDUCED_VAT_RATES.some(reduced => reduced.rate === historyRate
+      && (reduced.from === null || reverseChargeDate >= reduced.from))) {
+      return { rate: String(historyRate) };
+    }
+    return {
+      review: `Reverse-charge receipt: the supplier's history VAT rate ${historyRate}% is neither the standard rate ` +
+        `${standardRate}% nor a reduced rate in force on the invoice date; confirm the self-assessed rate.`,
+    };
+  }
+  const invoiceDate = extracted.invoice_date ?? "";
+  const candidates = [
+    ...(standardRate !== null ? [standardRate] : []),
+    ...REDUCED_VAT_RATES
+      .filter(reduced => reduced.rate > 0 && (reduced.from === null || invoiceDate >= reduced.from))
+      .map(reduced => reduced.rate),
+  ];
+  const tolerance = Math.max(0.02, netAmount * 0.0005);
+  const snapped = netAmount > 0
+    ? candidates.find(rate => Math.abs(netAmount * rate / 100 - extracted.total_vat!) <= tolerance)
+    : undefined;
+  if (snapped === undefined) {
+    const implied = netAmount > 0 ? roundMoney(extracted.total_vat / netAmount * 100) : undefined;
+    return {
+      review: `Extracted VAT ${extracted.total_vat} on net ${netAmount}${implied !== undefined ? ` implies ${implied}%` : ""}, ` +
+        `which matches neither the standard rate${standardRate !== null ? ` ${standardRate}%` : ""} in force on the invoice date nor a valid reduced rate.`,
+    };
+  }
+  return { rate: String(snapped) };
+}
+
 export async function createAndMaybeMatchPurchaseInvoice(
   api: ApiContext,
   context: ReceiptProcessingContext,
@@ -91,7 +159,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
   const supplierId = supplier?.id;
   const supplierName = supplier?.name ?? supplierResolution.preview_client?.name;
   const invoiceCurrency = extracted.currency ?? "EUR";
-  const invoiceNotes = `Receipt inbox import from ${file.name}`;
+  // Never the source filename (user preference): the file name is not a
+  // description of the purchase.
+  const invoiceNotes = "Receipt inbox import";
 
   if (!supplierName) {
     notes.push("Supplier resolution did not return a concrete client ID.");
@@ -117,17 +187,23 @@ export async function createAndMaybeMatchPurchaseInvoice(
     return { notes, status: "needs_review" };
   }
 
+  if (extracted.due_date && extracted.due_date < extracted.invoice_date) {
+    notes.push(`Due date ${extracted.due_date} precedes invoice date ${extracted.invoice_date}; payment term set to 0 days — verify the dates.`);
+  }
+
+  const vatRate = resolveReceiptVatRateDropdown(extracted, itemNetAmount, bookingSuggestion.item);
+  if (vatRate.review && context.isVatRegistered) {
+    notes.push(vatRate.review);
+    return { notes, status: "needs_review" };
+  }
+
   const item = buildSyntheticItem(
     bookingSuggestion,
     extracted.description ?? `Expense from ${supplierName}`,
     itemNetAmount,
     context.purchaseArticlesWithVat,
     context.isVatRegistered,
-    extracted.total_vat === 0
-      ? "-"
-      : extracted.total_vat !== undefined
-        ? bookingSuggestion.item.vat_rate_dropdown
-        : undefined,
+    vatRate.rate,
   );
 
   const invoiceDraft: InvoiceSummaryForMatching = {

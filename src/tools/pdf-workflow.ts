@@ -11,7 +11,9 @@ import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePur
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { resolveFileInput } from "../file-validation.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
+import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "./purchase-vat-defaults.js";
+import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
+import { isStrictDate } from "../strict-date.js";
 import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
@@ -442,6 +444,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         // operator verifies the supplier before booking (mirrors receipt_batch).
         if (detectSelfVatOnly(extracted, ownCompanyVat)) signals.self_vat_detected = true;
         if (detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
+        if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
         // #1: an echo-only supplier identifier (coordinate_confirmed_echo) is
         // kept but UNCONFIRMED — surface it as a review signal so the operator
         // verifies the supplier before booking rather than trusting it.
@@ -744,11 +747,16 @@ export interface BookingSuggestionCore {
  * past_invoice custom_title at MCP output; the typed AccountingDocumentOperations
  * reuse this same core and the guided façade owns wrapping instead.
  */
+/** Upper bound on past invoices fetched (limit + 5 detail GETs) by suggest_booking. */
+const SUGGEST_BOOKING_MAX_LIMIT = 20;
+
 export async function computeBookingSuggestion(
   api: ApiContext,
   { clients_id, description, limit }: BookingSuggestionParams,
 ): Promise<BookingSuggestionCore> {
-      const maxResults = limit ?? 3;
+      const maxResults = limit !== undefined && Number.isFinite(limit)
+        ? Math.min(SUGGEST_BOOKING_MAX_LIMIT, Math.max(1, Math.floor(limit)))
+        : 3;
       const allInvoices = await api.purchaseInvoices.listAll();
 
       // Filter by supplier
@@ -908,6 +916,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG); uploaded during creation."),
       source_sha256: z.string().regex(/^[0-9a-f]{64}$/).describe("SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes."),
       block_on_duplicate: z.boolean().optional().describe("Refuse creation when this receipt's cash outflow looks like an already-booked duplicate (default false: warn only)."),
+      allow_duplicate_invoice_number: z.boolean().optional().describe("Explicit acknowledgement that the supplier reuses this invoice number (e.g. across years): an existing live invoice with the same supplier and number becomes a warning instead of a refusal (default false: refuse)."),
     },
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
     async (rawParams) => {
@@ -923,6 +932,13 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       if (!/^[0-9a-f]{64}$/.test(rawParams.source_sha256 ?? "")) {
         return toolError({ category: "source_sha256_required", error: "source_sha256 from extract_pdf_invoice is required" });
       }
+      const invalidDateFields = (["invoice_date", "journal_date"] as const).filter(field => !isStrictDate(params[field]));
+      if (invalidDateFields.length > 0) {
+        return toolError({ error: `${invalidDateFields.join(", ")} must be a real calendar date in canonical YYYY-MM-DD form.` });
+      }
+      if (!Number.isInteger(params.term_days) || params.term_days < 0) {
+        return toolError({ error: "term_days must be a non-negative integer." });
+      }
       const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256);
       try {
       const supplier = await api.clients.get(params.supplier_client_id);
@@ -935,6 +951,21 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // Parse items from the RAW payload, THEN deep-clean the parsed objects (a
       // JSON-string items field would otherwise keep wrapper framing in a title).
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
+      // Same guard as create_purchase_invoice: a non-VAT company must not book
+      // deductible VAT fields (applyPurchaseVatDefaults would silently strip them).
+      if (!isVatReg) {
+        const details = rawItems.flatMap((item, index) =>
+          validateNonVatItem(item).map(error => `items[${index}].${error}`)
+        );
+        if (details.length > 0) {
+          return toolError({
+            error: "Non-VAT purchase invoice contains deductible VAT fields",
+            category: "manual_review_required",
+            details,
+            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          });
+        }
+      }
       const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
       // Validate dimension requirements before hitting the API
@@ -951,6 +982,22 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
         return toolError({
           error: `currency_rate is required when currency="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+        });
+      }
+
+      // Exact live supplier + invoice-number duplicate → refuse before any write.
+      const numberDuplicates = detectDuplicatePurchaseInvoice(await api.purchaseInvoices.listAll(), {
+        clients_id: params.supplier_client_id,
+        invoice_number: params.invoice_number,
+      }).candidate_invoice_number_matches as { items: Array<{ id?: number }> };
+      const duplicateNumberIds = numberDuplicates.items.map(item => item.id).filter((id): id is number => id !== undefined);
+      if (numberDuplicates.items.length > 0 && params.allow_duplicate_invoice_number !== true) {
+        return toolError({
+          error: "A live purchase invoice with the same supplier and invoice number already exists",
+          category: "duplicate_purchase_invoice",
+          existing_invoice_ids: duplicateNumberIds,
+          next_action: `Review purchase invoice(s) ${duplicateNumberIds.join(", ")}; invalidate the existing one first if this is a deliberate re-booking, ` +
+            "or pass allow_duplicate_invoice_number=true if the supplier genuinely reuses this number (e.g. across years).",
         });
       }
 
@@ -1089,6 +1136,14 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
             result,
             document_uploaded: true,
             note: "Purchase invoice created as DRAFT. Review and use confirm_purchase_invoice to confirm.",
+            ...(numberDuplicates.items.length > 0
+              ? {
+                  duplicate_invoice_number_acknowledged: {
+                    existing_invoice_ids: duplicateNumberIds,
+                    note: "Created despite a live invoice with the same supplier and number (allow_duplicate_invoice_number=true).",
+                  },
+                }
+              : {}),
             ...(duplicateWarnings.length > 0
               ? {
                   warnings: duplicateWarnings,

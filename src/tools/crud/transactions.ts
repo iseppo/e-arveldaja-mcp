@@ -9,7 +9,14 @@ import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
 import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
-import { getNormalizedNetworkCause, LinkedInvoiceClientMismatchError } from "../../api/transactions.api.js";
+import {
+  getNormalizedNetworkCause,
+  LinkedInvoiceClientMismatchError,
+  LinkedInvoiceClientsAmbiguousError,
+  StoredTypeDirectionMismatchError,
+} from "../../api/transactions.api.js";
+import { BookingGuard } from "../../booking-guard.js";
+import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import {
   verifyInvoiceReceiptLedger,
   type ReceiptLedgerCheckResult,
@@ -24,6 +31,7 @@ import {
   DUPLICATE_SCAN_WINDOW_DAYS,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
+  type DuplicatePostingSuspect,
 } from "../../bank-posting-duplicate-guard.js";
 import type { Transaction } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
@@ -171,6 +179,16 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     block_on_duplicate: z.boolean().optional().describe("Refuse creation when a possible duplicate bank posting is found (default false: warn only)."),
   }, { ...create, title: "Create Transaction" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
+    // The direction lives in `type`; the amount is always the positive statement
+    // magnitude. Zero or a signed amount would book a meaningless or reversed row.
+    if (!Number.isFinite(params.amount) || params.amount <= 0) {
+      return toolError({
+        error: "Transaction amount must be greater than 0",
+        category: "invalid_amount",
+        details: { amount: params.amount },
+        next_action: "Pass the positive statement amount and set type 'D' (incoming) or 'C' (outgoing) for the direction.",
+      });
+    }
     const direction = params.type === "D" ? "incoming" : "outgoing";
 
     // Cross-mechanism duplicate guard (Task 4): scan ALL journal postings for an
@@ -281,6 +299,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       extra.possible_duplicate_postings = duplicateScan.suspects.map(s => ({
         ...s,
         journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+        document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
       }));
     }
 
@@ -321,7 +340,8 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       "is refused, because the journal's client comes from the transaction and the receivable/payable leg would land " +
       "in the payer's sub-ledger. bank_account_name (the real payer's name) is never changed."
     ),
-  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id, reassign_client_to_invoice }) => {
+    block_on_duplicate: z.boolean().optional().describe("Refuse an inter-account confirm (distribution to another own bank account) when an existing transfer journal or a possible duplicate bank posting is found (default false: warn only)."),
+  }, { ...destructive, title: "Confirm Transaction" }, async ({ id, distributions, clients_id, reassign_client_to_invoice, block_on_duplicate }) => {
     const dist = distributions ? parseTransactionDistributions(distributions) : undefined;
     if (dist && dist.some(d => d.related_table === "accounts")) {
       const [accounts, accountDimensions] = await Promise.all([
@@ -331,6 +351,84 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       const dimensionErrors = validateTransactionDistributionDimensions(dist, accounts, accountDimensions);
       if (dimensionErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimensionErrors });
+      }
+    }
+
+    // Inter-account duplicate guard: a distribution onto another OWN bank
+    // dimension books a transfer journal touching both banks. If the mirror
+    // leg (or a manual journal) already booked it, confirming books it twice.
+    // Advisory by default; refuses only with block_on_duplicate AND a finding.
+    const interAccountWarnings: string[] = [];
+    const interAccountExtra: Record<string, unknown> = {};
+    const interAccountRows = dist?.filter(d => d.related_table === "accounts" && typeof d.related_sub_id === "number") ?? [];
+    if (interAccountRows.length > 0) {
+      const bankDims = await resolveBankDimensionsSafe(api);
+      const ownDimensionIds = new Set(bankDims.dimensions.map(d => d.dimensionId));
+      const transferRows = interAccountRows.filter(d => ownDimensionIds.has(d.related_sub_id!));
+      if (!bankDims.scanAvailable) {
+        interAccountWarnings.push(bankDims.scanNote ?? "Duplicate scan unavailable.");
+      } else if (transferRows.length > 0) {
+        const existingJournalIds: number[] = [];
+        const suspects: DuplicatePostingSuspect[] = [];
+        try {
+          // Inside the try: a failed read degrades this advisory to a warning
+          // (the confirm below does its own required transaction read).
+          const tx = await api.transactions.get(id);
+          const guard = await BookingGuard.load(api, { ownDimensionIds });
+          for (const row of transferRows) {
+            const resolution = guard.resolveInterAccount({
+              sourceDim: tx.accounts_dimensions_id,
+              targetDim: row.related_sub_id!,
+              amount: row.amount,
+              date: tx.date,
+              maxGapDays: 1,
+              reference: tx.bank_ref_number ?? tx.ref_number,
+            }, { consume: false });
+            if (resolution.status === "matched") existingJournalIds.push(resolution.journal_id);
+            // The target bank receives the opposite side of this row's cash leg.
+            const candidate: DuplicatePostingCandidate = {
+              accountId: bankDims.dimensions.find(d => d.dimensionId === row.related_sub_id)!.accountId,
+              dimensionId: row.related_sub_id!,
+              amount: row.amount,
+              direction: bankTransactionDirection(tx) === "incoming" ? "C" : "D",
+              date: tx.date,
+            };
+            const scan = await findDuplicateBankPostings(api, candidate);
+            if (!scan.scan_available) {
+              interAccountWarnings.push(scan.scan_note ?? "Duplicate scan unavailable.");
+            } else if (scan.suspects.length > 0) {
+              suspects.push(...scan.suspects);
+              interAccountWarnings.push(...formatDuplicatePostingWarnings(scan, candidate, t => wrapUntrustedOcr(t) ?? ""));
+            }
+          }
+        } catch {
+          // Advisory sub-check: its own read failure never fails the confirm.
+          interAccountWarnings.push("Inter-account duplicate check unavailable: the transaction or journal snapshot could not be read.");
+        }
+        const conflictingJournalIds = [...new Set([...existingJournalIds, ...suspects.map(s => s.journal_id)])];
+        if (block_on_duplicate === true && conflictingJournalIds.length > 0) {
+          return toolError({
+            error: "Possible duplicate inter-account booking",
+            category: "possible_duplicate_posting",
+            conflicting_journal_ids: conflictingJournalIds,
+            ...(existingJournalIds.length > 0 ? { existing_inter_account_journal_ids: existingJournalIds } : {}),
+            next_action: `Verify journal(s) ${conflictingJournalIds.join(", ")} before confirming; if the transfer is already booked, delete this PROJECT row instead. Retry without block_on_duplicate to proceed with an advisory warning.`,
+          });
+        }
+        if (existingJournalIds.length > 0) {
+          interAccountExtra.existing_inter_account_journal_ids = existingJournalIds;
+          interAccountWarnings.push(
+            `POSSIBLE duplicate: an inter-account journal between these bank accounts for this amount already exists ` +
+            `(journal(s) ${existingJournalIds.join(", ")}, ±1 day). Confirming may book the transfer twice.`,
+          );
+        }
+        if (suspects.length > 0) {
+          interAccountExtra.possible_duplicate_postings = suspects.map(s => ({
+            ...s,
+            journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+            document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
+          }));
+        }
       }
     }
 
@@ -397,7 +495,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       }
       // Refused before the register call — no mutation happened, so this is a
       // structured tool error the caller can act on, not a thrown failure.
-      if (error instanceof LinkedInvoiceClientMismatchError) return toolError(error);
+      if (
+        error instanceof LinkedInvoiceClientMismatchError
+        || error instanceof LinkedInvoiceClientsAmbiguousError
+        || error instanceof StoredTypeDirectionMismatchError
+      ) return toolError(error);
       throw error;
     }
 
@@ -409,7 +511,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       (d.related_table === "sale_invoices" || d.related_table === "purchase_invoices") && !!d.related_id) ?? false;
     let ledgerCheck: ReceiptLedgerCheckResult | undefined;
     let clientsIdAfter: number | null | undefined;
-    const warnings: string[] = [];
+    const warnings: string[] = [...interAccountWarnings];
     if (hadInvoiceDistribution || reassign_client_to_invoice === true) {
       try {
         if (reassign_client_to_invoice === true) {
@@ -475,8 +577,10 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       raw: result,
       ...(warnings.length > 0 ? { warnings } : {}),
       ...(clientsIdChanged || (ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined)
+        || Object.keys(interAccountExtra).length > 0
         ? {
           extra: {
+            ...interAccountExtra,
             ...(clientsIdChanged ? { clients_id_before: clientsIdBefore ?? null, clients_id_after: clientsIdAfter } : {}),
             ...(ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined
               ? { registration_journal_id: ledgerCheck.journal_id }

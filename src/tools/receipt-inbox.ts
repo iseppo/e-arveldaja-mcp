@@ -14,6 +14,7 @@ import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.js";
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
@@ -110,6 +111,7 @@ import {
   renderUnmatchedAnalysisFull,
 } from "../receipts/classification-presenter.js";
 import { currentToolProfile } from "../tool-profile.js";
+import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
 
@@ -244,11 +246,15 @@ export function shouldGateCreation(
   const supplierIdentifierEchoUnconfirmed = summary.confidence_signals.includes(
     "supplier_identifier_echo_unconfirmed",
   );
+  // Layout and text gross disagreed: the payable amount itself is unverified, so
+  // a note alone is not enough — gate creation in every mode.
+  const totalGrossConflict = summary.confidence_signals.includes("total_gross_conflict");
   const confirmModeNeedsHighConfidence =
     executionMode === "create_and_confirm" && summary.confidence !== "high";
   const gate = summary.confidence === "low" ||
     foreignDefaultUnverified ||
     supplierIdentifierEchoUnconfirmed ||
+    totalGrossConflict ||
     confirmModeNeedsHighConfidence;
   return {
     gate,
@@ -279,11 +285,14 @@ export function groupTransactionsByCounterparty(transactions: Transaction[]): Tr
       transaction.description?.trim() ||
       "Unknown";
     const normalizedCounterparty = normalizeCounterpartyName(displayCounterparty) || `transaction-${transaction.id ?? displayCounterparty}`;
-    const group = groups.get(normalizedCounterparty);
+    // Keyed by counterparty AND direction: a supplier's refund must never share
+    // a group (and so a classification / apply decision) with its charges.
+    const groupKey = `${normalizedCounterparty}\u0000${bankTransactionDirection(transaction)}`;
+    const group = groups.get(groupKey);
     if (group) {
       group.transactions.push(transaction);
     } else {
-      groups.set(normalizedCounterparty, {
+      groups.set(groupKey, {
         normalized_counterparty: normalizedCounterparty,
         display_counterparty: displayCounterparty,
         transactions: [transaction],
@@ -829,8 +838,9 @@ export function applyReverseChargeAutoDetection(
     return;
   }
 
-  // Case 2: phrase match.
-  if (detectReverseChargeFromText(extracted.raw_text)) {
+  // Case 2: phrase match. Like the foreign default, only meaningful for a
+  // VAT-registered company (reverse charge is self-assessed input/output VAT).
+  if (isVatRegistered && detectReverseChargeFromText(extracted.raw_text)) {
     bookingSuggestion.item.reversed_vat_id = 1;
     bookingSuggestion.reverse_charge_reason = "phrase_match";
     notes.push(
@@ -868,7 +878,7 @@ export function applyReverseChargeAutoDetection(
  *
  * `matched: true` AND `matched_invoice_id` are populated when the receipt's
  * invoice number resolves to an existing purchase invoice in this company's
- * book, status not DELETED/INVALIDATED. A no-match is still returned with
+ * book, not invalidated (VOID/INVALIDATED/DELETED, see isInvalidatedPurchaseInvoice). A no-match is still returned with
  * the invoice number so callers can chain a fallback (search the batch,
  * ask the user, etc.).
  *
@@ -883,12 +893,13 @@ export function buildReferencedInvoiceForPaymentReceipt(
 ): { invoice_number: string; matched: boolean; matched_invoice_id?: number; ambiguity_reason?: string } | undefined {
   const trimmed = invoiceNumber?.trim();
   if (!trimmed || trimmed.toUpperCase().startsWith("AUTO-")) return undefined;
-  const normalized = trimmed.toLowerCase();
-  const numberMatches = purchaseInvoices.filter(invoice =>
-    invoice.status !== "DELETED" &&
-    invoice.status !== "INVALIDATED" &&
-    invoice.number.trim().toLowerCase() === normalized,
-  );
+  // Same comparison the purchase-invoice duplicate checks use (case, spaces
+  // and dash variants ignored), so "ABC 001" on the receipt links "ABC-001".
+  const normalized = normalizeInvoiceNumberForComparison(trimmed);
+  const numberMatches = normalized ? purchaseInvoices.filter(invoice =>
+    !isInvalidatedPurchaseInvoice(invoice) &&
+    normalizeInvoiceNumberForComparison(invoice.number) === normalized,
+  ) : [];
 
   // An invoice number is not unique across suppliers, so a bare number match
   // must never auto-link — it could book the receipt against a different legal
@@ -930,10 +941,9 @@ export function selectBatchBankTransactions(
   return allTransactions.filter(transaction =>
     transaction.accounts_dimensions_id === accountsDimensionsId &&
     isProjectTransaction(transaction) &&
-    // All API-created and CAMT-imported bank transactions are type "C" regardless of
-    // debit/credit direction (see CLAUDE.md). This filter is a defensive guard — any
-    // legacy type="D" rows are intentionally excluded from auto-match.
-    transaction.type === "C" &&
+    // Receipts settle OUTGOING payments only. Direction comes from the signed
+    // source marker first (legacy rows may all be stored type "C"), then type.
+    bankTransactionDirection(transaction) === "outgoing" &&
     (!bounds.transaction_date_from || transaction.date >= bounds.transaction_date_from) &&
     (!bounds.transaction_date_to || transaction.date <= bounds.transaction_date_to),
   );

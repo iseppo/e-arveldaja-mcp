@@ -2,12 +2,12 @@
   "profile": "lean-purchase",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 81866,
-    "descriptionsBytes": 10552,
-    "inputSchemasBytes": 50669,
+    "toolsListBytes": 82954,
+    "descriptionsBytes": 10984,
+    "inputSchemasBytes": 51323,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
-      "bytes": 3627
+      "bytes": 3909
     },
     "serverInstructionsBytes": 932,
     "promptMetadataBytes": 7703,
@@ -156,7 +156,8 @@
               "SENT",
               "DELETE_FAILED",
               "CONNECTION_SWITCH_INTERRUPTED",
-              "MUTATION_INDETERMINATE"
+              "MUTATION_INDETERMINATE",
+              "LOG_CLEARED"
             ],
             "type": "string"
           },
@@ -1118,6 +1119,10 @@
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "block_on_duplicate": {
+            "description": "Refuse an inter-account confirm (distribution to another own bank account) when an existing transfer journal or a possible duplicate bank posting is found (default false: warn only).",
+            "type": "boolean"
+          },
           "clients_id": {
             "description": "Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)",
             "exclusiveMinimum": 0,
@@ -2288,6 +2293,10 @@
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "allow_duplicate_invoice_number": {
+            "description": "Explicit acknowledgement that the supplier reuses this invoice number (e.g. across years): an existing live invoice with the same supplier and number becomes a warning instead of a refusal (default false: refuse).",
+            "type": "boolean"
+          },
           "bank_account_no": {
             "description": "Supplier bank account",
             "type": "string"
@@ -2679,7 +2688,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute trial balance (käibeandmik/proovibilanss) from journal postings. Shows debit/credit totals and balance for each account.",
+      "description": "Compute trial balance (käibeandmik/proovibilanss) from journal postings. Shows debit/credit totals and balance for each account. Without date_to every posting counts, including future-dated ones (period.to = \"unbounded\").",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2739,7 +2748,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute profit and loss statement (kasumiaruanne) for a period. Shows revenue minus expenses.",
+      "description": "Compute profit and loss statement (kasumiaruanne) for a period. Shows revenue minus expenses; account 9000 (Arvestuslik koondtulemus, the RIK year-end close counter-account) and legacy YECL closing journals are excluded.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2775,7 +2784,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables.",
+      "description": "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_payables).",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2881,6 +2890,10 @@
           "gross_price": {
             "description": "Incoming gross amount to match against existing invoices",
             "type": "number"
+          },
+          "invoice_date": {
+            "description": "Incoming invoice date (YYYY-MM-DD); limits amount matches to ±7 days",
+            "type": "string"
           },
           "invoice_number": {
             "description": "Incoming invoice number to match against existing invoices",

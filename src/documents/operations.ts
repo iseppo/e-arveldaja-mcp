@@ -53,6 +53,21 @@ import type {
   PrepareAccountingDocumentInput,
 } from "./types.js";
 
+/**
+ * Live (non-invalidated) purchase invoices of `supplierClientId` whose number
+ * equals the bound invoice number — the same supplier+number key
+ * `detect_duplicate_purchase_invoice` uses. An exact match is a hard blocker.
+ */
+function exactLiveSupplierNumberMatches(
+  allPurchases: Parameters<typeof detectDuplicatePurchaseInvoice>[0],
+  supplierClientId: number,
+  invoiceNumber: string,
+): number[] {
+  const result = detectDuplicatePurchaseInvoice(allPurchases, { clients_id: supplierClientId, invoice_number: invoiceNumber });
+  const matches = result.candidate_invoice_number_matches as { items: Array<{ id?: number }> };
+  return matches.items.map(item => item.id).filter((id): id is number => id !== undefined);
+}
+
 // The execution-plan domain that binds a reviewed accounting-document dry run to
 // its create. Distinct from the confirm-plan domain minted AFTER create for the
 // SEPARATE confirm/link step (Step 3 — the op NEVER confirms/registers).
@@ -144,6 +159,7 @@ interface EffectiveBookingModel {
   readonly supplierName: string;
   readonly currencyCode: string;
   readonly blockOnDuplicate: boolean;
+  readonly allowDuplicateInvoiceNumber: boolean;
   readonly grossAmountEur?: number;
 }
 
@@ -194,6 +210,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     const notes = booking.notes === undefined ? undefined : desandboxText(booking.notes);
     const liabilityAccountsId = booking.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT;
     const blockOnDuplicate = booking.blockOnDuplicate === true;
+    const allowDuplicateInvoiceNumber = booking.allowDuplicateInvoiceNumber === true;
     // The actual settled EUR gross when known, else the nominal gross only for
     // an EUR-native invoice — never a guessed conversion.
     const grossAmountEur = booking.baseGrossPrice ?? (currencyCode === "EUR" ? booking.grossPrice : undefined);
@@ -245,6 +262,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       bank_account_no: bankAccountNo,
       notes,
       block_on_duplicate: blockOnDuplicate,
+      allow_duplicate_invoice_number: allowDuplicateInvoiceNumber,
       // Explicit bind: isVatReg already shapes the effective items/totals, but
       // binding it directly keeps it covered even if a future refactor stops
       // feeding it into the item defaults.
@@ -259,6 +277,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       supplierName,
       currencyCode,
       blockOnDuplicate,
+      allowDuplicateInvoiceNumber,
       ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
     });
   }
@@ -293,6 +312,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       if (minOcrConfidence !== undefined && minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) signals.low_ocr_confidence = true;
       if (detectSelfVatOnly(extracted, ownCompanyVat)) signals.self_vat_detected = true;
       if (detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
+      if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
       if (
         extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
         extracted.vat_no_rationale === "coordinate_confirmed_echo"
@@ -361,6 +381,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ...(resolvedClientId !== undefined ? { clients_id: resolvedClientId } : {}),
         invoice_number: extracted.invoice_number,
         gross_price: extracted.total_gross,
+        ...(extracted.invoice_date ? { invoice_date: extracted.invoice_date } : {}),
       });
 
       // Cross-mechanism intake cash-duplicate scan (real EUR gross only).
@@ -387,6 +408,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (signals.partial_ocr_failure || signals.low_ocr_confidence) {
         warnings.push({ code: "ocr_quality", message: "OCR quality is low; verify extracted fields before booking." });
+      }
+      if (signals.total_gross_conflict) {
+        warnings.push({ code: "total_gross_conflict", message: "Layout and text extraction disagree on the gross total; verify the payable amount before booking." });
       }
       if (signals.self_vat_detected || signals.self_reg_code_detected) {
         warnings.push({ code: "self_supplier_signal", message: "An identifier matched the active company itself; verify the supplier." });
@@ -418,6 +442,29 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         const effective = await this.computeEffectiveBooking(input.booking, material.source_sha256, material.fileName);
         if (!effective.ok) return effective;
         bookingProjection = effective.value.fingerprint;
+        // The extraction-level duplicate check above keys on the OCR number and
+        // OCR-resolved supplier; the create writes the REVIEWED supplier+number.
+        // An exact live match on those is a blocker (no plan handle is issued)
+        // unless the operator acknowledged a supplier that reuses numbers
+        // (allowDuplicateInvoiceNumber, bound into the fingerprint) — then it
+        // is a warning.
+        const boundDuplicates = exactLiveSupplierNumberMatches(
+          allPurchases, input.booking.supplierClientId, effective.value.invoiceData.number,
+        );
+        if (boundDuplicates.length > 0 && effective.value.allowDuplicateInvoiceNumber) {
+          warnings.push({
+            code: "duplicate_purchase_invoice_acknowledged",
+            message: `A live purchase invoice with the same supplier and invoice number already exists (id ${boundDuplicates.join(", ")}); ` +
+              "allow_duplicate_invoice_number acknowledges the supplier reuses this number.",
+          });
+        } else if (boundDuplicates.length > 0) {
+          blockers.push({
+            item_id: "duplicate_purchase_invoice",
+            code: "duplicate_purchase_invoice",
+            message: `A live purchase invoice with the same supplier and invoice number already exists (id ${boundDuplicates.join(", ")}).`,
+            severity: "blocker",
+          });
+        }
         const planInput: ExecutionPlanInput = {
           normalizedArgs: effective.value.fingerprint,
           sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
@@ -527,10 +574,20 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint)) {
         return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");
       }
-      const { invoiceData, isVatReg, blockOnDuplicate, grossAmountEur } = effective.value;
+      const { invoiceData, isVatReg, blockOnDuplicate, allowDuplicateInvoiceNumber, grossAmountEur } = effective.value;
       const supplierName = effective.value.supplierName;
       const invoiceNumber = invoiceData.number;
       const items = invoiceData.items;
+
+      // Re-check the reviewed supplier+number against FRESH live invoices: one
+      // may have been booked between prepare and create (any booking made
+      // through this server invalidates the purchase-invoice cache).
+      const freshDuplicates = exactLiveSupplierNumberMatches(
+        await this.api.purchaseInvoices.listAll(), invoiceData.clients_id, invoiceNumber,
+      );
+      if (freshDuplicates.length > 0 && !allowDuplicateInvoiceNumber) {
+        return fail("duplicate_purchase_invoice", `A live purchase invoice with the same supplier and invoice number already exists (id ${freshDuplicates.join(", ")}).`, "never");
+      }
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document
       // mutation.

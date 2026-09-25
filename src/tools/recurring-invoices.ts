@@ -1,12 +1,15 @@
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import type { SaleInvoice } from "../types/api.js";
+import type { CreateSaleInvoiceRequest } from "../types/mutations.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { parseStrictDate, parseStrictMonth } from "../strict-date.js";
+import { canonicalPlanJson } from "./camt-plan.js";
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
 const RECURRING_CLONE_MARKER_RE = /RECURRING_SOURCE_INVOICE:\d+:TARGET_DATE:\d{4}-\d{2}-\d{2}/g;
@@ -18,13 +21,151 @@ function buildRecurringCloneMarker(sourceId: number, targetDate: string): string
   return `${RECURRING_CLONE_MARKER_PREFIX}:${sourceId}:TARGET_DATE:${targetDate}`;
 }
 
-function extractRecurringCloneMarkers(notes?: string | null): string[] {
-  return notes?.match(RECURRING_CLONE_MARKER_RE) ?? [];
+/**
+ * Dedup key for a clone: source invoice id + TARGET MONTH (not the exact
+ * target_date), so re-running the same month with a different day (02-01 vs
+ * 02-05) finds the existing clone instead of creating a second one.
+ */
+function recurringCloneKey(sourceId: number | string, targetDate: string): string {
+  return `${sourceId}:${targetDate.slice(0, 7)}`;
 }
 
+function extractRecurringCloneKeys(notes: string | null | undefined): string[] {
+  return (notes?.match(RECURRING_CLONE_MARKER_RE) ?? []).map(marker => {
+    const [, sourceId, , date] = marker.split(":");
+    return recurringCloneKey(sourceId!, date!);
+  });
+}
+
+/**
+ * Replace (not accumulate) the recurring marker: markers inherited from the
+ * source's own notes (it may itself be a clone) are stripped first, and a line
+ * left empty only by that removal is dropped, so a monthly clone chain carries
+ * exactly one marker — its own.
+ */
 function appendRecurringCloneMarker(notes: string | null | undefined, marker: string): string {
-  if (notes?.includes(marker)) return notes;
-  return notes ? `${notes}\n${marker}` : marker;
+  const stripped = (notes ?? "")
+    .split("\n")
+    .flatMap(line => {
+      const cleaned = line.replace(RECURRING_CLONE_MARKER_RE, "");
+      return cleaned !== line && cleaned.trim() === "" ? [] : [cleaned];
+    })
+    .join("\n")
+    .trimEnd();
+  return stripped ? `${stripped}\n${marker}` : marker;
+}
+
+/**
+ * Clone eligibility: only a live, CONFIRMED, ordinary INVOICE (type absent or
+ * "INVOICE") is a recurring-billing source. A credit invoice, a draft/VOID
+ * invoice or a deleted one must never be re-issued as a new receivable.
+ * Returns the refusal reason, or undefined when eligible.
+ */
+function cloneIneligibility(invoice: SaleInvoice): string | undefined {
+  if (invoice.is_deleted) return "Source invoice is deleted; only live CONFIRMED invoices are cloned";
+  if (invoice.status !== "CONFIRMED") {
+    return `Source invoice status is ${String(invoice.status)}; only CONFIRMED invoices are cloned`;
+  }
+  if (invoice.sale_invoice_type !== undefined && invoice.sale_invoice_type !== null && invoice.sale_invoice_type !== "INVOICE") {
+    return `Source invoice type is ${String(invoice.sale_invoice_type)}; only ordinary INVOICE (not credit invoices) is cloned`;
+  }
+  return undefined;
+}
+
+/**
+ * The exact create payload a recurring clone sends for `full` — the single
+ * source for both the create call and the plan binding (its digest), so the
+ * reviewed preview binds everything the clone would write: client, receivable
+ * account + dimension, bank account, tax flags, notes and every item's
+ * account/dimension, VAT rate/account, quantities and amounts.
+ */
+function buildRecurringClonePayload(
+  full: SaleInvoice,
+  targetDate: string,
+  targetJournalDate: string,
+  recurringMarker: string,
+): CreateSaleInvoiceRequest {
+  return {
+    sale_invoice_type: full.sale_invoice_type,
+    cl_templates_id: full.cl_templates_id,
+    clients_id: full.clients_id,
+    cl_countries_id: full.cl_countries_id,
+    number_prefix: full.number_prefix,
+    number_suffix: "", // empty = auto-assigned by invoice series
+    create_date: targetDate,
+    journal_date: targetJournalDate,
+    term_days: full.term_days,
+    cl_currencies_id: full.cl_currencies_id,
+    show_client_balance: full.show_client_balance,
+    receivable_accounts_id: full.receivable_accounts_id,
+    // The dimension belongs to the receivable account: copying the
+    // account without it books to the wrong (or a rejected) sub-ledger.
+    ...(full.receivable_accounts_dimensions_id != null ? { receivable_accounts_dimensions_id: full.receivable_accounts_dimensions_id } : {}),
+    ...(full.bank_accounts_id != null ? { bank_accounts_id: full.bank_accounts_id } : {}),
+    ...(full.payment_description != null ? { payment_description: full.payment_description } : {}),
+    ...(full.subclients_id != null ? { subclients_id: full.subclients_id } : {}),
+    ...(full.recipient_clients_id != null ? { recipient_clients_id: full.recipient_clients_id } : {}),
+    ...(full.recipient_subclients_id != null ? { recipient_subclients_id: full.recipient_subclients_id } : {}),
+    // Clone tax-critical invoice-level fields. Anything affecting VAT
+    // treatment, legal narrative, or cross-border classification must
+    // survive the clone — a stale value on a recurring invoice can
+    // silently change how it's reported on KMD INF / VD.
+    intra_community_supply: full.intra_community_supply,
+    client_vat_no: full.client_vat_no,
+    triangulation: full.triangulation,
+    assembled_in_member_state: full.assembled_in_member_state,
+    contract_number: full.contract_number,
+    invoice_content_code: full.invoice_content_code,
+    invoice_content_text: full.invoice_content_text,
+    trade_secret: full.trade_secret,
+    use_per_item_rounding: full.use_per_item_rounding,
+    overdue_charge: full.overdue_charge,
+    notes: tagNotes(appendRecurringCloneMarker(full.notes, recurringMarker)),
+    items: (full.items ?? []).map(item => ({
+      products_id: item.products_id,
+      cl_sale_articles_id: item.cl_sale_articles_id,
+      sale_accounts_id: item.sale_accounts_id,
+      sale_accounts_dimensions_id: item.sale_accounts_dimensions_id,
+      custom_title: item.custom_title,
+      amount: item.amount,
+      unit: item.unit,
+      unit_net_price: item.unit_net_price,
+      total_net_price: item.total_net_price,
+      vat_accounts_id: item.vat_accounts_id,
+      vat_rate: item.vat_rate,
+      discount_percent: item.discount_percent,
+      discount_amount: item.discount_amount,
+      projects_project_id: item.projects_project_id,
+      projects_location_id: item.projects_location_id,
+      projects_person_id: item.projects_person_id,
+    })),
+  };
+}
+
+/** Canonical SHA-256 of a clone's create payload (key order / undefined-insensitive). */
+function recurringClonePayloadDigest(payload: CreateSaleInvoiceRequest): string {
+  return createHash("sha256").update(canonicalPlanJson(payload)).digest("hex");
+}
+
+/**
+ * The binding of a recurring DRY-RUN preview: one entry per row the preview
+ * says WILL be created (source id + gross + type + the SHA-256 of the complete
+ * clone create payload), sorted by id. Bound into the manage_sale_invoice plan
+ * at prepare and recomputed at execute, so execute cannot create/confirm a
+ * clone the approved preview never showed — nor one whose client, accounts,
+ * dimensions, VAT or item lines changed since the review.
+ */
+export function recurringPreviewSourceBinding(preview: Record<string, unknown>): Array<Record<string, string | number | null>> {
+  const rows = Array.isArray(preview.results) ? (preview.results as Array<Record<string, unknown>>) : [];
+  return rows
+    .filter(row => row.status === "would_create_draft" || row.status === "would_create_and_confirm")
+    .map(row => ({
+      source_id: typeof row.source_id === "number" ? row.source_id : null,
+      gross_price: typeof row.gross_price === "number" ? row.gross_price : null,
+      sale_invoice_type: typeof row.source_sale_invoice_type === "string" ? row.source_sale_invoice_type : null,
+      clone_payload_sha256: typeof row.clone_payload_sha256 === "string" ? row.clone_payload_sha256 : null,
+    }))
+    .sort((a, b) => (a.source_id ?? 0) - (b.source_id ?? 0));
 }
 
 /** Recurring-clone parameters shared by the standalone tool and the guided-sales façade. */
@@ -71,7 +212,12 @@ export function validateRecurringParams(params: RecurringCloneParams): string | 
 export async function computeRecurringClone(
   api: ApiContext,
   params: RecurringCloneParams,
-  options: { dryRun: boolean },
+  options: {
+    dryRun: boolean;
+    onlySourceIds?: ReadonlySet<number>;
+    /** Reviewed clone-payload digests per source id: a source whose payload now differs is refused, never created. */
+    expectedPayloadDigests?: ReadonlyMap<number, string>;
+  },
 ): Promise<Record<string, unknown>> {
       // Belt-and-suspenders: never clone from an unvalidated shape. The
       // standalone tool passes Zod-validated input so this never trips there
@@ -85,27 +231,31 @@ export async function computeRecurringClone(
       const sourceFrom = `${source_month}-01`;
       const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();
       const sourceTo = `${source_month}-${String(sourceLastDay).padStart(2, "0")}`;
+      const targetMonth = target_date.slice(0, 7);
       const existingCloneMarkers = new Map<string, { id?: number; number?: string }>();
 
       for (const invoice of allSales) {
-        if (invoice.create_date !== target_date || invoice.is_deleted) continue;
-        for (const marker of extractRecurringCloneMarkers(invoice.notes)) {
-          existingCloneMarkers.set(marker, { id: invoice.id, number: invoice.number });
+        if (invoice.is_deleted || typeof invoice.create_date !== "string" || invoice.create_date.slice(0, 7) !== targetMonth) continue;
+        for (const key of extractRecurringCloneKeys(invoice.notes)) {
+          existingCloneMarkers.set(key, { id: invoice.id, number: invoice.number });
         }
       }
 
-      let sourceInvoices: SaleInvoice[];
+      // Explicit invoice_ids are only id stubs here: each is fetched once in
+      // the loop below (per-row error on a failed read) and checked for clone
+      // eligibility there, so one bad id never crashes the whole run.
+      let sourceInvoices: Array<Pick<SaleInvoice, "id" | "number" | "client_name">>;
       if (invoice_ids) {
-        const ids = invoice_ids.split(",").map(s => parseInt(s.trim(), 10));
-        sourceInvoices = [];
-        for (const id of ids) {
-          sourceInvoices.push(await api.saleInvoices.get(id));
-        }
+        sourceInvoices = invoice_ids.split(",").map(s => ({ id: parseInt(s.trim(), 10) }));
       } else {
         sourceInvoices = allSales.filter((inv: SaleInvoice) =>
-          inv.status === "CONFIRMED" &&
+          cloneIneligibility(inv) === undefined &&
           inv.create_date >= sourceFrom && inv.create_date <= sourceTo
         );
+      }
+      if (options.onlySourceIds) {
+        const allowed = options.onlySourceIds;
+        sourceInvoices = sourceInvoices.filter(inv => inv.id !== undefined && allowed.has(inv.id));
       }
 
       const results: Array<Record<string, unknown> & { status: string }> = [];
@@ -122,7 +272,8 @@ export async function computeRecurringClone(
         }
 
         const recurringMarker = buildRecurringCloneMarker(source.id, target_date);
-        const existingClone = existingCloneMarkers.get(recurringMarker);
+        const cloneKey = recurringCloneKey(source.id, target_date);
+        const existingClone = existingCloneMarkers.get(cloneKey);
         if (existingClone) {
           results.push({
             source_id: source.id,
@@ -155,81 +306,60 @@ export async function computeRecurringClone(
           });
           continue;
         }
+        const sourceFacts = {
+          source_id: source.id,
+          source_number: source.number ?? full.number,
+          client: wrapUntrustedOcr(full.client_name ?? undefined),
+          source_status: full.status,
+          source_sale_invoice_type: full.sale_invoice_type,
+          source_create_date: full.create_date,
+          ...(invoice_ids && (typeof full.create_date !== "string" || full.create_date < sourceFrom || full.create_date > sourceTo)
+            ? { warning: `Source invoice date ${String(full.create_date)} is outside source_month ${source_month}` }
+            : {}),
+        };
+        const ineligible = cloneIneligibility(full);
+        if (ineligible) {
+          results.push({ ...sourceFacts, status: "error", error: ineligible });
+          continue;
+        }
         if (!full.items || full.items.length === 0) {
           results.push({
-            source_id: source.id,
-            source_number: source.number,
-            client: wrapUntrustedOcr(full.client_name ?? undefined),
+            ...sourceFacts,
             status: "error",
             error: "Source invoice has no items to clone",
           });
           continue;
         }
 
+        const clonePayload = buildRecurringClonePayload(full, target_date, target_journal_date, recurringMarker);
+        const clonePayloadDigest = recurringClonePayloadDigest(clonePayload);
         if (isDryRun) {
           results.push({
-            source_id: source.id,
-            source_number: source.number,
-            client: wrapUntrustedOcr(full.client_name ?? undefined),
+            ...sourceFacts,
             items_count: full.items.length,
             gross_price: full.gross_price,
+            clone_payload_sha256: clonePayloadDigest,
             // Distinguish the exact execution effect on EACH row so the approval
             // card never says "draft" for a row that auto_confirm will register.
             status: auto_confirm ? "would_create_and_confirm" : "would_create_draft",
           });
-          existingCloneMarkers.set(recurringMarker, {});
+          existingCloneMarkers.set(cloneKey, {});
+          continue;
+        }
+
+        const expectedDigest = options.expectedPayloadDigests?.get(source.id);
+        if (options.expectedPayloadDigests && expectedDigest !== clonePayloadDigest) {
+          results.push({
+            ...sourceFacts,
+            status: "error",
+            error: "plan_drift: the clone payload no longer matches the reviewed preview; nothing was created for this source",
+          });
           continue;
         }
 
         try {
-          const result = await api.saleInvoices.create({
-            sale_invoice_type: full.sale_invoice_type,
-            cl_templates_id: full.cl_templates_id,
-            clients_id: full.clients_id,
-            cl_countries_id: full.cl_countries_id,
-            number_prefix: full.number_prefix,
-            number_suffix: "", // empty = auto-assigned by invoice series
-            create_date: target_date,
-            journal_date: target_journal_date,
-            term_days: full.term_days,
-            cl_currencies_id: full.cl_currencies_id,
-            show_client_balance: full.show_client_balance,
-            receivable_accounts_id: full.receivable_accounts_id,
-            // Clone tax-critical invoice-level fields. Anything affecting VAT
-            // treatment, legal narrative, or cross-border classification must
-            // survive the clone — a stale value on a recurring invoice can
-            // silently change how it's reported on KMD INF / VD.
-            intra_community_supply: full.intra_community_supply,
-            client_vat_no: full.client_vat_no,
-            triangulation: full.triangulation,
-            assembled_in_member_state: full.assembled_in_member_state,
-            contract_number: full.contract_number,
-            invoice_content_code: full.invoice_content_code,
-            invoice_content_text: full.invoice_content_text,
-            trade_secret: full.trade_secret,
-            use_per_item_rounding: full.use_per_item_rounding,
-            overdue_charge: full.overdue_charge,
-            notes: tagNotes(appendRecurringCloneMarker(full.notes, recurringMarker)),
-            items: full.items.map(item => ({
-              products_id: item.products_id,
-              cl_sale_articles_id: item.cl_sale_articles_id,
-              sale_accounts_id: item.sale_accounts_id,
-              sale_accounts_dimensions_id: item.sale_accounts_dimensions_id,
-              custom_title: item.custom_title,
-              amount: item.amount,
-              unit: item.unit,
-              unit_net_price: item.unit_net_price,
-              total_net_price: item.total_net_price,
-              vat_accounts_id: item.vat_accounts_id,
-              vat_rate: item.vat_rate,
-              discount_percent: item.discount_percent,
-              discount_amount: item.discount_amount,
-              projects_project_id: item.projects_project_id,
-              projects_location_id: item.projects_location_id,
-              projects_person_id: item.projects_person_id,
-            })),
-          });
-          existingCloneMarkers.set(recurringMarker, { id: result.created_object_id });
+          const result = await api.saleInvoices.create(clonePayload);
+          existingCloneMarkers.set(cloneKey, { id: result.created_object_id });
           logAudit({
             tool: "create_recurring_sale_invoices", action: "CREATED", entity_type: "sale_invoice",
             entity_id: result.created_object_id,
@@ -252,15 +382,13 @@ export async function computeRecurringClone(
                 details: { source_id: source.id, client_name: full.client_name, date: target_date },
               });
             } catch (err: unknown) {
-              confirmError = err instanceof Error ? err.message : String(err);
+              confirmError = wrapUntrustedOcr(err instanceof Error ? err.message : String(err));
               status = "confirm_error";
             }
           }
 
           results.push({
-            source_id: source.id,
-            source_number: source.number,
-            client: wrapUntrustedOcr(full.client_name ?? undefined),
+            ...sourceFacts,
             created_id: result.created_object_id,
             confirmed,
             ...(confirmError ? { confirm_error: confirmError } : {}),

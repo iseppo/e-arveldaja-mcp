@@ -1311,6 +1311,12 @@ describe("buildReferencedInvoiceForPaymentReceipt (#23)", () => {
     expect(result?.matched_invoice_id).toBe(501);
   });
 
+  it("matches invoice numbers that differ only in spacing or dash variants", () => {
+    expect(buildReferencedInvoiceForPaymentReceipt("ABC 001", invoices, { client_id: 10 }))
+      .toEqual({ invoice_number: "ABC 001", matched: true, matched_invoice_id: 501 });
+    expect(buildReferencedInvoiceForPaymentReceipt("ABC\u2013001", invoices, { client_id: 10 })?.matched_invoice_id).toBe(501);
+  });
+
   it("matches on normalized supplier name when no resolved client_id is available", () => {
     // The payment-receipt call site has no resolved client_id — only the OCR
     // supplier name. Legal-suffix/diacritic normalization must still link it.
@@ -2213,5 +2219,78 @@ describe("shouldGateCreation — echo-only supplier identifier (#4)", () => {
     const summary = summarizeInvoiceExtraction(baseGood);
     expect(summary.confidence).toBe("high");
     expect(shouldGateCreation(summary, "create").gate).toBe(false);
+  });
+});
+
+describe("shouldGateCreation — layout/text gross conflict (finding 1)", () => {
+  it("gates creation in plain 'create' mode when layout and text gross disagree", () => {
+    const summary = summarizeInvoiceExtraction({
+      supplier_name: "Acme OÜ",
+      invoice_number: "INV-1",
+      invoice_date: "2024-01-15",
+      total_gross: 124,
+      currency: "EUR",
+      raw_text: "Invoice content",
+    }, { total_gross_conflict: true });
+    expect(summary.confidence_signals).toContain("total_gross_conflict");
+    const gate = shouldGateCreation(summary, "create");
+    expect(gate.gate).toBe(true);
+    expect(gate.reason).toContain("total_gross_conflict");
+  });
+});
+
+describe("invalidated-status + invoice-number normalization in receipt duplicate checks", () => {
+  const inv = (overrides: Record<string, unknown>) => ({
+    id: 5, clients_id: 7, client_name: "Acme OÜ", number: "INV-2024-01", create_date: "2026-03-01", gross_price: 50, status: "CONFIRMED", ...overrides,
+  }) as any;
+
+  it("findDuplicateInvoice ignores a VOID invoice and normalizes number spelling", async () => {
+    const { findDuplicateInvoice } = await import("./receipt-inbox-matching.js");
+    expect(findDuplicateInvoice([inv({ status: "VOID" })], 7, "INV-2024-01", "2026-03-01", 50)).toBeUndefined();
+    expect(findDuplicateInvoice([inv({})], 7, "inv 2024 01", "2026-03-09", 99)?.reason).toBe("supplier_invoice_number");
+  });
+
+  it("payment-receipt cross-reference does not link to a VOID invoice", async () => {
+    const { buildReferencedInvoiceForPaymentReceipt } = await import("./receipt-inbox.js");
+    expect(buildReferencedInvoiceForPaymentReceipt("INV-2024-01", [inv({ status: "VOID" })], { client_id: 7 })?.matched).toBe(false);
+    expect(buildReferencedInvoiceForPaymentReceipt("INV-2024-01", [inv({})], { client_id: 7 })?.matched).toBe(true);
+  });
+});
+
+describe("direction-aware grouping and batch bank selection (bank-review MAJOR-2)", () => {
+  const tx = (overrides: Record<string, unknown>) => ({
+    id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 10, date: "2026-03-01",
+    accounts_dimensions_id: 100, bank_account_name: "Acme OÜ", description: "", ...overrides,
+  }) as any;
+
+  it("groups by (counterparty, direction) so a refund never shares a group with charges", async () => {
+    const { groupTransactionsByCounterparty } = await import("./receipt-inbox.js");
+    const groups = groupTransactionsByCounterparty([tx({ id: 1 }), tx({ id: 2, type: "D" }), tx({ id: 3 })]);
+    expect(groups.map(group => group.transactions.map(t => t.id).sort())).toEqual(expect.arrayContaining([[1, 3], [2]]));
+    expect(groups).toHaveLength(2);
+  });
+
+  it("selects batch bank rows by signed direction, not the stored type", async () => {
+    const { selectBatchBankTransactions } = await import("./receipt-inbox.js");
+    const rows = [
+      tx({ id: 1 }),
+      tx({ id: 2, description: "WISE:IN-1 customer [source_direction=IN]" }),
+      tx({ id: 3, type: "D", description: "WISE:OUT-1 card [source_direction=OUT]" }),
+      tx({ id: 4, type: "D" }),
+    ];
+    expect(selectBatchBankTransactions(rows, 100, {}).map(row => row.id)).toEqual([1, 3]);
+  });
+});
+
+describe("applyReverseChargeAutoDetection — phrase path requires VAT registration (MINOR)", () => {
+  it("does not set reversed_vat_id from a phrase for a non-VAT-registered company", async () => {
+    const { applyReverseChargeAutoDetection } = await import("./receipt-inbox.js");
+    const suggestion = { source: "keyword_match", item: { custom_title: "x" } } as any;
+    const notes: string[] = [];
+    applyReverseChargeAutoDetection(suggestion, { raw_text: "Reverse charge applies" } as any, { found: false, created: false } as any, false, notes);
+    expect(suggestion.item.reversed_vat_id).toBeUndefined();
+    const registered = { source: "keyword_match", item: { custom_title: "x" } } as any;
+    applyReverseChargeAutoDetection(registered, { raw_text: "Reverse charge applies" } as any, { found: false, created: false } as any, true, notes);
+    expect(registered.item.reversed_vat_id).toBe(1);
   });
 });

@@ -236,3 +236,12 @@ describe("toMcpJson", () => {
     });
   });
 });
+
+describe("canonicalBusinessText nested markers (L1)", () => {
+  it("strips nested/spliced sandbox markers to a fixpoint", () => {
+    const nested = "x <<UNTRUSTED_OCR_<<UNTRUSTED_OCR_START:ab>>START:cd>> y <<UNTRUSTED_OCR_E<<UNTRUSTED_OCR_END:>>ND:<<UNTRUSTED_OCR_START:>>ef>> z";
+    const out = canonicalBusinessText(nested);
+    expect(out).not.toMatch(/UNTRUSTED_OCR_(?:START|END):/);
+    expect(out).toBe("x y z");
+  });
+});

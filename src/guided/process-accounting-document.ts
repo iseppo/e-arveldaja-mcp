@@ -210,6 +210,7 @@ interface DocArgs {
   base_vat_price?: number;
   base_gross_price?: number;
   block_on_duplicate?: boolean;
+  allow_duplicate_invoice_number?: boolean;
 }
 
 export interface ProcessAccountingDocumentDeps {
@@ -255,6 +256,7 @@ export function registerProcessAccountingDocumentTool(
       base_vat_price: z.number().optional().describe("mode='create': EUR equivalent of vat_price."),
       base_gross_price: z.number().optional().describe("mode='create': actual settled EUR gross total."),
       block_on_duplicate: z.boolean().optional().describe("mode='create': refuse creation when the cash outflow looks like an already-booked duplicate (default false: warn only)."),
+      allow_duplicate_invoice_number: z.boolean().optional().describe("Booking-binding prepare + mode='create': explicit acknowledgement that the supplier reuses this invoice number (e.g. across years) — an existing live invoice with the same supplier and number becomes a warning instead of a blocker (default false). Bound into the plan; pass the SAME value at create."),
     },
     { ...createAnnotation, ...batch, openWorldHint: true, title: "Process Accounting Document" },
     async (args: DocArgs) => {
@@ -376,6 +378,7 @@ export function registerProcessAccountingDocumentTool(
             ...(args.base_vat_price !== undefined ? { baseVatPrice: args.base_vat_price } : {}),
             ...(args.base_gross_price !== undefined ? { baseGrossPrice: args.base_gross_price } : {}),
             ...(args.block_on_duplicate !== undefined ? { blockOnDuplicate: args.block_on_duplicate } : {}),
+            ...(args.allow_duplicate_invoice_number !== undefined ? { allowDuplicateInvoiceNumber: args.allow_duplicate_invoice_number } : {}),
           };
         }
         const outcome = await operations.prepare({
@@ -473,6 +476,7 @@ export function registerProcessAccountingDocumentTool(
         baseVatPrice: args.base_vat_price,
         baseGrossPrice: args.base_gross_price,
         blockOnDuplicate: args.block_on_duplicate,
+        allowDuplicateInvoiceNumber: args.allow_duplicate_invoice_number,
       });
       if (!outcome.ok) {
         // Was a hardcoded allow-list of ONE code. invoice_creation_failed and

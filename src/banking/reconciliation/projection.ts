@@ -43,6 +43,11 @@ export function exactMatchFingerprint(projection: ExactMatchProjection, threshol
         amount: descriptor.amount,
         currency: descriptor.currency,
         expected_clients_id: descriptor.clientsId,
+        // A cross-mechanism duplicate suspect that appears (or vanishes) after
+        // review changes what the operator approved: plan drift.
+        ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
+          ? { possible_duplicate_journal_ids: descriptor.possibleDuplicatePostings.map(s => s.journal_id) }
+          : {}),
       },
     ]),
     skipped: projection.skipped.map(row => ({ transaction_id: row.transaction_id, reason: row.reason })),

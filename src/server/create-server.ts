@@ -27,7 +27,7 @@ import { PurchaseInvoicesApi } from "../api/purchase-invoices.api.js";
 import { ReferenceDataApi } from "../api/readonly.api.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { createElicitor } from "../elicitation.js";
-import { persistCredentialImportViaPlan } from "../tools/credential-tools.js";
+import { persistStartupCredentialImport } from "../tools/credential-tools.js";
 import { toolError } from "../tool-error.js";
 import { z } from "zod";
 import { toMcpJson } from "../mcp-json.js";
@@ -279,6 +279,7 @@ export async function createMcpServer(
     stableIdentity: allConfigs[connectionState.activeIndex]
       ? buildConnectionFingerprint(allConfigs[connectionState.activeIndex]!.config)
       : "setup",
+    connectionCount: allConfigs.length,
   }));
   const connectionFingerprints = Object.fromEntries(
     allConfigs.map((config) => [config.name, buildConnectionFingerprint(config.config)]),
@@ -560,7 +561,9 @@ export async function createMcpServer(
       // Persist the sole startup candidate ONLY through a freshly-issued,
       // single-use, drift-checked plan handle — uniform with the tool execute
       // path — instead of writing directly after elicitation.
-      importCredentials: ({ apiKeyFile, storageScope }) => persistCredentialImportViaPlan(runtimeSafetyContext, {
+      // Runs inside an invocation snapshot: the plan store's scope comes only
+      // from AsyncLocalStorage, so outside one `issue` throws (M2).
+      importCredentials: ({ apiKeyFile, storageScope }) => persistStartupCredentialImport(invocationStorage, connectionState, runtimeSafetyContext, {
         apiKeyFile,
         storageScope,
         verify: verifyImportedCredentials,

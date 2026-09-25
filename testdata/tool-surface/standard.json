@@ -2,12 +2,12 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 123189,
-    "descriptionsBytes": 16013,
-    "inputSchemasBytes": 76606,
+    "toolsListBytes": 126007,
+    "descriptionsBytes": 16930,
+    "inputSchemasBytes": 78505,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
-      "bytes": 3627
+      "bytes": 3909
     },
     "serverInstructionsBytes": 932,
     "promptMetadataBytes": 11072,
@@ -156,7 +156,8 @@
               "SENT",
               "DELETE_FAILED",
               "CONNECTION_SWITCH_INTERRUPTED",
-              "MUTATION_INDETERMINATE"
+              "MUTATION_INDETERMINATE",
+              "LOG_CLEARED"
             ],
             "type": "string"
           },
@@ -1397,6 +1398,10 @@
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "block_on_duplicate": {
+            "description": "Refuse an inter-account confirm (distribution to another own bank account) when an existing transfer journal or a possible duplicate bank posting is found (default false: warn only).",
+            "type": "boolean"
+          },
           "clients_id": {
             "description": "Client ID to set on the transaction before confirming (required when transaction has no clients_id and distribution is against accounts, not invoices)",
             "exclusiveMinimum": 0,
@@ -3413,6 +3418,10 @@
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "allow_duplicate_invoice_number": {
+            "description": "Explicit acknowledgement that the supplier reuses this invoice number (e.g. across years): an existing live invoice with the same supplier and number becomes a warning instead of a refusal (default false: refuse).",
+            "type": "boolean"
+          },
           "bank_account_no": {
             "description": "Supplier bank account",
             "type": "string"
@@ -3804,7 +3813,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute trial balance (käibeandmik/proovibilanss) from journal postings. Shows debit/credit totals and balance for each account.",
+      "description": "Compute trial balance (käibeandmik/proovibilanss) from journal postings. Shows debit/credit totals and balance for each account. Without date_to every posting counts, including future-dated ones (period.to = \"unbounded\").",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3864,7 +3873,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute profit and loss statement (kasumiaruanne) for a period. Shows revenue minus expenses.",
+      "description": "Compute profit and loss statement (kasumiaruanne) for a period. Shows revenue minus expenses; account 9000 (Arvestuslik koondtulemus, the RIK year-end close counter-account) and legacy YECL closing journals are excluded.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3900,7 +3909,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables.",
+      "description": "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_*).",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4033,7 +4042,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE retained-earnings balance is distributable as net dividend (ÄS § 157 lg 1). Hard-blocks a net dividend exceeding retained earnings, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true. Reports max_net_dividend. Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document.",
+      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE lg 1 distributable profit (retained earnings + closed prior-year result + unclosed prior-year P&L; not the current year) is distributable as net dividend (ÄS § 157 lg 1). Hard-blocks a net dividend exceeding it, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true (never on an imbalanced ledger); pending unconfirmed dividend drafts count. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4053,7 +4062,7 @@
             "type": "string"
           },
           "force": {
-            "description": "Create journal even if retained earnings are insufficient (default false)",
+            "description": "Book even if the ÄS § 157 lg 1 or lg 2 check fails (only alongside e.g. a capital reduction). Never overrides a ledger-imbalance block. Default false.",
             "type": "boolean"
           },
           "income_tax_expense_account": {
@@ -4065,7 +4074,7 @@
             "type": "number"
           },
           "restricted_reserve_accounts": {
-            "description": "Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default.",
+            "description": "Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default. Explicit accounts need only exist (inactive OK).",
             "items": {
               "maximum": 9007199254740991,
               "minimum": -9007199254740991,
@@ -4314,13 +4323,24 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Prepare a dry-run year-end close package with unresolved items, balance check, and draft P&L closing entries.",
+      "description": "Dry-run calendar-year close per RIK's e-arveldaja method: unresolved items, balance check, existing-close detection, and the two drafts — Dec 31 result entry (profit D 9000 / K 2970) and Jan 1 transfer (D 2970 / K 2960). Revenue/expense accounts are not zeroed.",
       "execution": {
         "taskSupport": "forbidden"
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "reserve_capital_account": {
+            "description": "Reserve capital account override for reserve_capital_amount",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "reserve_capital_amount": {
+            "description": "Part of a profit to credit to reserve capital (default account: name-resolved Kohustuslik reservkapital, 2940) instead of retained earnings in the 1 January entry",
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
           "year": {
             "description": "Fiscal year (YYYY)",
             "maximum": 2200,
@@ -4372,16 +4392,31 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create draft closing journals from prepare_year_end_close. Requires confirm=true; review/register separately.",
+      "description": "Create the missing RIK year-end closing entries from prepare_year_end_close as draft journals (never books an existing entry twice). Requires confirm=true; review/register separately.",
       "execution": {
         "taskSupport": "forbidden"
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "allow_additional_transfer": {
+            "description": "Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and book the proposed remainder anyway (transfers on other dates or ambiguous ones always need manual review)",
+            "type": "boolean"
+          },
           "confirm": {
             "description": "Must be true to create the closing journal entries",
             "type": "boolean"
+          },
+          "reserve_capital_account": {
+            "description": "Reserve capital account override for reserve_capital_amount",
+            "maximum": 9007199254740991,
+            "minimum": -9007199254740991,
+            "type": "integer"
+          },
+          "reserve_capital_amount": {
+            "description": "Part of a profit to credit to reserve capital (default account: name-resolved Kohustuslik reservkapital, 2940) instead of retained earnings in the 1 January entry",
+            "exclusiveMinimum": 0,
+            "type": "number"
           },
           "year": {
             "description": "Fiscal year (YYYY)",
@@ -4456,6 +4491,10 @@
           "gross_price": {
             "description": "Incoming gross amount to match against existing invoices",
             "type": "number"
+          },
+          "invoice_date": {
+            "description": "Incoming invoice date (YYYY-MM-DD); limits amount matches to ±7 days",
+            "type": "string"
           },
           "invoice_number": {
             "description": "Incoming invoice number to match against existing invoices",

@@ -1837,7 +1837,8 @@ describe("camt import tool", () => {
             id: 79,
             match_reasons: ["counterparty_name"],
             suggested_patch_missing_fields: expect.objectContaining({
-              bank_ref_number: "REF-VOID-1",
+              // Statement-sourced patch values are sandbox-wrapped at output.
+              bank_ref_number: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nREF-VOID-1\n/),
             }),
           }),
         ],
@@ -1955,7 +1956,8 @@ describe("camt import tool", () => {
             status: "CONFIRMED",
             match_reasons: expect.arrayContaining(["counterparty_name", "description"]),
             suggested_patch_missing_fields: expect.objectContaining({
-              bank_ref_number: "REF-VOID-1",
+              // Statement-sourced patch values are sandbox-wrapped at output.
+              bank_ref_number: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nREF-VOID-1\n/),
             }),
           }),
         ],
@@ -2372,9 +2374,22 @@ describe("camt import tool", () => {
     expect(payload.sample.reduce((sum: number, row: { amount: number }) => sum + row.amount, 0)).toBe(50);
   });
 
-  it("still collapses the same standalone entry repeated across the file", async () => {
-    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
-    const repeatedEntry = `
+  function repeatedEntryXml(entryXml: string, copies: number): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-repeated-entry</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>${entryXml.repeat(copies)}
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+  }
+
+  const refLessEntry = `
       <Ntry>
         <Amt Ccy="EUR">50.00</Amt>
         <CdtDbtInd>DBIT</CdtDbtInd>
@@ -2387,28 +2402,84 @@ describe("camt import tool", () => {
           </TxDtls>
         </NtryDtls>
       </Ntry>`;
-    mockedReadFile.mockResolvedValue(`<?xml version="1.0" encoding="UTF-8"?>
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
-  <BkToCstmrStmt>
-    <Stmt>
-      <Id>stmt-repeated-entry</Id>
-      <Acct>
-        <Id><IBAN>EE637700771011212909</IBAN></Id>
-        <Ccy>EUR</Ccy>
-      </Acct>${repeatedEntry}${repeatedEntry}
-    </Stmt>
-  </BkToCstmrStmt>
-</Document>`);
+
+  it("keeps a genuine second identical ref-less entry instead of collapsing it (cardinality)", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
 
     const { api, handler } = setupCamtTool();
-    const result = await handler({
-      file_path: "/tmp/camt.xml",
-      accounts_dimensions_id: 7,
-    });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
 
-    // Two SEPARATE single-leg entries are both leg 0, so cross-entry dedup is
-    // untouched by the leg ordinal.
+    // No AcctSvcrRef: two identical rows are two payments until the ledger
+    // says otherwise. Dropping one would silently lose a cash movement.
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(2);
+    expect(payload.skipped_count).toBe(0);
+  });
+
+  it("executes both identical ref-less entries: create is called twice", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
+
+    const { api, handler } = setupCamtTool();
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
+    })).content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.transactions.create).mock.calls.map(([body]) => (body as { amount: number }).amount)).toEqual([50, 50]);
+  });
+
+  it("flags only as many ref-less copies as the ledger already holds", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
+
+    const { handler } = setupCamtTool({
+      existingTransactions: [{
+        id: 501, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7, type: "C", amount: 50,
+        cl_currencies_id: "EUR", date: "2026-02-04", bank_account_name: "Vendor OÜ", description: "Repeated row",
+      }],
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+
+    expect(payload.created_count).toBe(2);
+    // One ledger row can account for one file copy: exactly one is flagged.
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+    expect(payload.execution.needs_review).toEqual([
+      expect.objectContaining({ existing_transactions: [expect.objectContaining({ id: 501 })] }),
+    ]);
+  });
+
+  it("reads the ledger once for the per-row duplicate recheck, not once per row", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    const entries = [1, 2, 3, 4].map(n => refLessEntry
+      .replace("<BookgDt>", `<AcctSvcrRef>REF-ONCE-${n}</AcctSvcrRef>\n        <BookgDt>`)
+      .replace("50.00", `5${n}.00`)).join("");
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(entries, 1));
+
+    const { api, handler } = setupCamtTool();
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    vi.mocked(api.transactions.listAll).mockClear();
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
+    })).content[0]!.text);
+
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(4);
+    // One read for the execute-time projection + one before the first write.
+    expect(api.transactions.listAll).toHaveBeenCalledTimes(2);
+  });
+
+  it("still collapses the same bank-referenced entry repeated across the file", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(
+      refLessEntry.replace("<BookgDt>", "<AcctSvcrRef>REF-REPEAT-1</AcctSvcrRef>\n        <BookgDt>"), 2));
+
+    const { api, handler } = setupCamtTool();
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.created_count).toBe(1);
     expect(payload.skipped_count).toBe(1);
@@ -2788,17 +2859,16 @@ describe("camt plan-bound execution", () => {
 
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
 
-    // Creating the first command simulates a concurrent insert that makes the
-    // second command's bank reference a duplicate before its own mutate.
-    let ledger: unknown[] = [];
-    api.transactions.listAll.mockImplementation(async () => ledger);
-    api.transactions.create.mockImplementation(async () => {
-      ledger = [{
-        id: 777, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
-        bank_ref_number: "REF-B", date: "2026-02-02", type: "C", amount: 20, cl_currencies_id: "EUR",
-      }];
-      return { created_object_id: 9001 };
-    });
+    // A concurrent insert lands after the execute-time projection read but
+    // before the single pre-write ledger read (MEDIUM-3: the ledger is read
+    // once, not per row), making the second command's bank reference a
+    // duplicate. The first command still completes; the second drifts.
+    let ledgerReads = 0;
+    api.transactions.listAll.mockImplementation(async () => (ledgerReads++ === 0 ? [] : [{
+      id: 777, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
+      bank_ref_number: "REF-B", date: "2026-02-02", type: "C", amount: 20, cl_currencies_id: "EUR",
+    }]));
+    api.transactions.create.mockResolvedValue({ created_object_id: 9001 });
 
     const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
     const payload = parseMcpResponse(result.content[0]!.text);
@@ -2988,20 +3058,35 @@ describe("camt import — statement closing-balance tripwire", () => {
     expect(check.statement_closing_balance).toBe(12.00);
     expect(check.balance_date).toBe("2026-02-28");
     expect(check.booked_balance).toBe(0);
-    expect(check.expected_balance).toBe(0);
-    expect(check.difference).toBe(-12.00);
+    // Dry run projects the would-create DBIT 10.00 into the expected balance,
+    // so the tripwire already reflects the post-import ledger.
+    expect(check.pending_import_amount).toBe(-10.00);
+    expect(check.unconfirmed_amount).toBe(-10.00);
+    expect(check.expected_balance).toBe(-10.00);
+    expect(check.difference).toBe(-22.00);
     expect(check.within_tolerance).toBe(false);
     expect(check.tolerance).toBe(0.10);
-    // Dry run: the statement's own entries are not booked yet, so the
-    // out-of-tolerance tripwire is a false alarm. The tolerance warning is
-    // suppressed and replaced with a deferral note; the figures stay.
-    expect(check.warnings ?? []).toHaveLength(0);
-    expect((check.notes as string[]).join(" ")).toContain("deferred until execute");
+    expect(check.warnings.length).toBeGreaterThan(0);
+    expect((check.notes as string[]).join(" ")).toContain("Dry-run projection");
     expect(check.persisted).toBe(false);
 
     // Dry run must not write the statement-balance history.
     resetStatementBalanceCache();
     expect(readStatementBalances()).toEqual([]);
+  });
+
+  it("reconciles on the dry run when the projected import matches the closing balance", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance()
+      .replace("<Amt Ccy=\"EUR\">12.00</Amt>\n        <CdtDbtInd>CRDT</CdtDbtInd>", "<Amt Ccy=\"EUR\">10.00</Amt>\n        <CdtDbtInd>DBIT</CdtDbtInd>"));
+    const { handler } = setupCamtTool();
+
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    const check = payload.statement_balance_check;
+    expect(check.statement_closing_balance).toBe(-10.00);
+    expect(check.expected_balance).toBe(-10.00);
+    expect(check.within_tolerance).toBe(true);
+    expect(check.warnings).toEqual([]);
   });
 
   it("surfaces and persists the closing-balance check on execute", async () => {
@@ -3034,6 +3119,25 @@ describe("camt import — statement closing-balance tripwire", () => {
       currency: "EUR",
       source: "camt",
     });
+  });
+
+  it("surfaces the statement-balance identity warning when another connection's records are ignored", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance());
+    writeFileSync(join(bundleDir, "statement-balances.json"), JSON.stringify([{
+      dimensionId: 7, date: "2026-01-31", closingBalance: 5, currency: "EUR", source: "camt",
+      recordedAt: "2026-02-01T00:00:00.000Z", connectionIdentity: "some-other-company",
+    }]), "utf8");
+    resetStatementBalanceCache();
+    const { handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
+    })).content[0]!.text);
+
+    const warnings = payload.statement_balance_check.warnings as string[];
+    expect(warnings.some(w => /different connection/.test(w))).toBe(true);
   });
 
   it("still reports created transactions and surfaces a note when the advisory persist path fails", async () => {

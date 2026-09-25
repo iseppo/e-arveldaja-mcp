@@ -135,3 +135,28 @@ describe("resolveSupplierDefault — Resolution<SupplierRef> view", () => {
     expect(r.status).toBe("ambiguous");
   });
 });
+
+describe("supplier name ties are ambiguous, never first-wins (finding 9)", () => {
+  it("returns ambiguous when two active clients normalize to the supplier name and neither is a literal match", () => {
+    const clients = [makeClient({ id: 1, name: "Apple" }), makeClient({ id: 2, name: "Apple LP" })];
+    const outcome = matchSupplier(clients, { supplier_name: "Apple Inc" });
+    expect(outcome.kind).toBe("ambiguous");
+    expect(resolveSupplierDefault(clients, { supplier_name: "Apple Inc" }).status).toBe("ambiguous");
+  });
+
+  it("returns ambiguous for two clients with the identical name (equal fuzzy score)", () => {
+    const clients = [makeClient({ id: 1, name: "Some Vendor Ltd" }), makeClient({ id: 2, name: "Some Vendor Ltd" })];
+    expect(matchSupplier(clients, { supplier_name: "Some Vendor Ltd" }).kind).toBe("ambiguous");
+  });
+
+  it("returns ambiguous when two different names tie at the best fuzzy distance", () => {
+    const clients = [makeClient({ id: 1, name: "Nordic Tradex" }), makeClient({ id: 2, name: "Nordic Tradey" })];
+    expect(matchSupplier(clients, { supplier_name: "Nordic Trade" }).kind).toBe("ambiguous");
+  });
+
+  it("matches a registry code despite surrounding whitespace on the stored client code", () => {
+    const clients = [makeClient({ id: 7, name: "Coded OÜ", code: " 12345678 " })];
+    const outcome = matchSupplier(clients, { supplier_reg_code: "12345678" });
+    expect(outcome).toMatchObject({ kind: "matched", match_type: "registry_code" });
+  });
+});

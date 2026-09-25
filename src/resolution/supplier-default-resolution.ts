@@ -42,6 +42,8 @@ export type SupplierMatchType = "registry_code" | "vat_no" | "name_normalized" |
 export type SupplierMatchOutcome =
   | { kind: "matched"; match_type: SupplierMatchType; client: Client }
   | { kind: "conflict"; reason: string }
+  /** More than one active client ties on the supplier name — never pick one. */
+  | { kind: "ambiguous"; reason: string }
   | {
       kind: "no_match";
       selfMatchBlocked: boolean;
@@ -113,7 +115,8 @@ export function matchSupplier(
     if (ownCode && fields.supplier_reg_code.trim() === ownCode) {
       selfMatchBlocked = true;
     } else {
-      const byCode = clients.find(client => client.code === fields.supplier_reg_code && !client.is_deleted);
+      const regCode = fields.supplier_reg_code.trim();
+      const byCode = clients.find(client => client.code?.trim() === regCode && !client.is_deleted);
       if (byCode) {
         if (isSelfClient(byCode)) {
           selfMatchBlocked = true;
@@ -157,26 +160,48 @@ export function matchSupplier(
         if (conflict) return { kind: "conflict", reason: conflict };
         return { kind: "matched", match_type: "name_normalized", client: candidate };
       }
-      // length === 0 → no match, length > 1 → ambiguous, both fall through
-      // to the fuzzy tier which has stricter inclusion checks.
+      // Several clients normalize to the same name: only a single LITERAL name
+      // match may break the tie (the fuzzy tier below then picks it at edit
+      // distance 0); otherwise refuse rather than pick whichever comes first.
+      const literalSupplierName = fields.supplier_name.trim().toLowerCase();
+      const literalMatches = normalizedExactMatches.filter(client => client.name.trim().toLowerCase() === literalSupplierName);
+      if (normalizedExactMatches.length > 1 && literalMatches.length !== 1) {
+        return {
+          kind: "ambiguous",
+          reason: `${normalizedExactMatches.length} active clients share the supplier name — resolve the supplier manually (by registry code or VAT number).`,
+        };
+      }
     }
 
     const names = activeClients.map(client => client.name);
     if (names.length > 0) {
-      const bestMatch = closest(fields.supplier_name, names);
+      const supplierName = fields.supplier_name;
+      const passesFuzzyGate = (candidateName: string): boolean => {
+        const maxLen = Math.max(supplierName.length, candidateName.length);
+        const similarity = maxLen > 0 ? 1 - distance(supplierName, candidateName) / maxLen : 0;
+        const shorterLen = Math.min(supplierName.length, candidateName.length);
+        return similarity >= 0.7 &&
+          shorterLen >= 4 &&
+          (
+            candidateName.toLowerCase().includes(supplierName.toLowerCase()) ||
+            supplierName.toLowerCase().includes(candidateName.toLowerCase())
+          );
+      };
+      const bestMatch = closest(supplierName, names);
       const matchedClient = activeClients.find(client => client.name === bestMatch);
-      const maxLen = Math.max(fields.supplier_name.length, bestMatch.length);
-      const similarity = maxLen > 0 ? 1 - distance(fields.supplier_name, bestMatch) / maxLen : 0;
-      const shorterLen = Math.min(fields.supplier_name.length, bestMatch.length);
-      if (
-        matchedClient &&
-        similarity >= 0.7 &&
-        shorterLen >= 4 &&
-        (
-          bestMatch.toLowerCase().includes(fields.supplier_name.toLowerCase()) ||
-          fields.supplier_name.toLowerCase().includes(bestMatch.toLowerCase())
-        )
-      ) {
+      if (matchedClient && passesFuzzyGate(bestMatch)) {
+        // An equal-score tie (same name twice, or another name at the same
+        // edit distance that also passes the gate) must not silently resolve
+        // to whichever client happens to come first.
+        const bestDistance = distance(supplierName, bestMatch);
+        const tied = activeClients.filter(client =>
+          distance(supplierName, client.name) === bestDistance && passesFuzzyGate(client.name));
+        if (tied.length > 1) {
+          return {
+            kind: "ambiguous",
+            reason: `${tied.length} active clients match the supplier name equally well — resolve the supplier manually (by registry code or VAT number).`,
+          };
+        }
         const conflict = strongIdentifierConflict(matchedClient);
         if (conflict) return { kind: "conflict", reason: conflict };
         return { kind: "matched", match_type: "name_fuzzy", client: matchedClient };
@@ -208,7 +233,7 @@ export function resolveSupplierDefault(
       [{ tag: outcome.match_type, note: `Matched supplier by ${outcome.match_type}.` }],
     );
   }
-  if (outcome.kind === "conflict") {
+  if (outcome.kind === "conflict" || outcome.kind === "ambiguous") {
     return ambiguous([], outcome.reason);
   }
   if (outcome.selfMatchBlocked) {

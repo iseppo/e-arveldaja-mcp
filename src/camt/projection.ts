@@ -8,6 +8,7 @@ import {
   findDuplicateTransactionIds,
   findPossibleDuplicateMatches,
   findRepeatedBankReferences,
+  normalizeOptionalReference,
 } from "./duplicate-identity.js";
 import type {
   CamtCreateDescriptor,
@@ -81,6 +82,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
   const seenBatchDuplicateKeys = new Set(
     filteredEntries.filter(entry => entry.duplicate).map(entry => buildBatchDuplicateKey(entry)),
   );
+  const refLessOccurrences = new Map<string, number>();
   const clientCache: ClientResolutionCache = { byCode: new Map(), byName: new Map() };
   const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accountsDimensionsId);
   const descriptors: CamtCreateDescriptor[] = [];
@@ -101,7 +103,18 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       });
       continue;
     }
-    if (seenBatchDuplicateKeys.has(batchDuplicateKey)) {
+    // An entry WITH a bank reference (AcctSvcrRef) repeated in the file is the
+    // same bank entry listed twice. A ref-less entry has no identity beyond its
+    // content, so two identical ones are two genuine payments until proven
+    // otherwise: count them (cardinality) instead of collapsing them, and let
+    // the ledger comparison below decide which copies are possible duplicates.
+    const hasBankReference = normalizeOptionalReference(entry.bank_reference) !== undefined;
+    let refLessOccurrence = 1;
+    if (!hasBankReference) {
+      refLessOccurrence = (refLessOccurrences.get(batchDuplicateKey) ?? 0) + 1;
+      refLessOccurrences.set(batchDuplicateKey, refLessOccurrence);
+    }
+    if (hasBankReference && seenBatchDuplicateKeys.has(batchDuplicateKey)) {
       skipped.push({
         date: entry.date,
         amount: entry.amount,
@@ -114,7 +127,12 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
 
     const clientResolution = await resolveClient(entry, clientCache);
     const storedDescription = buildCamtDescriptionWithMetadata(entry.description, entry);
-    const possibleDuplicateMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
+    const ledgerMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
+    // Cardinality: k matching ledger rows can already account for at most the
+    // first k in-file copies of a ref-less entry; copies beyond that are new.
+    const possibleDuplicateMatches = refLessOccurrence <= ledgerMatches.length
+      ? ledgerMatches
+      : [];
     const payload: CreateTransactionPayload = {
       accounts_dimensions_id: accountsDimensionsId,
       // API type drives the cash-account leg at confirmation: incoming (CRDT) →

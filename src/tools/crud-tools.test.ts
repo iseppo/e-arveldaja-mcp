@@ -24,7 +24,7 @@ import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
-import { LinkedInvoiceClientMismatchError } from "../api/transactions.api.js";
+import { LinkedInvoiceClientMismatchError, StoredTypeDirectionMismatchError } from "../api/transactions.api.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import {
   PurchaseInvoicesApi,
@@ -2560,6 +2560,20 @@ describe("create_transaction duplicate-posting guard", () => {
     expect(payload.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
     ]);
+    // document_number is upstream free text: sandboxed in both the structured
+    // row and the warning line.
+    const suspect = (payload.possible_duplicate_postings as Array<Record<string, unknown>>)[0]!;
+    expect(suspect.document_number).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nDOC-DUP-1\n<<UNTRUSTED_OCR_END:/);
+    expect(payload.warnings?.some(w => /doc <<UNTRUSTED_OCR_START:[0-9a-f]+>>\nDOC-DUP-1\n/.test(w))).toBe(true);
+  });
+
+  it.each([0, -25])("refuses a non-positive amount (%s) before any read or create", async (amount) => {
+    const { handler, create, api } = setupCreateTransaction({ journals: [duplicateJournal] });
+    const result = await handler({ ...createParams, amount }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "invalid_amount" });
+    expect(create).not.toHaveBeenCalled();
+    expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
   });
 
   // FIX 2: create_transaction has no base_amount input, so a non-EUR row's
@@ -3252,5 +3266,94 @@ describe("confirm_transaction receipt-client alignment", () => {
     expect(payload.ok).toBe(true);
     expect(payload.warnings[0]).toContain("IS confirmed");
     expect(payload.warnings[0]).toContain("could not run");
+  });
+});
+
+describe("confirm_transaction inter-account duplicate guard (MEDIUM-4)", () => {
+  // Real transfer LHV (dim 100) -> SEB (dim 200), already booked by journal 9
+  // (e.g. the SEB mirror leg was confirmed first). Confirming the LHV row
+  // against SEB would book it a second time.
+  const bookedTransfer = {
+    id: 9, registered: true, is_deleted: false, effective_date: "2026-03-20", title: "Transfer", document_number: null,
+    postings: [
+      { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 500, is_deleted: false },
+      { accounts_id: 1020, accounts_dimensions_id: 200, type: "D", amount: 500, is_deleted: false },
+    ],
+  };
+
+  function interAccountHarness(journals: unknown[]) {
+    return getCrudToolHarness("confirm_transaction", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 31, clients_id: 5, type: "C", amount: 500, date: "2026-03-21", accounts_dimensions_id: 100 }),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
+      },
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue([{ id: 1020, account_code: "1020", allows_dimensions: true, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 100, accounts_id: 1020, is_deleted: false, title_est: "LHV" },
+          { id: 200, accounts_id: 1020, is_deleted: false, title_est: "SEB" },
+        ]),
+        getBankAccounts: vi.fn().mockResolvedValue([
+          { id: 1, accounts_dimensions_id: 100 },
+          { id: 2, accounts_dimensions_id: 200 },
+        ]),
+      },
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue(journals) },
+    });
+  }
+
+  const args = { id: 31, distributions: [{ related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 }] };
+
+  it("warns (Lane B, ±1 day) and still confirms by default", async () => {
+    const { api, handler } = interAccountHarness([bookedTransfer]);
+    const payload = parseMcpResponse(((await handler(args)) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(payload.existing_inter_account_journal_ids ?? payload.extra?.existing_inter_account_journal_ids).toEqual([9]);
+    expect((payload.warnings as string[]).some(w => /inter-account journal/.test(w))).toBe(true);
+  });
+
+  it("refuses before any mutation with block_on_duplicate", async () => {
+    const { api, handler } = interAccountHarness([bookedTransfer]);
+    const result = await handler({ ...args, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      category: "possible_duplicate_posting",
+      conflicting_journal_ids: [9],
+      existing_inter_account_journal_ids: [9],
+    });
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it("degrades a failed advisory transaction read to a warning and still confirms", async () => {
+    const { api, handler } = interAccountHarness([bookedTransfer]);
+    api.transactions.get.mockRejectedValueOnce(new Error("network"));
+    const result = await handler(args) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBeFalsy();
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect((payload.warnings as string[]).some(w => /Inter-account duplicate check unavailable/.test(w))).toBe(true);
+  });
+
+  it("confirms silently when no transfer is booked yet, even with block_on_duplicate", async () => {
+    const { api, handler } = interAccountHarness([]);
+    const payload = parseMcpResponse(((await handler({ ...args, block_on_duplicate: true })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(payload.warnings).toBeUndefined();
+  });
+});
+
+describe("confirm_transaction direction guard surfacing (MEDIUM-6)", () => {
+  it("returns stored_type_direction_mismatch as a structured tool error", async () => {
+    const mismatch = new StoredTypeDirectionMismatchError({ transactionId: 40, storedType: "C", signedDirection: "incoming" });
+    const { handler } = getCrudToolHarness("confirm_transaction", {
+      transactions: { get: vi.fn().mockResolvedValue({ id: 40, clients_id: 5 }), confirm: vi.fn().mockRejectedValue(mismatch) },
+    });
+    const result = await handler({ id: 40, distributions: [{ related_table: "sale_invoices", related_id: 77, amount: 10 }] }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
+      category: "stored_type_direction_mismatch", transaction_id: 40, stored_type: "C", signed_direction: "incoming",
+    });
   });
 });

@@ -224,6 +224,110 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(confirm).toHaveBeenCalledTimes(1);
   });
 
+  // ---- M1 — the plan binds the preview's would-create source set (id + gross
+  // + type); execute cannot create a clone the approved preview never showed.
+  const m1Source = (over: Record<string, unknown> = {}) => ({ id: 1, status: "CONFIRMED", create_date: "2026-01-15", number: "SI-1", client_name: "Acme OU",
+    sale_invoice_type: "INVOICE", number_prefix: "ARV", gross_price: 124,
+    items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100 }], ...over });
+  const m1Params = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01", auto_confirm: true };
+
+  it("M1: a source invoice confirmed AFTER the preview → execute plan_drift, nothing created or confirmed", async () => {
+    const a = m1Source();
+    const b = m1Source({ id: 2, number: "SI-2" });
+    const listAll = vi.fn().mockResolvedValueOnce([a]).mockResolvedValue([a, b]);
+    const get = vi.fn().mockImplementation(async (id: number) => (id === 2 ? b : a));
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ listAll, get, create, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(prepared.value.projection.would_create).toBe(1);
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: m1Params });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("M1: a source whose gross changed since the preview → execute plan_drift, nothing created", async () => {
+    const get = vi.fn().mockResolvedValueOnce(m1Source()).mockResolvedValue(m1Source({ gross_price: 9999 }));
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const ops = createSaleInvoiceOperations(makeApi({ listAll: vi.fn().mockResolvedValue([m1Source()]), get, create }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: m1Params });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  // The binding covers the COMPLETE clone payload, not just id/gross/type: a
+  // change that keeps the gross (client, receivable/bank account, dimensions,
+  // item account/VAT) must drift too.
+  const payloadDrifts: Array<[string, Record<string, unknown>]> = [
+    ["client", { clients_id: 77 }],
+    ["receivable account dimension", { receivable_accounts_dimensions_id: 555 }],
+    ["bank account", { bank_accounts_id: 42 }],
+    ["item sale account", { items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100, sale_accounts_id: 3110 }] }],
+    ["item sale account dimension", { items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100, sale_accounts_dimensions_id: 12 }] }],
+    ["item VAT rate/account", { items: [{ products_id: 9, custom_title: "svc", amount: 1, unit_net_price: 100, total_net_price: 100, vat_rate: "9", vat_accounts_id: 2411 }] }],
+  ];
+  for (const [label, change] of payloadDrifts) {
+    it(`M1: a source whose ${label} changed (same gross/type) since the preview → execute plan_drift, nothing created`, async () => {
+      const get = vi.fn().mockResolvedValueOnce(m1Source()).mockResolvedValue(m1Source(change));
+      const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+      const ops = createSaleInvoiceOperations(makeApi({ listAll: vi.fn().mockResolvedValue([m1Source()]), get, create }), createTestRuntimeSafetyContext());
+      const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: m1Params });
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.error.code).toBe("plan_drift");
+      expect(create).not.toHaveBeenCalled();
+    });
+  }
+
+  it("M1: a payload change between the execute drift check and the create is refused per source — never created", async () => {
+    // prepare preview + execute re-preview see the reviewed source; the create pass sees a changed client.
+    const get = vi.fn().mockResolvedValueOnce(m1Source()).mockResolvedValueOnce(m1Source()).mockResolvedValue(m1Source({ clients_id: 77 }));
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ listAll: vi.fn().mockResolvedValue([m1Source()]), get, create, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: m1Params });
+    if (!outcome.ok || outcome.value.mode !== "execute") throw new Error("execute failed");
+    const result = (outcome.value as unknown as { result: { results: Array<{ status: string; error?: string }> } }).result;
+    expect(result.results).toEqual([expect.objectContaining({ status: "error", error: expect.stringContaining("plan_drift") })]);
+    expect(create).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it("M1: an unchanged source still executes with the full-payload binding", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const confirm = vi.fn().mockResolvedValue({});
+    const ops = createSaleInvoiceOperations(makeApi({ listAll: vi.fn().mockResolvedValue([m1Source()]), get: vi.fn().mockResolvedValue(m1Source()), create, confirm }), createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    const outcome = await ops.run({ mode: "execute", action: "recurring", planHandle: prepared.value.planHandle, payload: m1Params });
+    expect(outcome.ok).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("M1: the plan's source identities carry the reviewed would-create set", async () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const issue = vi.spyOn(runtime.planStore, "issue");
+    const ops = createSaleInvoiceOperations(makeApi({ listAll: vi.fn().mockResolvedValue([m1Source()]), get: vi.fn().mockResolvedValue(m1Source()) }), runtime);
+    const prepared = await ops.run({ mode: "prepare", action: "recurring", payload: m1Params });
+    expect(prepared.ok).toBe(true);
+    const planInput = issue.mock.calls[0]![1];
+    expect(planInput.sourceIdentities).toEqual([{
+      source_id: 1, gross_price: 124, sale_invoice_type: "INVOICE", clone_payload_sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    }]);
+  });
+
   it("recurring: execute without a plan_handle is refused before any clone", async () => {
     const create = vi.fn();
     const api = makeApi({ listAll: vi.fn().mockResolvedValue([]), create });

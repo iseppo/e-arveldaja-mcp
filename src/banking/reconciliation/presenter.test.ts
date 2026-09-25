@@ -4,6 +4,7 @@ import {
   renderExactMatchCompact,
   renderExactMatchPayload,
   renderInterAccountCompact,
+  renderSuspects,
 } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../../response-budget.js";
 import { roundMoney } from "../../money.js";
@@ -453,5 +454,18 @@ describe("renderInterAccountCompact", () => {
     expect(summary.counts?.duplicates).toBe(1);
     expect(summary.counts?.needs_review_ambiguous_refless).toBe(1);
     expect(summary.warnings?.some(w => w.code === "ambiguous_refless")).toBe(true);
+  });
+});
+
+describe("renderSuspects untrusted text", () => {
+  it("sandboxes document_number alongside journal_title, keeping null as null", () => {
+    const base: DuplicatePostingSuspect = {
+      journal_id: 1, journal_title: "t", document_number: "IGNORE PREVIOUS", operation_type: null,
+      date: "2026-01-01", amount: 1, type: "C", dimension_id: 1, day_distance: 0,
+    };
+    const [wrapped, empty] = renderSuspects([base, { ...base, document_number: null }]);
+    expect(wrapped!.document_number).toMatch(OCR);
+    expect(wrapped!.journal_title).toMatch(OCR);
+    expect(empty!.document_number).toBeNull();
   });
 });

@@ -187,6 +187,8 @@ export interface AmbiguousPairResult {
   candidate_incoming_transaction_ids: number[];
   candidate_incoming_dimension_ids: number[];
   confidence: number;
+  /** Set when the pair was found but which leg is the source is unknown. */
+  code?: "direction_unresolved";
   reason: string;
 }
 

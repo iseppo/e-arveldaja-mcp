@@ -206,7 +206,8 @@ describe("H05 correction approval", () => {
     expect(patch).toHaveBeenNthCalledWith(1, "/purchase_invoices/1", {
       vat_price: expectedVat,
       gross_price: expectedGross,
-      items: invoice.items,
+      // #62 structural defaults are applied to the re-sent items.
+      items: invoice.items.map(item => ({ ...item, cl_fringe_benefits_id: 1 })),
     });
     expect(patch).toHaveBeenNthCalledWith(2, "/purchase_invoices/1/register", {});
   });
@@ -367,5 +368,116 @@ describe("PurchaseInvoicesApi.createAndSetTotals", () => {
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/17/invalidate", {});
+  });
+});
+
+describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", () => {
+  beforeEach(() => cache.invalidate());
+
+  function makeCreateApi(apiItems: Array<Record<string, unknown>>) {
+    const post = vi.fn().mockResolvedValue({ code: 200, created_object_id: 21, messages: [] });
+    const get = vi.fn().mockResolvedValue({ id: 21, items: apiItems });
+    const patch = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const api = new PurchaseInvoicesApi({ cacheNamespace: "ct", post, get, patch } as any);
+    return { api, post, get, patch };
+  }
+
+  const baseData = {
+    clients_id: 10,
+    client_name: "Supplier OÜ",
+    number: "PI-21",
+    create_date: "2026-03-01",
+    journal_date: "2026-03-01",
+    term_days: 0,
+    liability_accounts_id: 2310,
+  };
+
+  function totalsPatch(patch: ReturnType<typeof vi.fn>) {
+    const call = patch.mock.calls.find(([path]) => path === "/purchase_invoices/21");
+    return call?.[1] as Record<string, any>;
+  }
+
+  it("splits an explicit base_gross_price in the invoice net/gross proportion (0 VAT stays 0)", async () => {
+    const { api, patch } = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 0 }]);
+    await api.createAndSetTotals({
+      ...baseData,
+      cl_currencies_id: "USD",
+      currency_rate: 0.9234,
+      base_gross_price: 92.37,
+      items: [{ custom_title: "SaaS", amount: 1, total_net_price: 100, vat_rate_dropdown: "-" }],
+    } as any, 0, 100, true);
+    const body = totalsPatch(patch);
+    expect(body.base_gross_price).toBe(92.37);
+    expect(body.base_net_price).toBe(92.37);
+    expect(body.base_vat_price).toBe(0);
+  });
+
+  it("splits an explicit base_gross_price pro rata for a VAT invoice", async () => {
+    const { api, patch } = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
+    await api.createAndSetTotals({
+      ...baseData,
+      cl_currencies_id: "USD",
+      currency_rate: 0.9,
+      base_gross_price: 111.6,
+      items: [{ custom_title: "SaaS", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
+    } as any, 24, 124, true);
+    const body = totalsPatch(patch);
+    expect(body.base_net_price).toBe(90);
+    expect(body.base_vat_price).toBe(21.6);
+  });
+
+  it("applies #62 structural defaults on the count-mismatch fallback items", async () => {
+    const { api, patch } = makeCreateApi([
+      { id: 1, total_net_price: 50, vat_amount: 12 },
+      { id: 2, total_net_price: 50, vat_amount: 12 },
+    ]);
+    await api.createAndSetTotals({
+      ...baseData,
+      cl_currencies_id: "EUR",
+      items: [{ custom_title: "One", amount: 1, total_net_price: 100 }],
+    } as any, undefined, undefined, true);
+    const body = totalsPatch(patch);
+    expect(body.items).toHaveLength(2);
+    for (const item of body.items) {
+      expect(item.cl_fringe_benefits_id).toBe(1);
+      expect(item.amount).toBe(1);
+    }
+  });
+
+  it("absorbs a per-item rounding residue but refuses a larger VAT mismatch (and invalidates the draft)", async () => {
+    const ok = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
+    await ok.api.createAndSetTotals({
+      ...baseData, cl_currencies_id: "EUR",
+      items: [{ custom_title: "A", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
+    } as any, 24.01, 124.01, true);
+    expect(totalsPatch(ok.patch).items[0].project_no_vat_gross_price).toBe(124.01);
+
+    const bad = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
+    await expect(bad.api.createAndSetTotals({
+      ...baseData, cl_currencies_id: "EUR",
+      items: [{ custom_title: "A", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
+    } as any, 30, 130, true)).rejects.toThrow(/totals mismatch/);
+    expect(totalsPatch(bad.patch)).toBeUndefined();
+    expect(bad.patch).toHaveBeenCalledWith("/purchase_invoices/21/invalidate", {});
+  });
+
+  it("distributes the invoice gross across non-VAT multi-item rows pro rata to net, cent-exact", async () => {
+    const { api, post } = makeCreateApi([
+      { id: 1, total_net_price: 10, vat_amount: 0 },
+      { id: 2, total_net_price: 20, vat_amount: 0 },
+      { id: 3, total_net_price: 70, vat_amount: 0 },
+    ]);
+    await api.createAndSetTotals({
+      ...baseData, cl_currencies_id: "EUR",
+      items: [
+        { custom_title: "A", amount: 1, total_net_price: 10, vat_rate_dropdown: "-" },
+        { custom_title: "B", amount: 1, total_net_price: 20, vat_rate_dropdown: "-" },
+        { custom_title: "C", amount: 1, total_net_price: 70, vat_rate_dropdown: "-" },
+      ],
+    } as any, 0, 124.01, false);
+    const created = post.mock.calls[0]![1] as Record<string, any>;
+    const grosses = created.items.map((item: any) => item.project_no_vat_gross_price);
+    expect(grosses).toEqual([12.4, 24.8, 86.81]);
+    expect(Math.round(grosses.reduce((a: number, b: number) => a + b, 0) * 100)).toBe(12401);
   });
 });

@@ -864,6 +864,16 @@ describe("receipt inbox tool status handling", () => {
     }
   });
 
+  it("skips dot-files (AppleDouble / OS metadata) in a folder scan", async () => {
+    const folder = createReceiptFolder({ "receipt.pdf": "%PDF-1.4\n", "._receipt.pdf": "%PDF-1.4\n", ".hidden.pdf": "%PDF-1.4\n" });
+    try {
+      const scan = await scanReceiptFolderInternal(folder);
+      expect(scan.files.map(file => file.name)).toEqual(["receipt.pdf"]);
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
   it("retains direct-path canonicalization when the path changes before validation", async () => {
     const requestedPath = createReceiptFolder({ "old.pdf": "%PDF-1.4\n" });
     const replacementPath = createReceiptFolder({ "replacement.pdf": "%PDF-1.4\n" });

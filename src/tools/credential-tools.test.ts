@@ -18,6 +18,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import {
   registerCredentialTools,
   persistCredentialImportViaPlan,
+  persistStartupCredentialImport,
   type CredentialToolDeps,
 } from "./credential-tools.js";
 import { parseToolProfile } from "../tool-profile.js";
@@ -410,5 +411,45 @@ describe("persistCredentialImportViaPlan (startup sole-candidate path)", () => {
     const result = await persistCredentialImportViaPlan(rtsc, importOptions());
     expect(result.action).toBe("unchanged");
     expect(readFileSync(envFile, "utf8")).toBe(before);
+  });
+});
+
+describe("startup credential import with the PRODUCTION runtime safety context (M2)", () => {
+  async function productionSetupModeContext() {
+    const { createRuntimeSafetyContext } = await import("../runtime-safety-context.js");
+    const { createInvocationStorage } = await import("../runtime/invocation-scope.js");
+    const invocationStorage = createInvocationStorage();
+    const rtsc = createRuntimeSafetyContext({
+      invocationStorage,
+      configs: [], // setup mode: zero configured connections
+      toolExposure: {
+        enableLightyear: true, exposeGranularTools: false, exposeSetupTools: true,
+        enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true,
+        enableSales: true, enableProducts: true,
+      },
+    });
+    return { invocationStorage, rtsc, connectionState: { activeIndex: 0, generation: 0 } };
+  }
+
+  it("the production plan store refuses to issue outside an invocation (the hidden failure)", async () => {
+    const { rtsc } = await productionSetupModeContext();
+    // getActiveScope throws "outside an MCP invocation"; the plan store surfaces
+    // it as plan_data_invalid — the exact error every startup import hit.
+    await expect(persistCredentialImportViaPlan(rtsc, importOptions()))
+      .rejects.toThrow(/invalid or oversized data/);
+    expect(existsSync(envFile)).toBe(false);
+  });
+
+  it("persists the sole startup candidate when run through persistStartupCredentialImport", async () => {
+    const { invocationStorage, rtsc, connectionState } = await productionSetupModeContext();
+    const result = await persistStartupCredentialImport(invocationStorage, connectionState, rtsc, importOptions());
+    expect(result.action).toBe("created");
+    expect(readFileSync(envFile, "utf8")).toContain("EARVELDAJA_API_KEY_ID=key-id-1234567890");
+  });
+
+  it("create-server wires the startup import through the invocation-scoped helper", () => {
+    const source = readFileSync(join(__dirname, "..", "server", "create-server.ts"), "utf8");
+    expect(source).toMatch(/importCredentials:[^\n]*persistStartupCredentialImport\(invocationStorage, connectionState, runtimeSafetyContext/);
+    expect(source).not.toMatch(/persistCredentialImportViaPlan\(/);
   });
 });

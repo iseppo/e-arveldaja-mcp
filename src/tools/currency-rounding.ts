@@ -13,6 +13,7 @@ import {
 import { resolveFxAccount } from "../account-resolution.js";
 import type { PurchaseInvoice, Transaction, TransactionItem } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
+import { todayInTallinn } from "../local-date.js";
 
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
@@ -651,7 +652,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
               // Post the FX difference in the SETTLEMENT period (latest payment
               // date), not the invoice date — a Dec invoice paid in Jan books the
               // rate difference in Jan. Fall back to invoice date, then today.
-              const journalDate = c.settlement_date ?? c.invoice_date ?? new Date().toISOString().slice(0, 10);
+              const journalDate = c.settlement_date ?? c.invoice_date ?? todayInTallinn();
               // Guarded write: find-then-create against the run snapshot. The
               // guard stamps document_number "FX:{invoice_id}", best-effort
               // confirms, and records the journal so a duplicate can never be

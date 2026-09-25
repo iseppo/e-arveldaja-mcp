@@ -149,6 +149,25 @@ describe("process_accounting_document", () => {
     expect(Array.isArray(review.items)).toBe(true);
   });
 
+  it("booking-binding prepare threads allow_duplicate_invoice_number: a reused supplier number is a bound warning, not a blocker", async () => {
+    const { path } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()],
+      purchaseInvoiceRows: [{ id: 777, clients_id: 4242, number: "INV-1", status: "CONFIRMED", create_date: "2025-06-01", gross_price: 50 }],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+    });
+    const blocked = parse(await handler({ mode: "prepare", file_path: path, ...bookingArgs() }));
+    expect("plan_handle" in blocked.summary).toBe(false);
+
+    const result = await handler({ mode: "prepare", file_path: path, ...bookingArgs(), allow_duplicate_invoice_number: true });
+    expect(result.isError).toBeFalsy();
+    const payload = parse(result);
+    expect(payload.summary.status).toBe("ready_for_approval");
+    expect(typeof payload.summary.plan_handle).toBe("string");
+    expect(payload.summary.booking_review.allow_duplicate_invoice_number).toBe(true);
+  });
+
   it("booking-binding prepare with an incomplete booking set is rejected with missing_required_fields", async () => {
     const { path } = writeTempPdf();
     const { handler } = setup({ clientRows: [supplier()], purchaseInvoiceRows: [], clients: { get: vi.fn().mockResolvedValue(supplier()) } });

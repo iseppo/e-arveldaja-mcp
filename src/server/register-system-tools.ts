@@ -297,11 +297,19 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
           hint: "Call get_setup_instructions and configure credentials before using mutating session-log tools.",
         }));
       }
-      clearAuditLog();
+      const result = clearAuditLog();
+      if (!result.cleared) {
+        return toolError({
+          error: "The audit log could not be cleared (see server stderr); it was left unchanged.",
+        });
+      }
       return {
         content: [{
           type: "text",
-          text: toMcpJson({ message: "Audit log cleared for current connection." }),
+          text: toMcpJson({
+            message: "Audit log cleared for current connection. A tombstone entry records the clearing.",
+            entries_removed: result.entries_removed,
+          }),
         }],
       };
     }

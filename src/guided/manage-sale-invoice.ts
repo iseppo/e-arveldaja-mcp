@@ -33,10 +33,10 @@ function textResult(payload: Record<string, unknown>, isError = false) {
   return { ...(isError ? { isError: true } : {}), content: [{ type: "text" as const, text: toMcpJson(payload) }] };
 }
 
-function renderRead(value: SaleInvoiceReadResult): Record<string, unknown> {
+function renderRead(value: SaleInvoiceReadResult, view: "brief" | "full" | undefined): Record<string, unknown> {
   if (value.action === "list") {
     const page = value.data as { current_page?: number; total_pages?: number; items?: unknown[] };
-    const items = renderExternalEntity("sale_invoice", applyListView("sale_invoice", page.items ?? [], undefined));
+    const items = renderExternalEntity("sale_invoice", applyListView("sale_invoice", page.items ?? [], view));
     return { mode: "read", action: "list", page: page.current_page, total_pages: page.total_pages, items };
   }
   if (value.action === "get") {
@@ -108,7 +108,7 @@ export function registerManageSaleInvoiceTool(
         });
         if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code }, true);
         if (outcome.value.mode !== "read") return textResult({ error: "unexpected", category: "internal" }, true);
-        return textResult(renderRead(outcome.value));
+        return textResult(renderRead(outcome.value, args.view));
       }
 
       const action = args.action as SaleInvoiceMutationAction | undefined;

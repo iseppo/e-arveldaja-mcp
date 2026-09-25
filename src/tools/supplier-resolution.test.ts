@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Client } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
-import { resolveSupplierInternal } from "./supplier-resolution.js";
+import { fetchRegistryData, resolveSupplierInternal } from "./supplier-resolution.js";
+import { ARIREGISTER_AUTOCOMPLETE_DELETED, ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 
 // resolveSupplierInternal calls fetchRegistryData() when the resolution falls
 // through to "create" mode for an EE supplier with a reg_code. The tests below
@@ -730,5 +731,59 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.code).toBe("legal_entity_identity_required");
+  });
+});
+
+describe("fetchRegistryData — live ariregister autocomplete shape (finding 8)", () => {
+  function stubBody(body: unknown) {
+    const text = JSON.stringify(body);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, headers: { get: () => String(text.length) }, text: () => Promise.resolve(text) }));
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("parses json.data with an exact (numeric) reg_code match and surfaces the status", async () => {
+    stubBody(ARIREGISTER_AUTOCOMPLETE_TELIA);
+    await expect(fetchRegistryData("10234957")).resolves.toEqual({
+      name: "Telia Eesti AS",
+      reg_code: "10234957",
+      address: "Harju maakond, Tallinn, Kristiine linnaosa, Mustamäe tee 3",
+      status: "R",
+    });
+  });
+
+  it("skips non-exact prefix hits and flags a deleted company (status K)", async () => {
+    stubBody(ARIREGISTER_AUTOCOMPLETE_DELETED);
+    const data = await fetchRegistryData("10234957");
+    expect(data?.name).toBe("Telia Eesti AS");
+    expect(data?.status).toBe("K");
+  });
+
+  it("returns null when no entry matches the code exactly", async () => {
+    stubBody({ status: "OK", data: [{ ...ARIREGISTER_AUTOCOMPLETE_TELIA.data[0], reg_code: 10234958 }] });
+    await expect(fetchRegistryData("10234957")).resolves.toBeNull();
+  });
+
+  it("refuses to auto-create a supplier whose registry entry is deleted", async () => {
+    stubBody(ARIREGISTER_AUTOCOMPLETE_DELETED);
+    const create = vi.fn();
+    const api = { clients: { listAll: () => Promise.resolve([]), create, get: vi.fn() } } as unknown as ApiContext;
+    const result = await resolveSupplierInternal(api, [], { supplier_name: "Telia Eesti AS", supplier_reg_code: "10234957" }, true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.created).toBe(false);
+    expect(result.requires_manual_review).toBe(true);
+    expect(result.reason).toMatch(/deleted/);
+    expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveSupplierInternal — tied supplier names (finding 9)", () => {
+  it("routes a name tie to manual review and never creates a new client", async () => {
+    const create = vi.fn();
+    const api = { clients: { listAll: () => Promise.resolve([]), create, get: vi.fn() } } as unknown as ApiContext;
+    const clients = [makeClient({ id: 1, name: "Some Vendor Ltd" }), makeClient({ id: 2, name: "Some Vendor Ltd" })];
+    const result = await resolveSupplierInternal(api, clients, { supplier_name: "Some Vendor Ltd" }, true);
+    expect(result.found).toBe(false);
+    expect(result.requires_manual_review).toBe(true);
+    expect(result.client).toBeUndefined();
+    expect(create).not.toHaveBeenCalled();
   });
 });

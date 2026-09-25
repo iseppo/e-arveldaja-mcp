@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { resolve, win32 } from "path";
-import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync } from "fs";
+import { readFileSync, existsSync, statSync, readdirSync, realpathSync, lstatSync, writeFileSync, mkdirSync, chmodSync, renameSync, unlinkSync, openSync, closeSync, fchmodSync, fsyncSync } from "fs";
 import { homedir } from "os";
 import { exposureForProfile, LEGACY_TOOL_EXPOSURE_ENV_KEYS, parseToolProfile, type ToolProfile } from "./tool-profile.js";
 export interface Config {
@@ -787,13 +787,29 @@ export function writePrivateFile(filePath: string, content: string): void {
   }
 
   mkdirSync(resolve(filePath, ".."), { recursive: true, mode: 0o700 });
-  const tmpPath = `${filePath}.tmp-${process.pid}`;
+  // Unpredictable temp name + O_CREAT|O_EXCL ("wx"): a pre-planted file or
+  // symlink at the temp path makes the open FAIL (EEXIST) instead of following
+  // it, so the secret can never be written into an attacker-chosen file. The
+  // mode is enforced on the open descriptor (fchmod), never via a path lookup.
+  const tmpPath = `${filePath}.tmp-${process.pid}-${randomBytes(16).toString("hex")}`;
+  let created = false;
   try {
-    writeFileSync(tmpPath, content, { mode: 0o600 });
-    chmodSync(tmpPath, 0o600); // enforce even if the temp already existed (mode is ignored on reopen)
+    const fd = openSync(tmpPath, "wx", 0o600);
+    created = true;
+    try {
+      fchmodSync(fd, 0o600);
+      writeFileSync(fd, content);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmpPath, filePath);
   } catch (error) {
-    try { unlinkSync(tmpPath); } catch { /* temp may not exist */ }
+    // Only remove a temp WE created. unlink never follows symlinks (it removes
+    // the link itself), and a pre-existing entry we failed to open is left alone.
+    if (created) {
+      try { unlinkSync(tmpPath); } catch { /* temp may already be renamed/removed */ }
+    }
     throw error;
   }
 }
@@ -819,33 +835,27 @@ export function serializeEnvFile(
     }
     return `# ${label}: ${value.trim()}`;
   };
-  const serializeEnvValue = (v: string): string => {
-    const needsQuoting = v === "" || /^[\s]|[\s]$/.test(v) || /[#\n\r]/.test(v);
-    if (!needsQuoting) return v;
-
-    const hasNewline = /[\n\r]/.test(v);
-    if (hasNewline) {
-      if (v.includes(`"`)) {
-        throw new Error("Cannot serialize env value containing both newlines and double quotes safely.");
+  // Emit the first candidate form that dotenv parses back to EXACTLY `v`.
+  // Heuristic quoting corrupted quote-wrapped values (`'abc'` lost its quotes)
+  // and a literal backslash-n (it became a real newline inside a
+  // double-quoted value), so every candidate is verified by a real
+  // dotenv.parse round-trip; a value no form can represent is refused.
+  const emitted: Record<string, string> = {};
+  const serializeEnvValue = (v: string, key: string): string => {
+    const candidates = [
+      v,
+      `'${v}'`,
+      `"${v}"`,
+      `\`${v}\``,
+      `"${v.replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`,
+    ];
+    for (const candidate of candidates) {
+      if (dotenv.parse(`${key}=${candidate}\n`)[key] === v) {
+        emitted[key] = v;
+        return candidate;
       }
-      return `"${v.replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
     }
-
-    if (v.includes("#")) {
-      if (!v.includes(`'`)) {
-        return `'${v}'`;
-      }
-      if (!v.includes(`"`)) {
-        return `"${v}"`;
-      }
-
-      throw new Error("Cannot serialize env value containing both quote characters when quoting is required.");
-    }
-
-    if (!v.includes(`'`)) {
-      return `'${v}'`;
-    }
-    return `"${v}"`;
+    throw new Error(`Cannot serialize the value of ${key} into a .env form that round-trips safely.`);
   };
 
   const buildMetadataLines = (metadata?: CredentialBlockMetadata): string[] => {
@@ -869,10 +879,10 @@ export function serializeEnvFile(
     sections.push([
       "# Default connection",
       ...buildMetadataLines(metadataByTarget.primary),
-      `EARVELDAJA_SERVER=${serializeEnvValue(primary.server)}`,
-      `EARVELDAJA_API_KEY_ID=${serializeEnvValue(primary.apiKeyId)}`,
-      `EARVELDAJA_API_PUBLIC_VALUE=${serializeEnvValue(primary.apiPublicValue)}`,
-      `EARVELDAJA_API_PASSWORD=${serializeEnvValue(primary.apiPassword)}`,
+      `EARVELDAJA_SERVER=${serializeEnvValue(primary.server, "EARVELDAJA_SERVER")}`,
+      `EARVELDAJA_API_KEY_ID=${serializeEnvValue(primary.apiKeyId, "EARVELDAJA_API_KEY_ID")}`,
+      `EARVELDAJA_API_PUBLIC_VALUE=${serializeEnvValue(primary.apiPublicValue, "EARVELDAJA_API_PUBLIC_VALUE")}`,
+      `EARVELDAJA_API_PASSWORD=${serializeEnvValue(primary.apiPassword, "EARVELDAJA_API_PASSWORD")}`,
     ].join("\n"));
   }
 
@@ -881,10 +891,10 @@ export function serializeEnvFile(
     sections.push([
       `# Additional connection ${slot}`,
       ...buildMetadataLines(metadataByTarget[block.target]),
-      `${getEnvConnectionKey(slot, "SERVER")}=${serializeEnvValue(block.server)}`,
-      `${getEnvConnectionKey(slot, "API_KEY_ID")}=${serializeEnvValue(block.apiKeyId)}`,
-      `${getEnvConnectionKey(slot, "API_PUBLIC_VALUE")}=${serializeEnvValue(block.apiPublicValue)}`,
-      `${getEnvConnectionKey(slot, "API_PASSWORD")}=${serializeEnvValue(block.apiPassword)}`,
+      `${getEnvConnectionKey(slot, "SERVER")}=${serializeEnvValue(block.server, getEnvConnectionKey(slot, "SERVER"))}`,
+      `${getEnvConnectionKey(slot, "API_KEY_ID")}=${serializeEnvValue(block.apiKeyId, getEnvConnectionKey(slot, "API_KEY_ID"))}`,
+      `${getEnvConnectionKey(slot, "API_PUBLIC_VALUE")}=${serializeEnvValue(block.apiPublicValue, getEnvConnectionKey(slot, "API_PUBLIC_VALUE"))}`,
+      `${getEnvConnectionKey(slot, "API_PASSWORD")}=${serializeEnvValue(block.apiPassword, getEnvConnectionKey(slot, "API_PASSWORD"))}`,
     ].join("\n"));
   }
 
@@ -903,11 +913,24 @@ export function serializeEnvFile(
     .sort();
 
   if (otherKeys.length > 0) {
-    sections.push(otherKeys.map((key) => `${key}=${serializeEnvValue(env[key]!)}`).join("\n"));
+    sections.push(otherKeys.map((key) => `${key}=${serializeEnvValue(env[key]!, key)}`).join("\n"));
   }
 
   if (sections.length === 0) return "";
-  return `${sections.join("\n\n")}\n`;
+  const serialized = `${sections.join("\n\n")}\n`;
+  // Whole-file round-trip gate: the file we are about to write must parse back
+  // to exactly the key/value pairs we emitted (no lost, altered, or injected
+  // keys). Refuse rather than persist a credential file that loads differently.
+  const reparsed = dotenv.parse(serialized);
+  const reparsedKeys = Object.keys(reparsed).sort();
+  const emittedKeys = Object.keys(emitted).sort();
+  if (
+    reparsedKeys.length !== emittedKeys.length ||
+    reparsedKeys.some((key, i) => key !== emittedKeys[i] || reparsed[key] !== emitted[key])
+  ) {
+    throw new Error("Refusing to write .env: serialized content does not round-trip through dotenv.");
+  }
+  return serialized;
 }
 
 export function loadDotenvFiles(): void {
@@ -1073,7 +1096,15 @@ export function loadAllConfigs(): NamedConfig[] {
       return;
     }
     seenConnections.set(connectionKey, configs.length);
-    configs.push(entry);
+    // Connection names must be unique: the per-call `connection` guard (#61)
+    // and EARVELDAJA_DEFAULT_CONNECTION match by exact name, so two distinct
+    // credentials sharing a name (e.g. apikey.txt + apikey.TXT, or env-local
+    // from two working dirs) would make a name-pinned call ambiguous. Later
+    // duplicates get a deterministic `-2`, `-3`, … suffix in load order.
+    const usedNames = new Set(configs.map((config) => config.name));
+    let name = entry.name;
+    for (let suffix = 2; usedNames.has(name); suffix++) name = `${entry.name}-${suffix}`;
+    configs.push(name === entry.name ? entry : { ...entry, name });
   };
 
   // 1. Check specific file from env var first so the explicitly selected

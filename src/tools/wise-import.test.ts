@@ -11,6 +11,7 @@ import { clearRuntimeCaches } from "../cache-control.js";
 import { reportProgress } from "../progress.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { createExecutionPlanPageHandler } from "../plan-tools.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -689,6 +690,37 @@ describe("wise import tool", () => {
         { wise_id: "abc-4", reason: expect.stringMatching(wrapped("Main create failed")) },
       ],
     });
+  });
+
+  it("stops on an indeterminate create instead of reporting it as skipped and carrying on", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      ["q-1", "COMPLETED", "OUT", "2026-02-01 09:00:00", "2026-02-01 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "7", "EUR", "Shop A", "7", "EUR",
+        "1", "", "", "", "General", ""],
+      ["q-2", "COMPLETED", "OUT", "2026-02-02 09:00:00", "2026-02-02 09:00:00",
+        "0", "EUR", "0", "EUR",
+        "Seppo OU", "8", "EUR", "Shop B", "8", "EUR",
+        "1", "", "", "", "General", ""],
+    ]));
+    const create = vi.fn().mockRejectedValue(new MutationIndeterminateError({
+      operation: "create", entity: "transaction", businessKey: "wise:q-1",
+      affectedCaches: ["/transactions"], cause: new Error("socket hang up"),
+      nextAction: "Freshly read transactions before retrying.",
+    }));
+    const { api, handler } = setupWiseTool([], create);
+
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9, execute: true,
+    })).content[0]!.text);
+
+    // Nothing after the unknown-outcome write is attempted.
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    const errors = payload.execution.errors as Array<{ wise_id: string; reason: string }>;
+    expect(errors.find(e => e.wise_id === "q-1")!.reason).toMatch(/Outcome unknown/);
+    expect(errors.find(e => e.wise_id === "q-2")!.reason).toMatch(/Not attempted: import stopped after an indeterminate mutation/);
+    // Never presented as an ordinary non-error skip.
+    expect(payload.execution.skipped).toEqual([]);
   });
 
   it("skips Jar transfers by default", async () => {

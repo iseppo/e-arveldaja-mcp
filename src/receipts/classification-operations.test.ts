@@ -551,3 +551,40 @@ describe("classification operations — P0-2 plan binding", () => {
     expect(BANK_CLASSIFICATION_PLAN_DOMAIN).toBe("bank_classification");
   });
 });
+
+describe("classification operations — incoming rows are never booked as purchase invoices (bank-review MAJOR-2)", () => {
+  it("skips an incoming refund in an echoed purchase_invoice group with a note, creating nothing", async () => {
+    const refund = { ...SAAS_TX, description: "WISE:REFUND-1 OpenAI refund [source_direction=IN]" };
+    const { operations, api } = makeSaasOperations(refund);
+    const group = saasGroup({ transactions: [refund] });
+    const handle = await dryRunHandle(operations, [group]);
+    const outcome = await operations.applyClassifications({
+      classificationsJson: { groups: [group] },
+      execute: true,
+      planHandle: handle,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expectNoWrites(api);
+    expect(outcome.value.results[0]!.notes.join(" ")).toMatch(/not an outgoing payment \(direction: incoming\)/);
+  });
+
+  it("analyze splits one counterparty's charges and refunds into separate direction groups", async () => {
+    const charge = { ...SAAS_TX, id: 42 };
+    const refund = { ...SAAS_TX, id: 43, amount: 25, type: "D", description: "refund" };
+    const { operations } = makeOperations({
+      transactionRows: [charge, refund],
+      clientRows: [SAAS_CLIENT],
+      purchaseArticles: SAAS_ARTICLES,
+      accounts: SAAS_ACCOUNTS,
+    });
+    const outcome = await operations.analyzeUnmatched({ accountsDimensionsId: 100 } as any);
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const openaiGroups = outcome.value.groups.filter((group: any) => group.normalized_counterparty === "openai");
+    expect(openaiGroups).toHaveLength(2);
+    const refundGroup = openaiGroups.find((group: any) => group.transactions.some((tx: any) => tx.id === 43));
+    expect(refundGroup!.transactions.map((tx: any) => tx.id)).toEqual([43]);
+    expect(refundGroup!.category).toBe("revenue_without_invoice");
+  });
+});

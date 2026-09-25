@@ -5,6 +5,7 @@ import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { readOnly } from "../annotations.js";
+import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 
 export interface DetectDuplicateFilters {
   clients_id?: number;
@@ -12,6 +13,17 @@ export interface DetectDuplicateFilters {
   date_to?: string;
   invoice_number?: string;
   gross_price?: number;
+  /** Incoming invoice date: bounds the same-amount candidates to ±SAME_AMOUNT_DATE_WINDOW_DAYS. */
+  invoice_date?: string;
+}
+
+/** Same-amount candidates further than this from the incoming invoice date are not "same amount + date". */
+const SAME_AMOUNT_DATE_WINDOW_DAYS = 7;
+
+function withinDateWindow(date: string | undefined, anchor: string, windowDays: number): boolean {
+  if (!date) return false;
+  const diff = Math.abs(Date.parse(`${date.slice(0, 10)}T00:00:00Z`) - Date.parse(`${anchor.slice(0, 10)}T00:00:00Z`));
+  return Number.isFinite(diff) && diff <= windowDays * 86_400_000;
 }
 
 export interface MissingDocumentsFilters {
@@ -160,12 +172,12 @@ export function wrapMissingDocuments(core: MissingDocumentsCore, limit = 20): Re
  */
 export function detectDuplicatePurchaseInvoice(
   allPurchases: PurchaseInvoice[],
-  { clients_id, date_from, date_to, invoice_number, gross_price }: DetectDuplicateFilters,
+  { clients_id, date_from, date_to, invoice_number, gross_price, invoice_date }: DetectDuplicateFilters,
 ): Record<string, unknown> {
-  const normalizedInvoiceNumber = invoice_number?.trim().toLowerCase();
+  const normalizedInvoiceNumber = invoice_number !== undefined ? normalizeInvoiceNumberForComparison(invoice_number) : undefined;
 
   const filtered = allPurchases.filter((inv: PurchaseInvoice) => {
-    if (inv.status === "DELETED" || inv.status === "INVALIDATED") return false;
+    if (isInvalidatedPurchaseInvoice(inv)) return false;
     if (clients_id && inv.clients_id !== clients_id) return false;
     if (date_from && inv.create_date < date_from) return false;
     if (date_to && inv.create_date > date_to) return false;
@@ -175,7 +187,7 @@ export function detectDuplicatePurchaseInvoice(
   // Group by supplier + invoice number
   const groups = new Map<string, PurchaseInvoice[]>();
   for (const inv of filtered) {
-    const key = `${inv.clients_id}:${inv.number.trim().toLowerCase()}`;
+    const key = `${inv.clients_id}:${normalizeInvoiceNumberForComparison(inv.number)}`;
     const group = groups.get(key) ?? [];
     group.push(inv);
     groups.set(key, group);
@@ -227,25 +239,28 @@ export function detectDuplicatePurchaseInvoice(
   }
 
   const candidateInvoiceNumberMatches = normalizedInvoiceNumber
-    ? filtered.filter(inv => inv.number.trim().toLowerCase() === normalizedInvoiceNumber)
+    ? filtered.filter(inv => normalizeInvoiceNumberForComparison(inv.number) === normalizedInvoiceNumber)
     : [];
   const candidateSameAmountDateMatches = gross_price !== undefined
-    ? filtered.filter(inv => inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02)
+    ? filtered.filter(inv =>
+      inv.gross_price !== undefined && Math.abs(inv.gross_price - gross_price) <= 0.02 &&
+      (invoice_date === undefined || withinDateWindow(inv.create_date, invoice_date, SAME_AMOUNT_DATE_WINDOW_DAYS)))
     : [];
 
   // Also look at invalidated/deleted invoices for the candidate so the caller
   // sees "we tried to book this before and voided it" instead of assuming new.
   const voidedCandidates = allPurchases.filter((inv) => {
-    if (inv.status !== "DELETED" && inv.status !== "INVALIDATED") return false;
+    if (!isInvalidatedPurchaseInvoice(inv)) return false;
     if (clients_id && inv.clients_id !== clients_id) return false;
     if (date_from && inv.create_date < date_from) return false;
     if (date_to && inv.create_date > date_to) return false;
     const numberMatch = normalizedInvoiceNumber
-      ? inv.number.trim().toLowerCase() === normalizedInvoiceNumber
+      ? normalizeInvoiceNumberForComparison(inv.number) === normalizedInvoiceNumber
       : false;
     const amountMatch = gross_price !== undefined &&
       inv.gross_price !== undefined &&
-      Math.abs(inv.gross_price - gross_price) <= 0.02;
+      Math.abs(inv.gross_price - gross_price) <= 0.02 &&
+      (invoice_date === undefined || withinDateWindow(inv.create_date, invoice_date, SAME_AMOUNT_DATE_WINDOW_DAYS));
     return numberMatch || amountMatch;
   });
 
@@ -303,10 +318,24 @@ export function detectDuplicatePurchaseInvoice(
   };
 }
 
-/** Wrap every `supplier` string in a duplicate-detection result at MCP output. */
+/**
+ * Wrap every `supplier` and invoice-number string in a duplicate-detection
+ * result at MCP output — invoice numbers are OCR/import-populated too.
+ */
 function wrapDuplicateSuppliers(result: Record<string, unknown>): Record<string, unknown> {
+  const wrapString = (value: unknown) => wrapUntrustedOcr((value as string | undefined) ?? undefined);
   const wrapItems = (items: Array<Record<string, unknown>>) =>
-    items.map(item => ({ ...item, supplier: wrapUntrustedOcr((item.supplier as string | undefined) ?? undefined) }));
+    items.map(item => ({
+      ...item,
+      supplier: wrapString(item.supplier),
+      ...("invoice_number" in item ? { invoice_number: wrapString(item.invoice_number) } : {}),
+      ...(Array.isArray(item.invoices)
+        ? {
+            invoices: (item.invoices as Array<Record<string, unknown>>).map(inv =>
+              "number" in inv ? { ...inv, number: wrapString(inv.number) } : inv),
+          }
+        : {}),
+    }));
   const section = (value: unknown) => {
     const s = value as { count: number; items: Array<Record<string, unknown>>; note?: unknown };
     return { ...s, items: wrapItems(s.items) };
@@ -350,11 +379,12 @@ export function registerDocumentAuditTools(server: McpServer, api: ApiContext): 
       date_to: z.string().optional().describe("End date"),
       invoice_number: z.string().optional().describe("Incoming invoice number to match against existing invoices"),
       gross_price: z.number().optional().describe("Incoming gross amount to match against existing invoices"),
+      invoice_date: z.string().optional().describe("Incoming invoice date (YYYY-MM-DD); limits amount matches to ±7 days"),
     },
     { ...readOnly, title: "Detect Duplicate Purchase Invoices" },
-    async ({ clients_id, date_from, date_to, invoice_number, gross_price }) => {
+    async ({ clients_id, date_from, date_to, invoice_number, gross_price, invoice_date }) => {
       const allPurchases = await api.purchaseInvoices.listAll();
-      const result = detectDuplicatePurchaseInvoice(allPurchases, { clients_id, date_from, date_to, invoice_number, gross_price });
+      const result = detectDuplicatePurchaseInvoice(allPurchases, { clients_id, date_from, date_to, invoice_number, gross_price, invoice_date });
       return {
         content: [{
           type: "text",

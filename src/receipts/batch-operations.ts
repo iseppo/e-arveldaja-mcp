@@ -363,6 +363,7 @@ async function processSingleReceipt(
       signals.low_ocr_confidence = true;
     }
     if (selfVatDetected) signals.self_vat_detected = true;
+    if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
     const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
     if (selfRegCodeDetected) signals.self_reg_code_detected = true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
@@ -504,6 +505,7 @@ async function processSingleReceipt(
         signals.improbable_fixed_asset = true;
       }
       if (
+        context.isVatRegistered &&
         detectReverseChargeFromText(extracted.raw_text) &&
         !bookingSuggestion.item.reversed_vat_id
       ) {

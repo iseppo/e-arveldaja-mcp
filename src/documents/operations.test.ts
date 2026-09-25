@@ -229,6 +229,72 @@ describe("AccountingDocumentOperations.create", () => {
     expect(typeof outcome.value.confirmPlan?.planHandle).toBe("string");
   });
 
+  it("blocks prepare (no plan handle) when the reviewed supplier+number already exists as a live invoice (finding 7)", async () => {
+    const { path, api, ops } = createSetup();
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 777, clients_id: 4242, number: " inv-1 ", status: "CONFIRMED", create_date: "2026-06-01", gross_price: 50 },
+    ]);
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.planHandle).toBeUndefined();
+    expect(outcome.value.blockers).toEqual([
+      expect.objectContaining({ code: "duplicate_purchase_invoice", severity: "blocker" }),
+    ]);
+  });
+
+  it("allow_duplicate_invoice_number turns the live supplier+number blocker into a bound warning and lets create proceed", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 777, clients_id: 4242, number: "INV-1", status: "CONFIRMED", create_date: "2025-06-01", gross_price: 50 },
+    ]);
+    const prepared = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), allowDuplicateInvoiceNumber: true } });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.value.blockers).toEqual([]);
+    expect(prepared.value.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "duplicate_purchase_invoice_acknowledged" }),
+    ]));
+    const handle = prepared.value.planHandle!;
+    expect(typeof handle).toBe("string");
+
+    // The acknowledgement is bound: create without it drifts, with zero writes.
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(drift.ok).toBe(false);
+    if (!drift.ok) expect(drift.error.code).toBe("plan_drift");
+    expectNoWrites(api);
+
+    const handle2 = await prepareBookingHandle(ops, path, { allowDuplicateInvoiceNumber: true });
+    const created = await ops.create({ ...baseCreateInput(path, sha256), allowDuplicateInvoiceNumber: true, planHandle: handle2 });
+    expect(created.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not block on an invalidated same supplier+number invoice (finding 7)", async () => {
+    const { path, api, ops } = createSetup();
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 777, clients_id: 4242, number: "INV-1", status: "VOID", create_date: "2026-06-01", gross_price: 12 },
+    ]);
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers).toEqual([]);
+    expect(typeof outcome.value.planHandle).toBe("string");
+  });
+
+  it("re-checks supplier+number at create and refuses with zero writes when a live duplicate appeared after prepare (finding 7)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    api.purchaseInvoices.listAll.mockResolvedValue([
+      { id: 778, clients_id: 4242, number: "INV-1", status: "PROJECT", create_date: "2026-06-15", gross_price: 12 },
+    ]);
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("duplicate_purchase_invoice");
+    expectNoWrites(api);
+  });
+
   it("desandboxes sandbox markers out of the invoiceData written to the API (write-boundary canonicalization)", async () => {
     const { path, sha256, api, ops } = createSetup();
     const wrap = (s: string) => wrapUntrustedOcr(s)!;

@@ -162,15 +162,13 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
       ...match,
       counterparty: wrapUntrustedOcr(match.counterparty ?? undefined),
       description: wrapUntrustedOcr(match.description ?? undefined),
-      suggested_patch_missing_fields: {
-        ...match.suggested_patch_missing_fields,
-        ...(match.suggested_patch_missing_fields?.bank_account_name
-          ? { bank_account_name: wrapUntrustedOcr(match.suggested_patch_missing_fields.bank_account_name) }
-          : {}),
-        ...(match.suggested_patch_missing_fields?.description
-          ? { description: wrapUntrustedOcr(match.suggested_patch_missing_fields.description) }
-          : {}),
-      },
+      ref_number: wrapUntrustedOcr(match.ref_number ?? undefined),
+      // Every patch value (bank_ref_number, ref_number, bank_account_no,
+      // bank_account_name, description) is copied from the statement entry.
+      suggested_patch_missing_fields: Object.fromEntries(
+        Object.entries(match.suggested_patch_missing_fields ?? {}).map(([key, value]) =>
+          [key, typeof value === "string" && value ? wrapUntrustedOcr(value) : value]),
+      ),
     })),
   }));
 
@@ -397,6 +395,9 @@ export function renderCamtParsePayload(parsed: CamtParseResult): Record<string, 
       description: wrapUntrustedOcr(entry.description),
       bank_reference: wrapUntrustedOcr(entry.bank_reference),
       reference_number: wrapUntrustedOcr(entry.reference_number),
+      end_to_end_id: wrapUntrustedOcr(entry.end_to_end_id),
+      counterparty_iban: wrapUntrustedOcr(entry.counterparty_iban),
+      counterparty_reg_code: wrapUntrustedOcr(entry.counterparty_reg_code),
       ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
       ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
     })),

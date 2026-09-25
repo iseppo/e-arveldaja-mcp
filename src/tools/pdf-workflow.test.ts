@@ -10,6 +10,7 @@ import { sha256Hex } from "./receipt-inbox-files.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { z } from "zod";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
+import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 
 vi.mock("../file-validation.js", () => ({
   resolveFileInput: vi.fn(),
@@ -857,6 +858,113 @@ describe("pdf workflow tools", () => {
     }
   });
 
+  it("caps suggest_booking limit so a huge value cannot fan out unbounded detail GETs (MINOR)", async () => {
+    const rows = Array.from({ length: 60 }, (_, index) => ({
+      id: index + 1, clients_id: 7, status: "CONFIRMED", create_date: `2026-01-${String((index % 28) + 1).padStart(2, "0")}`,
+    }));
+    const { handler, api } = setupPdfWorkflowTool("suggest_booking", {
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(rows) },
+    });
+    await handler({ clients_id: 7, limit: 1_000_000 });
+    expect(api.purchaseInvoices.get.mock.calls.length).toBeLessThanOrEqual(25);
+  });
+
+  describe("create_purchase_invoice_from_pdf input + duplicate hardening (finding 7 / MINORs)", () => {
+    function args(filePath: string, overrides: Record<string, unknown> = {}) {
+      return {
+        supplier_client_id: 7,
+        invoice_number: "PI-NEW-1",
+        invoice_date: "2026-03-20",
+        journal_date: "2026-03-20",
+        term_days: 14,
+        items: JSON.stringify([{
+          cl_purchase_articles_id: 45, custom_title: "Internet subscription", purchase_accounts_id: 5230,
+          total_net_price: 100, vat_rate_dropdown: "24", vat_accounts_id: 1510, cl_vat_articles_id: 1,
+        }]),
+        vat_price: 24,
+        gross_price: 124,
+        file_path: filePath,
+        source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+        ...overrides,
+      };
+    }
+
+    it("refuses an exact live supplier + invoice-number duplicate before any write", async () => {
+      const filePath = createTempInvoiceFile("dupnum.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        purchaseInvoices: {
+          listAll: vi.fn().mockResolvedValue([
+            { id: 31, clients_id: 7, number: "PI NEW 1", status: "PROJECT", create_date: "2026-03-01", gross_price: 10 },
+          ]),
+        },
+      });
+      const response = await handler(args(filePath));
+      expect(response.isError).toBe(true);
+      expect(response.content[0]!.text).toContain("duplicate_purchase_invoice");
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
+    it("creates with a warning when allow_duplicate_invoice_number acknowledges a reused supplier number", async () => {
+      const filePath = createTempInvoiceFile("dupack.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        purchaseInvoices: {
+          listAll: vi.fn().mockResolvedValue([
+            { id: 31, clients_id: 7, number: "PI-NEW-1", status: "CONFIRMED", create_date: "2025-03-01", gross_price: 10 },
+          ]),
+        },
+      });
+      const response = await handler(args(filePath, { allow_duplicate_invoice_number: true }));
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+      expect((parseMcpResponse(response.content[0]!.text) as any).duplicate_invoice_number_acknowledged)
+        .toMatchObject({ existing_invoice_ids: [31] });
+    });
+
+    it("does not refuse when the same supplier+number invoice is invalidated", async () => {
+      const filePath = createTempInvoiceFile("dupvoid.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        purchaseInvoices: {
+          listAll: vi.fn().mockResolvedValue([
+            { id: 31, clients_id: 7, number: "PI-NEW-1", status: "VOID", create_date: "2026-03-01", gross_price: 10 },
+          ]),
+        },
+      });
+      const response = await handler(args(filePath));
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      [{ invoice_date: "2026-02-30" }, "invoice_date"],
+      [{ journal_date: "20.03.2026" }, "journal_date"],
+      [{ term_days: -3 }, "term_days"],
+      [{ term_days: 1.5 }, "term_days"],
+    ])("rejects invalid %o before any write", async (overrides, field) => {
+      const filePath = createTempInvoiceFile("bad.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+      const response = await handler(args(filePath, overrides));
+      expect(response.isError).toBe(true);
+      expect(response.content[0]!.text).toContain(field);
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
+    it("refuses deductible VAT fields on a non-VAT company (same guard as create_purchase_invoice)", async () => {
+      const filePath = createTempInvoiceFile("nonvat.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }) },
+      });
+      const response = await handler(args(filePath));
+      expect(response.isError).toBe(true);
+      expect(response.content[0]!.text).toContain("Non-VAT purchase invoice contains deductible VAT fields");
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+  });
+
   describe("create_purchase_invoice_from_pdf intake duplicate guard (Task 6)", () => {
     const DUP_JOURNAL_ID = 555;
     const bankAccounts = [{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }];
@@ -1291,7 +1399,10 @@ describe("resolve_supplier external-text display matrix (P07)", () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       headers: { get: () => "128" },
-      text: () => Promise.resolve(JSON.stringify([{ company_name: companyName, address }])),
+      text: () => Promise.resolve(JSON.stringify({
+        status: "OK",
+        data: [{ ...ARIREGISTER_AUTOCOMPLETE_TELIA.data[0], reg_code: 17133416, name: companyName, legal_address: address }],
+      })),
     });
     vi.stubGlobal("fetch", fetchMock);
     return fetchMock;

@@ -56,6 +56,15 @@ describe("manage_sale_invoice façade", () => {
     expect(text.slice(0, idx)).toContain("UNTRUSTED_OCR_START");
   });
 
+  it("MINOR7: read action=list honours view='full' (brief strips non-whitelisted fields)", async () => {
+    const list = vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [{ id: 1, number: "S-1", status: "CONFIRMED", receivable_accounts_id: 1200 }] });
+    const handler = setup(makeApi({ list }));
+    const full = parse(await handler({ mode: "read", action: "list", view: "full" }));
+    expect(full.items[0].receivable_accounts_id).toBe(1200);
+    const brief = parse(await handler({ mode: "read", action: "list" }));
+    expect(brief.items[0].receivable_accounts_id).toBeUndefined();
+  });
+
   it("send is a two-call prepare -> execute over a plan handle (never one-shot)", async () => {
     const send = vi.fn().mockResolvedValue({ delivered: true });
     const handler = setup(makeApi({ sendEinvoice: send }));

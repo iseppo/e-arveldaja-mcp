@@ -65,9 +65,13 @@ export function renderReconFailure(failure: ReconFailure): CallToolResult {
 
 // --- Suspect wrapping + plan review commands ---------------------------------
 
-// Wrap each suspect's untrusted journal_title at MCP output (Task 3).
+// Wrap each suspect's untrusted journal_title / document_number at MCP output (Task 3).
 export function renderSuspects(suspects: DuplicatePostingSuspect[]): Array<Record<string, unknown>> {
-  return suspects.map(s => ({ ...s, journal_title: wrapUntrustedOcr(s.journal_title) ?? "" }));
+  return suspects.map(s => ({
+    ...s,
+    journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+    document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
+  }));
 }
 
 export function exactMatchReviewCommands(projection: ExactMatchProjection): ReconciliationReviewCommand[] {

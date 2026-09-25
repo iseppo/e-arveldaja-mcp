@@ -51,3 +51,26 @@ export function effectiveGross(inv: { base_gross_price?: number | null; gross_pr
   }
   return value;
 }
+
+/**
+ * Invoice gross in EUR, or `undefined` when a foreign-currency invoice has no
+ * base_gross_price: its gross_price is in the invoice currency and must never
+ * be summed into EUR totals (no guessed conversion rate). A missing
+ * cl_currencies_id is treated as EUR, the API default.
+ */
+export function eurGross(inv: { base_gross_price?: number | null; gross_price?: number | null; id?: number; cl_currencies_id?: string | null }): number | undefined {
+  if (inv.base_gross_price == null && (inv.cl_currencies_id || "EUR").toUpperCase() !== "EUR") return undefined;
+  return effectiveGross(inv);
+}
+
+/**
+ * Credit invoices (SaleInvoice.sale_invoice_type === "CREDIT_INVOICE") are
+ * sometimes stored with a positive gross_price, which would inflate AR instead
+ * of reducing it. Normalize to a negative contribution (same -Math.abs()
+ * convention as estonian-tax.ts's saleInvoiceTurnoverAmount). PurchaseInvoice
+ * has no equivalent type field — purchase-side credit notes already carry a
+ * negative gross_price — so this is a no-op for payables.
+ */
+export function signedByInvoiceType(amount: number, inv: { sale_invoice_type?: string }): number {
+  return inv.sale_invoice_type === "CREDIT_INVOICE" ? -Math.abs(amount) : amount;
+}

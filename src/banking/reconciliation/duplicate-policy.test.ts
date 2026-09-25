@@ -151,4 +151,57 @@ describe("exactMatchFingerprint review coverage", () => {
 
     expect(exactMatchFingerprint(projection, THRESHOLD)).not.toBe(exactMatchFingerprint(reasonChanged, THRESHOLD));
   });
+
+  it("changes when a possible-duplicate suspect appears on a confirm", () => {
+    const projection = computeExactMatchProjection([tx({ clients_id: INVOICE_CLIENT })], [sale()], NO_PURCHASES, THRESHOLD);
+    expect(projection.confirms).toHaveLength(1);
+    const clean = exactMatchFingerprint(projection, THRESHOLD);
+    const suspect = {
+      journal_id: 77, journal_title: "t", document_number: null, operation_type: null,
+      date: "2026-09-10", amount: 1488, type: "D" as const, dimension_id: 9, day_distance: 0,
+    };
+    const withSuspect = { ...projection, confirms: [{ ...projection.confirms[0]!, possibleDuplicatePostings: [suspect] }] };
+    expect(exactMatchFingerprint(withSuspect, THRESHOLD)).not.toBe(clean);
+  });
+});
+
+describe("computeExactMatchProjection signed-outgoing invoice eligibility", () => {
+  // A statement-proven debit (CAMT DBIT / Wise OUT) is cash leaving the account.
+  // Confirming it against a sale invoice would settle a receivable with money
+  // that went out. Only a legacy unsigned `C` keeps the sale-invoice fallback.
+  const camtDebit = "Payment\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]";
+
+  it("never matches a signed CAMT DBIT row to a sale invoice", () => {
+    const projection = computeExactMatchProjection(
+      [tx({ type: "C", clients_id: INVOICE_CLIENT, description: camtDebit })],
+      [sale()], NO_PURCHASES, THRESHOLD,
+    );
+    expect(projection.confirms).toEqual([]);
+    expect(projection.thirdPartyPayerReviews).toEqual([]);
+  });
+
+  it("never matches a signed Wise OUT row to a sale invoice", () => {
+    const projection = computeExactMatchProjection(
+      [tx({ type: "C", clients_id: INVOICE_CLIENT, description: "WISE:TRANSFER-1 Customer [source_direction=OUT]" })],
+      [sale()], NO_PURCHASES, THRESHOLD,
+    );
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it("still matches a signed DBIT row to a purchase invoice", () => {
+    const purchase = { ...sale(), id: 601, number: "P-601", client_name: "Vendor" } as unknown as PurchaseInvoice;
+    const projection = computeExactMatchProjection(
+      [tx({ type: "C", clients_id: INVOICE_CLIENT, description: camtDebit })],
+      [], [purchase], THRESHOLD,
+    );
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceTable, c.invoiceId])).toEqual([[1210, "purchase_invoices", 601]]);
+  });
+
+  it("keeps the sale-invoice fallback for a legacy unsigned C row", () => {
+    const projection = computeExactMatchProjection(
+      [tx({ type: "C", clients_id: INVOICE_CLIENT, description: "legacy row" })],
+      [sale()], NO_PURCHASES, THRESHOLD,
+    );
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceTable])).toEqual([[1210, "sale_invoices"]]);
+  });
 });

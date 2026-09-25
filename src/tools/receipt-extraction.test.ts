@@ -4,6 +4,7 @@ import type { LayoutTextItem } from "../document-identifiers.js";
 import {
   normalizeDate,
   extractDates,
+  extractInvoiceNumber,
   extractAmounts,
   buildKeywordSuggestion,
   computeMinOcrConfidence,
@@ -2056,5 +2057,152 @@ describe("computeMinOcrConfidence — small-sample robust minimum (Codex review 
     // Only 2 robust (>=3 char) items -> small-sample branch, but the min must be
     // taken over robust values (0.85), NOT the unfiltered min (0.10 noise).
     expect(computeMinOcrConfidence(items)).toBe(0.85);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 1 — gross must never be picked from a net-total line
+// ---------------------------------------------------------------------------
+
+describe("gross total excludes net-labelled total lines", () => {
+  it("picks the real gross, not 'Kokku km-ta', when a VAT line follows the net line", () => {
+    const amounts = extractAmounts(["Arve nr 12", "Kokku km-ta 50,00", "KM 24% 12,00", "Kokku 62,00"].join("\n"));
+    expect(amounts.total_gross).toBe(62);
+    expect(amounts.total_net).toBe(50);
+    expect(amounts.total_vat).toBe(12);
+  });
+
+  it.each([
+    ["Total excl. VAT 50.00"],
+    ["Total excluding VAT 50.00"],
+    ["Total ex VAT 50.00"],
+    ["Kokku ilma KM 50,00"],
+    ["Net total 50.00"],
+  ])("treats %s as a net line, not a gross candidate", (netLine) => {
+    const amounts = extractAmounts(["Invoice 12", netLine, "VAT 24% 12.00", "Total 62.00"].join("\n"));
+    expect(amounts.total_gross).toBe(62);
+    expect(amounts.total_net).toBe(50);
+  });
+
+  it("does not let the NEXT line's VAT word lift a preceding partial total over the payable total", () => {
+    const amounts = extractAmounts(["Arve nr 12", "Kokku 50,00", "KM 24% 12,00", "Tasuda 62,00"].join("\n"));
+    expect(amounts.total_gross).toBe(62);
+  });
+
+  it("classifies 'Kokku km-ta' / 'Total excl. VAT' layout labels as net", () => {
+    expect(classifyLayoutAmountLabel("Kokku km-ta")).toBe("total_net");
+    expect(classifyLayoutAmountLabel("Total excl. VAT")).toBe("total_net");
+    expect(classifyLayoutAmountLabel("Kokku km-ga")).toBe("total_gross");
+  });
+
+  it("flags total_gross_conflict when layout and text gross disagree", () => {
+    const layout: ExtractedAmountsWithMetadata = { total_gross: 999, provenance: [] };
+    const text: ExtractedAmountsWithMetadata = { total_gross: 124, provenance: [] };
+    expect(mergeLayoutAmounts(layout, text).total_gross_conflict).toBe(true);
+    const agree: ExtractedAmountsWithMetadata = { total_gross: 124, provenance: [] };
+    expect(mergeLayoutAmounts(agree, text).total_gross_conflict).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Findings 10/11 — invoice number and invoice date labels
+// ---------------------------------------------------------------------------
+
+describe("extractInvoiceNumber hardening (finding 10)", () => {
+  it("does not capture a label-only line's next-line text across a newline", () => {
+    const number = extractInvoiceNumber("Invoice number:\nPO12345\nTotal 10.00", "scan.pdf");
+    expect(number).toMatch(/^AUTO-/);
+  });
+
+  it("requires a digit in the captured number", () => {
+    expect(extractInvoiceNumber("Invoice No: PENDING", "scan.pdf")).toMatch(/^AUTO-/);
+  });
+
+  it("rejects a date-shaped capture", () => {
+    expect(extractInvoiceNumber("Receipt no. 12/03/2024", "scan.pdf")).toMatch(/^AUTO-/);
+  });
+
+  it("rejects real calendar dates in ISO, dotted and slashed layouts", () => {
+    expect(extractInvoiceNumber("Invoice no: 2024-03-12", "scan.pdf")).toMatch(/^AUTO-/);
+    expect(extractInvoiceNumber("Receipt no. 12/03/24", "scan.pdf")).toMatch(/^AUTO-/);
+    expect(extractInvoiceNumber("Dokument no. 12.03.2024", "scan.pdf")).toMatch(/^AUTO-/);
+  });
+
+  it("keeps date-shaped invoice numbers that are not real calendar dates", () => {
+    expect(extractInvoiceNumber("Arve nr: 2025-09-012", "scan.pdf")).toBe("2025-09-012");
+    expect(extractInvoiceNumber("Invoice no: 2024-12-0005", "scan.pdf")).toBe("2024-12-0005");
+    expect(extractInvoiceNumber("Arve nr: 25-10-100", "scan.pdf")).toBe("25-10-100");
+    expect(extractInvoiceNumber("Invoice no: 2025-02-31", "scan.pdf")).toBe("2025-02-31");
+  });
+
+  it("ranks an invoice/arve label over an earlier order/booking label", () => {
+    const text = "Order number: ORD-555001\nArve nr: 2024-117\nTotal 10.00";
+    expect(extractInvoiceNumber(text, "scan.pdf")).toBe("2024-117");
+  });
+
+  it("skips reference / account / phone lines in the generic fallback", () => {
+    const text = ["Viitenumber nr 1234567", "Konto nr EE123456789012345678", "Tel nr 5551234", "Dokument no. 88123"].join("\n");
+    expect(extractInvoiceNumber(text, "scan.pdf")).toBe("88123");
+  });
+
+  it("uses a word boundary in the fallback (no 'no' inside another word)", () => {
+    expect(extractInvoiceNumber("Casino 12345 Tallinn", "scan.pdf")).toMatch(/^AUTO-/);
+  });
+});
+
+describe("extractDates invoice-date label precedence (finding 11)", () => {
+  it("prefers an explicit invoice-date label over an earlier generic/delivery date", () => {
+    const text = "Delivery date: 2024-03-01\nInvoice date: 2024-03-05\nDue date: 2024-03-19";
+    expect(extractDates(text)).toEqual({ invoice_date: "2024-03-05", due_date: "2024-03-19" });
+  });
+
+  it("does not take a generic 'date' that is the tail of a due/order/payment label", () => {
+    const text = "Payment date 2024-04-10\nOrder date 2024-03-28\nDate: 2024-04-01\nDue date 2024-04-15";
+    expect(extractDates(text).invoice_date).toBe("2024-04-01");
+  });
+
+  it("does not treat 'Tarne kuupäev' as the invoice date", () => {
+    const text = "Tarne kuupäev 01.03.2024\nKuupäev 05.03.2024";
+    expect(extractDates(text).invoice_date).toBe("2024-03-05");
+  });
+});
+
+describe("categorizeTransactionGroup — mixed directions (bank-review MAJOR-2)", () => {
+  it("routes a group mixing incoming and outgoing rows to review instead of reading transactions[0]", () => {
+    const classification = categorizeTransactionGroup({
+      normalized_counterparty: "openai",
+      transactions: [
+        { type: "C", amount: 25, date: "2026-03-01", description: "OpenAI", bank_subtype: null },
+        { type: "D", amount: 25, date: "2026-03-05", description: "OpenAI refund", bank_subtype: null },
+      ],
+    });
+    expect(classification.apply_mode).toBe("review_only");
+    expect(classification.reasons).toContain("mixed_transaction_directions");
+  });
+});
+
+describe("detectReverseChargeFromText — negated phrases (MINOR)", () => {
+  it.each([
+    "This supply is not subject to reverse charge.",
+    "No reverse charge.",
+    "Reverse charge: not applicable",
+    "Käive ei kuulu pöördmaksustamisele",
+  ])("ignores a negated phrase: %s", (text) => {
+    expect(detectReverseChargeFromText(text)).toBe(false);
+  });
+
+  it.each([
+    "VAT not charged – reverse charge applies (Art. 196)",
+    "Reverse charge: VAT to be accounted for by the recipient",
+    "Pöördmaksustamine KMS § 41^1",
+  ])("still detects an affirmative phrase: %s", (text) => {
+    expect(detectReverseChargeFromText(text)).toBe(true);
+  });
+});
+
+describe("computeTermDays — due date before invoice date (MINOR)", () => {
+  it("clamps a due date before the invoice date to 0 instead of a positive term", () => {
+    expect(computeTermDays("2026-08-10", "2026-08-01")).toBe(0);
+    expect(computeTermDays("2026-08-01", "2026-08-15")).toBe(14);
   });
 });

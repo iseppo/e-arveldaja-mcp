@@ -6,6 +6,7 @@ import { getProjectRoot } from "./paths.js";
 import { getGlobalConfigDir } from "./config.js";
 import { normalizeCompanyName } from "./company-name.js";
 import { canonicalBusinessText } from "./mcp-json.js";
+import { MAX_JSON_INPUT_SIZE, safeJsonParse } from "./tools/crud/shared.js";
 
 const liabilityClassificationSchema = z.enum(["current", "non_current"]);
 const cashFlowCategorySchema = z.enum(["operating", "investing", "financing"]);
@@ -94,7 +95,13 @@ export interface SaveAutoBookingRuleInput {
 
 let cachedRules: AccountingRules | undefined;
 let cachedRulesKey: string | undefined;
-let accountingRulesConnectionGetter = () => ({ name: "default", stableIdentity: "default" });
+interface AccountingRulesConnection {
+  name: string;
+  stableIdentity: string;
+  /** How many connections this server has configured (legacy-record gating). */
+  connectionCount?: number;
+}
+let accountingRulesConnectionGetter = (): AccountingRulesConnection => ({ name: "default", stableIdentity: "default" });
 
 const AUTO_BOOKING_RULE_ACTION_FIELDS = [
   "purchase_article_id",
@@ -106,6 +113,11 @@ const AUTO_BOOKING_RULE_ACTION_FIELDS = [
 ] as const;
 
 const BUNDLE_DIR_NAME = "accounting-rules";
+// Company booking knowledge is private like the audit log: files are created
+// 0600 and directories 0700 (default umask would give 0664/0775). Modes only
+// apply on creation; existing files keep their permissions.
+const PRIVATE_DIR_MODE = 0o700;
+const PRIVATE_FILE_OPTIONS = { encoding: "utf8", mode: 0o600 } as const;
 const LEGACY_FILE_NAME = "accounting-rules.md";
 const OKF_VERSION = "0.1";
 
@@ -151,10 +163,70 @@ function resolveStorage(): RulesStorage {
 }
 
 export function initAccountingRulesConnection(
-  getter: () => { name: string; stableIdentity: string },
+  getter: () => AccountingRulesConnection,
 ): void {
   accountingRulesConnectionGetter = getter;
   resetAccountingRulesCache();
+}
+
+/**
+ * The active connection's stable identity (the same connection fingerprint the
+ * plan store scopes by) plus the configured connection count. Company-specific
+ * data files stored in the bundle (opening-balances.json,
+ * statement-balances.json) stamp this identity, because a bundle is NOT always
+ * per-connection: `EARVELDAJA_RULES_DIR` and the kept-in-place project/global
+ * bundle are shared by every connection of the server.
+ */
+export function getBundleRecordIdentity(): { stableIdentity: string; connectionCount: number } {
+  const connection = accountingRulesConnectionGetter();
+  return { stableIdentity: connection.stableIdentity, connectionCount: connection.connectionCount ?? 1 };
+}
+
+export type BundleRecordIdentityVerdict =
+  | { accept: true; warning?: undefined }
+  | { accept: false; warning: string };
+
+/**
+ * True when the active bundle is the default per-connection hashed dir
+ * (`<globalConfigDir>/accounting-rules/<sha256(stableIdentity)>/`), which only
+ * this connection ever resolves to. `EARVELDAJA_RULES_DIR` and a kept-in-place
+ * project/global root bundle are shared by every connection, so they are not.
+ */
+function isPerConnectionBundleStorage(): boolean {
+  if (process.env.EARVELDAJA_RULES_FILE?.trim() || process.env.EARVELDAJA_RULES_DIR?.trim()) return false;
+  const storage = resolveStorage();
+  if (storage.mode !== "bundle") return false;
+  const connection = accountingRulesConnectionGetter();
+  const scope = buildAccountingRulesConnectionScope(connection.name, connection.stableIdentity);
+  return storage.dir === resolve(getGlobalConfigDir(), BUNDLE_DIR_NAME, scope);
+}
+
+/**
+ * Decide whether a bundle record stamped with `recordIdentity` belongs to the
+ * active connection. A record from another connection is refused. A legacy
+ * record without identity (written before identity stamping) is accepted when
+ * the server has exactly one connection, or when the bundle is the default
+ * per-connection hashed dir (private to this connection by construction). In a
+ * shared bundle with several connections it cannot be attributed, so it is
+ * refused with a warning (re-import it on the right connection to stamp it).
+ */
+export function checkBundleRecordIdentity(recordIdentity: unknown, label: string): BundleRecordIdentityVerdict {
+  const current = getBundleRecordIdentity();
+  if (typeof recordIdentity === "string" && recordIdentity !== "") {
+    if (recordIdentity === current.stableIdentity) return { accept: true };
+    return {
+      accept: false,
+      warning: `Stored ${label} belong to a different connection (company) than the active one and were ignored. ` +
+        "Re-import them on this connection if they should apply here (also needed after an API key rotation, " +
+        "which changes the connection identity).",
+    };
+  }
+  if (current.connectionCount <= 1 || isPerConnectionBundleStorage()) return { accept: true };
+  return {
+    accept: false,
+    warning: `Stored ${label} predate per-connection identity and this server has ${current.connectionCount} connections, ` +
+      "so they cannot be attributed to a company and were ignored. Re-import them on the correct connection.",
+  };
 }
 
 const WINDOWS_RESERVED_COMPONENT = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
@@ -306,7 +378,7 @@ function reclaimDeadLock(lockPath: string): boolean {
   const guardPath = `${lockPath}.reclaim`;
   let guardFd = -1;
   try {
-    guardFd = openSync(guardPath, "wx");
+    guardFd = openSync(guardPath, "wx", 0o600);
   } catch {
     return false; // another reclaimer active (or a leaked guard) → wait
   }
@@ -350,13 +422,13 @@ export function withBundleLock<T>(dir: string, fn: () => T): T {
   if (heldBundleLocks.has(lockPath)) {
     return fn();
   }
-  mkdirSync(dirname(dir), { recursive: true });
+  mkdirSync(dirname(dir), { recursive: true, mode: PRIVATE_DIR_MODE });
   const token = `${process.pid}:${randomUUID()}\n`;
   const deadline = Date.now() + BUNDLE_LOCK_MAX_WAIT_MS;
   let fd = -1;
   acquire: for (;;) {
     try {
-      fd = openSync(lockPath, "wx");
+      fd = openSync(lockPath, "wx", 0o600);
     } catch (error) {
       if (errno(error) !== "EEXIST") throw error;
       // Held by another process (we'd have short-circuited if it were ours).
@@ -829,6 +901,18 @@ export function resolveOpeningBalanceStorePath(): string | null {
   return resolve(storage.dir, "opening-balances.json");
 }
 
+/**
+ * Size-capped JSON read for bundle data files: refuse (before reading) a file
+ * above MAX_JSON_INPUT_SIZE so a runaway or planted file cannot exhaust memory.
+ */
+export function readBoundedBundleJson(path: string, label: string): unknown {
+  const size = statSync(path).size;
+  if (size > MAX_JSON_INPUT_SIZE) {
+    throw new Error(`${label} exceeds the maximum size of ${MAX_JSON_INPUT_SIZE} bytes (${size} bytes).`);
+  }
+  return safeJsonParse(readFileSync(path, "utf8"), label);
+}
+
 export function resolveStatementBalanceStorePath(): string | null {
   const storage = resolveStorage();
   if (storage.mode === "file") return null;           // single-file legacy mode has no bundle dir
@@ -938,7 +1022,7 @@ function legacySaveAutoBookingRule(input: SaveAutoBookingRuleInput, path: string
 
   const validatedInput = parsed.data;
   if (!existsSync(path)) {
-    writeFileSync(path, DEFAULT_RULES_TEMPLATE, "utf8");
+    writeFileSync(path, DEFAULT_RULES_TEMPLATE, PRIVATE_FILE_OPTIONS);
   }
 
   const original = readFileSync(path, "utf8");
@@ -946,7 +1030,7 @@ function legacySaveAutoBookingRule(input: SaveAutoBookingRuleInput, path: string
   let sectionStart = lines.findIndex(line => line.trim() === "## Auto Booking");
   if (sectionStart === -1) {
     const suffix = original.endsWith("\n") ? "" : "\n";
-    writeFileSync(path, `${original}${suffix}\n## Auto Booking\n`, "utf8");
+    writeFileSync(path, `${original}${suffix}\n## Auto Booking\n`, PRIVATE_FILE_OPTIONS);
     return legacySaveAutoBookingRule(input, path);
   }
   let sectionEnd = lines.findIndex((line, index) => index > sectionStart && /^##\s+/.test(line.trim()));
@@ -975,7 +1059,7 @@ function legacySaveAutoBookingRule(input: SaveAutoBookingRuleInput, path: string
     if (existingMatch === matchKey && existingCategory === categoryKey) {
       mutableLines[index] = rowText;
       action = "updated";
-      writeFileSync(path, `${mutableLines.join("\n")}\n`, "utf8");
+      writeFileSync(path, `${mutableLines.join("\n")}\n`, PRIVATE_FILE_OPTIONS);
       resetAccountingRulesCache();
       return {
         path,
@@ -987,7 +1071,7 @@ function legacySaveAutoBookingRule(input: SaveAutoBookingRuleInput, path: string
   }
 
   mutableLines.splice(table.insertIndex, 0, rowText);
-  writeFileSync(path, `${mutableLines.join("\n")}\n`, "utf8");
+  writeFileSync(path, `${mutableLines.join("\n")}\n`, PRIVATE_FILE_OPTIONS);
   resetAccountingRulesCache();
   return {
     path,
@@ -1424,15 +1508,15 @@ function writeAutoBookingConcept(dir: string, rule: AccountingAutoBookingRule): 
   const rel = autoBookingConceptRelativeTarget(rule.match, rule.category);
   const file = resolve(dir, rel);
   const action: "inserted" | "updated" = existsSync(file) ? "updated" : "inserted";
-  mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, buildAutoBookingConcept(rule), "utf8");
+  mkdirSync(dirname(file), { recursive: true, mode: PRIVATE_DIR_MODE });
+  writeFileSync(file, buildAutoBookingConcept(rule), PRIVATE_FILE_OPTIONS);
   return { file, rel, action };
 }
 
 function writeOwnerExpenseConcept(dir: string, oe: NonNullable<AccountingRules["owner_expense_reimbursement"]>): string {
   const rel = join(...OWNER_EXPENSE_FILE);
   const file = resolve(dir, rel);
-  mkdirSync(dirname(file), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true, mode: PRIVATE_DIR_MODE });
   const overrides = oe.account_overrides ?? {};
   const rows = Object.entries(overrides).map(([account, rule]) => [
     account,
@@ -1451,13 +1535,13 @@ function writeOwnerExpenseConcept(dir: string, oe: NonNullable<AccountingRules["
       ["timestamp", isoNow()],
     ],
     body,
-  ), "utf8");
+  ), PRIVATE_FILE_OPTIONS);
   return rel;
 }
 
 function writeAnnualReportConcepts(dir: string, ar: NonNullable<AccountingRules["annual_report"]>): string[] {
   const written: string[] = [];
-  mkdirSync(resolve(dir, ANNUAL_REPORT_SUBDIR), { recursive: true });
+  mkdirSync(resolve(dir, ANNUAL_REPORT_SUBDIR), { recursive: true, mode: PRIVATE_DIR_MODE });
 
   if (ar.current_year_profit_account !== undefined) {
     const rel = join(...ANNUAL_REPORT_SETTINGS_FILE);
@@ -1469,7 +1553,7 @@ function writeAnnualReportConcepts(dir: string, ar: NonNullable<AccountingRules[
         ["timestamp", isoNow()],
       ],
       "",
-    ), "utf8");
+    ), PRIVATE_FILE_OPTIONS);
     written.push(rel);
   }
 
@@ -1483,7 +1567,7 @@ function writeAnnualReportConcepts(dir: string, ar: NonNullable<AccountingRules[
         ["timestamp", isoNow()],
       ],
       `# Schema\n\n${buildMarkdownTable(["account_id", "classification"], rows)}`,
-    ), "utf8");
+    ), PRIVATE_FILE_OPTIONS);
     written.push(rel);
   }
 
@@ -1497,7 +1581,7 @@ function writeAnnualReportConcepts(dir: string, ar: NonNullable<AccountingRules[
         ["timestamp", isoNow()],
       ],
       `# Schema\n\n${buildMarkdownTable(["account_id", "category"], rows)}`,
-    ), "utf8");
+    ), PRIVATE_FILE_OPTIONS);
     written.push(rel);
   }
 
@@ -1505,10 +1589,10 @@ function writeAnnualReportConcepts(dir: string, ar: NonNullable<AccountingRules[
 }
 
 function scaffoldBundle(dir: string): void {
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR_MODE });
   const logFile = resolve(dir, "log.md");
   if (!existsSync(logFile)) {
-    writeFileSync(logFile, "# Log\n", "utf8");
+    writeFileSync(logFile, "# Log\n", PRIVATE_FILE_OPTIONS);
   }
 }
 
@@ -1533,7 +1617,7 @@ function regenerateBundleIndex(dir: string): void {
     lines.push(`- [${title}](${bundleRelativeLink(rel)}) — ${type}`);
   }
   lines.push("");
-  writeFileSync(resolve(dir, "index.md"), lines.join("\n"), "utf8");
+  writeFileSync(resolve(dir, "index.md"), lines.join("\n"), PRIVATE_FILE_OPTIONS);
 }
 
 function appendBundleLog(dir: string, messages: string[]): void {
@@ -1555,7 +1639,7 @@ function appendBundleLog(dir: string, messages: string[]): void {
   } else {
     lines.splice(titleIndex + 1, 0, "", `## ${date}`, ...entries);
   }
-  writeFileSync(logFile, `${lines.join("\n").replace(/\s+$/, "")}\n`, "utf8");
+  writeFileSync(logFile, `${lines.join("\n").replace(/\s+$/, "")}\n`, PRIVATE_FILE_OPTIONS);
 }
 
 /**

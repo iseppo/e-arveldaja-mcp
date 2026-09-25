@@ -27,6 +27,12 @@ export interface StatementBalanceCheck {
   tolerance: number;
   warnings: string[];
   notes: string[];
+  /**
+   * Dry-run only: signed sum of the statement entries the import WOULD create
+   * (dated on or before the balance date), already folded into
+   * `unconfirmed_amount` so the comparison reflects the post-import ledger.
+   */
+  pending_import_amount?: number;
 }
 
 /**
@@ -46,6 +52,8 @@ export async function checkStatementClosingBalance(
     accountId: number;
     closing: { amount: number; direction?: "CRDT" | "DBIT"; date?: string; currency?: string };
     fallbackDate: string;
+    /** Signed (incoming +) amount of rows not yet created, e.g. a dry-run import. */
+    pendingImportAmount?: number;
   },
   opts?: { tolerance?: number },
 ): Promise<StatementBalanceCheck> {
@@ -87,6 +95,7 @@ export async function checkStatementClosingBalance(
     else if (direction === "outgoing") unconfirmedRaw -= amount;
     else excludedIndeterminateDirection += 1;
   }
+  if (input.pendingImportAmount !== undefined) unconfirmedRaw += input.pendingImportAmount;
   const unconfirmedAmount = roundMoney(unconfirmedRaw);
 
   const expectedBalance = roundMoney(bookedBalance + unconfirmedAmount);
@@ -163,5 +172,6 @@ export async function checkStatementClosingBalance(
     tolerance,
     warnings,
     notes,
+    ...(input.pendingImportAmount !== undefined ? { pending_import_amount: roundMoney(input.pendingImportAmount) } : {}),
   };
 }

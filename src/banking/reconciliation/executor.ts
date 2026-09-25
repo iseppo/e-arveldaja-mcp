@@ -3,12 +3,16 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.
 import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { bankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
-import { LinkedInvoiceClientMismatchError } from "../../api/transactions.api.js";
+import {
+  LinkedInvoiceClientMismatchError,
+  LinkedInvoiceClientsAmbiguousError,
+  StoredTypeDirectionMismatchError,
+} from "../../api/transactions.api.js";
 import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../../booking-guard.js";
@@ -85,6 +89,22 @@ import type {
   InterAccountErrorRow,
   SuggestMatchesInput,
 } from "./types.js";
+
+/**
+ * Error code for a non-indeterminate confirm failure. The api's pre-mutation
+ * refusals (payer/invoice client mismatch, ambiguous linked-invoice clients,
+ * stored type contradicting the signed statement direction) carry their own
+ * category so the report says why the register was refused, not a generic
+ * `confirm_failed`.
+ */
+function confirmRefusalErrorCode(err: unknown): string {
+  if (err instanceof LinkedInvoiceClientMismatchError
+    || err instanceof LinkedInvoiceClientsAmbiguousError
+    || err instanceof StoredTypeDirectionMismatchError) {
+    return err.category;
+  }
+  return "confirm_failed";
+}
 
 export const MAX_INTER_ACCOUNT_DATE_GAP_DAYS = 31;
 
@@ -472,10 +492,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
           // so the api guard should never fire here. Mapped anyway: if the
           // ledger changed between projection and mutate, the reason the
           // register was refused must reach the report, not a generic failure.
-          if (err instanceof LinkedInvoiceClientMismatchError) {
-            return { outcome: "failed", error_code: "linked_invoice_client_mismatch", mutation_occurred: false };
-          }
-          return { outcome: "failed", error_code: "confirm_failed", mutation_occurred: false };
+          return { outcome: "failed", error_code: confirmRefusalErrorCode(err), mutation_occurred: false };
         }
       },
     });
@@ -922,9 +939,11 @@ export async function runInterAccountMatching(
       confirmedNominalAmount: txOut.amount,
       confirmedCurrency: transactionCurrency(txOut),
       targetDimensionId: txIn.accounts_dimensions_id,
-      distributionAmount: txOut.amount,
+      // Base EUR (H10, af62766): the same unit the BookingGuard key and the
+      // one-sided confirms use. Equal to the nominal for plain EUR rows.
+      distributionAmount: bestCandidate.comparableAmount,
       deleteTxId: txIn.id!,
-      auditSummary: `Confirmed inter-account outgoing ${txOut.amount} EUR (${fromTitle} -> ${toTitle})`,
+      auditSummary: `Confirmed inter-account outgoing ${bestCandidate.comparableAmount} EUR (${fromTitle} -> ${toTitle})`,
       auditDetails: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
       deleteAuditSummary: `Deleted duplicate incoming row ${txIn.id} after confirming outgoing ${txOut.id} (${fromTitle} -> ${toTitle})`,
       deleteAuditDetails: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id },
@@ -1008,34 +1027,65 @@ export async function runInterAccountMatching(
     }
 
     const bestCandidate = topCandidates[0]!;
-    const counterpart = bestCandidate.counterpart;
+    const reciprocal = bestCandidate.counterpart;
 
-    if (!counterpart.id || consumedTxIds.has(counterpart.id) || blockedOneSidedTxIds.has(counterpart.id)) {
+    if (!reciprocal.id || consumedTxIds.has(reciprocal.id) || blockedOneSidedTxIds.has(reciprocal.id)) {
       continue;
     }
 
-    const fromTitleEarly = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
+    // Both legs carry the same stored type, so the type cannot say which account
+    // the money left. Confirming the wrong leg books the transfer reversed (the
+    // confirmed row's own account becomes the source). Only a signed importer
+    // marker proving "outgoing" on exactly one leg — and agreeing with that
+    // leg's stored `C`, which is what the backend books from — settles it;
+    // anything else is a human decision, independent of listing order.
+    const txProvenOutgoing = signedBankTransactionDirection(tx) === "outgoing" && tx.type === "C";
+    const reciprocalProvenOutgoing = signedBankTransactionDirection(reciprocal) === "outgoing" && reciprocal.type === "C";
+    if (txProvenOutgoing === reciprocalProvenOutgoing) {
+      ambiguousPairs.push({
+        outgoing_transaction_id: tx.id,
+        amount: tx.amount,
+        date_out: tx.date,
+        from_dimension_id: tx.accounts_dimensions_id,
+        candidate_incoming_transaction_ids: [reciprocal.id],
+        candidate_incoming_dimension_ids: [reciprocal.accounts_dimensions_id],
+        confidence: bestCandidate.confidence,
+        code: "direction_unresolved",
+        reason: `Transactions ${tx.id} and ${reciprocal.id} look like the two legs of one own-account transfer, but both carry stored type ${tx.type} and no single leg has a signed outgoing statement marker, so the transfer direction cannot be determined. Confirm the leg the money LEFT inline against the other bank account and delete the mirror row.`,
+      });
+      blockedOneSidedTxIds.add(tx.id);
+      blockedOneSidedTxIds.add(reciprocal.id);
+      continue;
+    }
+    const source = txProvenOutgoing ? tx : reciprocal;
+    const counterpart = txProvenOutgoing ? reciprocal : tx;
+    const sourceId = source.id!;
+    const counterpartId = counterpart.id!;
+    // Base EUR, the same unit the BookingGuard key and one-sided confirms use.
+    const distributionAmount = comparableTransactionAmount(source);
+
+    const fromTitleEarly = dimensionToTitle.get(source.accounts_dimensions_id) ?? `dim:${source.accounts_dimensions_id}`;
     const toTitleEarly = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;
 
     const resolution = resolveExistingJournal(
-      tx.accounts_dimensions_id, counterpart.accounts_dimensions_id,
-      bestCandidate.comparableAmount, tx.date, maxGap,
-      tx.bank_ref_number ?? tx.ref_number, true,
+      source.accounts_dimensions_id, counterpart.accounts_dimensions_id,
+      distributionAmount, source.date, maxGap,
+      source.bank_ref_number ?? source.ref_number, true,
     );
     if (resolution.status === "matched") {
-      consumedTxIds.add(tx.id);
-      consumedTxIds.add(counterpart.id);
+      consumedTxIds.add(sourceId);
+      consumedTxIds.add(counterpartId);
       skippedAlreadyHandled.push(
         {
-          transaction_id: tx.id,
-          amount: tx.amount,
-          date: tx.date,
-          source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? "",
+          transaction_id: sourceId,
+          amount: source.amount,
+          date: source.date,
+          source_account: dimensionToTitle.get(source.accounts_dimensions_id) ?? "",
           existing_journal_id: resolution.journal_id,
           reason: "Already journalized",
         },
         {
-          transaction_id: counterpart.id,
+          transaction_id: counterpartId,
           amount: counterpart.amount,
           date: counterpart.date,
           source_account: dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? "",
@@ -1046,30 +1096,30 @@ export async function runInterAccountMatching(
       continue;
     }
     if (resolution.status === "ambiguous_refless") {
-      consumedTxIds.add(tx.id);
-      consumedTxIds.add(counterpart.id);
+      consumedTxIds.add(sourceId);
+      consumedTxIds.add(counterpartId);
       ambiguousRefless.push({
-        transaction_ids: [tx.id, counterpart.id], amount: tx.amount, date: tx.date,
+        transaction_ids: [sourceId, counterpartId], amount: source.amount, date: source.date,
         source_account: fromTitleEarly, target_account: toTitleEarly,
         reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
       });
       continue;
     }
 
-    const fromTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
-    const toTitle = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;
+    const fromTitle = fromTitleEarly;
+    const toTitle = toTitleEarly;
 
-    consumedTxIds.add(tx.id);
-    consumedTxIds.add(counterpart.id);
+    consumedTxIds.add(sourceId);
+    consumedTxIds.add(counterpartId);
 
     const crossCurrencyPair =
       bestCandidate.reasons.includes("exact_base_amount") &&
       !bestCandidate.reasons.includes("exact_amount") &&
-      hasMeaningfulComparableAmount(tx);
+      hasMeaningfulComparableAmount(source);
     if (crossCurrencyPair) {
       crossCurrencyPairs.push({
-        transaction_ids: [tx.id, counterpart.id],
-        amount_out: tx.amount, amount_in: counterpart.amount, date: tx.date,
+        transaction_ids: [sourceId, counterpartId],
+        amount_out: source.amount, amount_in: counterpart.amount, date: source.date,
         source_account: fromTitle, target_account: toTitle,
         reason: "Cross-currency inter-account pair matched on base amount only; the legs have different nominal amounts. Auto-distributing the outgoing nominal amount would misbook the target leg. Confirm inline with the correct per-account amounts.",
       });
@@ -1077,16 +1127,16 @@ export async function runInterAccountMatching(
     }
 
     matchedPairs.push({
-      outgoing_transaction_id: tx.id,
-      incoming_transaction_id: counterpart.id,
-      amount: tx.amount,
-      date_out: tx.date,
+      outgoing_transaction_id: sourceId,
+      incoming_transaction_id: counterpartId,
+      amount: source.amount,
+      date_out: source.date,
       date_in: counterpart.date,
       from_account: fromTitle,
       to_account: toTitle,
-      from_dimension_id: tx.accounts_dimensions_id,
+      from_dimension_id: source.accounts_dimensions_id,
       to_dimension_id: counterpart.accounts_dimensions_id,
-      description_out: tx.description ?? undefined,
+      description_out: source.description ?? undefined,
       description_in: counterpart.description ?? undefined,
       confidence: bestCandidate.confidence,
       match_reasons: bestCandidate.reasons,
@@ -1094,23 +1144,23 @@ export async function runInterAccountMatching(
       incoming_action: "would_delete_duplicate",
     });
     confirmActions.push({
-      confirmedTxId: tx.id,
-      confirmedClientsId: tx.clients_id ?? null,
-      confirmedNominalAmount: tx.amount,
-      confirmedCurrency: transactionCurrency(tx),
+      confirmedTxId: sourceId,
+      confirmedClientsId: source.clients_id ?? null,
+      confirmedNominalAmount: source.amount,
+      confirmedCurrency: transactionCurrency(source),
       targetDimensionId: counterpart.accounts_dimensions_id,
-      distributionAmount: tx.amount,
-      deleteTxId: counterpart.id,
-      auditSummary: `Confirmed reciprocal same-type inter-account transfer ${tx.amount} EUR (${fromTitle} -> ${toTitle})`,
-      auditDetails: { amount: tx.amount, date: tx.date, paired_counterpart_id: counterpart.id },
-      deleteAuditSummary: `Deleted reciprocal same-type duplicate row ${counterpart.id} after confirming ${tx.id} (${fromTitle} -> ${toTitle})`,
-      deleteAuditDetails: { amount: counterpart.amount, date: counterpart.date, paired_confirmed_id: tx.id },
+      distributionAmount,
+      deleteTxId: counterpartId,
+      auditSummary: `Confirmed reciprocal same-type inter-account transfer ${distributionAmount} EUR (${fromTitle} -> ${toTitle})`,
+      auditDetails: { amount: source.amount, date: source.date, paired_counterpart_id: counterpartId },
+      deleteAuditSummary: `Deleted reciprocal same-type duplicate row ${counterpartId} after confirming ${sourceId} (${fromTitle} -> ${toTitle})`,
+      deleteAuditDetails: { amount: counterpart.amount, date: counterpart.date, paired_confirmed_id: sourceId },
     });
     recordInterAccountJournal(
-      tx.accounts_dimensions_id, counterpart.accounts_dimensions_id, comparableTransactionAmount(tx), tx.date,
-      undefined, tx.bank_ref_number ?? tx.ref_number,
+      source.accounts_dimensions_id, counterpart.accounts_dimensions_id, distributionAmount, source.date,
+      undefined, source.bank_ref_number ?? source.ref_number,
     );
-    if (tx.clients_id == null) await resolveCompanyClientsId();
+    if (source.clients_id == null) await resolveCompanyClientsId();
   }
 
   // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
@@ -1357,7 +1407,7 @@ export async function executeInterAccount(
           return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "confirmed" }] };
         } catch (err) {
           if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
-          return { outcome: "failed", error_code: "confirm_failed", mutation_occurred: false };
+          return { outcome: "failed", error_code: confirmRefusalErrorCode(err), mutation_occurred: false };
         }
       },
     });

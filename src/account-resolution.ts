@@ -14,6 +14,8 @@ import {
   CIT_PAYABLE_ACCOUNT,
   SHARE_CAPITAL_ACCOUNT,
   RESERVE_CAPITAL_ACCOUNT,
+  CURRENT_YEAR_PROFIT_ACCOUNT,
+  CALCULATED_RESULT_ACCOUNT,
   DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT,
   DEFAULT_FX_GAIN_ACCOUNT,
   SECURITIES_INCOME_ACCOUNT,
@@ -62,6 +64,24 @@ export function resolveAccountByName(
  * anchored so "Jaotamata kasumi reserv" (a distributable reserve) is excluded. */
 export const resolveRetainedEarningsAccount = (accounts: Account[], override?: number): number =>
   resolveAccountByName(accounts, /^(eelmiste perioodide )?jaotamata kasum( \(kahjum\))?$/i, RETAINED_EARNINGS_ACCOUNT, override);
+
+/** Current-year result — "Aruandeaasta kasum (kahjum)" (2970), the account
+ * RIK's year-end result entry credits with a closed year's profit; anchored so a
+ * suffixed sibling ("Aruandeaasta kasum erikonto") is excluded. */
+export const resolveCurrentYearProfitAccount = (accounts: Account[], override?: number): number =>
+  resolveAccountByName(accounts, /^aruandeaasta kasum( \(kahjum\))?$/i, CURRENT_YEAR_PROFIT_ACCOUNT, override);
+
+/** Calculated result — "Arvestuslik koondtulemus" (9000), the counter-account
+ * of RIK's year-end result entry (profit: D 9000 / K 2970). Not an income-
+ * statement line. */
+export const resolveCalculatedResultAccount = (accounts: Account[], override?: number): number =>
+  resolveAccountByName(accounts, /^arvestuslik koondtulemus$/i, CALCULATED_RESULT_ACCOUNT, override);
+
+/** Posting target for a statutory reserve-capital transfer — the lowest-numbered
+ * ACTIVE "Kohustuslik reservkapital" (2940). Unlike
+ * resolveRestrictedReserveAccounts (a balance read), this picks one account. */
+export const resolveReserveCapitalAccount = (accounts: Account[], override?: number): number =>
+  resolveAccountByName(accounts, /^kohustuslik reservkapital$/i, RESERVE_CAPITAL_ACCOUNT, override);
 
 /** Dividend payable — "Dividendivõlad" (2650). */
 export const resolveDividendPayableAccount = (accounts: Account[], override?: number): number =>

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
+import { resetAccountingRulesCache } from "../accounting-rules.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -1247,7 +1248,7 @@ describe("prepare_dividend_package", () => {
     expect(payload).toMatch(/Ledger is imbalanced|Ledger imbalance/);
   });
 
-  it("ledger-imbalance block is overridable with force=true (operator explicitly accepts the risk)", async () => {
+  it("ledger-imbalance block is NOT overridable with force=true (force only overrides the § 157 clauses)", async () => {
     const journals = [
       makeJournal("2024-01-01", [
         makePosting(1000, "D", 30000),
@@ -1272,13 +1273,15 @@ describe("prepare_dividend_package", () => {
       shareholder_client_id: 1,
       effective_date: "2026-06-01",
       force: true,
-      dry_run: true,
     });
 
-    expect(isError(result)).toBe(false);
+    expect(isError(result)).toBe(true);
     const data = parseResult(result);
+    expect(String(data.error)).toContain("Ledger is imbalanced");
+    expect(String(data.hint)).toContain("force=true does not override");
     const warnings = (data.warnings ?? []) as string[];
     expect(warnings.some(w => w.includes("Ledger imbalance"))).toBe(true);
+    expect(vi.mocked(api2.journals.create)).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -1571,6 +1574,335 @@ describe("prepare_dividend_package", () => {
 // ---------------------------------------------------------------------------
 // Tests: create_owner_expense_reimbursement
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// prepare_dividend_package — pending drafts (M1), key conflicts (M2),
+// lg 1 distributable profit components (M3), and minors
+// ---------------------------------------------------------------------------
+
+describe("prepare_dividend_package remediation", () => {
+  beforeEach(() => {
+    mockedLogAudit.mockClear();
+  });
+
+  function setup(journals: Journal[], accounts: Account[] = makeStandardAccounts(), options: { clientName?: string } = {}) {
+    const api = makeApi(journals, accounts, options);
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    return { api, cb: mock.tools.get("prepare_dividend_package")! };
+  }
+
+  const base = (retained: number): Journal[] => [
+    makeJournal("2024-01-01", [makePosting(1000, "D", retained), makePosting(2960, "C", retained)]),
+    makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
+  ];
+
+  // The unconfirmed journal prepare_dividend_package itself creates (confirm:false).
+  const dividendDraft = (id: number, date: string, clientId: number, net: number, cit: number, registered = false): Journal =>
+    makeJournal(date, [
+      makePosting(2960, "D", net),
+      makePosting(8900, "D", cit),
+      makePosting(2650, "C", net),
+      makePosting(2656, "C", cit),
+    ], { id, registered, is_deleted: false, document_number: `DIV-${date}-${clientId}` });
+
+  // ---- M1: unconfirmed dividend drafts reduce both § 157 headrooms ----------
+
+  it("M1 counts a pending unconfirmed DIV draft against lg 1: two 60 000 dividends cannot both pass on 100 000 retained", async () => {
+    const { api, cb } = setup([...base(100000), dividendDraft(501, "2026-06-01", 1, 60000, 16923.08)]);
+    const result = await cb({ net_dividend: 60000, shareholder_client_id: 2, effective_date: "2026-06-01" });
+
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(String(data.error)).toContain("Insufficient retained earnings");
+    const check = data.retained_earnings_check as { balance: number; components: { retained_earnings_balance: number; pending_unconfirmed_dividends: number } };
+    expect(check.components.retained_earnings_balance).toBe(100000);
+    expect(check.components.pending_unconfirmed_dividends).toBe(60000);
+    expect(check.balance).toBe(40000);
+    const max = data.maximum_distributable as { max_net_by_retained_earnings: number; pending_unconfirmed_dividend_drafts: Array<{ journal_id: number }> };
+    expect(max.max_net_by_retained_earnings).toBe(40000);
+    expect(max.pending_unconfirmed_dividend_drafts.map(d => d.journal_id)).toEqual([501]);
+    expect((data.warnings as string[]).some(w => w.includes("Pending unconfirmed dividend drafts counted") && w.includes("journal 501"))).toBe(true);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("M1 counts a manual unconfirmed draft (no DIV- number) crediting dividend payable, including its gross effect on lg 2", async () => {
+    const manualDraft = makeJournal("2026-05-01", [
+      makePosting(2960, "D", 10000),
+      makePosting(8900, "D", 2820.51),
+      makePosting(2650, "C", 10000),
+      makePosting(2656, "C", 2820.51),
+    ], { id: 777, registered: false, document_number: null });
+    const { cb } = setup([...base(100000), manualDraft]);
+    const data = parseResult(await cb({ net_dividend: 1000, shareholder_client_id: 2, effective_date: "2026-06-01", dry_run: true }));
+
+    const check = data.retained_earnings_check as { balance_before: number };
+    expect(check.balance_before).toBe(90000);
+    const net = data.net_assets_check as { net_assets_before_distribution: number; pending_unconfirmed_dividends: number; net_assets_after_distribution: number };
+    expect(net.net_assets_before_distribution).toBe(102500);
+    expect(net.pending_unconfirmed_dividends).toBe(12820.51);
+    expect(net.net_assets_after_distribution).toBe(roundMoney(102500 - 12820.51 - 1282.05));
+  });
+
+  it("M1 ignores deleted and confirmed drafts in the pending set (confirmed ones are already in the balances)", async () => {
+    const deleted = { ...dividendDraft(601, "2026-06-01", 3, 60000, 16923.08), is_deleted: true };
+    const { cb } = setup([...base(100000), deleted]);
+    const data = parseResult(await cb({ net_dividend: 60000, shareholder_client_id: 2, effective_date: "2026-06-01", dry_run: true }));
+    expect((data.retained_earnings_check as { sufficient: boolean }).sufficient).toBe(true);
+    expect((data.maximum_distributable as Record<string, unknown>).pending_unconfirmed_dividend_drafts).toBeUndefined();
+  });
+
+  // ---- M2: same key, different amount → conflict; same → echo existing ----
+
+  it("M2 refuses a same-key call with a different amount (dividend_key_conflict), on execute and on dry_run", async () => {
+    const { api, cb } = setup([...base(100000), dividendDraft(501, "2026-06-01", 1, 1000, 282.05)]);
+    for (const dry_run of [false, true]) {
+      const result = await cb({ net_dividend: 2000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run });
+      expect(isError(result)).toBe(true);
+      const data = parseResult(result);
+      expect(data.error_code).toBe("dividend_key_conflict");
+      expect(data.existing_journal_id).toBe(501);
+      const existing = data.existing_postings as Array<{ account: number; type: string; amount: number }>;
+      const requested = data.requested_postings as Array<{ account: number; type: string; amount: number }>;
+      expect(existing.find(p => p.account === 2960)?.amount).toBe(1000);
+      expect(requested.find(p => p.account === 2960)?.amount).toBe(2000);
+    }
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    expect(mockedLogAudit).not.toHaveBeenCalled();
+  });
+
+  it("M2 detects a key collision that appears after the pre-check (guard duplicate) and reports the conflict instead of 'duplicate'", async () => {
+    const { api, cb } = setup(base(100000));
+    const first = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    expect(isError(first)).toBe(false);
+    const second = await cb({ net_dividend: 2000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    expect(isError(second)).toBe(true);
+    const data = parseResult(second);
+    expect(data.error_code).toBe("dividend_key_conflict");
+    expect((data.existing_postings as Array<{ account: number; amount: number }>).find(p => p.account === 2650)?.amount).toBe(1000);
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+    expect(mockedLogAudit).toHaveBeenCalledTimes(1); // only the original CREATED
+  });
+
+  it("M2 echoes the EXISTING journal's postings on an identical retry (guard duplicate path)", async () => {
+    const { cb } = setup(base(100000));
+    await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    const data = parseResult(await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" }));
+    const je = data.journal_entry as { booking_status: string; postings: Array<{ account: number; type: string; amount: number }> };
+    expect(je.booking_status).toBe("duplicate");
+    expect(je.postings.map(p => `${p.account}${p.type}${p.amount}`).sort()).toEqual(["2650C1000", "2656C282.05", "2960D1000", "8900D282.05"]);
+    const audit = mockedLogAudit.mock.calls[1]![0] as { details: { postings: unknown[] } };
+    expect(audit.details.postings).toHaveLength(4);
+  });
+
+  it("M2 echoes the existing journal's ACTUAL postings (as stored, e.g. reordered) on both duplicate paths", async () => {
+    // Pre-check path: the stored same-key journal lists its postings in a different order.
+    const stored = dividendDraft(501, "2026-06-01", 1, 1000, 282.05);
+    stored.postings = [...stored.postings].reverse();
+    const pre = setup([...base(100000), stored]);
+    const preData = parseResult(await pre.cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" }));
+    expect((preData.journal_entry as { postings: Array<{ account: number }> }).postings.map(p => p.account)).toEqual([2656, 2650, 8900, 2960]);
+
+    // Guard-duplicate path: the journal fetched by id stores its postings reordered.
+    const { api, cb } = setup(base(100000));
+    await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    const created = await api.journals.get(42);
+    vi.mocked(api.journals.get).mockResolvedValue({ ...created!, postings: [...created!.postings].reverse() });
+    const data = parseResult(await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" }));
+    const je = data.journal_entry as { booking_status: string; postings: Array<{ account: number }> };
+    expect(je.booking_status).toBe("duplicate");
+    expect(je.postings.map(p => p.account)).toEqual([2656, 2650, 8900, 2960]);
+  });
+
+  it("MINOR-4 an identical retry of an already-CONFIRMED dividend reports duplicate, not 'insufficient retained earnings'", async () => {
+    // Retained 1000 fully distributed by the confirmed DIV journal 501 → the
+    // ledger now shows 0 retained; the retry must be recognised before the
+    // legality checks run.
+    const { api, cb } = setup([...base(1000), dividendDraft(501, "2026-06-01", 1, 1000, 282.05, true)]);
+    for (const dry_run of [true, false]) {
+      const result = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run });
+      expect(isError(result)).toBe(false);
+      const data = parseResult(result);
+      const je = data.journal_entry as { booking_status: string; api_response: { created_object_id: number }; postings: Array<{ account: number; amount: number }> };
+      expect(je.booking_status).toBe("duplicate");
+      expect(je.api_response.created_object_id).toBe(501);
+      expect(je.postings.find(p => p.account === 2960)?.amount).toBe(1000);
+    }
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    expect(mockedLogAudit).toHaveBeenCalledTimes(1);
+    expect(mockedLogAudit.mock.calls[0]![0]).toMatchObject({ action: "UPDATED", entity_id: 501, details: { booking_status: "duplicate" } });
+  });
+
+  // ---- M3: lg 1 = 2960 + 2970 + unclosed prior-year P&L (not current year) --
+
+  const m3Accounts = (): Account[] => [
+    ...makeStandardAccounts(),
+    makeAccount(2970, "C", "Omakapital", "Aruandeaasta kasum (kahjum)", "Current year profit"),
+    makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue"),
+  ];
+
+  it("M3 includes the closed prior-year result on 2970 (YECL) and unclosed prior-year P&L, but not distribution-year P&L", async () => {
+    const journals: Journal[] = [
+      ...base(5000),
+      // 2024: 20 000 profit, closed by YECL-2024 into 2970
+      makeJournal("2024-06-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]),
+      makeJournal("2024-12-31", [makePosting(4000, "D", 20000), makePosting(2970, "C", 20000)], { document_number: "YECL-2024", title: "Aasta lõppkanne 2024" }),
+      // 2025: 10 000 profit, NOT closed yet
+      makeJournal("2025-06-01", [makePosting(1000, "D", 10000), makePosting(4000, "C", 10000)]),
+      // 2026 (distribution year): 50 000 profit — not distributable
+      makeJournal("2026-03-01", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]),
+    ];
+    const { cb } = setup(journals, m3Accounts());
+
+    const ok = parseResult(await cb({ net_dividend: 35000, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: true }));
+    const check = ok.retained_earnings_check as {
+      sufficient: boolean; balance_before: number;
+      components: { retained_earnings_balance: number; current_year_profit_account: number; closed_prior_year_result: number; unclosed_prior_year_profit_and_loss: number };
+    };
+    expect(check.sufficient).toBe(true);
+    expect(check.components.retained_earnings_balance).toBe(5000);
+    expect(check.components.current_year_profit_account).toBe(2970);
+    expect(check.components.closed_prior_year_result).toBe(20000);
+    expect(check.components.unclosed_prior_year_profit_and_loss).toBe(10000);
+    expect(check.balance_before).toBe(35000);
+    expect((ok.maximum_distributable as { max_net_by_retained_earnings: number }).max_net_by_retained_earnings).toBe(35000);
+
+    const blocked = await cb({ net_dividend: 35000.01, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    expect(isError(blocked)).toBe(true);
+    expect(String(parseResult(blocked).error)).toContain("Insufficient retained earnings");
+  });
+
+  it("M3 excludes the distribution year's own YECL from 2970 on a Dec-31 distribution", async () => {
+    const journals: Journal[] = [
+      ...base(5000),
+      makeJournal("2026-03-01", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]),
+      makeJournal("2026-12-31", [makePosting(4000, "D", 50000), makePosting(2970, "C", 50000)], { document_number: "YECL-2026", title: "Aasta lõppkanne 2026" }),
+    ];
+    const { cb } = setup(journals, m3Accounts());
+    const result = await cb({ net_dividend: 6000, shareholder_client_id: 1, effective_date: "2026-12-31", dry_run: true });
+    expect(isError(result)).toBe(true);
+    const check = parseResult(result).retained_earnings_check as { balance: number; components: { closed_prior_year_result: number } };
+    expect(check.components.closed_prior_year_result).toBe(0);
+    expect(check.balance).toBe(5000);
+  });
+
+  // ---- RIK year-end close: a closed year counts exactly once in lg 1 --------
+  // RIK entries: Dec 31 D 9000 / K 2970, Jan 1 D 2970 / K 2960. Revenue and
+  // expense accounts stay open, so the unclosed-P&L component must include
+  // 9000 (Tulud, D) for its debit to cancel them.
+
+  const rikAccounts = (): Account[] => [
+    ...m3Accounts(),
+    makeAccount(9000, "D", "Tulud", "Arvestuslik koondtulemus", "Calculated result"),
+  ];
+  const profit2025 = makeJournal("2025-06-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]);
+  const rikResult2025 = makeJournal("2025-12-31", [makePosting(9000, "D", 20000), makePosting(2970, "C", 20000)], { title: "Majandusaasta lõpetamine" });
+  const rikTransfer2025 = makeJournal("2026-01-01", [makePosting(2970, "D", 20000), makePosting(2960, "C", 20000)]);
+
+  async function lg1(journals: Journal[], effective_date = "2026-06-01") {
+    const { cb } = setup(journals, rikAccounts());
+    const data = parseResult(await cb({ net_dividend: 1, shareholder_client_id: 1, effective_date, dry_run: true }));
+    return data.retained_earnings_check as {
+      balance_before: number;
+      components: { retained_earnings_balance: number; closed_prior_year_result: number; unclosed_prior_year_profit_and_loss: number };
+    };
+  }
+
+  it("RIK counts a closed 2025 profit once in every close state (open, after entry 1, after entry 2)", async () => {
+    const open = await lg1([...base(5000), profit2025]);
+    const afterResult = await lg1([...base(5000), profit2025, rikResult2025]);
+    const afterTransfer = await lg1([...base(5000), profit2025, rikResult2025, rikTransfer2025]);
+
+    for (const check of [open, afterResult, afterTransfer]) expect(check.balance_before).toBe(25000);
+    expect(open.components).toMatchObject({ unclosed_prior_year_profit_and_loss: 20000, closed_prior_year_result: 0 });
+    // 20 000 open revenue + (−20 000) on 9000 = 0; the result is on 2970.
+    expect(afterResult.components).toMatchObject({ unclosed_prior_year_profit_and_loss: 0, closed_prior_year_result: 20000 });
+    expect(afterTransfer.components).toMatchObject({ retained_earnings_balance: 25000, closed_prior_year_result: 0, unclosed_prior_year_profit_and_loss: 0 });
+  });
+
+  it("RIK operator practice (only D 2970 / K 2960, no 9000 entry) counts the year once", async () => {
+    // Booked either on 1 Dec of the closed year or during the distribution year.
+    for (const date of ["2025-12-01", "2026-05-01"]) {
+      const transferOnly = makeJournal(date, [makePosting(2970, "D", 20000), makePosting(2960, "C", 20000)]);
+      const check = await lg1([...base(5000), profit2025, transferOnly]);
+      expect(check.components, date).toMatchObject({
+        retained_earnings_balance: 25000, closed_prior_year_result: -20000, unclosed_prior_year_profit_and_loss: 20000,
+      });
+      expect(check.balance_before, date).toBe(25000);
+    }
+  });
+
+  it("honors the configured current-year profit account (accounting-rules override) in the lg 1 ceiling", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-div-cyp-"));
+    const rulesPath = join(dir, "accounting-rules.md");
+    writeFileSync(rulesPath, "# Accounting Rules\n\n## Annual Report\nCurrent year profit account: 2999\n", "utf-8");
+    const previous = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesPath;
+    resetAccountingRulesCache();
+    try {
+      const resultOn2999 = makeJournal("2025-12-31", [makePosting(9000, "D", 20000), makePosting(2999, "C", 20000)]);
+      const { cb } = setup([...base(5000), profit2025, resultOn2999], [
+        ...rikAccounts(),
+        makeAccount(2999, "C", "Omakapital", "Aruandeaasta kasum erikonto", "Current year profit override"),
+      ]);
+      const data = parseResult(await cb({ net_dividend: 1, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: true }));
+      const check = data.retained_earnings_check as {
+        balance_before: number; components: { current_year_profit_account: number; closed_prior_year_result: number };
+      };
+      expect(check.components.current_year_profit_account).toBe(2999);
+      expect(check.components.closed_prior_year_result).toBe(20000);
+      expect(check.balance_before).toBe(25000);
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+      else process.env.EARVELDAJA_RULES_FILE = previous;
+      resetAccountingRulesCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("RIK excludes the distribution year's own result entry from 2970 on a Dec-31 distribution", async () => {
+    const profit2026 = makeJournal("2026-03-01", [makePosting(1000, "D", 50000), makePosting(4000, "C", 50000)]);
+    const rikResult2026 = makeJournal("2026-12-31", [makePosting(9000, "D", 50000), makePosting(2970, "C", 50000)]);
+    const check = await lg1([...base(5000), profit2026, rikResult2026], "2026-12-31");
+    expect(check.components.closed_prior_year_result).toBe(0);
+    expect(check.balance_before).toBe(5000);
+  });
+
+  // ---- MINOR 8: shareholder name sandboxing ---------------------------------
+
+  it("MINOR-8 desandboxes the shareholder name for the journal title and wraps it at MCP output", async () => {
+    const nonce = "0123456789abcdef0123456789abcdef";
+    const wrapped = `<<UNTRUSTED_OCR_START:${nonce}>>\nEvil OÜ\n<<UNTRUSTED_OCR_END:${nonce}>>`;
+    const { api, cb } = setup(base(100000), makeStandardAccounts(), { clientName: wrapped });
+    const result = await cb({ net_dividend: 1000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+    expect(isError(result)).toBe(false);
+    const created = vi.mocked(api.journals.create).mock.calls[0]![0] as { title: string };
+    expect(created.title).toContain("Evil OÜ");
+    expect(created.title).not.toContain("UNTRUSTED_OCR");
+    const data = parseResult(result);
+    const name = (data.shareholder as { name: string }).name;
+    expect(name).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]{32}>>\nEvil OÜ\n<<UNTRUSTED_OCR_END:[0-9a-f]{32}>>$/);
+    expect(name).not.toContain(nonce);
+    const audit = mockedLogAudit.mock.calls[0]![0] as { summary: string };
+    expect(audit.summary).not.toContain("UNTRUSTED_OCR");
+  });
+
+  // ---- MINOR 9: explicit inactive reserve account accepted -----------------
+
+  it("MINOR-9 accepts an explicit INACTIVE restricted reserve account and still reads its balance into the floor", async () => {
+    const accounts = [
+      ...makeStandardAccounts(),
+      makeAccount(2930, "C", "Omakapital", "Kohustuslik reservkapital (vana)", "Old reserve", { is_valid: false }),
+    ];
+    const journals = [...base(20000), makeJournal("2023-02-01", [makePosting(1000, "D", 3000), makePosting(2930, "C", 3000)])];
+    const { cb } = setup(journals, accounts);
+    const result = await cb({ net_dividend: 100, shareholder_client_id: 1, effective_date: "2026-06-01", restricted_reserve_accounts: [2930], dry_run: true });
+    expect(isError(result)).toBe(false);
+    const net = parseResult(result).net_assets_check as { restricted_reserves: number; minimum_net_assets: number };
+    expect(net.restricted_reserves).toBe(3000);
+    expect(net.minimum_net_assets).toBe(5500);
+  });
+});
 
 describe("create_owner_expense_reimbursement", () => {
   let tools: Map<string, ToolCallback>;

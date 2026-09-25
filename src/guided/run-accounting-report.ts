@@ -12,6 +12,7 @@ import type {
   AccountingReportResult,
   AgingSide,
   MonthEndInvoiceRow,
+  MonthEndDueList,
 } from "../reporting/types.js";
 
 // GUIDED FAÇADE. `run_accounting_report` unifies trial_balance / balance_sheet /
@@ -39,6 +40,7 @@ function cap<T>(items: readonly T[], detail: "compact" | "full"): { items: reado
 }
 
 function renderAgingSide(side: AgingSide, detail: "compact" | "full") {
+  const parties = cap(side.top_parties, detail);
   return {
     total_unpaid_face_value: side.total_unpaid_face_value,
     total_invoices: side.total_invoices,
@@ -53,14 +55,26 @@ function renderAgingSide(side: AgingSide, detail: "compact" | "full") {
         ...(truncated ? { truncated: true } : {}),
       };
     }),
-    top_parties: side.top_parties.map(p => ({ ...p, name: wrapUntrustedOcr(p.name) ?? p.name })),
+    top_parties: parties.items.map(p => ({ ...p, name: wrapUntrustedOcr(p.name) ?? p.name })),
+    ...(parties.truncated ? { top_parties_truncated: true, party_count: side.top_parties.length } : {}),
     ...(side.unmatched ? { unmatched: side.unmatched } : {}),
     ...(side.warnings.length > 0 ? { warnings: side.warnings } : {}),
   };
 }
 
-function wrapInvoiceRows(rows: readonly MonthEndInvoiceRow[]) {
+function wrapInvoiceRows<T extends MonthEndInvoiceRow>(rows: readonly T[]) {
   return rows.map(r => ({ ...r, client: wrapUntrustedOcr(r.client) ?? r.client }));
+}
+
+// `count`/`total` always cover every row; a capped list says so.
+function renderDueList(list: MonthEndDueList, detail: "compact" | "full") {
+  const { items, truncated } = cap(list.items, detail);
+  return { count: list.count, total: list.total, items: wrapInvoiceRows(items), ...(truncated ? { truncated: true } : {}) };
+}
+
+function renderCounted<T, R>(list: { count: number; items: readonly T[] }, detail: "compact" | "full", wrap: (items: readonly T[]) => R[]) {
+  const { items, truncated } = cap(list.items, detail);
+  return { count: list.count, items: wrap(items), ...(truncated ? { truncated: true } : {}) };
 }
 
 function renderReport(value: AccountingReportResult, detail: "compact" | "full"): Record<string, unknown> {
@@ -123,18 +137,15 @@ function renderReport(value: AccountingReportResult, detail: "compact" | "full")
       return {
         report: "month_end",
         month: value.month,
-        unconfirmed_journals: {
-          count: value.unconfirmed_journals.count,
-          items: cap(value.unconfirmed_journals.items, detail).items.map(j => ({ ...j, title: wrapUntrustedOcr(j.title) ?? j.title })),
-        },
-        unconfirmed_transactions: {
-          count: value.unconfirmed_transactions.count,
-          items: cap(value.unconfirmed_transactions.items, detail).items.map(t => ({ ...t, description: wrapUntrustedOcr(t.description) ?? t.description })),
-        },
-        ...(value.unconfirmed_sale_invoices ? { unconfirmed_sale_invoices: { count: value.unconfirmed_sale_invoices.count, items: wrapInvoiceRows(cap(value.unconfirmed_sale_invoices.items, detail).items) } } : {}),
-        unconfirmed_purchase_invoices: { count: value.unconfirmed_purchase_invoices.count, items: wrapInvoiceRows(cap(value.unconfirmed_purchase_invoices.items, detail).items) },
-        ...(value.overdue_receivables ? { overdue_receivables: { count: value.overdue_receivables.count, total: value.overdue_receivables.total, items: wrapInvoiceRows(value.overdue_receivables.items) } } : {}),
-        overdue_payables: { count: value.overdue_payables.count, total: value.overdue_payables.total, items: wrapInvoiceRows(value.overdue_payables.items) },
+        unconfirmed_journals: renderCounted(value.unconfirmed_journals, detail, rows => rows.map(j => ({ ...j, title: wrapUntrustedOcr(j.title) ?? j.title }))),
+        unconfirmed_transactions: renderCounted(value.unconfirmed_transactions, detail, rows => rows.map(t => ({ ...t, description: wrapUntrustedOcr(t.description) ?? t.description }))),
+        ...(value.unconfirmed_sale_invoices ? { unconfirmed_sale_invoices: renderCounted(value.unconfirmed_sale_invoices, detail, wrapInvoiceRows) } : {}),
+        unconfirmed_purchase_invoices: renderCounted(value.unconfirmed_purchase_invoices, detail, wrapInvoiceRows),
+        overdue_as_of: value.overdue_as_of,
+        ...(value.overdue_receivables ? { overdue_receivables: renderDueList(value.overdue_receivables, detail) } : {}),
+        overdue_payables: renderDueList(value.overdue_payables, detail),
+        ...(value.due_before_month_end_receivables ? { due_before_month_end_receivables: renderDueList(value.due_before_month_end_receivables, detail) } : {}),
+        ...(value.due_before_month_end_payables ? { due_before_month_end_payables: renderDueList(value.due_before_month_end_payables, detail) } : {}),
         summary: value.summary,
         ...(value.warnings.length > 0 ? { warnings: value.warnings } : {}),
       };
@@ -186,7 +197,7 @@ export function registerRunAccountingReportTool(
     {
       report: z.enum(["trial_balance", "balance_sheet", "profit_and_loss", "aging", "month_end", "missing_documents", "receipt_client_alignment"]).describe("Which report to run."),
       date_from: z.string().optional().describe("Period start (YYYY-MM-DD). Required for profit_and_loss; optional for trial_balance."),
-      date_to: z.string().optional().describe("Period end / balance date (YYYY-MM-DD)."),
+      date_to: z.string().optional().describe("Period end / balance date (YYYY-MM-DD). balance_sheet defaults to today; trial_balance without it counts every posting (period.to=\"unbounded\")."),
       as_of_date: z.string().optional().describe("aging only: cutoff date (YYYY-MM-DD, default today)."),
       month: z.string().optional().describe("month_end only: month (YYYY-MM)."),
       detail: z.enum(["compact", "full"]).optional().describe("compact (default) caps long line lists; full returns every line."),

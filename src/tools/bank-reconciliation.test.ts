@@ -3,6 +3,7 @@ import { z } from "zod";
 import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { LinkedInvoiceClientsAmbiguousError, StoredTypeDirectionMismatchError } from "../api/transactions.api.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -1235,6 +1236,40 @@ describe("bank_reconciliation plan binding", () => {
     expect(completedIds).toContain(`recon-delete-duplicate-tx-${inc}`);
   });
 
+  it.each([
+    ["stored_type_direction_mismatch", () => new StoredTypeDirectionMismatchError({ transactionId: 1, storedType: "D", signedDirection: "outgoing" })],
+    ["linked_invoice_clients_ambiguous", () => new LinkedInvoiceClientsAmbiguousError({ transactionId: 1, invoiceClientsIds: [20, 21] })],
+  ])("auto-confirm reports a %s confirm refusal under its own error code", async (code, makeError) => {
+    const context = createTestRuntimeSafetyContext();
+    const { handler, api } = autoConfirmWithContext(context, {
+      transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    api.transactions.confirm.mockRejectedValueOnce(makeError());
+    const handle = await issueAutoConfirmPlanHandle(handler, {});
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const failed = res.execution.execution_report.command_partitions.failed;
+    expect(failed).toHaveLength(1);
+    expect(failed[0].code).toBe(code);
+  });
+
+  it("inter-account: reports a stored-type/direction confirm refusal under its own error code", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: 7 },
+        { id: 41, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 7 },
+      ],
+      bankAccounts: iaBankAccounts,
+    });
+    api.transactions.confirm.mockRejectedValueOnce(
+      new StoredTypeDirectionMismatchError({ transactionId: 40, storedType: "C", signedDirection: "incoming" }),
+    );
+    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const failed = res.execution.execution_report.command_partitions.failed;
+    expect(failed.map((f: any) => f.code)).toContain("stored_type_direction_mismatch");
+  });
+
   it("inter-account: refuses on ledger drift after review", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
@@ -1412,7 +1447,7 @@ describe("reconcile_inter_account_transfers", () => {
   it("pairs reciprocal same-type own-IBAN transfers instead of treating both legs as one-sided", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
-        { id: 109, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "Transfer to SEB" },
+        { id: 109, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "WISE:T109 Transfer to SEB [source_direction=OUT]" },
         { id: 110, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" },
       ],
       bankAccounts,
@@ -1431,7 +1466,7 @@ describe("reconcile_inter_account_transfers", () => {
   it("pairs reciprocal same-type company-name transfers when both sides strongly infer each other", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
-        { id: 115, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer out" },
+        { id: 115, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer out\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" },
         { id: 116, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer in" },
       ],
       bankAccounts,
@@ -1454,7 +1489,7 @@ describe("reconcile_inter_account_transfers", () => {
     // and is deleted instead of being confirmed.
     const { handler, api } = setupInterAccountTool({
       transactions: [
-        { id: 111, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "Transfer to SEB" },
+        { id: 111, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description: "WISE:T111 Transfer to SEB [source_direction=OUT]" },
         { id: 112, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" },
       ],
       bankAccounts,
@@ -1474,6 +1509,52 @@ describe("reconcile_inter_account_transfers", () => {
     ], { autoFixClientsId: false });
     expect(api.transactions.delete).toHaveBeenCalledTimes(1);
     expect(api.transactions.delete).toHaveBeenCalledWith(112);
+  });
+
+  describe("MAJOR-1 same-type reciprocal direction", () => {
+    // Real transfer: LHV (dim 100) -> SEB (dim 200). Both legs stored as C.
+    const lhvOut = (description: string) => ({ id: 131, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description });
+    const sebIn = { id: 132, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" };
+
+    it("routes an unsigned same-type pair to direction_unresolved review in either listing order", async () => {
+      for (const order of [[lhvOut("Transfer to SEB"), sebIn], [sebIn, lhvOut("Transfer to SEB")]]) {
+        const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        expect(payload.matched_pairs).toBe(0);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(payload.ambiguous_pairs).toHaveLength(1);
+        expect(payload.ambiguous_pairs[0].code).toBe("direction_unresolved");
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
+    });
+
+    it("confirms the signed outgoing leg even when the incoming mirror is listed first", async () => {
+      const out = lhvOut("WISE:T131 Transfer to SEB [source_direction=OUT]");
+      const { handler, api } = setupInterAccountTool({ transactions: [sebIn, out], bankAccounts });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 131, incoming_transaction_id: 132, from_dimension_id: 100, to_dimension_id: 200, status: "confirmed" });
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm).toHaveBeenCalledWith(131, [
+        { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
+      ], { autoFixClientsId: false });
+      expect(api.transactions.delete).toHaveBeenCalledWith(132);
+    });
+  });
+
+  it("MEDIUM-2 distributes a same-currency foreign pair in base EUR, like one-sided confirms", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 141, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 92, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
+        { id: 142, status: "PROJECT", is_deleted: false, type: "D", amount: 100, base_amount: 92, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+      ],
+      bankAccounts,
+    });
+    const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+    expect(payload.matched_pairs).toBe(1);
+    expect(api.transactions.confirm).toHaveBeenCalledWith(141, [
+      { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 92 },
+    ], { autoFixClientsId: false });
   });
 
   it("does not pair or one-side-match reciprocal same-type transfers when base amounts conflict", async () => {

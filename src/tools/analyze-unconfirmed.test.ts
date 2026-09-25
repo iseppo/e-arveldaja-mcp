@@ -647,3 +647,58 @@ describe("analyze_unconfirmed_transactions", () => {
     });
   });
 });
+
+describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
+  const journal = (id: number, date: string, postings: Array<{ dim: number; type: "D" | "C"; amount: number }>) => ({
+    id, effective_date: date, is_deleted: false, registered: true,
+    postings: postings.map(p => ({ accounts_id: 1020, accounts_dimensions_id: p.dim, type: p.type, amount: p.amount, base_amount: null, is_deleted: false })),
+  });
+  const baseTx = {
+    id: 7, status: "PROJECT", is_deleted: false, amount: 100, date: "2026-03-22",
+    accounts_dimensions_id: 100, cl_currencies_id: "EUR", bank_account_name: "Acme OÜ", bank_account_no: null,
+  };
+
+  it("keys the duplicate side on the signed direction, not the raw stored type", async () => {
+    // Signed CRDT stored as legacy C: the money came IN, so the bank posting is D.
+    const handler = setupTool({
+      transactions: [{ ...baseTx, type: "C", description: "Receipt\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]" }],
+      bankAccounts: defaultBankAccounts,
+      journals: [journal(91, "2026-03-22", [{ dim: 100, type: "D", amount: 100 }])],
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 91 });
+  });
+
+  it("finds an already-booked journal one day off the transaction date", async () => {
+    const handler = setupTool({
+      transactions: [{ ...baseTx, type: "D", description: "Receipt" }],
+      bankAccounts: defaultBankAccounts,
+      journals: [journal(92, "2026-03-23", [{ dim: 100, type: "D", amount: 100 }])],
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 92 });
+  });
+
+  it("does not suggest confirming an own-account transfer Lane B already covers", async () => {
+    // Legacy unsigned C on LHV, but the booked transfer shows money came IN
+    // from SEB: the side-keyed scan misses it; the bidirectional Lane B key
+    // does not.
+    const handler = setupTool({
+      transactions: [{ ...baseTx, type: "C", amount: 500, bank_account_no: "EE987654321098765432", description: "Transfer" }],
+      bankAccounts: defaultBankAccounts,
+      journals: [journal(93, "2026-03-21", [{ dim: 200, type: "C", amount: 500 }, { dim: 100, type: "D", amount: 500 }])],
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 93 });
+    expect(payload.summary.confirm_inter_account ?? 0).toBe(0);
+  });
+
+  it("fails closed on a malformed invoice payment_status like the reconcile paths", async () => {
+    const handler = setupTool({
+      transactions: [{ ...baseTx, type: "D", description: "Payment", ref_number: "RF1" }],
+      bankAccounts: defaultBankAccounts,
+      sales: [{ id: 10, status: "CONFIRMED", payment_status: 42, number: "ARV-10", clients_id: 20, client_name: "Acme OÜ", gross_price: 100, bank_ref_number: "RF1" }],
+    });
+    await expect(handler({})).rejects.toThrow(/payment_status/);
+  });
+});
