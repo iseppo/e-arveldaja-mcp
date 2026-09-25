@@ -7,6 +7,7 @@ import {
   renderSuspects,
 } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../../response-budget.js";
+import { runWithToolProfile } from "../../tool-profile.js";
 import { roundMoney } from "../../money.js";
 import { reconInvoiceConfirmCommandId } from "../../tools/bank-reconciliation-plan.js";
 import type { PlanExecutionReport } from "../../plan-execution.js";
@@ -333,6 +334,43 @@ describe("renderExactMatchCompact", () => {
     expect(warning?.message).toContain("2327264");
   });
 
+  it("names confirm_transaction in third-party-payer follow-ups only where it is registered", () => {
+    const projection = makeExactProjection(0, {
+      thirdPartyPayerReviews: [thirdPartyReview, { ...thirdPartyReview, transaction_id: 1211, reason: "invoice_client_missing" }],
+    });
+    for (const profile of ["guided", "guided-sales"] as const) {
+      const { summary } = runWithToolProfile(profile, () => renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "P" }));
+      const messages = (summary.warnings ?? []).filter(w => w.code === "third_party_payer" || w.code === "invoice_client_missing").map(w => w.message);
+      expect(messages).toHaveLength(2);
+      for (const message of messages) {
+        expect(message).not.toMatch(/confirm_transaction|update_sale_invoice|update_purchase_invoice/);
+        expect(message).toContain("EARVELDAJA_PROFILE");
+      }
+      expect(messages[0]).toContain("reassign_client_to_invoice: true");
+    }
+    const standard = runWithToolProfile("standard", () => renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "P" }));
+    // Where confirm_transaction is registered, the review row's own next_action is kept verbatim.
+    expect(standard.summary.warnings?.find(w => w.code === "third_party_payer")?.message).toContain("Review the payer");
+    const guidedMessage = runWithToolProfile("guided", () => renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "P" }))
+      .summary.warnings?.find(w => w.code === "third_party_payer")?.message;
+    expect(guidedMessage).not.toContain("Review the payer");
+  });
+
+  it("the guided ledger-repair blocker names no unregistered tool", () => {
+    const projection = makeExactProjection(1);
+    const { summary } = runWithToolProfile("guided", () => renderExactMatchCompact({
+      mode: "EXECUTED",
+      projection,
+      executionReport: executionReport([0]),
+      ledgerChecks,
+      operationHandle: "op-led",
+    }));
+    const blocker = summary.blockers?.find(b => b.code === "ledger_client_mismatch");
+    expect(blocker?.message).toContain("IS confirmed");
+    expect(blocker?.message).not.toMatch(/invalidate_transaction|confirm_transaction/);
+    expect(blocker?.message).toContain("EARVELDAJA_PROFILE");
+  });
+
   it("reports a broken post-confirm ledger invariant as a blocker on an otherwise clean execute", () => {
     const projection = makeExactProjection(1);
     const { summary } = renderExactMatchCompact({
@@ -423,6 +461,20 @@ describe("renderInterAccountCompact", () => {
     expect((scope.period as Record<string, unknown>).from).toBe("2026-03-03");
     expect(summary.samples?.length).toBe(3);
     expect(String((summary.samples?.[0] as Record<string, unknown>).description_out)).toMatch(OCR);
+  });
+
+  it("dry run points at reconcile_bank_transactions execute_inter_account with the reviewed inputs", () => {
+    const { summary } = renderInterAccountCompact({
+      mode: "DRY_RUN", match: makeInterAccount(2), planHandle: "PLAN-IA", maxDateGap: 3, targetAccountsDimensionsId: 55,
+    });
+    expect(summary.next_action).toEqual({
+      tool: "reconcile_bank_transactions",
+      args: { mode: "execute_inter_account", plan_handle: "PLAN-IA", max_date_gap: 3, target_accounts_dimensions_id: 55 },
+      approval_required: true,
+    });
+    expect(JSON.stringify(summary)).not.toContain("reconcile_inter_account_transfers");
+    const executed = renderInterAccountCompact({ mode: "EXECUTED", match: makeInterAccount(2), operationHandle: "op" });
+    expect(executed.summary.next_action).toBeUndefined();
   });
 
   it("NEVER hides blockers: a stopped execute surfaces a blocker + references the result page", () => {

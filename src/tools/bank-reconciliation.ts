@@ -195,7 +195,7 @@ export function registerBankReconciliationTools(
           const outcome = await operations.prepareInterAccount(input);
           if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
           return compact
-            ? compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName }))
+            ? compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id }))
             : response(buildInterAccountPayload({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle }));
         }
         const outcome = await operations.executeInterAccount({ ...input, planHandle: plan_handle });
@@ -262,7 +262,7 @@ export function registerBankReconciliationTools(
             case "inter_account_dry_run": {
               const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id });
               if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
-              return compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName }));
+              return compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id }));
             }
             case "execute_inter_account": {
               const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, planHandle: plan_handle });

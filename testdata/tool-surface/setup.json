@@ -2,18 +2,18 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 129904,
-    "descriptionsBytes": 17603,
-    "inputSchemasBytes": 80986,
+    "toolsListBytes": 131035,
+    "descriptionsBytes": 17974,
+    "inputSchemasBytes": 81746,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4099
     },
-    "serverInstructionsBytes": 769,
-    "promptMetadataBytes": 11133,
+    "serverInstructionsBytes": 765,
+    "promptMetadataBytes": 11460,
     "resourceMetadataBytes": 3251
   },
-  "serverInstructions": "Setup mode:\n- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.\n- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, receipt_batch (mode=\"scan\"), parse_lightyear_statement, and parse_lightyear_capital_gains remain available.\n- Call get_setup_instructions for the exact credential setup steps.\n- list_connections returns the currently configured connections (0 until credentials are added).\n- Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.\n- Audit logs remain human-readable Markdown under logs/, but no audit log file exists until a configured connection performs a mutating action.\n  ",
+  "serverInstructions": "Setup mode:\n- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.\n- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, parse_lightyear_statement, parse_lightyear_capital_gains, receipt_batch (mode=\"scan\") remain available.\n- Call get_setup_instructions for the exact credential setup steps.\n- list_connections returns the currently configured connections (0 until credentials are added).\n- Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.\n- Audit logs remain human-readable Markdown under logs/, but no audit log file exists until a configured connection performs a mutating action.\n  ",
   "tools": [
     {
       "annotations": {
@@ -276,6 +276,8 @@
               "CREATED",
               "UPDATED",
               "DELETED",
+              "DEACTIVATED",
+              "REACTIVATED",
               "CONFIRMED",
               "INVALIDATED",
               "UPLOADED",
@@ -449,6 +451,10 @@
             "description": "Address",
             "type": "string"
           },
+          "allow_duplicate": {
+            "description": "Create even when a live client with the same registry code exists, or the code/VAT is the company's own (default false: refused with the existing client id(s)).",
+            "type": "boolean"
+          },
           "bank_account_no": {
             "description": "Bank account (IBAN)",
             "type": "string"
@@ -516,13 +522,17 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools.",
+      "description": "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client.",
       "execution": {
         "taskSupport": "forbidden"
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "allow_duplicate": {
+            "description": "Allow a registry code another live client (or the company itself) already uses (default false).",
+            "type": "boolean"
+          },
           "data": {
             "anyOf": [
               {
@@ -537,6 +547,10 @@
               }
             ],
             "description": "Object with fields to update."
+          },
+          "foreign_identity_attested": {
+            "description": "Operator attestation for a FOREIGN legal entity's identity, required when changing its identity fields (see create_client).",
+            "type": "boolean"
           },
           "id": {
             "description": "Client ID",
@@ -1250,7 +1264,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped and failures are reported per ID.",
+      "description": "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped; failures and indeterminate outcomes are reported per ID.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1579,7 +1593,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.",
+      "description": "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1599,7 +1613,7 @@
                 "type": "string"
               }
             ],
-            "description": "Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number."
+            "description": "Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction)."
           },
           "id": {
             "description": "Transaction ID",
@@ -1682,7 +1696,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures are reported per ID.",
+      "description": "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures and indeterminate outcomes are reported per ID.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4181,7 +4195,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE lg 1 distributable profit (retained earnings + closed prior-year result + unclosed prior-year P&L; not the current year) is distributable as net dividend (ÄS § 157 lg 1). Hard-blocks a net dividend exceeding it, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true (never on an imbalanced ledger); pending unconfirmed dividend drafts count. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document.",
+      "description": "Calculate dividend CIT (22/78 from 2025-01-01; earlier dates date-gated) and create draft journal entries. Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE lg 1 distributable profit (retained earnings + closed prior-year result + unclosed prior-year P&L; not the current year) is distributable as net dividend (ÄS § 157 lg 1). Hard-blocks a net dividend exceeding it, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true (never on an imbalanced ledger); pending unconfirmed dividend drafts count. Reports max_net_dividend. One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document. Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -4193,7 +4207,7 @@
             "type": "number"
           },
           "dry_run": {
-            "description": "Preview calculation and postings without creating journal (default false)",
+            "description": "Preview calculation, legality checks, and postings without creating a journal (default true). Set false only after the user explicitly approves the previewed journal.",
             "type": "boolean"
           },
           "effective_date": {
@@ -5844,7 +5858,7 @@
           "required": true
         },
         {
-          "description": "Optional bank account dimension ID used for bank transaction matching; if omitted, list account dimensions and ask the user to confirm the best match",
+          "description": "Optional bank-account dimension ID (the integer id of the bank account's dimension, not the account number) used for bank transaction matching; if omitted, the workflow proposes one and asks you to confirm it",
           "name": "accounts_dimensions_id",
           "required": false
         },
@@ -5871,7 +5885,7 @@
           "required": true
         },
         {
-          "description": "Optional bank account dimension ID in e-arveldaja; if omitted, list account dimensions and ask the user to confirm the bank account",
+          "description": "Optional bank-account dimension ID (integer dimension id, not the account number); if omitted, a unique bank account is resolved automatically or you are asked to confirm one",
           "name": "accounts_dimensions_id",
           "required": false
         },
@@ -5898,12 +5912,12 @@
           "required": true
         },
         {
-          "description": "Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account",
+          "description": "Optional bank-account dimension ID of the Wise account (integer dimension id, not the account number); if omitted, a unique Wise account is resolved automatically or you are asked to confirm one",
           "name": "accounts_dimensions_id",
           "required": false
         },
         {
-          "description": "Optional Wise fee expense account dimension ID",
+          "description": "Optional dimension ID of the Wise fee expense account (normally an 8610 dimension); auto-detected when unique",
           "name": "fee_account_dimensions_id",
           "required": false
         },
@@ -5935,7 +5949,7 @@
     {
       "arguments": [
         {
-          "description": "Optional bank account dimension ID used for transaction classification; if omitted, list account dimensions and ask the user to confirm the bank account",
+          "description": "Optional bank-account dimension ID (integer dimension id, not the account number) whose unmatched transactions are classified; if omitted, the workflow proposes one and asks you to confirm it",
           "name": "accounts_dimensions_id",
           "required": false
         },
@@ -5996,7 +6010,7 @@
           "required": true
         }
       ],
-      "description": "Create a new supplier by looking up registry data and creating a client record.",
+      "description": "Create a new supplier client record after an existing-client check, Estonian registry lookup (or foreign-identity attestation), and explicit approval.",
       "name": "new-supplier",
       "title": "New Supplier"
     },

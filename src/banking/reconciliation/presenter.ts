@@ -10,6 +10,7 @@ import {
 } from "../../bank-posting-duplicate-guard.js";
 import { roundMoney } from "../../money.js";
 import { createOperationSummary, type OperationSummaryV1 } from "../../operation-summary.js";
+import { currentToolProfile, isToolVisibleForProfile } from "../../tool-profile.js";
 import type { CompactReviewItem, CompactWarning } from "../../operation-outcome.js";
 import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../../operation-result-store.js";
 import {
@@ -491,6 +492,40 @@ export function buildReconExactResultDetailItems(
   }));
 }
 
+// The third-party-payer / ledger-repair follow-ups need a single-transaction
+// confirm (with reassign_client_to_invoice) that only confirm_transaction
+// performs. Name it only when it is registered on the active profile; the guided
+// profiles have no such route, so they get a tool-free description instead.
+const GUIDED_THIRD_PARTY_PAYER_NEXT_ACTION =
+  "If the payment settles this invoice, it must be confirmed against the invoice with reassign_client_to_invoice: true "
+  + "(books the receipt under the invoice's client), which this profile cannot do: list the proposed distribution and "
+  + "confirm it on the standard or full profile (EARVELDAJA_PROFILE). Otherwise match manually.";
+const GUIDED_INVOICE_CLIENT_MISSING_NEXT_ACTION =
+  "The matched invoice has no client, so the receipt cannot be pinned to a client sub-ledger: set the client on the "
+  + "invoice first, then confirm the transaction against it on the standard or full profile (EARVELDAJA_PROFILE).";
+
+function singleConfirmToolVisible(): boolean {
+  try {
+    return isToolVisibleForProfile("confirm_transaction", currentToolProfile());
+  } catch {
+    return false;
+  }
+}
+
+function thirdPartyPayerNextAction(review: ExactMatchProjection["thirdPartyPayerReviews"][number]): string {
+  if (singleConfirmToolVisible()) return review.next_action;
+  return review.reason === "invoice_client_missing"
+    ? GUIDED_INVOICE_CLIENT_MISSING_NEXT_ACTION
+    : GUIDED_THIRD_PARTY_PAYER_NEXT_ACTION;
+}
+
+function ledgerRepairInstruction(transactionId: number): string {
+  return singleConfirmToolVisible()
+    ? `Run invalidate_transaction ${transactionId}, then confirm_transaction with reassign_client_to_invoice: true.`
+    : "Repair it by invalidating the transaction and re-confirming it with reassign_client_to_invoice: true on the "
+      + "standard or full profile (EARVELDAJA_PROFILE); this profile cannot.";
+}
+
 export function renderExactMatchCompact(input: ExactMatchCompactInput): { summary: OperationSummaryV1 } {
   const { mode, projection } = input;
   const dryRun = mode === "DRY_RUN";
@@ -539,7 +574,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
       code: review.reason,
       message: `Payer client ${review.transaction_clients_id ?? "none"} does not match ${review.invoice_type} `
         + `#${review.invoice_id} client ${review.invoice_clients_id ?? "none"}; withheld from the confirm batch. `
-        + review.next_action,
+        + thirdPartyPayerNextAction(review),
     });
   }
   for (const warning of input.ledgerChecks?.warnings ?? []) {
@@ -557,8 +592,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
       item_id: String(failure.transaction_id),
       code: failure.code,
       message: `Transaction ${failure.transaction_id} IS confirmed but its registration journal failed the receipt `
-        + `ledger check (${failure.code}). Run invalidate_transaction ${failure.transaction_id}, then `
-        + "confirm_transaction with reassign_client_to_invoice: true.",
+        + `ledger check (${failure.code}). ${ledgerRepairInstruction(failure.transaction_id)}`,
       severity: "blocker",
     });
   }
@@ -640,6 +674,10 @@ export interface InterAccountCompactInput {
   /** Execute only: an operation-result handle bound to the consumed recon plan. */
   readonly operationHandle?: string;
   readonly connectionName?: string;
+  /** Dry run only: the matching inputs the reviewed plan was built with. The
+   * execute_inter_account next_action must resend them unchanged (plan_drift). */
+  readonly maxDateGap?: number;
+  readonly targetAccountsDimensionsId?: number;
 }
 
 /** Scalar-only per-transfer details for the operation-result store. */
@@ -782,6 +820,23 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
     blockers,
     samples,
     ...(dryRun && input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+    // The compact surface serves the guided profiles, where the standalone
+    // reconcile_inter_account_transfers is not registered: the reviewed plan is
+    // executed through reconcile_bank_transactions mode="execute_inter_account".
+    ...(dryRun && input.planHandle !== undefined
+      ? {
+          next_action: {
+            tool: "reconcile_bank_transactions",
+            args: {
+              mode: "execute_inter_account",
+              plan_handle: input.planHandle,
+              ...(input.maxDateGap !== undefined ? { max_date_gap: input.maxDateGap } : {}),
+              ...(input.targetAccountsDimensionsId !== undefined ? { target_accounts_dimensions_id: input.targetAccountsDimensionsId } : {}),
+            },
+            approval_required: true,
+          },
+        }
+      : {}),
     ...(details ? { details } : {}),
   }, { budget: "batch", measureEnvelope: "summary" });
 

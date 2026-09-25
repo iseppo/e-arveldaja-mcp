@@ -5,6 +5,7 @@ import {
   createClassificationOperations,
 } from "./classification-operations.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { renderApplyClassificationsCompact, renderClassificationAnalysisCompact } from "./classification-presenter.js";
 import {
   createAccountingWorkflowApi,
   type AccountingWorkflowApiOptions,
@@ -323,6 +324,37 @@ describe("classification operations — P0-2 plan binding", () => {
     expect(outcome.value.results[0]!.status).toBe("applied");
   });
 
+  it("execute_apply re-reads clients/invoices/transactions uncached before the gating reads; dry_run_apply stays cached", async () => {
+    const { operations, api } = makeSaasOperations();
+    const handle = await dryRunHandle(operations, [saasGroup()]);
+    expect(api.clients.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.transactions.invalidateListCache).not.toHaveBeenCalled();
+    const clientListsBefore = api.clients.listAll.mock.calls.length;
+    const invoiceListsBefore = api.purchaseInvoices.listAll.mock.calls.length;
+    const txGetsBefore = api.transactions.get.mock.calls.length;
+
+    const outcome = await operations.applyClassifications({
+      classificationsJson: { groups: [saasGroup()] },
+      execute: true,
+      planHandle: handle,
+    });
+    expect(outcome.ok).toBe(true);
+    const firstInvalidate = (resource: { invalidateListCache: { mock: { invocationCallOrder: number[] } } }) =>
+      resource.invalidateListCache.mock.invocationCallOrder[0]!;
+    expect(firstInvalidate(api.clients)).toBeLessThan(api.clients.listAll.mock.invocationCallOrder[clientListsBefore]!);
+    expect(firstInvalidate(api.purchaseInvoices)).toBeLessThan(api.purchaseInvoices.listAll.mock.invocationCallOrder[invoiceListsBefore]!);
+    // Also drops cached transaction gets before the fingerprint pass's per-row read.
+    expect(firstInvalidate(api.transactions)).toBeLessThan(api.transactions.get.mock.invocationCallOrder[txGetsBefore]!);
+    // ... and again before the post-create freshness re-read of the transaction.
+    const createOrder = api.purchaseInvoices.createAndSetTotals.mock.invocationCallOrder[0]!;
+    const rereadOrder = (api.transactions.get.mock.invocationCallOrder as number[]).find(order => order > createOrder)!;
+    const invalidateAfterCreate = (api.transactions.invalidateListCache.mock.invocationCallOrder as number[])
+      .find(order => order > createOrder)!;
+    expect(invalidateAfterCreate).toBeDefined();
+    expect(invalidateAfterCreate).toBeLessThan(rereadOrder);
+  });
+
   it("books the auto-created supplier invoice with an explicit client reassignment", async () => {
     // The invoice is created for the rule-resolved supplier while the
     // transaction's client came from bank counterparty resolution; without the
@@ -586,5 +618,47 @@ describe("classification operations — incoming rows are never booked as purcha
     const refundGroup = openaiGroups.find((group: any) => group.transactions.some((tx: any) => tx.id === 43));
     expect(refundGroup!.transactions.map((tx: any) => tx.id)).toEqual([43]);
     expect(refundGroup!.category).toBe("revenue_without_invoice");
+  });
+});
+
+describe("classification operations — guided compact round trip", () => {
+  it("the classify compact's inlined classifications_json completes dry_run_apply → execute_apply", async () => {
+    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR" };
+    const { operations, api } = makeOperations({
+      transactionRows: [feeTx],
+      transactionDetails: { 1: feeTx },
+      clientRows: [{ ...SAAS_CLIENT, id: 9, name: "LHV Bank", cl_code_country: "EE" }],
+      purchaseArticles: PURCHASE_ARTICLES,
+      accounts: ACCOUNTS,
+    });
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (!analysis.ok) return;
+    const classifyCompact = renderClassificationAnalysisCompact({ result: analysis.value, accountsDimensionsId: 100 });
+    const classifyNext = classifyCompact.summary.next_action!;
+    expect(classifyNext.tool).toBe("classify_bank_transactions");
+    expect(classifyNext.args.mode).toBe("dry_run_apply");
+    // Round-trip through JSON exactly as a guided caller would resend it.
+    const classificationsJson = JSON.parse(JSON.stringify(classifyNext.args.classifications_json));
+    expect(classificationsJson.groups).toHaveLength(1);
+
+    const dryRun = await operations.applyClassifications({ classificationsJson });
+    expect(dryRun.ok).toBe(true);
+    if (!dryRun.ok) return;
+    expect(dryRun.value.results[0]!.status).toBe("dry_run_preview");
+    const applyCompact = renderApplyClassificationsCompact({ result: dryRun.value, classificationsJson });
+    const executeArgs = JSON.parse(JSON.stringify(applyCompact.summary.next_action!.args));
+    expect(executeArgs.mode).toBe("execute_apply");
+    expectNoWrites(api);
+
+    const executed = await operations.applyClassifications({
+      classificationsJson: executeArgs.classifications_json,
+      execute: true,
+      planHandle: executeArgs.plan_handle,
+    });
+    expect(executed.ok).toBe(true);
+    if (!executed.ok) return;
+    expect(executed.value.results[0]!.status).toBe("applied");
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 });

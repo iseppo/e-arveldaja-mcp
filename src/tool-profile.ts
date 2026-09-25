@@ -13,10 +13,12 @@ export const SETUP_PROFILE_CHOICES = Object.freeze([
 const GUIDED = new Set(GUIDED_TOOL_NAMES);
 const GUIDED_SALES = new Set([...GUIDED_TOOL_NAMES, "manage_sale_invoice"]);
 // Workflow-infra tools that ship in the `full` surface only for this release.
-// get_workflow_page pages non-plan workflow state. The interim granular guided
-// tools have now dropped (Task 14 folded reconcile_inter_account_transfers,
-// cleanup_camt_possible_duplicate, save_auto_booking_rule, compute_trial_balance
-// into merged/continuation façades), but get_workflow_page adoption stays
+// get_workflow_page pages non-plan workflow state. Task 14 folded
+// reconcile_inter_account_transfers (→ reconcile_bank_transactions inter-account
+// modes) and compute_trial_balance (→ run_accounting_report) out of the guided
+// surface; cleanup_camt_possible_duplicate and save_auto_booking_rule were NOT
+// folded and remain standalone guided tools (see GUIDED_TOOL_NAMES above).
+// get_workflow_page adoption stays
 // DEFERRED: no guided-reachable workflow action emits it as a next_action — the
 // workflow_action_v2 page reference is designed to stay latent (available:false)
 // when it is not visible, so guided never fails closed on it. Keeping it

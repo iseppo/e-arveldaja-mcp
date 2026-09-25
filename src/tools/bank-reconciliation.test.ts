@@ -21,13 +21,16 @@ function setupReconciliationTool(options: {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
       confirm: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.sales ?? []),
     },
     purchaseInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.purchases ?? []),
     },
     readonly: {
@@ -35,7 +38,7 @@ function setupReconciliationTool(options: {
       getAccountDimensions: vi.fn().mockResolvedValue([]),
       getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
     },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
 
@@ -52,15 +55,15 @@ function setupReconciliationTool(options: {
 function getReconciliationToolOptions(toolName: string): { description?: string; inputSchema?: Record<string, unknown> } {
   const server = { registerTool: vi.fn() } as any;
   const api = {
-    transactions: { listAll: vi.fn(), confirm: vi.fn() },
-    saleInvoices: { listAll: vi.fn() },
-    purchaseInvoices: { listAll: vi.fn() },
+    transactions: { invalidateListCache: vi.fn(), listAll: vi.fn(), confirm: vi.fn() },
+    saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn() },
+    purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn() },
     readonly: {
       getBankAccounts: vi.fn(),
       getAccountDimensions: vi.fn(),
       getInvoiceInfo: vi.fn(),
     },
-    journals: { listAllWithPostings: vi.fn() },
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn() },
     clients: { findByName: vi.fn() },
   } as any;
 
@@ -81,6 +84,7 @@ function setupInterAccountTool(options: {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
       get: vi.fn().mockImplementation(async (id: number) => {
         const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
@@ -91,12 +95,15 @@ function setupInterAccountTool(options: {
       delete: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([]),
     },
     purchaseInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([]),
     },
     journals: {
+      invalidateListCache: vi.fn(),
       listAllWithPostings: vi.fn().mockResolvedValue(options.journals ?? []),
     },
     clients: {
@@ -314,6 +321,7 @@ describe("reconcile_transactions", () => {
       const server = { registerTool: vi.fn() } as any;
       const api = {
         transactions: {
+          invalidateListCache: vi.fn(),
           listAll: vi.fn().mockResolvedValue([
             { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 },
           ]),
@@ -322,17 +330,18 @@ describe("reconcile_transactions", () => {
           confirm: vi.fn().mockResolvedValue({}),
         },
         saleInvoices: {
+          invalidateListCache: vi.fn(),
           listAll: vi.fn().mockResolvedValue([
             { id: 12, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-12", clients_id: 22, client_name: "Beta OU", gross_price: 200, bank_ref_number: "RF456" },
           ]),
         },
-        purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+        purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
         readonly: {
           getBankAccounts: vi.fn().mockResolvedValue([]),
           getAccountDimensions: vi.fn().mockResolvedValue([]),
           getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
         },
-        journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+        journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
         clients: { findByName: vi.fn().mockResolvedValue([]) },
       } as any;
       registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
@@ -695,6 +704,7 @@ function setupAutoConfirmTool(options: {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
       get: vi.fn().mockImplementation(async (id: number) => {
         const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
@@ -704,9 +714,11 @@ function setupAutoConfirmTool(options: {
       confirm: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.sales ?? []),
     },
     purchaseInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.purchases ?? []),
     },
     readonly: {
@@ -714,7 +726,7 @@ function setupAutoConfirmTool(options: {
       getAccountDimensions: vi.fn().mockResolvedValue([]),
       getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
     },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
 
@@ -1046,6 +1058,7 @@ describe("bank_reconciliation plan binding", () => {
     const server = { registerTool: vi.fn() } as any;
     const api = {
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
         get: vi.fn().mockImplementation(async (id: number) => {
           const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
@@ -1054,14 +1067,14 @@ describe("bank_reconciliation plan binding", () => {
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({}),
       },
-      saleInvoices: { listAll: vi.fn().mockResolvedValue(options.sales ?? []) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(options.purchases ?? []) },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.sales ?? []) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.purchases ?? []) },
       readonly: {
         getBankAccounts: vi.fn().mockResolvedValue([]),
         getAccountDimensions: vi.fn().mockResolvedValue([]),
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
       },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: { findByName: vi.fn().mockResolvedValue([]) },
     } as any;
     registerBankReconciliationTools(server, api, context, EXPOSE_GRANULAR);
@@ -1292,19 +1305,20 @@ describe("bank_reconciliation plan binding", () => {
     const sales = [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }];
     const api = {
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue(txs),
         get: vi.fn().mockResolvedValue(txs[0]),
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({}),
       },
-      saleInvoices: { listAll: vi.fn().mockResolvedValue(sales) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(sales) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
         getBankAccounts: vi.fn().mockResolvedValue([]),
         getAccountDimensions: vi.fn().mockResolvedValue([]),
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
       },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: { findByName: vi.fn().mockResolvedValue([]) },
     } as any;
 
@@ -3145,13 +3159,14 @@ describe("exact-match confirm duplicate-posting guard", () => {
       : vi.fn().mockResolvedValue(options.journals ?? []);
     const api = {
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([tx]),
         get: vi.fn().mockResolvedValue({ ...tx }),
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({}),
       },
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([sale]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([sale]) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
         getBankAccounts: options.bankDimsThrows
           ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
@@ -3161,7 +3176,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
         ]),
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
       },
-      journals: { listAllWithPostings },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings },
       clients: { findByName: vi.fn().mockResolvedValue([]) },
     } as any;
     registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);

@@ -426,6 +426,15 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
       const fxGainAccount = resolveFxAccount(fxAccounts, fx_gain_account_id);
       const fxLossAccount = resolveFxAccount(fxAccounts, fx_loss_account_id);
 
+      if (!dryRun) {
+        // Execute patches invoices / books FX journals from these reads (payment
+        // status, residual, linked payments, existing FX journal): bypass the
+        // 120 s cache so a payment or FX journal made elsewhere is seen. This
+        // also drops cached invoice/transaction gets used per candidate below.
+        api.purchaseInvoices.invalidateListCache();
+        api.transactions.invalidateListCache();
+        api.journals.invalidateListCache();
+      }
       const allInvoices = await api.purchaseInvoices.listAll();
       let partiallyPaid = allInvoices.filter(inv =>
         inv.payment_status === "PARTIALLY_PAID" && inv.id !== undefined

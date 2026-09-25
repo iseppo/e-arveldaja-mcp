@@ -39,36 +39,53 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Direction handling
 
-Each imported row's API `type` is set from the true statement direction: an incoming entry (CAMT `CRDT`) becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry (`DBIT`) becomes `type` C so it credits cash ("Tasumine" / money out). `process_bank_input` derives this from the statement automatically, so the created transactions carry the correct cash-leg direction — you do not set `type` by hand. If e-arveldaja's reported bank-account balance later disagrees with the real balance, a direction error at import is the first thing to check, and re-importing the affected statement fixes it.
+Each imported row's API `type` is set from the true statement direction: an incoming entry (CAMT `CRDT`) becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry (`DBIT`) becomes `type` C so it credits cash ("Tasumine" / money out). The import derives this from the statement automatically — you do not set `type` by hand. If e-arveldaja's reported bank-account balance later disagrees with the real balance, a direction error at import is the first thing to check, and re-importing the affected statement fixes it.
 
 ## Workflow
 
-Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects CAMT.053 vs Wise from the validated file CONTENT (not the filename) and, when a single bank account matches, resolves the `accounts_dimensions_id` automatically — do not ask for a dimension the tool can resolve. Under the standard/full profiles the granular `process_camt053` / `parse_camt053` / `import_camt053` entry points remain available and do the same work; treat them as the same operation and don't name them to the user.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects CAMT.053 vs Wise from the validated file CONTENT (not the filename) and, when a single bank account matches, resolves the `accounts_dimensions_id` automatically — do not ask for a dimension the tool can resolve.
 
 ### Step 1: Prepare (dry-run preview)
 
 If `accounts_dimensions_id` was not provided, let the tool resolve it: a unique bank account is chosen automatically, and an ambiguous or missing match comes back as a `needs_input` question with `choices` — surface that question and ask one recommendation-first confirmation, then pass the chosen `accounts_dimensions_id`.
 
-Call `process_bank_input`:
-- `mode`: `prepare`
-- `file_ref` or `file_path`: the provided input
-- `accounts_dimensions_id`: only when the tool asked for it
-- include `date_from` / `date_to` when provided
+Call `process_bank_input` with `mode: "prepare"`, `file_ref` or `file_path`, `accounts_dimensions_id` only when the tool asked for it, and `date_from` / `date_to` when provided.
 
-The compact preview returns a `summary` with:
-- `summary.counts` (total statement entries, eligible, filtered out, would-create, skipped, possible duplicates, errors)
-- `summary.totals` (credit / debit totals)
-- `summary.samples` (the first few rows that would be created)
-- `summary.blockers` and `summary.warnings` — never hidden
-- `summary.plan_handle`, an opaque server-issued execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
+The compact preview returns a `summary` with `summary.counts` (total statement entries, eligible, filtered out, would-create, skipped, possible duplicates, errors), `summary.totals`, `summary.samples`, `summary.blockers` and `summary.warnings` (never hidden), and `summary.plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Use `process_camt053` with `mode="dry_run"` / `mode="execute"` (`mode="parse"` only reads the file). `accounts_dimensions_id` is REQUIRED for `dry_run` and `execute`.
+
+### Step 1: Dry-run preview
+
+If `accounts_dimensions_id` was not provided, call `list_account_dimensions`, choose the most likely active bank-account dimension (account number, title, or the statement IBAN from `mode="parse"`), and ask one recommendation-first confirmation before the dry run.
+
+Call `process_camt053` with `mode: "dry_run"`, `file_ref` or `file_path`, the confirmed `accounts_dimensions_id`, and `date_from` / `date_to` when provided.
+
+The preview returns `summary` (`total_statement_entries`, `eligible_entries`, `filtered_out`, `created_count` = would-create, `skipped_count`, `error_count`, `possible_duplicate_count`), `sample` rows, the possible duplicates under `workflow.needs_review`, an advisory `statement_balance_check` when the statement carries a closing balance, and a top-level `plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 
 Present which rows would create transactions, which are skipped as exact duplicates, and any possible-duplicate review items.
 
 For possible duplicates, the default recommendation is:
 - if the older matched transaction is already confirmed, keep it by default: avoid creating the new row, or if it was already created, delete the new `PROJECT` (draft/unconfirmed) transaction
-- when keep/delete IDs are known, prefer `cleanup_camt_possible_duplicate` to enrich the kept transaction and delete the newly imported duplicate
+- when keep/delete IDs are known, use `cleanup_camt_possible_duplicate` to enrich the kept transaction and delete the newly imported duplicate
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
 - fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called
-- if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline using `confirm_transaction` (or `reconcile_inter_account_transfers` for inter-account transfers). Do NOT defer it to manual UI work in e-arveldaja — the agent has the IDs and amounts loaded, so the natural next step is to ask the user yes/no for inline confirmation.
+- if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline with `confirm_transaction` (inter-account transfers go through the **Reconcile Bank** workflow's inter-account step instead). Do NOT defer it to manual UI work in e-arveldaja.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+- if the older match is PROJECT (unconfirmed), present its current state and offer the **Reconcile Bank** workflow (`reconcile_bank_transactions`) to confirm it inline. Do NOT defer it to manual UI work in e-arveldaja.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 Do not suggest overwriting curated manual fields like description or reference when they are already filled.
 
@@ -82,29 +99,37 @@ The approval card must include:
 - possible duplicate review items
 - side effect: PROJECT (draft/unconfirmed) bank transactions created in e-arveldaja
 
-If the user does not explicitly approve, stop. The plan handle is not approval — never treat holding a `summary.plan_handle` as permission to execute.
+If the user does not explicitly approve, stop. The plan handle is not approval — never treat holding it as permission to execute.
 
 ### Step 3: Execute
 
-Call `process_bank_input` again:
-- `mode`: `execute`
-- `file_ref` or `file_path`: the same input
-- `accounts_dimensions_id`: matching the reviewed preview (omit again if the tool resolved it automatically)
-- `plan_handle`: the `summary.plan_handle` from the reviewed preview (required; consumed once)
-- include `date_from` / `date_to` when provided, matching the reviewed preview exactly
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Call `process_bank_input` again with `mode: "execute"`, the same `file_ref` or `file_path`, the same `accounts_dimensions_id` as the reviewed preview (omit it again if the tool resolved it automatically), the same `date_from` / `date_to`, and `plan_handle`: the `summary.plan_handle` from the reviewed preview (required; consumed once).
 
 If execute returns `plan_drift`, `plan_handle_required`, or another `plan_*` error, nothing was created: re-run `mode: "prepare"` to review a fresh plan and get a new handle, then ask for approval again.
 
-Report from the executed `summary`:
-- `summary.counts` created / skipped / errors
-- `summary.status` (`completed` or `partial`) and any `summary.blockers` — if it stopped part-way, do not retry automatically; re-run `mode: "prepare"` for a fresh preview
-- any possible-duplicate follow-ups — group similar duplicate decisions, show the first items plus counts, then propose one batch-friendly inline action set:
-  - Prefer `cleanup_camt_possible_duplicate` when the kept and deleted IDs are known; fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called.
-  - Use `confirm_transaction` or `reconcile_inter_account_transfers` for PROJECT matches that should be confirmed.
-  - Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action and the API error has been shown to the user.
+Report from the executed `summary`: `summary.counts` created / skipped / errors, `summary.status` (`completed` or `partial`) and any `summary.blockers` — if it stopped part-way, do not retry automatically; re-run `mode: "prepare"` for a fresh preview.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Call `process_camt053` again with `mode: "execute"`, the same `file_ref` or `file_path`, the same `accounts_dimensions_id`, the same `date_from` / `date_to`, and `plan_handle`: the top-level `plan_handle` from the reviewed dry run (required; consumed once).
+
+If execute returns `plan_drift`, `plan_handle_required`, or another `plan_*` error, nothing was created: re-run `mode: "dry_run"` to review a fresh plan and get a new handle, then ask for approval again.
+
+Report from the executed result: `summary.created_count` / `summary.skipped_count` / `summary.error_count`, and `execution.execution_report` when present — if it stopped part-way, do not retry automatically; re-run `mode: "dry_run"` for a fresh preview.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+
+For possible-duplicate follow-ups, group similar duplicate decisions, show the first items plus counts, then propose one batch-friendly inline action set using the duplicate handling above. Do not tell the user to "do this manually in e-arveldaja" — that is a last resort only when no MCP tool can perform the action and the API error has been shown to the user.
+
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
 ### Step 4: Full per-row detail (optional)
 
 When the executed `summary.details` references `get_operation_result_page`, page the complete per-row result with `process_bank_input` `mode="show_details"` (pass the `operation_handle`, optional `cursor`, optional `page_size`) or call `get_operation_result_page` directly. It is read-only and never resumes or mutates the import.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
-Offer reconciliation as the next step if the import succeeded.
+Offer reconciliation (the **Reconcile Bank** workflow) as the next step if the import succeeded.

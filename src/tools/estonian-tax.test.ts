@@ -45,14 +45,23 @@ type ToolCallback = (args: Record<string, unknown>) => Promise<unknown>;
 
 function makeMockServer() {
   const tools = new Map<string, ToolCallback>();
+  const rawTools = new Map<string, ToolCallback>();
   const configs = new Map<string, { description?: string; inputSchema?: Record<string, unknown> }>();
   const server = {
     registerTool: vi.fn((name: string, config: unknown, callback: ToolCallback) => {
       configs.set(name, config as { description?: string; inputSchema?: Record<string, unknown> });
-      tools.set(name, callback);
+      rawTools.set(name, callback);
+      // prepare_dividend_package previews by default (dry_run=true). These
+      // tests exercise the approved execute path, so a call that does not set
+      // dry_run explicitly runs with dry_run=false; the default itself is
+      // pinned through rawTools below.
+      tools.set(name, name === "prepare_dividend_package"
+        ? ((args: Record<string, unknown>, extra: unknown) =>
+          (callback as (a: Record<string, unknown>, e: unknown) => unknown)({ dry_run: false, ...args }, extra)) as unknown as ToolCallback
+        : callback);
     }),
   };
-  return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools, configs };
+  return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools, rawTools, configs };
 }
 
 function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
@@ -1355,6 +1364,20 @@ describe("prepare_dividend_package", () => {
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
+  it("previews by default: omitting dry_run creates no journal", async () => {
+    const rawMock = makeMockServer();
+    registerEstonianTaxTools(rawMock.server, api);
+    const cb = rawMock.rawTools.get("prepare_dividend_package")!;
+    const result = await (cb as (a: Record<string, unknown>) => Promise<unknown>)({
+      net_dividend: 10000,
+      shareholder_client_id: 1,
+      effective_date: "2026-06-01",
+    });
+    expect(isError(result as never)).toBe(false);
+    expect(parseResult(result as never).dry_run).toBe(true);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   it("dry_run previews the postings without creating a journal", async () => {
     const cb = tools.get("prepare_dividend_package")!;
     const result = await cb({
@@ -2054,7 +2077,7 @@ describe("create_owner_expense_reimbursement", () => {
       expect.stringContaining("M1-kategooria"),
       expect.stringContaining("erasõidud"),
     ]));
-    expect(payload.policy_hint).toContain("accounting-rules.md");
+    expect(payload.policy_hint).toContain("save_auto_booking_rule");
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 

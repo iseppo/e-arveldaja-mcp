@@ -1,11 +1,10 @@
 import type { ApiContext } from "./tools/crud-tools.js";
 import type { Journal, ApiResponse } from "./types/api.js";
-import { HttpError } from "./http-client.js";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { withOwnedFileLock } from "./file-lock.js";
-import { MutationIndeterminateError, isMutationIndeterminate } from "./mutation-outcome.js";
+import { MutationIndeterminateError, classifyMutationFailure } from "./mutation-outcome.js";
 import { roundMoney } from "./money.js";
 import {
   buildInterAccountJournalIndex,
@@ -155,7 +154,7 @@ export async function withBookingKeyLock<T>(
 }
 
 function isAmbiguousMutation(error: unknown): boolean {
-  return isMutationIndeterminate(error) || (error instanceof HttpError && error.status === "network");
+  return classifyMutationFailure(error) === "indeterminate";
 }
 
 function interAccountKey(sourceDim: number, targetDim: number, amount: number, date: string): string {

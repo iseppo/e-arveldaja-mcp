@@ -8,7 +8,7 @@ import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { HttpError } from "../../http-client.js";
-import { MutationIndeterminateError, isMutationIndeterminate } from "../../mutation-outcome.js";
+import { MutationIndeterminateError, classifyMutationFailure, isMutationIndeterminate } from "../../mutation-outcome.js";
 import {
   getNormalizedNetworkCause,
   LinkedInvoiceClientMismatchError,
@@ -23,7 +23,17 @@ import {
 } from "../../banking/receipt-ledger-check.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateTransactionDistributionDimensions } from "../../account-validation.js";
-import { createBankTransaction } from "../../bank-transaction-create.js";
+import {
+  createBankTransaction,
+  TRANSACTION_DESCRIPTION_MAX_LENGTH,
+  weaveFullRefIntoDescription,
+} from "../../bank-transaction-create.js";
+import { canonicalRefNumber } from "../../ref-number.js";
+import { stripWisePrefix, withWiseSourceDirection } from "../../wise/preflight.js";
+import {
+  extractCamtDescriptionMetadata,
+  isTrustedCamtDescriptionMetadata,
+} from "../../camt/duplicate-identity.js";
 import {
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,
@@ -46,6 +56,111 @@ import {
   parseTransactionDistributions,
   validateTransactionUpdateData,
 } from "./shared.js";
+
+// Machine markers the importers write into a transaction description. They are
+// the row's dedup identity (WISE:{id} prefix, camt sig/bank ref) and the signed
+// statement direction the confirm-time guard reads — the same shapes
+// `signedBankTransactionDirection` / `stripWisePrefix` match.
+const WISE_IDENTITY_PREFIX = /^WISE:(?:FEE:)?\S+/i;
+const WISE_DIRECTION_MARKER = /\[source_direction=(IN|OUT)\]\s*$/i;
+const CAMT_METADATA_MARKER = /(?:^|\n)(\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\])\s*$/i;
+const CAMT_IDENTITY_FIELDS = ["description", "ref_number", "bank_account_no", "bank_account_name"] as const;
+
+export type TransactionMetadataUpdateResult =
+  | { ok: true; payload: Record<string, string | null>; notes: string[] }
+  | { ok: false; error: string; category: string; next_action: string };
+
+/**
+ * Build the update_transaction PATCH body from the caller's metadata fields and
+ * the FRESHLY-read stored row:
+ * - a new `description` keeps the stored importer markers (WISE:{id} prefix,
+ *   `[source_direction=…]`, `[e-arveldaja-mcp:camt …]`) in the importers' order;
+ *   markers inside the caller text are machine-owned and dropped;
+ * - `ref_number` is canonicalized like createBankTransaction (over-cap value
+ *   woven into the description before the trailing marker);
+ * - the result must fit the 150-char description cap (refused, never truncated);
+ * - a trusted CAMT row whose identity lives only in the marker keeps it via
+ *   bank_ref_number, or the edit is refused when that cannot be preserved.
+ */
+export function buildTransactionMetadataUpdate(
+  stored: Pick<Transaction,
+    "bank_ref_number" | "date" | "type" | "amount" | "cl_currencies_id" |
+    "ref_number" | "bank_account_no" | "bank_account_name" | "description">,
+  data: Record<string, string | null>,
+): TransactionMetadataUpdateResult {
+  const payload: Record<string, string | null> = { ...data };
+  const notes: string[] = [];
+  const storedDescription = stored.description ?? "";
+
+  if ("description" in payload) {
+    const wisePrefix = storedDescription.match(WISE_IDENTITY_PREFIX)?.[0];
+    const wiseDirection = storedDescription.match(WISE_DIRECTION_MARKER)?.[1]?.toUpperCase() as "IN" | "OUT" | undefined;
+    const camtMarker = storedDescription.match(CAMT_METADATA_MARKER)?.[1];
+    const requested = payload.description;
+    const hasCallerMarker = requested != null && (
+      WISE_IDENTITY_PREFIX.test(requested) || WISE_DIRECTION_MARKER.test(requested) || CAMT_METADATA_MARKER.test(requested)
+    );
+    if (wisePrefix || wiseDirection || camtMarker || hasCallerMarker) {
+      let text = stripWisePrefix((requested ?? "").replace(CAMT_METADATA_MARKER, ""));
+      if (wisePrefix) text = text ? `${wisePrefix} ${text}` : wisePrefix;
+      if (wiseDirection) text = withWiseSourceDirection(text, wiseDirection).trimStart();
+      if (camtMarker) text = text ? `${text}\n${camtMarker}` : camtMarker;
+      payload.description = text === "" && requested === null ? null : text;
+      if (wisePrefix || wiseDirection || camtMarker) {
+        notes.push("Stored importer identity/direction markers were preserved in the new description.");
+      }
+    }
+  }
+
+  if ("ref_number" in payload) {
+    const canonical = canonicalRefNumber(payload.ref_number);
+    payload.ref_number = canonical.value ?? null;
+    if (canonical.truncated && canonical.full) {
+      const base = "description" in payload ? (payload.description ?? "") : storedDescription;
+      const woven = weaveFullRefIntoDescription(base, canonical.full, TRANSACTION_DESCRIPTION_MAX_LENGTH);
+      if (woven !== base) payload.description = woven;
+    }
+  }
+
+  const finalDescription = payload.description;
+  if (typeof finalDescription === "string" && finalDescription.length > TRANSACTION_DESCRIPTION_MAX_LENGTH) {
+    return {
+      ok: false,
+      category: "description_too_long",
+      error: `Transaction description would be ${finalDescription.length} characters (max ${TRANSACTION_DESCRIPTION_MAX_LENGTH}, including preserved importer markers).`,
+      next_action: "Shorten the description text; importer markers are kept and cannot be truncated.",
+    };
+  }
+
+  // A CAMT row without a stored bank_ref_number is deduplicated via its signed
+  // marker, whose signature covers these fields — changing any of them makes
+  // the marker untrusted and the row re-importable.
+  // The bank reference that will be stored after this update: a supplied
+  // null/blank value leaves the row without a usable direct reference.
+  const identityChanges = CAMT_IDENTITY_FIELDS.some(field =>
+    field in payload && (payload[field] ?? "") !== (stored[field] ?? ""));
+  const effectiveBankRef = "bank_ref_number" in payload ? payload.bank_ref_number : stored.bank_ref_number;
+  if (
+    identityChanges &&
+    !(typeof effectiveBankRef === "string" && effectiveBankRef.trim()) &&
+    CAMT_METADATA_MARKER.test(storedDescription) &&
+    isTrustedCamtDescriptionMetadata(stored)
+  ) {
+    const bankRef = extractCamtDescriptionMetadata(storedDescription).bank_ref_number;
+    if (!bankRef) {
+      return {
+        ok: false,
+        category: "camt_identity_would_break",
+        error: "This CAMT-imported row carries its bank reference only as a hash inside the description marker; changing description/ref_number/bank_account_no/bank_account_name would make it re-importable (double booking).",
+        next_action: "Include the statement's bank reference as bank_ref_number in the same update, or leave these fields unchanged.",
+      };
+    }
+    payload.bank_ref_number = bankRef;
+    notes.push("bank_ref_number was set from the CAMT marker so the row stays deduplicated after the edit.");
+  }
+
+  return { ok: true, payload, notes };
+}
 
 export function registerTransactionTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -233,6 +348,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         // and surface an advisory note instead. Never block.
         const isEur = (params.cl_currencies_id ?? "EUR") === "EUR";
         if (isEur) {
+          // A blocking scan gates the write, so it must not run on a cached
+          // journal snapshot that predates UI/other-process bookings.
+          if (params.block_on_duplicate === true) api.journals.invalidateListCache();
           duplicateScan = await findDuplicateBankPostings(api, candidate);
         } else {
           duplicateScan = {
@@ -265,8 +383,10 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       });
     }
 
+    // Tool-only flags never reach the API payload.
+    const { block_on_duplicate: _blockOnDuplicate, type: _type, ...createFields } = params;
     const result = await createBankTransaction(api, {
-      ...params,
+      ...createFields,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
     }, direction);
     logAudit({
@@ -373,6 +493,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         try {
           // Inside the try: a failed read degrades this advisory to a warning
           // (the confirm below does its own required transaction read).
+          // A blocking check gates the confirm: read live, not a cached snapshot.
+          if (block_on_duplicate === true) {
+            api.transactions.invalidateListCache();
+            api.journals.invalidateListCache();
+          }
           const tx = await api.transactions.get(id);
           const guard = await BookingGuard.load(api, { ownDimensionIds });
           for (const row of transferRows) {
@@ -460,7 +585,13 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         try {
           await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
         } catch (cleanupError) {
-          const normalizedNetworkCause = getNormalizedNetworkCause(cleanupError);
+          // update() goes through BaseResource.mutate, so an ambiguous cleanup
+          // normally arrives already classified as MutationIndeterminateError;
+          // a raw HttpError is classified with the same shared classifier.
+          const normalizedNetworkCause = getNormalizedNetworkCause(cleanupError)
+            ?? (cleanupError instanceof HttpError && classifyMutationFailure(cleanupError) === "indeterminate"
+              ? cleanupError
+              : undefined);
           if (normalizedNetworkCause) {
             api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
             throw new MutationIndeterminateError({
@@ -470,22 +601,6 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
               businessKey: "transaction:" + id,
               affectedCaches: ["/transactions"],
               cause: normalizedNetworkCause,
-              nextAction: "Freshly read transaction " + id +
-                "; clients_id cleanup may or may not have committed.",
-            });
-          }
-          if (
-            cleanupError instanceof HttpError &&
-            cleanupError.status === "network"
-          ) {
-            api.transactions.invalidateTransactionsAfterAmbiguousCleanup();
-            throw new MutationIndeterminateError({
-              operation: "rollback",
-              entity: "transaction",
-              entityId: id,
-              businessKey: "transaction:" + id,
-              affectedCaches: ["/transactions"],
-              cause: cleanupError,
               nextAction: "Freshly read transaction " + id +
                 "; clients_id cleanup may or may not have committed.",
             });
@@ -591,20 +706,27 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     });
   });
 
-  registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference.", {
+  registerTool(server, "update_transaction", "Update transaction metadata fields such as bank reference, counterparty name, bank account number, description, or payment reference. Importer markers in the stored description are preserved.", {
     id: coerceId.describe("Transaction ID"),
-    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description, ref_number."),
+    data: jsonObjectInput.describe("Object with allowed metadata fields only: bank_ref_number, bank_account_name, bank_account_no, description (max 150 chars incl. preserved importer markers), ref_number (canonicalized like create_transaction)."),
   }, { ...mutate, title: "Update Transaction" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const validationErrors = validateTransactionUpdateData(parsed);
     if (validationErrors.length > 0) {
       return toolError({ error: "Transaction metadata validation failed", details: validationErrors });
     }
-    const result = await api.transactions.update(id, parsed as Partial<Transaction>);
+    // Fresh read: the marker preservation below must see the live description.
+    api.transactions.invalidateListCache();
+    const stored = await api.transactions.get(id);
+    const built = buildTransactionMetadataUpdate(stored, parsed as Record<string, string | null>);
+    if (!built.ok) {
+      return toolError({ error: built.error, category: built.category, next_action: built.next_action });
+    }
+    const result = await api.transactions.update(id, built.payload as Partial<Transaction>);
     logAudit({
       tool: "update_transaction", action: "UPDATED", entity_type: "transaction", entity_id: id,
       summary: `Updated transaction ${id}`,
-      details: { fields_changed: Object.keys(parsed) },
+      details: { fields_changed: Object.keys(built.payload) },
     });
     return toolResponse({
       action: "updated",
@@ -612,6 +734,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       id,
       message: `Updated transaction ${id}.`,
       raw: result,
+      ...(built.notes.length > 0 ? { warnings: built.notes } : {}),
     });
   });
 
@@ -650,7 +773,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
   });
 
   registerTool(server, "batch_delete_transactions",
-    "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures are reported per ID.",
+    "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures and indeterminate outcomes are reported per ID.",
     {
       ids: z.array(z.number().int().positive()).min(1).max(500).describe("Transaction IDs (positive integers, 1-500 entries)"),
       reason: z.string().min(1).max(500).describe("Short audit note for the batch delete. Required, max 500 chars."),
@@ -660,8 +783,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       const unique = [...new Set(ids)];
       const results: Array<{
         id: number;
-        status: "deleted" | "skipped_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
+        status: "deleted" | "skipped_confirmed" | "skipped_missing" | "lookup_failed" | "failed" | "indeterminate";
         error?: string;
+        may_have_occurred?: true;
       }> = [];
       for (const id of unique) {
         let existing: Transaction | undefined;
@@ -718,13 +842,25 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           });
           results.push({ id, status: "deleted" });
         } catch (error: unknown) {
-          results.push({ id, status: "failed", error: error instanceof Error ? error.message : String(error) });
+          const message = error instanceof Error ? error.message : String(error);
+          if (isMutationIndeterminate(error)) {
+            // The delete may have committed: never report it as a plain failure.
+            logAudit({
+              tool: "batch_delete_transactions", action: "MUTATION_INDETERMINATE", entity_type: "transaction", entity_id: id,
+              summary: `Delete of transaction ${id} is indeterminate: ${reason}`,
+              details: { reason, operation: "delete", mutation_may_have_occurred: true, next_action: `Freshly read transaction ${id} before retrying.` },
+            });
+            results.push({ id, status: "indeterminate", may_have_occurred: true, error: message });
+          } else {
+            results.push({ id, status: "failed", error: message });
+          }
         }
       }
       const deleted = results.filter(r => r.status === "deleted").length;
       const skipped = results.filter(r => r.status === "skipped_confirmed" || r.status === "skipped_missing").length;
       const lookupFailed = results.filter(r => r.status === "lookup_failed").length;
       const failed = results.filter(r => r.status === "failed").length;
+      const indeterminate = results.filter(r => r.status === "indeterminate").length;
       return {
         content: [{
           type: "text",
@@ -734,6 +870,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
             skipped_count: skipped,
             lookup_failed_count: lookupFailed,
             failed_count: failed,
+            indeterminate_count: indeterminate,
             reason,
             results,
           }),

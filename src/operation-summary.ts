@@ -23,6 +23,9 @@ export interface OperationSummaryV1 {
   readonly next_action?: Readonly<{ tool: string; args: Readonly<Record<string, unknown>>; approval_required: boolean }>;
   readonly workflow_handle?: string;
   readonly plan_handle?: string;
+  /** Per-effect consume-once handles when one preview authorizes alternative
+   * executions (e.g. receipt_batch create vs create_and_confirm). */
+  readonly plan_handles?: Readonly<Record<string, string>>;
   readonly details?: Readonly<{
     available: boolean;
     total_items: number;

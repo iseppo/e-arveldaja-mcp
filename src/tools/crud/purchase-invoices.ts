@@ -197,7 +197,16 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Purchase Invoice" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
+    // Fresh read: merging onto a cached snapshot could revert UI edits.
+    api.purchaseInvoices.invalidateListCache();
     const current = await api.purchaseInvoices.get(id);
+    if (current.status === "VOID") {
+      return toolError({
+        category: "void_record_immutable",
+        error: `Purchase invoice ${id} is VOID and cannot be edited.`,
+        next_action: "Create a new purchase invoice instead of editing the voided one.",
+      });
+    }
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
@@ -210,6 +219,36 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         });
       }
       return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
+    // Caller-supplied draft items get the same validation and VAT defaulting as
+    // create_purchase_invoice (non-VAT field refusal, VAT defaults, dimensions).
+    if (parsed.items !== undefined && !isConfirmed) {
+      const isVatReg = await isCompanyVatRegistered(api);
+      const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
+      if (!isVatReg) {
+        const details = rawItems.flatMap((item, index) =>
+          validateNonVatItem(item).map(error => `items[${index}].${error}`)
+        );
+        if (details.length > 0) {
+          return toolError({
+            error: "Non-VAT purchase invoice contains deductible VAT fields",
+            category: "manual_review_required",
+            details,
+            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          });
+        }
+      }
+      const purchaseArticles = await getPurchaseArticlesWithVat(api);
+      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      if (dimErrors.length > 0) {
+        return toolError({ error: "Account validation failed", details: dimErrors });
+      }
+      parsed.items = items;
     }
     // The API rejects a metadata-only PATCH with "Products/services are
     // missing" — every update must carry the full item list. When the caller

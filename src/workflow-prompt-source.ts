@@ -4,10 +4,13 @@ import { getProjectRoot } from "./paths.js";
 import { renderPromptSurface, renderRuntimeFeatureSections } from "./prompt-surface.js";
 import {
   PROMPT_REGISTRY,
+  promptToolAvailability,
+  promptVariantEnabled,
+  type PromptToolAvailability,
+  type PromptToolSurfaceOptions,
   type PromptVariant,
   type WorkflowPromptSlug,
 } from "./prompt-registry.js";
-import type { ToolExposureConfig } from "./config.js";
 import { renderVatMetadataTokens } from "./estonian-tax-rules.js";
 
 export function workflowPromptSourcePath(slug: WorkflowPromptSlug): string {
@@ -101,19 +104,23 @@ export function buildWorkflowPromptSourceText(
   slug: WorkflowPromptSlug,
   args: unknown,
   variants?: readonly PromptVariant[],
-  toolExposure?: ToolExposureConfig,
+  surface: PromptToolSurfaceOptions | PromptToolAvailability = {},
 ): string {
   const promptVariants = variants
     ?? PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants
     ?? [];
+  // Each capability section renders only when its tools are on the active
+  // surface, so the MCP prompt names only tools that are in tools/list.
+  const hasTool = typeof surface === "function" ? surface : promptToolAvailability(surface);
   const workflowBody = renderRuntimeFeatureSections(
     renderVatMetadataTokens(readWorkflowPromptSource(slug)),
     promptVariants.map(variant => ({
       name: variant.name,
       advertisedTools: variant.advertisedTools,
-      enabled: variant.featurePredicate(toolExposure),
+      ...(variant.unlessTools ? { unlessTools: variant.unlessTools } : {}),
+      enabled: promptVariantEnabled(variant, hasTool),
     })),
-  );
+  ).replace(/\n{3,}/g, "\n\n");
   const trustedBody = `Canonical workflow source: ${workflowPromptSourcePath(slug)}
 
 ${workflowBody}

@@ -113,7 +113,16 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Sale Invoice" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
+    // Fresh read: the status gate must not act on a cached snapshot.
+    api.saleInvoices.invalidateListCache();
     const current = await api.saleInvoices.get(id);
+    if (current.status === "VOID") {
+      return toolError({
+        category: "void_record_immutable",
+        error: `Sale invoice ${id} is VOID and cannot be edited.`,
+        next_action: "Create a new sale invoice instead of editing the voided one.",
+      });
+    }
     const isConfirmed = current.status === "CONFIRMED";
     const updateErrors = validateUpdateFields(parsed, "sale_invoice", { isConfirmed });
     if (updateErrors.length > 0) {
@@ -126,6 +135,19 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
         });
       }
       return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
+    // Draft items get the same validation as create_sale_invoice.
+    if (parsed.items !== undefined) {
+      const items = desandboxAllStrings(parseSaleInvoiceItems(parsed.items));
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
+      if (dimErrors.length > 0) {
+        return toolError({ error: "Account validation failed", details: dimErrors });
+      }
+      parsed.items = items;
     }
     const result = await api.saleInvoices.update(id, parsed);
     logAudit({

@@ -455,6 +455,71 @@ describe("BaseResource", () => {
       expect(client.get).toHaveBeenCalledTimes(3);
     });
 
+    it("dedupes a row that shifted across a page boundary, keeping the first occurrence", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }, { id: 2, name: "b-first" }], 1, 2))
+        .mockResolvedValueOnce(paginated([{ id: 2, name: "b-shifted" }, { id: 3, name: "c" }], 2, 2));
+
+      const items = await resource.listAll();
+      expect(items).toEqual([
+        { id: 1, name: "a" },
+        { id: 2, name: "b-first" },
+        { id: 3, name: "c" },
+      ]);
+    });
+
+    it("stitches pages read live in one walk, never from per-page cache entries of another time", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      // An older cached page 2 (taken before row 3 shifted onto page 2): stitching
+      // it with a live page 1 would miss row 3 entirely.
+      cache.set(pageCacheKey(2), paginated([{ id: 4, name: "d-old" }], 2, 2));
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }, { id: 2, name: "b" }], 1, 2))
+        .mockResolvedValueOnce(paginated([{ id: 3, name: "c" }, { id: 4, name: "d" }], 2, 2));
+
+      const items = await resource.listAll();
+
+      expect(items.map(item => item.name)).toEqual(["a", "b", "c", "d"]);
+      expect(client.get).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(client.get).mock.calls.map(call => (call[1] as { page: number }).page)).toEqual([1, 2]);
+    });
+
+    it("caches the stitched result as a whole and clears it on invalidateListCache()", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }], 1, 2))
+        .mockResolvedValueOnce(paginated([{ id: 2, name: "b" }], 2, 2))
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a2" }], 1, 1));
+
+      expect((await resource.listAll()).map(item => item.name)).toEqual(["a", "b"]);
+      // Second read is served from the stitched snapshot, not re-assembled from pages.
+      expect((await resource.listAll()).map(item => item.name)).toEqual(["a", "b"]);
+      expect(client.get).toHaveBeenCalledTimes(2);
+      expect(cache.get("connection:0:/items:listAll:")).toBeDefined();
+
+      resource.invalidateListCache();
+      expect(cache.get("connection:0:/items:listAll:")).toBeUndefined();
+      expect((await resource.listAll()).map(item => item.name)).toEqual(["a2"]);
+      expect(client.get).toHaveBeenCalledTimes(3);
+    });
+
+    it("does not reuse a stitched result that exceeds the caller's caps", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }, { id: 2, name: "b" }], 1, 1))
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }, { id: 2, name: "b" }], 1, 1));
+
+      await resource.listAll();
+      await expect(resource.listAll(undefined, 200, 1)).rejects.toThrow(/exceeds limit of 1/);
+      expect(client.get).toHaveBeenCalledTimes(2);
+    });
+
     it("throws when page count exceeds 200-page cap", async () => {
       const client = makeClient();
       const resource = new BaseResource<Item>(client, "/items");
@@ -529,15 +594,15 @@ describe("BaseResource", () => {
         cache.set("connection:1:/items:list:page=1", "other-connection");
 
         if (mode === "cached") {
+          // listAll bypasses the per-page cache: seeded pages must not be consumed.
           cache.set(pageCacheKey(1), first);
           cache.set(pageCacheKey(2), second);
           cache.set(pageCacheKey(3), third);
-        } else {
-          vi.mocked(client.get)
-            .mockResolvedValueOnce(first)
-            .mockResolvedValueOnce(second)
-            .mockResolvedValueOnce(third);
         }
+        vi.mocked(client.get)
+          .mockResolvedValueOnce(first)
+          .mockResolvedValueOnce(second)
+          .mockResolvedValueOnce(third);
         const invalidateSpy = vi.spyOn(cache, "invalidate");
         invalidateSpy.mockClear();
 
@@ -546,7 +611,7 @@ describe("BaseResource", () => {
         expect(thrown).toBeInstanceOf(Error);
         expect(thrown.constructor.name).toBe("PaginationMetadataError");
         expect(thrown.message).toBe(row.message);
-        expect(client.get).toHaveBeenCalledTimes(mode === "fresh" ? 2 : 0);
+        expect(client.get).toHaveBeenCalledTimes(2);
         if (row.checksStableTotalBeforeItems) expect(iterator).not.toHaveBeenCalled();
         expect(invalidateSpy).toHaveBeenCalledTimes(1);
         expect(invalidateSpy).toHaveBeenCalledWith("connection:0:/items");
@@ -875,8 +940,7 @@ describe("BaseResource", () => {
     it.each([
       ["400", new HttpError("bad request", 400, "PATCH", "/clients/5")],
       ["409", new HttpError("conflict", 409, "PATCH", "/clients/5")],
-      ["503", new HttpError("unavailable", 503, "PATCH", "/clients/5")],
-      ["ordinary", new Error("ordinary failure")],
+      ["429", new HttpError("rate limited", 429, "PATCH", "/clients/5")],
     ] as const)("M01 preserves a definite %s failure without cache eviction", async (_label, failure) => {
       const client = makeClient();
       const resource = new ClientsApi(client);
@@ -889,6 +953,40 @@ describe("BaseResource", () => {
       expect(thrown).toBe(failure);
       expect(cache.get("connection:0:/clients:list:")).toBe("clients");
       expect(cache.generation).toBe(generation);
+    });
+
+    // A 5xx / 408 / unknown failure may have committed server-side: it must be
+    // surfaced as indeterminate (with cache eviction), never as a definitive
+    // failure the caller could blindly retry into a double booking.
+    it.each([
+      ["500 create", "create", undefined, "/clients:create", new HttpError("server error", 500, "POST", "/clients")],
+      ["503 update", "update", 5, "/clients:5", new HttpError("unavailable", 503, "PATCH", "/clients/5")],
+      ["408 update", "update", 5, "/clients:5", new HttpError("request timeout", 408, "PATCH", "/clients/5")],
+      ["ordinary update", "update", 5, "/clients:5", new Error("ordinary failure")],
+    ] as const)("M01 classifies a %s failure as indeterminate", async (_label, operation, entityId, businessKey, failure) => {
+      const client = makeClient();
+      const resource = new ClientsApi(client);
+      cache.set("connection:0:/clients:list:", "clients");
+      cache.set("connection:0:/products:list:", "products");
+      vi.mocked(operation === "create" ? client.post : client.patch).mockRejectedValueOnce(failure);
+
+      const thrown = await (operation === "create"
+        ? resource.create({ name: "new" })
+        : resource.update(5, { name: "updated" })
+      ).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(MutationIndeterminateError);
+      expect(thrown).toMatchObject({
+        operation,
+        entity: "client",
+        businessKey,
+        affectedCaches: ["/clients"],
+        cause: { message: failure.message },
+      });
+      expect(thrown.entityId).toBe(entityId);
+      if (failure instanceof HttpError) expect(thrown.cause.status).toBe(failure.status);
+      expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
+      expect(cache.get("connection:0:/products:list:")).toBe("products");
     });
 
     it("M01 rethrows structured ambiguity by identity and invalidates the deduplicated cache union", async () => {
@@ -993,6 +1091,146 @@ describe("BaseResource", () => {
       expect(cache.generation).toBe(generation + 1);
       expect(cache.get("connection:0:/clients:list:")).toBeUndefined();
       expect(cache.get("connection:0:/products:list:")).toBe("products");
+    });
+
+    // Action endpoints (deliver/register/invalidate/deactivate/reactivate) share
+    // the mutate() outcome classification: a dropped connection must surface as
+    // mutation_indeterminate so the operator re-reads before retrying.
+    const actionCases = [
+      {
+        label: "sale invoice deliver",
+        make: (c: HttpClient) => new SaleInvoicesApi(c),
+        invoke: (r: unknown) => (r as SaleInvoicesApi).sendEinvoice(5, {} as never),
+        path: "/sale_invoices/5/deliver", operation: "update", entity: "sale_invoice",
+        businessKey: "/sale_invoices:5:deliver", caches: ["/sale_invoices", "/journals"],
+      },
+      {
+        label: "sale invoice confirm",
+        make: (c: HttpClient) => new SaleInvoicesApi(c),
+        invoke: (r: unknown) => (r as SaleInvoicesApi).confirm(5),
+        path: "/sale_invoices/5/register", operation: "confirm", entity: "sale_invoice",
+        businessKey: "/sale_invoices:5:register", caches: ["/sale_invoices", "/journals", "/transactions"],
+      },
+      {
+        label: "sale invoice invalidate",
+        make: (c: HttpClient) => new SaleInvoicesApi(c),
+        invoke: (r: unknown) => (r as SaleInvoicesApi).invalidate(5),
+        path: "/sale_invoices/5/invalidate", operation: "invalidate", entity: "sale_invoice",
+        businessKey: "/sale_invoices:5:invalidate", caches: ["/sale_invoices", "/journals", "/transactions"],
+      },
+      {
+        label: "purchase invoice confirm",
+        make: (c: HttpClient) => new PurchaseInvoicesApi(c),
+        invoke: (r: unknown) => (r as PurchaseInvoicesApi).confirm(5),
+        path: "/purchase_invoices/5/register", operation: "confirm", entity: "purchase_invoice",
+        businessKey: "/purchase_invoices:5:register", caches: ["/purchase_invoices", "/journals", "/transactions"],
+      },
+      {
+        label: "purchase invoice invalidate",
+        make: (c: HttpClient) => new PurchaseInvoicesApi(c),
+        invoke: (r: unknown) => (r as PurchaseInvoicesApi).invalidate(5),
+        path: "/purchase_invoices/5/invalidate", operation: "invalidate", entity: "purchase_invoice",
+        businessKey: "/purchase_invoices:5:invalidate", caches: ["/purchase_invoices", "/journals", "/transactions"],
+      },
+      {
+        label: "journal confirm",
+        make: (c: HttpClient) => new JournalsApi(c),
+        invoke: (r: unknown) => (r as JournalsApi).confirm(5),
+        path: "/journals/5/register", operation: "confirm", entity: "journal",
+        businessKey: "/journals:5:register", caches: ["/journals", "/transactions"],
+      },
+      {
+        label: "journal invalidate",
+        make: (c: HttpClient) => new JournalsApi(c),
+        invoke: (r: unknown) => (r as JournalsApi).invalidate(5),
+        path: "/journals/5/invalidate", operation: "invalidate", entity: "journal",
+        businessKey: "/journals:5:invalidate", caches: ["/journals", "/transactions"],
+      },
+      {
+        label: "transaction invalidate",
+        make: (c: HttpClient) => new TransactionsApi(c),
+        invoke: (r: unknown) => (r as TransactionsApi).invalidate(5),
+        path: "/transactions/5/invalidate", operation: "invalidate", entity: "transaction",
+        businessKey: "transaction:5", caches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
+      },
+      {
+        label: "client deactivate",
+        make: (c: HttpClient) => new ClientsApi(c),
+        invoke: (r: unknown) => (r as ClientsApi).deactivate(5),
+        path: "/clients/5/deactivate", operation: "update", entity: "client",
+        businessKey: "/clients:5:deactivate", caches: ["/clients"],
+      },
+      {
+        label: "client reactivate",
+        make: (c: HttpClient) => new ClientsApi(c),
+        invoke: (r: unknown) => (r as ClientsApi).restore(5),
+        path: "/clients/5/reactivate", operation: "update", entity: "client",
+        businessKey: "/clients:5:reactivate", caches: ["/clients"],
+      },
+      {
+        label: "product deactivate",
+        make: (c: HttpClient) => new ProductsApi(c),
+        invoke: (r: unknown) => (r as ProductsApi).deactivate(5),
+        path: "/products/5/deactivate", operation: "update", entity: "product",
+        businessKey: "/products:5:deactivate", caches: ["/products"],
+      },
+      {
+        label: "product reactivate",
+        make: (c: HttpClient) => new ProductsApi(c),
+        invoke: (r: unknown) => (r as ProductsApi).restore(5),
+        path: "/products/5/reactivate", operation: "update", entity: "product",
+        businessKey: "/products:5:reactivate", caches: ["/products"],
+      },
+    ] as const;
+
+    it.each(actionCases)("M01 surfaces a network drop on $label as indeterminate and evicts affected caches", async row => {
+      const client = makeClient();
+      const resource = row.make(client);
+      for (const prefix of row.caches) cache.set(`connection:0:${prefix}:list:`, "stale");
+      cache.set("connection:1:/clients:list:", "other-company");
+      vi.mocked(client.patch).mockRejectedValueOnce(
+        new HttpError("socket hang up", "network", "PATCH", row.path),
+      );
+
+      const thrown = await row.invoke(resource).catch(error => error);
+
+      expect(thrown).toBeInstanceOf(MutationIndeterminateError);
+      expect(thrown).toMatchObject({
+        operation: row.operation,
+        entity: row.entity,
+        entityId: 5,
+        businessKey: row.businessKey,
+        affectedCaches: [...row.caches],
+        cause: { status: "network", method: "PATCH", path: row.path },
+      });
+      expect(thrown.nextAction).toMatch(/re-?read|freshly read/i);
+      expect(client.patch).toHaveBeenCalledTimes(1);
+      for (const prefix of row.caches) {
+        expect(cache.get(`connection:0:${prefix}:list:`)).toBeUndefined();
+      }
+      expect(cache.get("connection:1:/clients:list:")).toBe("other-company");
+    });
+
+    it.each(actionCases)("M01 keeps a 4xx rejection on $label definitive", async row => {
+      const client = makeClient();
+      const resource = row.make(client);
+      const rejection = new HttpError("rejected", 422, "PATCH", row.path);
+      vi.mocked(client.patch).mockRejectedValueOnce(rejection);
+
+      await expect(row.invoke(resource)).rejects.toBe(rejection);
+    });
+
+    it.each(actionCases)("M01 evicts every affected cache after a successful $label", async row => {
+      const client = makeClient();
+      const resource = row.make(client);
+      for (const prefix of row.caches) cache.set(`connection:0:${prefix}:list:`, "stale");
+      vi.mocked(client.patch).mockResolvedValueOnce(apiResponse());
+
+      await row.invoke(resource);
+
+      for (const prefix of row.caches) {
+        expect(cache.get(`connection:0:${prefix}:list:`)).toBeUndefined();
+      }
     });
 
     it.each([

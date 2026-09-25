@@ -195,7 +195,8 @@ describe("renderReceiptBatchCompact — dry_run", () => {
     // manifest IS inlined so the guided dry_run→create flow is self-completable)
     expect(summary.next_action?.tool).toBe("receipt_batch");
     expect(summary.next_action?.args.mode).toBe("create");
-    expect(summary.next_action?.args.approved_manifest_required).toBe(true);
+    // args carry only real receipt_batch inputs (resendable verbatim)
+    expect(summary.next_action?.args).not.toHaveProperty("approved_manifest_required");
     const manifest = summary.next_action?.args.approved_manifest as unknown[];
     expect(Array.isArray(manifest)).toBe(true);
     // one manifest entry per scanned file — the exact bytes to resend to create
@@ -247,6 +248,20 @@ describe("renderReceiptBatchCompact — dry_run", () => {
 });
 
 describe("renderReceiptBatchCompact — executed", () => {
+  it("dry run surfaces BOTH per-effect plan handles; next_action carries the create one", () => {
+    const batch = { ...makeBatch(3), planHandles: { create: "H-CREATE", create_and_confirm: "H-CONFIRM" } };
+    const { summary } = renderReceiptBatchCompact(compactInput(batch));
+    expect(summary.next_action?.args.mode).toBe("create");
+    expect(summary.next_action?.args.plan_handle).toBe("H-CREATE");
+    expect(summary.plan_handles).toEqual({ create: "H-CREATE", create_and_confirm: "H-CONFIRM" });
+  });
+
+  it("post-mutation compacts carry no plan handles", () => {
+    const batch = { ...makeBatch(3, { executionMode: "create", dryRun: false }), planHandles: { create: "H-CREATE", create_and_confirm: "H-CONFIRM" } };
+    const { summary } = renderReceiptBatchCompact(compactInput(batch));
+    expect(summary.plan_handles).toBeUndefined();
+  });
+
   it("create completes and points the guided user to continue_accounting_workflow", () => {
     const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(5, { executionMode: "create", dryRun: false })));
     expect(summary.status).toBe("completed");

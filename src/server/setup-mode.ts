@@ -1,6 +1,6 @@
-import type { getCredentialSetupInfo } from "../config.js";
+import { buildCredentialSetupNextSteps, type getCredentialSetupInfo } from "../config.js";
 import type { ApiContext } from "../tools/crud-tools.js";
-import { SETUP_PROFILE_CHOICES } from "../tool-profile.js";
+import { SETUP_PROFILE_CHOICES, type ToolProfile } from "../tool-profile.js";
 
 /**
  * Setup-mode payloads, errors, and the credential-blocked API proxy.
@@ -88,10 +88,24 @@ export function getResourceUri(args: unknown[]): string {
 export function buildSetupInstructionsPayload(
   setupInfo: ReturnType<typeof getCredentialSetupInfo>,
   isSetupMode: boolean,
+  /** False when the credential-management tools are not registered on this
+   * surface (e.g. the guided profiles, or configured mode without
+   * EARVELDAJA_EXPOSE_SETUP_TOOLS): the payload then names no import tool. */
+  credentialToolsAvailable = true,
+  toolProfile?: ToolProfile,
 ): Record<string, unknown> {
   return {
     ...setupInfo,
-    import_tool: "import_apikey_credentials",
+    ...(credentialToolsAvailable
+      ? { import_tool: "import_apikey_credentials" }
+      : {
+          next_steps: buildCredentialSetupNextSteps({
+            globalConfigDirectory: setupInfo.global_config_directory,
+            globalEnvFile: setupInfo.global_env_file,
+            credentialToolsAvailable: false,
+            ...(toolProfile !== undefined ? { toolProfile } : {}),
+          }),
+        }),
     mode: isSetupMode ? "setup" : "configured",
     message: isSetupMode
       ? "No API credentials configured. Server is running in setup mode."

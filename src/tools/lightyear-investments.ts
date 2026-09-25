@@ -35,6 +35,7 @@ import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
 import { HttpError } from "../http-client.js";
+import { classifyMutationFailure } from "../mutation-outcome.js";
 import { toolError } from "../tool-error.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT } from "../accounting-defaults.js";
 import {
@@ -2153,8 +2154,7 @@ async function validateProjectedPostings(
 function definitiveCreateRejection(
   error: unknown,
 ): { status: "failed"; upstream_detail?: string } | null {
-  if (!(error instanceof HttpError) || typeof error.status !== "number") return null;
-  if (error.status < 400 || error.status >= 500 || error.status === 408) return null;
+  if (!(error instanceof HttpError) || classifyMutationFailure(error) !== "definitive") return null;
   return {
     status: "failed",
     ...(error.upstream_detail !== undefined ? { upstream_detail: error.upstream_detail } : {}),

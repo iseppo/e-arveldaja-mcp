@@ -782,6 +782,8 @@ describe("audit log labels", () => {
         .toBe("MUTATION_INDETERMINATE");
       // clear_session_log's tombstone must be filterable via get_session_log's action enum.
       expect(auditLog.AuditAction.parse("LOG_CLEARED")).toBe("LOG_CLEARED");
+      expect(auditLog.AuditAction.parse("DEACTIVATED")).toBe("DEACTIVATED");
+      expect(auditLog.AuditAction.parse("REACTIVATED")).toBe("REACTIVATED");
       expect(auditLog.logAudit({
         tool: "update_client",
         action: "MUTATION_INDETERMINATE",

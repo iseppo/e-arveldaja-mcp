@@ -30,15 +30,16 @@ function setup(overrides: Record<string, unknown> = {}) {
   const confirm = vi.fn().mockResolvedValue({});
   const api = {
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingTx()]),
       get: vi.fn().mockResolvedValue(matchingTx()),
       update: vi.fn().mockResolvedValue({}),
       confirm,
       delete: vi.fn().mockResolvedValue({}),
     },
-    saleInvoices: { listAll: vi.fn().mockResolvedValue([matchingSale()]) },
-    purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([matchingSale()]) },
+    purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([]),
@@ -74,13 +75,14 @@ const thirdPartySale = () => ({
 function setupThirdPartyPayer() {
   return setup({
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([thirdPartyTx()]),
       get: vi.fn().mockResolvedValue(thirdPartyTx()),
       update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
       delete: vi.fn().mockResolvedValue({}),
     },
-    saleInvoices: { listAll: vi.fn().mockResolvedValue([thirdPartySale()]) },
+    saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([thirdPartySale()]) },
   });
 }
 
@@ -127,6 +129,7 @@ function setupLedgerCheck(journalClientsId: number) {
   });
   return setup({
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingTx()]),
       // Before the confirm the command's prepare() must still see a PROJECT row;
       // afterwards the ledger check reads the registered row and its items.
@@ -138,10 +141,11 @@ function setupLedgerCheck(journalClientsId: number) {
       delete: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingSale()]),
       get: vi.fn().mockResolvedValue({ ...matchingSale(), receivable_accounts_id: RECEIVABLE_ACCOUNT_ID }),
     },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([registrationJournal(journalClientsId)]) },
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([registrationJournal(journalClientsId)]) },
   });
 }
 
@@ -155,6 +159,7 @@ function setupTwoTxLedgerCheck() {
   const secondSale = () => ({ ...matchingSale(), id: 502, number: "INV-2", bank_ref_number: "REF2" });
   return setup({
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingTx(), secondTx()]),
       get: vi.fn().mockImplementation(async (id: number) => (confirmedIds.has(id)
         ? confirmedTxWithInvoiceItem(id, id === LEDGER_TX_ID ? 501 : 502)
@@ -167,6 +172,7 @@ function setupTwoTxLedgerCheck() {
       delete: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingSale(), secondSale()]),
       get: vi.fn().mockImplementation(async (id: number) => {
         if (id === 501) throw new Error("invoice read failed");
@@ -174,6 +180,7 @@ function setupTwoTxLedgerCheck() {
       }),
     },
     journals: {
+      invalidateListCache: vi.fn(),
       listAllWithPostings: vi.fn().mockResolvedValue([registrationJournal(42, 1), registrationJournal(42, 2)]),
     },
   });
@@ -209,7 +216,7 @@ describe("BankReconciliationOperations", () => {
 
   it("prepareInterAccount mints a plan handle by default but not with mintPlanHandles:false", async () => {
     const { operations, runtimeSafetyContext } = setup({
-      journals: { listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     });
     const before = runtimeSafetyContext.planStore.activeCount;
     const minted = await operations.prepareInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined });
@@ -231,6 +238,47 @@ describe("BankReconciliationOperations", () => {
     expect(outcome.ok).toBe(true);
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(mockedLogAudit).toHaveBeenCalled();
+  });
+
+  it("executeExactConfirm re-reads transactions/invoices/journals uncached before the gating projection; prepare stays cached", async () => {
+    const { api, operations } = setup();
+    const dry = await operations.prepareExactConfirm({ minConfidence: 90, blockOnDuplicate: undefined });
+    const planHandle = dry.ok ? dry.value.planHandle : undefined;
+    for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices, api.journals]) {
+      expect(resource.invalidateListCache).not.toHaveBeenCalled();
+    }
+
+    const outcome = await operations.executeExactConfirm({ minConfidence: 90, blockOnDuplicate: undefined, planHandle });
+    expect(outcome.ok).toBe(true);
+    for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices]) {
+      expect(resource.invalidateListCache).toHaveBeenCalled();
+      expect(resource.invalidateListCache.mock.invocationCallOrder[0]).toBeLessThan(resource.listAll.mock.invocationCallOrder.at(-1));
+    }
+    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(1);
+    // The confirm command's own pre-mutation transaction read is uncached too.
+    const lastInvalidate = api.transactions.invalidateListCache.mock.invocationCallOrder.at(-1);
+    const lastGetBeforeConfirm = api.transactions.get.mock.invocationCallOrder
+      .filter((order: number) => order < api.transactions.confirm.mock.invocationCallOrder[0]).at(-1);
+    expect(lastInvalidate).toBeLessThan(lastGetBeforeConfirm);
+    expect(api.transactions.invalidateListCache.mock.invocationCallOrder[1]).toBeGreaterThan(api.transactions.listAll.mock.invocationCallOrder.at(-1));
+  });
+
+  it("executeInterAccount re-reads transactions and the journal guard snapshot uncached; prepare stays cached", async () => {
+    const { api, operations } = setup({
+      journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    });
+    const prepared = await operations.prepareInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined });
+    const planHandle = prepared.ok ? prepared.value.planHandle : undefined;
+    expect(api.transactions.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
+    const listCallsBefore = api.transactions.listAll.mock.calls.length;
+
+    await operations.executeInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined, planHandle });
+    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(1);
+    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(1);
+    const invalidateOrder = api.transactions.invalidateListCache.mock.invocationCallOrder[0];
+    expect(invalidateOrder).toBeLessThan(api.transactions.listAll.mock.invocationCallOrder[listCallsBefore]);
+    expect(api.journals.invalidateListCache.mock.invocationCallOrder[0]).toBeLessThan(api.journals.listAll.mock.invocationCallOrder.at(-1));
   });
 
   it("executeExactConfirm refuses without a plan handle (a handle is not approval, but it is required)", async () => {
@@ -294,13 +342,14 @@ describe("BankReconciliationOperations", () => {
   it("keeps every manual-review note on a row that is both third-party paid and partially paid", async () => {
     const { operations } = setup({
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([thirdPartyTx()]),
         get: vi.fn().mockResolvedValue(thirdPartyTx()),
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({}),
         delete: vi.fn().mockResolvedValue({}),
       },
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([{ ...thirdPartySale(), payment_status: "PARTIALLY_PAID" }]) },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([{ ...thirdPartySale(), payment_status: "PARTIALLY_PAID" }]) },
     });
 
     const outcome = await operations.suggestMatches({ minConfidence: 50, blockOnDuplicate: undefined });
@@ -395,6 +444,7 @@ describe("BankReconciliationOperations", () => {
     } as any);
     const { api, operations } = setup({
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([matchingTx()]),
         get: vi.fn().mockResolvedValue(matchingTx()),
         update: vi.fn().mockResolvedValue({}),

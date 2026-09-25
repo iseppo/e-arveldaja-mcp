@@ -54,6 +54,9 @@ export const AUDIT_ACTIONS = [
   "CREATED",
   "UPDATED",
   "DELETED",
+  // Soft (reversible) activation changes on clients/products — distinct from DELETED
+  "DEACTIVATED",
+  "REACTIVATED",
   "CONFIRMED",
   "INVALIDATED",
   "UPLOADED",
@@ -462,8 +465,8 @@ function getLang(): Lang {
 }
 
 const ACTION_LABELS: Record<Lang, Record<string, string>> = {
-  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud", DELETE_FAILED: "Kustutamine ebaõnnestus", CONNECTION_SWITCH_INTERRUPTED: "Ühenduse vahetus katkestatud", MUTATION_INDETERMINATE: "Mutatsiooni tulemus määramatu", LOG_CLEARED: "Logi tühjendatud" },
-  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent", DELETE_FAILED: "Delete failed", CONNECTION_SWITCH_INTERRUPTED: "Connection switch interrupted", MUTATION_INDETERMINATE: "Mutation outcome indeterminate", LOG_CLEARED: "Log cleared" },
+  et: { CREATED: "Loodud", UPDATED: "Muudetud", DELETED: "Kustutatud", DEACTIVATED: "Deaktiveeritud", REACTIVATED: "Taasaktiveeritud", CONFIRMED: "Kinnitatud", INVALIDATED: "Tühistatud", UPLOADED: "Üles laetud", IMPORTED: "Imporditud", SENT: "Saadetud", DELETE_FAILED: "Kustutamine ebaõnnestus", CONNECTION_SWITCH_INTERRUPTED: "Ühenduse vahetus katkestatud", MUTATION_INDETERMINATE: "Mutatsiooni tulemus määramatu", LOG_CLEARED: "Logi tühjendatud" },
+  en: { CREATED: "Created", UPDATED: "Updated", DELETED: "Deleted", DEACTIVATED: "Deactivated", REACTIVATED: "Reactivated", CONFIRMED: "Confirmed", INVALIDATED: "Invalidated", UPLOADED: "Uploaded", IMPORTED: "Imported", SENT: "Sent", DELETE_FAILED: "Delete failed", CONNECTION_SWITCH_INTERRUPTED: "Connection switch interrupted", MUTATION_INDETERMINATE: "Mutation outcome indeterminate", LOG_CLEARED: "Log cleared" },
 };
 
 const ENTITY_LABELS: Record<Lang, Record<string, string>> = {

@@ -65,6 +65,42 @@ export class MutationIndeterminateError extends Error {
   }
 }
 
+/**
+ * Shared outcome classifier for a failed mutating request (POST/PATCH/PUT/DELETE).
+ *
+ * - "definitive": the server answered with a 4xx status (except 408), i.e. it
+ *   rejected the request before committing anything. 429 counts as definitive:
+ *   rate limiting is applied before the request is processed, so nothing was
+ *   written (HttpClient already retries 429 for every method on that basis).
+ * - "indeterminate": everything else — 5xx (the server may have committed the
+ *   write and failed afterwards), 408 (the server gave up on a request it may
+ *   have partly processed), network drops / timeouts / aborts / body-read
+ *   failures (surfaced by HttpClient as `status: "network"`), an already
+ *   classified MutationIndeterminateError, and any unknown thrown value.
+ *
+ * An indeterminate outcome must never be blindly retried: re-read the entity
+ * first, or the retry can double-book.
+ */
+export type MutationFailureClass = "definitive" | "indeterminate";
+
+export function classifyMutationFailure(error: unknown): MutationFailureClass {
+  try {
+    if (isMutationIndeterminate(error)) return "indeterminate";
+  } catch {
+    return "indeterminate";
+  }
+  if (
+    error instanceof HttpError &&
+    typeof error.status === "number" &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408
+  ) {
+    return "definitive";
+  }
+  return "indeterminate";
+}
+
 export function isMutationIndeterminate(
   error: unknown,
 ): error is MutationIndeterminateError {

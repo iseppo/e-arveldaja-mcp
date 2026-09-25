@@ -13,7 +13,11 @@ Follow these steps:
    - `EARVELDAJA_API_PUBLIC_VALUE`
    - `EARVELDAJA_API_PASSWORD`
    - `EARVELDAJA_API_KEY_FILE`
-   - importing a secure `apikey*.txt` with `import_apikey_credentials`
-4. The credential-management tools (`import_apikey_credentials`, `list_stored_credentials`, `remove_stored_credentials`) are always registered in `setup` mode. In `configured` mode they are hidden and only appear when the server is started with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1`. `get_setup_instructions` is never gated. If `import_apikey_credentials` is not in `tools/list`, tell the user to restart with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` (or from the setup folder) and stop.
-5. `import_apikey_credentials` is preview-first: the default call verifies and projects the target without writing and returns a `plan_handle`; persist by calling it again with `execute: true` and that `plan_handle`. Use it only after the user identifies the file or confirms the detected single candidate. Prefer the `setup-credentials` workflow, which covers the full preview→execute flow, storage scope, and removal.
-6. After a successful import, state that the MCP server must be restarted before the stored credentials become active.
+   - importing a secure `apikey*.txt` file
+<!-- E_ARVELDAJA_FEATURE_START:credential-tools -->
+4. `import_apikey_credentials` is preview-first: the default call verifies and projects the target without writing and returns a `plan_handle`; persist by calling it again with `execute: true` and that `plan_handle`. Use it only after the user identifies the file or confirms the detected single candidate. Prefer the `setup-credentials` workflow, which covers the full preview→execute flow, storage scope, and removal.
+<!-- E_ARVELDAJA_FEATURE_END:credential-tools -->
+<!-- E_ARVELDAJA_FEATURE_START:no-credential-tools -->
+4. The credential-import tool is not registered on this server's current tool surface (it appears in `setup` mode on the `standard`/`full` profiles, or with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1`). `get_setup_instructions` is never gated. On `EARVELDAJA_PROFILE=guided` / `guided-sales`, add the credentials through the environment variables or a local or shared `.env` file (no profile change needed), or — to import an `apikey*.txt` file from a tool call — start the server temporarily with `EARVELDAJA_PROFILE=full` (it includes the credential tools) and switch back to the guided profile afterwards. Do NOT suggest `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` there: setting any legacy exposure flag switches the profile to `custom` and replaces the guided tool surface. On the `standard` profile, restarting with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` adds the import tool (the profile then normalizes to `custom`: the standard tool set plus the credential tools), as does `EARVELDAJA_PROFILE=full`. Follow the `next_steps` from `get_setup_instructions`, which already names the right path for the running profile.
+<!-- E_ARVELDAJA_FEATURE_END:no-credential-tools -->
+5. After a successful import, state that the MCP server must be restarted before the stored credentials become active.

@@ -10,7 +10,10 @@ export const PROMPT_SURFACE_DATA_LIMITS = Object.freeze({
 
 export interface PromptFeatureSection {
   name: string;
+  /** The section renders only when every one of these tools is registered. */
   advertisedTools: readonly string[];
+  /** ...and none of these is registered (selects one of several surface variants). */
+  unlessTools?: readonly string[];
 }
 
 const FEATURE_TOKEN_PATTERN = String.raw`<!-- E_ARVELDAJA_FEATURE_(START|END):([a-z][a-z0-9-]*) -->`;
@@ -180,7 +183,7 @@ function validateFeatureSections(
       throw new Error(`Invalid prompt feature definition: ${section.name}`);
     }
     if (section.advertisedTools.length === 0
-      || section.advertisedTools.some(tool => !/^[a-z][a-z0-9_]*$/.test(tool))) {
+      || [...section.advertisedTools, ...(section.unlessTools ?? [])].some(tool => !/^[a-z][a-z0-9_]*$/.test(tool))) {
       throw new Error(`Invalid advertised tools for prompt feature: ${section.name}`);
     }
     byName.set(section.name, section);
@@ -239,9 +242,12 @@ export function renderStaticFeatureSections(
 ): string {
   const byName = validateFeatureSections(trustedBody, sections);
   const rendered = trustedBody.replace(featureBlockRegex(), (_block, name: string, content: string) => {
-    const tools = byName.get(name)!.advertisedTools.map(tool => `\`${tool}\``).join(", ");
+    const section = byName.get(name)!;
+    const tools = section.advertisedTools.map(tool => `\`${tool}\``).join(", ");
+    const unless = (section.unlessTools ?? []).map(tool => `\`${tool}\``).join(", ");
+    const unlessClause = unless ? `, and none of these is advertised: ${unless}` : "";
     return `<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:${name} -->
-Capability condition for \`${name}\`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: ${tools}. If any named tool is absent, skip this section and continue with the surrounding purchase-side workflow. Never call a missing tool to probe capability.
+Capability condition for \`${name}\`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: ${tools}${unlessClause}. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
 ${content}
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:${name} -->`;

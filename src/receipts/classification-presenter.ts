@@ -2,6 +2,8 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { ResponseBudgetError } from "../response-budget.js";
+import { PlanStoreError } from "../plan-store.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import type { ClassifiedTransactionGroupResult } from "../tools/receipt-inbox.js";
 import type {
@@ -150,9 +152,10 @@ export function renderApplyClassificationsFull(input: ApplyClassificationsFullIn
 // domain (Task 8), the apply dry_run_apply compact INLINES the SAME reviewed
 // classifications_json for execute_apply (self-completable, approval_required),
 // and a completed execute_apply points at continue_accounting_workflow. The
-// analysis compact points at dry_run_apply WITHOUT inlining the O(n) groups so
-// its size stays approximately constant — the store-less next-step limitation
-// tracked as F-UNIFORM-RESULT-PAGE for Task 10.
+// analysis compact likewise inlines a ready-to-send classifications_json (only
+// the auto-bookable groups, reduced to the fields apply reads) into its
+// dry_run_apply next_action, bounded by RESPONSE_BUDGETS.batch.hard; past that
+// bound it omits next_action and emits a narrow-the-range warning instead.
 
 export interface ClassificationAnalysisCompactInput {
   readonly result: UnmatchedAnalysisResult;
@@ -207,26 +210,68 @@ export function renderClassificationAnalysisCompact(
     ...(period.from !== undefined || period.to !== undefined ? { period } : {}),
   } as OperationSummaryV1["scope"];
 
-  // Store-less next step: point at dry_run_apply. classifications_json (this
-  // analysis output) must be carried forward by the caller; it is NOT inlined so
-  // the compact stays approximately constant-size (F-UNIFORM-RESULT-PAGE, T10).
-  const next_action = {
-    tool: "classify_bank_transactions",
-    args: { mode: "dry_run_apply" },
-    approval_required: false,
-  };
-
-  const summary = createOperationSummary({
+  // Store-less next step: the guided caller never sees the full groups, so the
+  // dry_run_apply next_action INLINES a ready-to-send classifications_json with
+  // only the auto-bookable groups, reduced to the fields apply reads (apply
+  // re-fetches every transaction by id and re-resolves the booking server-side).
+  // Counterparty text is OCR-sandbox-wrapped; apply canonicalizes it (M10).
+  // Review-only groups stay out (apply would skip them) and surface as warnings.
+  // When nothing is auto-bookable there is no apply step, so no next_action.
+  const bookableGroups = groups.filter(group => group.apply_mode === "purchase_invoice");
+  const applyGroups = bookableGroups.map(group => ({
+    category: group.category,
+    apply_mode: group.apply_mode,
+    normalized_counterparty: wrapUntrustedOcr(group.normalized_counterparty) ?? "",
+    display_counterparty: wrapUntrustedOcr(group.display_counterparty) ?? "",
+    recurring: group.recurring,
+    similar_amounts: group.similar_amounts,
+    total_amount: group.total_amount,
+    reasons: group.reasons,
+    suggested_booking: {
+      ...(group.suggested_booking.purchase_article_id !== undefined ? { purchase_article_id: group.suggested_booking.purchase_article_id } : {}),
+      ...(group.suggested_booking.purchase_account_id !== undefined ? { purchase_account_id: group.suggested_booking.purchase_account_id } : {}),
+    },
+    transactions: group.transactions.map(transaction => ({
+      ...(transaction.id !== undefined ? { id: transaction.id } : {}),
+      amount: transaction.amount,
+      date: transaction.date,
+    })),
+  }));
+  const build = (inlineGroups: boolean, extraWarnings: CompactWarning[] = []) => createOperationSummary({
     status,
     message,
     counts,
     scope,
-    warnings,
+    warnings: [...extraWarnings, ...warnings],
     samples,
-    next_action,
+    // Without the inlined groups a dry_run_apply call cannot succeed, and a
+    // re-classify with the same dates would return the same oversized result,
+    // so the fallback carries no next_action — only the narrow-the-range warning.
+    ...(bookableGroups.length > 0 && inlineGroups
+      ? {
+          next_action: {
+            tool: "classify_bank_transactions",
+            args: { mode: "dry_run_apply", classifications_json: { groups: applyGroups } },
+            approval_required: false,
+          },
+        }
+      : {}),
   }, { budget: "batch", measureEnvelope: "summary" });
 
-  return { summary };
+  try {
+    return { summary: build(true) };
+  } catch (error) {
+    if (!(error instanceof ResponseBudgetError) && !(error instanceof PlanStoreError)) throw error;
+    // Too many groups to inline within the hard response budget (or the
+    // summary's structural size limits): point at a narrower re-classify
+    // instead of failing the whole classify call.
+    return {
+      summary: build(false, [{
+        code: "classifications_too_large",
+        message: `${bookableGroups.length} auto-bookable group(s) are too many to inline; re-run classify_bank_transactions mode="classify" with the same accounts_dimensions_id and a narrower date_from/date_to range (choose the dates), then continue from that response.`,
+      }]),
+    };
+  }
 }
 
 export interface ApplyClassificationsCompactInput {

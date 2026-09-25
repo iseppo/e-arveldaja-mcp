@@ -1,10 +1,11 @@
-import { HttpError, type HttpClient } from "../http-client.js";
+import type { HttpClient } from "../http-client.js";
 import type { ApiFile, ApiResponse, PaginatedResponse } from "../types/api.js";
 import { Cache } from "../cache.js";
 import { log } from "../logger.js";
 import { reportProgress } from "../progress.js";
 import type { AuditEntityType } from "../audit-log.js";
 import {
+  classifyMutationFailure,
   isMutationIndeterminate,
   MutationIndeterminateError,
   type MutationOperation,
@@ -48,6 +49,10 @@ export interface ListParams {
   payment_status?: string;
   clients_id?: number;
   type?: string;
+}
+
+function sortedListParams(params?: ListParams): string {
+  return params ? Object.keys(params).sort().map(k => `${k}=${(params as Record<string, unknown>)[k]}`).join("&") : "";
 }
 
 class PaginationMetadataError extends Error {
@@ -148,6 +153,7 @@ export class BaseResource<T> {
     businessKey: string,
     affectedPatterns: readonly string[],
     request: () => Promise<R>,
+    nextAction?: string,
   ): Promise<R> {
     try {
       const result = await request();
@@ -185,7 +191,9 @@ export class BaseResource<T> {
         throw error;
       }
 
-      if (error instanceof HttpError && error.status === "network") {
+      // 5xx / 408 / network / unknown failures may have committed server-side;
+      // only a 4xx rejection (except 408) is a definitive "nothing written".
+      if (classifyMutationFailure(error) === "indeterminate") {
         for (const pattern of new Set(affectedPatterns)) {
           this.invalidateCache(pattern);
         }
@@ -200,7 +208,8 @@ export class BaseResource<T> {
           businessKey,
           affectedCaches: [...affectedPatterns],
           cause: error,
-          nextAction: `Re-read ${entity} state for business key "${businessKey}" before deciding whether to retry; do not repeat the mutation blindly.`,
+          nextAction: nextAction ??
+            `Re-read ${entity} state for business key "${businessKey}" before deciding whether to retry; do not repeat the mutation blindly.`,
         });
       }
 
@@ -208,11 +217,14 @@ export class BaseResource<T> {
     }
   }
 
+  private listCacheKey(params?: ListParams): string {
+    return this.cacheKey(`${this.basePath}:list:${sortedListParams(params)}`);
+  }
+
   async list(params?: ListParams): Promise<PaginatedResponse<T>> {
     const requestedPage = params?.page ?? 1;
     validateRequestedPage(requestedPage);
-    const sortedParams = params ? Object.keys(params).sort().map(k => `${k}=${(params as Record<string, unknown>)[k]}`).join("&") : "";
-    const cacheKey = this.cacheKey(`${this.basePath}:list:${sortedParams}`);
+    const cacheKey = this.listCacheKey(params);
     const cached = cache.get<PaginatedResponse<T>>(cacheKey);
     if (cached !== undefined) {
       try {
@@ -224,7 +236,16 @@ export class BaseResource<T> {
         throw error;
       }
     }
+    return this.fetchPage(params, requestedPage, cacheKey);
+  }
 
+  /** Live (cache-bypassing) page read; the validated page is written back to the per-page cache. */
+  private async fetchPage(
+    params: ListParams | undefined,
+    requestedPage: number,
+    cacheKey = this.listCacheKey(params),
+  ): Promise<PaginatedResponse<T>> {
+    validateRequestedPage(requestedPage);
     const gen = cache.generation;
     const result = await this.client.get<PaginatedResponse<T>>(this.basePath, params as Record<string, string | number>);
     try {
@@ -266,8 +287,24 @@ export class BaseResource<T> {
     return result;
   }
 
+  /**
+   * Walk every page and return the stitched rows. Pages are always fetched
+   * live (the per-page `list()` cache is bypassed) so one result never mixes
+   * pages cached at different times, where a row that shifted across a page
+   * boundary could be missed. The stitched result is cached as a whole under
+   * `${basePath}:listAll:<params>` (a `basePath` prefix, so
+   * `invalidateCache()` / `invalidateListCache()` clear it with the pages);
+   * a cached result is reused only while it fits the caller's caps.
+   */
   async listAll(params?: Omit<ListParams, "page">, maxPages = 200, maxItems = 50_000): Promise<T[]> {
+    const stitchedKey = this.cacheKey(`${this.basePath}:listAll:${sortedListParams(params)}`);
+    const stitched = cache.get<{ items: T[]; pages: number }>(stitchedKey);
+    if (stitched !== undefined && stitched.pages <= maxPages && stitched.items.length <= maxItems) {
+      return [...stitched.items];
+    }
+    const gen = cache.generation;
     const allItems: T[] = [];
+    const seenIds = new Set<number | string>();
     let page = 1;
     let totalPages = 1;
     let pinnedTotalPages: number | undefined;
@@ -287,7 +324,7 @@ export class BaseResource<T> {
             `Use date filters to narrow the query.`
           );
         }
-        const response = await this.list({ ...params, page });
+        const response = await this.fetchPage({ ...params, page }, page);
         if (pinnedTotalPages === undefined) {
           pinnedTotalPages = response.total_pages;
         } else if (response.total_pages !== pinnedTotalPages) {
@@ -296,7 +333,17 @@ export class BaseResource<T> {
             `total_pages changed from ${pinnedTotalPages} to ${describeMetadataValue(response.total_pages)}`,
           );
         }
-        allItems.push(...response.items);
+        // A row can still shift across a page boundary between two live page
+        // reads and appear on both pages. Keep the first occurrence per id;
+        // rows without an id are kept as-is.
+        for (const item of response.items) {
+          const id = (item as { id?: unknown } | null)?.id;
+          if (typeof id === "number" || typeof id === "string") {
+            if (seenIds.has(id)) continue;
+            seenIds.add(id);
+          }
+          allItems.push(item);
+        }
         if (allItems.length > maxItems) {
           throw new Error(
             `${this.basePath}: item count (${allItems.length}) exceeds limit of ${maxItems}. ` +
@@ -319,6 +366,7 @@ export class BaseResource<T> {
       throw error;
     }
 
+    cache.setIfSameGeneration(stitchedKey, { items: [...allItems], pages: totalPages }, gen, 120);
     return allItems;
   }
 

@@ -108,7 +108,9 @@ describe("TransactionsApi.confirm", () => {
         return undefined;
       },
       patchHandler: ({ path }) => {
-        if (path === "/transactions/3/register") throw new Error("upstream rejected register");
+        if (path === "/transactions/3/register") {
+          throw new HttpError("upstream rejected register", 422, "PATCH", "/transactions/3/register");
+        }
         return { code: 200, messages: [] };
       },
     });
@@ -133,9 +135,11 @@ describe("TransactionsApi.confirm", () => {
         return undefined;
       },
       patchHandler: ({ path, body }) => {
-        if (path === "/transactions/4/register") throw new Error("register failed");
+        if (path === "/transactions/4/register") {
+          throw new HttpError("register failed", 422, "PATCH", "/transactions/4/register");
+        }
         if (path === "/transactions/4" && (body as Record<string, unknown>).clients_id === null) {
-          throw new Error("rollback failed");
+          throw new HttpError("rollback failed", 422, "PATCH", "/transactions/4");
         }
         return { code: 200, messages: [] };
       },
@@ -153,7 +157,9 @@ describe("TransactionsApi.confirm", () => {
     const { client, patchCalls } = makeClient({
       getById: () => ({ id: 5, clients_id: 7 }),
       patchHandler: ({ path }) => {
-        if (path === "/transactions/5/register") throw new Error("register failed");
+        if (path === "/transactions/5/register") {
+          throw new HttpError("register failed", 422, "PATCH", "/transactions/5/register");
+        }
         return { code: 200, messages: [] };
       },
     });
@@ -180,6 +186,114 @@ describe("TransactionsApi.confirm", () => {
 
     expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
     expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+  });
+
+  it("busts invoice caches after a successful confirm so a paid invoice is not served as unpaid", async () => {
+    const { client } = makeClient({
+      getById: () => ({ id: 6, clients_id: 7 }),
+    });
+    const api = new TransactionsApi(client);
+    cache.set("test:/sale_invoices:list:page=1", { stale: true });
+    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
+    cache.set("test:/purchase_invoices:88", { stale: true });
+    cache.set("test:/clients:list:page=1", { untouched: true });
+
+    await api.confirm(6, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]);
+
+    expect(cache.get("test:/sale_invoices:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/purchase_invoices:88")).toBeUndefined();
+    expect(cache.get("test:/clients:list:page=1")).toEqual({ untouched: true });
+  });
+
+  it.each([500, 503, 408])("recovers a committed registration after an HTTP %s response", async status => {
+    let txReads = 0;
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/61") {
+          txReads += 1;
+          return txReads === 1
+            ? { id: 61, clients_id: null }
+            : { id: 61, clients_id: 42, status: "CONFIRMED" };
+        }
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/61/register") {
+          throw new HttpError("server error", status, "PATCH", "/transactions/61/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
+
+    const result = await api.confirm(61, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]);
+
+    expect(result.code).toBe(200);
+    // No rollback of the auto-set client: the registration committed.
+    expect(patchCalls).toEqual([
+      { path: "/transactions/61", body: { clients_id: 42 } },
+      { path: "/transactions/61/register", body: expect.any(Array) },
+    ]);
+    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
+  });
+
+  it("surfaces a 500 register as indeterminate when the re-read shows an unexpected status", async () => {
+    let txReads = 0;
+    const { client } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/62") {
+          txReads += 1;
+          return txReads === 1 ? { id: 62, clients_id: 7 } : { id: 62, clients_id: 7, status: "VOID" };
+        }
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path === "/transactions/62/register") {
+          throw new HttpError("server error", 500, "PATCH", "/transactions/62/register");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(62, [{ related_table: "accounts", related_id: 4000, amount: 10 }]))
+      .rejects.toMatchObject({
+        category: "mutation_indeterminate",
+        operation: "confirm",
+        businessKey: "transaction:62",
+        cause: { status: 500 },
+      });
+  });
+
+  it("surfaces an indeterminate (500) clients_id rollback as a rollback MutationIndeterminateError", async () => {
+    const { client } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/63") return { id: 63, clients_id: null };
+        if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path, body }) => {
+        if (path === "/transactions/63/register") {
+          throw new HttpError("rejected", 422, "PATCH", "/transactions/63/register");
+        }
+        if (path === "/transactions/63" && (body as Record<string, unknown>).clients_id === null) {
+          throw new HttpError("server error", 500, "PATCH", "/transactions/63");
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(63, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
+      .rejects.toMatchObject({
+        category: "mutation_indeterminate",
+        operation: "rollback",
+        businessKey: "transaction:63",
+        cause: { name: "HttpError", status: 500, method: "PATCH", path: "/transactions/63" },
+      });
   });
 
   it("recovers a committed registration on a network error without rolling back clients_id", async () => {
@@ -283,7 +397,7 @@ describe("TransactionsApi.confirm", () => {
         entity: "transaction",
         entityId: 9,
         businessKey: "transaction:9",
-        affectedCaches: ["/transactions", "/journals"],
+        affectedCaches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
         cause: {
           name: "HttpError",
           message: "fetch failed",
@@ -330,7 +444,7 @@ describe("TransactionsApi.confirm", () => {
         entity: "transaction",
         entityId: 10,
         businessKey: "transaction:10",
-        affectedCaches: ["/transactions", "/journals"],
+        affectedCaches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
         cause: {
           name: "HttpError",
           message: "read lost",
@@ -377,7 +491,7 @@ describe("TransactionsApi.confirm", () => {
         entity: "transaction",
         entityId: 11,
         businessKey: "transaction:11",
-        affectedCaches: ["/transactions", "/journals"],
+        affectedCaches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
         cause: {
           name: "HttpError",
           message: "register lost",
@@ -577,12 +691,31 @@ describe("TransactionsApi.invalidate", () => {
     const api = new TransactionsApi(client);
     cache.set("test:/journals:list:page=1", { stale: true });
     cache.set("test:/transactions:list:page=1", { stale: true });
+    cache.set("test:/sale_invoices:list:page=1", { stale: true });
+    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
 
     await api.invalidate(7);
 
     expect(patchCalls).toEqual([{ path: "/transactions/7/invalidate", body: {} }]);
     expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
     expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/sale_invoices:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
+  });
+
+  it("surfaces a network drop as indeterminate and still busts invoice caches", async () => {
+    const { client } = makeClient({
+      patchHandler: () => {
+        throw new HttpError("socket hang up", "network", "PATCH", "/transactions/7/invalidate");
+      },
+    });
+    const api = new TransactionsApi(client);
+    cache.set("test:/sale_invoices:list:page=1", { stale: true });
+    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
+
+    await expect(api.invalidate(7)).rejects.toBeInstanceOf(MutationIndeterminateError);
+    expect(cache.get("test:/sale_invoices:list:page=1")).toBeUndefined();
+    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
   });
 });
 
@@ -663,7 +796,9 @@ describe("TransactionsApi.confirm linked-invoice client guard", () => {
   it("restores the original payer client when the register call fails after reassignment", async () => {
     const { client, patchCalls } = makeMismatchClient(22, {
       patchHandler: ({ path }) => {
-        if (path === "/transactions/22/register") throw new Error("upstream rejected register");
+        if (path === "/transactions/22/register") {
+          throw new HttpError("upstream rejected register", 422, "PATCH", "/transactions/22/register");
+        }
         return { code: 200, messages: [] };
       },
     });

@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "crypto";
 import { open, opendir, realpath, stat } from "fs/promises";
 import { basename, extname, resolve } from "path";
 import { z } from "zod";
@@ -26,7 +27,7 @@ import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import { camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
 import { createAccountingOperations } from "../accounting-operations.js";
-import type { ReviewGuidance } from "../estonian-accounting-guidance.js";
+import { ownerExpenseQuestionEffect, type ReviewGuidance } from "../estonian-accounting-guidance.js";
 import {
   getAccountingRulesPath,
   hasAnyAutoBookingRuleActionField,
@@ -1987,15 +1988,68 @@ function isOwnerExpenseReviewItem(reviewItem: Record<string, unknown>): boolean 
   return item !== undefined && stringAt(item, "classification") === "owner_paid_expense_reimbursement";
 }
 
-// Read the reviewed owner-expense booking params from item.owner_expense. Returns
-// undefined when the classification is owner-expense but the concrete booking
-// params have not (yet) been supplied — in that case the legacy read-only planning
-// path is kept (no mint), so a param-less owner-expense item is never a mutation.
-function extractOwnerExpenseBookingParams(reviewItem: Record<string, unknown>): OwnerExpenseReimbursementParams | undefined {
+// The answer shape of an owner-expense review item: every answer lives under
+// review_item_json.item.owner_expense and is resent with action='prepare_action'.
+// The booking fields below are required; payable_account is required too (no
+// silent default — the owner debt may sit on the default 2110 or on a
+// per-person account such as 1360). Each review follow-up question is answered
+// on its own under question_answers[question_id]; vat_deduction_mode is the
+// booking decision those questions feed and answers none of them by itself.
+const OWNER_EXPENSE_ANSWER_QUESTIONS: Readonly<Record<string, string>> = {
+  owner_client_id: "Which owner paid this expense? Give the owner's e-arveldaja client id (owner_client_id).",
+  effective_date: "What is the expense date (effective_date, YYYY-MM-DD)?",
+  description: "What short description should the journal carry (description)?",
+  net_amount: "What is the net amount without VAT, in EUR (net_amount)?",
+  vat_rate: "What VAT rate is on the receipt, as a decimal fraction (vat_rate, e.g. 0.24; 0 when there is no VAT)?",
+  expense_account: "Which expense account should be debited (expense_account)?",
+  payable_account: `Which account holds the debt to the owner (payable_account)? The server default is ${DEFAULT_OWNER_PAYABLE_ACCOUNT}; confirm it or name the company's owner-payable account. An account with per-person dimensions (such as 1360) cannot be booked through this continuation.`,
+};
+
+const OWNER_EXPENSE_VAT_ANSWER_QUESTION =
+  "Given the answers to the review questions, how is the input VAT deducted (vat_deduction_mode)? 'full' (business use, VAT deductible), 'partial' (with deductible_vat_amount), or 'none' (VAT not deductible).";
+
+interface OwnerExpenseMissingAnswer {
+  field: string;
+  question: string;
+  question_id?: string;
+  expected_answer?: string;
+}
+
+interface OwnerExpenseAnswers {
+  // Present only when every required booking field is supplied.
+  params?: OwnerExpenseReimbursementParams;
+  missing: OwnerExpenseMissingAnswer[];
+  // Review questions answered `false`: the question's premise does not hold.
+  blocked: OwnerExpenseMissingAnswer[];
+}
+
+function parseVatDeductionMode(value: string | undefined): "none" | "full" | "partial" | undefined {
+  return value === "none" || value === "full" || value === "partial" ? value : undefined;
+}
+
+const OWNER_EXPENSE_QUESTION_ANSWER_SHAPE =
+  "true, false, or { \"answer\": true|false, \"note\": \"optional text\" }. A plain text answer is not accepted. Depending on the question, an answer can block the booking or limit the VAT deduction to 'partial'/'none'.";
+
+// The decision of one review-question answer: only a boolean, or an object with
+// a boolean `answer`, decides it. The object's `note` is never interpreted.
+function ownerExpenseQuestionDecision(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (isRecord(value) && typeof value.answer === "boolean") return value.answer;
+  return undefined;
+}
+
+// Stable id of one review follow-up question: a hash of its canonical text, so
+// a sandbox-wrapped round trip of the same question keeps the same id.
+function ownerExpenseQuestionId(question: string): string {
+  return `q_${createHash("sha256").update(desandboxText(question).trim()).digest("hex").slice(0, 12)}`;
+}
+
+// Read the owner-expense answers from item.owner_expense and list what is still
+// missing. A needs_answers item reaches ready exactly when `missing` and
+// `blocked` are both empty.
+function readOwnerExpenseAnswers(reviewItem: Record<string, unknown>, followUpQuestions: readonly string[]): OwnerExpenseAnswers {
   const item = recordAt(reviewItem, "item");
-  if (item === undefined) return undefined;
-  const oe = recordAt(item, "owner_expense");
-  if (oe === undefined) return undefined;
+  const oe = (item !== undefined ? recordAt(item, "owner_expense") : undefined) ?? {};
 
   const owner_client_id = numberAt(oe, "owner_client_id");
   const effective_date = stringAt(oe, "effective_date");
@@ -2003,35 +2057,96 @@ function extractOwnerExpenseBookingParams(reviewItem: Record<string, unknown>): 
   const net_amount = numberAt(oe, "net_amount");
   const vat_rate = numberAt(oe, "vat_rate");
   const expense_account = numberAt(oe, "expense_account");
+  const payable_account = numberAt(oe, "payable_account");
+  const vat_deduction_mode = parseVatDeductionMode(stringAt(oe, "vat_deduction_mode"));
+  const required: Record<string, unknown> = {
+    owner_client_id, effective_date, description, net_amount, vat_rate, expense_account, payable_account,
+  };
+  const missing: OwnerExpenseMissingAnswer[] = Object.entries(required)
+    .filter(([, value]) => value === undefined)
+    .map(([field]) => ({ field, question: OWNER_EXPENSE_ANSWER_QUESTIONS[field]! }));
+
+  // Every review question needs its own structured decision: `true`/`false`
+  // (or `{ answer, note? }`). Free text is never interpreted as a decision — a
+  // plain string ("No, personal use") leaves the question open. What a decision
+  // means comes from the server-owned question semantics: it proceeds, limits
+  // the VAT deduction, or blocks. A question without server semantics blocks
+  // on "no" (conservative); a "yes" to it proceeds.
+  const questionAnswers = recordAt(oe, "question_answers") ?? {};
+  const blocked: OwnerExpenseMissingAnswer[] = [];
+  const vatLimiting: OwnerExpenseMissingAnswer[] = [];
+  const vatExcluded: OwnerExpenseMissingAnswer[] = [];
+  for (const question of followUpQuestions) {
+    const questionId = ownerExpenseQuestionId(question);
+    const entry = { field: `question_answers.${questionId}`, question_id: questionId, question };
+    const decision = ownerExpenseQuestionDecision(Object.hasOwn(questionAnswers, questionId) ? questionAnswers[questionId] : undefined);
+    if (decision === undefined) {
+      missing.push({ ...entry, expected_answer: OWNER_EXPENSE_QUESTION_ANSWER_SHAPE });
+      continue;
+    }
+    const semantics = ownerExpenseQuestionEffect(desandboxText(question));
+    const effect = decision
+      ? semantics?.on_true ?? "proceed"
+      : semantics?.on_false ?? "block";
+    if (effect === "block") blocked.push(entry);
+    else if (effect === "limit_vat") vatLimiting.push(entry);
+    else if (effect === "no_vat") vatExcluded.push(entry);
+  }
+  // A VAT-excluding answer allows only vat_deduction_mode 'none'.
+  if (vatExcluded.length > 0 && vat_deduction_mode !== undefined && vat_deduction_mode !== "none") {
+    missing.push({
+      field: "vat_deduction_mode",
+      question: `vat_deduction_mode '${vat_deduction_mode}' conflicts with the answer to review question(s) ${vatExcluded.map(entry => entry.question_id).join(", ")}: this input VAT is not deductible at all (KMS § 30 lg 1, e.g. guest reception or staff consumption). Use 'none'.`,
+    });
+  }
+  // A VAT-limiting answer rules out a full deduction.
+  if (vatLimiting.length > 0 && vatExcluded.length === 0 && vat_deduction_mode === "full") {
+    missing.push({
+      field: "vat_deduction_mode",
+      question: `vat_deduction_mode 'full' conflicts with the answer to review question(s) ${vatLimiting.map(entry => entry.question_id).join(", ")}, which limit the input-VAT deduction (KMS § 29 lg 4, § 30, § 30 lg 4, § 32). Use 'partial' with deductible_vat_amount (e.g. the 50% passenger-car cap or the business share) or 'none'.`,
+    });
+  }
+  if (followUpQuestions.length > 0 && vat_deduction_mode === undefined) {
+    missing.push({ field: "vat_deduction_mode", question: OWNER_EXPENSE_VAT_ANSWER_QUESTION });
+  }
   if (
     owner_client_id === undefined || effective_date === undefined || description === undefined ||
-    net_amount === undefined || vat_rate === undefined || expense_account === undefined
+    net_amount === undefined || vat_rate === undefined || expense_account === undefined ||
+    payable_account === undefined
   ) {
-    return undefined;
+    return { missing, blocked };
   }
 
-  const modeRaw = stringAt(oe, "vat_deduction_mode");
-  const vat_deduction_mode = modeRaw === "none" || modeRaw === "full" || modeRaw === "partial" ? modeRaw : undefined;
   const vat_amount = numberAt(oe, "vat_amount");
   const deductible_vat_amount = numberAt(oe, "deductible_vat_amount");
   const vat_account = numberAt(oe, "vat_account");
-  const payable_account = numberAt(oe, "payable_account");
   const document_number = stringAt(oe, "document_number");
 
   return {
-    owner_client_id,
-    effective_date,
-    description,
-    net_amount,
-    vat_rate,
-    expense_account,
-    ...(vat_amount !== undefined ? { vat_amount } : {}),
-    ...(vat_deduction_mode !== undefined ? { vat_deduction_mode } : {}),
-    ...(deductible_vat_amount !== undefined ? { deductible_vat_amount } : {}),
-    ...(vat_account !== undefined ? { vat_account } : {}),
-    ...(payable_account !== undefined ? { payable_account } : {}),
-    ...(document_number !== undefined ? { document_number } : {}),
+    missing,
+    blocked,
+    params: {
+      owner_client_id,
+      effective_date,
+      description,
+      net_amount,
+      vat_rate,
+      expense_account,
+      payable_account,
+      ...(vat_amount !== undefined ? { vat_amount } : {}),
+      ...(vat_deduction_mode !== undefined ? { vat_deduction_mode } : {}),
+      ...(deductible_vat_amount !== undefined ? { deductible_vat_amount } : {}),
+      ...(vat_account !== undefined ? { vat_account } : {}),
+      ...(document_number !== undefined ? { document_number } : {}),
+    },
   };
+}
+
+// The projection posts the owner payable without a dimension; the API rejects a
+// dimension-less posting on an account that has per-person dimensions (1360).
+async function payableAccountHasDimensions(api: ApiContext, payableAccount: number): Promise<boolean> {
+  const dimensions = await api.readonly.getAccountDimensions();
+  return dimensions.some(dimension => dimension.accounts_id === payableAccount && dimension.is_deleted !== true);
 }
 
 // The drift-binding fingerprint IS the resolved effective journal projection —
@@ -2111,21 +2226,24 @@ function ownerExpenseNotServerExecutableResponse(): CallToolResult {
 // handle only ever exists for a fully-resolved, reviewable journal.
 async function buildOwnerExpenseContinuationPrepareResponse(
   reviewItem: Record<string, unknown>,
-  params: OwnerExpenseReimbursementParams,
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig,
 ): Promise<CallToolResult> {
   const resolution = resolveReviewItemPlan(reviewItem, exposure);
-  // Recommendation/compliance text is echoed from the caller's review item.
+  const answers = readOwnerExpenseAnswers(reviewItem, resolution.unresolved_questions);
+  // Recommendation/compliance text and the review questions are echoed from the
+  // caller's review item; the booking-field questions are server-authored.
   const sandboxedResolution = sandboxReviewFields({
     recommendation: resolution.recommendation,
     compliance_basis: resolution.compliance_basis,
-    unresolved_questions: resolution.unresolved_questions,
-  }) as Pick<ReviewResolutionResult, "recommendation" | "compliance_basis" | "unresolved_questions">;
-  // A handle only exists for a fully-reviewed item: open questions (e.g. VAT or
-  // business-use) must be answered before anything is approvable.
-  if (resolution.unresolved_questions.length > 0) {
+  }) as Pick<ReviewResolutionResult, "recommendation" | "compliance_basis">;
+  const publicEntry = (entry: OwnerExpenseMissingAnswer): OwnerExpenseMissingAnswer => entry.question_id !== undefined
+    ? { ...entry, question: sandboxReviewFields(entry.question) as string }
+    : entry;
+  const needsAnswers = (missing: OwnerExpenseMissingAnswer[], blocked: OwnerExpenseMissingAnswer[] = []): CallToolResult => {
+    const publicMissing = missing.map(publicEntry);
+    const publicBlocked = blocked.map(publicEntry);
     return {
       content: [{
         type: "text",
@@ -2133,11 +2251,29 @@ async function buildOwnerExpenseContinuationPrepareResponse(
           review_type: "receipt_review",
           status: "needs_answers",
           ...sandboxedResolution,
-          next_step_summary: "Answer the unresolved_questions, then call action='prepare_action' again to get an approval plan_handle.",
+          unresolved_questions: [...publicBlocked, ...publicMissing].map(entry => entry.question),
+          missing_answers: publicMissing,
+          ...(publicBlocked.length > 0 ? { blocked_answers: publicBlocked } : {}),
+          answer_input: "review_item_json.item.owner_expense",
+          next_step_summary: publicBlocked.length > 0
+            ? "A review question was answered false (see blocked_answers), so this receipt cannot be booked as an owner reimbursement as it stands. Resolve the issue (e.g. obtain a proper source document) and re-answer, or book it another way; nothing is prepared until then."
+            : "Ask the user only these questions, put each answer at review_item_json.item.owner_expense.<field> (see missing_answers; review questions go under question_answers.<question_id>), then call continue_accounting_workflow action='prepare_action' again with the updated item to get an approval plan_handle.",
           assistant_guidance: reviewActionAssistantGuidance,
         }),
       }],
     };
+  };
+  // A handle only exists for a fully-answered item: every review question, the
+  // VAT decision, and every booking field must be answered first.
+  const params = answers.params;
+  if (answers.missing.length > 0 || answers.blocked.length > 0 || params === undefined) {
+    return needsAnswers(answers.missing, answers.blocked);
+  }
+  if (await payableAccountHasDimensions(api, params.payable_account!)) {
+    return needsAnswers([{
+      field: "payable_account",
+      question: `Account ${params.payable_account} has per-person dimensions, which this continuation cannot post. Which dimension-less owner-payable account should hold the debt (default ${DEFAULT_OWNER_PAYABLE_ACCOUNT})? For a per-person account, book the journal manually with the owner's dimension instead.`,
+    }]);
   }
   const projected = await computeOwnerExpenseJournalProjection(api, params);
   if (!projected.ok) return projected.error;
@@ -2193,11 +2329,21 @@ async function buildOwnerExpenseExecuteResponse(
   if (!isOwnerExpenseReviewItem(reviewItem)) {
     return ownerExpenseNotServerExecutableResponse();
   }
-  const params = extractOwnerExpenseBookingParams(reviewItem);
+  const item = recordAt(reviewItem, "item");
+  const answers = readOwnerExpenseAnswers(reviewItem, (item ? reviewGuidanceFromRecord(item)?.follow_up_questions : undefined) ?? []);
+  const params = answers.params;
+  // The same readiness prepare enforced: an item whose review questions are
+  // unanswered (or answered false) is never booked, whatever handle it carries.
+  if (params !== undefined && (answers.missing.length > 0 || answers.blocked.length > 0)) {
+    return ownerExpenseError(
+      "owner_expense_answers_incomplete",
+      "This owner-expense review item still has unanswered or blocking review answers. Call action='prepare_action' with the answered item first.",
+    );
+  }
   if (params === undefined) {
     return ownerExpenseError(
       "owner_expense_params_invalid",
-      "This owner-expense review item is missing the required booking params under item.owner_expense (owner_client_id, effective_date, description, net_amount, vat_rate, expense_account).",
+      "This owner-expense review item is missing the required booking params under item.owner_expense (owner_client_id, effective_date, description, net_amount, vat_rate, expense_account, payable_account).",
     );
   }
   // 2. The plan handle is mandatory — it is not itself approval, but the mutation
@@ -2410,15 +2556,12 @@ export function registerAccountingInboxTools(
 
       if (action === "prepare_action") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
-        // Owner-expense server-executed continuation: when the reviewed booking
-        // params are present, mint a plan handle instead of the read-only planning
-        // projection. A param-less owner-expense item (and every other review type)
-        // keeps the legacy read-only behavior below.
-        if (isOwnerExpenseReviewItem(reviewItem)) {
-          const ownerExpenseParams = extractOwnerExpenseBookingParams(reviewItem);
-          if (ownerExpenseParams !== undefined) {
-            return buildOwnerExpenseContinuationPrepareResponse(reviewItem, ownerExpenseParams, api, runtimeSafetyContext, exposure);
-          }
+        // Owner-expense server-executed continuation: a fully-answered item
+        // (item.owner_expense) mints a plan handle; an item with open answers
+        // returns needs_answers naming the missing owner_expense fields. A rule
+        // save and every other review type keep the read-only planning below.
+        if (isOwnerExpenseReviewItem(reviewItem) && !save_as_rule) {
+          return buildOwnerExpenseContinuationPrepareResponse(reviewItem, api, runtimeSafetyContext, exposure);
         }
         const ruleOverride = rule_override_json
           ? parseJsonObject(rule_override_json, "rule_override_json")
@@ -2530,6 +2673,9 @@ export function registerAccountingInboxTools(
         throw new Error("keep_transaction_id and delete_transaction_id must be different transactions");
       }
 
+      // The keep/delete gate below is destructive: decide it on a fresh read,
+      // not a cached row that predates a confirm/delete made elsewhere.
+      api.transactions.invalidateListCache();
       const keptTransaction = await api.transactions.get(keep_transaction_id);
       if (keptTransaction.is_deleted) {
         throw new Error(`Cannot keep transaction ${keep_transaction_id} because it is already deleted`);

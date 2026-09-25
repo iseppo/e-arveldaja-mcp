@@ -115,5 +115,5 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   registerAccountingKnowledgeResources(server);
 
   // Register prompts
-  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, toolExposure });
+  registerPrompts(server, { setupInfo: setupMode ? setupInfo : undefined, toolExposure, toolProfile });
 }

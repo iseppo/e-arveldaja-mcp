@@ -556,7 +556,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
     "Only the NET dividend debits retained earnings (Jaotamata kasum); the CIT books as a current-period income-tax expense (P&L 'Tulumaks' line), never a direct reduction of retained earnings — so the ENTIRE lg 1 distributable profit (retained earnings + closed prior-year result + unclosed prior-year P&L; not the current year) is distributable as net dividend (ÄS § 157 lg 1). " +
     "Hard-blocks a net dividend exceeding it, or a distribution whose gross effect (net + CIT) would push net assets below share capital + restricted reserves (ÄS § 157 lg 2), unless force=true (never on an imbalanced ledger); pending unconfirmed dividend drafts count. Reports max_net_dividend. " +
     "One journal per shareholder+date: identical retry → duplicate, different amount → dividend_key_conflict. " +
-    "Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document.",
+    "Requires an approved annual report and a profit-distribution decision — attach the decision to the journal with attach_document. " +
+    "Previews by default (dry_run=true): show the preview and get explicit user approval, then call again with dry_run=false to create the draft journal.",
     {
       net_dividend: z.number().finite().describe("Net dividend amount to shareholder (EUR)"),
       shareholder_client_id: coerceId.describe("Shareholder client ID"),
@@ -568,10 +569,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       share_capital_account: z.number().optional().describe("Share capital account for ÄS §157 net-assets check (default: auto-detect 'Osakapital', standard 2900)"),
       restricted_reserve_accounts: z.array(z.number().int()).optional().describe("Accounts whose balances ÄS §157(2) makes non-distributable (net assets must stay above share capital + these reserves). Default: auto-detect every 'Kohustuslik reservkapital' account (active or inactive) AND always the standard reserve number 2940, so a funded-but-renamed 2940 is never missed; only booked balances raise the floor, so unfunded accounts add nothing. If your chart has REPURPOSED 2940 to a distributable reserve, pass this list explicitly (e.g. [] for no floor, or your real reserve account) to override the 2940 default. Explicit accounts need only exist (inactive OK)."),
       force: z.boolean().optional().describe("Book even if the ÄS § 157 lg 1 or lg 2 check fails (only alongside e.g. a capital reduction). Never overrides a ledger-imbalance block. Default false."),
-      dry_run: z.boolean().optional().describe("Preview calculation and postings without creating journal (default false)"),
+      dry_run: z.boolean().optional().describe("Preview calculation, legality checks, and postings without creating a journal (default true). Set false only after the user explicitly approves the previewed journal."),
     },
     { ...create, title: "Prepare Dividend Distribution" },
-    async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run }) => {
+    async ({ net_dividend: rawNetDividend, shareholder_client_id, effective_date, retained_earnings_account, dividend_payable_account, tax_payable_account, income_tax_expense_account, share_capital_account, restricted_reserve_accounts, force, dry_run = true }) => {
       // Reject non-positive dividends up front — a zero or negative net
       // would otherwise compute gross=0 and book an empty journal with
       // zero-amount postings, which is noise on the ledger and passes

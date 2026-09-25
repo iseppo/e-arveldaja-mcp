@@ -470,21 +470,27 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {});
-    this.invalidateCache();
     // Registering a purchase invoice creates a journal server-side and can
     // flip payment_status on any linked transaction — bust both caches.
-    this.invalidateCache("/journals");
-    this.invalidateCache("/transactions");
-    return result;
+    return this.mutate(
+      "confirm",
+      id,
+      `/purchase_invoices:${id}:register`,
+      ["/purchase_invoices", "/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/purchase_invoices/${id}/register`, {}),
+      `Re-read purchase invoice ${id} and check whether it is already confirmed before retrying.`,
+    );
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {});
-    this.invalidateCache();
-    this.invalidateCache("/journals");
-    this.invalidateCache("/transactions");
-    return result;
+    return this.mutate(
+      "invalidate",
+      id,
+      `/purchase_invoices:${id}:invalidate`,
+      ["/purchase_invoices", "/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/purchase_invoices/${id}/invalidate`, {}),
+      `Re-read purchase invoice ${id} and check whether it is already invalidated before retrying.`,
+    );
   }
 
   // getDocument / uploadDocument / deleteDocument are inherited from BaseResource

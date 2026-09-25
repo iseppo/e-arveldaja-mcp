@@ -278,7 +278,8 @@ describe("H14 post-create recovery state", () => {
       name: "H14 reread definite response",
       createStatus: "DRAFT",
       stage: "transaction_reread",
-      error: new HttpError("reread unavailable", 503, "GET", "/transactions/99"),
+      // 4xx = definitive; a 5xx is now classified indeterminate (classifyMutationFailure).
+      error: new HttpError("reread forbidden", 403, "GET", "/transactions/99"),
       category: "mutation_failed",
       invoiceStatus: "UNKNOWN",
       transactionStatus: "UNKNOWN",

@@ -8,15 +8,25 @@ export class ClientsApi extends BaseResource<Client> {
   }
 
   async deactivate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {});
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `/clients:${id}:deactivate`,
+      ["/clients"],
+      () => this.client.patch<ApiResponse>(`/clients/${id}/deactivate`, {}),
+      `Re-read client ${id} and check whether it is already deactivated before retrying.`,
+    );
   }
 
   async restore(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {});
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `/clients:${id}:reactivate`,
+      ["/clients"],
+      () => this.client.patch<ApiResponse>(`/clients/${id}/reactivate`, {}),
+      `Re-read client ${id} and check whether it is already active before retrying.`,
+    );
   }
 
   // 120s TTL: supplier/customer lookups happen in tight loops during receipt

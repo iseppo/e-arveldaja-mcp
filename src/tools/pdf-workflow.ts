@@ -571,6 +571,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
     },
     { ...create, title: "Find or Create Supplier" },
     async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity, foreign_identity_attested }) => {
+      // auto_create gates a write: a client created meanwhile in the UI or by
+      // another flow must be found, not duplicated — bypass the 120 s list cache.
+      if (auto_create === true) api.clients.invalidateListCache();
       const allClients = await api.clients.listAll();
       // Activate resolveSupplierInternal's self-match guards: without the
       // active company's own VAT/registry code, a header identifier the OCR
@@ -1014,6 +1017,9 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // EUR figure: the actual settled EUR gross when known, else the nominal
       // gross only for an EUR-native invoice — never a guessed conversion.
       const grossAmountEur = params.base_gross_price ?? (currencyCode === "EUR" ? params.gross_price : undefined);
+      // Uncached: a bank posting booked elsewhere within the 120 s journal
+      // cache window must still be seen (block_on_duplicate gates the write).
+      api.journals.invalidateListCache();
       const duplicateScan = await checkIntakeCashDuplicates(api, {
         grossAmountEur,
         invoiceDate: params.invoice_date,

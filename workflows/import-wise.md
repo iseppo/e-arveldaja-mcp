@@ -21,42 +21,45 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Direction handling
 
-Each imported row's API `type` is set from the true statement direction: an incoming Wise entry becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry becomes `type` C so it credits cash ("Tasumine" / money out). `process_bank_input` derives this from the Wise CSV's signed direction automatically, so the created transactions carry the correct cash-leg direction — you do not set `type` by hand. If e-arveldaja's reported Wise balance later disagrees with the real balance, a direction error at import is the first thing to check, and re-importing the affected rows fixes it.
+Each imported row's API `type` is set from the true statement direction: an incoming Wise entry becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry becomes `type` C so it credits cash ("Tasumine" / money out). The import derives this from the Wise CSV's signed direction automatically — you do not set `type` by hand. If e-arveldaja's reported Wise balance later disagrees with the real balance, a direction error at import is the first thing to check, and re-importing the affected rows fixes it.
 
 ## Workflow
 
-Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects Wise CSV vs CAMT.053 from the validated file CONTENT (not the filename) and, when a single Wise bank account matches, resolves the `accounts_dimensions_id` automatically. Under the standard/full profiles the granular `import_wise_transactions` entry point remains available and does the same work; treat it as the same operation and don't name it to the user.
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects Wise CSV vs CAMT.053 from the validated file CONTENT (not the filename) and, when a single Wise bank account matches, resolves the `accounts_dimensions_id` automatically. In this workflow "preview" means `mode: "prepare"` and "execute" means `mode: "execute"`.
 
-### Step 1: Prepare (dry-run preview)
+### Step 1: Preview
 
 If `accounts_dimensions_id` was not provided, let the tool resolve it: a unique Wise bank account is chosen automatically, and an ambiguous or missing match comes back as a `needs_input` question with `choices` — surface it and ask one recommendation-first confirmation, then pass the chosen `accounts_dimensions_id`.
 
-Call `process_bank_input`:
-- `mode`: `prepare`
-- `file_ref` or `file_path`: the provided input
-- `accounts_dimensions_id`: only when the tool asked for it
+Call `process_bank_input` with `mode: "prepare"`, `file_ref` or `file_path`, `accounts_dimensions_id` only when the tool asked for it, and the optional arguments below.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+Use `import_wise_transactions`: the default call (`execute` omitted or `false`) is the dry-run preview, and `execute: true` runs the reviewed plan. `accounts_dimensions_id` is REQUIRED on every call. In this workflow "preview" means the dry run and "execute" means `execute: true`.
+
+### Step 1: Preview
+
+If `accounts_dimensions_id` was not provided, call `list_account_dimensions`, choose the most likely Wise bank-account dimension from the account title or user context, and ask one recommendation-first confirmation before the preview.
+
+Call `import_wise_transactions` with `file_ref` or `file_path`, the confirmed `accounts_dimensions_id`, and the optional arguments below.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
 - `fee_account_dimensions_id`: include it when available
 - `inter_account_dimension_id`: include it when provided or when the user selected it
 - include `date_from` / `date_to` when provided
 - include `skip_jar_transfers: false` only when the user explicitly wants Jar transfers imported
 
-If the preview fails because fee rows require a fee account:
-- first note that the tool already auto-detects a unique active `8610` fee dimension when possible
-- call `list_account_dimensions`, show the available dimensions
-- ask the user which expense dimension should be used only when auto-detection was not possible
-- retry with `fee_account_dimensions_id`
+If the preview fails because fee rows require a fee account: the tool already auto-detects a unique active `8610` fee dimension when possible; only when that was not possible, show the candidate expense dimensions, ask which one to use, and retry with `fee_account_dimensions_id`.
 
 ### Step 2: Review the preview
 
-The compact preview returns a `summary` plus an `approved_command_digest`. BOTH the digest and the `summary.plan_handle` are required to execute: a digest without a handle cannot execute, and a plan handle is NOT approval — it only binds the reviewed plan to one execute attempt.
+BOTH the `approved_command_digest` and the `plan_handle` are required to execute: a digest without a handle cannot execute, and a plan handle is NOT approval — it only binds the reviewed plan to one execute attempt. Record both; approval and execution must use that exact pair.
 
-Review:
-- `summary.counts` (total CSV rows, eligible, filtered out, would-create, in/out counts, skipped, duplicates, errors, needs-review, inter-account, invoice currency fixes)
-- `summary.totals` (in / out totals)
-- `summary.samples` (the first few rows that would be created)
-- `summary.warnings` — ownership transfers that could not be auto-verified (code `wise_transfer_ownership_unverified`); never dropped
-- `summary.blockers` — never hidden
-- Record BOTH the `summary.plan_handle` and the `approved_command_digest`; approval and execution must use that exact pair.
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+The compact preview returns a `summary`: `summary.counts` (CSV rows, eligible, filtered out, would-create, in/out, skipped, duplicates, errors, needs-review, inter-account, invoice currency fixes), `summary.totals`, `summary.samples`, `summary.warnings` (ownership transfers that could not be auto-verified carry code `wise_transfer_ownership_unverified` and are never dropped), `summary.blockers` (never hidden), and `summary.plan_handle`. The digest is NOT a top-level field here: it is inside the ready-to-run execute call at `summary.next_action.args.approved_command_digest` (next to `summary.next_action.args.plan_handle`).
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+The dry run returns top-level `plan_handle` and `approved_command_digest`, a `summary` (`total_csv_rows`, `eligible`, `filtered_out`, `created` = would-create, `skipped`, `error_count`, `inter_account_total`, `needs_review`), `ownership_reviews` (transfers that could not be auto-verified as own-account transfers; never dropped), `inter_account_reconciliation`, and advisory `invoice_currency_fixes`.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
 
 Show main transactions and fee rows that would be created, exact duplicate / skip reasons, whether fees will be auto-confirmed to the chosen dimension, inter-account transfer confirmations or skips, and advisory invoice FX corrections (reported only — the import never changes confirmed purchase invoices).
 
@@ -64,9 +67,8 @@ Show main transactions and fee rows that would be created, exact duplicate / ski
 
 Do not disable Jar skipping unless the user explicitly wants those internal Wise movements imported.
 
-**Ownership re-preview (unverified transfers).** When the preview lists ownership warnings (code `wise_transfer_ownership_unverified`), those are the EXACT unverified transfer IDs. If the user wants any treated as own-account transfers, approve them by re-running `mode: "prepare"` with `confirm_own_transfer_ids` set to those exact IDs, in the order presented. That approval is a NEW preview: it returns a NEW `plan_handle` and NEW `approved_command_digest`, and the previous pair is rejected. Execution requires the approvals to match, in order, the reviewed plan — extra, missing, or reordered ownership decisions invalidate the plan (`wise_transfer_ownership_reapproval_required`) and nothing is created. A plan handle is NOT approval — always review before executing.
+**Ownership re-preview (unverified transfers).** When the preview lists unverified ownership transfers, those are the EXACT unverified transfer IDs. If the user wants any treated as own-account transfers, approve them by re-running the preview with `confirm_own_transfer_ids` set to those exact IDs, in the order presented. That is a NEW preview: it returns a NEW `plan_handle` and NEW `approved_command_digest`, and the previous pair is rejected. Execution requires the approvals to match, in order, the reviewed plan — extra, missing, or reordered ownership decisions invalidate the plan (`wise_transfer_ownership_reapproval_required`) and nothing is created.
 
-Ask for approval before running with `mode: "execute"`.
 The approval card must include:
 - source Wise CSV
 - number of main transactions and fee rows that would be created as PROJECT (draft/unconfirmed) bank transactions
@@ -74,37 +76,36 @@ The approval card must include:
 - inter-account confirmations or skips, including selected `inter_account_dimension_id` when used
 - each advisory invoice FX correction (not applied), including whether it would lock a foreign-currency rate or fix a legacy EUR settlement; the user corrects those invoices separately (invalidate → edit → re-confirm)
 - skipped duplicates and Jar-transfer handling
-- selected fee account dimension, if any
 - side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and transfer reviews (ownership, cross-currency, ambiguous or already-journalized)
 - the reviewed plan's `plan_handle` + `approved_command_digest` pair
 
-State that approval authorizes all listed categories (PROJECT bank-row creation, fee creation and confirmation, inter-account handling). Both the `plan_handle` and the `approved_command_digest` are required. If the user does not approve every listed category, stop and ask which should be excluded; do not run `mode: "execute"`.
-
-If the user does not explicitly approve, stop.
+State that approval authorizes all listed categories (PROJECT bank-row creation, fee creation and confirmation, inter-account handling). If the user does not approve every listed category, stop and ask which should be excluded; do not execute. If the user does not explicitly approve, stop.
 
 ### Step 4: Execute
 
-Call `process_bank_input` again:
-- use the reviewed preview inputs
-- `mode`: `execute`
-- `plan_handle`: the exact handle returned by the reviewed preview
-- `approved_command_digest`: the exact digest returned by the reviewed preview
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+Call `process_bank_input` with exactly the reviewed preview inputs plus `mode: "execute"`, `plan_handle`, and `approved_command_digest` — `summary.next_action.args` already carries this exact call.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+Call `import_wise_transactions` with exactly the reviewed preview inputs plus `execute: true`, the top-level `plan_handle`, and the top-level `approved_command_digest` from the reviewed dry run.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
 
-Every execute attempt consumes the plan handle exactly once. If execution reports a missing handle (`plan_handle_required`), a consumed/expired/invalid handle, scope/domain rejection, drift (`plan_drift`), an ownership re-approval requirement (`wise_transfer_ownership_reapproval_required`), or a mismatched digest (`digest_mismatch`), do not retry with a guessed, older, or reused handle/digest. Re-run `mode: "prepare"`, review the new plan, and request approval for its newly returned `plan_handle` + `approved_command_digest` pair.
+Every execute attempt consumes the plan handle exactly once. If execution reports a missing handle (`plan_handle_required`), a consumed/expired/invalid handle, scope/domain rejection, drift (`plan_drift`), an ownership re-approval requirement (`wise_transfer_ownership_reapproval_required`), or a mismatched digest (`digest_mismatch`), do not retry with a guessed, older, or reused handle/digest. Re-run the preview, review the new plan, and request approval for its newly returned `plan_handle` + `approved_command_digest` pair.
 
-Report from the executed `summary`:
-- `summary.counts` created / skipped / errors
-- fee transactions created
-- inter-account confirmations, advisory invoice FX corrections (not applied)
-- any rows still needing manual follow-up
+Report from the executed result: created / skipped / errors, fee transactions created, inter-account confirmations, advisory invoice FX corrections (not applied), and any rows still needing follow-up.
 
 For created PROJECT bank transactions, keep follow-up decisions compact: group low-risk identical confirmations, show the first items plus counts, and ask one batch approval with exceptions instead of one yes/no question per row. Offer the next inline action for the approved group — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.
 
 Inline actions:
-- For rows that match an open invoice, suggest running the **Reconcile Bank** workflow or offer `confirm_transaction` directly when the distribution is unambiguous.
+- For rows that match an open invoice, suggest running the **Reconcile Bank** workflow.
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+- When the invoice distribution is unambiguous, offer `confirm_transaction` directly.
 - For rows where `bank_ref_number` is missing or stale, offer `update_transaction` with the corrected reference before confirming.
 - For skipped duplicates the user explicitly wants to discard, offer `delete_transaction`.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
 
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
 ### Step 5: Full per-row detail (optional)
 
 When the executed `summary.details` references `get_operation_result_page`, page the complete per-row result with `process_bank_input` `mode="show_details"` (pass the `operation_handle`, optional `cursor`, optional `page_size`) or call `get_operation_result_page` directly. It is read-only and never resumes or mutates the import.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->

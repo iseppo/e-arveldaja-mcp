@@ -55,6 +55,7 @@ For owner-paid expense receipts:
 - VAT-registered company: ordinary business input VAT normally defaults to deductible.
 - Non-VAT-registered company: book the gross amount with no input-VAT deduction.
 - Likely restricted categories (representation, passenger-car, etc.): need confirmation, unless a saved company booking rule already defines the policy.
+- To book it, continue with `action: "prepare_action"` (see the `prepare-accounting-review-action` workflow, "Owner-paid expense receipts"): the answers go into `review_item_json.item.owner_expense`, and the prepared journal is booked with `action: "execute_review_action"`.
 
 ### Step 3: Keep the interaction minimal
 
@@ -64,5 +65,3 @@ For owner-paid expense receipts:
 ### Step 4: When the review item is already understood
 
 If the next step is clear, continue with `continue_accounting_workflow` and `action: "prepare_action"` instead of inventing your own action plan.
-
-Use `continue_accounting_workflow` with `action="resolve_review"`. The granular `resolve_accounting_review_item` only appears when granular tools are exposed — treat it as the same tool and don't name it to the user.

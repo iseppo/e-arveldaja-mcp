@@ -21,20 +21,29 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {});
-    this.invalidateCache();
     // Registering a sale invoice creates a journal server-side — bust the
     // journals cache so trial balance / aging / list_journals don't serve
-    // stale data missing the new registration journal.
-    this.invalidateCache("/journals");
-    return result;
+    // stale data missing the new registration journal. Linked transactions'
+    // displayed state can change too (parity with purchase invoices).
+    return this.mutate(
+      "confirm",
+      id,
+      `/sale_invoices:${id}:register`,
+      ["/sale_invoices", "/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/sale_invoices/${id}/register`, {}),
+      `Re-read sale invoice ${id} and check whether it is already confirmed before retrying.`,
+    );
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/invalidate`, {});
-    this.invalidateCache();
-    this.invalidateCache("/journals");
-    return result;
+    return this.mutate(
+      "invalidate",
+      id,
+      `/sale_invoices:${id}:invalidate`,
+      ["/sale_invoices", "/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/sale_invoices/${id}/invalidate`, {}),
+      `Re-read sale invoice ${id} and check whether it is already invalidated before retrying.`,
+    );
   }
 
   async getDeliveryOptions(id: number): Promise<SaleInvoiceDeliveryOptions> {
@@ -50,12 +59,16 @@ export class SaleInvoicesApi extends BaseResource<SaleInvoice> {
   }
 
   async sendEinvoice(id: number, request: SaleInvoiceDeliveryRequest): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request);
-    this.invalidateCache();
     // Defensive: delivery currently updates only the invoice itself, but
     // if the server ever posts an e-invoice-delivery journal we would
     // otherwise serve stale journal lists. Keep parity with confirm/invalidate.
-    this.invalidateCache("/journals");
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `/sale_invoices:${id}:deliver`,
+      ["/sale_invoices", "/journals"],
+      () => this.client.patch<ApiResponse>(`/sale_invoices/${id}/deliver`, request),
+      `Re-read sale invoice ${id} and check its delivery status before retrying; the e-invoice may already have been sent.`,
+    );
   }
 }

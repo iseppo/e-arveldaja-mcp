@@ -9,7 +9,7 @@ import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
-import { isMutationIndeterminate } from "../mutation-outcome.js";
+import { classifyMutationFailure, isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
@@ -220,8 +220,11 @@ export function transactionClassificationStatus(
 }
 
 export function isAmbiguousPostCreateFailure(error: unknown): boolean {
+  // Only upstream outcomes can be ambiguous here: a plain Error at this stage
+  // is a local pre-mutation guard (e.g. totals-correction or client-mismatch
+  // refusal) thrown before any request, so it stays a definitive failure.
   return isMutationIndeterminate(error) || (
-    error instanceof HttpError && error.status === "network"
+    error instanceof HttpError && classifyMutationFailure(error) === "indeterminate"
   );
 }
 

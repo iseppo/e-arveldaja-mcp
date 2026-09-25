@@ -28,6 +28,7 @@ function makeApi(over: Record<string, unknown> = {}, clientsApi: Record<string, 
       getInvoiceInfo: vi.fn().mockResolvedValue({}),
     },
     clients: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ created_object_id: 77 }),
       get: vi.fn().mockResolvedValue({ id: 77, name: "New Buyer OÜ" }),

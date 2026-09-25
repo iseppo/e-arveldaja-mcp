@@ -175,9 +175,10 @@ function makeApi(spies: Partial<ApiSpies> = {}): { api: never; spies: ApiSpies }
   const confirmWithTotals = spies.confirmWithTotals ?? vi.fn().mockResolvedValue(undefined);
   const invalidate = spies.invalidate ?? vi.fn().mockResolvedValue(undefined);
   const api = {
-    clients: { listAll: vi.fn().mockResolvedValue([]) },
+    clients: { listAll: vi.fn().mockResolvedValue([]), invalidateListCache: vi.fn() },
     purchaseInvoices: {
       listAll: vi.fn().mockResolvedValue([]),
+      invalidateListCache: vi.fn(),
       createAndSetTotals,
       uploadDocument,
       confirmWithTotals,
@@ -189,8 +190,8 @@ function makeApi(spies: Partial<ApiSpies> = {}): { api: never; spies: ApiSpies }
       getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       getBankAccounts: vi.fn().mockResolvedValue([]),
     },
-    transactions: { listAll: vi.fn().mockResolvedValue([]) },
-    journals: { listAll: vi.fn().mockResolvedValue([]) },
+    transactions: { listAll: vi.fn().mockResolvedValue([]), invalidateListCache: vi.fn() },
+    journals: { listAll: vi.fn().mockResolvedValue([]), invalidateListCache: vi.fn() },
   } as never;
   return { api, spies: { createAndSetTotals, uploadDocument, confirmWithTotals, invalidate } };
 }
@@ -336,6 +337,61 @@ describe("receipt batch typed operation", () => {
     expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
     expect(spies.uploadDocument).toHaveBeenCalledTimes(1);
     expect(spies.confirmWithTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("execute re-reads clients/invoices/transactions/journals uncached; the dry run stays cached", async () => {
+    const { api } = makeApi();
+    const a = api as unknown as Record<string, { invalidateListCache: ReturnType<typeof vi.fn>; listAll: ReturnType<typeof vi.fn> }>;
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    for (const resource of ["clients", "purchaseInvoices", "transactions", "journals"]) {
+      expect(a[resource]!.invalidateListCache).not.toHaveBeenCalled();
+    }
+    const listCallsBeforeExecute = a.clients!.listAll.mock.calls.length;
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(true);
+    for (const resource of ["clients", "purchaseInvoices", "transactions"]) {
+      const invalidate = a[resource]!.invalidateListCache.mock.invocationCallOrder;
+      expect(invalidate).toHaveLength(1);
+      // The execute run's (first) list read follows the cache drop.
+      expect(invalidate[0]!).toBeLessThan(a[resource]!.listAll.mock.invocationCallOrder.at(-1)!);
+    }
+    expect(a.clients!.listAll.mock.invocationCallOrder[listCallsBeforeExecute]!)
+      .toBeGreaterThan(a.clients!.invalidateListCache.mock.invocationCallOrder[0]!);
+    expect(a.journals!.invalidateListCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("execute runs the intake cash-duplicate scan (advisory) against the live journals before creating", async () => {
+    const { api, spies } = makeApi();
+    const mocked = api as unknown as {
+      readonly: Record<string, ReturnType<typeof vi.fn>>;
+      journals: Record<string, ReturnType<typeof vi.fn>>;
+    };
+    mocked.readonly.getBankAccounts!.mockResolvedValue([{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }]);
+    mocked.readonly.getAccountDimensions = vi.fn().mockResolvedValue([{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }]);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    // A matching bank posting booked elsewhere AFTER the reviewed dry run.
+    mocked.journals.listAllWithPostings = vi.fn().mockResolvedValue([{
+      id: 555, title: "Manual booking", effective_date: "2026-03-20", registered: true, is_deleted: false,
+      postings: [{ accounts_id: 1020, type: "C", amount: 124, accounts_dimensions_id: 5001, is_deleted: false }],
+    }]);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    // Advisory, same as the dry run: the invoice is still created.
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("created");
+    expect(result.notes.some(note => note.includes("POSSIBLE duplicate") && note.includes("555"))).toBe(true);
+    const invalidateOrder = mocked.journals.invalidateListCache!.mock.invocationCallOrder;
+    const scanOrder = mocked.journals.listAllWithPostings.mock.invocationCallOrder;
+    expect(invalidateOrder[0]!).toBeLessThan(scanOrder[0]!);
+    expect(scanOrder.at(-1)!).toBeLessThan(spies.createAndSetTotals.mock.invocationCallOrder[0]!);
   });
 
   it("rolls back (invalidates) the created invoice when the document upload fails", async () => {

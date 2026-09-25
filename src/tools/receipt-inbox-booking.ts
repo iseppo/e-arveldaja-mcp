@@ -220,6 +220,32 @@ export async function createAndMaybeMatchPurchaseInvoice(
     bank_ref_number: extracted.ref_number,
   };
 
+  // Task 6: cross-mechanism intake duplicate guard — catches the incident at
+  // the EARLIEST moment (the dry-run preview, before any invoice exists), and
+  // again at execute right before the create. Currency is guaranteed EUR here
+  // (a non-EUR receipt already returned needs_review above), so the extracted
+  // gross total IS the EUR figure — no conversion, never a guessed rate.
+  // Advisory-only in both modes: folded into `notes` (the result carries no
+  // separate warnings field), never blocks. The batch caller invalidates the
+  // journal cache once before an execute run, so the execute scan is live.
+  const grossTotal = extracted.total_gross;
+  const invoiceDate = extracted.invoice_date;
+  const appendIntakeDuplicateNotes = async (): Promise<void> => {
+    const duplicateScan = await checkIntakeCashDuplicates(api, {
+      grossAmountEur: grossTotal,
+      invoiceDate,
+    });
+    if (duplicateScan.suspects.length > 0) {
+      notes.push(...formatDuplicatePostingWarnings(
+        duplicateScan,
+        { accountId: -1, dimensionId: null, amount: grossTotal, direction: "C", date: invoiceDate },
+        t => wrapUntrustedOcr(t) ?? "",
+      ));
+    } else if (!duplicateScan.scan_available && duplicateScan.scan_note) {
+      notes.push(duplicateScan.scan_note);
+    }
+  };
+
   const dryRunMatch = dryRun
     ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
     : undefined;
@@ -245,26 +271,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
 
-    // Task 6: cross-mechanism intake duplicate guard — catches the incident at
-    // the EARLIEST moment (the dry-run preview, before any invoice exists).
-    // Currency is guaranteed EUR here (a non-EUR receipt already returned
-    // needs_review above), so the extracted gross total IS the EUR figure —
-    // no conversion, never a guessed rate. Advisory-only: folded into `notes`
-    // (this preview result carries no separate warnings field), never blocks
-    // the dry-run preview itself.
-    const duplicateScan = await checkIntakeCashDuplicates(api, {
-      grossAmountEur: extracted.total_gross,
-      invoiceDate: extracted.invoice_date,
-    });
-    if (duplicateScan.suspects.length > 0) {
-      notes.push(...formatDuplicatePostingWarnings(
-        duplicateScan,
-        { accountId: -1, dimensionId: null, amount: extracted.total_gross, direction: "C", date: extracted.invoice_date },
-        t => wrapUntrustedOcr(t) ?? "",
-      ));
-    } else if (!duplicateScan.scan_available && duplicateScan.scan_note) {
-      notes.push(duplicateScan.scan_note);
-    }
+    await appendIntakeDuplicateNotes();
 
     return {
       notes,
@@ -278,6 +285,8 @@ export async function createAndMaybeMatchPurchaseInvoice(
     notes.push("Supplier resolution did not return a concrete client ID.");
     return { notes, status: "needs_review" };
   }
+
+  await appendIntakeDuplicateNotes();
 
   if (legacyExecuteCreate) {
     notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');

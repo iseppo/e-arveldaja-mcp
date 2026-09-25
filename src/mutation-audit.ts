@@ -29,6 +29,10 @@ const MutationAuditRecovery = z.object({
     "/transactions",
     "/sale_invoices",
     "/purchase_invoices",
+    // Reference-data writes (readonly.api.ts, separate readonly cache)
+    "/invoice_info",
+    "/invoice_series",
+    "/bank_accounts",
   ])).min(1),
   cause: z.object({
     name: z.string(),

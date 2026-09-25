@@ -2,7 +2,7 @@ import type { HttpClient } from "../http-client.js";
 import { HttpError, type HttpMethod } from "../http-client.js";
 import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
-import { isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
+import { classifyMutationFailure, isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource } from "./base-resource.js";
 import { signedBankTransactionDirection, storedTypeContradictsSignedDirection } from "../bank-transaction-direction.js";
 
@@ -11,14 +11,24 @@ function isHttpMethod(value: unknown): value is HttpMethod {
     value === "PATCH" || value === "DELETE";
 }
 
+/**
+ * Rebuild the HttpError behind a MutationIndeterminateError's serialized cause
+ * when that cause is itself an indeterminate HTTP outcome (network drop,
+ * timeout, 5xx, 408 — see classifyMutationFailure).
+ */
 export function getNormalizedNetworkCause(error: unknown): HttpError | undefined {
   try {
     if (!isMutationIndeterminate(error)) return undefined;
     if (typeof error.cause !== "object" || error.cause === null) return undefined;
     const cause = error.cause as unknown as Record<string, unknown>;
+    const status = cause.status;
     if (
       cause.name !== "HttpError" ||
-      cause.status !== "network" ||
+      !(status === "network" || (
+        typeof status === "number" &&
+        Number.isFinite(status) &&
+        classifyMutationFailure(new HttpError("", status, "GET", "/")) === "indeterminate"
+      )) ||
       typeof cause.message !== "string" ||
       typeof cause.path !== "string" ||
       cause.path.trim() === "" ||
@@ -26,7 +36,7 @@ export function getNormalizedNetworkCause(error: unknown): HttpError | undefined
     ) {
       return undefined;
     }
-    return new HttpError(cause.message, "network", cause.method, cause.path);
+    return new HttpError(cause.message, status as number | "network", cause.method, cause.path);
   } catch {
     return undefined;
   }
@@ -130,6 +140,15 @@ export class LinkedInvoiceClientsAmbiguousError extends Error {
     this.invoice_clients_ids = details.invoiceClientsIds;
   }
 }
+
+// Caches a transaction register/invalidate can change: the transaction itself,
+// the journal it creates/reverses, and the linked invoices' payment status.
+const CONFIRM_AFFECTED_CACHES = [
+  "/transactions",
+  "/journals",
+  "/sale_invoices",
+  "/purchase_invoices",
+] as const;
 
 interface LinkedInvoiceClient {
   table: string;
@@ -284,26 +303,26 @@ export class TransactionsApi extends BaseResource<Transaction> {
 
     try {
       const result = await this.client.patch<ApiResponse>(`/transactions/${id}/register`, body);
-      this.invalidateCache();
-      // Registering a transaction creates a journal server-side — bust the
-      // journal aggregate cache too so list_journals / analyze_unconfirmed
-      // don't serve stale data (missing the new registration journal).
-      this.invalidateCache("/journals");
+      // Registering a transaction creates a journal server-side and flips the
+      // linked invoices' payment status — bust the journal and invoice caches
+      // too so list_journals / analyze_unconfirmed / auto-confirm don't serve
+      // stale data (missing the journal, or an invoice still shown unpaid).
+      this.invalidateConfirmCaches();
       return result;
     } catch (error) {
       this.invalidateCache();
-      if (error instanceof HttpError && error.status === "network") {
+      if (classifyMutationFailure(error) === "indeterminate") {
         let freshTransaction: Transaction;
         try {
           freshTransaction = await this.get(id);
         } catch (readError) {
-          this.invalidateCache("/journals");
+          this.invalidateConfirmCaches();
           throw new MutationIndeterminateError({
             operation: "confirm",
             entity: "transaction",
             entityId: id,
             businessKey: "transaction:" + id,
-            affectedCaches: ["/transactions", "/journals"],
+            affectedCaches: [...CONFIRM_AFFECTED_CACHES],
             cause: readError,
             nextAction: "Freshly read transaction " + id +
               " before any retry; registration may or may not have committed.",
@@ -311,21 +330,20 @@ export class TransactionsApi extends BaseResource<Transaction> {
         }
 
         if (freshTransaction.status === "CONFIRMED") {
-          this.invalidateCache("/journals");
+          this.invalidateConfirmCaches();
           // The tx re-read does not carry the new journal id; callers already
           // tolerate an absent created_object_id (recording the sentinel id).
           return { code: 200, messages: ["Registration recovered after network error"] };
         }
 
         if (freshTransaction.status !== "PROJECT") {
-          this.invalidateCache();
-          this.invalidateCache("/journals");
+          this.invalidateConfirmCaches();
           throw new MutationIndeterminateError({
             operation: "confirm",
             entity: "transaction",
             entityId: id,
             businessKey: "transaction:" + id,
-            affectedCaches: ["/transactions", "/journals"],
+            affectedCaches: [...CONFIRM_AFFECTED_CACHES],
             cause: error,
             nextAction: "Freshly read transaction " + id +
               " before any retry; registration may or may not have committed.",
@@ -337,8 +355,15 @@ export class TransactionsApi extends BaseResource<Transaction> {
         try {
           await this.update(id, { clients_id: clientsIdRollbackValue });
         } catch (rollbackErr) {
-          const normalizedNetworkCause = getNormalizedNetworkCause(rollbackErr);
-          if (normalizedNetworkCause) {
+          // A well-formed indeterminate cleanup outcome (network, 5xx, 408 —
+          // raw, or wrapped by update()) means the clients_id restore may or
+          // may not have committed. Malformed ambiguity falls through to the
+          // compound manual-review error below.
+          const normalizedCleanupCause = getNormalizedNetworkCause(rollbackErr) ??
+            (rollbackErr instanceof HttpError && classifyMutationFailure(rollbackErr) === "indeterminate"
+              ? rollbackErr
+              : undefined);
+          if (normalizedCleanupCause) {
             this.invalidateTransactionsAfterAmbiguousCleanup();
             throw new MutationIndeterminateError({
               operation: "rollback",
@@ -346,20 +371,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
               entityId: id,
               businessKey: "transaction:" + id,
               affectedCaches: ["/transactions"],
-              cause: normalizedNetworkCause,
-              nextAction: "Freshly read transaction " + id +
-                "; clients_id cleanup may or may not have committed.",
-            });
-          }
-          if (rollbackErr instanceof HttpError && rollbackErr.status === "network") {
-            this.invalidateTransactionsAfterAmbiguousCleanup();
-            throw new MutationIndeterminateError({
-              operation: "rollback",
-              entity: "transaction",
-              entityId: id,
-              businessKey: "transaction:" + id,
-              affectedCaches: ["/transactions"],
-              cause: rollbackErr,
+              cause: normalizedCleanupCause,
               nextAction: "Freshly read transaction " + id +
                 "; clients_id cleanup may or may not have committed.",
             });
@@ -379,13 +391,22 @@ export class TransactionsApi extends BaseResource<Transaction> {
     }
   }
 
+  private invalidateConfirmCaches(): void {
+    for (const pattern of CONFIRM_AFFECTED_CACHES) this.invalidateCache(pattern);
+  }
+
   async invalidate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {});
-    this.invalidateCache();
-    // Invalidating a confirmed transaction reverses its journal — same
-    // cross-namespace flush as confirm().
-    this.invalidateCache("/journals");
-    return result;
+    // Invalidating a confirmed transaction reverses its journal and reopens the
+    // linked invoices' payment status — same cross-namespace flush as confirm().
+    return this.mutate(
+      "invalidate",
+      id,
+      "transaction:" + id,
+      CONFIRM_AFFECTED_CACHES,
+      () => this.client.patch<ApiResponse>(`/transactions/${id}/invalidate`, {}),
+      "Freshly read transaction " + id +
+        " before any retry; invalidation may or may not have committed.",
+    );
   }
 
 }

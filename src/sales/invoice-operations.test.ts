@@ -34,6 +34,7 @@ function makeApi(
       ...readonlyApi,
     },
     clients: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([]),
       create: vi.fn().mockResolvedValue({ created_object_id: 42 }),
       get: vi.fn().mockResolvedValue({ id: 42, name: "New Buyer OÜ" }),
@@ -361,6 +362,28 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(sent.client).toBeUndefined();
   });
 
+  it("execute re-reads clients uncached before the resolve-or-create decision; prepare stays cached", async () => {
+    const clientCreate = vi.fn();
+    // The customer was created elsewhere after prepare: only a live read sees it.
+    const listAll = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ id: 42, name: "Acme OÜ", code: "17133416", is_deleted: false }]);
+    const invalidateListCache = vi.fn();
+    const create = vi.fn().mockResolvedValue({ created_object_id: 500 });
+    const api = makeApi({ create }, {}, { listAll, create: clientCreate, invalidateListCache });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const payload = { client: { name: "Acme OÜ", reg_code: "17133416" }, items: [] };
+    const prepared = await ops.run({ mode: "prepare", action: "create", payload });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    expect(invalidateListCache).not.toHaveBeenCalled();
+    const executed = await ops.run({ mode: "execute", action: "create", planHandle: prepared.value.planHandle, payload });
+    expect(executed.ok).toBe(true);
+    expect(invalidateListCache).toHaveBeenCalledTimes(1);
+    expect(invalidateListCache.mock.invocationCallOrder[0]!).toBeLessThan(listAll.mock.invocationCallOrder.at(-1)!);
+    expect(clientCreate).not.toHaveBeenCalled();
+    expect((create.mock.calls[0]![0] as Record<string, unknown>).clients_id).toBe(42);
+  });
+
   it("create with a brand-NEW client creates the client, then the invoice against the new id", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
     vi.stubGlobal("fetch", fetchMock);
@@ -511,6 +534,20 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(blocked.ok).toBe(false);
     if (blocked.ok) return;
     expect(blocked.error.code).toBe("confirmed_record_immutable");
+  });
+
+  it("update drops the sale-invoice cache before the immutability read", async () => {
+    const update = vi.fn().mockResolvedValue({});
+    const get = vi.fn().mockResolvedValue({ id: 4, status: "PROJECT" });
+    const api = makeApi({ update, get });
+    const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+    const prepared = await ops.run({ mode: "prepare", action: "update", id: 4, payload: { notes: "x" } });
+    if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+    await ops.run({ mode: "execute", action: "update", id: 4, planHandle: prepared.value.planHandle, payload: { notes: "x" } });
+    const invalidate = api.saleInvoices.invalidateListCache as unknown as { mock: { invocationCallOrder: number[] } };
+    expect(invalidate.mock.invocationCallOrder.length).toBeGreaterThan(0);
+    expect(invalidate.mock.invocationCallOrder.at(-1)!).toBeLessThan(get.mock.invocationCallOrder.at(-1)!);
+    expect(update).toHaveBeenCalledTimes(1);
   });
 
   // Fix 1 — validation must run BEFORE the inline customer is resolve-or-created.

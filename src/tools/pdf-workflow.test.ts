@@ -55,6 +55,7 @@ function setupPdfWorkflowTool(
   const server = { registerTool: vi.fn() } as any;
   const api = {
     journals: {
+      invalidateListCache: vi.fn(),
       listAllWithPostings: vi.fn().mockResolvedValue([]),
       ...options.journals,
     },
@@ -95,6 +96,7 @@ function setupPdfWorkflowTool(
       ...options.purchaseInvoices,
     },
     clients: {
+      invalidateListCache: vi.fn(),
       get: vi.fn().mockResolvedValue({
         id: 7,
         name: "Supplier OÜ",
@@ -1041,6 +1043,26 @@ describe("pdf workflow tools", () => {
       expect(payload.possible_duplicate_postings?.[0]).toMatchObject({ journal_id: DUP_JOURNAL_ID });
     });
 
+    it("drops the journal cache right before the intake cash-duplicate scan", async () => {
+      const filePath = createTempInvoiceFile("dupjfresh.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        readonly: {
+          getBankAccounts: vi.fn().mockResolvedValue(bankAccounts),
+          getAccountDimensions: vi.fn().mockResolvedValue(accountDimensions),
+        },
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([duplicateJournal]) },
+      });
+
+      await handler(baseArgs(filePath));
+      const invalidateOrder = api.journals.invalidateListCache.mock.invocationCallOrder as number[];
+      const listOrder = api.journals.listAllWithPostings.mock.invocationCallOrder as number[];
+      expect(invalidateOrder.length).toBeGreaterThan(0);
+      expect(listOrder.length).toBeGreaterThan(0);
+      expect(invalidateOrder[0]!).toBeLessThan(listOrder[0]!);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+    });
+
     it("USD invoice without base_gross_price: skipped note, no false duplicate warning", async () => {
       const filePath = createTempInvoiceFile("usd.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
@@ -1421,6 +1443,28 @@ describe("resolve_supplier self-supplier guard", () => {
     expect(payload.found).toBe(false);
     expect(payload.created).toBe(false);
     // The self-match must be caught before any client is created.
+    expect(api.clients.create).not.toHaveBeenCalled();
+  });
+
+  it("auto_create re-reads clients uncached before the find-or-create decision; a plain lookup stays cached", async () => {
+    const existing = { id: 7, name: "Supplier OÜ", code: "12345678", invoice_vat_no: "EE999999999", is_deleted: false };
+    const { handler, api } = setupPdfWorkflowTool("resolve_supplier", {
+      clients: { listAll: vi.fn().mockResolvedValue([existing]), create: vi.fn() },
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }) },
+    });
+
+    await handler({ name: "Supplier OÜ", reg_code: "12345678" });
+    expect(api.clients.invalidateListCache).not.toHaveBeenCalled();
+
+    const payload = parseMcpResponse(
+      (await handler({ name: "Supplier OÜ", reg_code: "12345678", auto_create: true })).content[0]!.text,
+    ) as Record<string, unknown>;
+    const invalidateOrder = api.clients.invalidateListCache.mock.invocationCallOrder as number[];
+    const listAllOrder = api.clients.listAll.mock.invocationCallOrder as number[];
+    expect(invalidateOrder).toHaveLength(1);
+    expect(invalidateOrder[0]!).toBeLessThan(listAllOrder.at(-1)!);
+    expect(invalidateOrder[0]!).toBeGreaterThan(listAllOrder[0]!);
+    expect(payload.found).toBe(true);
     expect(api.clients.create).not.toHaveBeenCalled();
   });
 

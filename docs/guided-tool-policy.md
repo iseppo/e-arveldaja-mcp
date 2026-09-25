@@ -62,8 +62,9 @@ above `guided`; the same target/band/backstop apply.
   with `mode=search|inspect`. Both read-only, same domain, mirrors the existing
   mode-merge pattern. Clean, low-risk; frees 1 slot.
 - **`cleanup_camt_possible_duplicate` + `save_auto_booking_rule`** → fold into
-  `continue_accounting_workflow` as server-executed continuations. Needs
-  relaxing that tool's `readOnly` annotation for those specific continuations;
+  `continue_accounting_workflow` as server-executed, plan-gated continuations.
+  That tool is already non-read-only (its `execute_review_action` books the
+  owner-expense reimbursement journal), so no annotation change is needed;
   frees 2 slots and dissolves the recurring placement tension.
 - **Do NOT merge** `get_execution_plan_page` / `get_operation_result_page` /
   `get_session_log` (distinct security boundaries: pre-consumption review vs.

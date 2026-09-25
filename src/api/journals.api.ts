@@ -56,20 +56,28 @@ export class JournalsApi extends BaseResource<Journal> {
   }
 
   async confirm(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/journals/${id}/register`, {});
-    this.invalidateCache();
     // If this journal is linked to a transaction (operation_type=TRANSACTION),
     // the transaction's displayed status changes too — bust the transaction
     // cache so list_transactions doesn't serve stale status.
-    this.invalidateCache("/transactions");
-    return result;
+    return this.mutate(
+      "confirm",
+      id,
+      `/journals:${id}:register`,
+      ["/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/journals/${id}/register`, {}),
+      `Re-read journal ${id} and check whether it is already registered before retrying.`,
+    );
   }
 
   async invalidate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {});
-    this.invalidateCache();
-    this.invalidateCache("/transactions");
-    return result;
+    return this.mutate(
+      "invalidate",
+      id,
+      `/journals:${id}:invalidate`,
+      ["/journals", "/transactions"],
+      () => this.client.patch<ApiResponse>(`/journals/${id}/invalidate`, {}),
+      `Re-read journal ${id} and check whether it is already invalidated before retrying.`,
+    );
   }
 
 }

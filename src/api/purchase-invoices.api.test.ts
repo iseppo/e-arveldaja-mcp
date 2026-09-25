@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PurchaseInvoicesApi } from "./purchase-invoices.api.js";
 import { cache } from "./base-resource.js";
-import type { HttpClient } from "../http-client.js";
+import { HttpError, type HttpClient } from "../http-client.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
@@ -333,7 +333,9 @@ describe("PurchaseInvoicesApi.createAndSetTotals", () => {
     });
     const patch = vi.fn().mockImplementation(async (path: string) => {
       if (path === "/purchase_invoices/17") {
-        throw new Error("patch failed");
+        // Definitive 4xx rejection: an unknown/5xx failure would now surface
+        // as mutation_indeterminate instead.
+        throw new HttpError("patch failed", 422, "PATCH", "/purchase_invoices/17");
       }
       if (path === "/purchase_invoices/17/invalidate") {
         return { code: 200, messages: [] };

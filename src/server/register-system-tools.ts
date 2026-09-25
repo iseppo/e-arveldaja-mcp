@@ -23,6 +23,7 @@ import {
 } from "../audit-log.js";
 import { getServerStatus } from "./release-notices.js";
 import { buildSetupModePayload, buildSetupInstructionsPayload } from "./setup-mode.js";
+import { isToolVisibleForProfile } from "../tool-profile.js";
 
 export interface RegisterSystemToolsContext {
   /** The public (profile/catalog-gated) server every system tool registers on. */
@@ -73,7 +74,12 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
     async () => ({
       content: [{
         type: "text",
-        text: toMcpJson(buildSetupInstructionsPayload(setupInfo, setupMode)),
+        text: toMcpJson(buildSetupInstructionsPayload(
+          setupInfo,
+          setupMode,
+          exposeSetupTools && isToolVisibleForProfile("import_apikey_credentials", toolProfile),
+          toolProfile,
+        )),
       }],
     })
   );

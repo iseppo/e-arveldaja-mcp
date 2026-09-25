@@ -32,6 +32,7 @@ import {
   type PurchaseInvoiceTotalsCorrectionCode,
 } from "../api/purchase-invoices.api.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -49,6 +50,7 @@ function getCrudToolHarness(toolName: string, overrides?: {
       get: vi.fn(),
       update: vi.fn(),
       confirm: vi.fn(),
+      invalidateListCache: vi.fn(),
       ...overrides?.transactions,
     },
     readonly: {
@@ -60,25 +62,31 @@ function getCrudToolHarness(toolName: string, overrides?: {
     },
     clients: {
       update: vi.fn(),
+      invalidateListCache: vi.fn(),
+      listAll: vi.fn().mockResolvedValue([]),
       ...overrides?.clients,
     },
     products: {
       update: vi.fn(),
+      invalidateListCache: vi.fn(),
       ...overrides?.products,
     },
     journals: {
       update: vi.fn(),
+      invalidateListCache: vi.fn(),
       get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
       listAllWithPostings: vi.fn().mockResolvedValue([]),
       ...overrides?.journals,
     },
     saleInvoices: {
       update: vi.fn(),
+      invalidateListCache: vi.fn(),
       get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
       ...overrides?.saleInvoices,
     },
     purchaseInvoices: {
       update: vi.fn(),
+      invalidateListCache: vi.fn(),
       get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
       previewTotalsCorrection: vi.fn(),
       confirmWithTotals: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
@@ -96,6 +104,16 @@ function getCrudToolHarness(toolName: string, overrides?: {
     api,
     options: call[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: call[2] as (args: Record<string, unknown>, extra?: unknown) => Promise<unknown>,
+  };
+}
+
+function purchaseUpdateReadonly() {
+  return {
+    getPurchaseArticles: vi.fn().mockResolvedValue([]),
+    getAccounts: vi.fn().mockResolvedValue([
+      { id: 7910, allows_dimensions: false, is_valid: true },
+      { id: 1510, allows_dimensions: false, is_valid: true },
+    ]),
   };
 }
 
@@ -1067,13 +1085,13 @@ describe("structured JSON-compatible inputs", () => {
 
     const result = await handler({
       effective_date: "2026-04-24",
-      postings: [{ accounts_id: "4000", type: "D", amount: "12.50" }],
+      postings: [{ accounts_id: "4000", type: "D", amount: "12.50" }, { accounts_id: "4000", type: "C", amount: "12.50" }],
     }) as { content: Array<{ text: string }> };
 
     expect(api.journals.create).toHaveBeenCalledWith({
       effective_date: "2026-04-24",
       cl_currencies_id: "EUR",
-      postings: [{ accounts_id: 4000, type: "D", amount: 12.5 }],
+      postings: [{ accounts_id: 4000, type: "D", amount: 12.5 }, { accounts_id: 4000, type: "C", amount: 12.5 }],
     });
     expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
       ok: true,
@@ -1165,7 +1183,7 @@ describe("reactivate tools", () => {
       id: 12,
     });
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
-      tool: "reactivate_client", action: "UPDATED", entity_type: "client", entity_id: 12,
+      tool: "reactivate_client", action: "REACTIVATED", entity_type: "client", entity_id: 12,
     }));
   });
 
@@ -1184,7 +1202,35 @@ describe("reactivate tools", () => {
       id: 34,
     });
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
-      tool: "reactivate_product", action: "UPDATED", entity_type: "product", entity_id: 34,
+      tool: "reactivate_product", action: "REACTIVATED", entity_type: "product", entity_id: 34,
+    }));
+  });
+});
+
+describe("deactivate tools", () => {
+  it("deactivate_client logs DEACTIVATED (not DELETED)", async () => {
+    const { api, handler } = getCrudToolHarness("deactivate_client", {
+      clients: { deactivate: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    await handler({ id: 12 });
+
+    expect(api.clients.deactivate).toHaveBeenCalledWith(12);
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "deactivate_client", action: "DEACTIVATED", entity_type: "client", entity_id: 12,
+    }));
+  });
+
+  it("deactivate_product logs DEACTIVATED (not DELETED)", async () => {
+    const { api, handler } = getCrudToolHarness("deactivate_product", {
+      products: { deactivate: vi.fn().mockResolvedValue({ code: 200, messages: [] }) },
+    });
+
+    await handler({ id: 34 });
+
+    expect(api.products.deactivate).toHaveBeenCalledWith(34);
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "deactivate_product", action: "DEACTIVATED", entity_type: "product", entity_id: 34,
     }));
   });
 });
@@ -1543,6 +1589,7 @@ describe("update_transaction", () => {
   it("allows safe metadata enrichment fields", async () => {
     const { api, handler } = getCrudToolHarness("update_transaction", {
       transactions: {
+        get: vi.fn().mockResolvedValue({ id: 1, description: "old" }),
         update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
       },
     });
@@ -1706,9 +1753,10 @@ describe("update_* post-confirmation audit lock", () => {
   });
 
   it("update_purchase_invoice keeps caller-supplied items when provided", async () => {
-    const callerItems = [{ custom_title: "New line", total_net_price: 50 }];
+    const callerItems = [{ custom_title: "New line", cl_purchase_articles_id: 66, total_net_price: 50, vat_accounts_id: 1510, cl_vat_articles_id: 1 }];
     const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
     const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: purchaseUpdateReadonly(),
       purchaseInvoices: {
         get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [{ custom_title: "Old", total_net_price: 1 }] }),
         update: updateMock,
@@ -1726,6 +1774,7 @@ describe("update_* post-confirmation audit lock", () => {
   it("update_purchase_invoice defaults cl_fringe_benefits_id/amount on caller items like create does", async () => {
     const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
     const { handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: purchaseUpdateReadonly(),
       purchaseInvoices: {
         get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [] }),
         update: updateMock,
@@ -1980,9 +2029,10 @@ describe("H04 confirmed accounting record update boundaries", () => {
   it("H04 draft journal forwards effective date and postings exactly", async () => {
     const patch = {
       effective_date: "2026-07-15",
-      postings: [{ accounts_id: 4000, type: "D", amount: 10 }],
+      postings: [{ accounts_id: 4000, type: "D", amount: 10 }, { accounts_id: 4000, type: "C", amount: 10 }],
     };
     const { api, handler } = getCrudToolHarness("update_journal", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue([{ id: 4000, allows_dimensions: false, is_valid: true }]) },
       journals: {
         get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
         update: vi.fn().mockResolvedValue({ id: 7, registered: false }),
@@ -1997,9 +2047,10 @@ describe("H04 confirmed accounting record update boundaries", () => {
   it("H04 draft purchase invoice forwards journal date and caller items exactly", async () => {
     const patch = {
       journal_date: "2026-07-15",
-      items: [{ custom_title: "Hosting", total_net_price: 10, amount: 2, cl_fringe_benefits_id: 1 }],
+      items: [{ custom_title: "Hosting", cl_purchase_articles_id: 66, total_net_price: 10, amount: 2, cl_fringe_benefits_id: 1, vat_accounts_id: 1510, cl_vat_articles_id: 1 }],
     };
     const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: purchaseUpdateReadonly(),
       purchaseInvoices: {
         get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [{ custom_title: "Old" }] }),
         update: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
@@ -2017,6 +2068,7 @@ describe("H04 confirmed accounting record update boundaries", () => {
       items: [{ products_id: 1, custom_title: "Service", amount: 1 }],
     };
     const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue([]) },
       saleInvoices: {
         get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
         update: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" }),
@@ -2375,7 +2427,9 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
 
   it("strips sandbox markers from update_transaction data fields before API", async () => {
     const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
-    const { handler } = getCrudToolHarness("update_transaction", { transactions: { update } });
+    const { handler } = getCrudToolHarness("update_transaction", {
+      transactions: { update, get: vi.fn().mockResolvedValue({ id: 4, description: null }) },
+    });
     await handler({ id: 4, data: JSON.stringify({ description: marker("desc"), bank_account_name: marker("party") }) });
     const arg = update.mock.calls[0]![1] as { description: string; bank_account_name: string };
     expect(arg.description).toBe("desc");
@@ -2433,7 +2487,7 @@ describe("D01 external-text stripping at CRUD write boundaries", () => {
       effective_date: "2026-04-24",
       title: marker("Monthly close"),
       document_number: marker("DOC-1"),
-      postings: [{ accounts_id: 4000, type: "D", amount: 10 }],
+      postings: [{ accounts_id: 4000, type: "D", amount: 10 }, { accounts_id: 4000, type: "C", amount: 10 }],
     });
     const arg = create.mock.calls[0]![0] as { title: string; document_number: string };
     expect(arg.title).toBe("Monthly close");
@@ -3355,5 +3409,411 @@ describe("confirm_transaction direction guard surfacing (MEDIUM-6)", () => {
     expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
       category: "stored_type_direction_mismatch", transaction_id: 40, stored_type: "C", signed_direction: "incoming",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CRUD remediation: M1 / M4 / N5 / M5 / F3 and minors
+// ---------------------------------------------------------------------------
+
+describe("M1 update_transaction preserves importer markers", () => {
+  function harness(stored: Record<string, unknown>) {
+    const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const get = vi.fn().mockResolvedValue({ id: 9, ...stored });
+    const h = getCrudToolHarness("update_transaction", { transactions: { update, get } });
+    return { ...h, update, get };
+  }
+
+  it("reads the stored row fresh before merging", async () => {
+    const { api, handler, get } = harness({ description: "x" });
+    await handler({ id: 9, data: { description: "y" } });
+    expect(api.transactions.invalidateListCache).toHaveBeenCalled();
+    expect(vi.mocked(api.transactions.invalidateListCache).mock.invocationCallOrder[0]!)
+      .toBeLessThan(get.mock.invocationCallOrder[0]!);
+  });
+
+  it("keeps the WISE:{id} prefix and [source_direction] marker around new text", async () => {
+    const { handler, update } = harness({ description: "WISE:TRANSFER-123 Old text [source_direction=IN]" });
+    await handler({ id: 9, data: { description: "New text" } });
+    expect(update.mock.calls[0]![1].description).toBe("WISE:TRANSFER-123 New text [source_direction=IN]");
+  });
+
+  it("keeps the camt marker on its own trailing line and drops caller-forged markers", async () => {
+    const marker = "[e-arveldaja-mcp:camt br=ABC dir=CRDT sig=0123456789abcdef]";
+    const { handler, update } = harness({ description: `Old\n${marker}`, bank_ref_number: "ABC" });
+    await handler({ id: 9, data: { description: "New [source_direction=OUT]" } });
+    expect(update.mock.calls[0]![1].description).toBe(`New\n${marker}`);
+  });
+
+  it("keeps only the markers when the description is cleared", async () => {
+    const { handler, update } = harness({ description: "WISE:FEE:9 Wise teenustasu [source_direction=OUT]" });
+    await handler({ id: 9, data: { description: null } });
+    expect(update.mock.calls[0]![1].description).toBe("WISE:FEE:9 [source_direction=OUT]");
+  });
+
+  it("refuses when text plus preserved markers exceed 150 chars (no truncation)", async () => {
+    const { handler, update } = harness({ description: "WISE:TRANSFER-1 x [source_direction=IN]" });
+    const result = await handler({ id: 9, data: { description: "a".repeat(140) } }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "description_too_long" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("canonicalizes an over-cap ref_number and weaves the full value before the marker", async () => {
+    const { handler, update } = harness({ description: "WISE:TRANSFER-1 Pay [source_direction=OUT]" });
+    const fullRef = "RF1234567890123456789012345";
+    await handler({ id: 9, data: { ref_number: `  ${fullRef} ` } });
+    const body = update.mock.calls[0]![1];
+    expect(body.ref_number).toBe(fullRef.slice(0, 20));
+    expect(body.description).toBe(`WISE:TRANSFER-1 Pay ${fullRef} [source_direction=OUT]`);
+  });
+
+  it("carries a trusted CAMT bank ref into bank_ref_number when identity fields change", async () => {
+    const entry = {
+      date: "2026-07-01", amount: 10, currency: "EUR", direction: "CRDT" as const,
+      counterparty_name: "Payer", description: "Invoice 5", bank_reference: "BREF-1",
+      duplicate: false, duplicate_transaction_ids: [],
+    };
+    const description = buildCamtDescriptionWithMetadata(entry.description, entry)!;
+    const stored = {
+      description, date: entry.date, type: "D", amount: 10, cl_currencies_id: "EUR",
+      ref_number: null, bank_account_no: null, bank_account_name: "Payer", bank_ref_number: null,
+    };
+    const { handler, update } = harness(stored);
+    await handler({ id: 9, data: { description: "Invoice 5 (paid)" } });
+    const body = update.mock.calls[0]![1];
+    expect(body.bank_ref_number).toBe("BREF-1");
+    expect(body.description).toMatch(/^Invoice 5 \(paid\)\n\[e-arveldaja-mcp:camt /);
+  });
+
+  it("refuses an identity edit on a hash-only CAMT row", async () => {
+    const entry = {
+      date: "2026-07-01", amount: 10, currency: "EUR", direction: "CRDT" as const,
+      counterparty_name: "Payer", counterparty_iban: "EE382200221020145685",
+      description: "Invoice 5", bank_reference: "B".repeat(90),
+      duplicate: false, duplicate_transaction_ids: [],
+    };
+    const description = buildCamtDescriptionWithMetadata(entry.description, entry)!;
+    expect(description).not.toMatch(/ br=/);
+    const stored = {
+      description, date: entry.date, type: "D", amount: 10, cl_currencies_id: "EUR",
+      ref_number: null, bank_account_no: entry.counterparty_iban, bank_account_name: "Payer", bank_ref_number: null,
+    };
+    const { handler, update } = harness(stored);
+    const result = await handler({ id: 9, data: { bank_account_name: "Other" } }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "camt_identity_would_break" });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an identity edit on a hash-only CAMT row when bank_ref_number is supplied blank", async () => {
+    const entry = {
+      date: "2026-07-01", amount: 10, currency: "EUR", direction: "CRDT" as const,
+      counterparty_name: "Payer", counterparty_iban: "EE382200221020145685",
+      description: "Invoice 5", bank_reference: "B".repeat(90),
+      duplicate: false, duplicate_transaction_ids: [],
+    };
+    const description = buildCamtDescriptionWithMetadata(entry.description, entry)!;
+    const stored = {
+      description, date: entry.date, type: "D", amount: 10, cl_currencies_id: "EUR",
+      ref_number: null, bank_account_no: entry.counterparty_iban, bank_account_name: "Payer", bank_ref_number: null,
+    };
+    for (const blank of [null, "", "  "]) {
+      const { handler, update } = harness(stored);
+      const result = await handler({ id: 9, data: { description: "Edited", bank_ref_number: blank } }) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(result.isError).toBe(true);
+      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "camt_identity_would_break" });
+      expect(update).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe("M4/N5 update_purchase_invoice validation and fresh read", () => {
+  it("reads the invoice fresh before merging", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: { update: vi.fn().mockResolvedValue({}) },
+    });
+    await handler({ id: 7, data: { notes: "n" } });
+    expect(vi.mocked(api.purchaseInvoices.invalidateListCache).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(api.purchaseInvoices.get).mock.invocationCallOrder[0]!);
+  });
+
+  it("refuses VAT fields on caller items for a non-VAT company", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: { ...purchaseUpdateReadonly(), getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }) },
+    });
+    const result = await handler({
+      id: 7,
+      data: { items: [{ custom_title: "X", cl_purchase_articles_id: 66, purchase_accounts_id: 7910, total_net_price: 10, vat_accounts_id: 1510 }] },
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "manual_review_required" });
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+  });
+
+  it("applies non-VAT defaults and requires dimensions on dimensioned accounts", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      readonly: {
+        getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }),
+        getPurchaseArticles: vi.fn().mockResolvedValue([]),
+        getAccounts: vi.fn().mockResolvedValue([{ id: 5120, allows_dimensions: true, is_valid: true }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([
+          { id: 1, accounts_id: 5120, is_deleted: false },
+          { id: 2, accounts_id: 5120, is_deleted: false },
+        ]),
+      },
+    });
+    const result = await handler({
+      id: 7,
+      data: { items: [{ custom_title: "X", cl_purchase_articles_id: 66, purchase_accounts_id: 5120, total_net_price: 10 }] },
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Account validation failed" });
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses to edit a VOID invoice", async () => {
+    const { api, handler } = getCrudToolHarness("update_purchase_invoice", {
+      purchaseInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "VOID" }) },
+    });
+    const result = await handler({ id: 7, data: { notes: "n" } }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "void_record_immutable" });
+    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("update_sale_invoice / update_journal draft validation", () => {
+  it("update_sale_invoice refuses a VOID invoice", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      saleInvoices: { get: vi.fn().mockResolvedValue({ id: 7, status: "VOID" }) },
+    });
+    const result = await handler({ id: 7, data: { notes: "n" } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "void_record_immutable" });
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+  });
+
+  it("update_sale_invoice validates draft items like create (missing required fields)", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue([]) },
+    });
+    await expect(handler({ id: 7, data: { items: [{ custom_title: "No product" }] } })).rejects.toThrow(/products_id/);
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+  });
+
+  it("update_sale_invoice rejects server-computed totals", async () => {
+    const { api, handler } = getCrudToolHarness("update_sale_invoice");
+    const result = await handler({ id: 7, data: { base_gross_price: 10 } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Invalid update fields" });
+    expect(api.saleInvoices.update).not.toHaveBeenCalled();
+  });
+
+  it("update_journal refuses unbalanced draft postings", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue([{ id: 4000, allows_dimensions: false, is_valid: true }]) },
+    });
+    const result = await handler({ id: 7, data: { postings: [{ accounts_id: 4000, type: "D", amount: 10 }] } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Posting validation failed" });
+    expect(api.journals.update).not.toHaveBeenCalled();
+  });
+
+  it("update_journal rejects server-managed number / operation_type", async () => {
+    const { api, handler } = getCrudToolHarness("update_journal");
+    const result = await handler({ id: 7, data: { operation_type: "ENTRY" } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Invalid update fields" });
+    expect(api.journals.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("create_journal remediation", () => {
+  const accounts = [{ id: 4000, allows_dimensions: false, is_valid: true }, { id: 1020, allows_dimensions: true, is_valid: true }];
+
+  it("refuses unbalanced postings before any write", async () => {
+    const create = vi.fn();
+    const { handler } = getCrudToolHarness("create_journal", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue(accounts) },
+      journals: { create },
+    });
+    const result = await handler({ effective_date: "2026-07-01", postings: [{ accounts_id: 4000, type: "D", amount: 10 }] }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "Posting validation failed" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("balances mixed-currency postings on EUR base amounts", async () => {
+    const { validatePostingsBalanced } = await import("./crud/shared.js");
+    const usdDebit = { accounts_id: 4000, type: "D", amount: 100, base_amount: 90 } as never;
+    expect(validatePostingsBalanced([usdDebit, { accounts_id: 1020, type: "C", amount: 90 } as never])).toBeUndefined();
+    expect(validatePostingsBalanced([usdDebit, { accounts_id: 1020, type: "C", amount: 100 } as never])).toMatch(/unbalanced/);
+  });
+
+  function bankHarness(journals: unknown[]) {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 1 });
+    const listAllWithPostings = vi.fn().mockResolvedValue(journals);
+    const h = getCrudToolHarness("create_journal", {
+      readonly: {
+        getAccounts: vi.fn().mockResolvedValue(accounts),
+        getAccountDimensions: vi.fn().mockResolvedValue([{ id: 100, accounts_id: 1020, is_deleted: false, title_est: "LHV" }]),
+        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: 100 }]),
+      },
+      journals: { create, listAllWithPostings, listAll: vi.fn().mockResolvedValue([]) },
+    });
+    return { ...h, create, listAllWithPostings };
+  }
+  const bankJournal = {
+    id: 555, registered: true, is_deleted: false, effective_date: "2026-07-01", title: "t", postings: [
+      { accounts_id: 1020, accounts_dimensions_id: 100, type: "D", amount: 92, is_deleted: false },
+      { accounts_id: 4000, type: "C", amount: 92, is_deleted: false },
+    ],
+  };
+
+  it("does not compare a non-EUR nominal posting amount against EUR postings", async () => {
+    const { handler, create, listAllWithPostings } = bankHarness([bankJournal]);
+    const result = await handler({
+      effective_date: "2026-07-01", cl_currencies_id: "USD", block_on_duplicate: true,
+      postings: [{ accounts_id: 1020, accounts_dimensions_id: 100, type: "D", amount: 92 }, { accounts_id: 4000, type: "C", amount: 92 }],
+    }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBeFalsy();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(listAllWithPostings).not.toHaveBeenCalled();
+  });
+
+  it("uses base_amount and a fresh journal read when blocking, and never sends block_on_duplicate", async () => {
+    const { api, handler, create } = bankHarness([bankJournal]);
+    const result = await handler({
+      effective_date: "2026-07-01", cl_currencies_id: "USD", block_on_duplicate: true,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "D", amount: 100, base_amount: 92 },
+        { accounts_id: 4000, type: "C", amount: 100, base_amount: 92 },
+      ],
+    }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "possible_duplicate_posting" });
+    expect(api.journals.invalidateListCache).toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+
+    const ok = bankHarness([]);
+    await ok.handler({
+      effective_date: "2026-07-01", block_on_duplicate: false,
+      postings: [{ accounts_id: 4000, type: "D", amount: 1 }, { accounts_id: 4000, type: "C", amount: 1 }],
+    });
+    expect(ok.create.mock.calls[0]![0]).not.toHaveProperty("block_on_duplicate");
+  });
+});
+
+describe("F3 / minors on transactions", () => {
+  it("create_transaction reads journals fresh when blocking and never sends tool-only flags", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 42 });
+    const { api, handler } = getCrudToolHarness("create_transaction", {
+      transactions: { create },
+      readonly: {
+        getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: 100 }]),
+        getAccountDimensions: vi.fn().mockResolvedValue([{ id: 100, accounts_id: 1020, is_deleted: false, title_est: "LHV" }]),
+      },
+    });
+    await handler({ accounts_dimensions_id: 100, type: "D", amount: 5, date: "2026-07-01", block_on_duplicate: true });
+    expect(vi.mocked(api.journals.invalidateListCache).mock.invocationCallOrder[0]!)
+      .toBeLessThan(vi.mocked(api.journals.listAllWithPostings).mock.invocationCallOrder[0]!);
+    expect(create.mock.calls[0]![0]).not.toHaveProperty("block_on_duplicate");
+    expect(create.mock.calls[0]![0].type).toBe("D");
+  });
+
+  it("batch_delete_transactions reports indeterminate deletes separately and audits them", async () => {
+    vi.mocked(logAudit).mockClear();
+    const indeterminate = new MutationIndeterminateError({
+      operation: "delete", entity: "transaction", entityId: 2, businessKey: "transaction:2",
+      affectedCaches: ["/transactions"], cause: new Error("socket hang up"), nextAction: "re-read",
+    });
+    const { handler } = getCrudToolHarness("batch_delete_transactions", {
+      transactions: {
+        get: vi.fn().mockResolvedValue({ id: 2, status: "PROJECT" }),
+        delete: vi.fn().mockRejectedValueOnce(indeterminate).mockRejectedValueOnce(new Error("400")),
+      },
+    });
+    const result = await handler({ ids: [2, 3], reason: "cleanup" }) as { content: Array<{ text: string }> };
+    const body = parseMcpResponse(result.content[0]!.text) as any;
+    expect(body.indeterminate_count).toBe(1);
+    expect(body.failed_count).toBe(1);
+    expect(body.results[0]).toMatchObject({ id: 2, status: "indeterminate", may_have_occurred: true });
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "MUTATION_INDETERMINATE", entity_id: 2 }));
+  });
+
+  it("batch_confirm_journals reports indeterminate confirms separately", async () => {
+    const indeterminate = new MutationIndeterminateError({
+      operation: "confirm", entity: "journal", entityId: 5, businessKey: "journal:5",
+      affectedCaches: ["/journals"], cause: new Error("timeout"), nextAction: "re-read",
+    });
+    const { handler } = getCrudToolHarness("batch_confirm_journals", {
+      journals: {
+        listAllCached: vi.fn().mockResolvedValue([{ id: 5, registered: false }]),
+        confirm: vi.fn().mockRejectedValue(indeterminate),
+      },
+    });
+    const body = parseMcpResponse(((await handler({ ids: [5], reason: "r" })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(body.indeterminate_count).toBe(1);
+    expect(body.failed_count).toBe(0);
+  });
+});
+
+describe("M5 create_client / update_client identity guards", () => {
+  beforeEach(() => vi.mocked(logAudit).mockClear());
+  const base = { name: "Acme OÜ", is_client: false, is_supplier: true, is_physical_entity: false, code: "17133416" };
+
+  it("refuses a duplicate registry code with the existing client ids, reading fresh", async () => {
+    const create = vi.fn();
+    const { api, handler } = getCrudToolHarness("create_client", {
+      clients: { create, listAll: vi.fn().mockResolvedValue([{ id: 31, code: " 17133416 ", name: "Acme" }, { id: 32, code: "17133416", is_deleted: true }]) },
+    });
+    const result = await handler(base) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "duplicate_client", existing_client_ids: [31] });
+    expect(api.clients.invalidateListCache).toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("refuses the company's own VAT number (self-match)", async () => {
+    const create = vi.fn();
+    const { handler } = getCrudToolHarness("create_client", { clients: { create } });
+    const result = await handler({ ...base, invoice_vat_no: "ee 123456789" }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "client_self_match" });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("creates with allow_duplicate and strips tool-only flags from the payload", async () => {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 40 });
+    const { handler } = getCrudToolHarness("create_client", {
+      clients: { create, listAll: vi.fn().mockResolvedValue([{ id: 31, code: "17133416" }]) },
+    });
+    await handler({ ...base, allow_duplicate: true, foreign_identity_attested: true });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0]).not.toHaveProperty("allow_duplicate");
+    expect(create.mock.calls[0]![0]).not.toHaveProperty("foreign_identity_attested");
+  });
+
+  it("update_client runs the P17 gate on identity changes", async () => {
+    const { api, handler } = getCrudToolHarness("update_client", {
+      clients: { get: vi.fn().mockResolvedValue({ id: 7, name: "Acme", code: "17133416", is_physical_entity: false, cl_code_country: "EST" }) },
+    });
+    const result = await handler({ id: 7, data: { code: "12345679" } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ error: "legal_entity_identity_required" });
+    expect(api.clients.update).not.toHaveBeenCalled();
+  });
+
+  it("update_client refuses a code another live client uses, excluding itself", async () => {
+    const { api, handler } = getCrudToolHarness("update_client", {
+      clients: {
+        get: vi.fn().mockResolvedValue({ id: 7, name: "Acme", code: "12345678", is_physical_entity: false, cl_code_country: "EST" }),
+        listAll: vi.fn().mockResolvedValue([{ id: 7, code: "17133416" }, { id: 8, code: "17133416" }]),
+      },
+    });
+    const result = await handler({ id: 7, data: { code: "17133416" } }) as { content: Array<{ text: string }> };
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "duplicate_client", existing_client_ids: [8] });
+    expect(api.clients.update).not.toHaveBeenCalled();
+  });
+
+  it("update_client skips the identity checks for non-identity fields", async () => {
+    const { api, handler } = getCrudToolHarness("update_client", {
+      clients: { get: vi.fn(), update: vi.fn().mockResolvedValue({}) },
+    });
+    await handler({ id: 7, data: { email: "a@b.ee" } });
+    expect(api.clients.get).not.toHaveBeenCalled();
+    expect(api.clients.update).toHaveBeenCalledWith(7, { email: "a@b.ee" });
   });
 });

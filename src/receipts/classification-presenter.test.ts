@@ -8,7 +8,9 @@ import type {
   ApplyClassificationsResult,
   UnmatchedAnalysisResult,
 } from "./classification-operations.js";
-import { mcpPayloadBytes } from "../response-budget.js";
+import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
+import { extractClassificationGroups } from "../tools/receipt-inbox.js";
+import { canonicalBusinessText } from "../mcp-json.js";
 
 function cleanGroup(index: number): UnmatchedAnalysisResult["groups"][number] {
   return {
@@ -45,25 +47,70 @@ function analysis(groupCount: number): UnmatchedAnalysisResult {
 }
 
 describe("classification analysis compact", () => {
-  it("stays approximately constant between 10 and 100 clean groups", () => {
-    const small = renderClassificationAnalysisCompact({ result: analysis(10), accountsDimensionsId: 100 });
-    const large = renderClassificationAnalysisCompact({ result: analysis(100), accountsDimensionsId: 100 });
-    const smallBytes = mcpPayloadBytes(small);
-    const largeBytes = mcpPayloadBytes(large);
-    // Clean groups are omitted; only scalar counts + ≤3 samples remain, so the
-    // 10× growth in group count must not meaningfully grow the response.
+  it("stays approximately constant between 3 and 10 clean groups, apart from the inlined apply input", () => {
+    // Past ~20 groups the inlined apply input pushes the summary over the batch
+    // target and the samples are trimmed first (the groups stay in next_action).
+    const small = renderClassificationAnalysisCompact({ result: analysis(3), accountsDimensionsId: 100 });
+    const large = renderClassificationAnalysisCompact({ result: analysis(10), accountsDimensionsId: 100 });
+    // Both still inline their groups (the budget fallback is covered below).
+    expect(small.summary.next_action).toBeDefined();
+    expect(large.summary.next_action).toBeDefined();
+    // Excluding the inlined ready-to-send classifications_json (the O(n) apply
+    // input), clean groups are omitted; only scalar counts + ≤3 samples remain,
+    // so the 10× growth in group count must not meaningfully grow the rest.
+    const withoutApplyInput = (summary: typeof small.summary) => ({ ...summary, next_action: undefined });
+    const smallBytes = mcpPayloadBytes(withoutApplyInput(small.summary));
+    const largeBytes = mcpPayloadBytes(withoutApplyInput(large.summary));
     expect(Math.abs(largeBytes - smallBytes)).toBeLessThan(256);
     expect(small.summary.samples!.length).toBeLessThanOrEqual(3);
+    expect(mcpPayloadBytes(large)).toBeLessThan(RESPONSE_BUDGETS.batch.hard);
   });
 
-  it("wraps counterparty free text and points at dry_run_apply", () => {
+  it("inlines a ready-to-send, sandboxed classifications_json that apply accepts", () => {
+    const result = analysis(2);
+    result.groups[1]!.apply_mode = "review_only";
+    const compact = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
+    const action = compact.summary.next_action!;
+    expect(action.tool).toBe("classify_bank_transactions");
+    expect(action.args.mode).toBe("dry_run_apply");
+    expect(action.approval_required).toBe(false);
+    const payload = action.args.classifications_json as { groups: Array<Record<string, any>> };
+    // Only the auto-bookable group is inlined; the review-only one stays a warning.
+    expect(payload.groups).toHaveLength(1);
+    const [group] = payload.groups;
+    expect(group!.category).toBe("bank_fees");
+    expect(group!.apply_mode).toBe("purchase_invoice");
+    expect(group!.suggested_booking).toEqual({ purchase_article_id: 501 });
+    expect(group!.transactions).toEqual([{ id: 0, amount: 15, date: "2026-03-20" }]);
+    // Untrusted bank-statement text is sandboxed; raw descriptions never enter.
+    expect(group!.display_counterparty).toMatch(/UNTRUSTED_OCR_START/);
+    expect(group!.normalized_counterparty).toMatch(/UNTRUSTED_OCR_START/);
+    expect(JSON.stringify(payload)).not.toContain("Bank fee 0");
+    // The apply input validator accepts it, and apply's canonicalization
+    // recovers the business counterparty from the sandboxed display text.
+    const parsed = extractClassificationGroups(payload);
+    expect(parsed).toHaveLength(1);
+    expect(canonicalBusinessText(parsed[0]!.display_counterparty)).toBe("LHV Bank 0");
+    expect(canonicalBusinessText(parsed[0]!.normalized_counterparty)).toBe("lhv 0");
+  });
+
+  it.each([100, 2000])("omits next_action and warns to narrow the range when %i groups exceed the budget", (groupCount) => {
+    const compact = renderClassificationAnalysisCompact({ result: analysis(groupCount), accountsDimensionsId: 100 });
+    // A dry_run_apply without classifications_json would fail, so none is offered.
+    expect(compact.summary.next_action).toBeUndefined();
+    const warning = compact.summary.warnings!.find(w => w.code === "classifications_too_large");
+    expect(warning?.message).toContain('mode="classify"');
+    expect(warning?.message).toContain("date_from/date_to");
+  });
+
+  it("wraps counterparty free text; a review-only result has no apply next_action", () => {
     const result = analysis(1);
     result.groups[0]!.apply_mode = "review_only";
     const compact = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
     expect(compact.summary.status).toBe("needs_review");
     expect(compact.summary.warnings![0]!.item_id).toContain("UNTRUSTED_OCR_START");
-    expect(compact.summary.next_action!.tool).toBe("classify_bank_transactions");
-    expect(compact.summary.next_action!.args.mode).toBe("dry_run_apply");
+    // Nothing is auto-bookable, so there is no apply step to point at.
+    expect(compact.summary.next_action).toBeUndefined();
   });
 });
 

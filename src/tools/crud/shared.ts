@@ -135,6 +135,24 @@ export function parsePostings(input: unknown): Posting[] {
   return postings as unknown as Posting[];
 }
 
+/**
+ * Debit total must equal credit total (to the cent) in EUR ledger amounts
+ * (`base_amount ?? amount`, as the balance computations use), so a
+ * mixed-currency journal balances on its EUR side. Returns an error string,
+ * or undefined when balanced.
+ */
+export function validatePostingsBalanced(postings: Posting[]): string | undefined {
+  let debitCents = 0;
+  let creditCents = 0;
+  for (const posting of postings) {
+    const cents = Math.round((posting.base_amount ?? posting.amount) * 100);
+    if (posting.type === "D") debitCents += cents;
+    else creditCents += cents;
+  }
+  if (debitCents === creditCents) return undefined;
+  return `Postings are unbalanced: debit ${(debitCents / 100).toFixed(2)} != credit ${(creditCents / 100).toFixed(2)}.`;
+}
+
 export function parseTransactionDistributions(input: unknown): TransactionDistribution[] {
   const distributions = parseJsonObjectArray(input, "distributions");
   requireFields(distributions, "distributions", ["related_table", "amount"]);
@@ -281,17 +299,33 @@ export function validateTransactionUpdateData(data: Record<string, unknown>): st
  * but denylist-style so we don't have to track every legitimately-updatable
  * field as the API surface grows.
  */
+// Server-managed fields per entity (derived from types/api.ts): ids, status /
+// registration state, server timestamps, linkage arrays, and totals the server
+// computes from the items. Purchase-invoice totals and base_* stay editable —
+// the caller supplies them (create_purchase_invoice contract).
 const UPDATE_BLOCKED_FIELDS: Record<string, { fields: string[]; alt: string }> = {
-  client:           { fields: ["id", "is_active", "deactivated_date"],
-                       alt: "use deactivate_client / reactivate_client to change activation state" },
-  product:          { fields: ["id", "is_active", "deactivated_date"],
-                       alt: "use deactivate_product / reactivate_product to change activation state" },
-  journal:          { fields: ["id", "registered", "register_date", "status"],
-                       alt: "use confirm_journal / invalidate_journal to change registration state" },
-  sale_invoice:     { fields: ["id", "status", "registered", "register_date"],
-                       alt: "use confirm_sale_invoice / invalidate_sale_invoice to change registration state" },
-  purchase_invoice: { fields: ["id", "status", "registered", "register_date", "payment_status"],
-                       alt: "use confirm_purchase_invoice / invalidate_purchase_invoice to change registration state" },
+  client:           { fields: ["id", "is_active", "deactivated_date", "is_deleted"],
+                       alt: "use deactivate_client / reactivate_client / delete_client to change activation state" },
+  product:          { fields: ["id", "is_active", "deactivated_date", "is_deleted"],
+                       alt: "use deactivate_product / reactivate_product / delete_product to change activation state" },
+  journal:          { fields: [
+                         "id", "registered", "register_date", "status", "is_deleted", "number", "amendment_number",
+                         "operations_id", "operation_type", "insert_date", "is_xls_imported", "base_document_files_id",
+                       ],
+                       alt: "these are server-managed; use confirm_journal / invalidate_journal / delete_journal / attach_document" },
+  sale_invoice:     { fields: [
+                         "id", "status", "registered", "register_date", "payment_status", "is_deleted", "number",
+                         "is_xls_imported", "base_document_files_id", "files_id",
+                         "net_price", "vat5_price", "vat9_price", "vat20_price", "gross_price",
+                         "base_net_price", "base_vat5_price", "base_vat9_price", "base_vat20_price", "base_gross_price",
+                         "deliveries", "credit_invoices", "journals", "settlements", "transactions",
+                       ],
+                       alt: "these are server-managed; use confirm_sale_invoice / invalidate_sale_invoice / delete_sale_invoice, and change items to change totals" },
+  purchase_invoice: { fields: [
+                         "id", "status", "registered", "register_date", "payment_status", "is_deleted",
+                         "is_xls_imported", "base_document_files_id", "journals", "settlements", "transactions",
+                       ],
+                       alt: "these are server-managed; use confirm_purchase_invoice / invalidate_purchase_invoice / delete_purchase_invoice" },
 };
 
 type ConfirmableEntity = "journal" | "purchase_invoice" | "sale_invoice";

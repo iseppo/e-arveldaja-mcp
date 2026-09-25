@@ -29,13 +29,14 @@ function setup() {
   const server = { registerTool: vi.fn() } as any;
   const api = {
     transactions: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingTx]),
       get: vi.fn().mockResolvedValue({ ...matchingTx }),
       update: vi.fn().mockResolvedValue({}),
       confirm: vi.fn().mockResolvedValue({}),
     },
-    saleInvoices: { listAll: vi.fn().mockResolvedValue([matchingSale]) },
-    purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+    saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([matchingSale]) },
+    purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
       getAccountDimensions: vi.fn().mockResolvedValue([
@@ -43,7 +44,7 @@ function setup() {
       ]),
       getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
     },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
   registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
@@ -106,6 +107,23 @@ describe("reconciliation compact profile routing", () => {
       expect(exec.summary.details.tool).toBe("get_operation_result_page");
       expect(typeof exec.summary.details.args.operation_handle).toBe("string");
       expect(api.transactions.confirm).toHaveBeenCalled();
+    });
+  });
+
+  it("guided inter_account_dry_run names only the guided execute route and it runs", async () => {
+    const { handler } = setup();
+    await runWithToolProfile("guided", async () => {
+      const raw = (await handler("reconcile_bank_transactions")({ mode: "inter_account_dry_run", max_date_gap: 2 })).content[0]!.text;
+      expect(raw).not.toContain("reconcile_inter_account_transfers");
+      const dry = parseMcpResponse(raw) as any;
+      expect(dry.summary.contract).toBe("operation_summary_v1");
+      const next = dry.summary.next_action;
+      expect(next.tool).toBe("reconcile_bank_transactions");
+      expect(next.args).toEqual({ mode: "execute_inter_account", plan_handle: dry.summary.plan_handle, max_date_gap: 2 });
+      expect(next.approval_required).toBe(true);
+      const exec = await call(handler("reconcile_bank_transactions"), next.args);
+      expect(exec.summary.contract).toBe("operation_summary_v1");
+      expect(exec.summary.status).toBe("completed");
     });
   });
 });

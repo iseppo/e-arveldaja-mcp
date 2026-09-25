@@ -192,7 +192,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -206,6 +208,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
       readonly: {
@@ -229,6 +232,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -311,8 +315,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
-      clients: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
         getAccounts: vi.fn().mockResolvedValue([]),
         getPurchaseArticles: vi.fn().mockResolvedValue([]),
@@ -320,7 +325,7 @@ describe("process_receipt_batch rollback handling", () => {
       },
       // June-dated PROJECT/type-C row: exact_amount(50)+client_id(15)+reference(20)=85 ≥ 70.
       // Its date is OUTSIDE the July file window on purpose.
-      transactions: { listAll: vi.fn().mockResolvedValue([
+      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([
         { id: 1, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-06-30", amount: 124, clients_id: 7, ref_number: "REF-JUNE" },
       ]) },
     } as any;
@@ -437,7 +442,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -451,6 +458,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
       readonly: {
@@ -474,6 +482,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -598,7 +607,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -612,6 +623,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
       readonly: {
@@ -656,6 +668,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -778,7 +791,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -792,6 +807,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
       readonly: {
@@ -815,6 +831,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -920,7 +937,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -934,6 +953,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn().mockResolvedValue({
           id: 9001,
@@ -971,6 +991,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -1106,7 +1127,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -1120,6 +1143,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn().mockResolvedValue({
           id: 9001,
@@ -1157,6 +1181,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -1271,7 +1296,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "Runikon Retail OU",
@@ -1285,6 +1312,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn().mockResolvedValue({
           id: 9001,
@@ -1322,6 +1350,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         get: vi.fn(),
         confirm: vi.fn(),
@@ -1437,7 +1466,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 7,
           name: "OpenAI Ireland Limited",
@@ -1451,6 +1482,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn().mockResolvedValue({
           id: 9001,
@@ -1487,6 +1519,7 @@ describe("process_receipt_batch rollback handling", () => {
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -1598,7 +1631,9 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
       clients: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([{
           id: 200,
           name: "Anthropic",
@@ -1612,6 +1647,7 @@ describe("process_receipt_batch rollback handling", () => {
         }]),
       },
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn(),
         uploadDocument: vi.fn(),
@@ -1640,6 +1676,7 @@ describe("process_receipt_batch rollback handling", () => {
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
       },
       transactions: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([]),
       },
     } as any;
@@ -1725,15 +1762,16 @@ describe("process_receipt_batch rollback handling", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const api = {
-      clients: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       readonly: {
         getAccounts: vi.fn().mockResolvedValue([]),
         getPurchaseArticles: vi.fn().mockResolvedValue([]),
         getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
         getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
       },
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
     } as any;
 
     registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
@@ -1802,10 +1840,11 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     };
     if (getInvoiceInfo !== undefined) readonly.getInvoiceInfo = getInvoiceInfo;
     const api = {
-      clients: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]), create, createAndSetTotals: create, uploadDocument: vi.fn(), invalidate: vi.fn() },
+      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), create, createAndSetTotals: create, uploadDocument: vi.fn(), invalidate: vi.fn() },
       readonly,
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
     } as any;
 
     registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);

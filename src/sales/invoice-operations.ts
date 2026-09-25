@@ -532,6 +532,9 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
    * no client was persisted and the caller skips the invoice too.
    */
   private async resolveInvoiceClient(clientInput: InvoiceClientInput, execute: boolean): Promise<InvoiceClientResolution> {
+    // Execute may create the customer: re-read clients uncached so one created
+    // meanwhile (UI, another flow) is reused, not duplicated. Preview stays cached.
+    if (execute) this.api.clients.invalidateListCache();
     const clients = await this.api.clients.listAll();
     const { ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(this.api, clients);
     const resolution = await resolveSupplierInternal(
@@ -696,6 +699,8 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
 
   private async executeUpdate(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     const parsed = desandboxAllStrings(input.payload ?? {}) as Record<string, unknown>;
+    // Uncached: the immutability guard must see a confirm made elsewhere.
+    this.api.saleInvoices.invalidateListCache();
     const current = await this.api.saleInvoices.get(input.id!);
     if (decodeInvoiceStatusCritical(current).status === "CONFIRMED") {
       return fail("confirmed_record_immutable", "Confirmed sale_invoice cannot be updated — invalidate, edit the draft, then re-confirm.");

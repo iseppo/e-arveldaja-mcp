@@ -8,15 +8,25 @@ export class ProductsApi extends BaseResource<Product> {
   }
 
   async deactivate(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/products/${id}/deactivate`, {});
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `/products:${id}:deactivate`,
+      ["/products"],
+      () => this.client.patch<ApiResponse>(`/products/${id}/deactivate`, {}),
+      `Re-read product ${id} and check whether it is already deactivated before retrying.`,
+    );
   }
 
   async restore(id: number): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/products/${id}/reactivate`, {});
-    this.invalidateCache();
-    return result;
+    return this.mutate(
+      "update",
+      id,
+      `/products:${id}:reactivate`,
+      ["/products"],
+      () => this.client.patch<ApiResponse>(`/products/${id}/reactivate`, {}),
+      `Re-read product ${id} and check whether it is already active before retrying.`,
+    );
   }
 
 }

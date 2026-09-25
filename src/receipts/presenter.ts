@@ -384,8 +384,8 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
   // Next action. A dry_run points to the create call and INLINES the exact
   // approved manifest (the same O(n) reviewed-set artifact the FULL envelope
   // emits) so a guided user can complete dry_run→create without a separate way to
-  // obtain it; `approved_manifest_required` still flags that the create call must
-  // carry it, and a manifest NEVER implies approval — it is the bytes to resend,
+  // obtain it (args hold only real receipt_batch inputs, so they can be resent
+  // verbatim), and a manifest NEVER implies approval — it is the bytes to resend,
   // not an approval token. A completed create/create_and_confirm points to
   // `continue_accounting_workflow` (receipts feed the accounting inbox) and does
   // NOT resend the manifest — post-mutation there is nothing to approve.
@@ -400,7 +400,6 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
           ...(input.dateTo ? { date_to: input.dateTo } : {}),
           ...(input.transactionDateFrom ? { transaction_date_from: input.transactionDateFrom } : {}),
           ...(input.transactionDateTo ? { transaction_date_to: input.transactionDateTo } : {}),
-          approved_manifest_required: true,
           approved_manifest: input.responseManifest ?? result.manifest,
           // P0-3: the create call REQUIRES this consume-once handle bound to the
           // reviewed effect; without it create fails closed (plan_handle_required).
@@ -424,6 +423,10 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
     blockers,
     samples,
     next_action,
+    // P0-3: both per-effect handles. next_action carries the `create` one; a
+    // separately approved create_and_confirm resends next_action.args with
+    // mode "create_and_confirm" and plan_handles.create_and_confirm instead.
+    ...(dryRun && result.planHandles !== undefined ? { plan_handles: { ...result.planHandles } } : {}),
   }, { budget: "batch", measureEnvelope: "summary" });
 
   return { summary: operationSummary };

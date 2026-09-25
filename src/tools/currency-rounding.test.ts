@@ -42,9 +42,11 @@ function setupTool(options: SetupOptions) {
         return Promise.resolve(inv);
       }),
       update: options.invoiceUpdate ?? vi.fn().mockResolvedValue({}),
+      invalidateListCache: vi.fn(),
     },
     transactions: {
       get: txGet,
+      invalidateListCache: vi.fn(),
     },
     journals: {
       connectionFingerprint: "currency-rounding-test-connection",
@@ -345,6 +347,48 @@ describe("reconcile_currency_rounding", () => {
     expect(payload.summary.fx_already_reconciled).toBe(1);
     expect(payload.summary.applied_success).toBe(0);
     expect(payload.candidates[0].already_reconciled).toBe(true);
+  });
+
+  it("execute re-reads invoices, transactions and journals uncached before the gating reads; dry run stays cached", async () => {
+    const { handler, api } = setupTool({
+      invoices: [
+        {
+          id: 102,
+          number: "USD-002",
+          client_name: "Anthropic",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          net_price: 100,
+          vat_price: 0,
+          gross_price: 100,
+          base_gross_price: 90.50,
+          liability_accounts_id: 2310,
+          liability_accounts_dimensions_id: null,
+          create_date: "2026-05-01",
+          transactions: [202],
+        },
+      ],
+      transactionsById: {
+        202: { id: 202, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
+      },
+      existingJournals: [{ id: 777, document_number: "FX:102" }],
+    });
+
+    await handler({});
+    expect(api.purchaseInvoices.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.transactions.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
+
+    await handler({ execute: true });
+    const first = (fn: { mock: { invocationCallOrder: number[] } }) => fn.mock.invocationCallOrder[0]!;
+    const last = (fn: { mock: { invocationCallOrder: number[] } }) => fn.mock.invocationCallOrder.at(-1)!;
+    // Execute's first reads (list, per-invoice get, linked transaction, FX
+    // journal snapshot) all follow the cache drops.
+    expect(first(api.purchaseInvoices.invalidateListCache)).toBeLessThan(last(api.purchaseInvoices.listAll));
+    expect(first(api.purchaseInvoices.invalidateListCache)).toBeLessThan(last(api.purchaseInvoices.get));
+    expect(first(api.transactions.invalidateListCache)).toBeLessThan(last(api.transactions.get));
+    expect(first(api.journals.invalidateListCache)).toBeLessThan(last(api.journals.listAll));
   });
 
   it("re-books an FX journal when the existing one was deleted/invalidated", async () => {

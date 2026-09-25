@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -1776,6 +1778,37 @@ ${entryXml}
     expect(api.transactions.update).toHaveBeenCalledWith(77, { ref_number: "RF123" });
   });
 
+  it("cleanup_camt_possible_duplicate drops the transactions cache before the keep/delete gating reads", async () => {
+    const order: string[] = [];
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        invalidateListCache: vi.fn(() => { order.push("invalidate"); }),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          order.push(`get:${id}`);
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Curated supplier",
+          };
+          return id === 77
+            ? { id: 77, status: "CONFIRMED", is_deleted: false, ...identity }
+            : { id, status: "PROJECT", is_deleted: false, ...identity };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await handler({ keep_transaction_id: 77, delete_transaction_id: 9001 });
+
+    expect(order.slice(0, 3)).toEqual(["invalidate", "get:77", "get:9001"]);
+    expect(api.transactions.delete).toHaveBeenCalledWith(9001);
+  });
+
   it("cleanup_camt_possible_duplicate refuses to delete a row that is no longer PROJECT", async () => {
     const { handler, api } = setupAccountingInboxTool({
       transactions: {
@@ -3017,8 +3050,10 @@ ${entryXml}
     const result = await handler({ action: "prepare_action", review_item_json: ownerExpenseReviewItem });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
-    expect(payload.suggested_tools).toEqual(["create_journal"]);
-    expect(payload.suggested_tools).not.toContain("create_owner_expense_reimbursement");
+    // The server-executed continuation needs no tax tool: the param-less item
+    // asks for its answers instead of naming an unregistered helper.
+    expect(payload.status).toBe("needs_answers");
+    expect(JSON.stringify(payload)).not.toContain("create_owner_expense_reimbursement");
   });
 
   // --- server-executed owner-expense continuation (plan-gated mutation) ---
@@ -3046,6 +3081,7 @@ ${entryXml}
           net_amount: 100,
           vat_rate: 0,
           expense_account: 5000,
+          payable_account: 2110,
           ...overrides,
         },
       },
@@ -3097,7 +3133,10 @@ ${entryXml}
     const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
     expect(payload.status).toBe("needs_answers");
     expect(payload).not.toHaveProperty("plan_handle");
-    expect(payload.unresolved_questions).toEqual([expect.stringContaining("used only for business")]);
+    expect(payload.unresolved_questions).toEqual([
+      expect.stringContaining("used only for business"),
+      expect.stringContaining("vat_deduction_mode"),
+    ]);
     expect(runtime.planStore.activeCount).toBe(before);
   });
 
@@ -3254,13 +3293,218 @@ ${entryXml}
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
-  it("prepare_action on a param-LESS owner-expense item keeps the legacy planning behavior (no mint)", async () => {
-    const { handler, api } = ownerExpenseContinuationSetup();
+  it("prepare_action on a param-LESS owner-expense item asks for every booking answer (no mint)", async () => {
+    const { handler, api, runtime } = ownerExpenseContinuationSetup();
+    const before = runtime.planStore.activeCount;
     const result = await handler({ action: "prepare_action", review_item_json: ownerExpenseReviewItem });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     expect(payload.plan_handle).toBeUndefined();
-    expect(payload.suggested_tools).toEqual(["create_owner_expense_reimbursement"]);
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.answer_input).toBe("review_item_json.item.owner_expense");
+    expect(payload.missing_answers.map((entry: any) => entry.field)).toEqual([
+      "owner_client_id", "effective_date", "description", "net_amount", "vat_rate", "expense_account", "payable_account",
+    ]);
+    expect(payload.unresolved_questions).toHaveLength(7);
+    expect(runtime.planStore.activeCount).toBe(before);
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  const ownerExpenseQuestionId = (question: string) =>
+    `q_${createHash("sha256").update(question).digest("hex").slice(0, 12)}`;
+  const vatQuestion = "Is the chair used only for business?";
+  const documentQuestion = "Does the source document clearly identify the seller, date, amount and VAT?";
+  const ownerExpenseItemWithQuestions = (ownerExpense: Record<string, unknown>) => ({
+    review_type: "receipt_review",
+    item: {
+      classification: "owner_paid_expense_reimbursement",
+      file: { path: "/tmp/receipts/chair.pdf" },
+      review_guidance: {
+        recommendation: "Book it as an owner reimbursement.",
+        compliance_basis: ["KMS § 29"],
+        follow_up_questions: [vatQuestion, documentQuestion],
+      },
+      owner_expense: ownerExpense,
+    },
+  });
+  const ownerExpensePartialAnswers = { owner_client_id: 1, effective_date: "2026-06-01", description: "Office chair", net_amount: 100, vat_rate: 0, expense_account: 5000 };
+
+  it("owner-expense needs_answers -> answers under item.owner_expense -> ready_for_approval -> execute books", async () => {
+    const { handler, api } = ownerExpenseContinuationSetup();
+
+    // 1. Partial answers: the payable account, each review question and the VAT decision are open.
+    const first = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseItemWithQuestions(ownerExpensePartialAnswers),
+    })).content[0]!.text) as any;
+    expect(first.status).toBe("needs_answers");
+    expect(first.plan_handle).toBeUndefined();
+    expect(first.missing_answers.map((entry: any) => entry.field)).toEqual([
+      "payable_account",
+      `question_answers.${ownerExpenseQuestionId(vatQuestion)}`,
+      `question_answers.${ownerExpenseQuestionId(documentQuestion)}`,
+      "vat_deduction_mode",
+    ]);
+    expect(first.missing_answers[0].question).toContain("2110");
+    expect(first.missing_answers[1].question_id).toBe(ownerExpenseQuestionId(vatQuestion));
+    expect(desandboxText(first.missing_answers[1].question)).toContain(vatQuestion);
+
+    // 2. Every question answered individually: ready, and a plan handle is minted.
+    const answered = ownerExpenseItemWithQuestions({
+      ...ownerExpensePartialAnswers,
+      payable_account: 2110,
+      vat_deduction_mode: "none",
+      question_answers: {
+        [ownerExpenseQuestionId(vatQuestion)]: true,
+        [ownerExpenseQuestionId(documentQuestion)]: { answer: true, note: "The till receipt shows all of them." },
+      },
+    });
+    const ready = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: answered })).content[0]!.text) as any;
+    expect(ready.status).toBe("ready_for_approval");
+    expect(ready.plan_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(ready.proposed_action.booking_preview.payable_account).toBe(2110);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+
+    // 3. Execute with the same answered item books exactly once.
+    const booked = parseMcpResponse((await handler({
+      action: "execute_review_action",
+      review_item_json: answered,
+      plan_handle: ready.plan_handle,
+    })).content[0]!.text) as any;
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+    expect((vi.mocked(api.journals.create).mock.calls[0][0] as any).postings).toEqual([
+      { accounts_id: 5000, type: "D", amount: 100 },
+      { accounts_id: 2110, type: "C", amount: 100 },
+    ]);
+    expect(booked.journal_entry.api_response.created_object_id).toBe(42);
+  });
+
+  it("owner-expense vat_deduction_mode does not answer a non-VAT review question (no handle)", async () => {
+    const { handler, runtime } = ownerExpenseContinuationSetup();
+    const before = runtime.planStore.activeCount;
+    const payload = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseItemWithQuestions({
+        ...ownerExpensePartialAnswers,
+        payable_account: 2110,
+        vat_deduction_mode: "full",
+        question_answers: { [ownerExpenseQuestionId(vatQuestion)]: true },
+      }),
+    })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.missing_answers.map((entry: any) => entry.question_id)).toEqual([ownerExpenseQuestionId(documentQuestion)]);
+    expect(runtime.planStore.activeCount).toBe(before);
+  });
+
+  it("owner-expense plain-text question answer is not a decision: still needs_answers, no handle", async () => {
+    const { handler, runtime } = ownerExpenseContinuationSetup();
+    const before = runtime.planStore.activeCount;
+    const payload = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseItemWithQuestions({
+        ...ownerExpensePartialAnswers,
+        payable_account: 2110,
+        vat_deduction_mode: "none",
+        question_answers: {
+          [ownerExpenseQuestionId(vatQuestion)]: "No, this was personal use",
+          [ownerExpenseQuestionId(documentQuestion)]: { answer: true },
+        },
+      }),
+    })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.missing_answers).toEqual([expect.objectContaining({
+      question_id: ownerExpenseQuestionId(vatQuestion),
+      expected_answer: expect.stringContaining("plain text answer is not accepted"),
+    })]);
+    expect(runtime.planStore.activeCount).toBe(before);
+  });
+
+  it("owner-expense review question answered false blocks preparation (no handle)", async () => {
+    const { handler, runtime } = ownerExpenseContinuationSetup();
+    const before = runtime.planStore.activeCount;
+    const payload = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseItemWithQuestions({
+        ...ownerExpensePartialAnswers,
+        payable_account: 2110,
+        vat_deduction_mode: "none",
+        question_answers: {
+          [ownerExpenseQuestionId(vatQuestion)]: true,
+          [ownerExpenseQuestionId(documentQuestion)]: { answer: false, note: "The seller is not legible." },
+        },
+      }),
+    })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.missing_answers).toEqual([]);
+    expect(payload.blocked_answers.map((entry: any) => entry.question_id)).toEqual([ownerExpenseQuestionId(documentQuestion)]);
+    expect(payload.next_step_summary).toMatch(/cannot be booked/);
+    expect(runtime.planStore.activeCount).toBe(before);
+  });
+
+  it("owner-expense execute refuses an item whose review answers were dropped after prepare", async () => {
+    const { handler, api } = ownerExpenseContinuationSetup();
+    const answers = {
+      ...ownerExpensePartialAnswers,
+      payable_account: 2110,
+      vat_deduction_mode: "none",
+      question_answers: {
+        [ownerExpenseQuestionId(vatQuestion)]: true,
+        [ownerExpenseQuestionId(documentQuestion)]: true,
+      },
+    };
+    const ready = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseItemWithQuestions(answers),
+    })).content[0]!.text) as any;
+    expect(ready.status).toBe("ready_for_approval");
+    const { question_answers: _dropped, ...withoutAnswers } = answers;
+    const payload = parseMcpResponse((await handler({
+      action: "execute_review_action",
+      review_item_json: ownerExpenseItemWithQuestions(withoutAnswers),
+      plan_handle: ready.plan_handle,
+    })).content[0]!.text) as any;
+    expect(payload.error_code).toBe("owner_expense_answers_incomplete");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("owner-expense prepare asks again when the answered payable account has per-person dimensions", async () => {
+    const server = createMockToolServer();
+    const runtime = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({
+      accounts: [...ownerExpenseBookingAccounts, { id: 1360, name_est: "Arveldused aruandvate isikutega", name_eng: "Accountable persons" }],
+      accountDimensions: [{ id: 555, accounts_id: 1360, title_est: "Owner" }],
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]), create: vi.fn() } as any,
+    });
+    registerAccountingInboxTools(server, runtime, api, DEFAULT_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "continue_accounting_workflow");
+    const before = runtime.planStore.activeCount;
+
+    const payload = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseBookingItem({ payable_account: 1360 }),
+    })).content[0]!.text) as any;
+
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.missing_answers).toEqual([expect.objectContaining({ field: "payable_account" })]);
+    expect(payload.missing_answers[0].question).toContain("1360");
+    expect(runtime.planStore.activeCount).toBe(before);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("owner-expense prepare_action with save_as_rule keeps the read-only rule planning path", async () => {
+    const { handler, runtime } = ownerExpenseContinuationSetup();
+    const before = runtime.planStore.activeCount;
+    const payload = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseBookingItem(),
+      save_as_rule: true,
+    })).content[0]!.text) as any;
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.status).not.toBe("ready_for_approval");
+    expect(runtime.planStore.activeCount).toBe(before);
   });
 
   // --- P1-2: the approval card must show the WHOLE journal, and the plan must
@@ -3442,6 +3686,162 @@ ${entryXml}
     expect(auditEntry.summary).not.toContain("UNTRUSTED_OCR");
     expect(auditEntry.summary).toContain("Office chair");
     expect(auditEntry.details.description).toBe("Office chair");
+  });
+
+  // --- per-question answer semantics (server-owned, not parsed from text) ---
+
+  function ownerExpenseItemWithGuidance(description: string, ownerExpense: Record<string, unknown>) {
+    const guidance = buildOwnerExpenseVatReviewGuidance({ description });
+    return {
+      guidance,
+      item: {
+        review_type: "receipt_review",
+        item: {
+          classification: "owner_paid_expense_reimbursement",
+          file: { path: "/tmp/receipts/fuel.pdf" },
+          review_guidance: guidance,
+          owner_expense: {
+            owner_client_id: 1,
+            effective_date: "2026-06-01",
+            description,
+            net_amount: 100,
+            vat_rate: 0.24,
+            expense_account: 5000,
+            payable_account: 2110,
+            ...ownerExpense,
+          },
+        },
+      },
+    };
+  }
+  const questionIdOf = (question: string) => `q_${createHash("sha256").update(question).digest("hex").slice(0, 12)}`;
+  // M1 car: yes; private use excluded: NO; exempt turnover: no.
+  const carAnswers = (questions: string[]) => ({
+    [questionIdOf(questions[0]!)]: true,
+    [questionIdOf(questions[1]!)]: { answer: false, note: "Also used for private trips." },
+    [questionIdOf(questions[2]!)]: false,
+  });
+
+  it("M1 car with private use not excluded + vat_deduction_mode partial -> ready_for_approval", async () => {
+    const { handler } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Fuel for company car", {});
+    expect(guidance.follow_up_questions).toHaveLength(3);
+    const { item } = ownerExpenseItemWithGuidance("Fuel for company car", {
+      vat_deduction_mode: "partial",
+      deductible_vat_amount: 12,
+      question_answers: carAnswers(guidance.follow_up_questions),
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("ready_for_approval");
+    expect(payload.plan_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(payload.proposed_action.booking_preview.deductible_vat_amount).toBe(12);
+  });
+
+  it("M1 car with private use not excluded + vat_deduction_mode full is refused (no handle)", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Fuel for company car", {});
+    const { item } = ownerExpenseItemWithGuidance("Fuel for company car", {
+      vat_deduction_mode: "full",
+      question_answers: carAnswers(guidance.follow_up_questions),
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.blocked_answers).toBeUndefined();
+    expect(payload.missing_answers).toEqual([expect.objectContaining({
+      field: "vat_deduction_mode",
+      question: expect.stringContaining(questionIdOf(guidance.follow_up_questions[1]!)),
+    })]);
+    expect(payload.missing_answers[0].question).toMatch(/'full' conflicts/);
+
+    // Execute re-checks with the same semantics: nothing is booked.
+    const executed = parseMcpResponse((await handler({
+      action: "execute_review_action",
+      review_item_json: item,
+      plan_handle: "A".repeat(43),
+    })).content[0]!.text) as any;
+    expect(executed.error_code).toBe("owner_expense_answers_incomplete");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  // Hospitality: guest reception / staff consumption / trip accommodation / business link.
+  const hospitalityAnswers = (questions: string[], [guest, staff, trip, link]: boolean[]) => ({
+    [questionIdOf(questions[0]!)]: guest,
+    [questionIdOf(questions[1]!)]: staff,
+    [questionIdOf(questions[2]!)]: trip,
+    [questionIdOf(questions[3]!)]: link,
+  });
+
+  it("guest reception + vat_deduction_mode partial is refused (KMS § 30 lg 1: no deduction), no handle", async () => {
+    const { handler, api } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Restaurant dinner with client", {});
+    expect(guidance.follow_up_questions).toHaveLength(4);
+    const { item } = ownerExpenseItemWithGuidance("Restaurant dinner with client", {
+      vat_deduction_mode: "partial",
+      deductible_vat_amount: 12,
+      question_answers: hospitalityAnswers(guidance.follow_up_questions, [true, false, false, true]),
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.missing_answers).toEqual([expect.objectContaining({
+      field: "vat_deduction_mode",
+      question: expect.stringContaining("Use 'none'"),
+    })]);
+    expect(payload.missing_answers[0].question).toContain(questionIdOf(guidance.follow_up_questions[0]!));
+
+    const executed = parseMcpResponse((await handler({
+      action: "execute_review_action",
+      review_item_json: item,
+      plan_handle: "A".repeat(43),
+    })).content[0]!.text) as any;
+    expect(executed.error_code).toBe("owner_expense_answers_incomplete");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("guest reception + vat_deduction_mode none -> ready_for_approval with no deductible VAT", async () => {
+    const { handler } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Restaurant dinner with client", {});
+    const { item } = ownerExpenseItemWithGuidance("Restaurant dinner with client", {
+      vat_deduction_mode: "none",
+      question_answers: hospitalityAnswers(guidance.follow_up_questions, [true, false, false, true]),
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("ready_for_approval");
+    expect(payload.plan_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(payload.proposed_action.booking_preview.deductible_vat_amount).toBe(0);
+  });
+
+  it("business-trip accommodation + vat_deduction_mode full -> ready_for_approval", async () => {
+    const { handler } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Hotel accommodation", {});
+    expect(guidance.follow_up_questions).toHaveLength(4);
+    const { item } = ownerExpenseItemWithGuidance("Hotel accommodation", {
+      vat_deduction_mode: "full",
+      question_answers: hospitalityAnswers(guidance.follow_up_questions, [false, false, true, true]),
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("ready_for_approval");
+    expect(payload.proposed_action.booking_preview.deductible_vat_amount).toBe(24);
+  });
+
+  it("owner-expense document-completeness question answered false blocks the booking", async () => {
+    const { handler } = ownerExpenseVatSetup();
+    const { guidance } = ownerExpenseItemWithGuidance("Office chair", {});
+    const [businessOnly, documentComplete] = guidance.follow_up_questions;
+    const { item } = ownerExpenseItemWithGuidance("Office chair", {
+      vat_deduction_mode: "partial",
+      deductible_vat_amount: 12,
+      question_answers: {
+        // Mixed use only limits VAT; an incomplete document blocks.
+        [questionIdOf(businessOnly!)]: false,
+        [questionIdOf(documentComplete!)]: false,
+      },
+    });
+    const payload = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as any;
+    expect(payload.status).toBe("needs_answers");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.blocked_answers.map((entry: any) => entry.question_id)).toEqual([questionIdOf(documentComplete!)]);
   });
 
   it("scan recommended_steps name merged entry points when granular tools are hidden (default)", async () => {

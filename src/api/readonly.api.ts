@@ -5,6 +5,13 @@ import type {
   BankAccount, ApiResponse, PaginatedResponse
 } from "../types/api.js";
 import { Cache } from "../cache.js";
+import type { AuditEntityType } from "../audit-log.js";
+import {
+  classifyMutationFailure,
+  isMutationIndeterminate,
+  MutationIndeterminateError,
+  type MutationOperation,
+} from "../mutation-outcome.js";
 
 const REFERENCE_TTL_SECONDS = 600; // 10 min cache for reference data
 
@@ -16,6 +23,57 @@ function readonlyCacheKey(client: HttpClient, key: string): string {
 
 function invalidateReadonlyCache(client: HttpClient, pattern: string): void {
   readonlyCache.invalidate(readonlyCacheKey(client, pattern));
+}
+
+const READONLY_MUTATION_ENTITY_BY_PATH = {
+  "/invoice_info": "invoice_info",
+  "/invoice_series": "invoice_series",
+  "/bank_accounts": "bank_account",
+} as const satisfies Record<string, AuditEntityType>;
+
+type ReadonlyMutationPath = keyof typeof READONLY_MUTATION_ENTITY_BY_PATH;
+
+/**
+ * Reference-data counterpart of BaseResource.mutate(): same outcome classifier
+ * (classifyMutationFailure), but against the separate readonly cache. The
+ * affected cache is invalidated on success and on any indeterminate failure
+ * (5xx / 408 / network), which is rethrown as MutationIndeterminateError; a
+ * definitive 4xx rejection is rethrown unchanged with the cache left intact.
+ */
+async function readonlyMutate<R>(
+  client: HttpClient,
+  operation: MutationOperation,
+  basePath: ReadonlyMutationPath,
+  entityId: number | undefined,
+  request: () => Promise<R>,
+): Promise<R> {
+  try {
+    const result = await request();
+    invalidateReadonlyCache(client, basePath);
+    return result;
+  } catch (error) {
+    if (classifyMutationFailure(error) === "definitive") throw error;
+    invalidateReadonlyCache(client, basePath);
+    let alreadyClassified = false;
+    try {
+      alreadyClassified = isMutationIndeterminate(error);
+    } catch {
+      alreadyClassified = false;
+    }
+    if (alreadyClassified) throw error;
+    const entity = READONLY_MUTATION_ENTITY_BY_PATH[basePath];
+    const businessKey = entityId === undefined ? `${basePath}:${operation}` : `${basePath}:${entityId}`;
+    throw new MutationIndeterminateError({
+      operation,
+      entity,
+      entityId,
+      businessKey,
+      affectedCaches: [basePath],
+      cause: error,
+      nextAction:
+        `Re-read ${entity} state for business key "${businessKey}" before deciding whether to retry; do not repeat the mutation blindly.`,
+    });
+  }
 }
 
 async function readonlyCachedGet<T>(client: HttpClient, path: string): Promise<T> {
@@ -114,9 +172,8 @@ export class ReferenceDataApi {
   }
 
   async updateInvoiceInfo(data: Partial<CompanyInvoiceInfo>): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>("/invoice_info", data);
-    invalidateReadonlyCache(this.client, "/invoice_info");
-    return result;
+    return readonlyMutate(this.client, "update", "/invoice_info", undefined,
+      () => this.client.patch<ApiResponse>("/invoice_info", data));
   }
 
   // VAT info
@@ -139,21 +196,18 @@ export class ReferenceDataApi {
   }
 
   async createInvoiceSeries(data: Partial<InvoiceSeries>): Promise<ApiResponse> {
-    const result = await this.client.post<ApiResponse>("/invoice_series", data);
-    invalidateReadonlyCache(this.client, "/invoice_series");
-    return result;
+    return readonlyMutate(this.client, "create", "/invoice_series", undefined,
+      () => this.client.post<ApiResponse>("/invoice_series", data));
   }
 
   async updateInvoiceSeries(id: number, data: Partial<InvoiceSeries>): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/invoice_series/${id}`, data);
-    invalidateReadonlyCache(this.client, "/invoice_series");
-    return result;
+    return readonlyMutate(this.client, "update", "/invoice_series", id,
+      () => this.client.patch<ApiResponse>(`/invoice_series/${id}`, data));
   }
 
   async deleteInvoiceSeries(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`/invoice_series/${id}`);
-    invalidateReadonlyCache(this.client, "/invoice_series");
-    return result;
+    return readonlyMutate(this.client, "delete", "/invoice_series", id,
+      () => this.client.delete<ApiResponse>(`/invoice_series/${id}`));
   }
 
   // Bank accounts
@@ -166,20 +220,17 @@ export class ReferenceDataApi {
   }
 
   async createBankAccount(data: Partial<BankAccount>): Promise<ApiResponse> {
-    const result = await this.client.post<ApiResponse>("/bank_accounts", data);
-    invalidateReadonlyCache(this.client, "/bank_accounts");
-    return result;
+    return readonlyMutate(this.client, "create", "/bank_accounts", undefined,
+      () => this.client.post<ApiResponse>("/bank_accounts", data));
   }
 
   async updateBankAccount(id: number, data: Partial<BankAccount>): Promise<ApiResponse> {
-    const result = await this.client.patch<ApiResponse>(`/bank_accounts/${id}`, data);
-    invalidateReadonlyCache(this.client, "/bank_accounts");
-    return result;
+    return readonlyMutate(this.client, "update", "/bank_accounts", id,
+      () => this.client.patch<ApiResponse>(`/bank_accounts/${id}`, data));
   }
 
   async deleteBankAccount(id: number): Promise<ApiResponse> {
-    const result = await this.client.delete<ApiResponse>(`/bank_accounts/${id}`);
-    invalidateReadonlyCache(this.client, "/bank_accounts");
-    return result;
+    return readonlyMutate(this.client, "delete", "/bank_accounts", id,
+      () => this.client.delete<ApiResponse>(`/bank_accounts/${id}`));
   }
 }

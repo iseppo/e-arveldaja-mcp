@@ -9,6 +9,9 @@ import { validateLegalEntityIdentity } from "../../legal-entity-identity.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
 import { applyListView, viewParam } from "../../list-views.js";
+import { normalizeVatValue } from "../../document-identifiers.js";
+import { resolveOwnCompanyIdentifiers } from "../own-company-identity.js";
+import type { Client } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
 import {
   coerceId,
@@ -18,6 +21,46 @@ import {
   parseJsonObject,
   validateUpdateFields,
 } from "./shared.js";
+
+/**
+ * Live clients that already carry this registry code, plus whether the code /
+ * VAT number is the active company's own (self-match). Reads the clients list
+ * fresh — the check gates a create. Same `.trim()` equality as matchSupplier.
+ */
+async function findClientIdentityConflicts(
+  api: ApiContext,
+  identity: { code?: string | null; invoice_vat_no?: string | null },
+  excludeId?: number,
+): Promise<{ duplicates: Client[]; selfMatch: boolean }> {
+  const code = identity.code?.trim() || undefined;
+  const vat = normalizeVatValue(identity.invoice_vat_no ?? undefined);
+  if (!code && !vat) return { duplicates: [], selfMatch: false };
+  api.clients.invalidateListCache();
+  const clients = await api.clients.listAll();
+  const duplicates = code
+    ? clients.filter(c => !c.is_deleted && c.id !== excludeId && c.code?.trim() === code)
+    : [];
+  const own = await resolveOwnCompanyIdentifiers(api, clients);
+  const selfMatch = (!!code && code === own.ownCompanyRegistryCode?.trim()) ||
+    (!!vat && vat === normalizeVatValue(own.ownCompanyVat));
+  return { duplicates, selfMatch };
+}
+
+function clientConflictError(conflicts: { duplicates: Client[]; selfMatch: boolean }, verb: string) {
+  const ids = conflicts.duplicates.map(c => c.id).filter((id): id is number => typeof id === "number");
+  return toolError({
+    error: conflicts.selfMatch
+      ? "Registry code / VAT number belongs to the active company itself"
+      : "A client with this registry code already exists",
+    category: conflicts.selfMatch ? "client_self_match" : "duplicate_client",
+    existing_client_ids: ids,
+    next_action: conflicts.selfMatch
+      ? `Do not ${verb} a client with the company's own identifiers; use the real counterparty's registry code. Pass allow_duplicate: true only if this is intended.`
+      : `Use the existing client (id ${ids.join(", ")}) instead. Pass allow_duplicate: true only for an intended second record.`,
+  });
+}
+
+const CLIENT_IDENTITY_FIELDS = ["code", "invoice_vat_no", "cl_code_country", "is_physical_entity", "is_juridical_entity"] as const;
 
 export function registerClientTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -52,6 +95,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     bank_account_no: z.string().optional().describe("Bank account (IBAN)"),
     invoice_vat_no: z.string().optional().describe("VAT number"),
     notes: z.string().optional().describe("Notes"),
+    allow_duplicate: z.boolean().optional().describe("Create even when a live client with the same registry code exists, or the code/VAT is the company's own (default false: refused with the existing client id(s))."),
   }, { ...create, title: "Create Client" }, async (rawParams) => {
     // Strip any sandbox markers that round-tripped in from a wrapped read off
     // EVERY field (not only the scoped ones), so no marker is ever persisted to
@@ -77,8 +121,16 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
         next_action: "Supply a checksum-valid Estonian registry code, set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration. No client was created.",
       });
     }
+    if (params.allow_duplicate !== true) {
+      const conflicts = await findClientIdentityConflicts(api, { code: params.code, invoice_vat_no: params.invoice_vat_no });
+      if (conflicts.selfMatch || conflicts.duplicates.length > 0) {
+        return clientConflictError(conflicts, "create");
+      }
+    }
+    // Tool-only flags never reach the API payload.
+    const { foreign_identity_attested: _attested, allow_duplicate: _allowDuplicate, ...clientFields } = params;
     const result = await api.clients.create({
-      ...params,
+      ...clientFields,
       cl_code_country: params.cl_code_country ?? "EST",
       // The API treats the person-type flags as complements and requires one to be
       // set; derive the juridical flag from the required is_physical_entity so this
@@ -104,14 +156,51 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools.", {
+  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client.", {
     id: coerceId.describe("Client ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
-  }, { ...mutate, title: "Update Client" }, async ({ id, data }) => {
+    foreign_identity_attested: z.boolean().optional().describe("Operator attestation for a FOREIGN legal entity's identity, required when changing its identity fields (see create_client)."),
+    allow_duplicate: z.boolean().optional().describe("Allow a registry code another live client (or the company itself) already uses (default false)."),
+  }, { ...mutate, title: "Update Client" }, async ({ id, data, foreign_identity_attested, allow_duplicate }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
     const updateErrors = validateUpdateFields(parsed, "client");
     if (updateErrors.length > 0) {
       return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
+    if (CLIENT_IDENTITY_FIELDS.some(field => field in parsed)) {
+      // P17 on the merged (fresh stored + requested) identity.
+      api.clients.invalidateListCache();
+      const current = await api.clients.get(id);
+      const merged = { ...current, ...parsed } as Client;
+      const isPhysical = "is_physical_entity" in parsed
+        ? merged.is_physical_entity === true
+        : "is_juridical_entity" in parsed
+          ? merged.is_juridical_entity === false
+          : merged.is_physical_entity === true;
+      const identity = validateLegalEntityIdentity({
+        reg_code: merged.code,
+        vat_no: merged.invoice_vat_no,
+        country: merged.cl_code_country,
+        is_physical_entity: isPhysical,
+        foreign_identity_attested,
+      });
+      if (!identity.ok) {
+        return toolError({
+          error: identity.code,
+          category: "manual_review_required",
+          reason: identity.reason,
+          next_action: "Supply a checksum-valid Estonian registry code, set is_physical_entity=true for a natural person, or pass foreign_identity_attested=true for an operator-verified foreign registration. The client was not updated.",
+        });
+      }
+      if (allow_duplicate !== true && ("code" in parsed || "invoice_vat_no" in parsed)) {
+        const conflicts = await findClientIdentityConflicts(api, {
+          code: "code" in parsed ? merged.code : undefined,
+          invoice_vat_no: "invoice_vat_no" in parsed ? merged.invoice_vat_no : undefined,
+        }, id);
+        if (conflicts.selfMatch || conflicts.duplicates.length > 0) {
+          return clientConflictError(conflicts, "update");
+        }
+      }
     }
     const result = await api.clients.update(id, parsed);
     logAudit({
@@ -131,7 +220,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "deactivate_client", "Deactivate a client (can be restored with reactivate_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
     const result = await api.clients.deactivate(id);
     logAudit({
-      tool: "deactivate_client", action: "DELETED", entity_type: "client", entity_id: id,
+      tool: "deactivate_client", action: "DEACTIVATED", entity_type: "client", entity_id: id,
       summary: `Deactivated client ${id}`,
       details: {},
     });
@@ -147,7 +236,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "reactivate_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Reactivate Client" }, async ({ id }) => {
     const result = await api.clients.restore(id);
     logAudit({
-      tool: "reactivate_client", action: "UPDATED", entity_type: "client", entity_id: id,
+      tool: "reactivate_client", action: "REACTIVATED", entity_type: "client", entity_id: id,
       summary: `Reactivated client ${id}`,
       details: {},
     });

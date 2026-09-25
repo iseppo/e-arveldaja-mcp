@@ -25,8 +25,8 @@ satisfied, do not force creation — resolve the supplier manually instead.
 
 ## Step 1: Determine input type
 
-- 8-digit number → treat as registry code
-- Text → treat as supplier name
+- 8-digit number → treat as an Estonian registry code (country `EST`)
+- Text → treat as supplier name, and ask for the supplier's country when it is not obviously Estonian (country codes are 3-letter ISO codes, e.g. `EST`, `FIN`, `DEU`)
 
 ## Step 2: Check if supplier already exists
 
@@ -46,17 +46,17 @@ Call `resolve_supplier`:
 - `name`: supplier name (if provided)
 - `reg_code`: registry code (if provided)
 - `auto_create`: `false` (review registry data before creating)
-- `country`: `"EST"` (default)
+- `country`: the supplier's 3-letter country code (`"EST"` is the default; pass the real code, e.g. `"FIN"`, for a foreign supplier)
 
-For Estonian codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review.
+For Estonian registry codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review. There is no registry lookup for foreign suppliers — use the details the user or the invoice provides, and remember the foreign identity attestation above.
 
-A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for `invoice_vat_no` separately when needed.
+A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for the VAT number separately when needed.
 
 ## Step 4: Gather additional information
 
 Ask the user for any details to add:
 - Bank account (IBAN) — useful for payment matching
-- VAT number (KMKR, e.g. EE123456789) — needed for EU intra-community supply
+- VAT number — the KMKR number (e.g. EE123456789) for an Estonian VAT-registered supplier, or the EU VAT ID (e.g. FI12345678) for a supplier in another member state; needed for correct VAT / reverse-charge treatment of its invoices
 - Email address
 - Phone number
 - Address (if not found from registry)
@@ -80,7 +80,7 @@ Call `create_client`:
 - `code`: registry code (if known)
 - `is_client`: `false`
 - `is_supplier`: `true`
-- `cl_code_country`: `"EST"` (or as specified)
+- `cl_code_country`: the supplier's 3-letter country code (`"EST"` for Estonian suppliers)
 - `is_physical_entity`: `false` (REQUIRED — `false` = legal entity/company, the default case; `true` for natural persons)
 - `foreign_identity_attested`: `true` ONLY when creating a foreign legal entity
   (`cl_code_country` != `EST`) whose identity you have verified — this is the

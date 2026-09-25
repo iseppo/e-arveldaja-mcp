@@ -1751,6 +1751,10 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         });
       }
 
+      // Uncached: existing-close detection (and the closing amounts) come from
+      // the journals — a close booked elsewhere within the 120 s cache window
+      // must be seen, or it would be booked twice.
+      api.journals.invalidateListCache();
       const analysis = await analyzeYearEndClose(api, year, {
         reserveCapitalAmount: reserve_capital_amount,
         reserveCapitalAccount: reserve_capital_account,

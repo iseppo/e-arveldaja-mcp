@@ -172,6 +172,7 @@ function createApi(
     },
     journals: {
       listAllWithPostings: async () => journals,
+      invalidateListCache: vi.fn(),
       ...(options.journalsCreate !== undefined ? { create: options.journalsCreate } : {}),
     },
   } as unknown as ApiContext;
@@ -1250,6 +1251,27 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     expect(payload.created_journals).toEqual([]);
     expect(payload.next_action).toContain("No journals were created");
     expect(journalsCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops the journal cache before the existing-close detection read (prepare stays cached)", async () => {
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 7701 });
+    const api = createApi(makeM20BaseJournals(), { journalsCreate }) as unknown as {
+      journals: { invalidateListCache: ReturnType<typeof vi.fn>; listAllWithPostings: () => Promise<Journal[]> };
+    };
+    const listAllWithPostings = vi.spyOn(api.journals, "listAllWithPostings");
+    const server = { registerTool: vi.fn() } as any;
+    registerAnnualReportTools(server, api as never);
+    const tool = (name: string) => server.registerTool.mock.calls.find(([toolName]: [string]) => toolName === name)![2] as
+      (args: Record<string, unknown>) => Promise<unknown>;
+
+    await tool("prepare_year_end_close")({ year: 2025 });
+    expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
+
+    await tool("execute_year_end_close")({ year: 2025, confirm: true });
+    const invalidateOrder = api.journals.invalidateListCache.mock.invocationCallOrder;
+    expect(invalidateOrder).toHaveLength(1);
+    expect(invalidateOrder[0]!).toBeLessThan(listAllWithPostings.mock.invocationCallOrder.at(-1)!);
+    expect(listAllWithPostings.mock.invocationCallOrder.at(-1)!).toBeLessThan(journalsCreate.mock.invocationCallOrder[0]!);
   });
 });
 

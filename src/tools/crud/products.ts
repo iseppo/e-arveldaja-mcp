@@ -94,7 +94,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "deactivate_product", "Deactivate a product (can be restored with reactivate_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
     const result = await api.products.deactivate(id);
     logAudit({
-      tool: "deactivate_product", action: "DELETED", entity_type: "product", entity_id: id,
+      tool: "deactivate_product", action: "DEACTIVATED", entity_type: "product", entity_id: id,
       summary: `Deactivated product ${id}`,
       details: {},
     });
@@ -110,7 +110,7 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "reactivate_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Reactivate Product" }, async ({ id }) => {
     const result = await api.products.restore(id);
     logAudit({
-      tool: "reactivate_product", action: "UPDATED", entity_type: "product", entity_id: id,
+      tool: "reactivate_product", action: "REACTIVATED", entity_type: "product", entity_id: id,
       summary: `Reactivated product ${id}`,
       details: {},
     });

@@ -438,6 +438,15 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       : input.classificationsJson;
     const groups = extractClassificationGroups(parsed);
 
+    if (!dryRun) {
+      // execute_apply gates writes on these reads (transaction still PROJECT,
+      // existing supplier, duplicate invoice): bypass the 120 s cache so state
+      // changed elsewhere since dry_run_apply is seen. Also drops cached
+      // transaction gets, so the fingerprint pass below reads each one live.
+      api.clients.invalidateListCache();
+      api.purchaseInvoices.invalidateListCache();
+      api.transactions.invalidateListCache();
+    }
     const [clients, purchaseArticlesWithVat, purchaseInvoices, accounts] = await Promise.all([
       api.clients.listAll(),
       getPurchaseArticlesWithVat(api),
@@ -739,6 +748,9 @@ class ClassificationOperationsImpl implements ClassificationOperations {
 
           let freshTransaction: Transaction;
           try {
+            // Uncached: the fingerprint pass fetched this transaction moments
+            // ago; the post-create re-read must see a confirm made since.
+            api.transactions.invalidateListCache();
             freshTransaction = await api.transactions.get(transaction.id!);
           } catch (error) {
             recordPostCreateFailure(error, "transaction_reread", observedInvoiceStatus, "UNKNOWN");

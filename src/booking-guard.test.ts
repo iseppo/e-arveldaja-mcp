@@ -582,14 +582,40 @@ describe("H06-C cross-process create-once", () => {
     expect(get.mock.invocationCallOrder.at(-1)).toBe(lastInvalidation + 1);
   });
 
-  it.each(["http", "unexpected"])("H06-C propagates definite %s confirm errors with createdJournalId", async kind => {
-    const error = kind === "http" ? new HttpError("bad", 400, "PATCH", "/journals/68/register") : new Error("boom");
+  it.each([400, 429])("H06-C propagates definite HTTP %s confirm errors with createdJournalId", async status => {
+    const error = new HttpError("bad", status, "PATCH", "/journals/68/register");
     const { api, confirm } = setup({ createResult: { created_object_id: 68 } });
     const guard = await BookingGuard.load(api);
     confirm.mockRejectedValueOnce(error);
     await expect(guard.createJournalOnce(
       { ns: "FX", id: "def" }, { effective_date: "2026-01-01", postings: [] },
     )).rejects.toMatchObject({ createdJournalId: 68 });
+  });
+
+  it.each([
+    ["HTTP 500", () => new HttpError("server error", 500, "PATCH", "/journals/69/register")],
+    ["HTTP 408", () => new HttpError("timeout", 408, "PATCH", "/journals/69/register")],
+    ["unknown", () => new Error("boom")],
+  ])("H06-C treats a %s confirm failure as ambiguity and verifies before recovering", async (_label, makeError) => {
+    const { api, confirm, get } = setup({ createResult: { created_object_id: 69 } });
+    const guard = await BookingGuard.load(api);
+    confirm.mockRejectedValueOnce(makeError());
+    get.mockResolvedValueOnce(journal({ id: 69, document_number: "FX:amb", registered: true }));
+    const result = await guard.createJournalOnce(
+      { ns: "FX", id: "amb" }, { effective_date: "2026-01-01", postings: [] },
+    );
+    expect(result).toMatchObject({ journal_id: 69, registered: true, recovered: true });
+    expect(get).toHaveBeenCalledWith(69);
+  });
+
+  it("H06-C treats an HTTP 500 create failure as ambiguity and re-scans instead of failing definitively", async () => {
+    const { api, create } = setup({ createResult: { created_object_id: 70 } });
+    const guard = await BookingGuard.load(api);
+    create.mockRejectedValueOnce(new HttpError("server error", 500, "POST", "/journals"));
+    await expect(guard.createJournalOnce(
+      { ns: "FX", id: "c500" }, { effective_date: "2026-01-01", postings: [] },
+    )).rejects.toMatchObject({ category: "mutation_indeterminate", operation: "create", businessKey: "FX:c500" });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 
   it("H06-C supports legacy DIV spelling only", () => {

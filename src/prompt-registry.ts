@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { ToolExposureConfig } from "./config.js";
 import { renderVatMetadataTokens } from "./estonian-tax-rules.js";
+import { toolMeta } from "./tool-catalog.js";
+import { exposureForProfile, isToolVisibleForProfile, type ToolProfile } from "./tool-profile.js";
 import {
   parseAbsolutePath,
   parseExactBoolean,
@@ -17,10 +19,17 @@ export interface SetupPromptOptions {
   note?: string;
 }
 
+/**
+ * A capability-selected workflow section. It renders only when every
+ * `advertisedTools` entry is registered on the active tool surface and none of
+ * `unlessTools` is — so a workflow can carry one section per surface (e.g. the
+ * guided façade vs the standard granular tools) and exactly the matching one
+ * renders. Static command mirrors render the same condition as prose.
+ */
 export interface PromptVariant {
   name: string;
   advertisedTools: readonly string[];
-  featurePredicate: (toolExposure: ToolExposureConfig | undefined) => boolean;
+  unlessTools?: readonly string[];
 }
 
 export interface PromptDefinition {
@@ -30,7 +39,64 @@ export interface PromptDefinition {
   argsSchema: z.ZodRawShape | undefined;
   setupOptions: SetupPromptOptions | undefined;
   featurePredicate: (toolExposure: ToolExposureConfig | undefined) => boolean;
+  /**
+   * The prompt is registered only when at least one of these tools is on the
+   * active surface (empty = always). Keeps a workflow whose tools are all absent
+   * (e.g. Lightyear or supplier creation on a guided profile) out of prompts/list.
+   */
+  requiredTools: readonly string[];
   variants: readonly PromptVariant[];
+}
+
+export interface PromptToolSurfaceOptions {
+  /** Active tool profile; defaults to the `standard` compatibility profile. */
+  toolProfile?: ToolProfile;
+  /** Normalized tool-exposure flags; absent flags use the registration defaults. */
+  toolExposure?: ToolExposureConfig;
+  /** Setup mode registers the credential-management tools unconditionally. */
+  setupMode?: boolean;
+}
+
+/** True when the named tool is registered (appears in tools/list) on the surface. */
+export type PromptToolAvailability = (tool: string) => boolean;
+
+/**
+ * Derive the registered tool set for a profile + exposure combination from the
+ * tool catalog, mirroring the registration gates (profile visibility, granular
+ * and setup exposure, opt-out feature groups). Prompts are registered after the
+ * tools, but server instructions are built before them, so both use this
+ * derivation; `prompt-tool-surface.test.ts` pins it to the real tools/list.
+ */
+export function promptToolAvailability(options: PromptToolSurfaceOptions = {}): PromptToolAvailability {
+  const profile = options.toolProfile ?? "standard";
+  const exposure = profile === "full" && options.toolExposure === undefined
+    ? exposureForProfile("full", {} as ToolExposureConfig)
+    : options.toolExposure;
+  return (tool: string): boolean => {
+    let meta: ReturnType<typeof toolMeta>;
+    try {
+      meta = toolMeta(tool);
+      if (!isToolVisibleForProfile(tool, profile)) return false;
+    } catch {
+      return false;
+    }
+    if (meta.granular_of && exposure?.exposeGranularTools !== true) return false;
+    switch (meta.feature) {
+      case "setup":
+        return tool === "get_setup_instructions" || options.setupMode === true || exposure?.exposeSetupTools === true;
+      case "sales": return exposure?.enableSales !== false;
+      case "products": return exposure?.enableProducts !== false;
+      case "tax": return exposure?.enableTaxTools !== false;
+      case "annual_report": return exposure?.enableAnnualReport !== false;
+      case "lightyear": return exposure?.enableLightyear !== false;
+      case "reference_admin": return exposure?.enableReferenceAdmin !== false;
+      default: return true;
+    }
+  };
+}
+
+export function promptVariantEnabled(variant: PromptVariant, hasTool: PromptToolAvailability): boolean {
+  return variant.advertisedTools.every(hasTool) && !(variant.unlessTools ?? []).some(hasTool);
 }
 
 type StringParser<T> = (value: string) => T;
@@ -102,19 +168,34 @@ const taxEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
   toolExposure?.enableTaxTools !== false;
 const lightyearEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
   toolExposure?.enableLightyear !== false;
-const salesEnabled = (toolExposure: ToolExposureConfig | undefined): boolean =>
-  toolExposure?.enableSales !== false;
 const NO_VARIANTS: readonly PromptVariant[] = Object.freeze([]);
-const COMPANY_OVERVIEW_VARIANTS: readonly PromptVariant[] = [{
-  name: "sales",
-  advertisedTools: ["compute_receivables_aging"],
-  featurePredicate: salesEnabled,
-}];
-const MONTH_END_VARIANTS: readonly PromptVariant[] = [{
-  name: "sales",
-  advertisedTools: ["confirm_sale_invoice"],
-  featurePredicate: salesEnabled,
-}];
+const NO_REQUIRED_TOOLS: readonly string[] = Object.freeze([]);
+
+/** Standard/full granular section vs the guided façade section of one workflow. */
+function surfaceVariants(standardTool: string, guidedTool: string): PromptVariant[] {
+  return [
+    { name: "standard", advertisedTools: [standardTool] },
+    { name: "guided", advertisedTools: [guidedTool], unlessTools: [standardTool] },
+  ];
+}
+
+const COMPANY_OVERVIEW_VARIANTS: readonly PromptVariant[] = [
+  ...surfaceVariants("compute_balance_sheet", "run_accounting_report"),
+  { name: "sales", advertisedTools: ["compute_receivables_aging"] },
+];
+const MONTH_END_VARIANTS: readonly PromptVariant[] = [
+  ...surfaceVariants("month_end_close_checklist", "run_accounting_report"),
+  { name: "sales", advertisedTools: ["confirm_sale_invoice"] },
+  { name: "guided-sales", advertisedTools: ["manage_sale_invoice"], unlessTools: ["confirm_sale_invoice"] },
+];
+const CREDENTIAL_TOOL_VARIANTS: readonly PromptVariant[] = [
+  { name: "credential-tools", advertisedTools: ["import_apikey_credentials", "list_stored_credentials", "remove_stored_credentials"] },
+  { name: "no-credential-tools", advertisedTools: ["get_setup_instructions"], unlessTools: ["import_apikey_credentials"] },
+];
+const RECONCILE_VARIANTS: readonly PromptVariant[] = [
+  ...surfaceVariants("confirm_transaction", "reconcile_bank_transactions"),
+  { name: "alignment-report", advertisedTools: ["run_accounting_report"] },
+];
 
 const PROMPT_DEFINITIONS = [
   {
@@ -139,6 +220,7 @@ const PROMPT_DEFINITIONS = [
       note: "VAT threshold checking needs live VAT status and sale invoices from e-arveldaja, so it cannot run before credentials are configured.",
     },
     featurePredicate: taxEnabled,
+    requiredTools: ["check_vat_registration_threshold"],
     variants: NO_VARIANTS,
   },
   {
@@ -152,7 +234,8 @@ const PROMPT_DEFINITIONS = [
     },
     setupOptions: undefined,
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: NO_REQUIRED_TOOLS,
+    variants: CREDENTIAL_TOOL_VARIANTS,
   },
   {
     name: "setup-e-arveldaja",
@@ -161,7 +244,8 @@ const PROMPT_DEFINITIONS = [
     argsSchema: undefined,
     setupOptions: undefined,
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: NO_REQUIRED_TOOLS,
+    variants: CREDENTIAL_TOOL_VARIANTS,
   },
   {
     name: "accounting-inbox",
@@ -175,6 +259,7 @@ const PROMPT_DEFINITIONS = [
     },
     setupOptions: undefined,
     featurePredicate: enabled,
+    requiredTools: ["accounting_inbox"],
     variants: NO_VARIANTS,
   },
   {
@@ -186,6 +271,7 @@ const PROMPT_DEFINITIONS = [
     },
     setupOptions: undefined,
     featurePredicate: enabled,
+    requiredTools: ["continue_accounting_workflow"],
     variants: NO_VARIANTS,
   },
   {
@@ -200,6 +286,7 @@ const PROMPT_DEFINITIONS = [
     },
     setupOptions: undefined,
     featurePredicate: enabled,
+    requiredTools: ["continue_accounting_workflow"],
     variants: NO_VARIANTS,
   },
   {
@@ -211,10 +298,11 @@ const PROMPT_DEFINITIONS = [
     },
     setupOptions: {
       offlineTools: ["process_accounting_document", "extract_pdf_invoice", "validate_invoice_data"],
-      note: "The guided one-tool flow (process_accounting_document), supplier resolution, duplicate detection, booking suggestions, invoice creation, and confirmation all require configured e-arveldaja credentials.",
+      note: "Supplier resolution, duplicate detection, booking suggestions, invoice creation, and confirmation all require configured e-arveldaja credentials.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["extract_pdf_invoice", "process_accounting_document"],
+    variants: surfaceVariants("extract_pdf_invoice", "process_accounting_document"),
   },
   {
     name: "receipt-batch",
@@ -222,7 +310,7 @@ const PROMPT_DEFINITIONS = [
     description: "Scan a receipt folder, preview auto-bookable results, and only create purchase invoices after explicit approval.",
     argsSchema: {
       folder_path: absolutePath("Absolute path to the receipt folder"),
-      accounts_dimensions_id: optionalPositiveId("Optional bank account dimension ID used for bank transaction matching; if omitted, list account dimensions and ask the user to confirm the best match"),
+      accounts_dimensions_id: optionalPositiveId("Optional bank-account dimension ID (the integer id of the bank account's dimension, not the account number) used for bank transaction matching; if omitted, the workflow proposes one and asks you to confirm it"),
       date_from: optionalDate("Optional receipt modified-date lower bound (YYYY-MM-DD)"),
       date_to: optionalDate("Optional receipt modified-date upper bound (YYYY-MM-DD)"),
     },
@@ -231,7 +319,8 @@ const PROMPT_DEFINITIONS = [
       note: "Full receipt processing, supplier resolution, duplicate checks, bank matching, and invoice creation all require configured credentials.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["receipt_batch"],
+    variants: surfaceVariants("list_account_dimensions", "receipt_batch"),
   },
   {
     name: "import-camt",
@@ -239,16 +328,17 @@ const PROMPT_DEFINITIONS = [
     description: "Parse a CAMT.053 statement, preview imported bank transactions, and only create them after approval.",
     argsSchema: {
       file_path: absolutePath("Absolute path to the CAMT.053 XML file"),
-      accounts_dimensions_id: optionalPositiveId("Optional bank account dimension ID in e-arveldaja; if omitted, list account dimensions and ask the user to confirm the bank account"),
+      accounts_dimensions_id: optionalPositiveId("Optional bank-account dimension ID (integer dimension id, not the account number); if omitted, a unique bank account is resolved automatically or you are asked to confirm one"),
       date_from: optionalDate("Optional statement-entry lower bound (YYYY-MM-DD)"),
       date_to: optionalDate("Optional statement-entry upper bound (YYYY-MM-DD)"),
     },
     setupOptions: {
-      offlineTools: ["process_bank_input"],
-      note: "Previewing the bank file can be done locally (process_bank_input mode='prepare'), but transaction creation requires configured e-arveldaja credentials.",
+      offlineTools: ["process_camt053", "process_bank_input"],
+      note: "Parsing the statement file can be done locally, but the import preview and transaction creation require configured e-arveldaja credentials.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["process_camt053", "process_bank_input"],
+    variants: surfaceVariants("process_camt053", "process_bank_input"),
   },
   {
     name: "import-wise",
@@ -256,8 +346,8 @@ const PROMPT_DEFINITIONS = [
     description: "Preview Wise CSV import results (fees, skipped duplicates) before creating any bank transactions.",
     argsSchema: {
       file_path: absolutePath("Absolute path to the regular Wise transaction-history.csv export"),
-      accounts_dimensions_id: optionalPositiveId("Optional bank account dimension ID for the Wise account; if omitted, list account dimensions and ask the user to confirm the Wise bank account"),
-      fee_account_dimensions_id: optionalPositiveId("Optional Wise fee expense account dimension ID"),
+      accounts_dimensions_id: optionalPositiveId("Optional bank-account dimension ID of the Wise account (integer dimension id, not the account number); if omitted, a unique Wise account is resolved automatically or you are asked to confirm one"),
+      fee_account_dimensions_id: optionalPositiveId("Optional dimension ID of the Wise fee expense account (normally an 8610 dimension); auto-detected when unique"),
       inter_account_dimension_id: optionalPositiveId("Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts and auto-detection cannot pick one"),
       date_from: optionalDate("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: optionalDate("Optional transaction-date upper bound (YYYY-MM-DD)"),
@@ -268,14 +358,15 @@ const PROMPT_DEFINITIONS = [
       note: "Wise import preview and execution both depend on live e-arveldaja account and transaction data, so this workflow stays blocked until credentials are configured.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["import_wise_transactions", "process_bank_input"],
+    variants: surfaceVariants("import_wise_transactions", "process_bank_input"),
   },
   {
     name: "classify-unmatched",
     slug: "classify-unmatched",
     description: "Classify unmatched bank transactions, preview generated purchase-invoice bookings, and only apply them after approval.",
     argsSchema: {
-      accounts_dimensions_id: optionalPositiveId("Optional bank account dimension ID used for transaction classification; if omitted, list account dimensions and ask the user to confirm the bank account"),
+      accounts_dimensions_id: optionalPositiveId("Optional bank-account dimension ID (integer dimension id, not the account number) whose unmatched transactions are classified; if omitted, the workflow proposes one and asks you to confirm it"),
       date_from: optionalDate("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: optionalDate("Optional transaction-date upper bound (YYYY-MM-DD)"),
     },
@@ -283,7 +374,8 @@ const PROMPT_DEFINITIONS = [
       note: "This workflow depends on live unmatched bank transactions and e-arveldaja booking data, so it cannot run before credentials are configured.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["classify_bank_transactions"],
+    variants: surfaceVariants("list_account_dimensions", "classify_bank_transactions"),
   },
   {
     name: "reconcile-bank",
@@ -299,7 +391,8 @@ const PROMPT_DEFINITIONS = [
       note: "Bank reconciliation requires live transactions, invoices, and journals from e-arveldaja, so it cannot run in setup mode.",
     },
     featurePredicate: enabled,
-    variants: NO_VARIANTS,
+    requiredTools: ["reconcile_bank_transactions"],
+    variants: RECONCILE_VARIANTS,
   },
   {
     name: "month-end-close",
@@ -313,12 +406,13 @@ const PROMPT_DEFINITIONS = [
       note: "Month-end checks rely on live e-arveldaja invoices, transactions, journals, and reports, so this workflow stays blocked until credentials are configured.",
     },
     featurePredicate: enabled,
+    requiredTools: ["month_end_close_checklist", "run_accounting_report"],
     variants: MONTH_END_VARIANTS,
   },
   {
     name: "new-supplier",
     slug: "new-supplier",
-    description: "Create a new supplier by looking up registry data and creating a client record.",
+    description: "Create a new supplier client record after an existing-client check, Estonian registry lookup (or foreign-identity attestation), and explicit approval.",
     argsSchema: {
       identifier: parsedString(parseIdentifier, "a bounded identifier without control characters")
         .describe("Supplier name or 8-digit Estonian registry code"),
@@ -327,6 +421,7 @@ const PROMPT_DEFINITIONS = [
       note: "Existing-client lookup, supplier resolution, and client creation are API-backed steps, so this workflow cannot complete before credentials are configured.",
     },
     featurePredicate: enabled,
+    requiredTools: ["create_client"],
     variants: NO_VARIANTS,
   },
   {
@@ -338,6 +433,7 @@ const PROMPT_DEFINITIONS = [
       note: "This dashboard depends on live company settings and financial reports from e-arveldaja, so it cannot run before credentials are configured.",
     },
     featurePredicate: enabled,
+    requiredTools: ["compute_balance_sheet", "run_accounting_report"],
     variants: COMPANY_OVERVIEW_VARIANTS,
   },
   {
@@ -362,6 +458,7 @@ const PROMPT_DEFINITIONS = [
       note: "Lightyear booking needs live e-arveldaja journal creation and duplicate checks, so it cannot run before credentials are configured.",
     },
     featurePredicate: lightyearEnabled,
+    requiredTools: ["book_lightyear_trades"],
     variants: NO_VARIANTS,
   },
 ] as const satisfies readonly PromptDefinition[];
@@ -373,8 +470,10 @@ for (const definition of PROMPT_DEFINITIONS) {
     }
     Object.freeze(definition.setupOptions);
   }
+  Object.freeze(definition.requiredTools);
   for (const variant of definition.variants) {
     Object.freeze(variant.advertisedTools);
+    if (variant.unlessTools) Object.freeze(variant.unlessTools);
     Object.freeze(variant);
   }
   Object.freeze(definition.variants);
@@ -395,8 +494,16 @@ export const PROMPT_SLUGS: readonly WorkflowPromptSlug[] = Object.freeze(
   PROMPT_REGISTRY.map(definition => definition.slug),
 );
 
+/**
+ * Prompts enabled on the active surface: the exposure feature predicate holds
+ * AND at least one of the prompt's `requiredTools` is registered, so prompts/list
+ * never advertises a workflow whose tools are all absent from tools/list.
+ */
 export function enabledPromptDefinitions(
   toolExposure?: ToolExposureConfig,
+  surface: Omit<PromptToolSurfaceOptions, "toolExposure"> = {},
 ): readonly RegisteredPromptDefinition[] {
-  return PROMPT_REGISTRY.filter(definition => definition.featurePredicate(toolExposure));
+  const hasTool = promptToolAvailability({ ...surface, ...(toolExposure ? { toolExposure } : {}) });
+  return PROMPT_REGISTRY.filter(definition => definition.featurePredicate(toolExposure)
+    && (definition.requiredTools.length === 0 || definition.requiredTools.some(hasTool)));
 }

@@ -694,6 +694,16 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
     );
     try {
       const scan = snapshot.scan;
+      if (!input.dryRun) {
+        // Execute gates writes on these reads (existing supplier / invoice
+        // duplicate / bank match / intake cash-duplicate scan): re-read them
+        // uncached once, before the projection pass. In-run creates are pushed
+        // onto the in-memory lists, so no per-row re-read is needed.
+        this.api.clients.invalidateListCache();
+        this.api.purchaseInvoices.invalidateListCache();
+        this.api.transactions.invalidateListCache();
+        this.api.journals.invalidateListCache();
+      }
       const vatInfo = await this.api.readonly.getVatInfo();
       const ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
       const context: ReceiptProcessingContext = {

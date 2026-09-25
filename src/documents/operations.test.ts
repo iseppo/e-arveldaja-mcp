@@ -326,6 +326,20 @@ describe("AccountingDocumentOperations.create", () => {
     expect(invalidateListCache.mock.invocationCallOrder.at(-1)!).toBeLessThan(listAll.mock.invocationCallOrder.at(-1)!);
   });
 
+  it("drops the journal cache right before the create-time intake cash-duplicate scan (prepare stays cached)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    api.readonly.getBankAccounts.mockResolvedValue([{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }]);
+    api.readonly.getAccountDimensions.mockResolvedValue([{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }]);
+    const handle = await prepareBookingHandle(ops, path);
+    expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(true);
+    const invalidateOrder = api.journals.invalidateListCache.mock.invocationCallOrder as number[];
+    const scanOrder = api.journals.listAllWithPostings.mock.invocationCallOrder as number[];
+    expect(invalidateOrder).toHaveLength(1);
+    expect(invalidateOrder[0]!).toBeLessThan(scanOrder.at(-1)!);
+  });
+
   it("desandboxes sandbox markers out of the invoiceData written to the API (write-boundary canonicalization)", async () => {
     const { path, sha256, api, ops } = createSetup();
     const wrap = (s: string) => wrapUntrustedOcr(s)!;

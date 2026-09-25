@@ -390,8 +390,57 @@ export function getConnectionDefaultsFile(globalConfigDir = getGlobalConfigDir()
   return resolve(globalConfigDir, CONNECTION_DEFAULTS_FILE_NAME);
 }
 
+/**
+ * How to reach the credential-import tool when it is not registered. Any
+ * explicitly present legacy exposure flag (EARVELDAJA_EXPOSE_SETUP_TOOLS
+ * included, whatever its value) makes parseToolProfile normalize the profile to
+ * `custom` and ignore EARVELDAJA_PROFILE, so on guided/guided-sales that flag
+ * would silently replace the guided surface: recommend env/.env or a temporary
+ * EARVELDAJA_PROFILE=full (whose exposure includes the credential tools) instead.
+ */
+export function credentialImportUnavailableAdvice(toolProfile?: ToolProfile): string {
+  if (toolProfile === "guided" || toolProfile === "guided-sales") {
+    return `The ${toolProfile} profile does not register the credential-import tools. Add the credentials through the environment variables or a local or shared .env file — no profile change is needed. `
+      + `To import an apikey*.txt from a tool call instead, start the MCP server temporarily with EARVELDAJA_PROFILE=full (it includes the credential tools), import, then restart with EARVELDAJA_PROFILE=${toolProfile}. `
+      + "Do not set EARVELDAJA_EXPOSE_SETUP_TOOLS for this: setting any legacy exposure flag switches the profile to custom and replaces the guided tool surface.";
+  }
+  return "This tool surface does not register the credential-import tools. To import an apikey*.txt from a tool call, restart the MCP server with EARVELDAJA_EXPOSE_SETUP_TOOLS=1 "
+    + "(setting any legacy exposure flag normalizes the profile to custom: the standard tool set plus the credential tools) or with EARVELDAJA_PROFILE=full; otherwise use the environment variables or a .env file.";
+}
+
+/**
+ * Setup next steps. The credential-management tools (import_apikey_credentials,
+ * list/remove_stored_credentials) are named only when they are registered;
+ * otherwise the steps point at the environment variables / .env file plus the
+ * profile-correct way to expose the import tool (credentialImportUnavailableAdvice).
+ */
+export function buildCredentialSetupNextSteps(options: {
+  globalConfigDirectory: string;
+  globalEnvFile: string;
+  credentialToolsAvailable: boolean;
+  toolProfile?: ToolProfile;
+}): string[] {
+  const { globalConfigDirectory, globalEnvFile, credentialToolsAvailable } = options;
+  return [
+    ...(credentialToolsAvailable
+      ? [
+          "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in this folder and run import_apikey_credentials.",
+          "If credentials are already stored, import_apikey_credentials can append another stored connection by default, and list_stored_credentials / remove_stored_credentials can inspect or delete stored .env connections.",
+        ]
+      : [
+          "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables (or put them in the local or shared .env file), or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
+          credentialImportUnavailableAdvice(options.toolProfile),
+        ]),
+    "If exactly one secure apikey*.txt is present in this folder and the MCP client supports prompts, the server will offer to verify it and save the resulting .env either only for this folder or so it works when you start the MCP server from any folder.",
+    `Shared config directory (used when you want the configuration available from any folder): ${globalConfigDirectory}. Shared env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
+    "Keep secrets in the chosen .env once verified; treat apikey*.txt as an import source, not the long-term store.",
+    "After adding credentials, restart the MCP server.",
+  ];
+}
+
 export function getCredentialSetupInfo(
   workingDir = CWD,
+  options: { credentialToolsAvailable?: boolean } = {},
 ): CredentialSetupInfo {
   const resolvedWorkingDir = resolve(workingDir);
   const globalConfigDirectory = getGlobalConfigDir();
@@ -419,14 +468,11 @@ export function getCredentialSetupInfo(
       "ApiKey public value: <your public value>",
       "Password: <your password>",
     ],
-    next_steps: [
-      "Set the EARVELDAJA_API_KEY_ID, EARVELDAJA_API_PUBLIC_VALUE, and EARVELDAJA_API_PASSWORD environment variables, set EARVELDAJA_API_KEY_FILE to an explicit credential file path, or place apikey*.txt in this folder and run import_apikey_credentials.",
-      "If credentials are already stored, import_apikey_credentials can append another stored connection by default, and list_stored_credentials / remove_stored_credentials can inspect or delete stored .env connections.",
-      "If exactly one secure apikey*.txt is present in this folder and the MCP client supports prompts, the server will offer to verify it and save the resulting .env either only for this folder or so it works when you start the MCP server from any folder.",
-      `Shared config directory (used when you want the configuration available from any folder): ${globalConfigDirectory}. Shared env file: ${globalEnvFile}. Override the directory with EARVELDAJA_CONFIG_DIR if needed.`,
-      "Keep secrets in the chosen .env once verified; treat apikey*.txt as an import source, not the long-term store.",
-      "After adding credentials, restart the MCP server.",
-    ],
+    next_steps: buildCredentialSetupNextSteps({
+      globalConfigDirectory,
+      globalEnvFile,
+      credentialToolsAvailable: options.credentialToolsAvailable !== false,
+    }),
   };
 }
 

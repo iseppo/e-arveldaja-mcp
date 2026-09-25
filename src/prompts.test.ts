@@ -3,9 +3,14 @@ import { readFileSync } from "fs";
 import { resolve } from "path";
 import { registerPrompts } from "./prompts.js";
 import { getProjectRoot } from "./paths.js";
-import type { CredentialSetupInfo } from "./config.js";
+import type { CredentialSetupInfo, ToolExposureConfig } from "./config.js";
+import type { ToolProfile } from "./tool-profile.js";
 
-function setupPromptServer(options: { setupInfo?: CredentialSetupInfo } = {}) {
+function setupPromptServer(options: {
+  setupInfo?: CredentialSetupInfo;
+  toolProfile?: ToolProfile;
+  toolExposure?: ToolExposureConfig;
+} = {}) {
   const server = { registerPrompt: vi.fn() } as any;
   registerPrompts(server, options);
   return server;
@@ -125,8 +130,10 @@ describe("registerPrompts", () => {
     expect(overviewSales).toContain("compute_receivables_aging");
     expect(monthEndSales).toContain("confirm_sale_invoice");
 
+    // Sales tools may appear only inside capability-conditioned sections (the
+    // `sales` section, or a guided variant's unless-condition naming them).
     const withoutCapabilitySections = (text: string): string => text.replace(
-      /<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:sales -->[\s\S]*?<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:sales -->/g,
+      /<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:([a-z-]+) -->[\s\S]*?<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:\1 -->/g,
       "",
     );
     expect(withoutCapabilitySections(overview)).not.toContain("compute_receivables_aging");
@@ -296,7 +303,8 @@ describe("registerPrompts", () => {
   });
 
   it("keeps setup-credentials aligned with append and removal tooling", async () => {
-    const server = setupPromptServer();
+    // Setup mode registers the credential-management tools, so their steps render.
+    const server = setupPromptServer({ setupInfo: buildSetupInfo() });
     const text = await getPromptText(server, "setup-credentials", {
       file_path: "/tmp/apikey.txt",
       storage_scope: "global",
@@ -307,6 +315,17 @@ describe("registerPrompts", () => {
     expect(text).toContain("list_stored_credentials");
     expect(text).toContain("remove_stored_credentials");
     expect(text).toContain("EARVELDAJA_API_KEY_FILE");
+  });
+
+  it("drops the credential-tool steps when the configured surface hides those tools", async () => {
+    for (const toolProfile of ["standard", "guided"] as const) {
+      const server = setupPromptServer({ toolProfile });
+      const text = await getPromptText(server, "setup-credentials", {});
+      expect(text, toolProfile).not.toContain("import_apikey_credentials");
+      expect(text, toolProfile).not.toContain("remove_stored_credentials");
+      expect(text, toolProfile).toContain("EARVELDAJA_EXPOSE_SETUP_TOOLS=1");
+      expect(text, toolProfile).toContain("get_setup_instructions");
+    }
   });
 
   it("returns setup-safe workflow prompts when setup mode guidance is enabled", async () => {
@@ -435,39 +454,44 @@ describe("registerPrompts", () => {
     expect(text).toContain("new supplier record will be created after approval");
   });
 
-  it("surfaces the guided process_accounting_document façade as an approval-gated two-call flow", async () => {
-    const server = setupPromptServer();
+  it("surfaces the guided process_accounting_document façade as prepare → bind → create → confirm", async () => {
+    const server = setupPromptServer({ toolProfile: "guided" });
     const text = await getPromptText(server, "book-invoice", { file_path: "/tmp/invoice.pdf" });
 
-    // Façade is named and framed as the guided one-tool flow.
+    // The guided surface renders only the façade flow, never the granular tools.
     expect(text).toContain("process_accounting_document");
-    expect(text).toContain('mode: "prepare"');
-    expect(text).toContain('mode: "create"');
+    expect(text).not.toContain("extract_pdf_invoice");
+    expect(text).not.toContain("confirm_purchase_invoice");
+    // Extraction prepare (no handle) → booking-binding prepare (handle) → create → confirm.
+    const extraction = text.indexOf('**Extraction preview.** Call `process_accounting_document` with `mode: "prepare"`');
+    const binding = text.indexOf('with `mode: "prepare"` again, the same source, AND all those booking fields');
+    const approvalStop = text.indexOf("If the user has not explicitly approved, stop — the plan handle is not approval.");
+    const createCall = text.indexOf('`mode: "create"`, the same source, `source_sha256`, the `plan_handle`');
+    const confirmCall = text.indexOf('`mode: "confirm"`, `invoice_id`: `confirm_plan.invoice_id`, and `plan_handle`: `confirm_plan.plan_handle`');
+    expect(extraction).toBeGreaterThan(-1);
+    expect(binding).toBeGreaterThan(extraction);
+    expect(approvalStop).toBeGreaterThan(binding);
+    expect(createCall).toBeGreaterThan(approvalStop);
+    expect(confirmCall).toBeGreaterThan(createCall);
+    expect(text).toContain("carries NO plan handle");
     expect(text).toContain("summary.plan_handle");
-    // Two-call ordering: prepare/approve BEFORE create; create BEFORE confirm.
-    const prepare = text.indexOf('mode: "prepare"');
-    const approvalStop = text.indexOf("If the user has not explicitly approved the preview, stop here and wait.");
-    const createCall = text.indexOf('mode: "create"');
-    expect(prepare).toBeGreaterThan(-1);
-    expect(approvalStop).toBeGreaterThan(prepare);
-    expect(createCall).toBeGreaterThan(prepare);
-    // Staged safety survives on the façade path.
-    expect(text).toContain("is not approval");
-    expect(text).toContain("confirm_plan");
-    expect(text).toContain("carries NO raw OCR text");
+    expect(text).toContain("carries no raw OCR text");
+    expect(text).toContain("This profile cannot create supplier records");
   });
 
-  it("keeps the shipped book-invoice markdown pointing at the guided façade", () => {
+  it("keeps the shipped book-invoice markdown carrying both the guided façade and the granular flow", () => {
     for (const relativePath of ["workflows/book-invoice.md", ".claude/commands/book-invoice.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("process_accounting_document");
       expect(text).toContain('mode: "prepare"');
       expect(text).toContain('mode: "create"');
+      expect(text).toContain('mode: "confirm"');
       expect(text).toContain("summary.plan_handle");
+      expect(text).toContain("confirm_plan.plan_handle");
       // Every staged-safety statement must survive the façade migration.
       expect(text).toContain("untrusted OCR output");
       expect(text).toContain("is not approval");
-      expect(text).toContain("confirmation is a distinct, later step");
+      expect(text).toContain("confirmation is a separate step");
       expect(text).toContain("If the user has not explicitly approved the preview, stop here and wait.");
     }
   });
@@ -483,10 +507,12 @@ describe("registerPrompts", () => {
     expect(autoText).toContain('mode: "dry_run_auto_confirm"');
     expect(autoText).toContain('mode: "execute_auto_confirm"');
     expect(autoText).toContain("result.execution");
-    expect(autoText).toContain('call `reconcile_inter_account_transfers` with `execute: true`');
-    // Single-journal invariant + incoming_action terms for reconcile_inter_account_transfers
+    // Inter-account execution runs through the merged execute mode (M3).
+    expect(autoText).toContain('call `reconcile_bank_transactions` with `mode: "execute_inter_account"` and `plan_handle`');
+    expect(autoText).not.toContain("reconcile_inter_account_transfers");
+    // Single-journal invariant + incoming_action terms for the inter-account modes
     expect(autoText).toContain('incoming_action: "would_delete_duplicate"');
-    expect(autoText).toContain("Never manually confirm both sides");
+    expect(autoText).toContain("never confirm both legs of a transfer by hand");
     expect(autoText).toContain('incoming_action: "deleted"');
     expect(autoText).toContain('incoming_action: "orphan"');
     // Cross-currency guidance for match_reasons
@@ -521,15 +547,17 @@ describe("registerPrompts", () => {
     });
 
     expect(text).toContain("receipt_batch");
-    expect(text).toContain("scan_receipt_folder");
-    expect(text).toContain("process_receipt_batch");
+    // Hidden granular constituents are never named on the standard surface.
+    expect(text).not.toContain("scan_receipt_folder");
+    expect(text).not.toContain("process_receipt_batch");
     expect(text).toContain('mode: "dry_run"');
     expect(text).toContain('mode: "create"');
     expect(text).toContain('mode: "create_and_confirm"');
-    expect(text).toContain("treat them as the same tool");
+    // M4: the create call carries the consume-once handle minted by the dry run.
+    expect(text).toContain("`plan_handle`: `result.plan_handles.create` from the same dry run");
     // P11: the merged receipt_batch nests the delegated payload under result.*
     // (mirroring the CAMT merged wrapper), so canonical paths are result.execution.*
-    expect(text).toContain("Treat `result.execution` as the canonical batch payload when present.");
+    expect(text).toContain("Treat `result.execution` as the canonical batch payload when present");
     expect(text).toContain("result.execution.results");
     expect(text).toContain("result.execution.needs_review");
     expect(text).toContain("result.execution.audit_reference");
@@ -555,7 +583,11 @@ describe("registerPrompts", () => {
     expect(text).toContain('"folder_path":"/tmp/receipts"');
     expect(text).toContain('"accounts_dimensions_id":123');
     expect(text).toContain("Canonical workflow source: workflows/receipt-batch.md");
-    expect(text).toContain(readPromptSurface("workflows/receipt-batch.md").trimEnd());
+    // The body is the canonical source with only the matching capability
+    // sections kept (and their markers consumed).
+    const source = readPromptSurface("workflows/receipt-batch.md");
+    expect(text).toContain(source.slice(0, source.indexOf("### Step 2")).trimEnd());
+    expect(text).not.toContain("E_ARVELDAJA_FEATURE");
     expect(text).not.toContain("Process a receipt batch from: /tmp/receipts");
   });
 
@@ -579,7 +611,9 @@ describe("registerPrompts", () => {
     const text = await getPromptText(server, "setup-e-arveldaja");
 
     expect(text).toContain("Canonical workflow source: workflows/setup-e-arveldaja.md");
-    expect(text).toContain(readPromptSurface("workflows/setup-e-arveldaja.md").trimEnd());
+    const source = readPromptSurface("workflows/setup-e-arveldaja.md");
+    expect(text).toContain(source.slice(0, source.indexOf("<!-- E_ARVELDAJA_FEATURE_START")).trimEnd());
+    expect(text).not.toContain("E_ARVELDAJA_FEATURE");
   });
 
   it("keeps import-camt aligned with parse and dry-run import details", async () => {
@@ -589,24 +623,30 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 77,
     });
 
-    expect(text).toContain("process_bank_input");
-    expect(text).toContain("process_camt053");
-    expect(text).toContain("parse_camt053");
-    expect(text).toContain("import_camt053");
-    expect(text).toContain("`mode`: `prepare`");
-    expect(text).toContain("`mode`: `execute`");
-    expect(text).toContain('mode="show_details"');
-    expect(text).toContain("treat them as the same operation");
-    expect(text).toContain("summary.counts");
-    expect(text).toContain("summary.totals");
-    expect(text).toContain("summary.samples");
-    expect(text).toContain("summary.blockers");
-    expect(text).toContain("summary.plan_handle");
+    // Standard (default) surface: process_camt053 dry_run/execute, never the
+    // guided façade or the hidden granular tools (M2).
+    expect(text).toContain('`process_camt053` with `mode: "dry_run"`');
+    expect(text).toContain('`mode: "execute"`');
+    expect(text).toContain("`accounts_dimensions_id` is REQUIRED");
+    expect(text).toContain("top-level `plan_handle`");
+    expect(text).not.toContain("process_bank_input");
+    expect(text).not.toContain("parse_camt053");
+    expect(text).not.toContain("import_camt053");
     expect(text).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(text).toContain("offer to confirm it inline using `confirm_transaction`");
-    expect(text).toContain("prefer `cleanup_camt_possible_duplicate`");
+    expect(text).toContain("offer to confirm it inline with `confirm_transaction`");
+    expect(text).toContain("use `cleanup_camt_possible_duplicate`");
     expect(text).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
+
+    const guided = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "import-camt", {
+      file_path: "/tmp/statement.xml",
+    });
+    expect(guided).toContain('`process_bank_input` with `mode: "prepare"`');
+    expect(guided).toContain('mode="show_details"');
+    expect(guided).toContain("summary.counts");
+    expect(guided).toContain("summary.plan_handle");
+    expect(guided).not.toContain("process_camt053");
+    expect(guided).not.toContain("confirm_transaction");
   });
 
   it("keeps import-wise aligned with fee account handling and dry-run fields", async () => {
@@ -616,22 +656,27 @@ describe("registerPrompts", () => {
       accounts_dimensions_id: 88,
     });
 
-    expect(text).toContain("process_bank_input");
+    // Standard (default) surface: import_wise_transactions with execute:true and
+    // TOP-LEVEL plan_handle + approved_command_digest (M2).
     expect(text).toContain("import_wise_transactions");
+    expect(text).not.toContain("process_bank_input");
     expect(text).toContain("fee_account_dimensions_id");
     expect(text).toContain("inter_account_dimension_id");
     expect(text).toContain("list_account_dimensions");
-    expect(text).toContain("`mode`: `prepare`");
-    expect(text).toContain("`mode`: `execute`");
-    expect(text).toContain("approved_command_digest");
-    expect(text).toContain("digest returned by the reviewed preview");
-    expect(text).toContain("summary.counts");
-    expect(text).toContain("summary.totals");
-    expect(text).toContain("summary.samples");
-    expect(text).toContain("summary.warnings");
-    expect(text).toContain("summary.blockers");
-    expect(text).toContain("summary.plan_handle");
-    expect(text).toContain("invoice currency fixes");
+    expect(text).toContain("`execute: true`");
+    expect(text).toContain("the top-level `plan_handle`, and the top-level `approved_command_digest`");
+    expect(text).toContain("ownership_reviews");
+    expect(text).toContain("invoice_currency_fixes");
+
+    // Guided surface: the digest lives inside summary.next_action.args (MINOR).
+    const guided = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "import-wise", {
+      file_path: "/tmp/wise.csv",
+    });
+    expect(guided).toContain("summary.next_action.args.approved_command_digest");
+    expect(guided).toContain("summary.plan_handle");
+    expect(guided).toContain("summary.warnings");
+    expect(guided).not.toContain("import_wise_transactions");
+    expect(guided).not.toContain("list_account_dimensions");
     expect(text).toContain("fee confirmations");
     expect(text).toContain("inter-account confirmations or skips");
     expect(text).toContain("each advisory invoice FX correction (not applied)");
@@ -648,10 +693,18 @@ describe("registerPrompts", () => {
 
     expect(text).toContain("classify_bank_transactions");
     expect(text).toContain('mode: "classify"');
-    expect(text).toContain("apply_transaction_classifications");
+    expect(text).not.toContain("apply_transaction_classifications");
     expect(text).toContain('mode: "dry_run_apply"');
     expect(text).toContain('mode: "execute_apply"');
-    expect(text).toContain("`classifications_json`: the step-1 result payload passed directly as a JSON object/array");
+    expect(text).toContain("passed directly as a JSON object");
+    // M5: groups are chosen BEFORE the dry run and execute carries its handle.
+    const choose = text.indexOf("Decide WHICH groups to apply BEFORE the dry run");
+    const dryRun = text.indexOf('- mode: "dry_run_apply"');
+    expect(choose).toBeGreaterThan(-1);
+    expect(dryRun).toBeGreaterThan(choose);
+    expect(text).toContain("`plan_handle`: the handle from that dry run (required; consumed once)");
+    expect(text).toContain("EXACTLY the object that was dry-run in step 3");
+    expect(text).toContain("result.plan_handle");
     expect(text).not.toContain("JSON.stringify(the full response from step 1)");
     expect(text).toContain("result.total_unconfirmed");
     expect(text).toContain("result.execution.results");
@@ -664,17 +717,26 @@ describe("registerPrompts", () => {
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
   });
 
-  it("routes month-end and overview reporting through run_accounting_report with the real report/period params", async () => {
-    const server = setupPromptServer();
+  it("routes month-end and overview reporting through the profile's report tools with the real report/period params", async () => {
+    const server = setupPromptServer({ toolProfile: "guided" });
     const monthEndText = await getPromptText(server, "month-end-close", { month: "2026-03" });
     const overviewText = await getPromptText(server, "company-overview");
 
     // Derived run-data still pins the concrete period the guided reader passes.
     expect(monthEndText).toContain('"date_from":"2026-03-01"');
     expect(monthEndText).toContain('"date_to":"2026-03-31"');
-    // The guided-visible unified façade leads; the granular compute_* names stay
-    // named as the standard/full fallback (reference-both).
-    expect(monthEndText).toContain('Call `run_accounting_report` with report="balance_sheet":');
+    // Guided renders the unified façade only; standard renders the granular
+    // compute_* tools only (run_accounting_report is not registered there).
+    expect(monthEndText).toContain('Call `run_accounting_report` with report="balance_sheet"');
+    expect(monthEndText).not.toContain("compute_balance_sheet");
+    const standard = setupPromptServer();
+    const standardMonthEnd = await getPromptText(standard, "month-end-close", { month: "2026-03" });
+    const standardOverview = await getPromptText(standard, "company-overview");
+    expect(standardMonthEnd).toContain("Call `month_end_close_checklist`");
+    expect(standardMonthEnd).toContain("Call `compute_balance_sheet`");
+    expect(standardMonthEnd).not.toContain("run_accounting_report");
+    expect(standardOverview).toContain("Call `compute_payables_aging` with `as_of_date`: the selected reporting date");
+    expect(standardOverview).not.toContain("run_accounting_report");
     expect(overviewText).toContain('run_accounting_report` with report="balance_sheet" and date_to:');
     expect(overviewText).toContain("date_from:");
     // P13/P25: the aging call must carry the same operator-selected reporting
@@ -693,8 +755,9 @@ describe("registerPrompts", () => {
       // so every figure in the overview shares one consistent cutoff — the
       // payables side and the receivables side come from the same as_of_date.
       expect(text).toContain('run_accounting_report` with report="aging" and as_of_date:');
-      expect(text).toContain("read the receivables side");
+      expect(text).toContain("the receivables side when the result includes one");
       expect(text).toContain("as_of_date: the selected reporting date");
+      expect(text).toContain("`compute_receivables_aging` with `as_of_date`: the selected reporting date");
       // The single-cutoff intent is spelled out, not left implicit.
       expect(text).toContain("one consistent cutoff");
       // The aging snapshot must never silently fall back to today's date.
@@ -725,8 +788,9 @@ describe("registerPrompts", () => {
     // The guided bank façade auto-resolves a unique bank account and only returns a
     // `needs_input`/`choices` question on ambiguity — the migrated equivalent of
     // discovering the dimension before asking the user.
+    const guided = setupPromptServer({ toolProfile: "guided" });
     for (const promptName of ["import-camt", "import-wise"]) {
-      const text = await getPromptText(server, promptName, {});
+      const text = await getPromptText(guided, promptName, {});
       expect(text).toContain("resolves the `accounts_dimensions_id` automatically");
       expect(text).toContain("needs_input");
       expect(text).toContain("choices");
@@ -947,15 +1011,18 @@ describe("registerPrompts", () => {
       expect(text).toContain("distributions: [match.distribution]");
       expect(text).toContain("JSON strings are legacy compatibility only");
       expect(text).toContain("prepare the distribution manually");
-      expect(text).toContain("reconcile_inter_account_transfers");
+      expect(text).not.toContain("reconcile_inter_account_transfers");
       expect(text).toContain('mode: "inter_account_dry_run"');
+      expect(text).toContain('mode: "execute_inter_account"');
+      expect(text).toContain("linked_invoice_clients_ambiguous");
+      expect(text).toContain("split the payment");
       expect(text).toContain("already_handled");
       expect(text).toContain("Wise-side transfers");
       expect(text).toContain('Newly created bank transactions set API `type` from the true statement direction');
       expect(text).toContain('`type: "D"` for incoming');
       expect(text).toContain("signed `source_direction` metadata");
       expect(text).toContain('incoming_action: "would_delete_duplicate"');
-      expect(text).toContain("Never manually confirm both sides");
+      expect(text).toContain("never confirm both legs of a transfer by hand");
       // Confidence guidance must match the auto-confirm bar (>= 90 + approval),
       // not label an >= 80 match "safe to auto-confirm".
       expect(text).toContain("only confidence >= 90 is eligible for confirmation");
@@ -1000,14 +1067,16 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/receipt-batch.md", ".claude/commands/receipt-batch.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("receipt_batch");
-      expect(text).toContain("scan_receipt_folder");
-      expect(text).toContain("process_receipt_batch");
-      expect(text).toContain("treat them as the same tool");
+      expect(text).not.toContain("scan_receipt_folder");
+      expect(text).not.toContain("process_receipt_batch");
       expect(text).toContain("`mode`: `dry_run`");
       expect(text).toContain("`mode`: `create`");
       expect(text).toContain("create_and_confirm");
+      // M4: create carries the dry run's consume-once plan handle on both surfaces.
+      expect(text).toContain("result.plan_handles.create");
+      expect(text).toContain("result.summary.next_action.args");
       // P11: merged wrapper nests under result.* — canonical paths are result.execution.*
-      expect(text).toContain("Treat `result.execution` as the canonical batch payload when present.");
+      expect(text).toContain("Treat `result.execution` as the canonical batch payload when present");
       expect(text).toContain("result.execution.results");
       expect(text).toContain("result.execution.needs_review");
       expect(text).toContain("result.execution.audit_reference");
@@ -1054,7 +1123,7 @@ describe("registerPrompts", () => {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("continue_accounting_workflow");
       expect(text).toContain('action: "resolve_review"');
-      expect(text).toContain("resolve_accounting_review_item");
+      expect(text).not.toContain("resolve_accounting_review_item");
       expect(text).toContain("recommendation");
       expect(text).toContain("compliance_basis");
       expect(text).toContain("VAT-registered company: ordinary business input VAT normally defaults to deductible");
@@ -1069,7 +1138,7 @@ describe("registerPrompts", () => {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("continue_accounting_workflow");
       expect(text).toContain('action: "prepare_action"');
-      expect(text).toContain("prepare_accounting_review_action");
+      expect(text).not.toContain("prepare_accounting_review_action");
       expect(text).toContain("proposed_action");
       expect(text).toContain("save_auto_booking_rule");
       expect(text).toContain("explicit approval");
@@ -1080,9 +1149,10 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/import-camt.md", ".claude/commands/import-camt.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("process_camt053");
-      expect(text).toContain("treat them as the same operation");
-      expect(text).toContain("`mode`: `prepare`");
-      expect(text).toContain("`mode`: `execute`");
+      expect(text).toContain("process_bank_input");
+      expect(text).toContain('mode: "prepare"');
+      expect(text).toContain('mode: "dry_run"');
+      expect(text).toContain('mode: "execute"');
       expect(text).toContain("summary.counts");
       expect(text).toContain("summary.plan_handle");
       expect(text.toLowerCase()).toContain("approval");
@@ -1090,8 +1160,9 @@ describe("registerPrompts", () => {
 
     for (const relativePath of ["workflows/import-wise.md", ".claude/commands/import-wise.md"]) {
       const text = readPromptSurface(relativePath);
-      expect(text).toContain("`mode`: `prepare`");
-      expect(text).toContain("`mode`: `execute`");
+      expect(text).toContain('mode: "prepare"');
+      expect(text).toContain('mode: "execute"');
+      expect(text).toContain("`execute: true`");
       expect(text).toContain("summary.counts");
       expect(text).toContain("summary.plan_handle");
       expect(text.toLowerCase()).toContain("approval");
@@ -1103,17 +1174,15 @@ describe("registerPrompts", () => {
     const camtCommand = readPromptSurface(".claude/commands/import-camt.md");
     const wiseCommand = readPromptSurface(".claude/commands/import-wise.md");
 
-    expect(camtWorkflow).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(camtWorkflow).toContain("offer to confirm it inline using `confirm_transaction`");
-    expect(camtWorkflow).toContain("prefer `cleanup_camt_possible_duplicate`");
-    expect(camtWorkflow).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
-    expect(camtCommand).toContain("if the older matched transaction is already confirmed, keep it by default");
-    expect(camtCommand).toContain("offer to confirm it inline using `confirm_transaction`");
-    expect(camtCommand).toContain("prefer `cleanup_camt_possible_duplicate`");
-    expect(camtCommand).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
+    for (const camt of [camtWorkflow, camtCommand]) {
+      expect(camt).toContain("if the older matched transaction is already confirmed, keep it by default");
+      expect(camt).toContain("offer to confirm it inline with `confirm_transaction`");
+      expect(camt).toContain("use `cleanup_camt_possible_duplicate`");
+      expect(camt).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
+    }
 
     expect(wiseCommand).toContain("auto-detects a unique active `8610` fee dimension when possible");
-    expect(wiseCommand).toContain("only when auto-detection was not possible");
+    expect(wiseCommand).toContain("only when that was not possible");
   });
 
   it("keeps shipped classify-unmatched markdown prompts aligned with review guidance", () => {
@@ -1172,6 +1241,7 @@ describe("registerPrompts", () => {
       expect(text).toContain("get_operation_result_page");
       expect(text).toContain("plan_drift");
       expect(text).toContain("`plan_handle`: the `summary.plan_handle` from the reviewed preview");
+      expect(text).toContain("`plan_handle`: the top-level `plan_handle` from the reviewed dry run");
       expect(text).toContain("The plan handle is not approval");
       expect(text).toContain("summary.status");
     }
@@ -1183,11 +1253,11 @@ describe("registerPrompts", () => {
       expect(text).toContain("result.plan_handle");
       expect(text).toContain("get_execution_plan_page");
       expect(text).toContain("plan_drift");
-      expect(text).toContain("`plan_handle`: the `result.plan_handle` from the reviewed dry run");
+      expect(text).toContain('`mode: "execute_auto_confirm"` and `plan_handle`: the handle from the reviewed dry run');
       expect(text).toContain("The plan handle is not approval");
       expect(text).toContain("result.execution.execution_report");
       // Inter-account execute also binds to the reviewed plan handle.
-      expect(text).toContain("`execute: true` REQUIRES that `plan_handle`");
+      expect(text).toContain('`mode: "execute_inter_account"` and `plan_handle` set to the handle from the reviewed dry run');
     }
   });
 
@@ -1210,12 +1280,13 @@ describe("registerPrompts", () => {
     for (const relativePath of ["workflows/classify-unmatched.md", ".claude/commands/classify-unmatched.md"]) {
       const text = readPromptSurface(relativePath);
       expect(text).toContain("classify_bank_transactions");
-      expect(text).toContain("classify_unmatched_transactions");
-      expect(text).toContain("apply_transaction_classifications");
+      expect(text).not.toContain("classify_unmatched_transactions");
+      expect(text).not.toContain("apply_transaction_classifications");
       expect(text).toContain('mode: "dry_run_apply"');
       expect(text).toContain('mode: "execute_apply"');
       expect(text).toContain("classifications_json");
-      expect(text).toContain("the step-1 result payload passed directly as a JSON object/array");
+      expect(text).toContain("passed directly as a JSON object");
+      expect(text).toContain("`plan_handle`: the handle from that dry run");
       expect(text).not.toContain("JSON.stringify(the full response from step 1)");
       expect(text).toContain("result.execution.summary");
       expect(text).toContain("result.execution.audit_reference");

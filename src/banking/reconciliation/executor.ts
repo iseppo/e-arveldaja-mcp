@@ -443,6 +443,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
         id: reconClientUpdateCommandId(descriptor.transactionId),
         category: RECON_UPDATE_CLIENT_CATEGORY,
         prepare: async () => {
+          api.transactions.invalidateListCache(); // uncached: gates the mutation below
           const fresh = await api.transactions.get(descriptor.transactionId);
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
           if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
@@ -463,6 +464,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
       id: reconInvoiceConfirmCommandId(descriptor.transactionId),
       category: RECON_CONFIRM_INVOICE_CATEGORY,
       prepare: async () => {
+        api.transactions.invalidateListCache(); // uncached: gates the mutation below
         const fresh = await api.transactions.get(descriptor.transactionId);
         if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
         if (roundMoney(fresh.amount) !== roundMoney(descriptor.amount)) return { outcome: "drift", error_code: "amount_changed" };
@@ -610,8 +612,18 @@ async function runPostConfirmLedgerChecks(
 async function loadExactMatchProjection(
   api: ApiContext,
   input: ExactConfirmInput,
+  opts?: { fresh?: boolean },
 ): Promise<{ projection: ExactMatchProjection; threshold: number }> {
   const threshold = input.minConfidence ?? 90;
+  if (opts?.fresh) {
+    // Execute: this projection gates confirms, so bypass the 120 s cache — an
+    // invoice paid or a transaction confirmed elsewhere since the dry run must
+    // not be confirmed (paid) a second time.
+    api.transactions.invalidateListCache();
+    api.saleInvoices.invalidateListCache();
+    api.purchaseInvoices.invalidateListCache();
+    api.journals.invalidateListCache();
+  }
   const allTx = await api.transactions.listAll();
   const unconfirmed = allTx.filter(isProjectTransaction);
   const total = unconfirmed.length;
@@ -654,7 +666,7 @@ export async function executeExactConfirm(
   runtimeSafetyContext: RuntimeSafetyContext,
   input: ExactConfirmExecutionInput,
 ): Promise<ReconExecResult<ExactConfirmExecution>> {
-  const { projection, threshold } = await loadExactMatchProjection(api, input);
+  const { projection, threshold } = await loadExactMatchProjection(api, input, { fresh: true });
 
   const plan_handle = input.planHandle;
   if (typeof plan_handle !== "string" || plan_handle.length === 0) {
@@ -686,9 +698,17 @@ export async function executeExactConfirm(
 export async function runInterAccountMatching(
   api: ApiContext,
   input: InterAccountInput,
+  opts?: { fresh?: boolean },
 ): Promise<InterAccountMatchResult> {
   const maxGap = validateInterAccountDateGap(input.maxDateGap);
   const target_accounts_dimensions_id = input.targetAccountsDimensionsId;
+  if (opts?.fresh) {
+    // Execute: the transaction list and the BookingGuard journal snapshot gate
+    // confirms and journal creates (existing-journal detection) — read them
+    // uncached so a transfer booked elsewhere since the dry run is not booked twice.
+    api.transactions.invalidateListCache();
+    api.journals.invalidateListCache();
+  }
 
   const confirmActions: InterAccountConfirmAction[] = [];
 
@@ -1333,7 +1353,7 @@ export async function executeInterAccount(
   runtimeSafetyContext: RuntimeSafetyContext,
   input: InterAccountExecutionInput,
 ): Promise<ReconExecResult<InterAccountExecution>> {
-  const match = await runInterAccountMatching(api, input);
+  const match = await runInterAccountMatching(api, input, { fresh: true });
   const dimensionToAccountsId = match.dimensionToAccountsId;
   const companyClientsId = match.companyClientsId;
 
@@ -1364,6 +1384,7 @@ export async function executeInterAccount(
         id: reconClientUpdateCommandId(action.confirmedTxId),
         category: RECON_UPDATE_CLIENT_CATEGORY,
         prepare: async () => {
+          api.transactions.invalidateListCache(); // uncached: gates the mutation below
           const fresh = await api.transactions.get(action.confirmedTxId);
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
           if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
@@ -1384,6 +1405,7 @@ export async function executeInterAccount(
       id: reconTransferConfirmCommandId(action.confirmedTxId),
       category: RECON_CONFIRM_TRANSFER_CATEGORY,
       prepare: async () => {
+        api.transactions.invalidateListCache(); // uncached: gates the mutation below
         const fresh = await api.transactions.get(action.confirmedTxId);
         if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
         if (roundMoney(fresh.amount) !== roundMoney(action.confirmedNominalAmount)) return { outcome: "drift", error_code: "amount_changed" };
@@ -1418,6 +1440,7 @@ export async function executeInterAccount(
         id: reconDeleteDuplicateCommandId(deleteTxId),
         category: RECON_DELETE_DUPLICATE_CATEGORY,
         prepare: async () => {
+          api.transactions.invalidateListCache(); // uncached: gates the mutation below
           const fresh = await api.transactions.get(deleteTxId);
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "duplicate_not_project" };
           return { outcome: "ready" };

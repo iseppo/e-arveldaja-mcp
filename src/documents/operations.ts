@@ -618,7 +618,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document
-      // mutation.
+      // mutation. Uncached, like the invoice re-check above: a bank posting
+      // booked since prepare must be seen.
+      this.api.journals.invalidateListCache();
       const duplicateScan = await checkIntakeCashDuplicates(this.api, {
         grossAmountEur,
         invoiceDate: input.invoiceDate,

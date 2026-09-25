@@ -31,8 +31,10 @@ import {
   pageParam,
   parseJsonObject,
   parsePostings,
+  validatePostingsBalanced,
   validateUpdateFields,
 } from "./shared.js";
+import { isMutationIndeterminate } from "../../mutation-outcome.js";
 
 export function registerJournalTools(server: McpServer, api: ApiContext): void {
   // =====================
@@ -161,6 +163,10 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     if (postingErrors.length > 0) {
       return toolError({ error: "Account validation failed", details: postingErrors });
     }
+    const balanceError = validatePostingsBalanced(postings);
+    if (balanceError) {
+      return toolError({ error: "Posting validation failed", details: [balanceError] });
+    }
 
     // Cross-mechanism duplicate guard (Task 5): consult only when at least one
     // posting touches a known bank-account dimension — the exact shape of the
@@ -199,18 +205,31 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
         });
       }
     }
+    // The scan compares against journal postings' EUR base_amount, so a
+    // non-EUR posting without an explicit base_amount has no comparable value.
+    const isEurJournal = (params.cl_currencies_id ?? "EUR").toUpperCase() === "EUR";
+    // A blocking scan gates the write: read journals live, not from cache.
+    if (params.block_on_duplicate === true) api.journals.invalidateListCache();
     for (const posting of postings) {
       if (posting.accounts_dimensions_id == null) continue;
       const dim = bankDimById.get(posting.accounts_dimensions_id);
       if (!dim) continue;
+      const eurAmount = posting.base_amount ?? (isEurJournal ? posting.amount : undefined);
       const candidate: DuplicatePostingCandidate = {
         accountId: dim.accountId,
         dimensionId: dim.dimensionId,
-        amount: posting.base_amount ?? posting.amount,
+        amount: eurAmount ?? posting.amount,
         direction: posting.type === "D" ? "D" : "C",
         date: params.effective_date,
       };
-      const scan = await findDuplicateBankPostings(api, candidate);
+      const scan: DuplicatePostingScanResult = eurAmount === undefined
+        ? {
+            scan_available: false,
+            scan_note: "Cross-mechanism duplicate scan skipped: non-EUR posting without base_amount (no EUR-equivalent available to compare).",
+            window_days: DUPLICATE_SCAN_WINDOW_DAYS,
+            suspects: [],
+          }
+        : await findDuplicateBankPostings(api, candidate);
       postingScans.push({ dim, candidate, scan });
     }
 
@@ -240,8 +259,10 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       }
     }
 
+    // Tool-only flags never reach the API payload.
+    const { block_on_duplicate: _blockOnDuplicate, ...journalFields } = params;
     const result = await api.journals.create({
-      ...params,
+      ...journalFields,
       cl_currencies_id: params.cl_currencies_id ?? "EUR",
       postings,
     });
@@ -352,6 +373,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
+    // Fresh read: the registered gate must not act on a cached snapshot.
+    api.journals.invalidateListCache();
     const current = await api.journals.get(id);
     const isConfirmed = current.registered === true;
     const updateErrors = validateUpdateFields(parsed, "journal", { isConfirmed });
@@ -365,6 +388,23 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
         });
       }
       return toolError({ error: "Invalid update fields", details: updateErrors });
+    }
+    // Draft postings get the same validation as create_journal.
+    if (parsed.postings !== undefined) {
+      const postings = parsePostings(parsed.postings);
+      const [accounts, accountDimensions] = await Promise.all([
+        api.readonly.getAccounts(),
+        api.readonly.getAccountDimensions(),
+      ]);
+      const postingErrors = validatePostingDimensions(postings, accounts, accountDimensions);
+      if (postingErrors.length > 0) {
+        return toolError({ error: "Account validation failed", details: postingErrors });
+      }
+      const balanceError = validatePostingsBalanced(postings);
+      if (balanceError) {
+        return toolError({ error: "Posting validation failed", details: [balanceError] });
+      }
+      parsed.postings = postings;
     }
     const result = await api.journals.update(id, parsed);
     logAudit({
@@ -414,7 +454,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "batch_confirm_journals",
-    "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped and failures are reported per ID.",
+    "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped; failures and indeterminate outcomes are reported per ID.",
     {
       ids: z.array(z.number().int().positive()).min(1).max(500).describe("Journal IDs (positive integers, 1-500 entries)"),
       reason: z.string().min(1).max(500).describe("Short audit note for the batch confirmation. Required, max 500 chars."),
@@ -430,8 +470,9 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       const byId = new Map(allJournals.filter(j => j.id != null).map(j => [j.id!, j]));
       const results: Array<{
         id: number;
-        status: "confirmed" | "skipped_already_confirmed" | "skipped_missing" | "lookup_failed" | "failed";
+        status: "confirmed" | "skipped_already_confirmed" | "skipped_missing" | "lookup_failed" | "failed" | "indeterminate";
         error?: string;
+        may_have_occurred?: true;
       }> = [];
       for (const id of unique) {
         // Pre-check lets us categorize already-registered journals (which the API
@@ -472,7 +513,18 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           });
           results.push({ id, status: "confirmed" });
         } catch (error: unknown) {
-          results.push({ id, status: "failed", error: error instanceof Error ? error.message : String(error) });
+          const message = error instanceof Error ? error.message : String(error);
+          if (isMutationIndeterminate(error)) {
+            // The confirm may have committed: never report it as a plain failure.
+            logAudit({
+              tool: "batch_confirm_journals", action: "MUTATION_INDETERMINATE", entity_type: "journal", entity_id: id,
+              summary: `Confirm of journal ${id} is indeterminate: ${reason}`,
+              details: { reason, operation: "confirm", mutation_may_have_occurred: true, next_action: `Freshly read journal ${id} before retrying.` },
+            });
+            results.push({ id, status: "indeterminate", may_have_occurred: true, error: message });
+          } else {
+            results.push({ id, status: "failed", error: message });
+          }
         }
       }
       const confirmed = results.filter(r => r.status === "confirmed").length;
@@ -481,6 +533,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       ).length;
       const lookupFailed = results.filter(r => r.status === "lookup_failed").length;
       const failed = results.filter(r => r.status === "failed").length;
+      const indeterminate = results.filter(r => r.status === "indeterminate").length;
       return {
         content: [{
           type: "text",
@@ -490,6 +543,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
             skipped_count: skipped,
             lookup_failed_count: lookupFailed,
             failed_count: failed,
+            indeterminate_count: indeterminate,
             reason,
             results,
           }),

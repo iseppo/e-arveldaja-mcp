@@ -81,6 +81,67 @@ function buildMissingFieldQuestions(missingFields: string[]): string[] {
   return dedupe(questions);
 }
 
+// Owner-expense review questions. Each carries server-owned answer semantics
+// (OWNER_EXPENSE_QUESTION_EFFECTS) so the inbox continuation can tell a "no"
+// that only limits the VAT deduction from one that stops the booking.
+const Q_OWNER_CAR_M1 = "Kas kulu on seotud M1-kategooria sõiduauto või selle kasutamisega?";
+const Q_OWNER_CAR_PRIVATE_USE_EXCLUDED = "Kas sõidukit kasutatakse eranditult ettevõtluses ja kas erasõidud on tegelikult välistatud?";
+const Q_OWNER_CAR_EXEMPT_TURNOVER = "Kas ettevõttel on ka maksuvaba käive või muud mitte-ettevõtluslikku kasutust, mis vähendaks mahaarvatavat osa veelgi?";
+const Q_OWNER_HOSPITALITY_GUEST_RECEPTION = "Kas tegemist on külaliste vastuvõtu kuluga (klientide, koostööpartnerite või muude külaliste võõrustamine)?";
+const Q_OWNER_HOSPITALITY_STAFF = "Kas tegemist on oma töötajate toitlustuse, majutuse või muu isikliku tarbimisega (v.a töölähetuse majutus)? Maksustatav erisoodustus on eraldi juhtum, mida selles voos ei kirjendata.";
+const Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION = "Kas tegemist on töötaja töölähetuse majutusega?";
+const Q_OWNER_HOSPITALITY_BUSINESS_LINK = "Kas kulu seos ettevõtlusega on tõendatav (töölähetuse korral: kas lähetuse alus on olemas)?";
+const Q_OWNER_BUSINESS_ONLY = "Kas kulu on tehtud ainult ettevõtluse tarbeks või on siin ka isiklikku / mitte-ettevõtluslikku kasutust?";
+const Q_OWNER_DOCUMENT_COMPLETE = "Kas alusdokumendilt on müüja, kuupäev, summa ja käibemaks selgelt tuvastatavad?";
+
+/**
+ * What a true/false answer to an owner-expense review question means:
+ * - `proceed`: the booking may go ahead as answered;
+ * - `limit_vat`: the booking may go ahead, but input VAT is not fully
+ *   deductible (KMS § 29 lg 4, § 30 lg 4, § 32), so vat_deduction_mode
+ *   must be "partial" or "none";
+ * - `no_vat`: the booking may go ahead with NO input-VAT deduction (KMS § 30
+ *   lg 1, e.g. guest reception), so vat_deduction_mode must be "none";
+ * - `block`: the booking must not be prepared (e.g. no valid source document).
+ */
+export type OwnerExpenseAnswerEffect = "proceed" | "limit_vat" | "no_vat" | "block";
+
+export interface OwnerExpenseQuestionEffect {
+  readonly on_true: OwnerExpenseAnswerEffect;
+  readonly on_false: OwnerExpenseAnswerEffect;
+}
+
+const OWNER_EXPENSE_QUESTION_EFFECTS: ReadonlyMap<string, OwnerExpenseQuestionEffect> = new Map([
+  // Not an M1 car → the passenger-car cap does not apply.
+  [Q_OWNER_CAR_M1, { on_true: "proceed", on_false: "proceed" }],
+  // Private use not excluded → 50% cap (KMS § 30 lg 4).
+  [Q_OWNER_CAR_PRIVATE_USE_EXCLUDED, { on_true: "proceed", on_false: "limit_vat" }],
+  // Exempt / non-business turnover → deductible share shrinks (KMS § 32).
+  [Q_OWNER_CAR_EXEMPT_TURNOVER, { on_true: "limit_vat", on_false: "proceed" }],
+  // Guest reception → input VAT is not deductible at all (KMS § 30 lg 1).
+  [Q_OWNER_HOSPITALITY_GUEST_RECEPTION, { on_true: "no_vat", on_false: "proceed" }],
+  // Staff catering / accommodation / personal consumption → not deductible
+  // (KMS § 30; conservative — a taxed fringe benefit is handled outside this flow).
+  [Q_OWNER_HOSPITALITY_STAFF, { on_true: "no_vat", on_false: "proceed" }],
+  // Business-trip accommodation is the deductible exception; any other
+  // hospitality cost defaults to a limited deduction (the recommendation's
+  // conservative default).
+  [Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION, { on_true: "proceed", on_false: "limit_vat" }],
+  // Business link not provable → do not book as a business expense.
+  [Q_OWNER_HOSPITALITY_BUSINESS_LINK, { on_true: "proceed", on_false: "block" }],
+  // Mixed business/private use → only the business share is deductible.
+  [Q_OWNER_BUSINESS_ONLY, { on_true: "proceed", on_false: "limit_vat" }],
+  // Source document incomplete → no valid basis (RPS § 6–7, KMS § 31).
+  [Q_OWNER_DOCUMENT_COMPLETE, { on_true: "proceed", on_false: "block" }],
+]);
+
+// Server-owned semantics for one owner-expense review question, matched on the
+// exact server question text. Unknown questions have no semantics (undefined):
+// the caller treats a "no" to them conservatively as blocking.
+export function ownerExpenseQuestionEffect(question: string): OwnerExpenseQuestionEffect | undefined {
+  return OWNER_EXPENSE_QUESTION_EFFECTS.get(question.trim());
+}
+
 export function buildOwnerExpenseVatReviewGuidance(params: {
   description: string;
   accountName?: string;
@@ -96,11 +157,11 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
         BASIS_KMS_PARTIAL,
       ],
       follow_up_questions: [
-        "Kas kulu on seotud M1-kategooria sõiduauto või selle kasutamisega?",
-        "Kas sõidukit kasutatakse eranditult ettevõtluses ja kas erasõidud on tegelikult välistatud?",
-        "Kas ettevõttel on ka maksuvaba käive või muud mitte-ettevõtluslikku kasutust, mis vähendaks mahaarvatavat osa veelgi?",
+        Q_OWNER_CAR_M1,
+        Q_OWNER_CAR_PRIVATE_USE_EXCLUDED,
+        Q_OWNER_CAR_EXEMPT_TURNOVER,
       ],
-      policy_hint: "Kui sama sõiduauto või kululiigi poliitika kordub, salvesta see accounting-rules.md faili owner_expense_reimbursement jaotisesse, et edaspidi küsitaks vähem.",
+      policy_hint: "Kui sama sõiduauto või kululiigi poliitika kordub, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement), et edaspidi küsitaks vähem.",
     };
   }
 
@@ -113,10 +174,12 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
         BASIS_KMS_INVOICE,
       ],
       follow_up_questions: [
-        "Kas kulu on külaliste vastuvõtt, oma töötaja toitlustus/majutus või töötaja töölähetuse majutus?",
-        "Kui tegemist oli töölähetusega, kas selle kohta on olemas lähetuse alus ja kulu seos ettevõtlusega on tõendatav?",
+        Q_OWNER_HOSPITALITY_GUEST_RECEPTION,
+        Q_OWNER_HOSPITALITY_STAFF,
+        Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION,
+        Q_OWNER_HOSPITALITY_BUSINESS_LINK,
       ],
-      policy_hint: "Kui sama tüüpi kulude käsitlus on ettevõttes püsiv, salvesta see accounting-rules.md faili owner_expense_reimbursement jaotisesse.",
+      policy_hint: "Kui sama tüüpi kulude käsitlus on ettevõttes püsiv, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement).",
     };
   }
 
@@ -127,10 +190,10 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
       BASIS_KMS_INVOICE,
     ],
     follow_up_questions: [
-      "Kas kulu on tehtud ainult ettevõtluse tarbeks või on siin ka isiklikku / mitte-ettevõtluslikku kasutust?",
-      "Kas alusdokumendilt on müüja, kuupäev, summa ja käibemaks selgelt tuvastatavad?",
+      Q_OWNER_BUSINESS_ONLY,
+      Q_OWNER_DOCUMENT_COMPLETE,
     ],
-    policy_hint: "Kui sama kululiigi käibemaksukäsitlus kordub, salvesta see accounting-rules.md faili owner_expense_reimbursement jaotisesse.",
+    policy_hint: "Kui sama kululiigi käibemaksukäsitlus kordub, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement).",
   };
 }
 
@@ -187,7 +250,7 @@ export function buildReceiptReviewGuidance(params: {
         BASIS_KMS_INVOICE,
       ],
       follow_up_questions: buildMissingFieldQuestions(missingFields),
-      policy_hint: "Kui sama tarnija OCR kipub korduvalt samu välju vahele jätma, tasub sama tarnija jaoks kasutada varasemaid kinnitatud arveid või accounting-rules.md vaikereeglit ainult pärast põhiandmete kinnitamist.",
+      policy_hint: "Kui sama tarnija OCR kipub korduvalt samu välju vahele jätma, tasub sama tarnija jaoks kasutada varasemaid kinnitatud arveid või ettevõtte raamatupidamisreeglite (save_auto_booking_rule) vaikereeglit ainult pärast põhiandmete kinnitamist.",
     };
   }
 
@@ -202,7 +265,7 @@ export function buildReceiptReviewGuidance(params: {
         "Mis on dokumendil müüja ametlik nimi ning kas registrikood või KMKR number on loetav?",
         "Kas dokumendilt on näha IBAN või muu tunnus, mille järgi saab tarnija olemasoleva kliendiga kindlalt siduda?",
       ],
-      policy_hint: "Pärast tarnija kinnitamist saab sama tarnija vaikekäsitluse talletada accounting-rules.md faili või lasta süsteemil kasutada varasemat kinnitatud arvet.",
+      policy_hint: "Pärast tarnija kinnitamist saab sama tarnija vaikekäsitluse talletada ettevõtte raamatupidamisreeglitesse (save_auto_booking_rule) või lasta süsteemil kasutada varasemat kinnitatud arvet.",
     };
   }
 
@@ -232,7 +295,7 @@ export function buildReceiptReviewGuidance(params: {
             "Mis on selle kauba või teenuse tegelik majanduslik sisu, mille järgi konto valida?",
             "Kas sama tarnija kohta on varasem kinnitatud arve, mille käsitlust võiks vaikeotsusena üle võtta?",
           ],
-      policy_hint: "Kui sama tarnija või kululiigi käsitlus kordub, salvesta see accounting-rules.md faili auto_booking jaotisesse.",
+      policy_hint: "Kui sama tarnija või kululiigi käsitlus kordub, salvesta see ettevõtte raamatupidamisreeglitesse automaatse kirjendamise reeglina (save_auto_booking_rule).",
     };
   }
 

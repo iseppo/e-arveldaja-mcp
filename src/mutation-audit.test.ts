@@ -86,6 +86,27 @@ describe("M01 mutation ambiguity audit", () => {
     }, { connectionName: "original-company" });
   });
 
+  it.each([
+    ["/invoice_info", "invoice_info"],
+    ["/invoice_series", "invoice_series"],
+    ["/bank_accounts", "bank_account"],
+  ] as const)("audits a reference-data write ambiguity on %s", (cachePrefix, entity) => {
+    const writeAudit = vi.fn().mockReturnValue(true);
+    const persisted = auditMutationIndeterminate({
+      toolName: "update_reference_data",
+      error: structuralMutation({ entity, businessKey: `${cachePrefix}:5`, affectedCaches: [cachePrefix] }),
+      connectionName: "original-company",
+      writeAudit,
+    });
+
+    expect(persisted).toBe(true);
+    expect(writeAudit).toHaveBeenCalledWith(expect.objectContaining({
+      action: "MUTATION_INDETERMINATE",
+      entity_type: entity,
+      details: expect.objectContaining({ affected_caches: cachePrefix }),
+    }), { connectionName: "original-company" });
+  });
+
   it("M01 serialization audits snapshot index zero and preserves every original neutral field", () => {
     const writeAudit = vi.fn().mockReturnValue(true);
     const error = ambiguousClientUpdate();

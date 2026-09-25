@@ -19,9 +19,11 @@ export interface MockAccountingWorkflowApi {
     findByName: ReturnType<typeof vi.fn>;
     listAll: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
+    invalidateListCache: ReturnType<typeof vi.fn>;
   };
   journals: {
     listAllWithPostings: ReturnType<typeof vi.fn>;
+    invalidateListCache: ReturnType<typeof vi.fn>;
   };
   products: Record<string, never>;
   saleInvoices: {
@@ -93,10 +95,12 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
       findByName: vi.fn().mockResolvedValue([]),
       listAll: vi.fn().mockResolvedValue(options.clientRows ?? []),
       create: vi.fn().mockResolvedValue({ id: 7001 }),
+      invalidateListCache: vi.fn(),
       ...options.clients,
     },
     journals: {
       listAllWithPostings: vi.fn().mockResolvedValue([]),
+      invalidateListCache: vi.fn(),
       ...options.journals,
     },
     products: {},
