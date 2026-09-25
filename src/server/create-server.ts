@@ -41,7 +41,7 @@ import { initAuditLog, logAudit } from "../audit-log.js";
 import { serializeToolMutationError } from "../mutation-audit.js";
 import { initAccountingRulesConnection } from "../accounting-rules.js";
 import { createPublicToolRegistrar } from "../public-tool-registrar.js";
-import { exposureForProfile, type ToolProfile } from "../tool-profile.js";
+import { exposureForProfile, isToolVisibleForProfile, type ToolProfile } from "../tool-profile.js";
 import { buildServerInstructions } from "./server-instructions.js";
 import {
   type ConnectionSnapshot,
@@ -304,17 +304,23 @@ export async function createMcpServer(
   const connectionContexts = allConfigs.map((namedConfig, index) =>
     buildApiContext(new HttpClient(namedConfig.config, `connection:${index}`, requestGuard))
   );
-  const api = setupMode
-    ? createSetupModeApiContext(setupInfo)
-    : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
-  const auditResolver = createAuditLabelResolver({ allConfigs, connectionContexts, setupMode });
-
   // toolExposure decides which optional/redundant tools enter tools/list;
   // resolved here (before the server instructions) so both the setup-mode
   // instruction text and the setup-tool gating below can use it.
   const resolvedProfile = getToolProfileConfig();
   const toolProfile = options.toolProfile ?? resolvedProfile.profile;
   const toolExposure = exposureForProfile(toolProfile, options.toolExposure ?? resolvedProfile.exposure);
+  const exposeSetupTools = setupMode || toolExposure.exposeSetupTools;
+  // Setup-mode errors name import_apikey_credentials only when it is actually
+  // registered (same rule as get_setup_instructions).
+  const setupCredentialTools = {
+    credentialToolsAvailable: exposeSetupTools && isToolVisibleForProfile("import_apikey_credentials", toolProfile),
+    toolProfile,
+  };
+  const api = setupMode
+    ? createSetupModeApiContext(setupInfo, setupCredentialTools)
+    : createScopedApiContext(connectionState, connectionContexts, invocationStorage);
+  const auditResolver = createAuditLabelResolver({ allConfigs, connectionContexts, setupMode });
   const runtimeSafetyContext = buildRuntimeSafetyContext({
     invocationStorage,
     configs: allConfigs,
@@ -462,6 +468,7 @@ export async function createMcpServer(
             blockedTool: toolName,
             blockedApiMethod: error.blocked_api_method,
             hint: error.hint,
+            ...setupCredentialTools,
           }));
         }
         return serializeToolMutationError({
@@ -499,6 +506,7 @@ export async function createMcpServer(
                 blockedResource: uri,
                 blockedApiMethod: error.blocked_api_method,
                 hint: error.hint,
+                ...setupCredentialTools,
               })),
             }],
           };
@@ -519,7 +527,7 @@ export async function createMcpServer(
     invocationStorage,
     inFlightMutations,
     runtimeSafetyContext,
-    exposeSetupTools: setupMode || toolExposure.exposeSetupTools,
+    exposeSetupTools,
     verify: verifyImportedCredentials,
     resolveStorageScope: () => resolveCredentialStorageScope(publicServer),
   });

@@ -65,6 +65,11 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
     resolveStorageScope,
   } = ctx;
 
+  const setupCredentialTools = {
+    credentialToolsAvailable: exposeSetupTools && isToolVisibleForProfile("import_apikey_credentials", toolProfile),
+    toolProfile,
+  };
+
   // --- Multi-account tools ---
 
   registerTool(publicServer, "get_setup_instructions",
@@ -77,7 +82,7 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
         text: toMcpJson(buildSetupInstructionsPayload(
           setupInfo,
           setupMode,
-          exposeSetupTools && isToolVisibleForProfile("import_apikey_credentials", toolProfile),
+          setupCredentialTools.credentialToolsAvailable,
           toolProfile,
         )),
       }],
@@ -144,9 +149,11 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
             searched_directories: setupInfo.searched_directories,
             global_config_directory: setupInfo.global_config_directory,
             global_env_file: setupInfo.global_env_file,
-            import_tool: "import_apikey_credentials",
+            ...(setupCredentialTools.credentialToolsAvailable ? { import_tool: "import_apikey_credentials" } : {}),
             hint: allConfigs.length === 0
-              ? "No API credentials configured. Call get_setup_instructions, run import_apikey_credentials for an apikey*.txt in this folder, or add EARVELDAJA_API_* env vars / EARVELDAJA_API_KEY_FILE."
+              ? (setupCredentialTools.credentialToolsAvailable
+                ? "No API credentials configured. Call get_setup_instructions, run import_apikey_credentials for an apikey*.txt in this folder, or add EARVELDAJA_API_* env vars / EARVELDAJA_API_KEY_FILE."
+                : "No API credentials configured. Call get_setup_instructions, or add EARVELDAJA_API_* env vars / a .env file / EARVELDAJA_API_KEY_FILE.")
               : "Use switch_connection with the index to switch between accounts.",
           }),
         }],
@@ -162,7 +169,7 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
     { ...mutate, title: "Switch Connection" },
     async ({ index }) => {
       if (allConfigs.length === 0) {
-        return toolError(buildSetupModePayload(setupInfo, { blockedTool: "switch_connection" }));
+        return toolError(buildSetupModePayload(setupInfo, { blockedTool: "switch_connection", ...setupCredentialTools }));
       }
 
       if (index < 0 || index >= allConfigs.length) {
@@ -300,6 +307,7 @@ export function registerSystemTools(ctx: RegisterSystemToolsContext): void {
       if (setupMode) {
         return toolError(buildSetupModePayload(setupInfo, {
           blockedTool: "clear_session_log",
+          ...setupCredentialTools,
           hint: "Call get_setup_instructions and configure credentials before using mutating session-log tools.",
         }));
       }

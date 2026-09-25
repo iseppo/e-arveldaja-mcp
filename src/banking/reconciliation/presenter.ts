@@ -471,6 +471,10 @@ export interface ExactMatchCompactInput {
   readonly operationHandle?: string;
   readonly connectionName?: string;
   readonly ledgerChecks?: ExactConfirmLedgerChecks;
+  /** Dry run only: the matching inputs the reviewed plan was built with. The
+   * execute_auto_confirm next_action must resend them unchanged (plan_drift). */
+  readonly minConfidence?: number;
+  readonly blockOnDuplicate?: boolean;
 }
 
 /** Scalar-only per-confirm details for the operation-result store. Free-form
@@ -658,6 +662,23 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     blockers,
     samples,
     ...(dryRun && input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
+    // The compact surface serves the guided profiles, where the standalone
+    // auto_confirm_exact_matches is not registered: the reviewed plan is
+    // executed through reconcile_bank_transactions mode="execute_auto_confirm".
+    ...(dryRun && input.planHandle !== undefined
+      ? {
+          next_action: {
+            tool: "reconcile_bank_transactions",
+            args: {
+              mode: "execute_auto_confirm",
+              plan_handle: input.planHandle,
+              ...(input.minConfidence !== undefined ? { min_confidence: input.minConfidence } : {}),
+              ...(input.blockOnDuplicate !== undefined ? { block_on_duplicate: input.blockOnDuplicate } : {}),
+            },
+            approval_required: true,
+          },
+        }
+      : {}),
     ...(details ? { details } : {}),
   }, { budget: "batch", measureEnvelope: "summary" });
 

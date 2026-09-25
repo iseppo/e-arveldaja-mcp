@@ -66,6 +66,9 @@ Show what would be confirmed. Ask user for approval. The approval card must incl
 If the user does not explicitly approve, stop. The plan handle is not approval — never treat holding it as permission to execute.
 
 If approved, call `reconcile_bank_transactions` with `mode: "execute_auto_confirm"` and `plan_handle`: the handle from the reviewed dry run (required; consumed once).
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+`summary.next_action` is that ready-to-send execute call (`mode: "execute_auto_confirm"` with the `plan_handle` and the dry run's `min_confidence` / `block_on_duplicate`); send its `args` unchanged, only after approval.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 If execute returns `plan_drift`, `plan_handle_required`, or another `plan_*` error, nothing was confirmed: re-run the dry run to review a fresh plan and get a new handle, then ask for approval again.
 

@@ -110,6 +110,26 @@ describe("reconciliation compact profile routing", () => {
     });
   });
 
+  it("guided dry_run_auto_confirm emits a ready-to-send execute next_action and it runs", async () => {
+    const { handler, api } = setup();
+    await runWithToolProfile("guided", async () => {
+      const raw = (await handler("reconcile_bank_transactions")({ mode: "dry_run_auto_confirm", min_confidence: 50, block_on_duplicate: true })).content[0]!.text;
+      expect(raw).not.toContain("auto_confirm_exact_matches");
+      const dry = parseMcpResponse(raw) as any;
+      const next = dry.summary.next_action;
+      expect(next.tool).toBe("reconcile_bank_transactions");
+      expect(next.args).toEqual({
+        mode: "execute_auto_confirm", plan_handle: dry.summary.plan_handle, min_confidence: 50, block_on_duplicate: true,
+      });
+      expect(next.approval_required).toBe(true);
+      // Sending next.args verbatim must not plan_drift against the reviewed dry run.
+      const exec = await call(handler("reconcile_bank_transactions"), next.args);
+      expect(exec.summary.contract).toBe("operation_summary_v1");
+      expect(exec.summary.status).toBe("completed");
+      expect(api.transactions.confirm).toHaveBeenCalled();
+    });
+  });
+
   it("guided inter_account_dry_run names only the guided execute route and it runs", async () => {
     const { handler } = setup();
     await runWithToolProfile("guided", async () => {

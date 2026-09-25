@@ -247,7 +247,7 @@ export function registerBankReconciliationTools(
             case "dry_run_auto_confirm": {
               const outcome = await operations.prepareExactConfirm({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate });
               if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
-              return compactResponse(renderExactMatchCompact({ mode: "DRY_RUN", projection: outcome.value.projection, planHandle: outcome.value.planHandle, connectionName }));
+              return compactResponse(renderExactMatchCompact({ mode: "DRY_RUN", projection: outcome.value.projection, planHandle: outcome.value.planHandle, connectionName, minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate }));
             }
             case "execute_auto_confirm": {
               const outcome = await operations.executeExactConfirm({ minConfidence: min_confidence, blockOnDuplicate: block_on_duplicate, planHandle: plan_handle });

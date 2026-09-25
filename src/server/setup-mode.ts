@@ -1,4 +1,4 @@
-import { buildCredentialSetupNextSteps, type getCredentialSetupInfo } from "../config.js";
+import { buildCredentialSetupNextSteps, credentialImportUnavailableAdvice, type getCredentialSetupInfo } from "../config.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { SETUP_PROFILE_CHOICES, type ToolProfile } from "../tool-profile.js";
 
@@ -12,6 +12,16 @@ import { SETUP_PROFILE_CHOICES, type ToolProfile } from "../tool-profile.js";
  * tools), so they live in one focused module rather than being duplicated.
  */
 
+/**
+ * Whether the credential-import tool is registered on this surface, and the
+ * active profile (for the profile-correct advice when it is not). Callers
+ * compute availability the same way get_setup_instructions does.
+ */
+export interface SetupCredentialToolOptions {
+  credentialToolsAvailable?: boolean;
+  toolProfile?: ToolProfile;
+}
+
 export function buildSetupModePayload(
   setupInfo: ReturnType<typeof getCredentialSetupInfo>,
   options?: {
@@ -19,20 +29,23 @@ export function buildSetupModePayload(
     blockedTool?: string;
     blockedResource?: string;
     blockedApiMethod?: string;
-  },
+  } & SetupCredentialToolOptions,
 ): Record<string, unknown> {
+  const credentialToolsAvailable = options?.credentialToolsAvailable !== false;
   return {
     mode: "setup",
     error: `${setupInfo.message} Call get_setup_instructions for guidance.`,
-    hint: options?.hint ??
-      "Call get_setup_instructions to see how to configure EARVELDAJA_API_*, use import_apikey_credentials to verify an apikey*.txt and save the configuration either only for this folder or for any folder you start the MCP server from, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path.",
+    hint: options?.hint ?? (credentialToolsAvailable
+      ? "Call get_setup_instructions to see how to configure EARVELDAJA_API_*, use import_apikey_credentials to verify an apikey*.txt and save the configuration either only for this folder or for any folder you start the MCP server from, or set EARVELDAJA_API_KEY_FILE to an explicit credential file path."
+      : "Call get_setup_instructions to see how to configure EARVELDAJA_API_* (environment variables or a local or shared .env file), or set EARVELDAJA_API_KEY_FILE to an explicit credential file path. "
+        + credentialImportUnavailableAdvice(options?.toolProfile)),
     credential_file_env_var: setupInfo.credential_file_env_var,
     credential_file_pattern: setupInfo.credential_file_pattern,
     working_directory: setupInfo.working_directory,
     searched_directories: setupInfo.searched_directories,
     global_config_directory: setupInfo.global_config_directory,
     global_env_file: setupInfo.global_env_file,
-    import_tool: "import_apikey_credentials",
+    ...(credentialToolsAvailable ? { import_tool: "import_apikey_credentials" } : {}),
     ...(options?.blockedTool ? { blocked_tool: options.blockedTool } : {}),
     ...(options?.blockedResource ? { blocked_resource: options.blockedResource } : {}),
     ...(options?.blockedApiMethod ? { blocked_api_method: options.blockedApiMethod } : {}),
@@ -42,17 +55,21 @@ export function buildSetupModePayload(
 export function buildSetupModeError(
   setupInfo: ReturnType<typeof getCredentialSetupInfo>,
   blockedApiMethod?: string,
+  credentialTools?: SetupCredentialToolOptions,
 ): Error {
-  const payload = buildSetupModePayload(setupInfo, { blockedApiMethod });
+  const payload = buildSetupModePayload(setupInfo, { blockedApiMethod, ...credentialTools });
   return Object.assign(new Error(String(payload.error)), payload);
 }
 
-export function createSetupModeApiContext(setupInfo: ReturnType<typeof getCredentialSetupInfo>): ApiContext {
+export function createSetupModeApiContext(
+  setupInfo: ReturnType<typeof getCredentialSetupInfo>,
+  credentialTools?: SetupCredentialToolOptions,
+): ApiContext {
   return new Proxy({}, {
     get(_target, apiSection) {
       return new Proxy({}, {
         get(_innerTarget, apiMethod) {
-          throw buildSetupModeError(setupInfo, `${String(apiSection)}.${String(apiMethod)}`);
+          throw buildSetupModeError(setupInfo, `${String(apiSection)}.${String(apiMethod)}`, credentialTools);
         },
       });
     },

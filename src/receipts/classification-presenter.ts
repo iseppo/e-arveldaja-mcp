@@ -5,7 +5,8 @@ import { createOperationSummary, type OperationSummaryV1 } from "../operation-su
 import { ResponseBudgetError } from "../response-budget.js";
 import { PlanStoreError } from "../plan-store.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
-import type { ClassifiedTransactionGroupResult } from "../tools/receipt-inbox.js";
+import { currentToolProfile, isToolVisibleForProfile } from "../tool-profile.js";
+import type { ClassifiedTransactionGroupResult, PartialClassificationMutation } from "../tools/receipt-inbox.js";
 import type {
   ApplyClassificationsResult,
   UnmatchedAnalysisResult,
@@ -284,6 +285,26 @@ export interface ApplyClassificationsCompactInput {
   readonly connectionName?: string;
 }
 
+// The operation's partial-mutation next_action assumes the granular record
+// tools (read/confirm/invalidate a single invoice or transaction). The guided
+// profiles register none of them, so they get wording that names only
+// registered tools and routes the completing step to standard/full.
+function granularRecordToolsVisible(): boolean {
+  try {
+    return isToolVisibleForProfile("confirm_transaction", currentToolProfile());
+  } catch {
+    return false;
+  }
+}
+
+function partialMutationNextAction(partial: PartialClassificationMutation): string {
+  if (granularRecordToolsVisible()) return partial.next_action;
+  return `Before any further action, read purchase invoice ${partial.created_invoice_id} and transaction `
+    + `${partial.attempted_transaction_id} with inspect_accounting_record (entity "purchase_invoices" / "transactions"). `
+    + "Completing the step (confirming or invalidating that invoice, or confirming the transaction against it) needs the "
+    + "standard or full profile (EARVELDAJA_PROFILE); this profile cannot. Continue only after explicit approval.";
+}
+
 export function renderApplyClassificationsCompact(
   input: ApplyClassificationsCompactInput,
 ): { summary: OperationSummaryV1 } {
@@ -310,7 +331,7 @@ export function renderApplyClassificationsCompact(
       blockers.push({
         item_id: `invoice-${partial.created_invoice_id}`,
         code: partial.category,
-        message: `Transaction ${partial.attempted_transaction_id}: ${partial.failed_stage} left invoice ${partial.created_invoice_id} in an incomplete state. ${partial.next_action}`,
+        message: `Transaction ${partial.attempted_transaction_id}: ${partial.failed_stage} left invoice ${partial.created_invoice_id} in an incomplete state. ${partialMutationNextAction(partial)}`,
         severity: "blocker",
       });
     }

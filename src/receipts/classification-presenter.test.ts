@@ -11,6 +11,7 @@ import type {
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { extractClassificationGroups } from "../tools/receipt-inbox.js";
 import { canonicalBusinessText } from "../mcp-json.js";
+import { runWithToolProfile } from "../tool-profile.js";
 
 function cleanGroup(index: number): UnmatchedAnalysisResult["groups"][number] {
   return {
@@ -175,6 +176,19 @@ describe("classification apply compact", () => {
     expect(compact.summary.blockers!.length).toBeGreaterThanOrEqual(2);
     expect(compact.summary.blockers![0]!.severity).toBe("blocker");
     expect(compact.summary.counts!.partial_mutations).toBe(1);
+  });
+
+  it("partial-mutation blocker wording is profile-correct (guided names only registered tools)", async () => {
+    const render = () => renderApplyClassificationsCompact({ result: baseApply(), classificationsJson: { groups: [] } })
+      .summary.blockers![0]!.message;
+    const standard = await runWithToolProfile("standard", async () => render());
+    expect(standard).toContain("Freshly read transaction 1.");
+    const guided = await runWithToolProfile("guided", async () => render());
+    expect(guided).not.toContain("Freshly read transaction 1.");
+    expect(guided).toContain("inspect_accounting_record");
+    expect(guided).toContain("701");
+    expect(guided).toContain("EARVELDAJA_PROFILE");
+    expect(guided).not.toMatch(/get_transaction|get_purchase_invoice|confirm_transaction|confirm_purchase_invoice|invalidate_/);
   });
 
   it("dry_run_apply re-hands the same classifications_json for execute_apply", () => {
