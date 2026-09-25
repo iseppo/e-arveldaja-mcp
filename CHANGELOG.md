@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-09-25
+
 ### Fixed
 
 - **A 5xx or timeout on a write is now "outcome unknown", not "failed".** A POST/PATCH/DELETE answered with 5xx or 408 was treated as a definite failure, so a retry could create a duplicate when the server had in fact saved the first request. One shared classifier (`classifyMutationFailure`) now treats only 4xx (except 408) as definitive; 5xx, 408, network/timeout errors and unknown failures raise `mutation_indeterminate` with a "re-read before retrying" next action. It is used by every API write, the booking guard, receipt intake recovery, bank-transaction confirm recovery and Lightyear.
@@ -17,6 +19,8 @@
 - **Reference-data writes use the same outcome check.** `update_invoice_info` and the invoice-series / bank-account create, update and delete calls now report 5xx, 408 and network failures as `mutation_indeterminate` and clear the affected cache.
 - **`listAll` reads a consistent snapshot.** It no longer stitches pages cached at different times (a row moving between pages could be missed); pages are read live and the whole result is cached for 2 minutes, cleared by any write.
 - **Guided flows can be completed with guided tools only.** The `classify_bank_transactions` compact now carries a ready-to-send `dry_run_apply` payload (auto-bookable groups, counterparties sandboxed); the receipt batch dry run exposes `plan_handles.create_and_confirm`; the inter-account dry run points to `reconcile_bank_transactions` `mode="execute_inter_account"` with its `plan_handle`; reconcile warnings no longer name `confirm_transaction` / `invalidate_transaction` where they are not registered; `get_setup_instructions` names `import_apikey_credentials` only when that tool is registered, and on guided profiles recommends env/`.env` or a temporary `EARVELDAJA_PROFILE=full` instead of `EARVELDAJA_EXPOSE_SETUP_TOOLS` (which would switch the profile to `custom`).
+
+- **Guided setup, auto-confirm and classify follow-ups name only registered tools.** In setup mode, errors for blocked tools and resources and the `list_connections` hint no longer name `import_apikey_credentials` when it is not registered (guided/guided-sales) and give profile-correct credential advice instead. The guided `reconcile_bank_transactions` `dry_run_auto_confirm` now returns a ready-to-send `next_action` (`execute_auto_confirm` with the `plan_handle` and the dry run's `min_confidence` / `block_on_duplicate`, approval required). The guided classify-apply partial-mutation blocker names only registered tools (`inspect_accounting_record`) and points the completing confirm step to the standard or full profile.
 
 ### Changed
 
