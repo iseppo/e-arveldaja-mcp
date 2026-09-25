@@ -477,7 +477,7 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     if (input.action === "recurring") {
       // Recompute the reviewed preview (read-only dry run) so the bound
       // would-create set is compared against what execute would do NOW.
-      const livePreview = await computeRecurringClone(this.api, recurringParams!, { dryRun: true });
+      const livePreview = await computeRecurringClone(this.api, recurringParams!, { dryRun: true, fresh: true });
       const liveSources = recurringPreviewSourceBinding(livePreview);
       boundArgs = recurringNormalizedArgs(recurringParams!, liveSources);
       recurringSourceIds = new Set(liveSources.flatMap(row => (typeof row.source_id === "number" ? [row.source_id] : [])));

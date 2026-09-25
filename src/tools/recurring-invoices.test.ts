@@ -53,6 +53,7 @@ function setupRecurringTool(options: {
   const fullInvoice = buildSaleInvoice();
   const api = {
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.listAllInvoices ?? [fullInvoice]),
       get: vi.fn().mockResolvedValue(fullInvoice),
       create: options.createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 321 }),
@@ -157,6 +158,56 @@ describe("recurring invoices tool", () => {
       target_journal_date: "2026-02-01",
       invoice_ids: "1, nope, 3",
     }).success).toBe(false);
+  });
+
+  it("re-reads the sale invoices uncached right before each create, so a clone made elsewhere meanwhile is not duplicated", async () => {
+    const sourceInvoice = buildSaleInvoice();
+    const cloneMadeElsewhere = buildSaleInvoice({
+      id: 98,
+      status: "DRAFT",
+      create_date: "2026-02-01",
+      number: "ARV-98",
+      notes: "RECURRING_SOURCE_INVOICE:1:TARGET_DATE:2026-02-01",
+    });
+    const { api, handler } = setupRecurringTool({ listAllInvoices: [sourceInvoice] });
+    // The first (batch) read does not see the clone; the pre-create re-read does.
+    (api.saleInvoices.listAll as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([sourceInvoice])
+      .mockResolvedValue([sourceInvoice, cloneMadeElsewhere]);
+
+    const payload = parseMcpResponse((await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      dry_run: false,
+    })).content[0]!.text);
+
+    expect(api.saleInvoices.create).not.toHaveBeenCalled();
+    expect(api.saleInvoices.invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(payload.results).toEqual([expect.objectContaining({ status: "skipped_existing", existing_id: 98 })]);
+  });
+
+  it("a failed pre-create re-read is a per-row error; clones created earlier in the batch stay in the response", async () => {
+    const first = buildSaleInvoice({ id: 1 });
+    const second = buildSaleInvoice({ id: 2, number: "ARV-2" });
+    const { api, handler } = setupRecurringTool({ listAllInvoices: [first, second] });
+    (api.saleInvoices.listAll as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce([first, second]) // batch read
+      .mockResolvedValueOnce([first, second]) // re-read before source 1
+      .mockRejectedValueOnce(new Error("upstream 503")); // re-read before source 2
+
+    const payload = parseMcpResponse((await handler({
+      source_month: "2026-01",
+      target_date: "2026-02-01",
+      target_journal_date: "2026-02-01",
+      dry_run: false,
+    })).content[0]!.text);
+
+    expect(api.saleInvoices.create).toHaveBeenCalledTimes(1);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ source_id: 1, status: expect.stringMatching(/^created/) }),
+      expect.objectContaining({ source_id: 2, status: "error", error: expect.stringContaining("upstream 503") }),
+    ]);
   });
 
   it("skips an already cloned target invoice instead of creating a duplicate", async () => {
@@ -302,6 +353,7 @@ describe("recurring invoices tool", () => {
     const b = buildSaleInvoice({ id: 2, number: "SI-2" });
     const coreApi = {
       saleInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([a, b]),
         get: vi.fn().mockImplementation(async (id: number) => (id === 2 ? b : a)),
         create: vi.fn().mockResolvedValue({ created_object_id: 321 }),
@@ -383,6 +435,7 @@ describe("recurring invoices tool", () => {
 
     const coreApi = {
       saleInvoices: {
+        invalidateListCache: vi.fn(),
         listAll: vi.fn().mockResolvedValue([buildSaleInvoice()]),
         get: vi.fn().mockResolvedValue(buildSaleInvoice()),
         create: vi.fn().mockResolvedValue({ created_object_id: 321 }),

@@ -26,7 +26,6 @@ import {
   isYearEndClosingJournal,
   isResultEntryShape,
   isRetainedTransferShape,
-  isNumberedTransferShape,
   isYearEndResultEntry,
   isYearEndTransferEntry,
   yearEndResultDocumentNumber,
@@ -774,7 +773,7 @@ async function analyzeYearEndClose(
   const onDateBooked = netDebit(existing.transfer, ids.currentYearProfit);
   // Same for YEC-RETAINED-YYYY found by number alone: it must post only
   // 2970 ↔ 2960 (+ reserve), or it is no transfer and needs manual review.
-  const malformedTransferJournals = existing.transfer.filter((journal) => !isNumberedTransferShape(journal, transferAccounts));
+  const malformedTransferJournals = existing.transfer.filter((journal) => !isRetainedTransferShape(journal, transferAccounts));
   const offDateCandidates = allJournals.filter((journal) =>
     !journal.is_deleted && journal.id !== -1 &&
     journal.effective_date.startsWith(`${year + 1}-`) && journal.effective_date !== `${year + 1}-01-01` &&

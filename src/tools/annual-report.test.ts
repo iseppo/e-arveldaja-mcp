@@ -1306,6 +1306,18 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
     expect(rerun.blocked_entries).toEqual([]);
   });
 
+  it("recognises a hand-booked all-to-reserve transfer (D 2970 / K 2940, other number) on 1 January or later — never a second transfer", async () => {
+    const onJan1 = handTransfer({ postings: [makePosting(2970, "D", 50), makePosting(2940, "C", 50)] });
+    const jan1 = await prepare([...profitYear(), handResult(), onJan1]);
+    expect(jan1.close_status).toEqual({ status: "closed", result_entry: "exists", retained_transfer_entry: "exists" });
+    expect(docNumbers(jan1)).toEqual([]);
+
+    const offDate = handTransfer({ effective_date: "2026-12-01", postings: [makePosting(2970, "D", 50), makePosting(2940, "C", 50)] });
+    const december = await prepare([...profitYear(), handResult(), offDate]);
+    expect(december.close_status.retained_transfer_entry).toBe("exists");
+    expect(docNumbers(december)).toEqual([]);
+  });
+
   it("splits part of a profit to reserve capital 2940 and rejects an over-large or loss-year split", async () => {
     const payload = await prepare(profitYear(), { reserve_capital_amount: 5 });
     expect(postingsOf(payload.proposed_journal_entries[1])).toEqual([[2970, "D", 50], [2960, "C", 45], [2940, "C", 5]]);

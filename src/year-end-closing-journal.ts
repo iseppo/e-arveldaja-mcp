@@ -87,10 +87,8 @@ export function isResultEntryShape(
 }
 
 /**
- * RIK entry B for `year`: dated (YYYY+1)-01-01, touching both the
- * current-year-result account (2970) and retained earnings (2960), with every
- * posting on those or a reserve account — or carrying YEC-RETAINED-YYYY on
- * that date.
+ * RIK entry B for `year`: dated (YYYY+1)-01-01 with the transfer shape below
+ * — or carrying YEC-RETAINED-YYYY on that date.
  */
 export function isYearEndTransferEntry(
   journal: ClosingCandidate,
@@ -103,28 +101,14 @@ export function isYearEndTransferEntry(
 }
 
 /**
- * Date-agnostic shape of RIK entry B: touches both the current-year-result
- * account (2970) and retained earnings (2960), every posting on those or a
- * reserve account. Operators also book the transfer by hand on another date
- * of the next year (e.g. 1 December), so off-date detection uses this shape.
+ * Date-agnostic shape of RIK entry B: touches the current-year-result account
+ * (2970) and at least one of retained earnings (2960) or a reserve account,
+ * every posting on those. A close that puts the whole profit into reserve
+ * capital (D 2970 / K 2940) has no 2960 line and is still the transfer.
+ * Operators also book the transfer by hand on another date of the next year
+ * (e.g. 1 December), so off-date detection uses this shape too.
  */
 export function isRetainedTransferShape(
-  journal: ClosingCandidate,
-  accounts: { currentYearProfit: number; retainedEarnings: number; reserves: number[] },
-): boolean {
-  const ids = postedAccountIds(journal);
-  if (!ids.has(accounts.currentYearProfit) || !ids.has(accounts.retainedEarnings)) return false;
-  const allowed = new Set([accounts.currentYearProfit, accounts.retainedEarnings, ...accounts.reserves]);
-  return [...ids].every((id) => allowed.has(id));
-}
-
-/**
- * Account shape a journal carrying YEC-RETAINED-YYYY must have: debits 2970
- * into retained earnings and/or reserves only. Unlike
- * `isRetainedTransferShape` it does not require 2960 — a close that puts the
- * whole profit into reserve capital (D 2970 / K 2940) has no 2960 line.
- */
-export function isNumberedTransferShape(
   journal: ClosingCandidate,
   accounts: { currentYearProfit: number; retainedEarnings: number; reserves: number[] },
 ): boolean {

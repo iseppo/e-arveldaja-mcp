@@ -217,6 +217,8 @@ export async function computeRecurringClone(
     onlySourceIds?: ReadonlySet<number>;
     /** Reviewed clone-payload digests per source id: a source whose payload now differs is refused, never created. */
     expectedPayloadDigests?: ReadonlyMap<number, string>;
+    /** Read the sale-invoice list uncached (execute and its drift check): the list pages are cached for 120 s. */
+    fresh?: boolean;
   },
 ): Promise<Record<string, unknown>> {
       // Belt-and-suspenders: never clone from an unvalidated shape. The
@@ -227,6 +229,7 @@ export async function computeRecurringClone(
       if (coreValidationError) throw new Error(`Invalid recurring parameters: ${coreValidationError}`);
       const { source_month, target_date, target_journal_date, invoice_ids, auto_confirm } = params;
       const isDryRun = options.dryRun;
+      if (!isDryRun || options.fresh) api.saleInvoices.invalidateListCache();
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
       const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();
@@ -353,6 +356,34 @@ export async function computeRecurringClone(
             ...sourceFacts,
             status: "error",
             error: "plan_drift: the clone payload no longer matches the reviewed preview; nothing was created for this source",
+          });
+          continue;
+        }
+
+        // Re-check live right before the write: a clone created elsewhere
+        // (UI, another process) since the list read above must not be duplicated.
+        // A failed re-read degrades to a per-row error (nothing created for this
+        // source) so earlier rows' created clones stay in the response.
+        let liveClone: Awaited<ReturnType<typeof api.saleInvoices.listAll>>[number] | undefined;
+        try {
+          api.saleInvoices.invalidateListCache();
+          liveClone = (await api.saleInvoices.listAll()).find(invoice =>
+            !invoice.is_deleted && typeof invoice.create_date === "string" && invoice.create_date.slice(0, 7) === targetMonth &&
+            extractRecurringCloneKeys(invoice.notes).includes(cloneKey));
+        } catch (err: unknown) {
+          results.push({
+            ...sourceFacts,
+            status: "error",
+            error: wrapUntrustedOcr(`Live duplicate re-check failed; nothing was created for this source: ${err instanceof Error ? err.message : String(err)}`),
+          });
+          continue;
+        }
+        if (liveClone) {
+          results.push({
+            ...sourceFacts,
+            existing_id: liveClone.id,
+            existing_number: liveClone.number,
+            status: "skipped_existing",
           });
           continue;
         }

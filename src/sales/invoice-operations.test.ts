@@ -12,6 +12,7 @@ function makeApi(
 ): ApiContext {
   return {
     saleInvoices: {
+      invalidateListCache: vi.fn(),
       list: vi.fn().mockResolvedValue({ current_page: 1, total_pages: 1, items: [] }),
       get: vi.fn().mockResolvedValue({ id: 1, status: "PROJECT" }),
       create: vi.fn().mockResolvedValue({ created_object_id: 500 }),
