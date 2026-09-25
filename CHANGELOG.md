@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-25
+
 ### Fixed
 
 - **Month-end checklist no longer reports not-yet-due invoices as overdue while the month is still open.** `month_end_close_checklist` and `run_accounting_report` (`month_end`) compared due dates against the month's last day even mid-month, so on 2026-09-25 an invoice due 2026-09-26 was listed under `overdue_receivables`. Overdue is now evaluated as of `min(today, month-end)` and exposed as `overdue_as_of`; while the month is open (including its last day), invoices still payable this month (due date from today up to and including the month's last day — the due date is the last day to pay) go to new `due_before_month_end_receivables` / `due_before_month_end_payables` lists (not counted in `issues_found`) with an explanatory warning. Overdue rows now carry `due_date` and `days_overdue`. A closed month evaluates exactly as before.
