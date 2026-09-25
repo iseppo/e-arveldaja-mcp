@@ -2452,24 +2452,31 @@ describe("camt import tool", () => {
     ]);
   });
 
-  it("reads the ledger once for the per-row duplicate recheck, not once per row", async () => {
+  it("re-reads the ledger uncached before every row's write, so a duplicate booked elsewhere mid-batch still blocks", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
-    const entries = [1, 2, 3, 4].map(n => refLessEntry
-      .replace("<BookgDt>", `<AcctSvcrRef>REF-ONCE-${n}</AcctSvcrRef>\n        <BookgDt>`)
-      .replace("50.00", `5${n}.00`)).join("");
-    mockedReadFile.mockResolvedValue(repeatedEntryXml(entries, 1));
-
+    mockedReadFile.mockResolvedValue(twoDistinctRefXml());
     const { api, handler } = setupCamtTool();
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
-    vi.mocked(api.transactions.listAll).mockClear();
+
+    // Reads: execute-time projection, row 1's recheck, row 2's recheck. REF-B
+    // is booked elsewhere only AFTER row 1's write — a single pre-batch read
+    // would miss it.
+    let ledgerReads = 0;
+    api.transactions.listAll.mockImplementation(async () => (ledgerReads++ < 2 ? [] : [{
+      id: 778, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
+      bank_ref_number: "REF-B", date: "2026-02-02", type: "C", amount: 20, cl_currencies_id: "EUR",
+    }]));
+    api.transactions.create.mockResolvedValue({ created_object_id: 9001 });
+    api.transactions.invalidateListCache.mockClear();
+
     const payload = parseMcpResponse((await handler({
       file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
     })).content[0]!.text);
 
-    expect(payload.mode).toBe("EXECUTED");
-    expect(api.transactions.create).toHaveBeenCalledTimes(4);
-    // One read for the execute-time projection + one before the first write.
-    expect(api.transactions.listAll).toHaveBeenCalledTimes(2);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    // Each per-row recheck drops the 120 s list cache first.
+    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(payload.execution.execution_report.stop_reason).toMatchObject({ command_id: "camt-create-1", category: "plan_drift" });
   });
 
   it("still collapses the same bank-referenced entry repeated across the file", async () => {
@@ -2859,10 +2866,9 @@ describe("camt plan-bound execution", () => {
 
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
 
-    // A concurrent insert lands after the execute-time projection read but
-    // before the single pre-write ledger read (MEDIUM-3: the ledger is read
-    // once, not per row), making the second command's bank reference a
-    // duplicate. The first command still completes; the second drifts.
+    // A concurrent insert lands after the execute-time projection read,
+    // making the second command's bank reference a duplicate. The first
+    // command still completes; the second drifts.
     let ledgerReads = 0;
     api.transactions.listAll.mockImplementation(async () => (ledgerReads++ === 0 ? [] : [{
       id: 777, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,

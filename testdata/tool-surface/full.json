@@ -2,8 +2,8 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 156542,
-    "descriptionsBytes": 22066,
+    "toolsListBytes": 156555,
+    "descriptionsBytes": 22079,
     "inputSchemasBytes": 98990,
     "largestTool": {
       "name": "process_accounting_document",
@@ -4104,7 +4104,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_*).",
+      "description": "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_*).",
       "execution": {
         "taskSupport": "forbidden"
       },

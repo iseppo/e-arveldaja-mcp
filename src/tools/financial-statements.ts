@@ -384,13 +384,17 @@ export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
 
   // Overdue is evaluated as of month-end for reproducibility — unless the month
   // is still open, in which case "overdue" means already past due today and the
-  // invoices falling due between today and month-end are reported separately
+  // invoices falling due from today up to month-end are reported separately
   // (listing them as overdue mid-month misled callers into chasing invoices
   // that were not yet due).
   // term_days is typed as required but the upstream API occasionally serves it
   // as null/undefined; treat missing as 0 so the invoice is still evaluated
   // rather than silently dropped via NaN comparison.
   const overdueAsOf = input.today !== undefined && input.today < dateTo ? input.today : dateTo;
+  // Invoices still payable this month (due today..month-end inclusive — the due
+  // date is the last day to pay). Listed while the month has not ended,
+  // including its last day; a finished month has no such list.
+  const monthOpenForDueList = input.today !== undefined && input.today <= dateTo;
   const missingTermDays: Array<{ entity: "sale_invoice" | "purchase_invoice"; id: number | undefined; number: string }> = [];
   let missingCreateDateCount = 0;
   const dueDates = new Map<SaleInvoice | PurchaseInvoice, string>();
@@ -424,8 +428,8 @@ export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
 
   const overdueReceivables = openSales.filter(r => r.due < overdueAsOf).map(r => r.inv);
   const overduePayables = openPurchases.filter(r => r.due < overdueAsOf).map(r => r.inv);
-  const dueBeforeMonthEndReceivables = openSales.filter(r => r.due >= overdueAsOf && r.due < dateTo).map(r => r.inv);
-  const dueBeforeMonthEndPayables = openPurchases.filter(r => r.due >= overdueAsOf && r.due < dateTo).map(r => r.inv);
+  const dueBeforeMonthEndReceivables = openSales.filter(r => r.due >= overdueAsOf && r.due <= dateTo && monthOpenForDueList).map(r => r.inv);
+  const dueBeforeMonthEndPayables = openPurchases.filter(r => r.due >= overdueAsOf && r.due <= dateTo && monthOpenForDueList).map(r => r.inv);
 
   const isPartiallyPaid = (inv: SaleInvoice | PurchaseInvoice) => inv.payment_status === "PARTIALLY_PAID";
   const partiallyPaidReceivables = [...overdueReceivables, ...dueBeforeMonthEndReceivables].filter(isPartiallyPaid).length;
@@ -441,7 +445,7 @@ export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
     dueBeforeMonthEndReceivables,
     dueBeforeMonthEndPayables,
     overdueAsOf,
-    monthOpen: overdueAsOf < dateTo,
+    monthOpen: monthOpenForDueList,
     dueDate: inv => dueDates.get(inv)!,
     missingTermDays,
     missingCreateDateCount,
@@ -458,7 +462,7 @@ export function daysPastDue(dueDate: string, asOf: string): number {
 
 export function monthOpenWarning(month: string, today: string, dateTo: string): string {
   return `Month ${month} has not ended yet (today ${today}); overdue_* lists only invoices already past due today. ` +
-    `Invoices falling due before month-end ${dateTo} are listed under due_before_month_end_* and are not yet overdue.`;
+    `Invoices falling due from today up to and including month-end ${dateTo} are listed under due_before_month_end_* and are not yet overdue.`;
 }
 
 
@@ -635,8 +639,8 @@ export function registerFinancialStatementTools(
 
   registerTool(server, "month_end_close_checklist",
     enableSales
-      ? "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_*)."
-      : "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_payables).",
+      ? "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_*)."
+      : "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_payables).",
     {
       month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data before running the checklist (use after web UI changes)."),

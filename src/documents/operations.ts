@@ -580,8 +580,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       const items = invoiceData.items;
 
       // Re-check the reviewed supplier+number against FRESH live invoices: one
-      // may have been booked between prepare and create (any booking made
-      // through this server invalidates the purchase-invoice cache).
+      // may have been booked between prepare and create — here, in the UI or
+      // by another process — so bypass the 120 s list cache.
+      this.api.purchaseInvoices.invalidateListCache();
       const freshDuplicates = exactLiveSupplierNumberMatches(
         await this.api.purchaseInvoices.listAll(), invoiceData.clients_id, invoiceNumber,
       );

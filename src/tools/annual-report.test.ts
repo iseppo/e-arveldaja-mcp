@@ -1468,6 +1468,26 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
       expect(acknowledged.docs).toEqual(["YEC-RESULT-2025"]);
     });
 
+    it("a further next-year transfer beside a complete 1 January transfer is a possible duplicate: manual review, not closed", async () => {
+      const journals = [...profitYear(), handResult(), handTransfer(), transferOn("2026-12-01", 50)];
+      const payload = await prepare(journals);
+      expect(payload.close_status.status).not.toBe("closed");
+      expect(payload.close_status.retained_transfer_entry).toBe("mismatch");
+      expect(payload.proposed_journal_entries).toEqual([]);
+      expect(payload.blocked_entries).toEqual([expect.objectContaining({ document_number: "YEC-RETAINED-2025", resolution: "manual_review" })]);
+      expect((payload.warnings as string[]).some((w) => w.includes("3501 (2026-12-01: 50 EUR)"))).toBe(true);
+      const acknowledged = await execute(journals, { allow_additional_transfer: true });
+      expect(acknowledged.journalsCreate).not.toHaveBeenCalled();
+    });
+
+    it("a second off-date transfer beside a matching one is not silently ignored", async () => {
+      const journals = [...profitYear(), handResult(), transferOn("2026-06-01", 50, 3505), transferOn("2026-12-01", 30)];
+      const payload = await prepare(journals);
+      expect(payload.close_status.status).not.toBe("closed");
+      expect(payload.blocked_entries).toEqual([expect.objectContaining({ document_number: "YEC-RETAINED-2025", resolution: "manual_review" })]);
+      expect(payload.proposed_journal_entries).toEqual([]);
+    });
+
     it("an off-date transfer that could equally be an earlier year's late transfer is ambiguous: warned, not booked", async () => {
       // 2024 left a 50 profit open (not closed/transferred); 2026-12-01 moves 50 — 2024's or 2025's?
       const prior2024 = makeJournal("2024-05-01", [makePosting(1020, "D", 50), makePosting(3100, "C", 50)], { id: 3502 });

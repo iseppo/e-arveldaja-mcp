@@ -33,9 +33,11 @@ export interface MockAccountingWorkflowApi {
     createAndSetTotals: ReturnType<typeof vi.fn>;
     confirmWithTotals: ReturnType<typeof vi.fn>;
     invalidate: ReturnType<typeof vi.fn>;
+    invalidateListCache: ReturnType<typeof vi.fn>;
   };
   transactions: {
     listAll: ReturnType<typeof vi.fn>;
+    invalidateListCache: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
     update: ReturnType<typeof vi.fn>;
@@ -112,10 +114,12 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
       createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
       confirmWithTotals: vi.fn().mockResolvedValue({}),
       invalidate: vi.fn().mockResolvedValue({}),
+      invalidateListCache: vi.fn(),
       ...options.purchaseInvoices,
     },
     transactions: {
       listAll: vi.fn().mockResolvedValue(options.transactionRows ?? []),
+      invalidateListCache: vi.fn(),
       get: vi.fn().mockImplementation(async (id: number) => {
         const detail = options.transactionDetails?.[id];
         if (detail) return detail;

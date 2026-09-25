@@ -1073,6 +1073,33 @@ describe("month_end_close_checklist", () => {
       expect(payload.overdue_receivables.items[0]).toMatchObject({ id: 15, days_overdue: 1 });
     });
 
+    it("an invoice due on the month's last day is listed as due before month-end (the due date is the last day to pay)", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-25T10:00:00Z"));
+      // 2026-09-16 + 14 days => due 2026-09-30.
+      const dueLastDay = { ...invoice(), create_date: "2026-09-16", journal_date: "2026-09-16" };
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [dueLastDay] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_receivables.count).toBe(0);
+      expect(payload.due_before_month_end_receivables.items).toEqual([expect.objectContaining({ id: 15, due_date: "2026-09-30" })]);
+    });
+
+    it("on the month's last day, invoices due that day are still listed and nothing due today is overdue", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-30T10:00:00Z"));
+      const dueLastDay = { ...invoice(), create_date: "2026-09-16", journal_date: "2026-09-16" };
+      const handler = setupTool("month_end_close_checklist", { saleInvoices: [invoice(), { ...dueLastDay, id: 16, number: "2026_16" }] });
+
+      const payload = parseMcpResponse((await handler({ month: "2026-09" })).content[0]!.text);
+
+      expect(payload.overdue_as_of).toBe("2026-09-30");
+      expect(payload.overdue_receivables.items).toEqual([expect.objectContaining({ id: 15, days_overdue: 4 })]);
+      expect(payload.due_before_month_end_receivables.items).toEqual([expect.objectContaining({ id: 16, due_date: "2026-09-30" })]);
+      expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("Month 2026-09 has not ended yet (today 2026-09-30)")]));
+    });
+
     it("closed month: evaluates as of month-end, with no due_before_month_end lists or open-month warning", async () => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-10-02T10:00:00Z"));

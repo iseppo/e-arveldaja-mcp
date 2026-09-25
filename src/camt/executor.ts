@@ -561,19 +561,23 @@ export async function executeCamtImport(
 
   const createdApiIdByIndex = new Map<number, number>();
   const completedIndices = new Set<number>();
-  // ONE fresh ledger read right before the first write; each row this run
-  // creates is appended to the in-memory lookup, so later rows still see it
-  // without re-reading the whole ledger per row.
-  const lookup = buildDuplicateLookup(
-    (await api.transactions.listAll()).filter(isNonVoidTransaction),
-    accountsDimensionsId,
-  );
+  // Rows this run created, re-indexed into every per-row lookup so a later row
+  // still sees them even when the list read does not return them yet (or no
+  // usable id came back).
+  const createdThisRun: Transaction[] = [];
   const executionReport = await executeCamtCommands({
     count: projection.descriptors.length,
     prepareIndex: async index => {
-      // Recheck this command's duplicate precondition immediately before its
-      // own mutate.
+      // Recheck this command's duplicate precondition against an UNCACHED
+      // ledger read immediately before its own mutate: a row booked elsewhere
+      // (UI, another process) since the plan review must still block it.
       const descriptor = projection.descriptors[index]!;
+      api.transactions.invalidateListCache();
+      const lookup = buildDuplicateLookup(
+        (await api.transactions.listAll()).filter(isNonVoidTransaction),
+        accountsDimensionsId,
+      );
+      for (const created of createdThisRun) addToDuplicateLookup(lookup, created, accountsDimensionsId);
       const duplicateIds = findDuplicateTransactionIds(
         descriptor.entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
       );
@@ -596,7 +600,7 @@ export async function executeCamtImport(
       // The row exists now whether or not a usable id came back; -1 stands in
       // for an unknown id (the lookup only needs a truthy id to hold a key).
       const knownId = typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0 ? createdId : -1;
-      addToDuplicateLookup(lookup, { ...descriptor.payload, id: knownId, status: "PROJECT" } as Transaction, accountsDimensionsId);
+      createdThisRun.push({ ...descriptor.payload, id: knownId, status: "PROJECT" } as Transaction);
       if (typeof createdId === "number" && Number.isSafeInteger(createdId) && createdId > 0) {
         createdApiIdByIndex.set(index, createdId);
         return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: createdId, outcome: "created" }] };

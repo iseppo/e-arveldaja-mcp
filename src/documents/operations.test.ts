@@ -295,6 +295,18 @@ describe("AccountingDocumentOperations.create", () => {
     expectNoWrites(api);
   });
 
+  it("drops the purchase-invoice list cache right before the create-time duplicate re-check (uncached lookup)", async () => {
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const invalidateListCache = api.purchaseInvoices.invalidateListCache as unknown as { mock: { invocationCallOrder: number[] } };
+    const listAll = api.purchaseInvoices.listAll as unknown as { mock: { invocationCallOrder: number[] } };
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(true);
+    expect(invalidateListCache.mock.invocationCallOrder.length).toBeGreaterThan(0);
+    // The last supplier+number lookup before the write must follow a cache drop.
+    expect(invalidateListCache.mock.invocationCallOrder.at(-1)!).toBeLessThan(listAll.mock.invocationCallOrder.at(-1)!);
+  });
+
   it("desandboxes sandbox markers out of the invoiceData written to the API (write-boundary canonicalization)", async () => {
     const { path, sha256, api, ops } = createSetup();
     const wrap = (s: string) => wrapUntrustedOcr(s)!;

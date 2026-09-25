@@ -986,6 +986,8 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       }
 
       // Exact live supplier + invoice-number duplicate → refuse before any write.
+      // Uncached: the 120 s list cache does not see invoices booked elsewhere.
+      api.purchaseInvoices.invalidateListCache();
       const numberDuplicates = detectDuplicatePurchaseInvoice(await api.purchaseInvoices.listAll(), {
         clients_id: params.supplier_client_id,
         invoice_number: params.invoice_number,

@@ -126,6 +126,22 @@ export class BaseResource<T> {
     cache.invalidate(this.cacheKey(pattern));
   }
 
+  /**
+   * Force-drop this resource's list caches so the next `list()` / `listAll()`
+   * re-reads from the server. Write-time duplicate guards call this right
+   * before their pre-create lookup: the paged list cache lives for 120 s and
+   * does not see writes made elsewhere (e-arveldaja UI, another process).
+   *
+   * `create()` only invalidates the cache *after* a successful POST, so a
+   * create that fails with a network error never clears it and the cached
+   * snapshot can still predate the ambiguous write. BookingGuard's
+   * verify-then-retry calls this on journals before re-scanning to check
+   * whether the ambiguous journal actually committed.
+   */
+  invalidateListCache(): void {
+    this.invalidateCache();
+  }
+
   protected async mutate<R>(
     operation: MutationOperation,
     entityId: number | undefined,

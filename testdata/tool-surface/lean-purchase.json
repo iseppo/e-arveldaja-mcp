@@ -2,8 +2,8 @@
   "profile": "lean-purchase",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 82954,
-    "descriptionsBytes": 10984,
+    "toolsListBytes": 82967,
+    "descriptionsBytes": 10997,
     "inputSchemasBytes": 51323,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
@@ -2784,7 +2784,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due between today and month-end are listed separately under due_before_month_end_payables).",
+      "description": "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_payables).",
       "execution": {
         "taskSupport": "forbidden"
       },

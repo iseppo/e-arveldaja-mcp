@@ -90,6 +90,7 @@ function setupPdfWorkflowTool(
       confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
       uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
       invalidate: vi.fn().mockResolvedValue({ ok: true }),
+      invalidateListCache: vi.fn(),
       ...options.purchaseInvoices,
     },
     clients: {
@@ -903,6 +904,19 @@ describe("pdf workflow tools", () => {
       expect(response.isError).toBe(true);
       expect(response.content[0]!.text).toContain("duplicate_purchase_invoice");
       expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
+    it("drops the purchase-invoice list cache right before the supplier + invoice-number duplicate lookup", async () => {
+      const filePath = createTempInvoiceFile("dupfresh.pdf", "pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+      await handler(args(filePath));
+      const invalidateOrder = api.purchaseInvoices.invalidateListCache.mock.invocationCallOrder as number[];
+      const listAllOrder = api.purchaseInvoices.listAll.mock.invocationCallOrder as number[];
+      expect(invalidateOrder.length).toBeGreaterThan(0);
+      expect(listAllOrder.length).toBeGreaterThan(0);
+      expect(invalidateOrder[0]!).toBeLessThan(listAllOrder[0]!);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
     });
 
     it("creates with a warning when allow_duplicate_invoice_number acknowledges a reused supplier number", async () => {

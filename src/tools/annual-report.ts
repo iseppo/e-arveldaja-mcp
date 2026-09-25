@@ -796,9 +796,10 @@ async function analyzeYearEndClose(
   if (existing.transfer.length === 0 && offDateCandidates.length === 0) {
     transferState = Math.abs(expectedTransfer) >= 0.01 ? "proposed" : "not_needed";
     transferAmount = expectedTransfer;
-  } else if (existing.transfer.length > 0 && malformedTransferJournals.length === 0 && matchesExpected(onDateBooked)) {
+  } else if (existing.transfer.length > 0 && malformedTransferJournals.length === 0 && matchesExpected(onDateBooked) &&
+    offDateCandidates.length === 0) {
     transferState = "exists";
-  } else if (offDateMatches.length === 1 && !offDateAmbiguous) {
+  } else if (offDateMatches.length === 1 && offDateCandidates.length === 1 && !offDateAmbiguous) {
     transferState = "exists";
     transferJournals = [...existing.transfer, offDateMatches[0]!];
   } else {
@@ -807,6 +808,8 @@ async function analyzeYearEndClose(
     // proposed; an over-transfer or a reversed transfer needs manual review.
     // Off-date transfers cannot be attributed to this year with certainty, so
     // any of them makes the remainder unknowable — manual review as well.
+    // A further next-year transfer beside a complete one is a possible
+    // duplicate (or another year's) — also manual review, never "closed".
     const remainderIsSafe = offDateCandidates.length === 0 && malformedTransferJournals.length === 0 && Math.abs(remainder) >= 0.01 && Math.sign(remainder) === Math.sign(expectedTransfer) &&
       Math.abs(remainder) <= Math.abs(expectedTransfer) + 0.005;
     transferState = offDateAmbiguous ? "ambiguous" : "mismatch";
@@ -838,7 +841,7 @@ async function analyzeYearEndClose(
     } else {
       blockedEntries.push({
         document_number: transferDocumentNumber,
-        reason: `The existing ${year} transfer (${describeJournals(found)}) exceeds or reverses the result to transfer (${expectedTransfer} EUR).`,
+        reason: `The existing ${year} transfer (${describeJournals(found)}) exceeds, reverses or duplicates the result to transfer (${expectedTransfer} EUR).`,
         resolution: "manual_review",
       });
     }
