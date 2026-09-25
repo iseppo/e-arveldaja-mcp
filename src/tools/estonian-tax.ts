@@ -38,7 +38,7 @@ import {
   resolveCalculatedResultAccount,
 } from "../account-resolution.js";
 import { isYearEndClosingJournal, isYearEndResultEntry } from "../year-end-closing-journal.js";
-import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
+import type { Account, ApiResponse, Journal, Posting, SaleInvoice } from "../types/api.js";
 import {
   getCurrentYearProfitAccountRule,
   getDefaultOwnerExpenseVatDeductionMode,
@@ -437,6 +437,32 @@ export async function computeOwnerExpenseJournalProjection(
 // the byte-identical display payload create_owner_expense_reimbursement has
 // always returned. The projection is the single source of truth, so prepare's
 // preview, the plan fingerprint, and this booked journal cannot diverge.
+// A retried owner-expense booking must not book the same receipt twice: a live
+// journal with the same document number, owner, date and owner-payable total is
+// that booking. Only document-numbered receipts have a key (two identical
+// undocumented expenses on one day can be legitimate). Reads the ledger
+// uncached, like the other live duplicate checks.
+async function findExistingOwnerExpenseJournal(
+  api: ApiContext,
+  p: OwnerExpenseJournalProjection,
+): Promise<number | undefined> {
+  if (p.document_number === null) return undefined;
+  api.journals.invalidateListCache();
+  const candidates = (await api.journals.listAll()).filter(j =>
+    j.id != null && j.is_deleted !== true &&
+    j.document_number === p.document_number &&
+    j.clients_id === p.owner_client_id &&
+    j.effective_date === p.journal_date);
+  for (const candidate of candidates) {
+    const postings = candidate.postings?.length ? candidate.postings : (await api.journals.get(candidate.id!))?.postings ?? [];
+    const credited = roundMoney(postings
+      .filter(posting => !posting.is_deleted && posting.type === "C")
+      .reduce((sum, posting) => sum + (posting.base_amount ?? posting.amount), 0));
+    if (credited === p.total) return candidate.id!;
+  }
+  return undefined;
+}
+
 export async function bookOwnerExpenseFromProjection(
   api: ApiContext,
   projection: OwnerExpenseJournalProjection,
@@ -444,15 +470,18 @@ export async function bookOwnerExpenseFromProjection(
 ): Promise<CallToolResult> {
   const p = projection;
   const apiPostings = p.postings.map(posting => ({ accounts_id: posting.account_id, type: posting.side, amount: posting.amount }));
-  const result = await api.journals.create({
-    title: p.title,
-    effective_date: p.journal_date,
-    clients_id: p.owner_client_id,
-    cl_currencies_id: "EUR",
-    document_number: p.document_number ?? undefined,
-    postings: apiPostings,
-  });
-  logAudit({
+  const existingId = await findExistingOwnerExpenseJournal(api, p);
+  const result: ApiResponse = existingId !== undefined
+    ? { code: 200, messages: [`Existing owner-expense journal ${existingId} reused.`], created_object_id: existingId }
+    : await api.journals.create({
+        title: p.title,
+        effective_date: p.journal_date,
+        clients_id: p.owner_client_id,
+        cl_currencies_id: "EUR",
+        document_number: p.document_number ?? undefined,
+        postings: apiPostings,
+      });
+  if (existingId === undefined) logAudit({
     tool: "create_owner_expense_reimbursement", action: "CREATED", entity_type: "journal",
     entity_id: result.created_object_id,
     summary: `Owner expense: ${p.title}, total ${p.total} EUR`,
@@ -489,13 +518,16 @@ export async function bookOwnerExpenseFromProjection(
         },
         journal_entry: {
           api_response: result,
+          ...(existingId !== undefined ? { booking_status: "duplicate" } : {}),
           postings: p.postings.map(posting => ({
             account: posting.account_id,
             type: posting.side,
             amount: posting.amount,
           })),
         },
-        note: p.vat_registered
+        note: existingId !== undefined
+          ? `An owner-expense journal ${existingId} with the same document number, owner, date and total already exists — no new journal was created.`
+          : p.vat_registered
           ? `Expense booked. Owner debt increased by ${p.total} EUR on account ${p.payable_account}.`
           : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${p.expense_account}. Owner debt increased by ${p.total} EUR on account ${p.payable_account}.`,
         ...(suggestions.length > 0 ? { suggestions } : {}),

@@ -15,6 +15,14 @@ export interface WorkflowActionV2NextAction {
   tool: string;
   args: Record<string, unknown>;
   approval_required: boolean;
+  // Present when the next step is answering a question (a tool-less v1 action):
+  // the caller asks the user, then reruns the tool named above with the answer
+  // in `answer_input` (when the question maps to a known input). No continuation
+  // call consumes a free-text answer.
+  question?: string;
+  recommendation?: string;
+  answer_input?: string;
+  instruction?: string;
 }
 export interface WorkflowActionV2Blocker {
   item_id: string;
@@ -32,7 +40,8 @@ export interface WorkflowActionV2 {
   contract: "workflow_action_v2";
   status: WorkflowStateStatus;
   message: string;
-  next_action: WorkflowActionV2NextAction;
+  // Absent when the workflow is completed (v1 kind "done"): nothing is pending.
+  next_action?: WorkflowActionV2NextAction;
   alternative_action_count: number;
   blockers: WorkflowActionV2Blocker[];
   // Present ONLY when the response carries pageable detail state. An item-less
@@ -46,6 +55,16 @@ export interface BuildWorkflowActionV2Options {
   readonly workflow?: string;
   readonly items?: readonly PublicWorkflowStateDetail[];
   readonly message?: string;
+  /**
+   * How a tool-less question is answered: rerun `tool` with `args` plus the
+   * answer in the input `inputs[question item id]`. Defaults to rerunning
+   * accounting_inbox with no carried args.
+   */
+  readonly questionRerun?: {
+    readonly tool: string;
+    readonly args: Record<string, unknown>;
+    readonly inputs?: Readonly<Record<string, string>>;
+  };
 }
 
 // The v1 envelope has no explicit status: derive the compact workflow-state
@@ -64,7 +83,47 @@ function deriveStatus(envelope: WorkflowEnvelope): WorkflowStateStatus {
   }
 }
 
-function nextActionFrom(action: WorkflowAction | undefined): WorkflowActionV2NextAction {
+const QUESTION_RERUN_TOOL = "accounting_inbox" as const;
+
+// The input a tool-less question is answered through: the needs_decision row
+// that carries the question names it by its item id.
+function answerInputFor(
+  question: string | undefined,
+  needsDecision: unknown[],
+  inputs: Readonly<Record<string, string>> | undefined,
+): string | undefined {
+  if (!question || !inputs) return undefined;
+  const row = needsDecision.find(item =>
+    isRecord(item) && (stringAt(item, "summary") ?? stringAt(item, "question")) === question);
+  const itemId = isRecord(row) ? stringAt(row, "item_id") ?? stringAt(row, "id") : undefined;
+  return itemId !== undefined && Object.hasOwn(inputs, itemId) ? inputs[itemId] : undefined;
+}
+
+function nextActionFrom(
+  action: WorkflowAction | undefined,
+  needsDecision: unknown[],
+  questionRerun: BuildWorkflowActionV2Options["questionRerun"],
+): WorkflowActionV2NextAction | undefined {
+  if (action?.kind === "done") return undefined;
+  if (action && (typeof action.tool !== "string" || action.tool.length === 0)) {
+    // A tool-less action (answer_question) is answered by asking the user and
+    // rerunning the originating tool with the answer — never the setup
+    // fallback, and never a continuation call that cannot consume the answer.
+    const question = action.question ?? action.label;
+    const answerInput = answerInputFor(question, needsDecision, questionRerun?.inputs);
+    const tool = questionRerun?.tool ?? QUESTION_RERUN_TOOL;
+    return {
+      tool,
+      args: { ...(questionRerun?.args ?? {}) },
+      approval_required: false,
+      ...(question ? { question } : {}),
+      ...(action.recommendation ? { recommendation: action.recommendation } : {}),
+      ...(answerInput !== undefined ? { answer_input: answerInput } : {}),
+      instruction: answerInput !== undefined
+        ? `Ask the user this question, then call ${tool} with these args plus ${answerInput} set to the answer.`
+        : `Ask the user this question, then call ${tool} again with the supplied input.`,
+    };
+  }
   const projected = projectActionForCurrentProfile({
     tool: typeof action?.tool === "string" ? action.tool : "",
     args: action?.args ?? {},
@@ -97,6 +156,17 @@ function blockerFrom(item: unknown): WorkflowActionV2Blocker {
     code: stringAt(record, "code") ?? "review_required",
     message: stringAt(record, "message") ?? stringAt(record, "summary") ?? "A review item needs accounting judgement before execution.",
     severity: severity === "warning" ? "warning" : "blocker",
+  };
+}
+
+// An unanswered needs_decision row blocks the workflow as missing input.
+function inputBlockerFrom(item: unknown): WorkflowActionV2Blocker {
+  const record = isRecord(item) ? item : {};
+  return {
+    item_id: stringAt(record, "item_id") ?? stringAt(record, "id") ?? "",
+    code: "needs_input",
+    message: stringAt(record, "summary") ?? stringAt(record, "question") ?? stringAt(record, "message") ?? "A workflow question needs an answer before the next step.",
+    severity: "blocker",
   };
 }
 
@@ -138,10 +208,14 @@ export function buildWorkflowActionV2(
     contract: "workflow_action_v2",
     status,
     message: options.message ?? stringAt(record, "summary") ?? "",
-    next_action: nextActionFrom(envelope.recommended_next_action),
     alternative_action_count: Math.max(0, availableActions.length - 1),
-    blockers: arrayAt(record, "needs_review").map(blockerFrom),
+    blockers: [
+      ...arrayAt(record, "needs_review").map(blockerFrom),
+      ...arrayAt(record, "needs_decision").map(inputBlockerFrom),
+    ],
   };
+  const nextAction = nextActionFrom(envelope.recommended_next_action, arrayAt(record, "needs_decision"), options.questionRerun);
+  if (nextAction !== undefined) v2.next_action = nextAction;
   if (workflowHandle !== undefined) {
     v2.workflow_handle = workflowHandle;
     const visible = isToolVisibleForProfile(WORKFLOW_PAGE_TOOL, currentToolProfile());

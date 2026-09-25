@@ -113,6 +113,27 @@ describe("renderWiseImportCompact", () => {
     expect(sample.reference).toMatch(/UNTRUSTED_OCR_START/);
   });
 
+  it("surfaces advisory invoice FX corrections as warnings (never applied, never dropped)", () => {
+    const data = makeData(1);
+    const advisory = {
+      row_index: 0, wise_id: "WISE-0", date: "2026-02-01", supplier_name: "Vendor 0 OÜ",
+      target_amount: 20, target_currency: "USD", source_amount_eur: 17.07, wise_currency_rate: 0.8535,
+      invoice_id: 700, invoice_number: "USD-700", invoice_currency: "USD", invoice_gross: 20,
+      category: "foreign_currency_lock" as const,
+      proposed_action: "Advisory, not applied: lock invoice USD-700 to Wise rate: base_gross_price 17.10 → 17.07 EUR, currency_rate → 0.8535.",
+      proposed_correction: { currency_rate: 0.8535, base_gross_price: 17.07 },
+      current_object_state: {} as never,
+    };
+    data.invoiceFixCandidates = [
+      { ...advisory, result: "advisory" },
+      { ...advisory, invoice_id: 701, result: "ambiguous_skipped" },
+    ];
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.warnings).toEqual([
+      { item_id: "WISE-0", code: "wise_invoice_currency_advisory", message: advisory.proposed_action },
+    ]);
+  });
+
   it("carries the statement identity: Wise dimension account + OCR-wrapped source file", () => {
     const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(50) });
     const scope = summary.scope as Record<string, unknown>;

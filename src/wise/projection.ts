@@ -6,11 +6,12 @@ import {
 import type { AccountDimension, Journal, PurchaseInvoice, Transaction } from "../types/api.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { PlanData } from "../plan-store.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import { roundMoney, roundTo } from "../money.js";
-import { buildInterAccountJournalIndex, findMatchingJournal } from "../tools/inter-account-utils.js";
+import type { BookingGuard } from "../booking-guard.js";
 import { canonicalRefNumber } from "../ref-number.js";
-import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
+import { TRANSACTION_DESCRIPTION_MAX_LENGTH, weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
 import {
   bookedAmountForWiseRow,
@@ -239,18 +240,6 @@ export function projectWiseCommand(command: WiseImportCommand): Record<string, u
         client_update: command.client_update,
         confirmation_distribution: command.confirmation_distribution,
       };
-    case "purchase_invoice_update":
-      return {
-        ...common,
-        existing_object_id: command.existing_object_id,
-        category: command.category,
-        update_payload: command.category === "foreign_currency_lock"
-          ? {
-              currency_rate: command.update_payload.currency_rate,
-              base_gross_price: command.update_payload.base_gross_price,
-            }
-          : { gross_price: command.update_payload.gross_price },
-      };
   }
 }
 
@@ -266,7 +255,6 @@ export const WISE_PLAN_COMMAND_CATEGORY: Readonly<Record<WiseImportCommand["acti
   main_create: "wise_main_create",
   fee_create_and_confirm: "wise_fee_create_and_confirm",
   inter_account: "wise_inter_account",
-  purchase_invoice_update: "wise_purchase_invoice_update",
 });
 
 /** Stable, position-derived plan-command id. Deterministic across dry run and
@@ -308,6 +296,11 @@ export interface WiseProjectionInput {
   readonly transferDecisions: Map<WiseRow, WiseTransferDecision>;
   readonly postingDimensionsSnapshot: Map<number, AccountDimension>;
   readonly journalSnapshot: Journal[];
+  /** Lane B guard over `journalSnapshot`, built fresh per projection pass
+   * (resolution consumes matched ref-less journals). */
+  readonly createInterAccountGuard: (ownDimensionIds: Set<number>) => BookingGuard;
+  /** Exact Wise IDs the operator passed in confirm_own_transfer_ids. */
+  readonly approvedTransferIds: ReadonlySet<string>;
   readonly ownCompanyClientId: number | undefined;
   readonly ownCompanyClientMatches: unknown;
   readonly allPurchaseInvoices: PurchaseInvoice[];
@@ -320,7 +313,20 @@ export interface WiseProjectionOutput {
   mainCommandKeysByRow: Map<number, string>;
   ownershipReviews: WiseTransferReview[];
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
+  /** True when a fee row still needs booking but the fee dimension / Wise
+   * client were not supplied: resolve them and project again. */
+  feeResolutionRequired: boolean;
 }
+
+// Transactions.bank_account_name maxLength in the e-arveldaja API.
+const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
+
+const WISE_TRANSFER_CROSS_CURRENCY_REASON =
+  "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
+const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
+  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
+const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
+  "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_inter_account_transfers.";
 
 export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionOutput {
   const {
@@ -333,6 +339,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     transferDecisions,
     postingDimensionsSnapshot,
     journalSnapshot,
+    createInterAccountGuard,
+    approvedTransferIds,
     ownCompanyClientId,
     ownCompanyClientMatches,
     allPurchaseInvoices,
@@ -382,6 +390,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const skipped: WiseSkippedEntry[] = [];
   const commands: WiseImportCommand[] = [];
   const mainCommandKeysByRow = new Map<number, string>();
+  const alreadyImportedApprovalReviews: WiseTransferReview[] = [];
+  let feeResolutionRequired = false;
 
   for (let i = 0; i < eligible.length; i++) {
     const row = eligible[i]!;
@@ -396,29 +406,69 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const fee = bookedFeeAmountForWiseRow(row);
     const transactionCurrency = bookedCurrencyForWiseRow(row);
     const wiseIdTag = `WISE:${row.id}`;
+    // The WISE:{id} tag is the dedup identity and the source-direction marker is
+    // mandatory, so neither is ever truncated: a row whose main (or fee)
+    // description cannot fit them within the description cap is not booked.
+    if (
+      withWiseSourceDirection(wiseIdTag, sourceDirection).length > TRANSACTION_DESCRIPTION_MAX_LENGTH ||
+      (fee > 0 && withWiseSourceDirection(`WISE:FEE:${row.id} Wise teenustasu`, "OUT").length > TRANSACTION_DESCRIPTION_MAX_LENGTH)
+    ) {
+      skipped.push({
+        wise_id: row.id,
+        reason: `Wise ID is too long (${row.id.length} characters) for its WISE: identity tag and source-direction marker to fit the ${TRANSACTION_DESCRIPTION_MAX_LENGTH}-character transaction description; book this row manually.`,
+      });
+      continue;
+    }
     const counterpartyName = counterpartyNameForWiseRow(row);
     const oppositeSide = oppositeSideForWiseRow(row);
 
     // Build description
-    let desc = wiseIdTag;
-    if (counterpartyName) desc += ` ${counterpartyName}`;
-    if (row.category && row.category !== "General") desc += ` (${row.category})`;
+    const narrativeParts: string[] = [];
+    if (counterpartyName) narrativeParts.push(counterpartyName);
+    if (row.category && row.category !== "General") narrativeParts.push(`(${row.category})`);
     if (oppositeSide.currency !== transactionCurrency) {
-      desc += ` [${oppositeSide.amount} ${oppositeSide.currency} @ ${row.exchangeRate}]`;
+      narrativeParts.push(`[${oppositeSide.amount} ${oppositeSide.currency} @ ${row.exchangeRate}]`);
     }
-    desc = withWiseSourceDirection(desc, sourceDirection);
-    const legacyDesc = stripWisePrefix(desc);
+    const narrative = narrativeParts.join(" ");
+    const uncappedDesc = withWiseSourceDirection(narrative ? `${wiseIdTag} ${narrative}` : wiseIdTag, sourceDirection);
+    // Transactions.description maxLength is 150: trim only the narrative so the
+    // WISE:{id} identity prefix and the trailing [source_direction=…] marker
+    // always survive (mirrors CAMT's metadata-marker budget).
+    const narrativeBudget = TRANSACTION_DESCRIPTION_MAX_LENGTH - withWiseSourceDirection(wiseIdTag, sourceDirection).length - 1;
+    const cappedNarrative = narrative.length > narrativeBudget
+      ? narrative.slice(0, Math.max(0, narrativeBudget)).trimEnd()
+      : narrative;
+    const desc = withWiseSourceDirection(cappedNarrative ? `${wiseIdTag} ${cappedNarrative}` : wiseIdTag, sourceDirection);
+    const bankAccountName = counterpartyName?.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH);
+    // Two signature forms per name: the legacy uncapped one (rows imported
+    // before the caps) and the exact stored form — capped name, the description
+    // as createBankTransaction stores it (full over-cap ref woven in when it
+    // fits) and the capped ref — so the stored row re-hashes identically.
+    const canonicalRef = canonicalRefNumber(row.reference || undefined);
+    const storedDesc = canonicalRef.truncated && canonicalRef.full
+      ? weaveFullRefIntoDescription(desc, canonicalRef.full)
+      : desc;
     const mainSignatureCandidates = new Set(
       [counterpartyName, row.targetName || undefined, row.sourceName || undefined]
         .filter((name): name is string => Boolean(name))
-        .map((name) => buildWiseTransactionSignature(
-          date,
-          amount,
-          transactionCurrency,
-          name,
-          row.reference || undefined,
-          legacyDesc,
-        ))
+        .flatMap((name) => [
+          buildWiseTransactionSignature(
+            date,
+            amount,
+            transactionCurrency,
+            name,
+            row.reference || undefined,
+            stripWisePrefix(uncappedDesc),
+          ),
+          buildWiseTransactionSignature(
+            date,
+            amount,
+            transactionCurrency,
+            name.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH),
+            canonicalRef.value,
+            stripWisePrefix(storedDesc),
+          ),
+        ])
     );
     const mainAlreadyImported = seenWiseIds.has(wiseIdTag) ||
       [...mainSignatureCandidates].some(signature => alreadyStored(signature, sourceDirection));
@@ -431,6 +481,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ? "Already imported (Wise ID match)"
           : "Already imported (date/amount/counterparty/reference match)",
       });
+      if (approvedTransferIds.has(row.id)) {
+        const decision = transferDecisions.get(row);
+        alreadyImportedApprovalReviews.push({
+          wise_id: row.id,
+          code: "wise_transfer_already_imported",
+          reason: WISE_TRANSFER_ALREADY_IMPORTED_REASON,
+          source_verified: decision?.sourceVerified ?? false,
+          target_verified: decision?.targetVerified ?? false,
+          approval_required: false,
+        });
+      }
       mainAvailableForFee = true;
     } else {
       const createPayload: TransactionCreatePayload = {
@@ -440,7 +501,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         cl_currencies_id: transactionCurrency,
         date,
         description: desc,
-        bank_account_name: counterpartyName,
+        bank_account_name: bankAccountName,
         ref_number: row.reference || undefined,
       };
       commands.push({
@@ -524,8 +585,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
 
       const feeType = "C" as const; // Fees are always outgoing regardless of main transaction direction
 
+      // Resolved lazily by the caller: only a fee that survives dedup needs
+      // the fee dimension and the Wise client.
       if (!feeAccountDimensionsId || !wiseClientId) {
-        throw new Error("Wise fee planning requires resolved fee dimension and Wise client IDs");
+        feeResolutionRequired = true;
+        continue;
       }
       const confirmationDistribution = [
         buildAccountDistributionFromDimension(accountDimensions, feeAccountDimensionsId, fee),
@@ -585,6 +649,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const review = transferDecisions.get(entry.source_row)?.review;
     return review ? [review] : [];
   });
+  ownershipReviews.push(...alreadyImportedApprovalReviews);
 
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,
@@ -594,10 +659,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     for (const decision of approvedTransferDecisions) {
       if (decision.targetDimensionId !== undefined) ownDimensionIds.add(decision.targetDimensionId);
     }
-    const journalIndex = buildInterAccountJournalIndex(journalSnapshot, ownDimensionIds);
-    let simulatedJournalId = -1;
+    // Lane B, like reconcile_inter_account_transfers: ±1 day, labelled journals
+    // identity-only, a matched ref-less journal consumed. Planned rows are NOT
+    // recorded back: every row here is a Wise-side leg with a unique Wise ID,
+    // so two of them are never the two legs of one transfer.
+    const guard = createInterAccountGuard(ownDimensionIds);
 
-    for (const entry of created) {
+    for (const entry of [...created]) {
       const row = entry.source_row;
       if (!row || entry.status !== "would_create") continue;
       const decision = transferDecisions.get(row);
@@ -606,18 +674,65 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const targetDim = targetDimensionId === undefined
         ? undefined
         : postingDimensionsSnapshot.get(targetDimensionId);
-      if (!ownershipBasis || targetDimensionId === undefined || !targetDim?.id) continue;
+      if (!decision || !ownershipBasis || targetDimensionId === undefined || !targetDim?.id) continue;
 
-      const roundedAmount = roundMoney(entry.amount);
-      const key = `${accounts_dimensions_id}|${targetDimensionId}|${roundedAmount}|${entry.date}`;
-      const candidates = journalIndex.get(key);
-      const existingJournalId = findMatchingJournal(candidates, row.id);
+      const reviewFor = (code: WiseTransferReview["code"], reason: string): WiseTransferReview => ({
+        wise_id: row.id,
+        code,
+        reason,
+        source_verified: decision.sourceVerified,
+        target_verified: decision.targetVerified,
+        approval_required: false,
+      });
+      // Inter-account distribution amounts are base EUR (H10). A non-EUR or
+      // cross-currency row's booked nominal is not that amount, so it is left
+      // unconfirmed for reconcile_inter_account_transfers.
+      if (
+        bookedCurrencyForWiseRow(row) !== "EUR" ||
+        normalizeWiseCurrency(row.sourceCurrency) !== normalizeWiseCurrency(row.targetCurrency)
+      ) {
+        ownershipReviews.push(reviewFor("wise_transfer_cross_currency", WISE_TRANSFER_CROSS_CURRENCY_REASON));
+        continue;
+      }
+
+      const query = {
+        sourceDim: accounts_dimensions_id,
+        targetDim: targetDimensionId,
+        amount: entry.amount,
+        date: entry.date,
+        maxGapDays: 1,
+        reference: row.id,
+      };
+      const resolution = guard.resolveInterAccount(query);
+      if (
+        resolution.status === "ambiguous_refless" ||
+        (resolution.status === "none" && guard.hasOtherLabelledInterAccount(query))
+      ) {
+        ownershipReviews.push(reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON));
+        continue;
+      }
+      const existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
       const existingJournal = existingJournalId === undefined
         ? undefined
         : journalSnapshot.find(journal => journal.id === existingJournalId);
-      if (existingJournalId !== undefined && candidates) {
-        const consumed = candidates.find(candidate => candidate.journal_id === existingJournalId);
-        if (consumed && !(consumed.document_number ?? "").trim()) consumed.consumed = true;
+
+      let dependsOn = mainCommandKeysByRow.get(row.rowIndex) ?? null;
+      if (existingJournalId !== undefined) {
+        // The journal already books this transfer: creating the Wise row would
+        // only leave a PROJECT duplicate of it. Drop the row (its fee, a
+        // separate cash movement, still books) and report it as journalized.
+        const mainIndex = commands.findIndex(command => command.row_key === dependsOn);
+        if (mainIndex >= 0) commands.splice(mainIndex, 1);
+        for (const command of commands) {
+          if (command.depends_on === dependsOn) command.depends_on = null;
+        }
+        mainCommandKeysByRow.delete(row.rowIndex);
+        created.splice(created.indexOf(entry), 1);
+        skipped.push({
+          wise_id: row.id,
+          reason: `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
+        });
+        dependsOn = null;
       }
 
       const direction = sourceDirectionForWiseDirection(row.direction)!;
@@ -652,7 +767,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         exchange_rate: row.exchangeRate,
         exchange_rate_orientation: "source_to_target",
         wise_dimension_id: accounts_dimensions_id,
-        depends_on: mainCommandKeysByRow.get(row.rowIndex) ?? null,
+        depends_on: dependsOn,
         counterpart_dimension_id: targetDimensionId,
         flow_source_dimension_id: direction === "IN" ? targetDimensionId : accounts_dimensions_id,
         flow_target_dimension_id: direction === "IN" ? accounts_dimensions_id : targetDimensionId,
@@ -667,25 +782,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         current_journal_state: existingJournal ?? null,
         current_client_state: ownCompanyClientMatches,
       });
-
-      if (existingJournalId === undefined) {
-        const simulated = {
-          journal_id: simulatedJournalId--,
-          document_number: row.id,
-          origin: "in_run" as const,
-        };
-        const reverseKey = `${targetDimensionId}|${accounts_dimensions_id}|${roundedAmount}|${entry.date}`;
-        for (const indexKey of [key, reverseKey]) {
-          const indexed = journalIndex.get(indexKey);
-          if (indexed) indexed.push(simulated);
-          else journalIndex.set(indexKey, [simulated]);
-        }
-      }
     }
   }
 
   // --- Post-import: scan eligible payment rows for unpaid purchase invoices
-  // that should be repriced to Wise's actual EUR conversion.
+  // that could be repriced to Wise's actual EUR conversion. ADVISORY ONLY: the
+  // invoices are CONFIRMED, so the import never modifies them — it reports the
+  // proposed correction for the operator to apply deliberately.
   const invoiceFixCandidates: WiseInvoiceFixCandidate[] = [];
 
   const paymentRows = eligible.filter(r => sourceDirectionForWiseDirection(r.direction) === "OUT" && bookedAmountForWiseRow(r) > 0);
@@ -742,13 +845,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           source_amount_eur: sourceAmount,
           wise_currency_rate: wiseRate,
           invoice_id: inv.id!,
-          invoice_number: inv.number,
+          invoice_number: wrapUntrustedOcr(inv.number) ?? inv.number,
           invoice_currency: invCurrency,
           invoice_gross: invGross,
           current_base_gross: currentBaseGross,
           current_currency_rate: currentRate,
           category: "foreign_currency_lock",
-          proposed_action: `Lock invoice ${inv.number} to Wise rate: base_gross_price ${(currentBaseGross ?? 0).toFixed(2)} → ${proposedBaseGross.toFixed(2)} EUR, currency_rate → ${wiseRate}.`,
+          proposed_action: `Advisory, not applied: lock invoice ${wrapUntrustedOcr(inv.number) ?? ""} to Wise rate: base_gross_price ${(currentBaseGross ?? 0).toFixed(2)} → ${proposedBaseGross.toFixed(2)} EUR, currency_rate → ${wiseRate}.`,
+          proposed_correction: { currency_rate: wiseRate, base_gross_price: proposedBaseGross },
           current_object_state: inv,
         });
       } else {
@@ -772,13 +876,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
             source_amount_eur: sourceAmount,
             wise_currency_rate: 1,
             invoice_id: inv.id!,
-            invoice_number: inv.number,
+            invoice_number: wrapUntrustedOcr(inv.number) ?? inv.number,
             invoice_currency: invCurrency,
             invoice_gross: invGross,
             current_base_gross: inv.base_gross_price ?? undefined,
             current_currency_rate: inv.currency_rate ?? undefined,
             category: "eur_legacy_autofix",
-            proposed_action: `Auto-fix legacy EUR booking ${inv.number}: gross_price ${invGross.toFixed(2)} → ${sourceAmount.toFixed(2)} EUR (Wise actual settlement, diff ${eurDiff.toFixed(2)}).`,
+            proposed_action: `Advisory, not applied: legacy EUR booking ${wrapUntrustedOcr(inv.number) ?? ""}: gross_price ${invGross.toFixed(2)} → ${sourceAmount.toFixed(2)} EUR (Wise actual settlement, diff ${eurDiff.toFixed(2)}).`,
+            proposed_correction: { gross_price: roundMoney(sourceAmount) },
             current_object_state: inv,
           });
         }
@@ -801,48 +906,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   }
 
   for (const fix of invoiceFixCandidates) {
-    if (fix.result === "ambiguous_skipped") continue;
-    const row = eligible.find(candidate => candidate.rowIndex === fix.row_index);
-    if (!row) continue;
-    const type = transactionTypeForWiseDirection(row.direction);
-    if (!type) continue;
-    const updatePayload: Partial<PurchaseInvoice> = fix.category === "foreign_currency_lock"
-      ? {
-          currency_rate: fix.wise_currency_rate,
-          base_gross_price: roundMoney(fix.source_amount_eur),
-        }
-      : { gross_price: roundMoney(fix.source_amount_eur) };
-    commands.push({
-      version: WISE_COMMAND_VERSION,
-      action: "purchase_invoice_update",
-      mutation_mode: "update_existing",
-      row_index: row.rowIndex,
-      row_key: `row:${row.rowIndex}:invoice:${fix.invoice_id}`,
-      identity_hash: commandIdentity(row, `invoice:${fix.invoice_id}`),
-      wise_id: row.id,
-      date: fix.date,
-      transaction_type: type,
-      source_direction: sourceDirectionForWiseDirection(row.direction)!,
-      booked_amount: bookedAmountForWiseRow(row),
-      booked_currency: bookedCurrencyForWiseRow(row),
-      source_amount: row.sourceAmount,
-      source_currency: normalizeWiseCurrency(row.sourceCurrency),
-      target_amount: row.targetAmount,
-      target_currency: normalizeWiseCurrency(row.targetCurrency),
-      exchange_rate: row.exchangeRate,
-      exchange_rate_orientation: "source_to_target",
-      wise_dimension_id: accounts_dimensions_id,
-      depends_on: mainCommandKeysByRow.get(row.rowIndex) ?? null,
-      existing_object_id: fix.invoice_id,
-      update_payload: updatePayload,
-      category: fix.category,
-      current_object_state: fix.current_object_state,
-    });
+    if (fix.result !== "ambiguous_skipped") fix.result = "advisory";
   }
 
-  for (const fix of invoiceFixCandidates) {
-    if (fix.result !== "ambiguous_skipped") fix.result = "would_update";
-  }
-
-  return { commands, created, skipped, mainCommandKeysByRow, ownershipReviews, invoiceFixCandidates };
+  return {
+    commands,
+    created,
+    skipped,
+    mainCommandKeysByRow,
+    ownershipReviews,
+    invoiceFixCandidates,
+    feeResolutionRequired,
+  };
 }

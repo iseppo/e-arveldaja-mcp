@@ -33,18 +33,25 @@ import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
-import { validateAccounts } from "../account-validation.js";
+import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
+import { HttpError } from "../http-client.js";
 import { toolError } from "../tool-error.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT } from "../accounting-defaults.js";
 import {
+  resolveAccountByName,
   resolveSecuritiesIncomeAccount,
   resolveSecuritiesExpenseAccount,
   resolveOtherFinancialIncomeAccount,
 } from "../account-resolution.js";
 import { BookingGuard } from "../booking-guard.js";
-import type { Journal } from "../types/api.js";
+import type { Account, Journal } from "../types/api.js";
 
 const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
+
+// Standard-chart fallbacks for Lightyear Interest ("Intressitulu hoiustelt") and
+// fund Distribution ("Tulu fondiosakute ümberhindlusest") rows; name-resolved first.
+const DEFAULT_INTEREST_INCOME_ACCOUNT = 8400;
+const DEFAULT_FUND_DISTRIBUTION_ACCOUNT = 8320;
 
 // Known Lightyear cash-sweep / cash-equivalent instruments. Lightyear's capital
 // gains report does not cover these, so we book buy/sell only for EUR-denominated
@@ -101,6 +108,8 @@ export type FxReviewCode =
   | "trade_fee_unresolved"
   | "distribution_currency_missing"
   | "distribution_amount_conflict"
+  | "invalid_date"
+  | "reference_conflict"
   | "portfolio_arithmetic_overflow";
 
 export interface FxReviewReason {
@@ -126,6 +135,8 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   trade_fee_unresolved: "The foreign-currency trade fee has no proven EUR conversion.",
   distribution_currency_missing: "The distribution has no explicit source currency.",
   distribution_amount_conflict: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent.",
+  invalid_date: "The statement date is not a valid calendar day.",
+  reference_conflict: "Several statement rows share this reference with differing content; none is booked automatically.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
 };
 
@@ -528,6 +539,18 @@ export function tradeFeeInEur(trade: {
   return Number.isFinite(convertedFee) ? roundMoney(convertedFee) : null;
 }
 
+/**
+ * A sell's EUR consideration — the basis of Lightyear's `Proceeds (EUR)`. For a
+ * EUR sell `eur_amount` is the gross, which IS the consideration; for an FX sell
+ * it is the euros that arrived, already net of the trade fee and the FX fee, so
+ * both are added back (an unresolved trade fee counts as zero here and is
+ * flagged separately by `trade_fee_unresolved`).
+ */
+function sellConsiderationEur(trade: InvestmentTrade): number {
+  if (normalizedCurrency(trade.ccy) === "EUR") return trade.eur_amount;
+  return trade.eur_amount + trade.fx_fee_eur + (tradeFeeInEur(trade) ?? 0);
+}
+
 export type TradeIntrinsicReadiness =
   | { kind: "ready"; converted_trade_fee_eur: number }
   | { kind: "review_required"; reason: FxReviewReason };
@@ -704,11 +727,16 @@ function reviewRequiredTradeDto(trade: InvestmentTrade, reason: FxReviewReason):
 function getStatementRowCashDelta(row: AccountStatementRow): { currency: string; amount: number } | null {
   if (!row.ccy) return null;
 
+  // Net = Gross − Fee in both directions, so the cash that LEAVES the balance is
+  // the gross (a buy; a conversion's source leg) and the cash that ARRIVES is the
+  // net (a sell; a conversion's receiving leg).
   switch (row.type) {
     case "Buy":
-      return { currency: row.ccy, amount: -Math.abs(row.net_amount || row.gross_amount) };
+      return { currency: row.ccy, amount: -Math.abs(row.gross_amount || row.net_amount) };
     case "Sell":
       return { currency: row.ccy, amount: Math.abs(row.net_amount || row.gross_amount) };
+    case "Conversion":
+      return { currency: row.ccy, amount: row.net_amount < 0 ? -Math.abs(row.gross_amount || row.net_amount) : row.net_amount };
     default:
       return { currency: row.ccy, amount: row.net_amount };
   }
@@ -965,7 +993,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 
     const trade: InvestmentTrade = {
       row_index: row.row_index,
-      date: parseLightyearDate(row.date),
+      date: statementDay(row.date) ?? parseLightyearDate(row.date),
       datetime: row.date,
       reference: row.reference,
       ticker: row.ticker,
@@ -1708,7 +1736,7 @@ function extractDistributions(
   const conversions = conversionRowsByReference(rows);
   const distributions: LightyearDistribution[] = sourceRows.map(row => ({
     row_index: row.row_index,
-    date: parseLightyearDate(row.date),
+    date: statementDay(row.date) ?? parseLightyearDate(row.date),
     reference: row.reference,
     type: row.type,
     ticker: row.ticker,
@@ -1732,8 +1760,10 @@ function extractDistributions(
   const availableCandidates = new Map<LightyearDistribution, CappedReferenceMatch>();
   for (const distribution of distributions) {
     const source = sourceRowsByIndex.get(distribution.row_index)!;
-    const nominalFailure = nominalDistributionFailure(source, distribution.currency);
     const day = statementDay(source.date);
+    const nominalFailure = day === null
+      ? fxReason("invalid_date")
+      : nominalDistributionFailure(source, distribution.currency);
     const canProbe = day !== null && distribution.currency !== "" && distribution.currency !== "EUR" && isFinitePositive(distribution.net_amount);
     const raw = canProbe
       ? probeCappedReferences(rawCandidateIndex, day, distribution.currency, distribution.net_amount)
@@ -2007,6 +2037,7 @@ function matchSellsToCapitalGains(
   const consumedGains = new Set<number>();
 
   for (const sell of sells) {
+    const consideration = sellConsiderationEur(sell);
     const exactMatches: number[] = [];
     const tolerantMatches: number[] = [];
     const outsideMatches: number[] = [];
@@ -2020,9 +2051,9 @@ function matchSellsToCapitalGains(
       if (gain.ticker !== sell.ticker) continue;
       if (Math.abs(gain.quantity - sell.quantity) >= 0.000001) continue;
 
-      if (Math.abs(gain.proceeds_eur - sell.eur_amount) < 0.02) {
+      if (Math.abs(gain.proceeds_eur - consideration) < 0.02) {
         exactMatches.push(i);
-      } else if (withinProceedsTolerance(sell.eur_amount, gain.proceeds_eur)) {
+      } else if (withinProceedsTolerance(consideration, gain.proceeds_eur)) {
         tolerantMatches.push(i);
       } else {
         outsideMatches.push(i);
@@ -2037,7 +2068,7 @@ function matchSellsToCapitalGains(
       if (tolerantMatches.length === 1) {
         warnings.push(
           `Inexact FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}): ` +
-          `proceeds differ (sell ${sell.eur_amount} EUR vs gains ${gain.proceeds_eur} EUR, likely FX rounding). ` +
+          `proceeds differ (sell ${roundMoney(consideration)} EUR vs gains ${gain.proceeds_eur} EUR, likely FX rounding). ` +
           `Using date+ticker+qty match; verify cost basis.`
         );
       }
@@ -2053,7 +2084,7 @@ function matchSellsToCapitalGains(
     } else if (outsideMatches.length > 0) {
       warnings.push(
         `FIFO candidates for sell ${sell.reference} (${sell.ticker} x${sell.quantity} on ${sell.date}, ` +
-        `sell proceeds ${sell.eur_amount} EUR) are outside proceeds tolerance. ` +
+        `sell proceeds ${roundMoney(consideration)} EUR) are outside proceeds tolerance. ` +
         `Skipping — manual review is required before booking.`
       );
     }
@@ -2091,6 +2122,43 @@ interface LyPosting {
   accounts_dimensions_id?: number;
   type: "D" | "C";
   amount: number;
+}
+
+/**
+ * Run the journal API's dimension rules over every projected posting before a
+ * plan is issued or executed, so the dry run never promises `would_create` for a
+ * journal the API will reject. A dimensioned account with exactly one dimension
+ * is auto-filled in place (on both paths, before the fingerprint).
+ */
+async function validateProjectedPostings(
+  api: ApiContext,
+  accounts: Account[],
+  commands: ReadonlyArray<{ reference: string; postings: LyPosting[] }>,
+): Promise<string[]> {
+  if (commands.length === 0) return [];
+  const accountDimensions = await api.readonly.getAccountDimensions();
+  return commands.flatMap(command =>
+    validatePostingDimensions(command.postings, accounts, accountDimensions)
+      .map(message => `${wrapUntrustedOcr(command.reference) ?? ""}: ${message}`));
+}
+
+/**
+ * A 4xx client rejection of the journal create means nothing was written:
+ * report it as a failed command carrying the upstream detail (already
+ * sandbox-wrapped by the HTTP client) instead of letting the tracker classify
+ * the throw as `mutation_outcome_unknown`. A 5xx, 408 timeout, or network error
+ * may follow a saved journal, so it stays indeterminate (rethrown) to keep a
+ * retry from double-booking.
+ */
+function definitiveCreateRejection(
+  error: unknown,
+): { status: "failed"; upstream_detail?: string } | null {
+  if (!(error instanceof HttpError) || typeof error.status !== "number") return null;
+  if (error.status < 400 || error.status >= 500 || error.status === 408) return null;
+  return {
+    status: "failed",
+    ...(error.upstream_detail !== undefined ? { upstream_detail: error.upstream_detail } : {}),
+  };
 }
 
 function sourceIdentityRecord(snapshot: FileInputSnapshot): PlanRecord {
@@ -2152,6 +2220,7 @@ interface TradeResultRow {
   journal_id?: number;
   cost_basis?: number;
   gain_loss?: number;
+  lightyear_capital_gains_eur?: number;
   skip_reason?: string;
 }
 
@@ -2165,7 +2234,8 @@ interface TradeCommand {
   resultRow: TradeResultRow;
   auditSummary: string;
   auditDetails: Record<string, unknown>;
-  reviewProjection: PlanData;
+  /** Review fields without postings; see reviewProjectionWithPostings. */
+  reviewProjection: PlanRecord;
 }
 
 type PlannedTradeRow =
@@ -2203,19 +2273,48 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
     broker_account, broker_dimension_id, gainAccount, lossAccount, feeAccount,
   } = params;
 
-  const seenRefs = new Set<string>();
+  // Same-reference rows collapse only when their statement content is identical
+  // (a re-exported row); the kept row is the first one that is intrinsically
+  // ready, so a review-required copy never blocks a bookable one. Differing
+  // same-reference rows cannot share one `LY:{ref}` journal, so all go to review.
+  const warnings: string[] = [...params.seedWarnings];
+  const tradeContent = (t: InvestmentTrade) => JSON.stringify([
+    t.datetime, t.ticker, t.isin, t.type, t.quantity, t.ccy, t.price_per_share, t.gross_amount_ccy, t.fee_eur,
+  ]);
+  const byRef = new Map<string, InvestmentTrade[]>();
+  for (const t of trades) {
+    if (existingRefs.has(t.reference)) continue;
+    const group = byRef.get(t.reference) ?? [];
+    group.push(t);
+    byRef.set(t.reference, group);
+  }
+  // A date that is not a real calendar day (31/02/2026, a non-DD/MM/YYYY token)
+  // would otherwise flow verbatim into the journal's effective_date, so such a
+  // trade is routed to review (it still owns its paired conversion).
+  const bookingReadiness = (t: InvestmentTrade): TradeIntrinsicReadiness =>
+    statementDay(t.datetime) === null
+      ? { kind: "review_required", reason: fxReason("invalid_date") }
+      : classifyTradeIntrinsicReadiness(t);
+  const keptTrades = new Set<InvestmentTrade>();
+  const conflictedRefs = new Set<string>();
+  for (const [reference, group] of byRef) {
+    if (group.some(t => tradeContent(t) !== tradeContent(group[0]!))) {
+      conflictedRefs.add(reference);
+      warnings.push(fxReviewWarning(reference, fxReason("reference_conflict")));
+      continue;
+    }
+    keptTrades.add(group.find(t => bookingReadiness(t).kind === "ready") ?? group[0]!);
+  }
   const newTrades: InvestmentTrade[] = [];
   const duplicates: Array<{ reference: string; ticker: string; date: string }> = [];
   for (const t of trades) {
-    if (existingRefs.has(t.reference) || seenRefs.has(t.reference)) {
-      duplicates.push({ reference: t.reference, ticker: t.ticker, date: t.date });
-    } else {
-      seenRefs.add(t.reference);
+    if (keptTrades.has(t) || conflictedRefs.has(t.reference)) {
       newTrades.push(t);
+    } else {
+      duplicates.push({ reference: t.reference, ticker: t.ticker, date: t.date });
     }
   }
 
-  const warnings: string[] = [...params.seedWarnings];
   const planned: PlannedTradeRow[] = [];
   const commands: TradeCommand[] = [];
 
@@ -2223,7 +2322,14 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
   const investmentDim = investment_dimension_id ? { accounts_dimensions_id: investment_dimension_id } : {};
 
   for (const trade of newTrades) {
-    const readiness = classifyTradeIntrinsicReadiness(trade);
+    if (conflictedRefs.has(trade.reference)) {
+      planned.push({ kind: "result", row: {
+        reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
+        eur_amount: 0, status: "skipped", skip_reason: FX_REVIEW_MESSAGES.reference_conflict,
+      } });
+      continue;
+    }
+    const readiness = bookingReadiness(trade);
     if (readiness.kind === "review_required") {
       if (trade.fx_review_reason === null) {
         warnings.push(fxReviewWarning(trade.reference, readiness.reason, trade.conversion_ref ?? undefined));
@@ -2275,8 +2381,7 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
         reviewProjection: stripUndefinedDeep({
           reference: trade.reference, ticker: trade.ticker, type: "Buy", date: trade.date,
           eur_amount: trade.eur_amount,
-          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-        }),
+        }) as PlanRecord,
       });
       planned.push({ kind: "command", command: commands[commands.length - 1]! });
       continue;
@@ -2318,8 +2423,7 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
         reviewProjection: stripUndefinedDeep({
           reference: trade.reference, ticker: trade.ticker, type: "Sell", date: trade.date,
           eur_amount: proceeds, cost_basis: proceeds, gain_loss: 0,
-          postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-        }),
+        }) as PlanRecord,
       });
       planned.push({ kind: "command", command: commands[commands.length - 1]! });
       continue;
@@ -2334,24 +2438,29 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
       continue;
     }
 
+    // The broker account receives the cash the statement shows: a EUR sell's
+    // net (gross − trade fee), an FX sell's EUR conversion leg (already net of
+    // both fees). The fees are expensed, the investment account is relieved at
+    // Lightyear's FIFO cost basis, and the realised gain/loss is the balancing
+    // figure — so any FX-rate gap to Lightyear's own `Capital Gains (EUR)` lands
+    // in the gain rather than overstating or shorting the broker balance.
     const costBasis = roundMoney(gainEntry.cost_basis_eur);
-    const proceeds = roundMoney(gainEntry.proceeds_eur);
+    const cashEur = roundMoney(normalizedCurrency(trade.ccy) === "EUR" ? trade.eur_amount - tradeFeeEur : trade.eur_amount);
+    const proceeds = roundMoney(cashEur + tradeFeeEur + trade.fx_fee_eur);
     const gainLoss = roundMoney(proceeds - costBasis);
-    postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: proceeds });
+    postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: cashEur });
     postings.push({ accounts_id: investment_account, ...investmentDim, type: "C", amount: costBasis });
     if (gainLoss > 0) postings.push({ accounts_id: gainAccount, type: "C", amount: gainLoss });
     else if (gainLoss < 0) postings.push({ accounts_id: lossAccount, type: "D", amount: Math.abs(gainLoss) });
-    const sellFees = roundMoney(tradeFeeEur + trade.fx_fee_eur);
-    if (sellFees > 0) {
-      if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
-      if (tradeFeeEur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: tradeFeeEur });
-      postings.push({ accounts_id: broker_account, ...brokerDim, type: "C", amount: sellFees });
-    }
+    if (trade.fx_fee_eur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: trade.fx_fee_eur });
+    if (tradeFeeEur > 0) postings.push({ accounts_id: feeAccount, type: "D", amount: tradeFeeEur });
+    const lightyearGainLoss = roundMoney(gainEntry.capital_gains_eur);
     const fxInfo = trade.fx_rate ? ` (${trade.ccy} FX ${trade.fx_rate})` : "";
     const title = `Lightyear Sell: ${trade.quantity.toFixed(6)} ${trade.ticker}${fxInfo} kasum/kahjum ${gainLoss >= 0 ? "+" : ""}${gainLoss} EUR`;
     const resultRow: TradeResultRow = {
       reference: trade.reference, ticker: trade.ticker, type: trade.type, date: trade.date,
       eur_amount: proceeds, status: "would_create", cost_basis: costBasis, gain_loss: gainLoss,
+      ...(lightyearGainLoss !== gainLoss ? { lightyear_capital_gains_eur: lightyearGainLoss } : {}),
     };
     commands.push({
       reference: trade.reference, date: trade.date, ticker: trade.ticker, tradeType: "Sell",
@@ -2365,8 +2474,7 @@ function computeTradesProjection(params: TradesProjectionParams): TradesProjecti
       reviewProjection: stripUndefinedDeep({
         reference: trade.reference, ticker: trade.ticker, type: "Sell", date: trade.date,
         eur_amount: proceeds, cost_basis: costBasis, gain_loss: gainLoss,
-        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-      }),
+      }) as PlanRecord,
     });
     planned.push({ kind: "command", command: commands[commands.length - 1]! });
   }
@@ -2404,11 +2512,25 @@ function tradesFingerprint(projection: TradesProjection, normalizedArgs: PlanRec
   });
 }
 
+/**
+ * The approval view's postings are rendered from the command's postings AFTER
+ * validateProjectedPostings ran, so a dimension it auto-filled (and that the
+ * fingerprint covers) is shown to the reviewer too.
+ */
+function reviewProjectionWithPostings(command: { reviewProjection: PlanRecord; postings: LyPosting[] }): PlanData {
+  return stripUndefinedDeep({
+    ...command.reviewProjection,
+    postings: command.postings.map(p => ({
+      accounts_id: p.accounts_id, accounts_dimensions_id: p.accounts_dimensions_id, type: p.type, amount: p.amount,
+    })),
+  }) as PlanData;
+}
+
 function tradesReviewCommands(projection: TradesProjection): LightyearPlanReviewCommand[] {
   return projection.commands.map((command, index) => ({
     id: lightyearTradeCommandId(index),
     category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
-    reviewProjection: command.reviewProjection,
+    reviewProjection: reviewProjectionWithPostings(command),
   }));
 }
 
@@ -2421,7 +2543,8 @@ interface DistributionCommand {
   postings: LyPosting[];
   sourceFields: Record<string, unknown>;
   auditSummary: string;
-  reviewProjection: PlanData;
+  /** Review fields without postings; see reviewProjectionWithPostings. */
+  reviewProjection: PlanRecord;
 }
 
 interface DistributionsProjection {
@@ -2444,6 +2567,8 @@ interface DistributionsProjectionParams {
   broker_account: number;
   broker_dimension_id?: number;
   income_account: number;
+  interest_account: number;
+  fund_distribution_account: number;
   reward_account: number;
   tax_account?: number;
   fee_account: number;
@@ -2468,7 +2593,29 @@ function distributionSourceFields(distribution: LightyearDistribution): Record<s
 }
 
 function computeDistributionsProjection(params: DistributionsProjectionParams): DistributionsProjection {
-  const { distributions, existingRefs, broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account } = params;
+  const {
+    existingRefs, broker_account, broker_dimension_id, income_account, interest_account,
+    fund_distribution_account, reward_account, tax_account, fee_account,
+  } = params;
+  // Same-reference rows collapse only when their statement content is identical;
+  // differing same-reference rows cannot share one `LY:{ref}` journal, so every
+  // row of such a reference goes to manual review instead of first-row-wins.
+  const warnings: string[] = [...params.seedWarnings];
+  const distributionContent = (d: LightyearDistribution) => JSON.stringify([
+    d.date, d.type, d.ticker, d.isin, d.currency, d.gross_amount, d.fee, d.net_amount, d.tax_amount,
+  ]);
+  const firstContentByRef = new Map<string, string>();
+  const conflictedRefs = new Set<string>();
+  for (const d of params.distributions) {
+    if (existingRefs.has(d.reference)) continue;
+    const first = firstContentByRef.get(d.reference);
+    if (first === undefined) firstContentByRef.set(d.reference, distributionContent(d));
+    else if (first !== distributionContent(d)) conflictedRefs.add(d.reference);
+  }
+  const distributions = params.distributions.map(d => conflictedRefs.has(d.reference)
+    ? { ...d, fx_review_reason: fxReason("reference_conflict") }
+    : d);
+  for (const reference of conflictedRefs) warnings.push(distributionWarning(reference, fxReason("reference_conflict")));
   const bookable = distributions.filter(isBookableDistribution);
   const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution));
 
@@ -2505,8 +2652,11 @@ function computeDistributionsProjection(params: DistributionsProjectionParams): 
     if (netEur > 0) postings.push({ accounts_id: broker_account, ...brokerDim, type: "D", amount: netEur });
     if (taxEur > 0 && tax_account) postings.push({ accounts_id: tax_account, type: "D", amount: taxEur });
     if (feeEur > 0) postings.push({ accounts_id: fee_account, type: "D", amount: feeEur });
-    const isReward = dist.type === "Reward";
-    postings.push({ accounts_id: isReward ? reward_account : income_account, type: "C", amount: grossEur });
+    const creditAccount = dist.type === "Reward" ? reward_account
+      : dist.type === "Interest" ? interest_account
+        : dist.type === "Distribution" ? fund_distribution_account
+          : income_account;
+    postings.push({ accounts_id: creditAccount, type: "C", amount: grossEur });
     const title = dist.ticker
       ? `Lightyear tulu: ${dist.ticker} (${dist.isin})`
       : `Lightyear tulu: ${dist.type === "Reward" ? "boonus" : "intress"}`;
@@ -2520,8 +2670,7 @@ function computeDistributionsProjection(params: DistributionsProjectionParams): 
       reviewProjection: stripUndefinedDeep({
         reference: dist.reference, ticker: dist.ticker, isin: dist.isin, date: dist.date,
         currency: dist.currency, gross_eur: grossEur, net_eur: netEur, tax_eur: taxEur, fee_eur: feeEur,
-        postings: postings.map(p => ({ accounts_id: p.accounts_id, type: p.type, amount: p.amount })),
-      }),
+      }) as PlanRecord,
     });
   }
 
@@ -2530,7 +2679,7 @@ function computeDistributionsProjection(params: DistributionsProjectionParams): 
     reviewedInOrder: reviewed,
     distributionsInOrder: distributions,
     newSet, duplicates,
-    warnings: [...params.seedWarnings],
+    warnings,
     totalDistributions: distributions.length,
     bookableCount: bookable.length,
     reviewRequired: reviewed.length,
@@ -2558,7 +2707,7 @@ function distributionsReviewCommands(projection: DistributionsProjection): Light
   return projection.commands.map((command, index) => ({
     id: lightyearDistributionCommandId(index),
     category: LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
-    reviewProjection: command.reviewProjection,
+    reviewProjection: reviewProjectionWithPostings(command),
   }));
 }
 
@@ -2569,7 +2718,7 @@ interface TradesRenderInput {
   projection: TradesProjection;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
-  createdByIndex?: Map<number, { journal_id?: number; status: string }>;
+  createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
 }
 
 function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> {
@@ -2586,6 +2735,7 @@ function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> 
       ...row.command.resultRow,
       status,
       ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}),
+      ...(created?.upstream_detail !== undefined ? { upstream_detail: created.upstream_detail } : {}),
     });
   });
   const createdCount = results.filter(r => r.status === "created" || r.status === "would_create").length;
@@ -2624,7 +2774,7 @@ interface DistributionsRenderInput {
   projection: DistributionsProjection;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
-  createdByIndex?: Map<number, { journal_id?: number; status: string }>;
+  createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
 }
 
 function renderDistributionsPayload(input: DistributionsRenderInput): Record<string, unknown> {
@@ -2657,6 +2807,7 @@ function renderDistributionsPayload(input: DistributionsRenderInput): Record<str
       ...distributionSourceFields(dist),
       status: created?.status ?? "not_created",
       ...(created?.journal_id !== undefined ? { journal_id: created.journal_id } : {}),
+      ...(created?.upstream_detail !== undefined ? { upstream_detail: created.upstream_detail } : {}),
     }));
   }
 
@@ -3080,7 +3231,7 @@ export function registerLightyearTools(
         const projection = computeTradesProjection({
           trades, gainsMap, existingRefs,
           seedWarnings: [...extraction.warnings, ...gainsWarnings],
-          hasCapitalGainsFile: Boolean(capital_gains_file),
+          hasCapitalGainsFile: hasGainsFile,
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
           gainAccount, lossAccount, feeAccount,
         });
@@ -3089,6 +3240,8 @@ export function registerLightyearTools(
 
       if (isDryRun) {
         const { projection, sourceIdentities } = await buildTradesProjection();
+        const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+        if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
         const planHandleIssued = runtimeSafetyContext.planStore.issue(
           LIGHTYEAR_TRADES_PLAN_DOMAIN,
           buildLightyearExecutionPlanInput({
@@ -3155,13 +3308,15 @@ export function registerLightyearTools(
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
         return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
       }
+      const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+      if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
       const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
       if (typeof storedFingerprint !== "string" || storedFingerprint !== tradesFingerprint(projection, normalizedArgs)) {
         return planErrorResult("plan_drift", "The reviewed Lightyear trade plan no longer matches the current ledger and source.");
       }
 
       const guard = await BookingGuard.load(api);
-      const createdByIndex = new Map<number, { journal_id?: number; status: string }>();
+      const createdByIndex = new Map<number, { journal_id?: number; status: string; upstream_detail?: string }>();
       const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
         id: lightyearTradeCommandId(index),
         category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
@@ -3173,11 +3328,19 @@ export function registerLightyearTools(
             : { outcome: "ready" };
         },
         mutate: async () => {
-          const outcome = await guard.createJournalOnce(
-            { ns: "LY", id: command.reference },
-            { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
-            { confirm: false },
-          );
+          let outcome;
+          try {
+            outcome = await guard.createJournalOnce(
+              { ns: "LY", id: command.reference },
+              { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
+              { confirm: false },
+            );
+          } catch (error) {
+            const rejection = definitiveCreateRejection(error);
+            if (!rejection) throw error;
+            createdByIndex.set(index, rejection);
+            return { outcome: "failed", error_code: "journal_create_rejected", mutation_occurred: false };
+          }
           if (outcome.status === "duplicate") {
             createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
             return { outcome: "completed" };
@@ -3206,7 +3369,9 @@ export function registerLightyearTools(
       file_ref: z.string().optional().describe("Opaque Lightyear AccountStatement file reference."),
       broker_account: z.number().describe("Broker cash account (e.g. 1120 Lightyear konto)"),
       broker_dimension_id: z.number().optional().describe("Dimension ID for broker account (accounts_dimensions_id)"),
-      income_account: z.number().describe("Investment income account for the distribution. Dividends from directly-held shares → 8330 'Tulu aktsiatelt ja osadelt'; fund distributions → 8320; interest → 8400."),
+      income_account: z.number().describe("Income account for Dividend rows (dividends from directly-held shares → 8330 'Tulu aktsiatelt ja osadelt'). Fund Distribution rows use fund_distribution_account and Interest rows use interest_account."),
+      interest_account: z.number().optional().describe("Account for Interest rows (default: auto-detect 'Intressitulu hoiustelt', standard 8400)."),
+      fund_distribution_account: z.number().optional().describe("Account for fund Distribution rows (default: auto-detect 'Tulu fondiosakute ümberhindlusest', standard 8320)."),
       reward_account: z.number().optional().describe(`Account for platform rewards/bonuses (default: auto-detect 'Muud finantstulud', standard ${DEFAULT_OTHER_FINANCIAL_INCOME_ACCOUNT}). Rewards are broker fee/campaign income, not securities income.`),
       tax_account: z.number().optional().describe("Withheld tax receivable/expense account (for tax_amount from CSV)"),
       fee_account: z.number().optional().describe(`Platform fee expense account (default ${DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT} Muud finantskulud)`),
@@ -3214,7 +3379,7 @@ export function registerLightyearTools(
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for dry_run=false."),
     },
     { ...batch, openWorldHint: true, title: "Book Lightyear Distributions" },
-    async ({ file_path, file_ref, broker_account, broker_dimension_id, income_account, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run, plan_handle }) => {
+    async ({ file_path, file_ref, broker_account, broker_dimension_id, income_account, interest_account: interest_account_param, fund_distribution_account: fund_distribution_account_param, reward_account: reward_account_param, tax_account, fee_account: fee_account_param, dry_run, plan_handle }) => {
       const isDryRun = dry_run !== false;
       const fee_account = fee_account_param ?? DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT;
       const statementSource = fileInputSource(file_path, file_ref);
@@ -3223,6 +3388,8 @@ export function registerLightyearTools(
         broker_account,
         broker_dimension_id,
         income_account,
+        interest_account: interest_account_param,
+        fund_distribution_account: fund_distribution_account_param,
         reward_account: reward_account_param,
         tax_account,
         fee_account,
@@ -3269,17 +3436,23 @@ export function registerLightyearTools(
       const resolveAndValidateAccounts = (distributions: LightyearDistribution[], accounts: Awaited<ReturnType<typeof api.readonly.getAccounts>>) => {
         const bookable = distributions.filter(isBookableDistribution);
         const hasReward = bookable.some(distribution => distribution.type === "Reward");
+        const hasInterest = bookable.some(distribution => distribution.type === "Interest");
+        const hasFundDistribution = bookable.some(distribution => distribution.type === "Distribution");
         const needsTax = bookable.some(distribution => (distribution.tax_eur ?? 0) > 0);
         const needsFee = bookable.some(distribution => (distribution.fee_eur ?? 0) > 0);
         const reward_account = resolveOtherFinancialIncomeAccount(accounts, reward_account_param);
+        const interest_account = resolveAccountByName(accounts, /^intressitulu hoiustelt$/i, DEFAULT_INTEREST_INCOME_ACCOUNT, interest_account_param);
+        const fund_distribution_account = resolveAccountByName(accounts, /^tulu fondiosakute ümberhindlusest$/i, DEFAULT_FUND_DISTRIBUTION_ACCOUNT, fund_distribution_account_param);
         const errors = validateAccounts(accounts, [
           { id: broker_account, label: "Broker account" },
           { id: income_account, label: "Income account" },
+          ...((hasInterest || interest_account_param !== undefined) ? [{ id: interest_account, label: "Interest account" }] : []),
+          ...((hasFundDistribution || fund_distribution_account_param !== undefined) ? [{ id: fund_distribution_account, label: "Fund distribution account" }] : []),
           ...((hasReward || reward_account_param !== undefined) ? [{ id: reward_account, label: "Reward account" }] : []),
           ...(tax_account !== undefined ? [{ id: tax_account, label: "Tax account" }] : []),
           ...((needsFee || fee_account_param !== undefined) ? [{ id: fee_account, label: "Fee account" }] : []),
         ]);
-        return { reward_account, needsTax, errors };
+        return { reward_account, interest_account, fund_distribution_account, needsTax, errors };
       };
 
       if (isDryRun) {
@@ -3288,7 +3461,7 @@ export function registerLightyearTools(
           return zeroBookableResponse("DRY_RUN", distributions, warnings);
         }
         const accounts = await api.readonly.getAccounts();
-        const { reward_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
+        const { reward_account, interest_account, fund_distribution_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
         if (errors.length > 0) return toolError({ error: "Account validation failed", details: errors });
         if (!tax_account && needsTax) {
           return toolError({
@@ -3300,14 +3473,16 @@ export function registerLightyearTools(
         const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
         const projection = computeDistributionsProjection({
           distributions, existingRefs, seedWarnings: warnings,
-          broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account,
+          broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account,
         });
+        const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+        if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
         const planHandleIssued = runtimeSafetyContext.planStore.issue(
           LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
           buildLightyearExecutionPlanInput({
             normalizedArgs,
             sourceIdentities: [sourceIdentityRecord(snapshot)],
-            liveSnapshot: { income_account, reward_account, ...(tax_account !== undefined ? { tax_account } : {}) },
+            liveSnapshot: { income_account, interest_account, fund_distribution_account, reward_account, ...(tax_account !== undefined ? { tax_account } : {}) },
             reviewCommands: distributionsReviewCommands(projection),
             fingerprint: distributionsFingerprint(projection, normalizedArgs),
             counts: {
@@ -3378,7 +3553,7 @@ export function registerLightyearTools(
       }
 
       const accounts = await api.readonly.getAccounts();
-      const { reward_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
+      const { reward_account, interest_account, fund_distribution_account, needsTax, errors } = resolveAndValidateAccounts(distributions, accounts);
       if (errors.length > 0) return toolError({ error: "Account validation failed", details: errors });
       if (!tax_account && needsTax) {
         return toolError({
@@ -3391,14 +3566,16 @@ export function registerLightyearTools(
       const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
       const projection = computeDistributionsProjection({
         distributions, existingRefs, seedWarnings: warnings,
-        broker_account, broker_dimension_id, income_account, reward_account, tax_account, fee_account,
+        broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account,
       });
+      const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
+      if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
       const storedFingerprint = readStoredFingerprint(storedPlan.privatePayload);
       if (typeof storedFingerprint !== "string" || storedFingerprint !== distributionsFingerprint(projection, normalizedArgs)) {
         return planErrorResult("plan_drift", "The reviewed Lightyear distribution plan no longer matches the current ledger and source.");
       }
 
-      const createdByIndex = new Map<number, { journal_id?: number; status: string }>();
+      const createdByIndex = new Map<number, { journal_id?: number; status: string; upstream_detail?: string }>();
       const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
         id: lightyearDistributionCommandId(index),
         category: LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
@@ -3410,11 +3587,19 @@ export function registerLightyearTools(
             : { outcome: "ready" };
         },
         mutate: async () => {
-          const outcome = await guard.createJournalOnce(
-            { ns: "LY", id: command.reference },
-            { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
-            { confirm: false },
-          );
+          let outcome;
+          try {
+            outcome = await guard.createJournalOnce(
+              { ns: "LY", id: command.reference },
+              { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
+              { confirm: false },
+            );
+          } catch (error) {
+            const rejection = definitiveCreateRejection(error);
+            if (!rejection) throw error;
+            createdByIndex.set(index, rejection);
+            return { outcome: "failed", error_code: "journal_create_rejected", mutation_occurred: false };
+          }
           if (outcome.status === "duplicate") {
             createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
             return { outcome: "completed" };

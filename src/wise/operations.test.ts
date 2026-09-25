@@ -60,7 +60,7 @@ function setup() {
   } as any;
   const runtimeSafetyContext = createTestRuntimeSafetyContext();
   const operations = createWiseOperations(api, runtimeSafetyContext);
-  return { api, operations };
+  return { api, operations, runtimeSafetyContext };
 }
 
 const baseInput = (source: string) => ({
@@ -92,6 +92,22 @@ describe("WiseOperations", () => {
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(api.transactions.confirm).not.toHaveBeenCalled();
     expect(mockedLogAudit).not.toHaveBeenCalled();
+  });
+
+  it("prepare with mintPlanHandle=false issues no plan and returns no plan_handle (default still mints)", async () => {
+    const { operations, runtimeSafetyContext } = setup();
+    const issue = vi.spyOn(runtimeSafetyContext.planStore, "issue");
+    const preview = await operations.prepare({ ...baseInput(inline(oneRowCsv())), mintPlanHandle: false });
+    expect(preview.ok).toBe(true);
+    if (preview.ok) {
+      expect(preview.value.planHandle).toBeUndefined();
+      expect(preview.value.approvedCommandDigest).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(issue).not.toHaveBeenCalled();
+
+    const defaulted = await operations.prepare(baseInput(inline(oneRowCsv())));
+    expect(defaulted.ok && typeof defaulted.value.planHandle).toBe("string");
+    expect(issue).toHaveBeenCalledTimes(1);
   });
 
   // A fee row is synthesised, so it carries no source_row and the presenter can

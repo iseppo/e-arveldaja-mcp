@@ -58,8 +58,10 @@ export interface AutopilotPreparedInboxData {
  *   yet in the ledger, so reading it now would reflect the OLD state.
  * - `failed`: an earlier import/receipt step failed, so the ledger is
  *   incomplete and unsafe to reconcile against.
+ * - `pending_input`: an earlier import/receipt step was skipped (missing input,
+ *   prerequisite, or credentials), so the ledger is incomplete until it runs.
  */
-export type AutopilotMaterializationState = "current" | "pending_imports" | "failed";
+export type AutopilotMaterializationState = "current" | "pending_imports" | "failed" | "pending_input";
 
 export interface AutopilotStepResult {
   step: number;
@@ -300,6 +302,11 @@ function invokeAutopilotOperation(
         accountsDimensionsId: numberAt(args, "accounts_dimensions_id") ?? 0,
         dateFrom: stringAt(args, "date_from"),
         dateTo: stringAt(args, "date_to"),
+        // The pipeline discards plan handles (like receipts below), so minting
+        // one per dry run would leak plan-store slots until approval paths hit
+        // plan_capacity_exceeded. The approval handle comes from the tool's own
+        // dry run.
+        mintPlanHandles: false,
       });
     case "import_wise_transactions":
       return operations.prepareWiseImport({
@@ -313,6 +320,7 @@ function invokeAutopilotOperation(
         dateFrom: stringAt(args, "date_from"),
         dateTo: stringAt(args, "date_to"),
         skipJarTransfers: undefined,
+        mintPlanHandle: false,
       });
     case "process_receipt_batch":
       return operations.prepareReceiptBatch({
@@ -331,6 +339,7 @@ function invokeAutopilotOperation(
       return operations.prepareInterAccount({
         maxDateGap: numberAt(args, "max_date_gap"),
         targetAccountsDimensionsId: numberAt(args, "target_accounts_dimensions_id"),
+        mintPlanHandles: false,
       });
     default:
       throw new Error(`Internal inbox autopilot has no operation binding for ${tool}`);
@@ -417,20 +426,49 @@ function summarizeAutopilotToolResult(
       const created = preview.created.length;
       const skipped = preview.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason)).length;
       const errorCount = preview.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
+      // Ownership/dimension reviews are the Wise preview's own needs_review rows:
+      // an unverified own-account transfer must never read as approvable. One
+      // follow-up per review, keyed by wise_id so the id is resume-stable.
+      const wiseReviewId = (...key: string[]) =>
+        `${tool}:${createHash("sha256").update(JSON.stringify([tool, ...key])).digest("hex").slice(0, 16)}`;
+      const ownershipFollowUps: AutopilotFollowUp[] = preview.ownershipReviews.map(review => ({
+        id: wiseReviewId("wise_transfer_review", review.wise_id, review.code),
+        source: tool,
+        summary: `Wise transfer ${review.wise_id} needs review (${review.code}): ${review.reason}`,
+        recommendation: review.code === "wise_transfer_ownership_unverified"
+          ? "Verify that both accounts belong to the company, then rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true."
+          : review.code === "wise_transfer_dimensions_unverified"
+            ? "Configure the source and target bank account dimensions for this transfer, then rerun the Wise dry run before execute=true."
+            : "Resolve this transfer as described, then rerun the Wise dry run before execute=true.",
+      }));
+      // Invoice FX corrections are advisory only (the import never applies
+      // them); surface each so the manual correction is not silently dropped.
+      const invoiceFixFollowUps: AutopilotFollowUp[] = preview.invoiceFixCandidates.map(fix => ({
+        id: wiseReviewId("wise_invoice_currency_advisory", fix.wise_id, String(fix.invoice_id)),
+        source: tool,
+        summary: `Wise row ${fix.wise_id} settles invoice ${fix.invoice_number}: ${fix.proposed_action}`,
+        recommendation: "Advisory only: the Wise import does not change the invoice. Apply the correction by hand if it is right.",
+      }));
       return {
         summary: `Wise dry run would create ${created} transaction(s), skip ${skipped}, and report ${errorCount} error(s).`,
         preview: {
           created,
           skipped,
           error_count: errorCount,
+          needs_review: ownershipFollowUps.length,
+          command_count: preview.commands.length,
         },
-        followUps: errorCount > 0
-          ? [{
-              source: tool,
-              summary: `${errorCount} Wise CSV row(s) still failed preview.`,
-              recommendation: "Review the Wise import errors before execute=true.",
-            }]
-          : [],
+        followUps: [
+          ...ownershipFollowUps,
+          ...invoiceFixFollowUps,
+          ...(errorCount > 0
+            ? [{
+                source: tool,
+                summary: `${errorCount} Wise CSV row(s) still failed preview.`,
+                recommendation: "Review the Wise import errors before execute=true.",
+              }]
+            : []),
+        ],
       };
     }
     case "process_receipt_batch": {
@@ -573,11 +611,14 @@ const LEDGER_DEPENDENT_TOOLS = new Set([
   "reconcile_inter_account_transfers",
 ]);
 
+type MaterializationBlockReason = "pending_materialization" | "earlier_step_failed" | "skipped_prerequisite";
+
 function materializationStateFromBlockReason(
-  reason: "pending_materialization" | "earlier_step_failed" | undefined,
+  reason: MaterializationBlockReason | undefined,
 ): AutopilotMaterializationState {
   if (reason === "pending_materialization") return "pending_imports";
   if (reason === "earlier_step_failed") return "failed";
+  if (reason === "skipped_prerequisite") return "pending_input";
   return "current";
 }
 
@@ -594,6 +635,7 @@ function leavesPendingMaterializationAfterDryRun(
         (numberAt(preview, "error_count") ?? 0) > 0;
     case "import_wise_transactions":
       return (numberAt(preview, "created") ?? 0) > 0 ||
+        (numberAt(preview, "needs_review") ?? 0) > 0 ||
         (numberAt(preview, "error_count") ?? 0) > 0;
     case "process_receipt_batch":
       return receiptDryRunLeavesPendingMaterialization(preview);
@@ -613,12 +655,13 @@ export async function runAccountingInboxDryRunPipeline({
   const skippedSteps: AutopilotStepResult[] = [];
   const doneAutomatically: string[] = [];
   const needsOneDecision: AutopilotFollowUp[] = prepared.questions.map(question => ({
+    id: question.id,
     source: question.id,
     summary: question.question,
     recommendation: question.recommendation,
   }));
   const needsAccountantReview: AutopilotFollowUp[] = [];
-  let materializationBlockReason: "pending_materialization" | "earlier_step_failed" | undefined;
+  let materializationBlockReason: MaterializationBlockReason | undefined;
 
   for (const step of prepared.steps) {
     const failedPrereqTool = failedPrerequisiteForStep(step, [...executedSteps, ...skippedSteps]);
@@ -640,7 +683,9 @@ export async function runAccountingInboxDryRunPipeline({
         materializationState = materializationStateFromBlockReason(materializationBlockReason);
         skipSummary = materializationBlockReason === "earlier_step_failed"
           ? `Deferred until approved imports are materialized and a fresh ledger is loaded: an earlier import or receipt step failed, so ${step.tool} would otherwise reflect an incomplete ledger.`
-          : `Deferred until approved imports are materialized and a fresh ledger is loaded: earlier import or receipt steps still show pending changes, so ${step.tool} would otherwise reflect the old live ledger.`;
+          : materializationBlockReason === "skipped_prerequisite"
+            ? `Deferred until the skipped import or receipt step can run: it still needs input or a prerequisite, so ${step.tool} would otherwise reflect an incomplete ledger.`
+            : `Deferred until approved imports are materialized and a fresh ledger is loaded: earlier import or receipt steps still show pending changes, so ${step.tool} would otherwise reflect the old live ledger.`;
       } else if (failedPrereqTool) {
         skipSummary = `Skipped because prerequisite ${failedPrereqTool} failed for the same input.`;
       } else if (step.missing_inputs.length > 0) {
@@ -660,7 +705,9 @@ export async function runAccountingInboxDryRunPipeline({
         ...(materializationState !== undefined ? { materialization_state: materializationState } : {}),
       });
       if (isMaterializationStep(step.tool) && materializationBlockReason === undefined) {
-        materializationBlockReason = "earlier_step_failed";
+        // Skipped, not failed: the step never ran, so the ledger is waiting on
+        // input rather than broken.
+        materializationBlockReason = "skipped_prerequisite";
       }
       continue;
     }

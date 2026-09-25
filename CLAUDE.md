@@ -220,7 +220,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **Deliver sale invoice**: `PATCH /sale_invoices/{id}/deliver` (not `/send_einvoice`)
 
 ### Document endpoints
-- **User-uploaded docs**: `GET/PUT/DELETE /{entity}/{id}/document_user` (PUT to upload, not POST). Implemented generically on `BaseResource` (`getDocument`/`uploadDocument`/`deleteDocument`, keyed on `basePath`) and exposed by the entity-agnostic tools `attach_document` / `get_document` / `delete_document` (`entity_type` ∈ purchase_invoice, sale_invoice, journal, transaction) in `src/tools/document-attachments.ts`. RPS requires a source document on every entry, so manual journals and directly-booked bank transactions can carry one too — `find_missing_documents` flags those that don't.
+- **User-uploaded docs**: `GET/PUT/DELETE /{entity}/{id}/document_user` (PUT to upload, not POST). Implemented generically on `BaseResource` (`getDocument`/`uploadDocument`/`deleteDocument`, keyed on `basePath`) and exposed by the entity-agnostic tools `attach_document` / `get_document` / `delete_document` (`entity_type` ∈ purchase_invoice, sale_invoice, journal, transaction) in `src/tools/document-attachments.ts`. RPS requires a source document on every entry, so manual journals and directly-booked bank transactions can carry one too — `find_missing_documents` flags those that don't. PUT replaces an existing document, so `attach_document` checks first and refuses with `document_exists` unless `replace_existing: true` (tool is destructive).
 - **System-generated sale invoice PDF**: `GET /sale_invoices/{id}/pdf_system` (tool `get_sale_invoice_document`)
 - **System-generated sale invoice e-invoice XML**: `GET /sale_invoices/{id}/xml` (tool `get_sale_invoice_xml`) — the structured machine-readable e-arve, distinct from the human-readable PDF
 
@@ -287,7 +287,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - CAMT-imported transactions confirmed as inter-account transfers create journal entries touching both bank accounts
 - If the other side (e.g. Wise import) is also confirmed against the same bank account → **duplicate journal entries** and incorrect balance
 - **Always use `reconcile_inter_account_transfers`** for inter-account confirmation — it checks existing journals before confirming
-- The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers
+- The Wise import tool (`import_wise_transactions`) has built-in duplicate detection for inter-account transfers (BookingGuard Lane B, ±1 day, labelled journals identity-only); it auto-confirms only same-currency EUR own transfers — cross-currency ones go to review for `reconcile_inter_account_transfers` (H10), and it never modifies confirmed purchase invoices (invoice FX corrections are advisory)
 - When manually confirming transactions against another bank account, first check for existing journals at that date/amount — `confirm_transaction` warns (BookingGuard Lane B ±1 day + bank-posting scan) and refuses with `block_on_duplicate: true`
 - Same-type reciprocal legs (both stored `C`, or both `D`) are auto-confirmed only when exactly one leg carries a signed outgoing marker agreeing with its stored `C`; otherwise they go to `ambiguous_pairs` with `code: "direction_unresolved"` (the stored type cannot say which account the money left)
 - Inter-account distribution amounts are base EUR (`base_amount ?? amount`) in every phase (pairs, same-type pairs, one-sided — H10)

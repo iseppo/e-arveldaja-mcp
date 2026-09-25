@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { getAllowedRootsStartupWarning, isPathWithinRoot, resolveFileInput, splitAllowedPaths, validateFilePath } from "./file-validation.js";
+import { contentMatchesExtension, getAllowedRootsStartupWarning, isPathWithinRoot, resolveFileInput, sanitizeUploadFileName, splitAllowedPaths, validateFilePath } from "./file-validation.js";
 import { writeFileSync, mkdirSync, symlinkSync, unlinkSync, rmdirSync, existsSync, readFileSync, realpathSync, rmSync } from "fs";
 import { join, win32, extname, resolve } from "path";
 import { tmpdir } from "os";
@@ -239,6 +239,25 @@ describe("resolveFileInput (base64 payload support)", () => {
     ).rejects.toThrow("conflicts with detected content type");
   });
 
+  it("rejects a signature-format hint (pdf/png/jpg) whose content carries no signature", async () => {
+    const html = Buffer.from("<html><script>alert(1)</script></html>");
+    for (const hint of ["pdf", "png", "jpg"]) {
+      await expect(
+        resolveFileInput(`base64:${hint}:${html.toString("base64")}`, [".pdf", ".png", ".jpg"], 1024),
+      ).rejects.toThrow("does not match");
+    }
+  });
+
+  it("still accepts an xml hint for XML without a declaration (no required signature)", async () => {
+    const xml = Buffer.from("<Document><x/></Document>");
+    const result = await resolveFileInput(`base64:xml:${xml.toString("base64")}`, [".xml"], 1024);
+    try {
+      expect(extname(result.path)).toBe(".xml");
+    } finally {
+      await result.cleanup?.();
+    }
+  });
+
   it("accepts JPEG magic bytes when the caller only listed .jpeg (not .jpg)", async () => {
     const jpegPayload = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("fake jpeg body")]);
     const result = await resolveFileInput(
@@ -324,5 +343,49 @@ describe("resolveFileInput (base64 payload support)", () => {
     expect(existsSync(result.path)).toBe(false);
     // Second cleanup must swallow the "file not found" from rm and not throw.
     await expect(result.cleanup?.()).resolves.toBeUndefined();
+  });
+});
+
+describe("contentMatchesExtension", () => {
+  it("requires the magic signature for pdf/png/jpg/jpeg only", () => {
+    const html = Buffer.from("<html></html>");
+    expect(contentMatchesExtension(html, ".pdf")).toBe(false);
+    expect(contentMatchesExtension(html, ".PNG")).toBe(false);
+    expect(contentMatchesExtension(html, ".jpeg")).toBe(false);
+    expect(contentMatchesExtension(Buffer.from("%PDF-1.4"), ".pdf")).toBe(true);
+    expect(contentMatchesExtension(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), ".jpeg")).toBe(true);
+    expect(contentMatchesExtension(Buffer.from([0xff, 0xd8, 0xff, 0xe0]), ".png")).toBe(false);
+    expect(contentMatchesExtension(html, ".xml")).toBe(true);
+    expect(contentMatchesExtension(html, ".csv")).toBe(true);
+  });
+});
+
+describe("sanitizeUploadFileName", () => {
+  it("keeps Unicode letters (Estonian) and strips control chars and path components", () => {
+    expect(sanitizeUploadFileName("/tmp/inbox/Arve õäöü ÕÄÖÜ šž.pdf")).toBe("Arve õäöü ÕÄÖÜ šž.pdf");
+    expect(sanitizeUploadFileName("C:\\Users\\x\\Tšekk.pdf")).toBe("Tšekk.pdf");
+    expect(sanitizeUploadFileName("bad\u0000na\u001bme\u202e.pdf")).toBe("badname.pdf");
+    expect(sanitizeUploadFileName("a\"<>|*?:b.pdf")).toBe("a_______b.pdf");
+  });
+
+  it("never yields a traversal or hidden name", () => {
+    expect(sanitizeUploadFileName("..")).toBe("document");
+    expect(sanitizeUploadFileName("../../etc/passwd")).toBe("passwd");
+    expect(sanitizeUploadFileName("..\\..\\x.pdf")).toBe("x.pdf");
+    expect(sanitizeUploadFileName(".hidden.pdf")).toBe("hidden.pdf");
+    expect(sanitizeUploadFileName("", ".pdf")).toBe("document.pdf");
+  });
+
+  it("forces the required extension (jpg/jpeg equivalent)", () => {
+    expect(sanitizeUploadFileName("invoice", ".pdf")).toBe("invoice.pdf");
+    expect(sanitizeUploadFileName("invoice.png", ".pdf")).toBe("invoice.png.pdf");
+    expect(sanitizeUploadFileName("scan.JPEG", ".jpg")).toBe("scan.JPEG");
+    expect(sanitizeUploadFileName("arve.pdf", ".pdf")).toBe("arve.pdf");
+  });
+
+  it("caps at 255 UTF-8 bytes while keeping the extension", () => {
+    const name = sanitizeUploadFileName(`${"õ".repeat(300)}.pdf`, ".pdf");
+    expect(Buffer.byteLength(name)).toBeLessThanOrEqual(255);
+    expect(name.endsWith(".pdf")).toBe(true);
   });
 });

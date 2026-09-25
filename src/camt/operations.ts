@@ -41,6 +41,10 @@ export interface CamtImportInput {
    * the op does not read the source a second time. Absent for the granular
    * process_camt053 path, which captures internally under camt_input. */
   readonly snapshot?: FileInputSnapshot;
+  /** false = preview only: no consume-once plan handle is minted. For callers
+   * that discard the handle (the accounting inbox dry run), so a preview never
+   * takes a plan-store slot. Default true. */
+  readonly mintPlanHandles?: boolean;
 }
 
 export interface CamtExecuteInput extends CamtImportInput {
@@ -112,7 +116,9 @@ class CamtOperationsImpl implements CamtOperations {
         )
       : undefined;
     const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);
-    const planHandle = issueCamtPlan(this.runtimeSafetyContext, snapshot, projection, normalizedArgs);
+    const planHandle = input.mintPlanHandles === false
+      ? undefined
+      : issueCamtPlan(this.runtimeSafetyContext, snapshot, projection, normalizedArgs);
     const results = projection.descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
     const possibleDuplicates = projection.descriptors
       .filter(descriptor => descriptor.possibleDuplicateMatches.length > 0)
@@ -128,7 +134,7 @@ class CamtOperationsImpl implements CamtOperations {
       ...(dateFrom ? { date_from: dateFrom } : {}),
       ...(dateTo ? { date_to: dateTo } : {}),
       execute: false,
-      plan_handle: planHandle,
+      ...(planHandle !== undefined ? { plan_handle: planHandle } : {}),
     };
 
     return ok({
@@ -138,7 +144,7 @@ class CamtOperationsImpl implements CamtOperations {
       createdCount: projection.descriptors.length,
       errorCount: 0,
       workflowArgs,
-      planHandle,
+      ...(planHandle !== undefined ? { planHandle } : {}),
       ...(statementBalanceCheck ? { statementBalanceCheck } : {}),
     });
   }

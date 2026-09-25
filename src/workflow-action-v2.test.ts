@@ -139,4 +139,50 @@ describe("workflow_action_v2", () => {
     expect(v2.status).toBe("needs_review");
     expect(v2.next_action).toEqual({ tool: "get_setup_instructions", args: {}, approval_required: false });
   });
+
+  it("routes a tool-less question to an accounting_inbox rerun (never the setup fallback or a continuation) and blocks on it", () => {
+    const runtime = guidedRuntime();
+    const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
+      summary: "Needs a bank account.",
+      needs_decision: [{ id: "q1", summary: "Which bank account dimension should be used?", recommendation: "LHV" }],
+    }));
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore));
+    expect(v2.status).toBe("needs_input");
+    expect(v2.next_action).toEqual({
+      tool: "accounting_inbox",
+      args: {},
+      approval_required: false,
+      question: "Which bank account dimension should be used?",
+      recommendation: "LHV",
+      instruction: "Ask the user this question, then call accounting_inbox again with the supplied input.",
+    });
+    expect(v2.blockers).toEqual([
+      { item_id: "q1", code: "needs_input", message: "Which bank account dimension should be used?", severity: "blocker" },
+    ]);
+  });
+
+  it("names the input that answers a mapped question and carries the rerun args", () => {
+    const runtime = guidedRuntime();
+    const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
+      summary: "Needs a bank account.",
+      needs_decision: [{ id: "q1", summary: "Which bank account dimension should be used?", recommendation: "LHV" }],
+    }));
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore, {
+      questionRerun: { tool: "accounting_inbox", args: { mode: "scan" }, inputs: { q1: "bank_account_dimension_id" } },
+    }));
+    expect(v2.next_action).toMatchObject({
+      tool: "accounting_inbox",
+      args: { mode: "scan" },
+      answer_input: "bank_account_dimension_id",
+      instruction: "Ask the user this question, then call accounting_inbox with these args plus bank_account_dimension_id set to the answer.",
+    });
+  });
+
+  it("emits no next_action for a completed (done) workflow", () => {
+    const runtime = guidedRuntime();
+    const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({ summary: "All done." }));
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore));
+    expect(v2.status).toBe("completed");
+    expect(v2).not.toHaveProperty("next_action");
+  });
 });

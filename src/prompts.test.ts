@@ -634,7 +634,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("invoice currency fixes");
     expect(text).toContain("fee confirmations");
     expect(text).toContain("inter-account confirmations or skips");
-    expect(text).toContain("each invoice FX update");
+    expect(text).toContain("each advisory invoice FX correction (not applied)");
     expect(text).toContain("approval authorizes all listed categories");
     expect(text).toContain("Do not disable Jar skipping");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);

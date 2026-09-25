@@ -12,6 +12,8 @@ import {
   LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
 } from "./lightyear-plan.js";
 import { randomBytes } from "node:crypto";
+import { HttpError } from "../http-client.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
 
@@ -249,6 +251,7 @@ function setupLightyearTool(
     journals?: unknown[];
     createImpl?: ReturnType<typeof vi.fn>;
     accounts?: unknown[];
+    accountDimensions?: unknown[];
   } = {},
 ) {
   const server = { registerTool: vi.fn() } as any;
@@ -261,9 +264,11 @@ function setupLightyearTool(
         { id: 8320, is_deleted: false, is_valid: true, code: "8320", title_est: "Investeeringutulu", name_est: "Investeeringutulu" },
         { id: 8330, is_deleted: false, is_valid: true, code: "8330", title_est: "Tulu aktsiatelt ja osadelt", name_est: "Tulu aktsiatelt ja osadelt" },
         { id: 8335, is_deleted: false, is_valid: true, code: "8335", title_est: "Kulu aktsiatelt ja osadelt", name_est: "Kulu aktsiatelt ja osadelt" },
+        { id: 8400, is_deleted: false, is_valid: true, code: "8400", title_est: "Intressitulu hoiustelt", name_est: "Intressitulu hoiustelt" },
         { id: 8600, is_deleted: false, is_valid: true, code: "8600", title_est: "Muud finantstulud", name_est: "Muud finantstulud" },
         { id: 8610, is_deleted: false, is_valid: true, code: "8610", title_est: "Muud finantskulud", name_est: "Muud finantskulud" },
       ]),
+      getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? []),
     },
     journals: {
       connectionFingerprint: "lightyear-test-connection",
@@ -723,12 +728,13 @@ describe("lightyear investments tools", () => {
     // Companion to the pairing test above, kept honest: pairing is necessary but not
     // sufficient. The capital-gains row below is the real one for this disposal.
     // Lightyear states `Proceeds (EUR)` as the sell GROSS at the ECB rate
-    // (2068.16 USD -> 1817.04), while the statement delivered 1803.66 EUR at the
-    // dealt rate. The gap exceeds the cross-check tolerance, so the row is skipped.
+    // (2068.16 USD -> 1817.04). The match now runs on the same consideration basis
+    // (1803.66 EUR received + 6.33 FX fee + 0.91 trade fee = 1810.90 at the dealt
+    // rate), but the 6.14 EUR rate gap still exceeds the 0.1% cross-check tolerance
+    // (1.82), so the row is skipped.
     //
-    // That gap is structural and pre-dates the conversion-pairing fix; it is not
-    // something the fix claims to solve. If it is ever addressed, this test should
-    // start failing rather than quietly keep asserting a skip.
+    // That gap is structural (ECB vs dealt rate). If it is ever addressed, this
+    // test should start failing rather than quietly keep asserting a skip.
     const statement = buildStatementCsv(realJuly13Rows());
     const gains = buildCapitalGainsCsv([[
       "13/07/2026 13:41:07", "BRK.B", "Berkshire Hathaway", "US0846707026", "United States", "equity",
@@ -1398,13 +1404,13 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(parsePayload.needs_review).toBe(true);
     expect(parsePayload.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
     expect(parsePayload.unhandled.rows.map((row: any) => row.type)).toEqual(["Conversion", "Conversion"]);
-    expect(parsePayload.warnings.join("\n")).toContain("distribution review [invalid_conversion_pair]");
+    expect(parsePayload.warnings.join("\n")).toContain("distribution review [invalid_date]");
     mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
     const { api, handler } = setupLightyearTool("book_lightyear_distributions");
     const result = await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, tax_account: 8610, dry_run: false });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
-    expect(payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "invalid_conversion_pair", message: H17_MESSAGES.invalid_conversion_pair }, gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null });
+    expect(payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "invalid_date", message: "The statement date is not a valid calendar day." }, gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null });
     expect(payload.warnings).toHaveLength(1);
     expect(api.readonly.getAccounts).not.toHaveBeenCalled();
     expect(api.journals.listAll).not.toHaveBeenCalled();
@@ -3047,7 +3053,7 @@ describe("H16 Lightyear handler provenance", () => {
     expect(payload.unhandled).toBeUndefined();
   });
 
-  it("H16 legacy-trade-shortlist preserves raw date-prefix matching for non-calendar statement dates", async () => {
+  it("H16 legacy-trade-shortlist preserves raw date-prefix matching for non-calendar statement dates, but routes the trade to review", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h16LegacyTradeShortlistRows({ date: "31/02/2026" })));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
 
@@ -3063,6 +3069,20 @@ describe("H16 Lightyear handler provenance", () => {
     expect(payload.warnings).toBeUndefined();
     expect(payload.needs_review).toBeUndefined();
     expect(payload.unhandled).toBeUndefined();
+
+    // The conversion still pairs on the raw date prefix (so its cash is handled),
+    // but 31/02/2026 is not a calendar day and must never reach effective_date.
+    mockedReadFile.mockResolvedValue(buildStatementCsv(h16LegacyTradeShortlistRows({ date: "31/02/2026" })));
+    const booking = setupLightyearTool("book_lightyear_trades");
+    const booked = parseMcpResponse((await booking.handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false,
+    })).content[0]!.text) as any;
+    expect(booked.created).toBe(0);
+    expect(booked.warnings.join("\n")).toContain("FX review [invalid_date]");
+    expect(booked.results).toEqual([
+      expect.objectContaining({ reference: "OR-H16-LEGACY", status: "skipped", skip_reason: "The statement date is not a valid calendar day." }),
+    ]);
+    expect(booking.api.journals.create).not.toHaveBeenCalled();
   });
 
   it("H16 legacy-trade-shortlist books the cent-rounded conversion through the public handler", async () => {
@@ -3320,9 +3340,11 @@ describe("H16 Lightyear handler provenance", () => {
       tradeNet: "1307.80",
       rates: ["", "0.86423"],
     }));
+    // Lightyear's `Proceeds (EUR)` is the sell's consideration: the 1126.28 EUR
+    // that arrived plus the 3.96 FX fee and 1.73 trade fee taken out on the way.
     const gains = buildCapitalGainsCsv([[
       "10/11/2025 08:51:32", "AAPL", "Apple", "US0378331005", "United States",
-      "equity", "1.73", "10", "1000.00", "1126.28", "126.28",
+      "equity", "1.73", "10", "1000.00", "1131.97", "131.97",
     ]]);
     let h16ReadIdx = 0;
     mockedReadFile.mockImplementation(async () => (h16ReadIdx++ % 2 === 0 ? statement : gains) as any);
@@ -3344,14 +3366,18 @@ describe("H16 Lightyear handler provenance", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
     expect(payload.created).toBe(1);
+    // The broker receives exactly the cash the EUR conversion leg shows (1126.28);
+    // the fees are expensed, not deducted from the broker a second time, and the
+    // gain is the balancing figure: 1126.28 + 3.96 + 1.73 − 1000 = 131.97.
     expect(created[0].postings).toEqual([
       { accounts_id: 1120, type: "D", amount: 1126.28 },
       { accounts_id: 1550, type: "C", amount: 1000 },
-      { accounts_id: 8320, type: "C", amount: 126.28 },
+      { accounts_id: 8320, type: "C", amount: 131.97 },
       { accounts_id: 8335, type: "D", amount: 3.96 },
       { accounts_id: 8335, type: "D", amount: 1.73 },
-      { accounts_id: 1120, type: "C", amount: 5.69 },
     ]);
+    expect(payload.results[0]).toMatchObject({ eur_amount: 1131.97, cost_basis: 1000, gain_loss: 131.97 });
+    expect(payload.results[0].lightyear_capital_gains_eur).toBeUndefined();
   });
 
   it("H16 uses both portfolio buy and sell fee consumers without nominal foreign fallback", async () => {
@@ -3683,10 +3709,21 @@ describe("H18 bounded proceeds tolerance", () => {
 
     expect(payload.created).toBe(1);
     expect(payload.skipped).toBe(0);
+    // Cash from the statement: the broker receives the 9990 EUR the sell actually
+    // paid, cost is relieved at Lightyear's 9000, and the gain is the balancing
+    // 990 — not Lightyear's 1000, which would overstate the broker by 10 EUR.
     expect(payload.results).toEqual([
-      expect.objectContaining({ reference: "OR-H18-RELATIVE", status: "created", eur_amount: 10000 }),
+      expect.objectContaining({
+        reference: "OR-H18-RELATIVE", status: "created", eur_amount: 9990,
+        cost_basis: 9000, gain_loss: 990, lightyear_capital_gains_eur: 1000,
+      }),
     ]);
     expect(run.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(run.api.journals.create.mock.calls[0][0].postings).toEqual([
+      { accounts_id: 1120, type: "D", amount: 9990 },
+      { accounts_id: 1550, type: "C", amount: 9000 },
+      { accounts_id: 8320, type: "C", amount: 990 },
+    ]);
     expect(vi.mocked(logAudit)).toHaveBeenCalledTimes(1);
   });
 
@@ -3775,7 +3812,7 @@ describe("H18 bounded proceeds tolerance", () => {
 
     expect(outsideFirst).toEqual(eligibleFirst);
     expect(eligibleFirst.results).toEqual([
-      expect.objectContaining({ reference: "OR-H18-FIRST", status: "created", eur_amount: 10000 }),
+      expect.objectContaining({ reference: "OR-H18-FIRST", status: "created", eur_amount: 9990 }),
       expect.objectContaining({ reference: "OR-H18-SECOND", status: "skipped" }),
     ]);
     expect(eligibleFirst.warnings).toContainEqual(expect.stringMatching(/outside proceeds tolerance.*manual review/i));
@@ -4159,7 +4196,7 @@ describe("M26 intrinsic portfolio outcomes", () => {
 
     const bounded = await runDryBook([sell("OR-M26-H18-BOUND")], [gain("10000", "US0378331006")]);
     expect(bounded).toMatchObject({ created: 1, skipped: 0 });
-    expect(bounded.results[0]).toMatchObject({ status: "would_create", eur_amount: 10000 });
+    expect(bounded.results[0]).toMatchObject({ status: "would_create", eur_amount: 9990 });
 
     const ambiguous = await runDryBook([sell("OR-M26-H18-AMBIG")], [
       gain("9990.004", "US0378331007"),
@@ -4451,7 +4488,7 @@ const PLAN_DIV_CSV = () => buildStatementCsv([
 function planApi(journals: unknown[] = [], createImpl?: ReturnType<typeof vi.fn>) {
   const create = createImpl ?? vi.fn().mockResolvedValue({ created_object_id: 9001 });
   return {
-    readonly: { getAccounts: vi.fn().mockResolvedValue(PLAN_ACCOUNTS) },
+    readonly: { getAccounts: vi.fn().mockResolvedValue(PLAN_ACCOUNTS), getAccountDimensions: vi.fn().mockResolvedValue([]) },
     journals: {
       connectionFingerprint: "lightyear-plan-connection",
       invalidateListCache: vi.fn(),
@@ -4904,5 +4941,274 @@ describe("lightyear external-text display matrix (P07)", () => {
     expect(createdJournals).toHaveLength(1);
     expect(createdJournals[0].document_number).toBe("LY:OR-EVIL-IGNORE-9");
     expect(JSON.stringify(createdJournals[0])).not.toContain("UNTRUSTED_OCR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review remediation: sell cash, income routing, dimension/HTTP failures,
+// calendar dates, same-reference conflicts, cash deltas, gains-file refs.
+// ---------------------------------------------------------------------------
+
+describe("Lightyear review remediation", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
+    mockedReadFile.mockReset();
+    vi.mocked(logAudit).mockClear();
+  });
+
+  const sumSide = (postings: any[], side: "D" | "C") =>
+    Math.round(postings.filter(p => p.type === side).reduce((total, p) => total + p.amount * 100, 0));
+
+  it("books a fee-bearing EUR sell with the statement's net cash on the broker account", async () => {
+    const statement = buildStatementCsv([
+      ["10/11/2025 08:51:32", "OR-EUR-FEE-SELL", "AAPL", "US0378331005", "Sell", "10", "EUR", "1000", "10000.00", "", "10.00", "9990.00", ""],
+    ]);
+    const gains = buildCapitalGainsCsv([[
+      "10/11/2025 08:51:32", "AAPL", "Apple", "US0378331005", "United States", "equity", "10", "10", "9000", "10000", "1000",
+    ]]);
+    let readIdx = 0;
+    mockedReadFile.mockImplementation(async () => (readIdx++ % 2 === 0 ? statement : gains) as any);
+    const { api, handler } = setupLightyearTool("book_lightyear_trades");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", capital_gains_file: "/tmp/gains.csv",
+      investment_account: 1550, broker_account: 1120, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.created).toBe(1);
+    const postings = api.journals.create.mock.calls[0][0].postings;
+    expect(postings).toEqual([
+      { accounts_id: 1120, type: "D", amount: 9990 },
+      { accounts_id: 1550, type: "C", amount: 9000 },
+      { accounts_id: 8330, type: "C", amount: 1000 },
+      { accounts_id: 8335, type: "D", amount: 10 },
+    ]);
+    expect(sumSide(postings, "D")).toBe(sumSide(postings, "C"));
+    expect(payload.results[0]).toMatchObject({ eur_amount: 10000, cost_basis: 9000, gain_loss: 1000 });
+  });
+
+  it("routes Dividend, fund Distribution and Interest rows to their own income accounts", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026 10:00:00", "DIV-ROUTE", "AAPL", "US0378331005", "Dividend", "0", "EUR", "0", "10.00", "", "0", "10.00", "0"],
+      ["01/03/2026 10:00:00", "DST-ROUTE", "VWCE", "IE00BK5BQT80", "Distribution", "0", "EUR", "0", "20.00", "", "0", "20.00", "0"],
+      ["01/03/2026 10:00:00", "IN-ROUTE", "", "", "Interest", "", "EUR", "", "3.00", "", "0", "3.00", "0"],
+    ]));
+    const { api, handler } = setupLightyearTool("book_lightyear_distributions");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8330, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.new_entries).toBe(3);
+    const credits = api.journals.create.mock.calls.map((call: any) => call[0].postings.find((p: any) => p.type === "C"));
+    expect(credits).toEqual([
+      { accounts_id: 8330, type: "C", amount: 10 },
+      { accounts_id: 8320, type: "C", amount: 20 },
+      { accounts_id: 8400, type: "C", amount: 3 },
+    ]);
+
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026 10:00:00", "IN-OVERRIDE", "", "", "Interest", "", "EUR", "", "3.00", "", "0", "3.00", "0"],
+    ]));
+    const overridden = setupLightyearTool("book_lightyear_distributions");
+    await overridden.handler({
+      file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8330, interest_account: 8600, dry_run: false,
+    });
+    expect(overridden.api.journals.create.mock.calls[0][0].postings.find((p: any) => p.type === "C").accounts_id).toBe(8600);
+  });
+
+  it("refuses the dry run when a projected posting fails the journal dimension rules", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const accounts = PLAN_ACCOUNTS.map(account => account.id === 1550 ? { ...account, allows_dimensions: true } : account);
+    const { api, rawHandler } = setupLightyearTool("book_lightyear_trades", {
+      accounts,
+      accountDimensions: [
+        { id: 11, accounts_id: 1550, title_est: "Portfell A", is_deleted: false },
+        { id: 12, accounts_id: 1550, title_est: "Portfell B", is_deleted: false },
+      ],
+    });
+    const result = await rawHandler({ file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    expect(result.isError).toBe(true);
+    expect(payload.error).toBe("Account validation failed");
+    expect(payload.details.join("\n")).toContain("accounts_dimensions_id is required");
+    expect(payload.plan_handle).toBeUndefined();
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("re-validates posting dimensions on execute before any create", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_trades");
+    const args = { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 };
+    const plan_handle = await issueTradesHandle(handler, args);
+
+    api.readonly.getAccounts.mockResolvedValue(PLAN_ACCOUNTS.map(account => account.id === 1550 ? { ...account, allows_dimensions: true } : account));
+    api.readonly.getAccountDimensions.mockResolvedValue([
+      { id: 11, accounts_id: 1550, title_est: "Portfell A", is_deleted: false },
+      { id: 12, accounts_id: 1550, title_est: "Portfell B", is_deleted: false },
+    ]);
+    const result = await handler({ ...args, dry_run: false, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.error).toBe("Account validation failed");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("reports a definitive API rejection as a failed command with the wrapped upstream detail", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const detail = wrapUntrustedOcr("Konto nõuab dimensiooni")!;
+    const create = vi.fn().mockRejectedValue(new HttpError("HTTP 400", 400, "POST", "/journals", { upstream_detail: detail }));
+    const { handler } = setupLightyearTool("book_lightyear_trades", { createImpl: create });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.execution_report.status).toBe("mutation_failed");
+    expect(payload.execution_report.mutation_may_have_occurred).toBe(false);
+    expect(payload.execution_report.command_partitions.failed).toEqual([
+      expect.objectContaining({ code: "journal_create_rejected", mutation_occurred: false }),
+    ]);
+    expect(payload.execution_report.command_partitions.indeterminate).toEqual([]);
+    expect(payload.results[0]).toMatchObject({ status: "failed", upstream_detail: detail });
+  });
+
+  it("reports a definitive API rejection of a distribution journal as failed, not indeterminate", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const create = vi.fn().mockRejectedValue(new HttpError("HTTP 422", 422, "POST", "/journals"));
+    const { handler } = setupLightyearTool("book_lightyear_distributions", { createImpl: create });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8330, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.execution_report.command_partitions.failed).toEqual([
+      expect.objectContaining({ code: "journal_create_rejected", mutation_occurred: false }),
+    ]);
+    expect(payload.results[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("keeps a 5xx journal-create failure indeterminate (the journal may have been saved)", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const create = vi.fn().mockRejectedValue(new HttpError("HTTP 500", 500, "POST", "/journals"));
+    const { handler } = setupLightyearTool("book_lightyear_trades", { createImpl: create });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.execution_report.mutation_may_have_occurred).toBe(true);
+    expect(payload.execution_report.command_partitions.failed).toEqual([]);
+    expect(payload.execution_report.command_partitions.indeterminate).toHaveLength(1);
+  });
+
+  it("shows an auto-filled single dimension in the dry-run approval view (trades and distributions)", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    api.readonly.getAccounts.mockResolvedValue(PLAN_ACCOUNTS.map(account => account.id === 1120 ? { ...account, allows_dimensions: true } : account));
+    api.readonly.getAccountDimensions.mockResolvedValue([{ id: 77, accounts_id: 1120, title_est: "Lightyear EUR", is_deleted: false }]);
+    const pageHandler = createExecutionPlanPageHandler(context, { cursorSecret: randomBytes(32) });
+
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const tradesHandle = await issueTradesHandle(registerBookingHandler(context, api, "book_lightyear_trades"),
+      { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 });
+    const tradesPage = parseMcpResponse((await pageHandler({ plan_handle: tradesHandle })).content[0]!.text) as any;
+    expect(tradesPage.commands[0].review_data).toContain('"accounts_dimensions_id":77');
+
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const distDry = parseMcpResponse((await registerBookingHandler(context, api, "book_lightyear_distributions")(
+      { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    const distPage = parseMcpResponse((await pageHandler({ plan_handle: distDry.plan_handle })).content[0]!.text) as any;
+    expect(distPage.commands[0].review_data).toContain('"accounts_dimensions_id":77');
+  });
+
+  it("routes a EUR distribution with an impossible calendar date to review and books ISO timestamps on their day", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["31/02/2026 10:00:00", "DIV-BADDAY", "AAPL", "US0378331005", "Dividend", "0", "EUR", "0", "10.00", "", "0", "10.00", "0"],
+    ]));
+    const bad = setupLightyearTool("book_lightyear_distributions");
+    const badPayload = parseMcpResponse((await bad.handler({
+      file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8330, dry_run: false,
+    })).content[0]!.text) as any;
+    expect(badPayload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "invalid_date" } });
+    expect(bad.api.journals.create).not.toHaveBeenCalled();
+
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["2025-11-10T08:51:32", "OR-ISO-TIME", "VUAA", "IE00BK5BQT80", "Buy", "10", "EUR", "100", "1000.00", "", "0.00", "1000.00", ""],
+    ]));
+    const iso = setupLightyearTool("book_lightyear_trades");
+    await iso.handler({ file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false });
+    expect(iso.api.journals.create.mock.calls[0][0].effective_date).toBe("2025-11-10");
+  });
+
+  it("sends differing same-reference trade rows to review instead of booking the first", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["10/03/2026 11:51:35", "OR-SAME", "VUAA", "IE00BK5BQT80", "Buy", "10", "EUR", "100", "1000.00", "", "0.00", "1000.00", ""],
+      ["10/03/2026 11:51:35", "OR-SAME", "VUAA", "IE00BK5BQT80", "Buy", "12", "EUR", "100", "1200.00", "", "0.00", "1200.00", ""],
+    ]));
+    const { api, handler } = setupLightyearTool("book_lightyear_trades");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.created).toBe(0);
+    expect(payload.duplicates_skipped).toBe(0);
+    expect(payload.results).toEqual([
+      expect.objectContaining({ reference: "OR-SAME", status: "skipped", skip_reason: expect.stringContaining("differing content") }),
+      expect.objectContaining({ reference: "OR-SAME", status: "skipped", skip_reason: expect.stringContaining("differing content") }),
+    ]);
+    expect(payload.warnings.join("\n")).toContain("[reference_conflict]");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("sends differing same-reference distribution rows to review instead of booking the first", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026 10:00:00", "DIV-SAME", "AAPL", "US0378331005", "Dividend", "0", "EUR", "0", "10.00", "", "0", "10.00", "0"],
+      ["01/03/2026 10:00:00", "DIV-SAME", "AAPL", "US0378331005", "Dividend", "0", "EUR", "0", "12.00", "", "0", "12.00", "0"],
+    ]));
+    const { api, handler } = setupLightyearTool("book_lightyear_distributions");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8330, dry_run: false,
+    })).content[0]!.text) as any;
+
+    expect(payload.new_entries).toBe(0);
+    expect(payload.results.map((row: any) => row.review_reason?.code)).toEqual(["reference_conflict", "reference_conflict"]);
+    expect(payload.warnings.join("\n")).toContain("[reference_conflict]");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("reconciles buy and conversion-source cash on the gross (Net = Gross − Fee)", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["10/11/2025 08:00:00", "DT-CASH", "", "", "Deposit", "", "EUR", "", "1130.24", "", "0", "1130.24", ""],
+      ...h16Pair(),
+    ]));
+    const { handler } = setupLightyearTool("parse_lightyear_statement");
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+
+    // 1130.24 EUR in, 1130.24 EUR out (conversion gross incl. 3.96 fee); 1303.22 USD
+    // in, 1303.22 USD out (buy gross incl. 2.00 fee) — nothing left on the balance.
+    expect(payload.cash_reconciliation.total_by_currency).toEqual({});
+    expect(payload.cash_reconciliation.is_balanced).toBe(true);
+  });
+
+  it("treats a capital-gains file reference as a provided gains file", async () => {
+    const statement = buildStatementCsv([
+      ["10/11/2025 08:51:32", "OR-REF-SELL", "AAPL", "US0378331005", "Sell", "10", "EUR", "100", "1000.00", "", "0.00", "1000.00", ""],
+    ]);
+    const gains = buildCapitalGainsCsv([[
+      "11/11/2025 08:51:32", "MSFT", "Microsoft", "US5949181045", "United States", "equity", "0", "1", "10", "12", "2",
+    ]]);
+    let readIdx = 0;
+    mockedReadFile.mockImplementation(async () => (readIdx++ % 2 === 0 ? statement : gains) as any);
+    const context = createTestRuntimeSafetyContext();
+    const capital_gains_file_ref = context.fileReferenceStore.issue({
+      canonicalPath: "/tmp/lightyear.csv", kind: "file", operation: "lightyear_gains_input",
+    });
+    const handler = registerBookingHandler(context, planApi(), "book_lightyear_trades");
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", capital_gains_file_ref, investment_account: 1550, broker_account: 1120,
+    })).content[0]!.text) as any;
+
+    expect(readIdx).toBe(2);
+    expect(payload.skipped).toBe(1);
+    expect((payload.warnings ?? []).join("\n")).not.toContain("provide capital_gains_file");
   });
 });

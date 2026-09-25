@@ -302,6 +302,9 @@ export interface ExactConfirmExecution {
 export interface InterAccountInput {
   readonly maxDateGap: number | undefined;
   readonly targetAccountsDimensionsId: number | undefined;
+  /** false = preview only: no consume-once plan handle is minted (accounting
+   * inbox dry run, which discards it). Default true. */
+  readonly mintPlanHandles?: boolean;
 }
 
 export interface InterAccountExecutionInput extends InterAccountInput {
@@ -310,7 +313,8 @@ export interface InterAccountExecutionInput extends InterAccountInput {
 
 export interface InterAccountPreview {
   match: InterAccountMatchResult;
-  planHandle: string;
+  /** Absent only when the caller passed mintPlanHandles:false. */
+  planHandle?: string;
 }
 
 export interface InterAccountExecution {

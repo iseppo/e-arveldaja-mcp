@@ -12,6 +12,7 @@ import {
   findMatchingJournal,
   findMatchingJournalEntry,
   isReflessEntry,
+  normalizeReference,
   toUtcDay,
   UNKNOWN_JOURNAL_ID,
   type InterAccountJournalEntry,
@@ -216,6 +217,15 @@ export class BookingGuard {
     const journals = needsPostings
       ? await api.journals.listAllWithPostings()
       : await api.journals.listAll();
+    return new BookingGuard(api, journals, ownDimensionIds);
+  }
+
+  /**
+   * Build a guard over a journal snapshot the caller already fetched (with
+   * postings), so a plan and its execute-time recheck resolve Lane B against
+   * exactly the journals they were reviewed / revalidated on.
+   */
+  static fromSnapshot(api: ApiContext, journals: Journal[], ownDimensionIds: Set<number>): BookingGuard {
     return new BookingGuard(api, journals, ownDimensionIds);
   }
 
@@ -494,6 +504,24 @@ export class BookingGuard {
       return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
     }
     return { status: "none" };
+  }
+
+  /**
+   * True when a live LABELLED journal whose reference differs from
+   * `q.reference` sits on this transfer's key within the ±`maxGapDays` window.
+   * {@link resolveInterAccount} treats such a journal as a distinct identity
+   * and answers `none`; a caller that cannot prove the difference (the journal
+   * may be this very transfer booked from the other side under its own label)
+   * uses this to route the row to review instead of booking it again.
+   */
+  hasOtherLabelledInterAccount(q: InterAccountQuery): boolean {
+    const ref = normalizeReference(q.reference);
+    const gap = Math.max(0, Math.floor(q.maxGapDays ?? 0));
+    return this.candidateDates(q.date, gap).some(date =>
+      (this.interAccountIndex.get(interAccountKey(q.sourceDim, q.targetDim, q.amount, date)) ?? []).some(c =>
+        !c.consumed && !isReflessEntry(c) && normalizeReference(c.document_number) !== ref
+      )
+    );
   }
 
   /** True when `candidates` holds a live (un-consumed) in-run journal entry. */

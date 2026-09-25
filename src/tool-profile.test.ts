@@ -66,6 +66,10 @@ describe("tool profiles", () => {
     }
   });
 
+  it("catalogues attach_document as destructive (it can overwrite an existing source document)", () => {
+    expect(toolMeta("attach_document").risk).toBe("destructive");
+  });
+
   it("catalogues continue_accounting_workflow as a mutation, its read-only granular constituents apart", () => {
     // action='execute_review_action' books a real owner-expense journal, so the
     // façade must not be read/preview-risk. Its granular constituents only

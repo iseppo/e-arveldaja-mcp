@@ -9,6 +9,7 @@ import {
   remapHiddenGranularTool,
   remapHiddenGranularWorkflowEnvelope,
   workflowActionFromBlockedDryRunStep,
+  workflowFromAccountingInboxPayload,
 } from "./workflow-response.js";
 
 describe("workflow response helpers", () => {
@@ -293,6 +294,52 @@ describe("workflow response helpers", () => {
     expect(invoiceOnly.available_actions[0]).toMatchObject({ args: expectedInvoiceOnlyArgs });
     expect(invoiceOnly.recommended_next_action).toMatchObject({ args: expectedInvoiceOnlyArgs });
     expect(invoiceOnly.approval_previews[0]?.execute_args).not.toHaveProperty("command_count");
+  });
+
+  it("blocks Wise approval while transfer ownership reviews remain", () => {
+    const step = {
+      tool: "import_wise_transactions",
+      suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 8, execute: false },
+      preview: { created: 2, command_count: 3, skipped: 0, error_count: 0, needs_review: 1 },
+    };
+    expect(approvalPreviewFromDryRunStep(step)).toBeUndefined();
+    expect(workflowActionFromBlockedDryRunStep(step)?.why).toContain("1 transfer needing ownership review");
+  });
+
+  it("turns handle-less inbox dry runs into a dry-run step instead of an execute card", () => {
+    const workflow = workflowFromAccountingInboxPayload({
+      autopilot: {
+        user_summary: "Ran dry runs.",
+        executed_steps: [
+          {
+            tool: "import_camt053",
+            summary: "CAMT dry run would create 1 transaction.",
+            suggested_args: { file_path: "/tmp/statement.xml", accounts_dimensions_id: 7, execute: false },
+            preview: { created_count: 1, skipped_count: 0, possible_duplicate_count: 0, error_count: 0 },
+          },
+          {
+            tool: "import_wise_transactions",
+            summary: "Wise dry run would create 1 transaction.",
+            suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 8, execute: false },
+            preview: { created: 1, command_count: 1, skipped: 0, error_count: 0, needs_review: 0 },
+          },
+          {
+            tool: "reconcile_inter_account_transfers",
+            summary: "Inter-account dry run found 1 pair.",
+            suggested_args: { execute: false },
+            preview: { matched_pairs: 1, matched_one_sided: 0, skipped_ambiguous: 0, error_count: 0 },
+          },
+        ],
+      },
+    });
+    expect(workflow.approval_previews).toEqual([]);
+    expect(workflow.available_actions.map(action => [action.kind, action.tool, action.args?.execute])).toEqual([
+      ["tool_call", "import_camt053", false],
+      ["tool_call", "import_wise_transactions", false],
+      ["tool_call", "reconcile_inter_account_transfers", false],
+    ]);
+    expect(workflow.recommended_next_action).toMatchObject({ approval_required: false });
+    expect(workflow.recommended_next_action.why).toContain("plan_handle");
   });
 
   it("blocks follow-up tool calls when materializing dry runs still need review", () => {

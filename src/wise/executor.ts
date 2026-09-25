@@ -22,15 +22,14 @@ import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
-import { roundMoney } from "../money.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
-import { buildInterAccountJournalIndex, findMatchingJournal } from "../tools/inter-account-utils.js";
+import { BookingGuard } from "../booking-guard.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
   bookedCurrencyForWiseRow,
-  bookedFeeAmountForWiseRow,
   classifyWiseOwnTransfer,
   isJarTransfer,
   isPositiveSafeInteger,
@@ -140,6 +139,12 @@ export interface WiseRunInput {
   readonly snapshot?: FileInputSnapshot;
 }
 
+export interface WisePrepareRunInput extends WiseRunInput {
+  /** Issue a server plan handle for the reviewed dry run (default true). A
+   * preview-only caller passes false: no plan is issued, no plan_handle returned. */
+  readonly mintPlanHandle?: boolean;
+}
+
 /**
  * Shared dry-run / execute orchestration. All api I/O (file capture, ledger,
  * bank, invoice, journal, purchase-invoice reads, mutations, audit, execution
@@ -153,6 +158,7 @@ async function runWiseImport(
   input: WiseRunInput,
   executeRequested: boolean,
   storedWisePlan: StoredExecutionPlan | undefined,
+  mintPlanHandle = true,
 ): Promise<WiseRunResult> {
   const {
     source,
@@ -284,27 +290,6 @@ async function runWiseImport(
     }
   }
 
-  const hasFeeRows = eligible.some(row => bookedFeeAmountForWiseRow(row) > 0);
-  const feeAccountDimensionsId = hasFeeRows
-    ? resolveWiseFeeAccountDimensionId(accountDimensionsSnapshot, fee_account_dimensions_id, fee_account_relation_id)
-    : undefined;
-
-  // Find Wise client for fee transactions
-  let wiseClientId: number | undefined;
-  let allClientsSnapshot: Awaited<ReturnType<typeof api.clients.listAll>> = [];
-  if (hasFeeRows) {
-    allClientsSnapshot = await api.clients.listAll();
-    const wiseClient = allClientsSnapshot.find(c =>
-      c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
-    );
-    wiseClientId = wiseClient?.id;
-    // Without a Wise client the fee rows can be created but never confirmed;
-    // refuse the whole import up-front instead of leaving stray PROJECT rows.
-    if (!wiseClientId) {
-      return { ok: false, failure: { kind: "wise_client_not_found" } };
-    }
-  }
-
   // Get existing transactions for duplicate detection
   const existingTx = (await api.transactions.listAll()).filter(isNonVoidTransaction);
 
@@ -330,20 +315,42 @@ async function runWiseImport(
   const hasPaymentCandidates = paymentRows.length > 0 && purchaseInvoicesApi !== undefined;
   const allPurchaseInvoices = hasPaymentCandidates ? await purchaseInvoicesApi.listAll() : [];
 
-  const projected = projectWiseCommands({
+  const projectionInput = {
     eligible,
     accountsDimensionsId: accounts_dimensions_id,
     accountDimensions: accountDimensionsSnapshot,
-    feeAccountDimensionsId,
-    wiseClientId,
+    feeAccountDimensionsId: undefined as number | undefined,
+    wiseClientId: undefined as number | undefined,
     existingTx,
     transferDecisions,
     postingDimensionsSnapshot,
     journalSnapshot,
+    createInterAccountGuard: (ownDimensionIds: Set<number>) =>
+      BookingGuard.fromSnapshot(api, journalSnapshot, ownDimensionIds),
+    approvedTransferIds: new Set(approvedTransferIds),
     ownCompanyClientId,
     ownCompanyClientMatches,
     allPurchaseInvoices,
-  });
+  };
+  let projected = projectWiseCommands(projectionInput);
+
+  // Fee dimension and Wise client are resolved only when a fee row survives
+  // dedup, so a fully imported re-run never needs (or fails on) them.
+  let feeAccountDimensionsId: number | undefined;
+  let allClientsSnapshot: Awaited<ReturnType<typeof api.clients.listAll>> = [];
+  if (projected.feeResolutionRequired) {
+    feeAccountDimensionsId = resolveWiseFeeAccountDimensionId(accountDimensionsSnapshot, fee_account_dimensions_id, fee_account_relation_id);
+    allClientsSnapshot = await api.clients.listAll();
+    const wiseClient = allClientsSnapshot.find(c =>
+      c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
+    );
+    // Without a Wise client the fee rows can be created but never confirmed;
+    // refuse the whole import up-front instead of leaving stray PROJECT rows.
+    if (!wiseClient?.id) {
+      return { ok: false, failure: { kind: "wise_client_not_found" } };
+    }
+    projected = projectWiseCommands({ ...projectionInput, feeAccountDimensionsId, wiseClientId: wiseClient.id });
+  }
   const commands = projected.commands;
   const created = projected.created;
   const skipped = projected.skipped;
@@ -379,7 +386,6 @@ async function runWiseImport(
           clients: allClientsSnapshot,
           own_company_client_matches: ownCompanyClientMatches,
           journals: journalSnapshot,
-          purchase_invoices: allPurchaseInvoices,
         },
       })
     : undefined;
@@ -398,7 +404,7 @@ async function runWiseImport(
 
   // DRY RUN: issue an immutable server plan the operator reviews.
   let planHandle: string | undefined;
-  if (!executeRequested && commands.length > 0 && approvedCommandDigest !== undefined) {
+  if (!executeRequested && mintPlanHandle && commands.length > 0 && approvedCommandDigest !== undefined) {
     const planInput: ExecutionPlanInput = {
       normalizedArgs: stripUndefinedDeep(canonicalPlanningArgs) as PlanRecord,
       sourceIdentities: [stripUndefinedDeep({ ...inputSnapshot.identity }) as PlanRecord],
@@ -421,7 +427,6 @@ async function runWiseImport(
         command_count: commands.length,
         inter_account_commands: commands.filter(command => command.action === "inter_account").length,
         fee_commands: commands.filter(command => command.action === "fee_create_and_confirm").length,
-        purchase_invoice_updates: commands.filter(command => command.action === "purchase_invoice_update").length,
       },
       exclusions: skipped.map(entry => stripUndefinedDeep({ wise_id: entry.wise_id, reason: entry.reason })),
       reviews: ownershipReviews.map(review => stripUndefinedDeep({ ...review })),
@@ -603,7 +608,7 @@ async function runWiseImport(
               source_direction: command.source_direction,
               amount: command.booked_amount,
               description: command.create_payload.description ?? "",
-              status: `created (confirm failed: ${errorMessage})`,
+              status: `created (confirm failed: ${wrapUntrustedOcr(errorMessage)})`,
               api_id: apiId,
               booked_currency: command.booked_currency,
             });
@@ -612,8 +617,6 @@ async function runWiseImport(
         }
 
         if (command.action === "inter_account") {
-          const apiId = command.depends_on ? runtimeIds.get(command.depends_on) : undefined;
-          if (apiId === undefined) throw new Error("Inter-account command dependency returned no transaction ID");
           if (command.mutation_mode === "create_only_already_journalized") {
             clearRuntimeCaches();
             const freshJournals = await api.journals.listAllWithPostings();
@@ -622,19 +625,15 @@ async function runWiseImport(
               const reason = `Stale already-journalized precondition: expected journal ${command.existing_journal_id} changed before acceptance`;
               skipped.push({ wise_id: command.wise_id, reason });
               interAccountResults.push({
-                api_id: apiId,
                 wise_id: command.wise_id,
                 amount: command.booked_amount,
                 status: `precondition_failed: ${reason}`,
                 ownership_basis: command.ownership_basis,
-                orphan_project_transaction_id: apiId,
-                orphan_action_hint: `Transaction ${apiId} was created but the approved journal precondition changed. Review journal ${command.existing_journal_id} and clean up or reconcile the PROJECT transaction manually.`,
               });
               continue;
             }
             successfulCommands.add(command.row_key);
             interAccountResults.push({
-              api_id: apiId,
               wise_id: command.wise_id,
               amount: command.booked_amount,
               status: "already_journalized",
@@ -644,6 +643,8 @@ async function runWiseImport(
             continue;
           }
 
+          const apiId = command.depends_on ? runtimeIds.get(command.depends_on) : undefined;
+          if (apiId === undefined) throw new Error("Inter-account command dependency returned no transaction ID");
           try {
             clearRuntimeCaches();
             const [freshTransactions, freshJournals] = await Promise.all([
@@ -661,12 +662,29 @@ async function runWiseImport(
             )) {
               throw new Error(`Stale created transaction precondition: inter-account transaction ${apiId} is missing or changed before confirmation`);
             }
-            const freshJournalIndex = buildInterAccountJournalIndex(
-              freshJournals,
+            // Same Lane B resolution as the plan (±1 day, labelled journals
+            // identity-only), minus the registration journals this run's own
+            // confirmations created (operations_id = a transaction created here).
+            const createdHere = new Set(runtimeIds.values());
+            const freshGuard = BookingGuard.fromSnapshot(
+              api,
+              freshJournals.filter(journal =>
+                !(journal.operation_type === "TRANSACTION" && journal.operations_id !== undefined && createdHere.has(journal.operations_id))
+              ),
               new Set([command.wise_dimension_id, command.counterpart_dimension_id]),
             );
-            const journalKey = `${command.wise_dimension_id}|${command.counterpart_dimension_id}|${roundMoney(command.booked_amount)}|${command.date}`;
-            if (findMatchingJournal(freshJournalIndex.get(journalKey), command.wise_id) !== undefined) {
+            const journalQuery = {
+              sourceDim: command.wise_dimension_id,
+              targetDim: command.counterpart_dimension_id,
+              amount: command.booked_amount,
+              date: command.date,
+              maxGapDays: 1,
+              reference: command.wise_id,
+            };
+            if (
+              freshGuard.resolveInterAccount(journalQuery, { consume: false }).status !== "none" ||
+              freshGuard.hasOtherLabelledInterAccount(journalQuery)
+            ) {
               throw new Error("Stale inter-account precondition: a matching journal appeared before confirmation");
             }
             if (command.client_update) await api.transactions.update(apiId, command.client_update);
@@ -706,7 +724,7 @@ async function runWiseImport(
               api_id: apiId,
               wise_id: command.wise_id,
               amount: command.booked_amount,
-              status: `confirm_failed: ${errorMessage}`,
+              status: `confirm_failed: ${wrapUntrustedOcr(errorMessage)}`,
               ownership_basis: command.ownership_basis,
               orphan_project_transaction_id: apiId,
               orphan_action_hint: `Transaction ${apiId} was created but left in PROJECT status. Rerunning the import will skip it via wise_id dedup. To retry confirmation: invalidate_transaction(${apiId}), then delete_transaction(${apiId}) and rerun — or confirm_transaction(${apiId}) manually against the target bank account.`,
@@ -715,33 +733,6 @@ async function runWiseImport(
           continue;
         }
 
-        const purchaseInvoices = api.purchaseInvoices;
-        if (!purchaseInvoices) throw new Error("Purchase invoice API is unavailable");
-        clearRuntimeCaches();
-        const freshInvoices = await purchaseInvoices.listAll();
-        const freshInvoice = freshInvoices.find(invoice => invoice.id === command.existing_object_id);
-        if (!freshInvoice || !exactStateMatches(freshInvoice, command.current_object_state)) {
-          throw new Error(`Stale purchase invoice precondition: invoice ${command.existing_object_id} changed before update`);
-        }
-        await purchaseInvoices.update(command.existing_object_id, command.update_payload);
-        successfulCommands.add(command.row_key);
-        const fix = invoiceFixCandidates.find(candidate =>
-          candidate.row_index === command.row_index && candidate.invoice_id === command.existing_object_id
-        );
-        if (fix) fix.result = "updated";
-        logAudit({
-          tool: "import_wise_transactions", action: "UPDATED", entity_type: "purchase_invoice",
-          entity_id: command.existing_object_id,
-          summary: command.category === "foreign_currency_lock"
-            ? `Locked Wise rate for invoice ${command.existing_object_id}`
-            : `Auto-fixed EUR rounding for invoice ${command.existing_object_id}`,
-          details: {
-            wise_id: command.wise_id,
-            ...command.update_payload,
-            approved_command_digest: approvedCommandDigest,
-            command_version: WISE_COMMAND_VERSION,
-          },
-        });
       } catch (err) {
         if (isMutationIndeterminate(err)) {
           // The write may or may not have committed. Reporting it as a plain
@@ -765,15 +756,6 @@ async function runWiseImport(
           wise_id: command.wise_id,
           reason: err instanceof Error ? err.message : String(err),
         });
-        if (command.action === "purchase_invoice_update") {
-          const fix = invoiceFixCandidates.find(candidate =>
-            candidate.row_index === command.row_index && candidate.invoice_id === command.existing_object_id
-          );
-          if (fix) {
-            fix.result = "error";
-            fix.error = err instanceof Error ? err.message : String(err);
-          }
-        }
       }
     }
     } finally {
@@ -818,9 +800,9 @@ async function runWiseImport(
 export async function prepareWiseImport(
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
-  input: WiseRunInput,
+  input: WisePrepareRunInput,
 ): Promise<WiseRunResult> {
-  return runWiseImport(api, runtimeSafetyContext, input, false, undefined);
+  return runWiseImport(api, runtimeSafetyContext, input, false, undefined, input.mintPlanHandle !== false);
 }
 
 export async function executeWiseImport(

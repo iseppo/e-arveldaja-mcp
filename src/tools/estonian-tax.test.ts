@@ -2331,6 +2331,21 @@ describe("bookOwnerExpenseReimbursement (shared core)", () => {
     expect(coreCreate).toEqual(toolCreate);
   });
 
+  it("returns the existing journal instead of booking the same receipt twice", async () => {
+    const api = makeApi([], makeStandardAccounts(), { vatRegistered: true });
+    const params = { ...bookingParams, document_number: "R-1" };
+    await bookOwnerExpenseReimbursement(api, params);
+    const retry = await bookOwnerExpenseReimbursement(api, params);
+    const payload = parseMcpResponse((retry as { content: Array<{ text: string }> }).content[0].text) as any;
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+    expect(payload.journal_entry).toMatchObject({ booking_status: "duplicate", api_response: { created_object_id: 42 } });
+    expect(payload.note).toContain("already exists");
+
+    // A different total on the same document is a different booking.
+    await bookOwnerExpenseReimbursement(api, { ...params, net_amount: 50 });
+    expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(2);
+  });
+
   it("core surfaces the same validation errors as the tool", async () => {
     const coreApi = makeApi([], makeStandardAccounts(), { vatRegistered: false });
     const result = await bookOwnerExpenseReimbursement(coreApi, {

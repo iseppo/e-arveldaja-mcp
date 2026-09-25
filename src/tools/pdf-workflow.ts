@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
+import { extname, join } from "path";
 import { registerTool } from "../mcp-compat.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
@@ -10,7 +10,7 @@ import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExtern
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
-import { resolveFileInput } from "../file-validation.js";
+import { contentMatchesExtension, resolveFileInput, sanitizeUploadFileName } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "./purchase-vat-defaults.js";
 import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
 import { isStrictDate } from "../strict-date.js";
@@ -46,10 +46,6 @@ async function resolveInvoiceDocumentInput(input: string): Promise<{ path: strin
   return resolveFileInput(input, INVOICE_DOCUMENT_EXTENSIONS, MAX_INVOICE_DOCUMENT_SIZE);
 }
 
-function sanitizeInvoiceDocumentFileName(resolvedPath: string): string {
-  return (resolvedPath.split(/[\\/]/).pop() ?? "document").replace(/[^a-zA-Z0-9._\- ]/g, "_").substring(0, 255);
-}
-
 /**
  * Snapshot the source document's bytes ONCE and bind the caller to their
  * SHA-256 digest. `extract_pdf_invoice` returns `source_sha256`;
@@ -57,9 +53,11 @@ function sanitizeInvoiceDocumentFileName(resolvedPath: string): string {
  * file swapped between extraction and creation is rejected (`digest_mismatch`)
  * BEFORE any API mutation. Both the parser and the uploader read the immutable
  * snapshot, never the live path. `cleanup()` is always defined and removes the
- * temp snapshot plus any resolver-owned temp file.
+ * temp snapshot plus any resolver-owned temp file. `fileName` (optional) names
+ * the uploaded document instead of the source basename; it is sanitized and
+ * forced to keep the source's extension.
  */
-export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha256?: string): Promise<{
+export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha256?: string, fileName?: string): Promise<{
   snapshotPath: string;
   fileName: string;
   bytes: Buffer;
@@ -79,10 +77,16 @@ export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha
   };
   try {
     const bytes = await readFile(resolved.path);
+    const extension = extname(resolved.path).toLowerCase();
+    if (!contentMatchesExtension(bytes, extension)) {
+      throw Object.assign(new Error(`Document content does not match its ${extension} extension.`), {
+        category: "content_type_mismatch",
+      });
+    }
     const source_sha256 = sha256Hex(bytes);
-    const fileName = sanitizeInvoiceDocumentFileName(resolved.path);
+    const uploadFileName = sanitizeUploadFileName(fileName ?? resolved.path, extension);
     dir = await mkdtemp(join(tmpdir(), "e-arveldaja-invoice-"));
-    const snapshotPath = join(dir, fileName);
+    const snapshotPath = join(dir, uploadFileName);
     await writeFile(snapshotPath, bytes, { mode: 0o600 });
     if (expectedSha256 !== undefined && source_sha256 !== expectedSha256) {
       throw Object.assign(new Error("Document digest mismatch"), {
@@ -91,7 +95,7 @@ export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha
         actual_sha256: source_sha256,
       });
     }
-    return { snapshotPath, fileName, bytes, contentsBase64: bytes.toString("base64"), source_sha256, cleanup };
+    return { snapshotPath, fileName: uploadFileName, bytes, contentsBase64: bytes.toString("base64"), source_sha256, cleanup };
   } catch (error) {
     await cleanup();
     throw error;
@@ -915,6 +919,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
       file_path: z.string().describe("Absolute path to the source invoice document (PDF/JPG/PNG); uploaded during creation."),
       source_sha256: z.string().regex(/^[0-9a-f]{64}$/).describe("SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes."),
+      file_name: z.string().optional().describe("Name for the uploaded document (e.g. the original filename for base64 input); defaults to the source file's name. The file's extension is kept."),
       block_on_duplicate: z.boolean().optional().describe("Refuse creation when this receipt's cash outflow looks like an already-booked duplicate (default false: warn only)."),
       allow_duplicate_invoice_number: z.boolean().optional().describe("Explicit acknowledgement that the supplier reuses this invoice number (e.g. across years): an existing live invoice with the same supplier and number becomes a warning instead of a refusal (default false: refuse)."),
     },
@@ -939,7 +944,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       if (!Number.isInteger(params.term_days) || params.term_days < 0) {
         return toolError({ error: "term_days must be a non-negative integer." });
       }
-      const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256);
+      const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256, params.file_name);
       try {
       const supplier = await api.clients.get(params.supplier_client_id);
       // supplier.name is a trusted API read, but a client created before this

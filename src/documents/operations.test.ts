@@ -1,4 +1,5 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -11,6 +12,10 @@ import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, AC
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), writeFile: vi.fn(actual.writeFile) };
+});
 
 const mockedParseDocument = vi.mocked(parseDocument);
 
@@ -143,6 +148,18 @@ describe("AccountingDocumentOperations.prepare", () => {
   });
 });
 
+describe("AccountingDocumentOperations snapshot materialization", () => {
+  it("removes its temp dir when writing the snapshot fails", async () => {
+    const { path } = writeTempPdf();
+    const { ops } = setup();
+    vi.mocked(writeFile).mockRejectedValueOnce(new Error("disk full"));
+    await expect(ops.prepare({ source: { file_path: path } })).rejects.toThrow("disk full");
+    const created = await vi.mocked(mkdtemp).mock.results.at(-1)!.value as string;
+    expect(created).toContain("e-arveldaja-document-");
+    expect(existsSync(created)).toBe(false);
+  });
+});
+
 describe("AccountingDocumentOperations.create", () => {
   const supplier = () => fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, is_supplier: true });
 
@@ -222,6 +239,8 @@ describe("AccountingDocumentOperations.create", () => {
     expect(outcome.value.createdInvoiceId).toBe(90_001);
     expect(outcome.value.documentUploaded).toBe(true);
     expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledTimes(1);
+    // The upload carries the source's own basename, not a generic name.
+    expect(vi.mocked(api.purchaseInvoices.uploadDocument).mock.calls[0]![1]).toBe("invoice.pdf");
     // NEVER auto-confirms/registers — the op stops at DRAFT + a fresh confirm plan.
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
     expect(outcome.value.confirmPlan).toBeDefined();

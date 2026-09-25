@@ -533,6 +533,7 @@ export function counterpartyNameForWiseRow(row: WiseRow): string | undefined {
 
 export function isNonErrorWiseSkipReason(reason: string): boolean {
   return reason.startsWith("Already imported") ||
+    reason.startsWith("Already journalized") ||
     reason.startsWith("Fee already imported") ||
     reason.startsWith("Unsupported Wise direction") ||
     reason === "Skipped because main transaction was not created";
@@ -618,7 +619,11 @@ export function isJarTransfer(row: WiseRow): boolean {
   if (refLower.includes("jar")) return true;
 
   // Self-transfer: source and target are the same person/company,
-  // same currency, zero fee (to avoid false-positives on owner payments)
+  // same currency, zero fee (to avoid false-positives on owner payments).
+  // Never for TRANSFER-* / BANK_DETAILS_* rows: those are real movements to or
+  // from an own bank account (both ends carry the company name), which must
+  // reach the ownership / inter-account path instead of being dropped.
+  if (row.id.startsWith("TRANSFER-") || row.id.startsWith("BANK_DETAILS_")) return false;
   const src = normalizeWiseText(row.sourceName);
   const tgt = normalizeWiseText(row.targetName);
   if (src && tgt && src === tgt && row.sourceCurrency === row.targetCurrency && row.sourceFeeAmount === 0) return true;

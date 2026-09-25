@@ -8,6 +8,10 @@ vi.mock("../audit-log.js", () => ({
 
 import { registerDocumentAttachmentTools } from "./document-attachments.js";
 import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";
+import { logAudit } from "../audit-log.js";
+import { HttpError } from "../http-client.js";
+
+const notFound = () => new HttpError("Not found", 404, "GET", "/x/document_user");
 
 function makeResource() {
   return {
@@ -53,10 +57,12 @@ describe("document attachment tools", () => {
   for (const [entity, prop] of CASES) {
     it(`attach_document routes ${entity} -> ${prop}.uploadDocument with the prepared file, and cleans up`, async () => {
       const api = makeApi();
+      api[prop].getDocument.mockRejectedValueOnce(notFound());
       const handlers = register(api);
 
       await handlers.attach_document({ entity_type: entity, id: 12, file_path: "/x/scan.pdf" });
 
+      expect(api[prop].getDocument).toHaveBeenCalledWith(12);
       expect(api[prop].uploadDocument).toHaveBeenCalledWith(12, "scan.pdf", "c2Nhbg==");
       for (const [, other] of CASES) {
         if (other !== prop) expect(api[other].uploadDocument).not.toHaveBeenCalled();
@@ -137,6 +143,7 @@ describe("document attachment tools", () => {
 
   it("still cleans up the temp file when the upload fails", async () => {
     const api = makeApi();
+    api.journals.getDocument.mockRejectedValueOnce(notFound());
     api.journals.uploadDocument.mockRejectedValueOnce(new Error("upload boom"));
     const handlers = register(api);
 
@@ -172,6 +179,84 @@ describe("document attachment tools", () => {
     const text = res.content[0].text;
     expect(text).toContain("UNTRUSTED_OCR_START:");
     expect(text).toContain("do-not-trust.pdf");
+  });
+
+  it("attach_document refuses to overwrite an existing document without replace_existing (no PUT)", async () => {
+    const api = makeApi();
+    api.journals.getDocument.mockResolvedValueOnce({ name: "old decision.pdf", contents: "b2xk" });
+    const handlers = register(api);
+
+    const res = await handlers.attach_document({ entity_type: "journal", id: 31, file_path: "/x/scan.pdf" });
+
+    expect(res.isError).toBe(true);
+    const text = res.content[0].text;
+    expect(text).toContain("document_exists");
+    expect(text).toContain("UNTRUSTED_OCR_START:");
+    expect(text).toContain("old decision.pdf");
+    expect(text).toMatch(/entity_type: journal/);
+    expect(api.journals.uploadDocument).not.toHaveBeenCalled();
+    expect(prepareInvoiceDocumentUpload).not.toHaveBeenCalled();
+    expect(logAudit).not.toHaveBeenCalled();
+  });
+
+  it("attach_document with replace_existing overwrites and audits the replaced filename", async () => {
+    const api = makeApi();
+    api.saleInvoices.getDocument.mockResolvedValueOnce({ name: "old.pdf", contents: "b2xk" });
+    const handlers = register(api);
+
+    const res = await handlers.attach_document({ entity_type: "sale_invoice", id: 4, file_path: "/x/scan.pdf", replace_existing: true });
+
+    expect(res.isError).toBeUndefined();
+    expect(api.saleInvoices.uploadDocument).toHaveBeenCalledWith(4, "scan.pdf", "c2Nhbg==");
+    expect(res.content[0].text).toContain("replaced_document_name");
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({
+      tool: "attach_document",
+      entity_id: 4,
+      details: { file_name: "scan.pdf", replaced_file_name: "old.pdf" },
+    }));
+  });
+
+  it("attach_document uploads when the existing-document read returns an empty file", async () => {
+    const api = makeApi();
+    api.transactions.getDocument.mockResolvedValueOnce({ name: "", contents: "" });
+    const handlers = register(api);
+
+    await handlers.attach_document({ entity_type: "transaction", id: 6, file_path: "/x/scan.pdf" });
+
+    expect(api.transactions.uploadDocument).toHaveBeenCalledWith(6, "scan.pdf", "c2Nhbg==");
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { file_name: "scan.pdf" } }));
+  });
+
+  it("attach_document does not upload when the existing-document read fails with a non-404 error", async () => {
+    const api = makeApi();
+    api.journals.getDocument.mockRejectedValueOnce(new HttpError("boom", 500, "GET", "/journals/1/document_user"));
+    const handlers = register(api);
+
+    await expect(handlers.attach_document({ entity_type: "journal", id: 1, file_path: "/x/scan.pdf" })).rejects.toThrow("boom");
+    expect(api.journals.uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it("attach_document rejects a relative file_path before any API call", async () => {
+    const api = makeApi();
+    const handlers = register(api);
+
+    const res = await handlers.attach_document({ entity_type: "journal", id: 1, file_path: "scan.pdf" });
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("invalid_file_path");
+    expect(api.journals.getDocument).not.toHaveBeenCalled();
+    expect(prepareInvoiceDocumentUpload).not.toHaveBeenCalled();
+  });
+
+  it("attach_document accepts base64 input and forwards file_name to the upload preparation", async () => {
+    const api = makeApi();
+    api.journals.getDocument.mockRejectedValueOnce(notFound());
+    const handlers = register(api);
+
+    await handlers.attach_document({ entity_type: "journal", id: 2, file_path: "base64:pdf:JVBERi0=", file_name: "otsus.pdf" });
+
+    expect(prepareInvoiceDocumentUpload).toHaveBeenCalledWith("base64:pdf:JVBERi0=", undefined, "otsus.pdf");
+    expect(api.journals.uploadDocument).toHaveBeenCalled();
   });
 
   it("registers exactly the three entity-agnostic document tools", () => {

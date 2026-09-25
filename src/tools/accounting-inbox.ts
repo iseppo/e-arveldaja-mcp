@@ -34,7 +34,7 @@ import {
   saveAutoBookingRule,
 } from "../accounting-rules.js";
 import { projectWorkflowResponse, remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload, type WorkflowEnvelope } from "../workflow-response.js";
-import { createPublicWorkflowStateDetail, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
+import { createPublicWorkflowStateDetail, WorkflowStateStoreError, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
 import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
@@ -1673,7 +1673,18 @@ function workflowStateDetailItems(workflow: unknown): PublicWorkflowStateDetail[
 // a scope-bound workflow handle (the page reference stays latent until guided
 // adopts get_workflow_page); standard/full receive the exact same v1 object,
 // byte-for-byte. A workflow handle never records or implies approval.
-function emitWorkflowEnvelope(v1Workflow: unknown, runtimeSafetyContext: RuntimeSafetyContext): unknown {
+// The accounting_inbox input that answers each bank-dimension question.
+const QUESTION_ANSWER_INPUTS: Readonly<Record<string, string>> = {
+  camt_accounts_dimensions_id: "bank_account_dimension_id",
+  wise_accounts_dimensions_id: "wise_account_dimension_id",
+  receipt_accounts_dimensions_id: "receipt_matching_dimension_id",
+};
+
+function emitWorkflowEnvelope(
+  v1Workflow: unknown,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  rerunArgs: Record<string, unknown> = {},
+): unknown {
   if (!isRecord(v1Workflow)) return v1Workflow;
   // Standard/full discard the v2 projection, so skip the detail-item reduction and
   // the store round-trip entirely for them — their output stays byte-identical v1.
@@ -1683,7 +1694,10 @@ function emitWorkflowEnvelope(v1Workflow: unknown, runtimeSafetyContext: Runtime
     return projectWorkflowResponse(
       v1Workflow as unknown as WorkflowEnvelope,
       runtimeSafetyContext.workflowStateStore,
-      { items: workflowStateDetailItems(v1Workflow) },
+      {
+        items: workflowStateDetailItems(v1Workflow),
+        questionRerun: { tool: "accounting_inbox", args: rerunArgs, inputs: QUESTION_ANSWER_INPUTS },
+      },
     );
   } catch {
     // A workflow-state store failure (e.g. workflow_state_capacity_exceeded) must
@@ -1711,7 +1725,11 @@ async function buildAccountingInboxScanResponse(
         // buildWorkflowEnvelope already remaps for guided/guided-sales, and a second
         // pass here is a no-op (no blocked actions remain after the first) while still
         // covering standard/full, which build the envelope unremapped.
-        workflow: emitWorkflowEnvelope(remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)), runtimeSafetyContext),
+        workflow: emitWorkflowEnvelope(
+          remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
+          runtimeSafetyContext,
+          { mode: "scan", ...params },
+        ),
       }),
     }],
   };
@@ -1786,6 +1804,7 @@ async function buildAccountingInboxDryRunResponse(
   const workflow = emitWorkflowEnvelope(
     remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
     runtimeSafetyContext,
+    { mode: "dry_run", ...params },
   );
 
   return {
@@ -2097,9 +2116,31 @@ async function buildOwnerExpenseContinuationPrepareResponse(
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig,
 ): Promise<CallToolResult> {
+  const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  // Recommendation/compliance text is echoed from the caller's review item.
+  const sandboxedResolution = sandboxReviewFields({
+    recommendation: resolution.recommendation,
+    compliance_basis: resolution.compliance_basis,
+    unresolved_questions: resolution.unresolved_questions,
+  }) as Pick<ReviewResolutionResult, "recommendation" | "compliance_basis" | "unresolved_questions">;
+  // A handle only exists for a fully-reviewed item: open questions (e.g. VAT or
+  // business-use) must be answered before anything is approvable.
+  if (resolution.unresolved_questions.length > 0) {
+    return {
+      content: [{
+        type: "text",
+        text: toMcpJson({
+          review_type: "receipt_review",
+          status: "needs_answers",
+          ...sandboxedResolution,
+          next_step_summary: "Answer the unresolved_questions, then call action='prepare_action' again to get an approval plan_handle.",
+          assistant_guidance: reviewActionAssistantGuidance,
+        }),
+      }],
+    };
+  }
   const projected = await computeOwnerExpenseJournalProjection(api, params);
   if (!projected.ok) return projected.error;
-  const resolution = resolveReviewItemPlan(reviewItem, exposure);
   const normalizedArgs = ownerExpenseProjectionFingerprint(projected.projection);
   const snapshot: PlanRecord = { ...normalizedArgs, destructive: false };
   const planInput: ExecutionPlanInput = {
@@ -2121,8 +2162,8 @@ async function buildOwnerExpenseContinuationPrepareResponse(
       text: toMcpJson({
         review_type: "receipt_review",
         status: "ready_for_approval",
-        recommendation: resolution.recommendation,
-        compliance_basis: resolution.compliance_basis,
+        recommendation: sandboxedResolution.recommendation,
+        compliance_basis: sandboxedResolution.compliance_basis,
         plan_handle: planHandle,
         proposed_action: {
           type: "owner_expense_reimbursement",
@@ -2201,6 +2242,118 @@ async function buildOwnerExpenseExecuteResponse(
   return bookOwnerExpenseFromProjection(api, freshProjection.projection, { rewrapDescription: sandboxExternalText });
 }
 
+function workflowContinuationError(code: string, message: string): CallToolResult {
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({ status: "error", error_code: code, error: message }),
+    }],
+  };
+}
+
+// Item ids are server-built stable ids (`tool:hex`); a caller-derived id that is
+// not token-shaped is never echoed raw.
+const SAFE_WORKFLOW_ITEM_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
+
+// action='next' with a workflow_handle: resolve item_id inside the stored
+// (inert, scope-bound) workflow state and return the item after it — or the
+// first item when no item_id is given. Reads only; records no answer and grants
+// no approval.
+function buildWorkflowHandleNextResponse(
+  workflowHandle: string,
+  itemId: string | undefined,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): CallToolResult {
+  let stored;
+  try {
+    stored = runtimeSafetyContext.workflowStateStore.inspect(workflowHandle);
+  } catch (error) {
+    if (error instanceof WorkflowStateStoreError) return workflowContinuationError(error.code, error.message);
+    throw error;
+  }
+  const items = (stored.items as readonly unknown[]).filter(isRecord);
+  let start = 0;
+  if (itemId !== undefined) {
+    const index = items.findIndex(item => item.item_id === itemId);
+    if (index < 0) {
+      return workflowContinuationError("workflow_item_not_found", "item_id does not name an item of this workflow state.");
+    }
+    start = index + 1;
+  }
+  const next = items[start];
+  const nextItemId = next && typeof next.item_id === "string" && SAFE_WORKFLOW_ITEM_ID.test(next.item_id)
+    ? next.item_id
+    : undefined;
+  return {
+    content: [{
+      type: "text",
+      text: toMcpJson({
+        message: next ? "Next workflow item." : "No further workflow items remain in this workflow state.",
+        workflow_handle: workflowHandle,
+        workflow: stored.workflow,
+        status: stored.status,
+        remaining_items: items.length - start,
+        ...(next
+          ? {
+              next_item: {
+                ...(nextItemId !== undefined ? { item_id: nextItemId } : {}),
+                review_data: sandboxExternalText(JSON.stringify(next)),
+              },
+            }
+          : {}),
+        ...(nextItemId !== undefined
+          ? {
+              next_action: {
+                tool: "continue_accounting_workflow",
+                args: { action: "next", workflow_handle: workflowHandle, item_id: nextItemId },
+                approval_required: false,
+              },
+            }
+          : {}),
+        note: "The workflow handle is inert state: an answer is not stored, and nothing is approved or booked by this call.",
+      }),
+    }],
+  };
+}
+
+// Text fields of an action/approval preview that a caller-supplied workflow can
+// carry; the machine fields (kind, tool, args, execute_*) stay raw.
+const ECHOED_WORKFLOW_TEXT_KEYS = ["label", "why", "question", "recommendation", "title", "summary", "duplicate_risk", "accounting_impact", "source_documents"];
+const ECHOED_ROW_TOKEN_KEYS = new Set(["id", "item_id", "code", "severity", "status"]);
+
+// action='next' echoes a workflow the caller supplied: sandbox its text before
+// it is re-emitted, exactly as review payloads are (sandboxReviewFields).
+function sandboxEchoedWorkflow(workflow: unknown): unknown {
+  if (!isRecord(workflow)) return workflow;
+  const sandboxAction = (action: unknown): unknown => {
+    if (!isRecord(action)) return action;
+    const next: Record<string, unknown> = { ...action };
+    for (const key of ECHOED_WORKFLOW_TEXT_KEYS) {
+      if (next[key] !== undefined) next[key] = sandboxReviewFields(next[key], key);
+    }
+    return next;
+  };
+  const sandboxRow = (row: unknown): unknown => {
+    if (!isRecord(row)) return sandboxReviewFields(row);
+    return Object.fromEntries(Object.entries(row).map(([key, value]) => [
+      key,
+      typeof value === "string" && ECHOED_ROW_TOKEN_KEYS.has(key) && SAFE_WORKFLOW_ITEM_ID.test(value)
+        ? value
+        : sandboxReviewFields(value, key),
+    ]));
+  };
+  const next: Record<string, unknown> = { ...workflow };
+  if (typeof next.summary === "string") next.summary = sandboxExternalText(next.summary);
+  for (const key of ["done", "needs_decision", "needs_review"]) {
+    if (Array.isArray(next[key])) next[key] = (next[key] as unknown[]).map(sandboxRow);
+  }
+  if (next.recommended_next_action !== undefined) next.recommended_next_action = sandboxAction(next.recommended_next_action);
+  for (const key of ["available_actions", "approval_previews"]) {
+    if (Array.isArray(next[key])) next[key] = (next[key] as unknown[]).map(sandboxAction);
+  }
+  return next;
+}
+
 export function registerAccountingInboxTools(
   server: McpServer,
   api: ApiContext,
@@ -2231,12 +2384,11 @@ export function registerAccountingInboxTools(
     "continue_accounting_workflow",
     "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
     {
-      action: z.enum(["next", "resolve_review", "prepare_action", "execute_review_action"]).optional().describe("next reads workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle."),
+      action: z.enum(["next", "resolve_review", "prepare_action", "execute_review_action"]).optional().describe("next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle."),
       workflow_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("Opaque server-issued workflow handle from a compact workflow_action_v2 response. Carries inert prior workflow state; never approval or mutation authority."),
       plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation. Drift-bound to the reviewed booking params; not itself approval."),
-      item_id: z.string().max(128).optional().describe("Stable id of the workflow item this continuation answers (from a workflow_action_v2 blocker or page item)."),
-      answer: z.string().max(700).optional().describe("Free-text answer to the current workflow question, for a compact guided continuation. Capped so a whole continuation stays within the 1 KiB budget."),
-      workflow_state_json: jsonObjectInput.optional().describe("Previous workflow response; required for action='next'."),
+      item_id: z.string().max(128).optional().describe("Stable id of a workflow item (from a workflow_action_v2 blocker or page item); action='next' returns the item after it."),
+      workflow_state_json: jsonObjectInput.optional().describe("Previous v1 workflow response; required for action='next' without workflow_handle."),
       review_item_json: jsonObjectInput.optional().describe("Review item object for action='resolve_review' or action='prepare_action'."),
       save_as_rule: z.boolean().optional().describe("For action='prepare_action', prepare save_auto_booking_rule when appropriate."),
       rule_override_json: jsonObjectInput.optional().describe("Optional explicit rule fields for action='prepare_action'."),
@@ -2245,7 +2397,7 @@ export function registerAccountingInboxTools(
     // real, plan-gated owner-expense booking. next/resolve_review/prepare_action stay
     // behaviorally read-only for every other review type.
     { ...mutate, title: "Continue Accounting Workflow" },
-    async ({ action, workflow_state_json, review_item_json, save_as_rule, rule_override_json, plan_handle }) => {
+    async ({ action, workflow_handle, item_id, workflow_state_json, review_item_json, save_as_rule, rule_override_json, plan_handle }) => {
       if (action === "resolve_review") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
         return buildReviewResolutionResponse(reviewItem, exposure);
@@ -2277,12 +2429,24 @@ export function registerAccountingInboxTools(
         }, exposure);
       }
 
+      if (workflow_handle !== undefined) {
+        return buildWorkflowHandleNextResponse(workflow_handle, item_id, runtimeSafetyContext);
+      }
       const workflowState = parseRequiredJsonObject(workflow_state_json, "workflow_state_json");
-      const v1Workflow = remapHiddenGranularWorkflowEnvelope(
+      // A compact workflow_action_v2 response carries no v1 actions to rebuild
+      // from; reading it as v1 would falsely report "no workflow action pending".
+      const suppliedWorkflow = isRecord(workflowState.workflow) ? workflowState.workflow : workflowState;
+      if (stringAt(suppliedWorkflow, "contract") === "workflow_action_v2") {
+        return workflowContinuationError(
+          "workflow_action_v2_not_accepted",
+          "workflow_state_json holds a compact workflow_action_v2 response. Continue it with its next_action, or call action='next' with its workflow_handle (and item_id) instead.",
+        );
+      }
+      const v1Workflow = remapHiddenGranularWorkflowEnvelope(sandboxEchoedWorkflow(
         isRecord(workflowState.workflow)
           ? workflowState.workflow
           : workflowFromAccountingInboxPayload(workflowState),
-      );
+      ));
       // Derive the human label from the v1 envelope's recommended action so the
       // message is identical across profiles; the emitted envelope may then be
       // projected to the compact v2 form for guided/guided-sales.

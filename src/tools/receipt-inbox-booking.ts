@@ -1,5 +1,6 @@
 import { logAudit } from "../audit-log.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { sanitizeUploadFileName } from "../file-validation.js";
 import { checkIntakeCashDuplicates, formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
@@ -152,6 +153,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
   consumedTransactionIds: Set<number>,
 ): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
   const file = snapshot.file;
+  // The inbox dir-entry name is untrusted (control chars, odd bytes): upload and
+  // audit it only in sanitized form.
+  const uploadFileName = sanitizeUploadFileName(file.name);
   const notes: string[] = [];
   const dryRun = executionMode === "dry_run";
   const shouldConfirm = executionMode === "create_and_confirm";
@@ -307,7 +311,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
       details: {
         supplier_name: supplier.name, invoice_number: extracted.invoice_number,
         invoice_date: extracted.invoice_date, total_vat: extracted.total_vat, total_gross: extracted.total_gross,
-        file_name: file.name,
+        file_name: uploadFileName,
       },
     });
   } catch (error) {
@@ -366,14 +370,14 @@ export async function createAndMaybeMatchPurchaseInvoice(
   if (createdInvoice.id) {
     try {
       const contents = snapshot.bytes.toString("base64");
-      await api.purchaseInvoices.uploadDocument(createdInvoice.id, file.name, contents);
+      await api.purchaseInvoices.uploadDocument(createdInvoice.id, uploadFileName, contents);
       uploadedDocument = true;
       notes.push("Uploaded source document to created purchase invoice.");
       logAudit({
         tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
         entity_id: createdInvoice.id,
-        summary: `Uploaded document "${file.name}" to purchase invoice ${createdInvoice.id}`,
-        details: { file_name: file.name },
+        summary: `Uploaded document "${uploadFileName}" to purchase invoice ${createdInvoice.id}`,
+        details: { file_name: uploadFileName },
       });
     } catch (error) {
       return rollbackCreatedInvoice("source document upload failed", error);
@@ -408,7 +412,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
         tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "purchase_invoice",
         entity_id: createdInvoice.id,
         summary: `Confirmed purchase invoice ${createdInvoice.id} (${createdInvoice.number ?? ""})`,
-        details: { invoice_number: createdInvoice.number, file_name: file.name },
+        details: { invoice_number: createdInvoice.number, file_name: uploadFileName },
       });
     } catch (error) {
       return rollbackCreatedInvoice("invoice confirmation failed", error);

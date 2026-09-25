@@ -237,8 +237,9 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
         total: invoiceFixCandidates.length,
         foreign_currency_lock: invoiceFixCandidates.filter(f => f.category === "foreign_currency_lock").length,
         eur_legacy_autofix: invoiceFixCandidates.filter(f => f.category === "eur_legacy_autofix").length,
-        updated: invoiceFixCandidates.filter(f => f.result === "updated").length,
-        errors: invoiceFixCandidates.filter(f => f.result === "error").length,
+        // Advisory only: the import never modifies a confirmed invoice; each
+        // candidate carries its proposed_correction for a deliberate manual fix.
+        advisory_only: true,
         // `supplier_name` is the raw Wise counterparty (targetName/sourceName)
         // CSV column — sandbox-wrap it at the output boundary so a tampered
         // statement cannot inject through the dry-run preview or the top-level
@@ -296,10 +297,11 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           tool: "import_wise_transactions",
           summary: workflowSummary,
           suggested_args: workflowArgs,
+          // invoice_currency_fixes is advisory (never applied), so it stays out
+          // of the approval preview's accounting impact.
           preview: {
             ...summary,
             command_count: commands.length,
-            ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
           },
         }]
       : [],
@@ -451,6 +453,13 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     code: review.code,
     message: review.reason,
   }));
+  // Invoice FX corrections are advisory only (never applied); surface them so
+  // the lean surface does not drop them. proposed_action is server-built from
+  // numbers and the upstream invoice number, which the projection sandbox-wraps.
+  for (const fix of data.invoiceFixCandidates) {
+    if (fix.result !== "advisory") continue;
+    warnings.push({ item_id: fix.wise_id, code: "wise_invoice_currency_advisory", message: fix.proposed_action });
+  }
   if (totalCurrencies.size > 1) {
     warnings.push({
       code: "mixed_currency_totals",

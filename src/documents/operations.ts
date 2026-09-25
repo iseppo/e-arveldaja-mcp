@@ -11,6 +11,7 @@ import {
   type FileInputSource,
 } from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import { sanitizeUploadFileName } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import type { LayoutTextItem } from "../document-identifiers.js";
 import {
@@ -112,18 +113,44 @@ interface MaterializedSnapshot {
 // document parser (which reads a path) and the uploader run over the exact
 // reviewed bytes — the source is never read a second time. `source_sha256` is
 // the snapshot's own digest, so a swapped file cannot slip past prepare→create.
-async function materializeSnapshot(snapshot: FileInputSnapshot): Promise<MaterializedSnapshot> {
+// `fileName` (the upload name) is the source's sanitized basename when a local
+// path or file_ref names it, else `document<ext>` (inline base64).
+async function materializeSnapshot(
+  snapshot: FileInputSnapshot,
+  source: FileInputSource,
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<MaterializedSnapshot> {
   const bytes = snapshot.bytes();
+  const extension = snapshot.identity.extension;
+  let sourcePath: string | undefined;
+  try {
+    if (source.file_ref !== undefined) {
+      sourcePath = runtimeSafetyContext.fileReferenceStore.resolve(source.file_ref, {
+        kind: "file",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+    } else if (source.file_path !== undefined && !source.file_path.toLowerCase().startsWith("base64:")) {
+      sourcePath = source.file_path;
+    }
+  } catch {
+    sourcePath = undefined; // naming is cosmetic; the snapshot already bound the bytes
+  }
+  const fileName = sanitizeUploadFileName(sourcePath ?? "document", extension);
   const dir = await mkdtemp(join(tmpdir(), "e-arveldaja-document-"));
-  const fileName = `document${snapshot.identity.extension}`;
-  const path = join(dir, fileName);
-  await writeFile(path, bytes, { mode: 0o600 });
+  const cleanup = async () => { await rm(dir, { recursive: true, force: true }).catch(() => {}); };
+  const path = join(dir, `document${extension}`);
+  try {
+    await writeFile(path, bytes, { mode: 0o600 });
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
   return {
     path,
     fileName,
     contentsBase64: bytes.toString("base64"),
     source_sha256: snapshot.identity.digest_sha256,
-    cleanup: async () => { await rm(dir, { recursive: true, force: true }).catch(() => {}); },
+    cleanup,
   };
 }
 
@@ -284,7 +311,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
   async prepare(input: PrepareAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentPreview>> {
     const snapshot = await loadSnapshot(input.source, this.runtimeSafetyContext, input.snapshot);
-    const material = await materializeSnapshot(snapshot);
+    const material = await materializeSnapshot(snapshot, input.source, this.runtimeSafetyContext);
     try {
       const parsedDocument = await parseDocument(material.path);
       const allTextItems = textItemsWithPageNums(parsedDocument.result?.pages);
@@ -560,7 +587,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     if (snapshot.identity.digest_sha256 !== input.sourceSha256) {
       return fail("digest_mismatch", "The document no longer matches the reviewed source bytes.", "never");
     }
-    const material = await materializeSnapshot(snapshot);
+    const material = await materializeSnapshot(snapshot, input.source, this.runtimeSafetyContext);
     try {
       // P0-1 drift gate: recompute the canonical effective model FRESH (live
       // supplier name, live VAT defaults, live dimension validation) and

@@ -396,4 +396,95 @@ describe("runAccountingInboxDryRunPipeline", () => {
     ]);
     expect(result.next_recommended_action).toBeUndefined();
   });
+
+  it("asks every plan-gated prepare op for a handle-free preview (the pipeline discards handles)", async () => {
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: [] }, createdCount: 0, errorCount: 0, possibleDuplicates: [],
+    }));
+    const prepareWiseImport = vi.fn().mockResolvedValue(ok({
+      created: [], skipped: [], commands: [], ownershipReviews: [], invoiceFixCandidates: [],
+    }));
+    const prepareInterAccount = vi.fn().mockResolvedValue(ok({
+      match: { matchedPairs: [], matchedOneSided: [], ambiguousPairs: [], skippedAlreadyHandled: [], errors: [] },
+    }));
+    const step = (n: number, tool: string, suggested_args: Record<string, unknown>) => ({
+      step: n, tool, purpose: tool, recommended: true, suggested_args, missing_inputs: [], reason: tool,
+    });
+    await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [
+          step(1, "import_camt053", { file_path: "/tmp/a.xml", accounts_dimensions_id: 101, execute: false }),
+          step(2, "import_wise_transactions", { file_path: "/tmp/w.csv", accounts_dimensions_id: 102, execute: false }),
+          step(3, "reconcile_inter_account_transfers", { execute: false }),
+        ],
+      }),
+      operations: mockOperations({ prepareCamtImport, prepareWiseImport, prepareInterAccount }),
+    });
+    expect(prepareCamtImport).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandles: false }));
+    expect(prepareWiseImport).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandle: false }));
+    expect(prepareInterAccount).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandles: false }));
+  });
+
+  it("emits one stable follow-up per Wise ownership review and blocks the downstream ledger step", async () => {
+    const wisePreview = {
+      created: [{}, {}],
+      skipped: [],
+      commands: [{ action: "create" }, { action: "create" }, { action: "inter_account" }],
+      ownershipReviews: [
+        { wise_id: "TRANSFER-1", code: "wise_transfer_ownership_unverified", reason: "Ownership unverified.", source_verified: false, target_verified: true, approval_required: true },
+        { wise_id: "TRANSFER-2", code: "wise_transfer_dimensions_unverified", reason: "Dimensions unverified.", source_verified: false, target_verified: false, approval_required: false },
+      ],
+      invoiceFixCandidates: [
+        { wise_id: "TRANSFER-3", invoice_id: 42, invoice_number: "INV-42", proposed_action: "Advisory, not applied: lock invoice INV-42 to Wise rate." },
+      ],
+    };
+    const run = () => runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_wise_transactions", purpose: "Wise", recommended: true,
+          suggested_args: { file_path: "/tmp/w.csv", accounts_dimensions_id: 5, execute: false },
+          missing_inputs: [], reason: "Wise found",
+        }],
+      }),
+      operations: mockOperations({ prepareWiseImport: vi.fn().mockResolvedValue(ok(wisePreview)) }),
+    });
+    const first = await run();
+    const second = await run();
+
+    expect(first.executed_steps[0]!.preview).toMatchObject({ created: 2, needs_review: 2, command_count: 3 });
+    expect(first.needs_accountant_review).toHaveLength(3);
+    expect(first.needs_accountant_review.map(item => item.summary)).toEqual([
+      expect.stringContaining("wise_transfer_ownership_unverified"),
+      expect.stringContaining("wise_transfer_dimensions_unverified"),
+      expect.stringContaining("Advisory, not applied"),
+    ]);
+    const ids = first.needs_accountant_review.map(item => item.id);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids.every(id => typeof id === "string" && id.startsWith("import_wise_transactions:"))).toBe(true);
+    expect(second.needs_accountant_review.map(item => item.id)).toEqual(ids);
+  });
+
+  it("defers ledger steps as pending_input (not failed) when an import step was only skipped", async () => {
+    const classifyTransactions = vi.fn();
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [
+          {
+            step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+            suggested_args: { file_path: "/tmp/a.xml", execute: false },
+            missing_inputs: ["accounts_dimensions_id"], reason: "CAMT found",
+          },
+          {
+            step: 2, tool: "classify_unmatched_transactions", purpose: "Classify", recommended: true,
+            suggested_args: { execute: false }, missing_inputs: [], reason: "Classify",
+          },
+        ],
+      }),
+      operations: mockOperations({ classifyTransactions }),
+    });
+    expect(classifyTransactions).not.toHaveBeenCalled();
+    const deferred = result.skipped_steps.find(step => step.tool === "classify_unmatched_transactions");
+    expect(deferred).toMatchObject({ status: "deferred", materialization_state: "pending_input" });
+    expect(deferred!.summary).not.toContain("failed");
+  });
 });

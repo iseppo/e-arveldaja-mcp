@@ -54,6 +54,13 @@ interface BuildWorkflowEnvelopeOptions {
   dry_run_steps?: unknown[];
   approval_previews?: ApprovalPreview[];
   fallback_actions?: WorkflowAction[];
+  /**
+   * The dry_run_steps come from a pipeline that minted no consume-once plan
+   * handles (the accounting inbox dry run). Their execute step would fail with
+   * plan_handle_required, so an approvable step becomes a "rerun the dry run"
+   * tool call (which returns the handle) instead of an approval card.
+   */
+  dry_run_steps_without_plan_handles?: boolean;
 }
 
 type MaterializingDryRunTool =
@@ -354,6 +361,23 @@ function actionFromApprovalPreview(preview: ApprovalPreview): WorkflowAction {
   };
 }
 
+// An approvable dry-run step that carries no plan_handle: point the caller at
+// the tool's own dry run (which mints the handle its execute step requires)
+// rather than at an execute call that would fail with plan_handle_required.
+function planHandleActionFromDryRunStep(step: unknown): WorkflowAction | undefined {
+  const preview = approvalPreviewFromDryRunStep(step);
+  if (!preview || !isRecord(step)) return undefined;
+  const args = recordAt(step, "suggested_args") ?? {};
+  return {
+    kind: "tool_call",
+    label: actionLabelForTool(preview.source_tool, args),
+    tool: preview.source_tool,
+    args,
+    why: `${preview.summary} Run this dry run to get the approval plan_handle its execute step requires; this preview minted none.`,
+    approval_required: false,
+  };
+}
+
 function blockedDryRunLabel(tool: MaterializingDryRunTool): string {
   switch (tool) {
     case "import_camt053":
@@ -389,10 +413,16 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
   const needsDecision = options.needs_decision ?? [];
   const needsReview = options.needs_review ?? [];
   const dryRunSteps = options.dry_run_steps ?? [];
+  const handleLess = options.dry_run_steps_without_plan_handles === true;
   const approvalPreviews = [
     ...(options.approval_previews ?? []),
-    ...approvalPreviewsFromDryRunSteps(dryRunSteps),
+    ...(handleLess ? [] : approvalPreviewsFromDryRunSteps(dryRunSteps)),
   ];
+  const planHandleActions = handleLess
+    ? dryRunSteps
+      .map(planHandleActionFromDryRunStep)
+      .filter((action): action is WorkflowAction => action !== undefined)
+    : [];
   const blockedDryRunActions = workflowActionsFromBlockedDryRunSteps(dryRunSteps);
   const recommendedAction = actionFromRecommendedStep(options.recommended_step);
   const decisionActions = needsDecision
@@ -406,6 +436,7 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
 
   const availableActions: WorkflowAction[] = [
     ...approvalPreviews.map(actionFromApprovalPreview),
+    ...planHandleActions,
     ...blockedDryRunActions,
     ...(recommendedAction ? [recommendedAction] : []),
     ...decisionActions,
@@ -537,16 +568,19 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
       commandCount: numberAt(preview, "command_count") ?? numberAt(preview, "created") ?? 0,
       errorCount: numberAt(preview, "error_count") ?? 0,
       skipped: numberAt(preview, "skipped") ?? 0,
+      reviewCount: numberAt(preview, "needs_review") ?? 0,
     }),
-    canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0,
+    canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0 && counts.reviewCount <= 0,
     buildImpact: (counts, preview) => [
       impactLine(counts.created, "bank transaction"),
       impactLine(counts.skipped, "skipped row"),
       invoiceCurrencyFixImpact(preview),
+      counts.reviewCount > 0 ? `${counts.reviewCount} transfer(s) still need ownership review before approval` : undefined,
       counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
     ].filter((line): line is string => line !== undefined),
     duplicateRisk: () => "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
     blockedReasons: counts => [
+      impactLine(counts.reviewCount, "transfer needing ownership review", "transfers needing ownership review"),
       impactLine(counts.errorCount, "import error"),
     ].filter((line): line is string => line !== undefined),
   },
@@ -748,6 +782,7 @@ export function workflowFromAccountingInboxPayload(payload: Record<string, unkno
       needs_review: arrayAt(autopilot, "needs_accountant_review"),
       recommended_step: recordAt(autopilot, "next_recommended_action"),
       dry_run_steps: arrayAt(autopilot, "executed_steps"),
+      dry_run_steps_without_plan_handles: true,
     });
   }
 

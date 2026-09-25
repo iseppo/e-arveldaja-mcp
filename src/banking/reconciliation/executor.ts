@@ -1299,6 +1299,7 @@ export async function prepareInterAccount(
   input: InterAccountInput,
 ): Promise<InterAccountPreview> {
   const match = await runInterAccountMatching(api, input);
+  if (input.mintPlanHandles === false) return { match };
   const planCommandProjections = buildInterAccountPlanCommandProjections(match.confirmActions, match.companyClientsId);
 
   const planHandle = runtimeSafetyContext.planStore.issue(

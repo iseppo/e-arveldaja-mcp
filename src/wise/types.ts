@@ -30,7 +30,12 @@ export type WiseTransferOwnershipBasis = "verified_endpoints" | "operator_approv
 
 export interface WiseTransferReview {
   wise_id: string;
-  code: "wise_transfer_dimensions_unverified" | "wise_transfer_ownership_unverified";
+  code:
+    | "wise_transfer_dimensions_unverified"
+    | "wise_transfer_ownership_unverified"
+    | "wise_transfer_cross_currency"
+    | "wise_transfer_journal_ambiguous"
+    | "wise_transfer_already_imported";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -131,16 +136,7 @@ export interface InterAccountCommand extends WiseCommandBase {
   current_client_state: unknown;
 }
 
-export interface PurchaseInvoiceUpdateCommand extends WiseCommandBase {
-  action: "purchase_invoice_update";
-  mutation_mode: "update_existing";
-  existing_object_id: number;
-  update_payload: Partial<PurchaseInvoice>;
-  category: "foreign_currency_lock" | "eur_legacy_autofix";
-  current_object_state: PurchaseInvoice;
-}
-
-export type WiseImportCommand = MainCreateCommand | FeeCreateCommand | InterAccountCommand | PurchaseInvoiceUpdateCommand;
+export type WiseImportCommand = MainCreateCommand | FeeCreateCommand | InterAccountCommand;
 
 // --- Preview / execution accumulators ----------------------------------------
 
@@ -173,7 +169,8 @@ export interface WiseSkippedJarRow {
 }
 
 export interface WiseInterAccountResult {
-  api_id: number;
+  /** Absent for an already-journalized transfer: no Wise bank row is created. */
+  api_id?: number;
   wise_id: string;
   amount: number;
   status: string;
@@ -200,8 +197,10 @@ export interface WiseInvoiceFixCandidate {
   current_currency_rate?: number;
   category: "foreign_currency_lock" | "eur_legacy_autofix";
   proposed_action: string;
-  result?: "would_update" | "updated" | "error" | "ambiguous_skipped" | "already_matches";
-  error?: string;
+  /** The correction the operator may apply by hand. Advisory only: the Wise
+   * import never modifies a confirmed purchase invoice. */
+  proposed_correction: { currency_rate: number; base_gross_price: number } | { gross_price: number };
+  result?: "advisory" | "ambiguous_skipped";
   current_object_state: PurchaseInvoice;
 }
 

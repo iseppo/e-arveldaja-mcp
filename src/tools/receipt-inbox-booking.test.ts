@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
+import { logAudit } from "../audit-log.js";
 vi.mock("../bank-posting-duplicate-guard.js", () => ({
   checkIntakeCashDuplicates: vi.fn().mockResolvedValue({ scan_available: true, suspects: [] }),
   formatDuplicatePostingWarnings: vi.fn().mockReturnValue([]),
@@ -54,14 +55,14 @@ function makeApi() {
   };
 }
 
-async function run(extractedFields: any, suggestionItem: Record<string, unknown>, mode: "create" | "dry_run" = "create") {
+async function run(extractedFields: any, suggestionItem: Record<string, unknown>, mode: "create" | "dry_run" = "create", snap: any = snapshot()) {
   const { api, createAndSetTotals } = makeApi();
   const result = await createAndMaybeMatchPurchaseInvoice(
-    api, context, snapshot() as any, extractedFields, supplierResolution,
+    api, context, snap, extractedFields, supplierResolution,
     { source: "keyword_match", item: { cl_purchase_articles_id: 1, purchase_accounts_id: 5230, custom_title: "x", amount: 1, ...suggestionItem } } as any,
     [], mode, false, new Set(),
   );
-  return { result, createAndSetTotals };
+  return { result, createAndSetTotals, api };
 }
 
 describe("receipt inbox booking — notes never carry the source filename (finding 12)", () => {
@@ -71,6 +72,21 @@ describe("receipt inbox booking — notes never carry the source filename (findi
     const data = createAndSetTotals.mock.calls[0]![0];
     expect(String(data.notes ?? "")).not.toContain(file.name);
     expect(String(data.notes ?? "")).not.toContain("SECRET-FILENAME");
+  });
+});
+
+describe("receipt inbox booking — upload filename is sanitized (MINOR-4)", () => {
+  it("uploads and audits the dir-entry name without control chars, keeping Estonian letters", async () => {
+    vi.mocked(logAudit).mockClear();
+    const snap = { ...snapshot(), file: { ...file, name: "Arve õäöü\u0007\u202e 08.pdf" } };
+    const { result, api } = await run(extracted(), {}, "create", snap);
+    expect(result.status).toBe("created");
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(900, "Arve õäöü 08.pdf", expect.any(String));
+    for (const [entry] of vi.mocked(logAudit).mock.calls) {
+      const e = entry as { summary: string; details: { file_name?: string } };
+      expect(`${e.summary}|${e.details.file_name ?? ""}`).not.toMatch(/[\u0007\u202e]/);
+      if (e.details.file_name !== undefined) expect(e.details.file_name).toBe("Arve õäöü 08.pdf");
+    }
   });
 });
 

@@ -7,6 +7,7 @@ import {
   prepareWiseImport,
   WiseOperationFailedError,
   type WiseFailure,
+  type WisePrepareRunInput,
   type WiseRunInput,
 } from "./executor.js";
 import type { WiseImportExecution, WiseImportPreview } from "./presenter.js";
@@ -24,7 +25,7 @@ import type { WiseImportExecution, WiseImportPreview } from "./presenter.js";
 // drift, the module execution lock, ownership gating, indeterminate stops,
 // partial results) all live in the executor.
 
-export interface WisePrepareInput extends WiseRunInput {}
+export interface WisePrepareInput extends WisePrepareRunInput {}
 export interface WiseExecuteInput extends WiseRunInput {
   readonly planHandle: string | undefined;
 }

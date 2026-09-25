@@ -207,6 +207,21 @@ describe("BankReconciliationOperations", () => {
     expect(mockedLogAudit).not.toHaveBeenCalled();
   });
 
+  it("prepareInterAccount mints a plan handle by default but not with mintPlanHandles:false", async () => {
+    const { operations, runtimeSafetyContext } = setup({
+      journals: { listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    });
+    const before = runtimeSafetyContext.planStore.activeCount;
+    const minted = await operations.prepareInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined });
+    expect(minted.ok && typeof minted.value.planHandle).toBe("string");
+    expect(runtimeSafetyContext.planStore.activeCount).toBe(before + 1);
+
+    const preview = await operations.prepareInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined, mintPlanHandles: false });
+    expect(preview.ok).toBe(true);
+    if (preview.ok) expect(preview.value.planHandle).toBeUndefined();
+    expect(runtimeSafetyContext.planStore.activeCount).toBe(before + 1);
+  });
+
   it("executeExactConfirm consumes the reviewed plan, confirms once, and audits it", async () => {
     const { api, operations } = setup();
     const dry = await operations.prepareExactConfirm({ minConfidence: 90, blockOnDuplicate: undefined });

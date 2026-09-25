@@ -5,14 +5,15 @@ import { tmpdir } from "os";
 import { access, readFile } from "fs/promises";
 import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
-import { registerPdfWorkflowTools } from "./pdf-workflow.js";
+import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { z } from "zod";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 
-vi.mock("../file-validation.js", () => ({
+vi.mock("../file-validation.js", async () => ({
+  ...await vi.importActual<typeof import("../file-validation.js")>("../file-validation.js"),
   resolveFileInput: vi.fn(),
 }));
 
@@ -34,7 +35,7 @@ const mockedReadFile = vi.mocked(readFile);
 
 const tempDirs: string[] = [];
 
-function createTempInvoiceFile(fileName = "invoice.pdf", contents = "invoice-bytes"): string {
+function createTempInvoiceFile(fileName = "invoice.pdf", contents = "%PDF-invoice-bytes"): string {
   const dir = mkdtempSync(join(tmpdir(), "pdf-workflow-test-"));
   tempDirs.push(dir);
   const filePath = join(dir, fileName);
@@ -166,7 +167,7 @@ afterEach(() => {
 
 describe("pdf workflow tools", () => {
   it("H05 PDF handoff preserves approved supplier totals", async () => {
-    const filePath = createTempInvoiceFile("invoice-rounding.pdf", "pdf-bytes");
+    const filePath = createTempInvoiceFile("invoice-rounding.pdf", "%PDF-pdf-bytes");
     mockedResolveFileInput.mockResolvedValue({ path: filePath });
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
 
@@ -188,7 +189,7 @@ describe("pdf workflow tools", () => {
       vat_price: 23.99,
       gross_price: 123.99,
       file_path: filePath,
-      source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+      source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
     });
     const payload = parseMcpResponse(response.content[0]!.text);
 
@@ -885,13 +886,13 @@ describe("pdf workflow tools", () => {
         vat_price: 24,
         gross_price: 124,
         file_path: filePath,
-        source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+        source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
         ...overrides,
       };
     }
 
     it("refuses an exact live supplier + invoice-number duplicate before any write", async () => {
-      const filePath = createTempInvoiceFile("dupnum.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("dupnum.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         purchaseInvoices: {
@@ -907,7 +908,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("drops the purchase-invoice list cache right before the supplier + invoice-number duplicate lookup", async () => {
-      const filePath = createTempInvoiceFile("dupfresh.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("dupfresh.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
       await handler(args(filePath));
@@ -920,7 +921,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("creates with a warning when allow_duplicate_invoice_number acknowledges a reused supplier number", async () => {
-      const filePath = createTempInvoiceFile("dupack.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("dupack.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         purchaseInvoices: {
@@ -937,7 +938,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("does not refuse when the same supplier+number invoice is invalidated", async () => {
-      const filePath = createTempInvoiceFile("dupvoid.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("dupvoid.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         purchaseInvoices: {
@@ -957,7 +958,7 @@ describe("pdf workflow tools", () => {
       [{ term_days: -3 }, "term_days"],
       [{ term_days: 1.5 }, "term_days"],
     ])("rejects invalid %o before any write", async (overrides, field) => {
-      const filePath = createTempInvoiceFile("bad.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("bad.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
       const response = await handler(args(filePath, overrides));
@@ -967,7 +968,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("refuses deductible VAT fields on a non-VAT company (same guard as create_purchase_invoice)", async () => {
-      const filePath = createTempInvoiceFile("nonvat.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("nonvat.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: null }) },
@@ -1013,13 +1014,13 @@ describe("pdf workflow tools", () => {
         vat_price: 24,
         gross_price: 124,
         file_path: filePath,
-        source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+        source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
         ...overrides,
       };
     }
 
     it("matching pre-existing journal: invoice still created, warnings name the journal (title wrapped)", async () => {
-      const filePath = createTempInvoiceFile("dup.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("dup.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         readonly: {
@@ -1041,7 +1042,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("USD invoice without base_gross_price: skipped note, no false duplicate warning", async () => {
-      const filePath = createTempInvoiceFile("usd.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("usd.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         readonly: {
@@ -1069,7 +1070,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("block path: block_on_duplicate=true refuses creation with a toolError naming the journal, before any mutation", async () => {
-      const filePath = createTempInvoiceFile("blocked.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("blocked.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         readonly: {
@@ -1090,7 +1091,7 @@ describe("pdf workflow tools", () => {
     });
 
     it("scan throws + block_on_duplicate=true: creation proceeds with a scan-unavailable note (no refusal without evidence)", async () => {
-      const filePath = createTempInvoiceFile("scanfail.pdf", "pdf-bytes");
+      const filePath = createTempInvoiceFile("scanfail.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
       const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
         readonly: {
@@ -1108,7 +1109,7 @@ describe("pdf workflow tools", () => {
   });
 
   it("uploads the source document when creating a purchase invoice from a file", async () => {
-    const filePath = createTempInvoiceFile("invoice-upload.pdf", "pdf-bytes");
+    const filePath = createTempInvoiceFile("invoice-upload.pdf", "%PDF-pdf-bytes");
     mockedResolveFileInput.mockResolvedValue({ path: filePath });
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
@@ -1131,7 +1132,7 @@ describe("pdf workflow tools", () => {
       vat_price: 24,
       gross_price: 124,
       file_path: filePath,
-      source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+      source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
     });
 
     const payload = parseMcpResponse(response.content[0]!.text);
@@ -1141,13 +1142,55 @@ describe("pdf workflow tools", () => {
     expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
       9001,
       "invoice-upload.pdf",
-      Buffer.from("pdf-bytes").toString("base64"),
+      Buffer.from("%PDF-pdf-bytes").toString("base64"),
     );
     expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
   });
 
+  it("uploads under the caller's sanitized file_name, keeping the source extension", async () => {
+    const filePath = createTempInvoiceFile("0b7c.pdf", "%PDF-pdf-bytes");
+    mockedResolveFileInput.mockResolvedValue({ path: filePath });
+
+    const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+
+    const response = await handler({
+      supplier_client_id: 7,
+      invoice_number: "PI-9004",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 24,
+      gross_price: 124,
+      file_path: filePath,
+      file_name: "../Arve Õismäe\u0007 2026",
+      source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
+    });
+
+    expect(response.isError).not.toBe(true);
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
+      9001,
+      "Arve Õismäe 2026.pdf",
+      Buffer.from("%PDF-pdf-bytes").toString("base64"),
+    );
+  });
+
+  it("refuses a document whose bytes do not match its signature extension", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("evil.png", "<html><script>alert(1)</script></html>") });
+
+    await expect(prepareInvoiceDocumentUpload("/x/evil.png")).rejects.toMatchObject({ category: "content_type_mismatch" });
+  });
+
   it("invalidates the draft invoice and returns an error when document upload fails", async () => {
-    const filePath = createTempInvoiceFile("invoice-fail.pdf", "pdf-bytes");
+    const filePath = createTempInvoiceFile("invoice-fail.pdf", "%PDF-pdf-bytes");
     mockedResolveFileInput.mockResolvedValue({ path: filePath });
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
@@ -1174,7 +1217,7 @@ describe("pdf workflow tools", () => {
       vat_price: 24,
       gross_price: 124,
       file_path: filePath,
-      source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+      source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
     });
 
     const payload = parseMcpResponse(response.content[0]!.text);
@@ -1190,7 +1233,7 @@ describe("pdf workflow tools", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "C:\\Users\\Seppo\\Documents\\invoice-upload.pdf" });
     // Once, not persistent: afterEach only mockClear()s readFile, so a
     // persistent implementation would leak into later real-file tests.
-    mockedReadFile.mockResolvedValueOnce(Buffer.from("pdf-bytes"));
+    mockedReadFile.mockResolvedValueOnce(Buffer.from("%PDF-pdf-bytes"));
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
 
@@ -1212,7 +1255,7 @@ describe("pdf workflow tools", () => {
       vat_price: 24,
       gross_price: 124,
       file_path: "C:\\Users\\Seppo\\Documents\\invoice-upload.pdf",
-      source_sha256: sha256Hex(Buffer.from("pdf-bytes")),
+      source_sha256: sha256Hex(Buffer.from("%PDF-pdf-bytes")),
     });
 
     const payload = parseMcpResponse(response.content[0]!.text);
@@ -1222,7 +1265,7 @@ describe("pdf workflow tools", () => {
     expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(
       9001,
       "invoice-upload.pdf",
-      Buffer.from("pdf-bytes").toString("base64"),
+      Buffer.from("%PDF-pdf-bytes").toString("base64"),
     );
   });
 

@@ -349,7 +349,7 @@ const PROMPT_DEFINITIONS = [
       capital_gains_path: optionalAbsolutePath("Absolute path to Lightyear CapitalGainsStatement CSV (required for sells)"),
       investment_account: positiveId("Investment asset account number (e.g. 1550)"),
       broker_account: positiveId("Broker cash account number (e.g. 1120)"),
-      income_account: optionalPositiveId("Distribution income account (dividends from shares → 8330; fund distributions → 8320; interest → 8400)"),
+      income_account: optionalPositiveId("Dividend income account (dividends from shares → 8330); Interest and fund Distribution rows use the tool's interest_account (8400) and fund_distribution_account (8320)"),
       gain_loss_account: optionalPositiveId("Realized gain account for sell gains (default: auto-detect 'Tulu aktsiatelt ja osadelt', standard 8330)"),
       loss_account: optionalPositiveId("Realized loss account for sell losses (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335)"),
       trade_fee_account: optionalPositiveId("Expensed TRADE fee account for book_lightyear_trades (default: auto-detect 'Kulu aktsiatelt ja osadelt', standard 8335). Do not reuse this for distributions."),

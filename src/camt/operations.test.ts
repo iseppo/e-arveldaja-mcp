@@ -67,6 +67,31 @@ describe("CamtOperations", () => {
     }
   });
 
+  it("prepareImport with mintPlanHandles:false previews without taking a plan-store slot", async () => {
+    const runtimeSafetyContext = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({
+      accountDimensions: [fixtureAccountDimension({ id: 7 })],
+      bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 })],
+      transactionRows: [],
+    });
+    const operations = createCamtOperations(api, runtimeSafetyContext);
+    const before = runtimeSafetyContext.planStore.activeCount;
+    const outcome = await operations.prepareImport({
+      source: { file_path: inline(fixtureCamtXml()) },
+      accountsDimensionsId: 7,
+      dateFrom: undefined,
+      dateTo: undefined,
+      mintPlanHandles: false,
+    });
+    expect(outcome.ok).toBe(true);
+    if (outcome.ok) {
+      expect(outcome.value.planHandle).toBeUndefined();
+      expect(outcome.value.workflowArgs).not.toHaveProperty("plan_handle");
+      expect(outcome.value.createdCount).toBe(1);
+    }
+    expect(runtimeSafetyContext.planStore.activeCount).toBe(before);
+  });
+
   it("executeImport consumes the reviewed plan and creates the transaction", async () => {
     const { api, operations } = setup();
     const source = { file_path: inline(fixtureCamtXml()) };

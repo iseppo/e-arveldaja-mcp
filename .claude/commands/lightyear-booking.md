@@ -68,6 +68,7 @@ Call `book_lightyear_trades` with `dry_run: true`.
 - Include `capital_gains_file`, `gain_loss_account`, `loss_account`, `investment_dimension_id`, and `broker_dimension_id` when available.
 - `book_lightyear_trades` takes a single `fee_account` argument. If a `trade_fee_account` value was supplied, pass it as the tool's `fee_account` (i.e. call the tool with `"fee_account": <trade_fee_account>`); otherwise omit `fee_account` and let it default to 8335. Never pass the tool an argument literally named `trade_fee_account`, and never send `distribution_fee_account` to this tool.
 - Present trades that would be booked, skipped entries, duplicate-detection basis, and warnings.
+- A sell debits the broker account with the cash the statement shows (net of fees), expenses its fees, credits the investment account at Lightyear's FIFO cost basis, and books the realized gain/loss as the balancing figure. When that differs from Lightyear's own `Capital Gains (EUR)` (the FX-rate gap), the row carries `lightyear_capital_gains_eur` — mention it.
 - The reviewed dry run issues an immutable execution plan and returns a `plan_handle` (top-level in the response). It binds BOTH the statement CSV and the capital-gains CSV, the normalized arguments, the enumerated journals, and the duplicate/skip decisions.
 - Use `get_execution_plan_page` with that `plan_handle` to page the enumerated journals, exclusions, and reviews without consuming the plan.
 - The plan handle is not approval. Ask for explicit human approval before re-running with `dry_run: false`.
@@ -75,18 +76,18 @@ Call `book_lightyear_trades` with `dry_run: true`.
 
 ### Step 5: Preview distributions only after required accounts are known
 
-If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number before calling `book_lightyear_distributions`. For **dividends from directly-held shares**, the income account is **8330** "Tulu aktsiatelt ja osadelt"; fund distributions use 8320; interest uses 8400. Dividend **withheld tax** stays on **8610** "Muud finantskulud" (pass it as `tax_account`).
+If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number before calling `book_lightyear_distributions`. `income_account` is used for **Dividend** rows (dividends from directly-held shares → **8330** "Tulu aktsiatelt ja osadelt"). Fund **Distribution** rows go to `fund_distribution_account` (default **8320** "Tulu fondiosakute ümberhindlusest", name-resolved) and **Interest** rows to `interest_account` (default **8400** "Intressitulu hoiustelt", name-resolved); pass those only to override. Dividend **withheld tax** stays on **8610** "Muud finantskulud" (pass it as `tax_account`).
 
 If the parsed distributions include withheld tax and no `tax_account` is known, ask the user for `tax_account` before booking them.
 
 When the required accounts are known, call `book_lightyear_distributions` with `dry_run: true`.
-- Include `broker_account`, `income_account`, optional `tax_account`, and optional `broker_dimension_id`.
+- Include `broker_account`, `income_account`, optional `tax_account`, optional `interest_account` / `fund_distribution_account` overrides, and optional `broker_dimension_id`.
 - `book_lightyear_distributions` takes a single `fee_account` argument. If a `distribution_fee_account` value was supplied, pass it as the tool's `fee_account` (i.e. call the tool with `"fee_account": <distribution_fee_account>`); otherwise omit it and let it default to 8610 "Muud finantskulud" — NOT the 8335 trade-fee account. Never pass the tool an argument literally named `distribution_fee_account`, and never send `trade_fee_account` to this tool.
 - The tool defaults `reward_account` to 8600 ("Muud finantstulud", other financial income, name-resolved) for platform rewards/bonuses — a broker fee/campaign income, NOT securities income (8330) and NOT a financial cost. Only pass `reward_account` explicitly to override.
-- Present dividends, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
+- Present dividends, fund distributions, interest, platform rewards, withheld tax, skipped entries, duplicate-detection basis, and warnings.
 - The reviewed dry run issues an immutable execution plan and returns a `plan_handle` (top-level in the response) binding the statement CSV, the normalized arguments, and the enumerated distribution journals. Page it with `get_execution_plan_page` if needed.
 - The plan handle is not approval. Ask for explicit human approval before re-running with `dry_run: false`.
-- The distribution approval card must include source CSV, income/tax/reward accounts, journals that would be created, skipped duplicates, and side effects.
+- The distribution approval card must include source CSV, income/interest/fund-distribution/tax/reward accounts, journals that would be created, skipped duplicates, and side effects.
 
 ### Step 6: Execute after approval
 

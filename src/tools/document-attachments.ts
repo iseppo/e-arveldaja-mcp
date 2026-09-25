@@ -1,13 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { isAbsolute } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-import { readOnly, mutate, destructive } from "../annotations.js";
+import { readOnly, destructive } from "../annotations.js";
 import { AUDIT_ENTITY_TYPES, logAudit } from "../audit-log.js";
 import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud/shared.js";
 import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";
 import type { BaseResource } from "../api/base-resource.js";
+import { HttpError } from "../http-client.js";
+import { toolError } from "../tool-error.js";
 
 /**
  * The RIK e-Financials `document_user` endpoint (GET/PUT/DELETE
@@ -56,27 +59,67 @@ function resolveDocumentResource(api: ApiContext, entityType: DocumentEntityType
   return DOCUMENT_ENTITIES[entityType].pick(api) as unknown as BaseResource<unknown>;
 }
 
+/**
+ * Name of the document already attached to the record, or undefined when there
+ * is none. "None" is accepted both as a 404 and as an empty file body; any other
+ * read failure propagates, so an unknown state never falls through to a
+ * silent replace.
+ */
+async function existingDocumentName(resource: BaseResource<unknown>, id: number): Promise<string | undefined> {
+  let file: { name?: string; contents?: string } | undefined;
+  try {
+    file = await resource.getDocument(id);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) return undefined;
+    throw error;
+  }
+  if (!file || (!file.name && !file.contents)) return undefined;
+  return file.name || "(unnamed)";
+}
+
 export function registerDocumentAttachmentTools(server: McpServer, api: ApiContext): void {
   registerTool(server, "attach_document",
-    "Attach (upload/replace) a source document (PDF/JPG/PNG) on a purchase invoice, sale invoice, journal, or bank transaction. RPS requires a source document on every accounting entry; manual journals and directly-booked transactions need one too.",
+    "Attach a source document (PDF/JPG/PNG) to a purchase invoice, sale invoice, journal, or bank transaction. A record holds one document: an existing one is refused (document_exists) unless replace_existing=true, which overwrites it. RPS requires a source document on every accounting entry; manual journals and directly-booked transactions need one too.",
     {
       entity_type: entityTypeParam,
       id: coerceId.describe("ID of the record to attach the document to."),
-      file_path: z.string().describe("Absolute path to the source document (PDF/JPG/PNG)."),
+      file_path: z.string().describe("Absolute path to the source document (PDF/JPG/PNG), or inline content as base64:<data> or base64:<ext>:<data>."),
+      file_name: z.string().optional().describe("Name for the uploaded document; defaults to the source file's name. The file's extension is kept."),
+      replace_existing: z.boolean().optional().describe("Overwrite a document already attached to the record (the old file is lost). Default false: refuse with document_exists."),
     },
-    { ...mutate, openWorldHint: true, title: "Attach Source Document" },
-    async ({ entity_type, id, file_path }) => {
+    { ...destructive, openWorldHint: true, title: "Attach Source Document" },
+    async ({ entity_type, id, file_path, file_name, replace_existing }) => {
+      if (!file_path.toLowerCase().startsWith("base64:") && !isAbsolute(file_path)) {
+        return toolError({ category: "invalid_file_path", error: "file_path must be an absolute path or base64:[<ext>:]<data>." });
+      }
       const resource = resolveDocumentResource(api, entity_type);
-      const upload = await prepareInvoiceDocumentUpload(file_path);
+      const target = { entity_type, id };
+      const existingName = await existingDocumentName(resource, id);
+      if (existingName !== undefined && replace_existing !== true) {
+        return toolError({
+          category: "document_exists",
+          error: `${entity_type} ${id} already has a source document. Pass replace_existing=true to overwrite it.`,
+          target,
+          existing_document_name: wrapUntrustedOcr(existingName),
+        });
+      }
+      const upload = await prepareInvoiceDocumentUpload(file_path, undefined, file_name);
       try {
         const result = await resource.uploadDocument(id, upload.fileName, upload.contentsBase64);
         logAudit({
           tool: "attach_document", action: "UPLOADED", entity_type: DOCUMENT_ENTITIES[entity_type].audit,
           entity_id: id,
-          summary: `Attached document "${upload.fileName}" to ${entity_type} ${id}`,
-          details: { file_name: upload.fileName },
+          summary: existingName !== undefined
+            ? `Replaced document "${existingName}" with "${upload.fileName}" on ${entity_type} ${id}`
+            : `Attached document "${upload.fileName}" to ${entity_type} ${id}`,
+          details: { file_name: upload.fileName, ...(existingName !== undefined ? { replaced_file_name: existingName } : {}) },
         });
-        return { content: [{ type: "text", text: toMcpJson(result) }] };
+        return { content: [{ type: "text", text: toMcpJson({
+          ...result,
+          target,
+          file_name: wrapUntrustedOcr(upload.fileName),
+          ...(existingName !== undefined ? { replaced_document_name: wrapUntrustedOcr(existingName) } : {}),
+        }) }] };
       } finally {
         if (upload.cleanup) await upload.cleanup();
       }

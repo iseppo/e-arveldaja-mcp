@@ -58,7 +58,7 @@ Review:
 - `summary.blockers` — never hidden
 - Record BOTH the `summary.plan_handle` and the `approved_command_digest`; approval and execution must use that exact pair.
 
-Show main transactions and fee rows that would be created, exact duplicate / skip reasons, whether fees will be auto-confirmed to the chosen dimension, inter-account transfer confirmations or skips, and invoice FX updates.
+Show main transactions and fee rows that would be created, exact duplicate / skip reasons, whether fees will be auto-confirmed to the chosen dimension, inter-account transfer confirmations or skips, and advisory invoice FX corrections (reported only — the import never changes confirmed purchase invoices).
 
 ### Step 3: Approval gate
 
@@ -72,13 +72,13 @@ The approval card must include:
 - number of main transactions and fee rows that would be created as PROJECT (draft/unconfirmed) bank transactions
 - fee confirmations that will be posted automatically to `fee_account_dimensions_id`
 - inter-account confirmations or skips, including selected `inter_account_dimension_id` when used
-- each invoice FX update, including whether it locks a foreign-currency rate or fixes a legacy EUR settlement
+- each advisory invoice FX correction (not applied), including whether it would lock a foreign-currency rate or fix a legacy EUR settlement; the user corrects those invoices separately (invalidate → edit → re-confirm)
 - skipped duplicates and Jar-transfer handling
 - selected fee account dimension, if any
-- side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and invoice FX updates
+- side effects: PROJECT bank rows, fee confirmations, inter-account confirmations/skips, and transfer reviews (ownership, cross-currency, ambiguous or already-journalized)
 - the reviewed plan's `plan_handle` + `approved_command_digest` pair
 
-State that approval authorizes all listed categories (PROJECT bank-row creation, fee creation and confirmation, inter-account handling, and invoice FX updates). Both the `plan_handle` and the `approved_command_digest` are required. If the user does not approve every listed category, stop and ask which should be excluded; do not run `mode: "execute"`.
+State that approval authorizes all listed categories (PROJECT bank-row creation, fee creation and confirmation, inter-account handling). Both the `plan_handle` and the `approved_command_digest` are required. If the user does not approve every listed category, stop and ask which should be excluded; do not run `mode: "execute"`.
 
 If the user does not explicitly approve, stop.
 
@@ -95,7 +95,7 @@ Every execute attempt consumes the plan handle exactly once. If execution report
 Report from the executed `summary`:
 - `summary.counts` created / skipped / errors
 - fee transactions created
-- inter-account confirmations, invoice FX updates
+- inter-account confirmations, advisory invoice FX corrections (not applied)
 - any rows still needing manual follow-up
 
 For created PROJECT bank transactions, keep follow-up decisions compact: group low-risk identical confirmations, show the first items plus counts, and ask one batch approval with exceptions instead of one yes/no question per row. Offer the next inline action for the approved group — do NOT close the workflow with "confirm them in e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action.

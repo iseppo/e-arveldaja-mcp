@@ -101,10 +101,22 @@ describe("H06-B owned file lock", () => {
     await loser.lock.release();
   });
 
-  it.each(["malformed", "live", "dead"])("H06-B never auto-reclaims an existing %s reclaim guard", async kind => {
+  it("clears a reclaim guard left by a crashed (dead) reclaimer, then reclaims the dead main owner", async () => {
+    const path = await lockPath();
+    await writeFile(path, JSON.stringify(deadOwner()));
+    await writeFile(`${path}.reclaim`, JSON.stringify({ ...deadOwner(), nonce: "crashed-reclaimer" }));
+    const lock = await acquireOwnedFileLock(path, { timeoutMs: 200, pollMs: 2 });
+    expect((parseOwner(await readFile(path, "utf8")) as { kind: "valid"; token: OwnerToken }).token.nonce)
+      .toBe(lock.token.nonce);
+    expect(await exists(`${path}.reclaim`)).toBe(false);
+    expect(await exists(`${path}.reclaim.reclaim`)).toBe(false);
+    await lock.release();
+  });
+
+  it.each(["malformed", "live"])("H06-B never auto-reclaims an existing %s reclaim guard", async kind => {
     const path = await lockPath();
     const main = JSON.stringify(deadOwner());
-    const reclaim = kind === "malformed" ? "bad" : JSON.stringify({ ...deadOwner(), pid: kind === "live" ? process.pid : deadOwner().pid });
+    const reclaim = kind === "malformed" ? "bad" : JSON.stringify({ ...deadOwner(), pid: process.pid });
     await writeFile(path, main);
     await writeFile(`${path}.reclaim`, reclaim);
     await expect(acquireOwnedFileLock(path, { timeoutMs: 20, pollMs: 2 })).rejects.toBeInstanceOf(LockBusyError);
@@ -207,6 +219,23 @@ describe("M17 synchronous owned file lock", () => {
     await writeFile(path, JSON.stringify(deadOwner()), { mode: 0o600 });
     const result = withOwnedFileLockSync(path, () => "ran", { timeoutMs: 200, pollMs: 5 });
     expect(result).toBe("ran");
+  });
+
+  it("clears a dead reclaimer's guard and reclaims the dead owner", async () => {
+    const path = await lockPath();
+    await writeFile(path, JSON.stringify(deadOwner()), { mode: 0o600 });
+    await writeFile(`${path}.reclaim`, JSON.stringify({ ...deadOwner(), nonce: "crashed-reclaimer" }));
+    expect(withOwnedFileLockSync(path, () => "ran", { timeoutMs: 200, pollMs: 2 })).toBe("ran");
+    expect(await exists(`${path}.reclaim`)).toBe(false);
+  });
+
+  it("keeps a live reclaim guard in place", async () => {
+    const path = await lockPath();
+    const guard = JSON.stringify({ ...deadOwner(), pid: process.pid });
+    await writeFile(path, JSON.stringify(deadOwner()), { mode: 0o600 });
+    await writeFile(`${path}.reclaim`, guard);
+    expect(() => withOwnedFileLockSync(path, () => "ran", { timeoutMs: 20, pollMs: 2 })).toThrow(LockBusyError);
+    expect(await readFile(`${path}.reclaim`, "utf8")).toBe(guard);
   });
 
   it("keeps a live owner busy without replacing it", async () => {

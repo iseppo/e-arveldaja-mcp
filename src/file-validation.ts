@@ -189,11 +189,15 @@ interface MagicSignature {
   prefix: Uint8Array;
   // If true, the prefix is text and may sit after a UTF-8 BOM (0xEF 0xBB 0xBF).
   allowsUtf8Bom?: boolean;
+  // If true, every valid file of this format starts with the prefix, so content
+  // claiming the extension without it is rejected. Text formats (XML may omit
+  // its `<?xml` declaration) leave this unset.
+  required?: boolean;
 }
 const MAGIC_SIGNATURES: MagicSignature[] = [
-  { extensions: [".pdf"], prefix: Buffer.from("%PDF-") },
-  { extensions: [".png"], prefix: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) },
-  { extensions: [".jpg", ".jpeg"], prefix: Buffer.from([0xff, 0xd8, 0xff]) },
+  { extensions: [".pdf"], prefix: Buffer.from("%PDF-"), required: true },
+  { extensions: [".png"], prefix: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), required: true },
+  { extensions: [".jpg", ".jpeg"], prefix: Buffer.from([0xff, 0xd8, 0xff]), required: true },
   { extensions: [".xml"], prefix: Buffer.from("<?xml"), allowsUtf8Bom: true },
 ];
 
@@ -220,6 +224,47 @@ function canonicalExtension(ext: string): string {
     if (sig.extensions.includes(ext)) return sig.extensions[0];
   }
   return ext;
+}
+
+/**
+ * True unless `extension` names a format with a required magic signature
+ * (PDF/PNG/JPEG) and `content` does not carry it. Formats without a reliable
+ * signature (CSV, TXT, XML without declaration) always pass.
+ */
+export function contentMatchesExtension(content: Buffer, extension: string): boolean {
+  const canonical = canonicalExtension(extension.toLowerCase());
+  const sig = MAGIC_SIGNATURES.find(candidate => candidate.extensions[0] === canonical);
+  if (!sig?.required) return true;
+  const sniffed = sniffExtensionFromBytes(content, sig.extensions);
+  return sniffed !== undefined && canonicalExtension(sniffed) === canonical;
+}
+
+const MAX_UPLOAD_FILE_NAME_BYTES = 255;
+
+/**
+ * Sanitize a filename for upload / temp-file use: reduce to its basename, drop
+ * control/format characters, replace anything but Unicode letters, digits and
+ * `._- ` with `_` (so Estonian õäöü survive), strip leading dots (no `..` or
+ * hidden names), and cap at 255 UTF-8 bytes. With `requiredExtension`, the
+ * result is forced to end in that extension (`.jpg`/`.jpeg` count as equal).
+ */
+export function sanitizeUploadFileName(name: string, requiredExtension?: string): string {
+  const cleaned = (name.split(/[\\/]/).pop() ?? "")
+    .normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .replace(/[^\p{L}\p{M}\p{N}._\- ]/gu, "_")
+    .replace(/^[.\s]+/, "")
+    .trimEnd();
+  let ext = extname(cleaned);
+  let stem = cleaned.slice(0, cleaned.length - ext.length);
+  if (requiredExtension !== undefined &&
+      canonicalExtension(ext.toLowerCase()) !== canonicalExtension(requiredExtension.toLowerCase())) {
+    stem = cleaned;
+    ext = requiredExtension;
+  }
+  const chars = Array.from(stem || "document");
+  while (chars.length > 1 && Buffer.byteLength(chars.join("") + ext) > MAX_UPLOAD_FILE_NAME_BYTES) chars.pop();
+  return chars.join("") + ext;
 }
 
 function normalizeExtensionHint(hint: string): string {
@@ -299,6 +344,9 @@ async function materializeBase64Input(
   }
   if (explicitExt && detectedExt && canonicalExtension(explicitExt) !== canonicalExtension(detectedExt)) {
     throw new Error(`base64 extension hint ${explicitExt} conflicts with detected content type ${detectedExt}.`);
+  }
+  if (!contentMatchesExtension(decoded, extension)) {
+    throw new Error(`base64 payload content does not match the ${extension} extension hint.`);
   }
 
   const dir = await mkdtemp(join(tmpdir(), "earveldaja-b64-"));

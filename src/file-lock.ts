@@ -84,6 +84,33 @@ function validateOptions(options: LockOptions): { timeoutMs: number; pollMs: num
   return { timeoutMs, pollMs };
 }
 
+/**
+ * Remove `path` when its owner token names a definitely-dead process. The
+ * check-and-remove is serialized through the guard `${path}.reclaim`, so a
+ * path a live owner re-published in between is never removed. When the guard
+ * itself is held by a crashed reclaimer, `clearDeadGuard` clears it with the
+ * same (one level deeper) dead-owner check so later polls can proceed.
+ */
+async function reclaimIfOwnerDead(path: string, ownerText: string, clearDeadGuard: boolean): Promise<boolean> {
+  const observedText = await readText(path);
+  if (observedText === undefined || !ownerDefinitelyDead(parseOwner(observedText))) return false;
+  const reclaimPath = `${path}.reclaim`;
+  if (!(await publishOwnedPath(reclaimPath, ownerText))) {
+    if (clearDeadGuard) await reclaimIfOwnerDead(reclaimPath, ownerText, false);
+    return false;
+  }
+  try {
+    const current = await readText(path);
+    if (current === observedText && ownerDefinitelyDead(parseOwner(current))) {
+      await rm(path, { force: true });
+      return true;
+    }
+    return false;
+  } finally {
+    await releaseIfOwned(reclaimPath, ownerText);
+  }
+}
+
 async function pause(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -111,22 +138,7 @@ export async function acquireOwnedFileLock(
       };
     }
 
-    const observedText = await readText(lockPath);
-    const observed = observedText === undefined ? { kind: "invalid" } as const : parseOwner(observedText);
-    if (observedText !== undefined && observed.kind === "valid" && ownerDefinitelyDead(observed)) {
-      const reclaimPath = `${lockPath}.reclaim`;
-      if (await publishOwnedPath(reclaimPath, ownerText)) {
-        try {
-          const current = await readText(lockPath);
-          if (current === observedText && ownerDefinitelyDead(parseOwner(current))) {
-            await rm(lockPath, { force: true });
-            continue;
-          }
-        } finally {
-          await releaseIfOwned(reclaimPath, ownerText);
-        }
-      }
-    }
+    if (await reclaimIfOwnerDead(lockPath, ownerText, true)) continue;
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new LockBusyError(lockPath, timeoutMs);
@@ -202,6 +214,27 @@ function releaseIfOwnedSync(path: string, ownerText: string): void {
   if (readTextSync(path) === ownerText) rmSync(path, { force: true });
 }
 
+/** Synchronous twin of reclaimIfOwnerDead (same guard protocol). */
+function reclaimIfOwnerDeadSync(path: string, ownerText: string, clearDeadGuard: boolean): boolean {
+  const observedText = readTextSync(path);
+  if (observedText === undefined || !ownerDefinitelyDead(parseOwner(observedText))) return false;
+  const reclaimPath = `${path}.reclaim`;
+  if (!publishOwnedPathSync(reclaimPath, ownerText)) {
+    if (clearDeadGuard) reclaimIfOwnerDeadSync(reclaimPath, ownerText, false);
+    return false;
+  }
+  try {
+    const current = readTextSync(path);
+    if (current === observedText && ownerDefinitelyDead(parseOwner(current))) {
+      rmSync(path, { force: true });
+      return true;
+    }
+    return false;
+  } finally {
+    releaseIfOwnedSync(reclaimPath, ownerText);
+  }
+}
+
 function sleepSync(ms: number): void {
   Atomics.wait(syncWaitCell, 0, 0, ms);
 }
@@ -226,22 +259,7 @@ export function withOwnedFileLockSync<T>(
       }
     }
 
-    const observedText = readTextSync(lockPath);
-    const observed = observedText === undefined ? { kind: "invalid" } as const : parseOwner(observedText);
-    if (observedText !== undefined && observed.kind === "valid" && ownerDefinitelyDead(observed)) {
-      const reclaimPath = `${lockPath}.reclaim`;
-      if (publishOwnedPathSync(reclaimPath, ownerText)) {
-        try {
-          const current = readTextSync(lockPath);
-          if (current !== undefined && current === observedText && ownerDefinitelyDead(parseOwner(current))) {
-            rmSync(lockPath, { force: true });
-            continue;
-          }
-        } finally {
-          releaseIfOwnedSync(reclaimPath, ownerText);
-        }
-      }
-    }
+    if (reclaimIfOwnerDeadSync(lockPath, ownerText, true)) continue;
 
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new LockBusyError(lockPath, timeoutMs);
