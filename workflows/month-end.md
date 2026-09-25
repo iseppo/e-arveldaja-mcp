@@ -40,6 +40,7 @@ Inline actions per blocker type:
 
 **WARNINGS (review but may not block close):**
 - Overdue payables — check if payment was made but not yet recorded
+- If the month is still open, overdue is evaluated as of today (`overdue_as_of`); report `due_before_month_end_*` as invoices still payable this month, not as overdue.
 
 <!-- E_ARVELDAJA_FEATURE_START:sales -->
 **Sales-side extension (only when sales tools are available):**

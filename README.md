@@ -4,6 +4,8 @@
 
 MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
+> **Year-end close now follows RIK's method (0.26.0, behaviour change).** `execute_year_end_close` no longer zeroes revenue and expense accounts into 2970 (that broke e-arveldaja's own income statement). It books RIK's two entries from the guide "Äriühingu majandusaasta lõpetamiskanded e-arveldajas": D 9000 "Arvestuslik koondtulemus" / K 2970 on 31 December and D 2970 / K 2960 (optionally part to reserve capital) on 1 January. Entries you already booked by hand — under any document number, on 1 January or later in the next year, plus the old `YECL-YYYY` closes — are detected and never booked twice; a partial, reversed, duplicate or mismatched entry is reported for manual review. Also in 0.26.0: the month-end checklist evaluates overdue invoices as of today while the month is open, `attach_document` refuses to replace an existing source document unless `replace_existing: true`, Lightyear sells book the cash the statement shows, and Wise import no longer changes confirmed purchase invoices. See the [changelog](CHANGELOG.md) for full details.
+>
 > **⚠️ Action required if you used v0.22.0 (incoming transactions booked backwards).** A high-severity regression in **0.22.0** forced every newly created bank transaction to the "money out" direction, so **incoming** entries — owner deposits, customer receipts, refunds, and incoming inter-account transfers — were booked backwards (cash on the wrong side, moving the balance by twice the amount the wrong way). The ledger still balanced, so nothing errored. It is fixed in **0.22.1**. If you ran an e-arveldaja-mcp session while 0.22.0 was current (roughly **Sunday 2026-07-19 22:30 – Monday 2026-07-20 04:15**), any bank-statement entries created in that window are very likely wrong. Check what e-arveldaja reports as the bank-account balance against the real bank-account balance; if they differ, re-importing the affected bank statements fixes it. See the [changelog](CHANGELOG.md) for full details.
 >
 > **Correct standard-chart accounts (behaviour change).** Every hardcoded default account was audited against the e-arveldaja RTJ standard chart and corrected — several earlier defaults pointed at the wrong account (e.g. the dividend income-tax liability at 2540 "Kogumispensioni maksed", an FX loss at an income account). More importantly, the tools now resolve each equity/liability/financial account **by its Estonian name** against your company's actual chart, using the standard number only as a fallback, so dividend, share-capital, reserve, FX, and Lightyear postings land on the right account even on a custom or renumbered chart. If you booked with an earlier version this year, the read-only `npm run audit:legacy-accounts` script flags any entries still sitting on an old default account. See the [changelog](CHANGELOG.md) for full details.
@@ -221,7 +223,7 @@ Download your Lightyear account statement CSV and capital gains report, then:
 
 > "Create e-arveldaja journal entries from these Lightyear CSVs"
 
-The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts. Dividends, fund distributions, and cash interest are also imported from the account statement CSV.
+The assistant will parse the trades, pair foreign currency conversions, calculate capital gains from the FIFO report, and create journal entries with the correct securities accounts. A sell debits the broker account with the cash the statement shows, credits the investment at Lightyear's FIFO cost basis, and books the gain or loss as the difference. Dividends, fund distributions, and cash interest are also imported from the account statement CSV, each to its own income account (8330, 8320 and 8400 by default).
 
 ### Import bank statements (CAMT.053)
 
@@ -254,6 +256,14 @@ Inter-account transfer reconciliation is conservative: if multiple candidate mat
 ### Month-end close
 
 > "Run the month-end close checklist for February 2026"
+
+For a month that is still open, overdue invoices are evaluated as of today (Estonian date); invoices still payable by month-end are listed separately under `due_before_month_end_*`.
+
+### Year-end close
+
+> "Prepare the 2025 year-end close"
+
+The assistant proposes RIK's two closing entries (31 Dec result to 2970, 1 Jan transfer to retained earnings 2960, optionally part to reserve capital), shows what already exists, and books only what is missing after your approval. The fiscal year is the calendar year.
 
 ### Estonian tax: dividends and owner expenses
 

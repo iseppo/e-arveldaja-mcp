@@ -61,6 +61,7 @@ Inline actions per blocker type:
 
 **WARNINGS (review but may not block close):**
 - Overdue payables — check if payment was made but not yet recorded
+- If the month is still open, overdue is evaluated as of today (`overdue_as_of`); report `due_before_month_end_*` as invoices still payable this month, not as overdue.
 
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:sales -->
 Capability condition for `sales`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_sale_invoice`. If any named tool is absent, skip this section and continue with the surrounding purchase-side workflow. Never call a missing tool to probe capability.
