@@ -346,7 +346,9 @@ async function currentProductionConsumers(): Promise<string[]> {
 describe("internal MCP delegation architecture contract", () => {
   it("allows no production consumers of internal MCP delegation", async () => {
     expect(await currentProductionConsumers()).toEqual([]);
-  });
+  // Scans every production source file; under the parallel full suite this
+  // exceeds vitest's 5 s default.
+  }, 30_000);
 
   it("keeps the parser definition isolated from the production allowlist", async () => {
     const parser = await readFile(resolve("src/mcp-json.ts"), "utf8");
