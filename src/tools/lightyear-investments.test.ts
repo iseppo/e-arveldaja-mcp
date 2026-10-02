@@ -607,8 +607,35 @@ describe("lightyear investments tools", () => {
 
     // Created journals are drafts that balances exclude: name them and the confirm call.
     expect(payload.unconfirmed_journal_ids).toEqual([5001, 5002]);
-    expect(payload.next_actions).toEqual([expect.objectContaining({ tool: "batch_confirm_journals", args: { ids: [5001, 5002] } })]);
+    expect(payload.next_actions).toEqual([expect.objectContaining({
+      tool: "batch_confirm_journals",
+      args: { ids: [5001, 5002], reason: expect.any(String) },
+    })]);
     expect(payload.note).toContain("DRAFTS");
+  });
+
+  it("surfaces earlier unregistered drafts when a rerun skips every row as a duplicate", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["10/03/2026 11:51:35", "OR-BRICE-BUY", "BRICEKSP", "IE000GWTNRJ7", "Buy", "900.000000000", "EUR", "1.000000000", "900.00", "", "0.00", "900.00", ""],
+    ]));
+    const { api, handler } = setupLightyearTool("book_lightyear_trades", {
+      journals: [{ id: 77, document_number: "LY:OR-BRICE-BUY", effective_date: "2026-03-10", is_deleted: false, registered: false }],
+    });
+    const result = await handler({
+      file_path: "/tmp/lightyear.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      skip_tickers: "none",
+      dry_run: false,
+    });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(payload.duplicates_skipped).toBe(1);
+    expect(payload.unconfirmed_journal_ids).toEqual([77]);
+    expect(payload.next_actions).toEqual([expect.objectContaining({
+      tool: "batch_confirm_journals",
+      args: { ids: [77], reason: expect.any(String) },
+    })]);
   });
 
   it("expenses the trade platform fee on a buy rather than capitalising it", async () => {
@@ -2899,6 +2926,18 @@ describe("H17 distribution currency and EUR provenance", () => {
     const { handler } = setupLightyearTool("book_lightyear_distributions", { journals: [{ id: 7, document_number: "LY:SNAP-H17", effective_date: "2026-03-02", is_deleted: false }] });
     const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 1, review_required: 0, new_entries: 0, duplicates_skipped: 1, results: [] });
+  });
+
+  it("surfaces an earlier unregistered distribution draft on an executed rerun", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([["02/03/2026", "SNAP-DRAFT", "", "", "Interest", "0", "EUR", "0", "5", "1", "0", "5", "0"]]));
+    const { api, handler } = setupLightyearTool("book_lightyear_distributions", {
+      journals: [{ id: 9, document_number: "LY:SNAP-DRAFT", effective_date: "2026-03-02", is_deleted: false, registered: false }],
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(payload.duplicates_skipped).toBe(1);
+    expect(payload.unconfirmed_journal_ids).toEqual([9]);
+    expect(payload.next_actions[0].args).toEqual({ ids: [9], reason: expect.any(String) });
   });
 
   it("H17 coverage applies exact mixed in-file duplicate and reviewed-result formulas", async () => {
@@ -5221,16 +5260,55 @@ describe("Lightyear review remediation", () => {
 });
 
 describe("draftConfirmationFields", () => {
-  it("splits the batch_confirm_journals hint into calls of at most 500 ids", () => {
+  const reason = "Confirm Lightyear trade journals booked by book_lightyear_trades.";
+
+  it("splits the batch_confirm_journals hint into calls of at most 500 ids, each with a reason", () => {
     const rows = Array.from({ length: 501 }, (_, i) => ({ status: "created", journal_id: i + 1 }));
-    const fields = lightyearInvestments.draftConfirmationFields(rows) as any;
+    const fields = lightyearInvestments.draftConfirmationFields(rows, { reason }) as any;
     expect(fields.unconfirmed_journal_ids).toHaveLength(501);
     expect(fields.next_actions.map((a: any) => a.args.ids.length)).toEqual([500, 1]);
+    for (const action of fields.next_actions) expect(action.args.reason).toBe(reason);
   });
 
-  it("points at possibly-draft earlier journals when every row is a duplicate", () => {
-    const fields = lightyearInvestments.draftConfirmationFields([{ status: "duplicate", journal_id: 7 }]) as any;
+  it("emits args that satisfy batch_confirm_journals' required ids and reason", () => {
+    const fields = lightyearInvestments.draftConfirmationFields([{ status: "created", journal_id: 5 }], { reason }) as any;
+    const args = fields.next_actions[0].args;
+    expect(Array.isArray(args.ids) && args.ids.length >= 1 && args.ids.length <= 500).toBe(true);
+    expect(typeof args.reason === "string" && args.reason.length >= 1 && args.reason.length <= 500).toBe(true);
+  });
+
+  it("offers earlier unregistered drafts when every row was skipped as a duplicate", () => {
+    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicateIds: [7, 8] }) as any;
+    expect(fields.unconfirmed_journal_ids).toEqual([7, 8]);
+    expect(fields.pending_duplicate_journal_ids).toEqual([7, 8]);
+    expect(fields.next_actions[0].args).toEqual({ ids: [7, 8], reason });
+    expect(fields.note).toContain("still unregistered drafts");
+  });
+
+  it("returns no confirm call when nothing was created and no drafts are pending", () => {
+    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicateIds: [] }) as any;
     expect(fields.next_actions).toBeUndefined();
-    expect(fields.note).toContain("may still be drafts");
+    expect(fields.unconfirmed_journal_ids).toBeUndefined();
+  });
+});
+
+describe("findUnregisteredJournalIdsByRef", () => {
+  const base = { is_deleted: false, postings: [] } as const;
+  it("returns only unregistered journals matching LY:{ref} or a same-date raw ref", () => {
+    const journals = [
+      { ...base, id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", registered: false },
+      { ...base, id: 2, document_number: "LY:OR-2", effective_date: "2026-01-03", registered: true },
+      { ...base, id: 3, document_number: "OR-3", effective_date: "2026-01-04", registered: false },
+      { ...base, id: 4, document_number: "OR-4", effective_date: "2026-02-01", registered: false },
+      { ...base, id: 5, document_number: "LY:OR-5", effective_date: "2026-01-05", registered: false, is_deleted: true },
+    ] as any;
+    const ids = lightyearInvestments.findUnregisteredJournalIdsByRef(journals, [
+      { reference: "OR-1", date: "2026-01-02" },
+      { reference: "OR-2", date: "2026-01-03" },
+      { reference: "OR-3", date: "2026-01-04" },
+      { reference: "OR-4", date: "2026-01-06" },
+      { reference: "OR-5", date: "2026-01-05" },
+    ]);
+    expect(ids).toEqual([1, 3]);
   });
 });

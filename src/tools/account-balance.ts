@@ -302,6 +302,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
 
       const draftScan = findUnregisteredDrafts(journalsFromApi, account_id, { dateFrom: date_from, dateTo: date_to });
       const drafts = unregisteredDraftsOutput(draftScan);
+      // A dimension holding only drafts still gets a zero-balance row, so the
+      // draft count shows where the missing amounts will land.
+      for (const dimId of draftScan.by_dimension.keys()) {
+        if (!groups.has(dimId)) groups.set(dimId, { debit: 0, credit: 0, count: 0 });
+      }
 
       const titleById = new Map<number, string>();
       for (const d of dimensions) if (d.id !== undefined) titleById.set(d.id, d.title_est);

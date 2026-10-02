@@ -1960,9 +1960,31 @@ function findExistingJournalsByRef(
   allJournals: readonly Journal[],
   lookups: LightyearRefLookup[],
 ): Set<string> {
-  if (lookups.length === 0) return new Set();
+  return new Set(matchJournalsByRef(allJournals, lookups).map(match => match.reference));
+}
 
-  const existing = new Set<string>();
+/**
+ * Ids of existing, still-unregistered journals for the given refs. A rerun
+ * skips these refs as duplicates, so without this the earlier drafts would
+ * stay invisible and the broker balance would keep disagreeing.
+ */
+export function findUnregisteredJournalIdsByRef(
+  allJournals: readonly Journal[],
+  lookups: LightyearRefLookup[],
+): number[] {
+  const ids = matchJournalsByRef(allJournals, lookups)
+    .filter(match => !match.journal.registered && typeof match.journal.id === "number")
+    .map(match => match.journal.id as number);
+  return [...new Set(ids)];
+}
+
+function matchJournalsByRef(
+  allJournals: readonly Journal[],
+  lookups: LightyearRefLookup[],
+): Array<{ reference: string; journal: Journal }> {
+  if (lookups.length === 0) return [];
+
+  const matches: Array<{ reference: string; journal: Journal }> = [];
 
   // Two document_number forms:
   // - `LY:{ref}` — our canonical prefix. Collision-free with hand-entered
@@ -1982,7 +2004,7 @@ function findExistingJournalsByRef(
     const documentNumber = String(journal.document_number).trim();
 
     if (prefixedTargets.has(documentNumber)) {
-      existing.add(documentNumber.substring(3));
+      matches.push({ reference: documentNumber.substring(3), journal });
       continue;
     }
 
@@ -1990,12 +2012,12 @@ function findExistingJournalsByRef(
     if (expectedDate !== undefined) {
       // Raw-ref match: require date alignment as a cross-check.
       if (journal.effective_date === expectedDate) {
-        existing.add(documentNumber);
+        matches.push({ reference: documentNumber, journal });
       }
     }
   }
 
-  return existing;
+  return matches;
 }
 
 /**
@@ -2718,26 +2740,37 @@ function distributionsReviewCommands(projection: DistributionsProjection): Light
  * journals only, so until they are confirmed the broker account silently
  * disagrees with the statement. Name the created ids and the confirm call.
  */
-export function draftConfirmationFields(results: Array<Record<string, unknown>>): Record<string, unknown> {
-  const ids = results
+export function draftConfirmationFields(
+  results: Array<Record<string, unknown>>,
+  opts: { reason: string; pendingDuplicateIds?: number[] },
+): Record<string, unknown> {
+  const createdIds = results
     .filter(r => r.status === "created" && typeof r.journal_id === "number")
     .map(r => r.journal_id as number);
-  const duplicateNote = results.some(r => r.status === "duplicate")
-    ? " Rows reported as duplicate point at earlier journals, which may still be drafts — compute_account_balance lists unregistered drafts."
-    : "";
-  if (ids.length === 0) return { note: `No new journal entries were created.${duplicateNote}` };
+  const pendingIds = (opts.pendingDuplicateIds ?? []).filter(id => !createdIds.includes(id));
+  const ids = [...createdIds, ...pendingIds];
+  if (ids.length === 0) return { note: "No new journal entries were created and no earlier Lightyear drafts are pending." };
+  const parts: string[] = [];
+  if (createdIds.length > 0) {
+    parts.push(`${createdIds.length} journal entr${createdIds.length === 1 ? "y was" : "ies were"} created as DRAFTS.`);
+  } else {
+    parts.push("No new journal entries were created.");
+  }
+  if (pendingIds.length > 0) {
+    parts.push(`${pendingIds.length} earlier journal entr${pendingIds.length === 1 ? "y" : "ies"} for rows skipped as duplicates ${pendingIds.length === 1 ? "is" : "are"} still unregistered drafts.`);
+  }
   // batch_confirm_journals takes at most 500 ids per call.
   const batches: number[][] = [];
   for (let i = 0; i < ids.length; i += 500) batches.push(ids.slice(i, i + 500));
   return {
     unconfirmed_journal_ids: ids,
+    ...(pendingIds.length > 0 ? { pending_duplicate_journal_ids: pendingIds } : {}),
     note:
-      `${ids.length} journal entr${ids.length === 1 ? "y was" : "ies were"} created as DRAFTS. Balances and reports ` +
-      `exclude drafts until they are registered — offer the user to confirm them now.${duplicateNote}`,
+      `${parts.join(" ")} Balances and reports exclude drafts until they are registered — offer the user to confirm them now.`,
     next_actions: batches.map(batch => ({
       tool: "batch_confirm_journals",
-      args: { ids: batch },
-      why: "Register the created Lightyear journals so the broker and investment balances include them.",
+      args: { ids: batch, reason: opts.reason },
+      why: "Register the Lightyear journals so the broker and investment balances include them.",
     })),
   };
 }
@@ -2748,6 +2781,7 @@ interface TradesRenderInput {
   planHandle?: string;
   executionReport?: PlanExecutionReport;
   createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
+  pendingDuplicateIds?: number[];
 }
 
 function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> {
@@ -2794,7 +2828,7 @@ function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> 
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     ...(dryRun
       ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
-      : draftConfirmationFields(results)),
+      : draftConfirmationFields(results, { reason: "Confirm Lightyear trade journals booked by book_lightyear_trades.", pendingDuplicateIds: input.pendingDuplicateIds })),
   };
 }
 
@@ -2804,6 +2838,7 @@ interface DistributionsRenderInput {
   planHandle?: string;
   executionReport?: PlanExecutionReport;
   createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
+  pendingDuplicateIds?: number[];
 }
 
 function renderDistributionsPayload(input: DistributionsRenderInput): Record<string, unknown> {
@@ -2853,7 +2888,7 @@ function renderDistributionsPayload(input: DistributionsRenderInput): Record<str
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     ...(dryRun
       ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
-      : draftConfirmationFields(results)),
+      : draftConfirmationFields(results, { reason: "Confirm Lightyear distribution journals booked by book_lightyear_distributions.", pendingDuplicateIds: input.pendingDuplicateIds })),
   };
 }
 
@@ -3386,7 +3421,10 @@ export function registerLightyearTools(
       })));
 
       return {
-        content: [{ type: "text", text: toMcpJson(renderTradesPayload({ mode: "EXECUTED", projection, executionReport, createdByIndex })) }],
+        content: [{ type: "text", text: toMcpJson(renderTradesPayload({
+          mode: "EXECUTED", projection, executionReport, createdByIndex,
+          pendingDuplicateIds: findUnregisteredJournalIdsByRef(guard.journals, projection.duplicates),
+        })) }],
       };
     }
   );
@@ -3645,7 +3683,10 @@ export function registerLightyearTools(
       })));
 
       return {
-        content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({ mode: "EXECUTED", projection, executionReport, createdByIndex })) }],
+        content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({
+          mode: "EXECUTED", projection, executionReport, createdByIndex,
+          pendingDuplicateIds: findUnregisteredJournalIdsByRef(guard.journals, projection.duplicates),
+        })) }],
       };
     }
   );

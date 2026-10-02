@@ -389,6 +389,19 @@ describe("compute_account_dimension_balances tool", () => {
     expect(data.unregistered_drafts).toMatchObject({ journal_count: 1, journal_ids: [3], debit_total: 743.54 });
   });
 
+  it("lists a dimension that holds only drafts as a zero-balance row", async () => {
+    const journals = [
+      journal({ id: 1, postings: [dimPosting("D", 1000, DIM_A.id)] }),
+      journal({ id: 2, registered: false, postings: [dimPosting("D", 300, DIM_B.id)] }),
+    ];
+    const data = parse(((await setup(journals)({ account_id: ACCOUNT_ID })).content[0] as { text: string }).text);
+    const rows = data.dimensions as Array<Record<string, unknown>>;
+    expect(rows.find(r => r.dimension_id === DIM_B.id)).toMatchObject({
+      balance: 0, debit_total: 0, credit_total: 0, entry_count: 0, unregistered_entry_count: 1,
+    });
+    expect(data.total).toBe(1000);
+  });
+
   it("splits account 1020 into per-dimension rows that sum to the account total", async () => {
     const journals = [
       journal({ id: 1, postings: [dimPosting("D", 1000, DIM_A.id)] }),
