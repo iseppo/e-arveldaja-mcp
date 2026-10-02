@@ -33,7 +33,8 @@ export const DATE_VALUE_SOURCE =
   TEXTUAL_MONTH_SOURCE +
   String.raw`\s+\d{1,2},?\s+\d{4})`;
 
-const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
+// "kokku" must not match "kokkuvõte" (summary / billing-period heading).
+const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku(?!võt)|kogusumma|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
 const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
 // Net (pre-VAT) total labels. A net-labelled line is never a gross candidate,
 // even when it also carries a TOTAL word ("Kokku km-ta 50,00", "Total excl. VAT").
@@ -105,6 +106,11 @@ const SUPPLIER_COUNTRY_NAME_TO_CLIENT_COUNTRY: Array<[string, string]> = [
   ["netherlands", "NLD"],
   ["poland", "POL"],
 ];
+const TEXTUAL_DATE_IN_LINE_RE = new RegExp(
+  String.raw`(?<![\d.,])\d{1,2}\.?\s*` + TEXTUAL_MONTH_VALUE_RE.source.slice(2, -2) + String.raw`\.?,?\s+\d{4}\b`,
+  "giu",
+);
+
 const MONTH_NAME_TO_NUMBER: Record<string, number> = {
   jaan: 1,
   jaanuar: 1,
@@ -1013,7 +1019,9 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // retain a zero on a line that does not state the document's VAT.
   // Everything read here comes from `line`, never from the amounts, so
   // resolving it first changes ordering only, not any value.
-  const amounts = extractAmountsFromLine(line, documentContext, {
+  // Textual dates ("30. sept 2026") are blanked first so a billing-period day
+  // number cannot become an amount candidate.
+  const amounts = extractAmountsFromLine(line.replace(TEXTUAL_DATE_IN_LINE_RE, " "), documentContext, {
     includeZero: isExplicitVatTotalLine(line),
   });
   const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));

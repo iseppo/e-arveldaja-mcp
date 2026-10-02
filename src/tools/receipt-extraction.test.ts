@@ -805,6 +805,30 @@ describe("extractAmounts", () => {
     const result = extractAmounts(text);
     expect(result.total_gross).toBe(75.5);
   });
+
+  // Google Cloud EMEA Estonian 0% invoice layout (live 2026-09/10). The billing
+  // period row "Kokkuvõte - 1. sept 2026 - 30. sept 2026" was taken as the
+  // total ("kokku" inside "kokkuvõte"), and "Kogusumma" was not a total label,
+  // so gross became the day number 30 and VAT was derived as 30 - net.
+  it("does not read a 'Kokkuvõte' billing-period row as the gross total", () => {
+    const text = [
+      "Arve kuupäev     ....................      Kogusumma (EUR)                                               1,87 €",
+      "Konto ID         ....................      Kokkuvõte - 1. sept 2026 - 30. sept 2026",
+      "                                           Vahesumma (EUR)                                               1,87 €",
+      "                                           Käibemaks (0%)                                                0,00 €",
+      "                                           Kogusumma (EUR)                                               1,87 €",
+      "Google Cloudi tasu - september 2026                         1,87",
+    ].join("\n");
+    expect(extractAmounts(text)).toMatchObject({ total_net: 1.87, total_vat: 0, total_gross: 1.87 });
+  });
+
+  it("treats 'Kogusumma' as a gross total label", () => {
+    expect(extractAmounts("Kogusumma (EUR) 13,60 €").total_gross).toBe(13.6);
+  });
+
+  it("does not take the day number of a textual date on a total line as an amount", () => {
+    expect(extractAmounts("Kokku perioodil 1. sept 2026 - 30. sept 2026").total_gross).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
