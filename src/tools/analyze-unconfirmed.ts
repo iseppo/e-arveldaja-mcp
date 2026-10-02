@@ -160,24 +160,27 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         await reportProgress(i, total);
 
         const txDim = tx.accounts_dimensions_id;
-        // The bank-posting side comes from the statement direction (signed
-        // marker first), not the raw stored type: incoming debits the bank.
+        // The bank-posting side comes from the signed statement direction:
+        // incoming debits the bank. Unsigned rows ("unknown" — the API reads
+        // every type back as "C") are checked against both sides.
         const direction = bankTransactionDirection(tx);
-        const postingSide: "D" | "C" | undefined =
-          direction === "incoming" ? "D" : direction === "outgoing" ? "C" : undefined;
+        const postingSides: Array<"D" | "C"> =
+          direction === "incoming" ? ["D"] : direction === "outgoing" ? ["C"] : ["D", "C"];
         const txDuplicateAmount = Math.round(((tx.base_amount ?? tx.amount) as number) * 100) / 100;
         const bankTitle = dimensionToTitle.get(txDim) ?? `dim:${txDim}`;
 
         // --- 1. Duplicate detection: journal already exists for this amount/bank account within the date window ---
         let dupMatches: JournalMatch[] | undefined;
-        if (postingSide) {
+        {
           const found: JournalMatch[] = [];
           // Exact date first, then outward, so the nearest journal leads.
           for (let offset = 0; offset <= DUPLICATE_DATE_WINDOW_DAYS; offset++) {
             const dates = offset === 0 ? [tx.date] : [shiftDate(tx.date, -offset), shiftDate(tx.date, offset)];
             for (const date of dates) {
-              for (const match of bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, postingSide, txDuplicateAmount, date)) ?? []) {
-                if (!found.some(existing => existing.journal_id === match.journal_id)) found.push(match);
+              for (const postingSide of postingSides) {
+                for (const match of bankJournalIndex.get(buildBankJournalDuplicateKey(txDim, postingSide, txDuplicateAmount, date)) ?? []) {
+                  if (!found.some(existing => existing.journal_id === match.journal_id)) found.push(match);
+                }
               }
             }
           }

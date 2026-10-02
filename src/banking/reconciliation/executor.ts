@@ -3,7 +3,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.
 import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankPostingSideForInvoiceMatch, bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
@@ -252,7 +252,7 @@ export async function runSuggestMatches(
           accountId: suggestDim.accountId,
           dimensionId: suggestDim.dimensionId,
           amount: tx.base_amount ?? tx.amount,
-          direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
+          direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
           date: tx.date,
         });
         if (scan.scan_available && scan.suspects.length > 0) {
@@ -730,7 +730,10 @@ export async function runInterAccountMatching(
     targetAccountsDimensionsId: target_accounts_dimensions_id,
   };
 
-  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) === "outgoing");
+  // Rows without a signed marker ("unknown") stay on the outgoing side as
+  // before; same-type pairs among them confirm only when exactly one leg is
+  // signed outgoing, and a confirm books from the real stored type.
+  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) !== "incoming");
   const incoming = unconfirmed.filter(tx => bankTransactionDirection(tx) === "incoming");
 
   const matchedPairs: PairResult[] = [];

@@ -3335,10 +3335,10 @@ describe("confirm_transaction inter-account duplicate guard (MEDIUM-4)", () => {
     ],
   };
 
-  function interAccountHarness(journals: unknown[]) {
+  function interAccountHarness(journals: unknown[], txOverrides: Record<string, unknown> = {}) {
     return getCrudToolHarness("confirm_transaction", {
       transactions: {
-        get: vi.fn().mockResolvedValue({ id: 31, clients_id: 5, type: "C", amount: 500, date: "2026-03-21", accounts_dimensions_id: 100 }),
+        get: vi.fn().mockResolvedValue({ id: 31, clients_id: 5, type: "C", amount: 500, date: "2026-03-21", accounts_dimensions_id: 100, ...txOverrides }),
         update: vi.fn().mockResolvedValue({}),
         confirm: vi.fn().mockResolvedValue({ code: 200, messages: [] }),
       },
@@ -3394,6 +3394,44 @@ describe("confirm_transaction inter-account duplicate guard (MEDIUM-4)", () => {
     const { api, handler } = interAccountHarness([]);
     const payload = parseMcpResponse(((await handler({ ...args, block_on_duplicate: true })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(payload.warnings).toBeUndefined();
+  });
+
+  // A one-sided bank posting on the TARGET dimension (SEB, dim 200) on its
+  // CREDIT side: the same side an incoming LHV row would hand SEB, the opposite
+  // of what an outgoing LHV row would.
+  const targetCreditPosting = {
+    id: 12, registered: true, is_deleted: false, effective_date: "2026-03-21", title: "Manual SEB entry", document_number: null,
+    postings: [
+      { accounts_id: 1020, accounts_dimensions_id: 200, type: "C", amount: 500, is_deleted: false },
+      { accounts_id: 5000, accounts_dimensions_id: null, type: "D", amount: 500, is_deleted: false },
+    ],
+  };
+
+  it("scans both target posting sides for an unsigned row whose direction is unknown", async () => {
+    // The live API reads every transaction back as type "C" whatever was
+    // stored (verified 2026-10), so the unsigned row's side is unknown.
+    const { api, handler } = interAccountHarness([targetCreditPosting]);
+    const payload = parseMcpResponse(((await handler(args)) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    const suspects = (payload.possible_duplicate_postings ?? payload.extra?.possible_duplicate_postings) as Array<{ journal_id: number }>;
+    expect(suspects.map(s => s.journal_id)).toEqual([12]);
+
+    const blocked = await handler({ ...args, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({
+      category: "possible_duplicate_posting",
+      conflicting_journal_ids: [12],
+    });
+  });
+
+  it("scans only the opposite target side for a signed outgoing row", async () => {
+    const { api, handler } = interAccountHarness([targetCreditPosting], {
+      description: "Transfer to SEB\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
+    });
+    const payload = parseMcpResponse(((await handler({ ...args, block_on_duplicate: true })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(payload).not.toHaveProperty("possible_duplicate_postings");
     expect(payload.warnings).toBeUndefined();
   });
 });

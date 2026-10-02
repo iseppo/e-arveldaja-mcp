@@ -1382,7 +1382,7 @@ describe("selectBatchBankTransactions (M08 — file vs accounting date separatio
     { id: 2, accounts_dimensions_id: 10, status: "PROJECT", type: "C", date: "2026-07-01", amount: 200 },
     { id: 3, accounts_dimensions_id: 99, status: "PROJECT", type: "C", date: "2026-07-01", amount: 300 },
     { id: 4, accounts_dimensions_id: 10, status: "CONFIRMED", type: "C", date: "2026-07-01", amount: 400 },
-    { id: 5, accounts_dimensions_id: 10, status: "PROJECT", type: "D", date: "2026-07-01", amount: 500 },
+    { id: 5, accounts_dimensions_id: 10, status: "PROJECT", type: "D", date: "2026-07-01", amount: 500, description: "WISE:IN-5 customer [source_direction=IN]" },
   ] as unknown as Parameters<typeof selectBatchBankTransactions>[0];
 
   it("retains bank transactions dated outside the receipt file window (no accounting bounds)", () => {
@@ -1406,8 +1406,8 @@ describe("selectBatchBankTransactions (M08 — file vs accounting date separatio
     expect(selectBatchBankTransactions(txns, 99, {}).map(t => t.id)).toEqual([3]);
   });
 
-  it("excludes non-PROJECT and non-C (legacy debit) rows", () => {
-    // ids 4 (CONFIRMED) and 5 (type D) must never enter auto-match.
+  it("excludes non-PROJECT and signed-incoming rows", () => {
+    // ids 4 (CONFIRMED) and 5 (signed incoming) must never enter auto-match.
     const result = selectBatchBankTransactions(txns, 10, {});
     expect(result.some(t => t.id === 4 || t.id === 5)).toBe(false);
   });
@@ -1669,17 +1669,30 @@ describe("categorizeTransactionGroup", () => {
   it("classifies bank fees", () => {
     const result = categorizeTransactionGroup({
       normalized_counterparty: "lhv",
-      transactions: [makeTx({ amount: 5.5, description: "Monthly fee" })],
+      transactions: [makeTx({ amount: 5.5, description: "Monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" })],
     });
 
     expect(result.category).toBe("bank_fees");
     expect(result.apply_mode).toBe("purchase_invoice");
   });
 
+  // The API reads every type back as "C": an unsigned row's direction is
+  // unknown, so its category stays a hint but apply is never offered.
+  it("keeps the category of an unsigned (direction-unknown) group but makes it review-only", () => {
+    const result = categorizeTransactionGroup({
+      normalized_counterparty: "lhv",
+      transactions: [makeTx({ amount: 5.5, description: "Monthly fee" })],
+    });
+
+    expect(result.category).toBe("bank_fees");
+    expect(result.apply_mode).toBe("review_only");
+    expect(result.reasons).toContain("direction_unknown");
+  });
+
   it("does not classify incoming bank credits as bank fees", () => {
     const result = categorizeTransactionGroup({
       normalized_counterparty: "lhv",
-      transactions: [makeTx({ type: "D", amount: 5.5, description: "Monthly fee refund" })],
+      transactions: [makeTx({ type: "D", amount: 5.5, description: "WISE:refund-1 Monthly fee refund [source_direction=IN]" })],
     });
 
     expect(result.category).toBe("revenue_without_invoice");
@@ -1713,7 +1726,7 @@ describe("categorizeTransactionGroup", () => {
     const result = categorizeTransactionGroup({
       normalized_counterparty: "emta",
       display_counterparty: "EMTA",
-      transactions: [makeTx({ type: "D", amount: 300 })],
+      transactions: [makeTx({ type: "D", amount: 300, description: "WISE:in-300 incoming [source_direction=IN]" })],
     });
 
     expect(result.category).toBe("tax_payments");
@@ -1724,7 +1737,7 @@ describe("categorizeTransactionGroup", () => {
       normalized_counterparty: "john doe",
       display_counterparty: "John Doe",
       owner_counterparties: new Set(["john doe"]),
-      transactions: [makeTx({ type: "D", amount: 300 })],
+      transactions: [makeTx({ type: "D", amount: 300, description: "WISE:in-300 incoming [source_direction=IN]" })],
     });
 
     expect(result.category).toBe("owner_transfers");
@@ -1733,7 +1746,7 @@ describe("categorizeTransactionGroup", () => {
   it("classifies incoming unmatched payments as revenue without invoice", () => {
     const result = categorizeTransactionGroup({
       normalized_counterparty: "customer payment",
-      transactions: [makeTx({ type: "D", amount: 1500 })],
+      transactions: [makeTx({ type: "D", amount: 1500, description: "WISE:in-1500 incoming [source_direction=IN]" })],
     });
 
     expect(result.category).toBe("revenue_without_invoice");
@@ -1742,7 +1755,7 @@ describe("categorizeTransactionGroup", () => {
   it("classifies bolt and similar card purchases", () => {
     const result = categorizeTransactionGroup({
       normalized_counterparty: "bolt",
-      transactions: [makeTx({ description: "Card purchase", bank_subtype: "card" })],
+      transactions: [makeTx({ description: "Card purchase\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]", bank_subtype: "card" })],
     });
 
     expect(result.category).toBe("card_purchases");
@@ -2265,7 +2278,7 @@ describe("direction-aware grouping and batch bank selection (bank-review MAJOR-2
 
   it("groups by (counterparty, direction) so a refund never shares a group with charges", async () => {
     const { groupTransactionsByCounterparty } = await import("./receipt-inbox.js");
-    const groups = groupTransactionsByCounterparty([tx({ id: 1 }), tx({ id: 2, type: "D" }), tx({ id: 3 })]);
+    const groups = groupTransactionsByCounterparty([tx({ id: 1 }), tx({ id: 2, type: "D", description: "WISE:IN-2 refund [source_direction=IN]" }), tx({ id: 3 })]);
     expect(groups.map(group => group.transactions.map(t => t.id).sort())).toEqual(expect.arrayContaining([[1, 3], [2]]));
     expect(groups).toHaveLength(2);
   });
@@ -2278,7 +2291,10 @@ describe("direction-aware grouping and batch bank selection (bank-review MAJOR-2
       tx({ id: 3, type: "D", description: "WISE:OUT-1 card [source_direction=OUT]" }),
       tx({ id: 4, type: "D" }),
     ];
-    expect(selectBatchBankTransactions(rows, 100, {}).map(row => row.id)).toEqual([1, 3]);
+    // id 4 is unsigned: its stored "D" proves nothing (the live API reads every
+    // type back as "C"), so its direction is unknown and it stays a candidate.
+    // Only the signed-incoming id 2 is excluded.
+    expect(selectBatchBankTransactions(rows, 100, {}).map(row => row.id)).toEqual([1, 3, 4]);
   });
 });
 

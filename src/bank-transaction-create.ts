@@ -85,7 +85,7 @@ export interface BankTransactionCreateApi {
  *
  * Direction comes from the explicit `direction` argument when the caller knows it
  * (CAMT/Wise importers pass their parsed statement direction), otherwise it is
- * derived from the payload's signed source metadata / legacy `type` via
+ * derived from the payload's signed source metadata via
  * `bankTransactionDirection`. Unknown falls back to `"C"` — the historical
  * default for manually-created rows with no direction signal.
  */

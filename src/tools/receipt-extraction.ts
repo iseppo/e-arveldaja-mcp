@@ -2470,6 +2470,18 @@ export function deriveAutoBookedVatPrice(
 }
 
 export function categorizeTransactionGroup(input: TransactionGroupClassificationInput): TransactionGroupClassification {
+  const result = categorizeTransactionGroupByPattern(input);
+  // Without a signed statement marker the direction is unknown (the API reads
+  // every type back as "C"), and apply books purchase invoices only for proven
+  // outgoing rows — so keep the category as a hint but never offer apply.
+  const sample = input.transactions[0];
+  if (result.apply_mode !== "review_only" && sample && bankTransactionDirection(sample) === "unknown") {
+    return { ...result, apply_mode: "review_only", reasons: [...result.reasons, "direction_unknown"] };
+  }
+  return result;
+}
+
+function categorizeTransactionGroupByPattern(input: TransactionGroupClassificationInput): TransactionGroupClassification {
   const counterparty = input.normalized_counterparty;
   const displayCounterparty = input.display_counterparty;
   const sample = input.transactions[0];

@@ -2172,8 +2172,8 @@ describe("categorizeTransactionGroup — mixed directions (bank-review MAJOR-2)"
     const classification = categorizeTransactionGroup({
       normalized_counterparty: "openai",
       transactions: [
-        { type: "C", amount: 25, date: "2026-03-01", description: "OpenAI", bank_subtype: null },
-        { type: "D", amount: 25, date: "2026-03-05", description: "OpenAI refund", bank_subtype: null },
+        { type: "C", amount: 25, date: "2026-03-01", description: "WISE:charge OpenAI [source_direction=OUT]", bank_subtype: null },
+        { type: "D", amount: 25, date: "2026-03-05", description: "WISE:refund OpenAI refund [source_direction=IN]", bank_subtype: null },
       ],
     });
     expect(classification.apply_mode).toBe("review_only");

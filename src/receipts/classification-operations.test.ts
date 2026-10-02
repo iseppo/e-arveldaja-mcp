@@ -133,6 +133,9 @@ const SAAS_TX = {
   bank_account_name: "OpenAI",
   clients_id: 7,
   cl_currencies_id: "EUR",
+  // Signed outgoing: apply books only rows PROVEN outgoing (the API reads every
+  // stored type back as "C", so the type alone proves nothing).
+  description: "OpenAI subscription\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
 };
 
 const SAAS_CLIENT = {
@@ -601,9 +604,27 @@ describe("classification operations — incoming rows are never booked as purcha
     expect(outcome.value.results[0]!.notes.join(" ")).toMatch(/not an outgoing payment \(direction: incoming\)/);
   });
 
+  it("skips an unsigned (direction-unknown) row in an echoed purchase_invoice group with a note, creating nothing", async () => {
+    // Without a signed marker the stored type proves nothing (the live API
+    // reads every transaction back as "C"), so the row could be a refund.
+    const unsigned = { ...SAAS_TX, description: "OpenAI subscription" };
+    const { operations, api } = makeSaasOperations(unsigned);
+    const group = saasGroup({ transactions: [unsigned] });
+    const handle = await dryRunHandle(operations, [group]);
+    const outcome = await operations.applyClassifications({
+      classificationsJson: { groups: [group] },
+      execute: true,
+      planHandle: handle,
+    });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expectNoWrites(api);
+    expect(outcome.value.results[0]!.notes.join(" ")).toMatch(/not an outgoing payment \(direction: unknown\)/);
+  });
+
   it("analyze splits one counterparty's charges and refunds into separate direction groups", async () => {
     const charge = { ...SAAS_TX, id: 42 };
-    const refund = { ...SAAS_TX, id: 43, amount: 25, type: "D", description: "refund" };
+    const refund = { ...SAAS_TX, id: 43, amount: 25, type: "D", description: "refund\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" };
     const { operations } = makeOperations({
       transactionRows: [charge, refund],
       clientRows: [SAAS_CLIENT],
@@ -623,7 +644,8 @@ describe("classification operations — incoming rows are never booked as purcha
 
 describe("classification operations — guided compact round trip", () => {
   it("the classify compact's inlined classifications_json completes dry_run_apply → execute_apply", async () => {
-    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR" };
+    // Signed outgoing so apply books it (unsigned rows are direction-unknown).
+    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
     const { operations, api } = makeOperations({
       transactionRows: [feeTx],
       transactionDetails: { 1: feeTx },

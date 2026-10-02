@@ -1,5 +1,5 @@
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
-import { bankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankPostingSideForInvoiceMatch } from "../../bank-transaction-direction.js";
 import { buildInvoiceIndex, getIndexedCandidates, type InvoiceIndex } from "./invoice-index.js";
 import { matchScore, getInvoiceMatchEligibility, type MatchCandidate } from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
@@ -167,7 +167,7 @@ export function computeExactMatchProjection(
       clientResolution,
       needsClientUpdate: clientResolution === "set_missing",
       accountsDimensionsId: tx.accounts_dimensions_id,
-      direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
+      direction: bankPostingSideForInvoiceMatch(tx, match.type),
     });
   }
 
