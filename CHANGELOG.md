@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-10-02
+
 ### Fixed
 
 - **Google's Estonian 0% invoices no longer read a date as the total.** On these invoices `extract_pdf_invoice` took the billing-period row ("Kokkuvõte - 1. sept 2026 - 30. sept 2026") as the total, because "kokku" matched inside "kokkuvõte", and "Kogusumma" was not a total label. The gross became the day number (30) and VAT was derived as gross − net (13.60 → VAT 16.40 / gross 30). "Kokkuvõte" is no longer a total label, "Kogusumma" is, and the day number of a textual date ("30. sept 2026") is no longer an amount candidate.
