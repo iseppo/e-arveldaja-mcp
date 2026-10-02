@@ -2718,21 +2718,27 @@ function distributionsReviewCommands(projection: DistributionsProjection): Light
  * journals only, so until they are confirmed the broker account silently
  * disagrees with the statement. Name the created ids and the confirm call.
  */
-function draftConfirmationFields(results: Array<Record<string, unknown>>): Record<string, unknown> {
+export function draftConfirmationFields(results: Array<Record<string, unknown>>): Record<string, unknown> {
   const ids = results
     .filter(r => r.status === "created" && typeof r.journal_id === "number")
     .map(r => r.journal_id as number);
-  if (ids.length === 0) return { note: "No new journal entries were created." };
+  const duplicateNote = results.some(r => r.status === "duplicate")
+    ? " Rows reported as duplicate point at earlier journals, which may still be drafts — compute_account_balance lists unregistered drafts."
+    : "";
+  if (ids.length === 0) return { note: `No new journal entries were created.${duplicateNote}` };
+  // batch_confirm_journals takes at most 500 ids per call.
+  const batches: number[][] = [];
+  for (let i = 0; i < ids.length; i += 500) batches.push(ids.slice(i, i + 500));
   return {
     unconfirmed_journal_ids: ids,
     note:
       `${ids.length} journal entr${ids.length === 1 ? "y was" : "ies were"} created as DRAFTS. Balances and reports ` +
-      "exclude drafts until they are registered — offer the user to confirm them now.",
-    next_actions: [{
+      `exclude drafts until they are registered — offer the user to confirm them now.${duplicateNote}`,
+    next_actions: batches.map(batch => ({
       tool: "batch_confirm_journals",
-      args: { ids },
+      args: { ids: batch },
       why: "Register the created Lightyear journals so the broker and investment balances include them.",
-    }],
+    })),
   };
 }
 

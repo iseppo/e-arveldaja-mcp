@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isAbsolute } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toMcpJson, unwrapUntrustedOcr, wrapUntrustedOcr } from "../mcp-json.js";
 import { readOnly, destructive } from "../annotations.js";
 import { AUDIT_ENTITY_TYPES, logAudit } from "../audit-log.js";
 import { coerceId } from "./crud/shared.js";
@@ -65,7 +65,7 @@ function resolveDocumentResource(api: ApiContext, entityType: DocumentEntityType
  * counts as "no document"; any other 409 stays an error.
  */
 function isNoFileFoundConflict(error: HttpError): boolean {
-  return error.status === 409 && /(?:^|\n)No file found\.?(?:\n|$)/i.test(error.upstream_detail ?? "");
+  return error.status === 409 && /^No file found\.?$/i.test(unwrapUntrustedOcr(error.upstream_detail ?? "").trim());
 }
 
 /**
@@ -145,7 +145,19 @@ export function registerDocumentAttachmentTools(server: McpServer, api: ApiConte
     { ...readOnly, openWorldHint: true, title: "Download Source Document" },
     async ({ entity_type, id, metadata_only }) => {
       const resource = resolveDocumentResource(api, entity_type);
-      const file = await resource.getDocument(id);
+      let file;
+      try {
+        file = await resource.getDocument(id);
+      } catch (error) {
+        if (error instanceof HttpError && (error.status === 404 || isNoFileFoundConflict(error))) {
+          return toolError({
+            category: "no_document",
+            error: `${entity_type} ${id} has no source document.`,
+            target: { entity_type, id },
+          });
+        }
+        throw error;
+      }
       const sizeBytes = decodedByteEstimate(file.contents ?? "");
       const tooLarge = sizeBytes > MAX_INLINE_DOCUMENT_BYTES;
       // The stored filename originates from the uploaded document and is

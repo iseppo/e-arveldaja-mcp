@@ -5,12 +5,14 @@
 ### Changed
 
 - **Draft journals no longer drop out of balances silently.** `compute_account_balance` and `compute_account_dimension_balances` still count registered journals only, but now report draft journals posting to the account in range (`unregistered_drafts`: count, ids, D/C totals; `unregistered_entry_count` per dimension) with a warning to confirm them before comparing with a statement.
-- **Lightyear bookings point at their own confirmation.** `book_lightyear_trades` and `book_lightyear_distributions` create drafts; an execute response now lists them in `unconfirmed_journal_ids` with a `batch_confirm_journals` next action, and the `lightyear-booking` workflow asks the user to confirm them before the balance check. Previously the drafts could be left unconfirmed, and the broker account then disagreed with the statement by their total.
+- **Lightyear bookings point at their own confirmation.** `book_lightyear_trades` and `book_lightyear_distributions` create drafts; an execute response now lists them in `unconfirmed_journal_ids` with `batch_confirm_journals` next actions (at most 500 ids each), and the `lightyear-booking` workflow asks the user to confirm them before the balance check. Previously the drafts could be left unconfirmed, and the broker account then disagreed with the statement by their total.
 
 ### Fixed
 
 - **`attach_document` works on records without a document again.** The live API answers the pre-upload existence read (`GET …/document_user`) with 409 "No file found." rather than 404, so since 0.26.0 every attach to an empty record failed before the upload, with or without `replace_existing`. That exact 409 now counts as "no document"; any other 409 still stops the upload.
 - **Incoming CAMT and Wise rows can be confirmed again.** The 0.26.0 confirm-time guard (`stored_type_direction_mismatch`) compared a row's signed statement direction with its stored `type`, but the API reads every transaction back as `type: "C"` whatever was stored, so every signed incoming row was refused although the backend books it correctly. The guard is removed; the direction is still set at creation from the statement.
+- **Wise inter-account and fee rows confirm after creation again.** The pre-confirm check that the created row still matches the approved payload compared the read-back `type`, which the API always returns as `"C"`, so every incoming row aborted with "Stale created transaction precondition". `type` is no longer compared; the direction stays pinned by the description's `[source_direction=…]` marker.
+- **`get_document` on a record without a document** returns `no_document` instead of the raw 409.
 - **Full-ledger reads no longer fail when a list holds an exact multiple of 100 rows.** The API then announces one page too many and serves it empty with `total_pages: 1` (seen on `/journals` at 3700 rows), which the pagination check rejected, breaking `compute_account_balance` and every report that reads all journals. `listAll` now ends the walk on exactly that shape — the announced last page, empty, reporting 1 — and still rejects any other change of `total_pages`.
 
 ## [0.27.0] - 2026-09-25

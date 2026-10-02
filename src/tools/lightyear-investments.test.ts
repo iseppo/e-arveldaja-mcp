@@ -5219,3 +5219,18 @@ describe("Lightyear review remediation", () => {
     expect((payload.warnings ?? []).join("\n")).not.toContain("provide capital_gains_file");
   });
 });
+
+describe("draftConfirmationFields", () => {
+  it("splits the batch_confirm_journals hint into calls of at most 500 ids", () => {
+    const rows = Array.from({ length: 501 }, (_, i) => ({ status: "created", journal_id: i + 1 }));
+    const fields = lightyearInvestments.draftConfirmationFields(rows) as any;
+    expect(fields.unconfirmed_journal_ids).toHaveLength(501);
+    expect(fields.next_actions.map((a: any) => a.args.ids.length)).toEqual([500, 1]);
+  });
+
+  it("points at possibly-draft earlier journals when every row is a duplicate", () => {
+    const fields = lightyearInvestments.draftConfirmationFields([{ status: "duplicate", journal_id: 7 }]) as any;
+    expect(fields.next_actions).toBeUndefined();
+    expect(fields.note).toContain("may still be drafts");
+  });
+});

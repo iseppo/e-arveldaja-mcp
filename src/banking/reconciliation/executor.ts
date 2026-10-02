@@ -1054,9 +1054,10 @@ export async function runInterAccountMatching(
     // Both legs carry the same stored type, so the type cannot say which account
     // the money left. Confirming the wrong leg books the transfer reversed (the
     // confirmed row's own account becomes the source). Only a signed importer
-    // marker proving "outgoing" on exactly one leg — and agreeing with that
-    // leg's stored `C`, which is what the backend books from — settles it;
-    // anything else is a human decision, independent of listing order.
+    // marker proving "outgoing" on exactly one leg settles it; anything else is
+    // a human decision, independent of listing order. (The live API reads every
+    // row back as `C`, so the `type === "C"` term never discriminates — the
+    // signed marker is the whole proof.)
     const txProvenOutgoing = signedBankTransactionDirection(tx) === "outgoing" && tx.type === "C";
     const reciprocalProvenOutgoing = signedBankTransactionDirection(reciprocal) === "outgoing" && reciprocal.type === "C";
     if (txProvenOutgoing === reciprocalProvenOutgoing) {

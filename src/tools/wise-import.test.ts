@@ -5540,6 +5540,17 @@ describe("createdTransactionMatchesApprovedPayload — over-cap ref precondition
     expect(createdTransactionMatchesApprovedPayload(tampered, 8860, payload)).toBe(false);
   });
 
+  // Live API: an incoming row created with type "D" reads back as "C".
+  it("matches an incoming (type D) payload whose created row reads back as C", () => {
+    const incoming = { ...payload, type: "D" } as unknown as TransactionCreatePayload;
+    expect(createdTransactionMatchesApprovedPayload(boundaryStored, 8860, incoming)).toBe(true);
+  });
+
+  it("still returns false when the stored direction marker differs from the approved one", () => {
+    const flipped = { ...boundaryStored, description: String(boundaryStored.description).replace("[source_direction=IN]", "[source_direction=OUT]") } as typeof boundaryStored;
+    expect(createdTransactionMatchesApprovedPayload(flipped, 8860, payload)).toBe(false);
+  });
+
   it("still matches a short (non-truncated) ref with an untouched description", () => {
     const shortPayload = { ...payload, ref_number: "RF-SHORT", description: "narrative" } as unknown as TransactionCreatePayload;
     const shortStored = { ...boundaryStored, ref_number: "RF-SHORT", description: "narrative" } as typeof boundaryStored;
