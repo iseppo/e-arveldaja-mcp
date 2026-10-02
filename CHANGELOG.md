@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Draft journals no longer drop out of balances silently.** `compute_account_balance` and `compute_account_dimension_balances` still count registered journals only, but now report draft journals posting to the account in range (`unregistered_drafts`: count, ids, D/C totals; `unregistered_entry_count` per dimension) with a warning to confirm them before comparing with a statement.
+- **Lightyear bookings point at their own confirmation.** `book_lightyear_trades` and `book_lightyear_distributions` create drafts; an execute response now lists them in `unconfirmed_journal_ids` with a `batch_confirm_journals` next action, and the `lightyear-booking` workflow asks the user to confirm them before the balance check. Previously the drafts could be left unconfirmed, and the broker account then disagreed with the statement by their total.
+
 ### Fixed
 
 - **`attach_document` works on records without a document again.** The live API answers the pre-upload existence read (`GET …/document_user`) with 409 "No file found." rather than 404, so since 0.26.0 every attach to an empty record failed before the upload, with or without `replace_existing`. That exact 409 now counts as "no document"; any other 409 still stops the upload.

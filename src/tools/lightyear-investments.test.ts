@@ -604,6 +604,11 @@ describe("lightyear investments tools", () => {
       cost_basis: 150,
       gain_loss: 0,
     }));
+
+    // Created journals are drafts that balances exclude: name them and the confirm call.
+    expect(payload.unconfirmed_journal_ids).toEqual([5001, 5002]);
+    expect(payload.next_actions).toEqual([expect.objectContaining({ tool: "batch_confirm_journals", args: { ids: [5001, 5002] } })]);
+    expect(payload.note).toContain("DRAFTS");
   });
 
   it("expenses the trade platform fee on a buy rather than capitalising it", async () => {
@@ -1855,6 +1860,8 @@ describe("H17 distribution currency and EUR provenance", () => {
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, broker_dimension_id: 77, income_account: 8320, tax_account: 8610, dry_run: false })).content[0]!.text) as any;
     expect(payload.results[0]).toMatchObject({ reference: "DIV-H17", currency: "USD", gross_eur: 90, net_eur: 76.5, tax_eur: 13.5, fee_eur: 0, status: "created" });
+    expect(payload.unconfirmed_journal_ids).toEqual([payload.results[0].journal_id]);
+    expect(payload.next_actions[0]).toMatchObject({ tool: "batch_confirm_journals", args: { ids: [payload.results[0].journal_id] } });
     expect(payload.results[0].fx_provenance).toMatchObject({ rate: 0.9, orientation: "eur_per_foreign", conversion_reference: "CN-H17" });
     const [eurIndex, foreignIndex] = payload.results[0].fx_provenance.conversion_row_indexes;
     expect(rows[eurIndex]![6]).toBe("EUR");

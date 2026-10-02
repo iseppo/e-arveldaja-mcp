@@ -276,6 +276,30 @@ describe("compute_account_balance tool", () => {
     expect(data.debit_total).toBe(100);
   });
 
+  it("reports draft journals on the account, which the balance leaves out", async () => {
+    const journals = [
+      journal({ id: 7, registered: false, postings: [posting(ACCOUNT_ID, "D", 500)] }),
+      journal({ id: 8, registered: false, postings: [posting(ACCOUNT_ID, "C", 20), posting(ACCOUNT_ID, "D", 5)] }),
+      journal({ id: 9, registered: false, postings: [posting(ACCOUNT_ID + 1, "D", 999)] }),
+      journal({ id: 10, registered: false, is_deleted: true, postings: [posting(ACCOUNT_ID, "D", 999)] }),
+      journal({ id: 11, registered: false, effective_date: "2024-03-01", postings: [posting(ACCOUNT_ID, "D", 999)] }),
+      journal({ id: 2, registered: true, postings: [posting(ACCOUNT_ID, "D", 100)] }),
+    ];
+    const handler = setup(journals);
+    const result = await handler({ account_id: ACCOUNT_ID, date_to: "2024-02-01" });
+    const data = parse((result.content[0] as { text: string }).text);
+    expect(data.balance).toBe(100);
+    expect(data.unregistered_drafts).toEqual({ journal_count: 2, journal_ids: [7, 8], debit_total: 505, credit_total: 20 });
+    expect((data.warnings as string[]).some(w => w.includes("2 unregistered (draft) journal(s)") && w.includes("batch_confirm_journals"))).toBe(true);
+  });
+
+  it("omits the draft report when every journal on the account is registered", async () => {
+    const handler = setup([journal({ id: 2, postings: [posting(ACCOUNT_ID, "D", 100)] })]);
+    const data = parse(((await handler({ account_id: ACCOUNT_ID })).content[0] as { text: string }).text);
+    expect(data.unregistered_drafts).toBeUndefined();
+    expect((data.warnings as string[] ?? []).some(w => w.includes("unregistered"))).toBe(false);
+  });
+
   it("computes the correct net balance from raw D/C sums instead of drifting ±0.01 (D 1.005 / C 0.004)", async () => {
     // Raw D 1.005 / C 0.004 nets to 1.001, which rounds once to 1.00.
     // Rounding debitTotal (1.005 -> 1.01) and creditTotal (0.004 -> 0.00)
@@ -350,6 +374,20 @@ describe("compute_account_dimension_balances tool", () => {
   function parse(text: string) {
     return parseMcpResponse(text) as Record<string, unknown>;
   }
+
+  it("counts draft journals per dimension without adding them to the balance", async () => {
+    const journals = [
+      journal({ id: 1, postings: [dimPosting("D", 1000, DIM_A.id)] }),
+      journal({ id: 2, postings: [dimPosting("D", 50, DIM_B.id)] }),
+      journal({ id: 3, registered: false, postings: [dimPosting("D", 743.54, DIM_B.id)] }),
+    ];
+    const data = parse(((await setup(journals)({ account_id: ACCOUNT_ID })).content[0] as { text: string }).text);
+    const rows = data.dimensions as Array<Record<string, unknown>>;
+    expect(rows.find(r => r.dimension_id === DIM_B.id)).toMatchObject({ balance: 50, unregistered_entry_count: 1 });
+    expect(rows.find(r => r.dimension_id === DIM_A.id)!.unregistered_entry_count).toBeUndefined();
+    expect(data.total).toBe(1050);
+    expect(data.unregistered_drafts).toMatchObject({ journal_count: 1, journal_ids: [3], debit_total: 743.54 });
+  });
 
   it("splits account 1020 into per-dimension rows that sum to the account total", async () => {
     const journals = [

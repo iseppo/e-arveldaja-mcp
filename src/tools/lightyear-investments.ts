@@ -2713,6 +2713,29 @@ function distributionsReviewCommands(projection: DistributionsProjection): Light
 
 // ---- Rendering --------------------------------------------------------------
 
+/**
+ * Booked Lightyear journals are drafts: balances and reports count registered
+ * journals only, so until they are confirmed the broker account silently
+ * disagrees with the statement. Name the created ids and the confirm call.
+ */
+function draftConfirmationFields(results: Array<Record<string, unknown>>): Record<string, unknown> {
+  const ids = results
+    .filter(r => r.status === "created" && typeof r.journal_id === "number")
+    .map(r => r.journal_id as number);
+  if (ids.length === 0) return { note: "No new journal entries were created." };
+  return {
+    unconfirmed_journal_ids: ids,
+    note:
+      `${ids.length} journal entr${ids.length === 1 ? "y was" : "ies were"} created as DRAFTS. Balances and reports ` +
+      "exclude drafts until they are registered — offer the user to confirm them now.",
+    next_actions: [{
+      tool: "batch_confirm_journals",
+      args: { ids },
+      why: "Register the created Lightyear journals so the broker and investment balances include them.",
+    }],
+  };
+}
+
 interface TradesRenderInput {
   mode: "DRY_RUN" | "EXECUTED";
   projection: TradesProjection;
@@ -2763,9 +2786,9 @@ function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> 
     ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
-    note: dryRun
-      ? "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first."
-      : "Journal entries created. Review and register (confirm) them when ready.",
+    ...(dryRun
+      ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
+      : draftConfirmationFields(results)),
   };
 }
 
@@ -2822,9 +2845,9 @@ function renderDistributionsPayload(input: DistributionsRenderInput): Record<str
     ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
-    note: dryRun
-      ? "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first."
-      : "Journal entries created. Review and register when ready.",
+    ...(dryRun
+      ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
+      : draftConfirmationFields(results)),
   };
 }
 

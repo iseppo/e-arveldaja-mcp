@@ -74,6 +74,8 @@ After approval, re-run only the approved booking tools with `dry_run: false`. Fo
 
 Execute re-reads every bound source file, re-derives the plan, and refuses to create anything if the sources or arguments changed since review — it returns `plan_drift` with zero journals. On success, review `execution_report` (the plan-execution tracker) to confirm every journal completed; if it reports a partial execution, run a fresh dry run before retrying (never blindly re-execute).
 
+The booked journals are DRAFTS. Balances and reports count registered journals only, so until they are confirmed the broker and investment accounts silently disagree with the statement. Each execute response lists them in `unconfirmed_journal_ids` with a `batch_confirm_journals` entry in `next_actions`. Before reporting, show those journal ids and ask the user yes/no to confirm them now; on yes, call `batch_confirm_journals` with exactly those ids and a short `reason`. If the user declines, say plainly that the balance check below will exclude them.
+
 Report:
 - Trades booked
 - Distributions booked
