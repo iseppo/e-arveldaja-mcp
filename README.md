@@ -334,20 +334,17 @@ Before publishing, make sure these versions all match:
 
 Also make sure `package.json` `mcpName` exactly matches `server.json` `name`; the registry uses that to verify npm package ownership.
 
-Run the normal checks before publishing:
+Run the full checks on the release commit before tagging it (metadata, build, unit and integration tests, packed-package smoke test):
 
 ```bash
-npm run validate:release
-npm run build
-npm test
-npm run test:integration
+npm run release:check
 ```
 
-Publish the npm package:
+Publish the npm package. `prepublishOnly` reruns only the fast package checks (metadata, build, packed smoke test, about 30 s), so a one-time password from `--otp` is still valid when the upload starts; the full test suite runs in `release:check` and in CI.
 
 ```bash
 npm login
-npm publish
+npm publish --otp=<code>
 ```
 
 Use the official `mcp-publisher` binary from the [`modelcontextprotocol/registry` GitHub releases](https://github.com/modelcontextprotocol/registry/releases) rather than third-party snap/brew packages. Unofficial channels can lag behind the current schema and reject the `$schema` version as "deprecated". A one-liner to install the latest official binary into `~/.local/bin` (make sure that directory is on your `PATH`):
