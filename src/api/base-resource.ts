@@ -79,7 +79,15 @@ function validateRequestedPage(requestedPage: number): void {
   }
 }
 
-function validatePage<T>(response: unknown, requestedPage: number): PaginatedResponse<T> {
+/**
+ * `pinnedLastPage` is the total_pages announced by page 1 of a `listAll` walk.
+ * When a list holds an exact multiple of the page size, the live API announces
+ * one page too many and serves that last page empty with `total_pages: 1`
+ * (seen on /journals at 3700 rows: pages 1-37 say 38, page 38 is empty and
+ * says 1). Only that shape — the announced last page, beyond page 1, with no
+ * items — is accepted, and its total_pages is restored to the pinned value.
+ */
+function validatePage<T>(response: unknown, requestedPage: number, pinnedLastPage?: number): PaginatedResponse<T> {
   validateRequestedPage(requestedPage);
   if (response === null || typeof response !== "object" || Array.isArray(response)) {
     throw new PaginationMetadataError(
@@ -100,6 +108,15 @@ function validatePage<T>(response: unknown, requestedPage: number): PaginatedRes
       requestedPage,
       `current_page must equal requested page ${requestedPage}; received ${describeMetadataValue(page.current_page)}`,
     );
+  }
+  if (
+    pinnedLastPage !== undefined &&
+    requestedPage > 1 &&
+    requestedPage === pinnedLastPage &&
+    page.items.length === 0 &&
+    page.total_pages === 1
+  ) {
+    return { ...page, total_pages: pinnedLastPage } as PaginatedResponse<T>;
   }
   if (
     !Number.isInteger(page.total_pages) ||
@@ -244,12 +261,13 @@ export class BaseResource<T> {
     params: ListParams | undefined,
     requestedPage: number,
     cacheKey = this.listCacheKey(params),
+    pinnedLastPage?: number,
   ): Promise<PaginatedResponse<T>> {
     validateRequestedPage(requestedPage);
     const gen = cache.generation;
     const result = await this.client.get<PaginatedResponse<T>>(this.basePath, params as Record<string, string | number>);
     try {
-      const validated = validatePage<T>(result, requestedPage);
+      const validated = validatePage<T>(result, requestedPage, pinnedLastPage);
       cache.setIfSameGeneration(cacheKey, validated, gen, 120);
       return validated;
     } catch (error) {
@@ -324,7 +342,8 @@ export class BaseResource<T> {
             `Use date filters to narrow the query.`
           );
         }
-        const response = await this.fetchPage({ ...params, page }, page);
+        const pageParams = { ...params, page };
+        const response = await this.fetchPage(pageParams, page, this.listCacheKey(pageParams), pinnedTotalPages);
         if (pinnedTotalPages === undefined) {
           pinnedTotalPages = response.total_pages;
         } else if (response.total_pages !== pinnedTotalPages) {

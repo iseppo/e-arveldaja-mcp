@@ -60,17 +60,26 @@ function resolveDocumentResource(api: ApiContext, entityType: DocumentEntityType
 }
 
 /**
+ * The live API answers GET document_user on a record without a document with
+ * 409 and the message "No file found." (not 404). Only that exact message
+ * counts as "no document"; any other 409 stays an error.
+ */
+function isNoFileFoundConflict(error: HttpError): boolean {
+  return error.status === 409 && /(?:^|\n)No file found\.?(?:\n|$)/i.test(error.upstream_detail ?? "");
+}
+
+/**
  * Name of the document already attached to the record, or undefined when there
- * is none. "None" is accepted both as a 404 and as an empty file body; any other
- * read failure propagates, so an unknown state never falls through to a
- * silent replace.
+ * is none. "None" is accepted as a 404, as the live 409 "No file found." and as
+ * an empty file body; any other read failure propagates, so an unknown state
+ * never falls through to a silent replace.
  */
 async function existingDocumentName(resource: BaseResource<unknown>, id: number): Promise<string | undefined> {
   let file: { name?: string; contents?: string } | undefined;
   try {
     file = await resource.getDocument(id);
   } catch (error) {
-    if (error instanceof HttpError && error.status === 404) return undefined;
+    if (error instanceof HttpError && (error.status === 404 || isNoFileFoundConflict(error))) return undefined;
     throw error;
   }
   if (!file || (!file.name && !file.contents)) return undefined;
