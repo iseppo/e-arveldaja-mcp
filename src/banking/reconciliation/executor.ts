@@ -11,7 +11,6 @@ import { MutationIndeterminateError } from "../../mutation-outcome.js";
 import {
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
-  StoredTypeDirectionMismatchError,
 } from "../../api/transactions.api.js";
 import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
@@ -92,15 +91,14 @@ import type {
 
 /**
  * Error code for a non-indeterminate confirm failure. The api's pre-mutation
- * refusals (payer/invoice client mismatch, ambiguous linked-invoice clients,
- * stored type contradicting the signed statement direction) carry their own
+ * refusals (payer/invoice client mismatch, ambiguous linked-invoice clients)
+ * carry their own
  * category so the report says why the register was refused, not a generic
  * `confirm_failed`.
  */
 function confirmRefusalErrorCode(err: unknown): string {
   if (err instanceof LinkedInvoiceClientMismatchError
-    || err instanceof LinkedInvoiceClientsAmbiguousError
-    || err instanceof StoredTypeDirectionMismatchError) {
+    || err instanceof LinkedInvoiceClientsAmbiguousError) {
     return err.category;
   }
   return "confirm_failed";

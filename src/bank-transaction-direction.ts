@@ -32,18 +32,3 @@ export function bankTransactionDirection(transaction: {
   if (transaction.type === "C") return "outgoing";
   return "unknown";
 }
-
-/**
- * True when a signed importer marker proves a direction the stored `type`
- * contradicts. The backend books the cash leg from `type`, so confirming such a
- * row would post the bank side backwards.
- */
-export function storedTypeContradictsSignedDirection(transaction: {
-  type?: string | null;
-  description?: string | null;
-}): boolean {
-  const signed = signedBankTransactionDirection(transaction);
-  if (signed === "incoming") return transaction.type === "C";
-  if (signed === "outgoing") return transaction.type === "D";
-  return false;
-}

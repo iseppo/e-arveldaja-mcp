@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
-import { LinkedInvoiceClientsAmbiguousError, StoredTypeDirectionMismatchError } from "../api/transactions.api.js";
+import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -1250,7 +1250,6 @@ describe("bank_reconciliation plan binding", () => {
   });
 
   it.each([
-    ["stored_type_direction_mismatch", () => new StoredTypeDirectionMismatchError({ transactionId: 1, storedType: "D", signedDirection: "outgoing" })],
     ["linked_invoice_clients_ambiguous", () => new LinkedInvoiceClientsAmbiguousError({ transactionId: 1, invoiceClientsIds: [20, 21] })],
   ])("auto-confirm reports a %s confirm refusal under its own error code", async (code, makeError) => {
     const context = createTestRuntimeSafetyContext();
@@ -1264,23 +1263,6 @@ describe("bank_reconciliation plan binding", () => {
     const failed = res.execution.execution_report.command_partitions.failed;
     expect(failed).toHaveLength(1);
     expect(failed[0].code).toBe(code);
-  });
-
-  it("inter-account: reports a stored-type/direction confirm refusal under its own error code", async () => {
-    const { handler, api } = setupInterAccountTool({
-      transactions: [
-        { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: 7 },
-        { id: 41, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 7 },
-      ],
-      bankAccounts: iaBankAccounts,
-    });
-    api.transactions.confirm.mockRejectedValueOnce(
-      new StoredTypeDirectionMismatchError({ transactionId: 40, storedType: "C", signedDirection: "incoming" }),
-    );
-    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
-    const failed = res.execution.execution_report.command_partitions.failed;
-    expect(failed.map((f: any) => f.code)).toContain("stored_type_direction_mismatch");
   });
 
   it("inter-account: refuses on ledger drift after review", async () => {

@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
-  StoredTypeDirectionMismatchError,
   TransactionsApi,
 } from "./transactions.api.js";
 import { cache } from "./base-resource.js";
@@ -908,45 +907,24 @@ describe("TransactionsApi.confirm linked-invoice client guard", () => {
   });
 });
 
-describe("TransactionsApi.confirm stored-type direction guard", () => {
+// The live API reads every transaction back as type "C" whatever was stored
+// (an incoming row created with "D" books "Laekumine" yet GET says "C"), so the
+// read-back type cannot be checked against the signed statement marker.
+describe("TransactionsApi.confirm with a read-back type that contradicts the signed marker", () => {
   beforeEach(() => cache.invalidate());
 
   const accountDist = [{ related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 }];
 
   it.each([
-    ["CAMT CRDT stored as C", "C", "Salary\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]", "incoming"],
-    ["Wise OUT stored as D", "D", "WISE:T1 Vendor [source_direction=OUT]", "outgoing"],
-  ])("refuses to register %s before any mutation, on every distribution kind", async (_label, type, description, direction) => {
-    for (const options of [undefined, { autoFixClientsId: false }]) {
-      cache.invalidate();
-      const { client, patchCalls } = makeClient({
-        getById: (path) => (path === "/transactions/40" ? { id: 40, clients_id: null, type, description } : undefined),
-      });
-      const api = new TransactionsApi(client);
-      const outcome = api.confirm(40, accountDist, options);
-      await expect(outcome).rejects.toBeInstanceOf(StoredTypeDirectionMismatchError);
-      await expect(outcome).rejects.toMatchObject({
-        category: "stored_type_direction_mismatch",
-        transaction_id: 40,
-        stored_type: type,
-        signed_direction: direction,
-      });
-      expect(patchCalls).toEqual([]);
-    }
-  });
-
-  it.each([
-    ["signed CRDT stored as D", "D", "x\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]"],
-    ["signed OUT stored as C", "C", "WISE:T2 Vendor [source_direction=OUT]"],
-    ["legacy unsigned C", "C", "card payment"],
-    ["unsigned lookalike", "C", "note source_direction=IN"],
-  ])("registers a consistent or unsigned row (%s)", async (_label, type, description) => {
+    ["CAMT CRDT read back as C", "C", "Salary\n[e-arveldaja-mcp:camt d=CRDT s=abc123abc123abcd]"],
+    ["Wise IN read back as C", "C", "WISE:T1 Customer [source_direction=IN]"],
+  ])("registers %s", async (_label, type, description) => {
     const { client, patchCalls } = makeClient({
-      getById: (path) => (path === "/transactions/41" ? { id: 41, clients_id: 5, type, description } : undefined),
+      getById: (path) => (path === "/transactions/40" ? { id: 40, clients_id: 5, type, description } : undefined),
     });
     const api = new TransactionsApi(client);
-    await api.confirm(41, accountDist, { autoFixClientsId: false });
-    expect(patchCalls.map(c => c.path)).toEqual(["/transactions/41/register"]);
+    await api.confirm(40, accountDist, { autoFixClientsId: false });
+    expect(patchCalls.map(c => c.path)).toEqual(["/transactions/40/register"]);
   });
 });
 

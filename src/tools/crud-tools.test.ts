@@ -24,7 +24,7 @@ import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
-import { LinkedInvoiceClientMismatchError, StoredTypeDirectionMismatchError } from "../api/transactions.api.js";
+import { LinkedInvoiceClientMismatchError } from "../api/transactions.api.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import {
   PurchaseInvoicesApi,
@@ -3395,20 +3395,6 @@ describe("confirm_transaction inter-account duplicate guard (MEDIUM-4)", () => {
     const payload = parseMcpResponse(((await handler({ ...args, block_on_duplicate: true })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(payload.warnings).toBeUndefined();
-  });
-});
-
-describe("confirm_transaction direction guard surfacing (MEDIUM-6)", () => {
-  it("returns stored_type_direction_mismatch as a structured tool error", async () => {
-    const mismatch = new StoredTypeDirectionMismatchError({ transactionId: 40, storedType: "C", signedDirection: "incoming" });
-    const { handler } = getCrudToolHarness("confirm_transaction", {
-      transactions: { get: vi.fn().mockResolvedValue({ id: 40, clients_id: 5 }), confirm: vi.fn().mockRejectedValue(mismatch) },
-    });
-    const result = await handler({ id: 40, distributions: [{ related_table: "sale_invoices", related_id: 77, amount: 10 }] }) as { isError?: boolean; content: Array<{ text: string }> };
-    expect(result.isError).toBe(true);
-    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({
-      category: "stored_type_direction_mismatch", transaction_id: 40, stored_type: "C", signed_direction: "incoming",
-    });
   });
 });
 

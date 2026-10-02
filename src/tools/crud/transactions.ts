@@ -13,7 +13,6 @@ import {
   getNormalizedNetworkCause,
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
-  StoredTypeDirectionMismatchError,
 } from "../../api/transactions.api.js";
 import { BookingGuard } from "../../booking-guard.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
@@ -59,7 +58,7 @@ import {
 
 // Machine markers the importers write into a transaction description. They are
 // the row's dedup identity (WISE:{id} prefix, camt sig/bank ref) and the signed
-// statement direction the confirm-time guard reads — the same shapes
+// statement direction the read-side classifiers use — the same shapes
 // `signedBankTransactionDirection` / `stripWisePrefix` match.
 const WISE_IDENTITY_PREFIX = /^WISE:(?:FEE:)?\S+/i;
 const WISE_DIRECTION_MARKER = /\[source_direction=(IN|OUT)\]\s*$/i;
@@ -613,7 +612,6 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       if (
         error instanceof LinkedInvoiceClientMismatchError
         || error instanceof LinkedInvoiceClientsAmbiguousError
-        || error instanceof StoredTypeDirectionMismatchError
       ) return toolError(error);
       throw error;
     }

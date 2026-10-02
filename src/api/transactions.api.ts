@@ -4,7 +4,6 @@ import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { classifyMutationFailure, isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource } from "./base-resource.js";
-import { signedBankTransactionDirection, storedTypeContradictsSignedDirection } from "../bank-transaction-direction.js";
 
 function isHttpMethod(value: unknown): value is HttpMethod {
   return value === "GET" || value === "POST" || value === "PUT" ||
@@ -83,33 +82,6 @@ export class LinkedInvoiceClientMismatchError extends Error {
     this.invoice_table = details.invoiceTable;
     this.invoice_id = details.invoiceId;
     this.invoice_clients_id = details.invoiceClientsId;
-  }
-}
-
-/**
- * The signed importer marker on the transaction (CAMT CRDT/DBIT, Wise IN/OUT)
- * proves a direction its stored `type` contradicts. The backend books the cash
- * leg from `type`, so registering would post the bank side backwards. Thrown
- * before any mutation, on every confirm path.
- */
-export class StoredTypeDirectionMismatchError extends Error {
-  readonly category = "stored_type_direction_mismatch";
-  readonly transaction_id: number;
-  readonly stored_type: string;
-  readonly signed_direction: "incoming" | "outgoing";
-  readonly next_action =
-    "Do not confirm this row: its stored type would book the bank leg on the wrong side. Delete it and " +
-    "re-import the statement line (the importers set type from the signed direction), or book it manually.";
-
-  constructor(details: { transactionId: number; storedType: string; signedDirection: "incoming" | "outgoing" }) {
-    super(
-      `Transaction ${details.transactionId} is stored as type ${details.storedType}, but its signed statement ` +
-      `marker says the money was ${details.signedDirection}. Confirming would book the bank leg backwards.`,
-    );
-    this.name = "StoredTypeDirectionMismatchError";
-    this.transaction_id = details.transactionId;
-    this.stored_type = details.storedType;
-    this.signed_direction = details.signedDirection;
   }
 }
 
@@ -232,16 +204,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Value to restore if the register call fails after we touched clients_id
     // (`undefined` = we did not touch it, so there is nothing to roll back).
     let clientsIdRollbackValue: number | null | undefined;
-    // Read on every path: the direction guard below applies to all confirms,
-    // whatever the distribution.
     const tx = await this.get(id);
-    if (tx && storedTypeContradictsSignedDirection(tx)) {
-      throw new StoredTypeDirectionMismatchError({
-        transactionId: id,
-        storedType: String(tx.type),
-        signedDirection: signedBankTransactionDirection(tx)!,
-      });
-    }
     if (tx && body.length > 0 && (autoFixClientsId || hasInvoiceDistribution)) {
       if (!tx.clients_id) {
         // Auto-fix missing clients_id from linked invoice

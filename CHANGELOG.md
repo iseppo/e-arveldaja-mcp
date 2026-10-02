@@ -5,6 +5,7 @@
 ### Fixed
 
 - **`attach_document` works on records without a document again.** The live API answers the pre-upload existence read (`GET …/document_user`) with 409 "No file found." rather than 404, so since 0.26.0 every attach to an empty record failed before the upload, with or without `replace_existing`. That exact 409 now counts as "no document"; any other 409 still stops the upload.
+- **Incoming CAMT and Wise rows can be confirmed again.** The 0.26.0 confirm-time guard (`stored_type_direction_mismatch`) compared a row's signed statement direction with its stored `type`, but the API reads every transaction back as `type: "C"` whatever was stored, so every signed incoming row was refused although the backend books it correctly. The guard is removed; the direction is still set at creation from the statement.
 - **Full-ledger reads no longer fail when a list holds an exact multiple of 100 rows.** The API then announces one page too many and serves it empty with `total_pages: 1` (seen on `/journals` at 3700 rows), which the pagination check rejected, breaking `compute_account_balance` and every report that reads all journals. `listAll` now ends the walk on exactly that shape — the announced last page, empty, reporting 1 — and still rejects any other change of `total_pages`.
 
 ## [0.27.0] - 2026-09-25
