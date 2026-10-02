@@ -132,6 +132,23 @@ describe("checkStatementClosingBalance", () => {
     expect(result.notes.some(note => /indeterminate direction/.test(note) && /excluded/.test(note))).toBe(true);
   });
 
+  it("skips the mismatch warning when an indeterminate row makes the expected balance partial", async () => {
+    const api = createAccountingWorkflowApi({
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 100.00)]) },
+      transactionRows: [
+        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: "C", description: "manual row", accounts_dimensions_id: DIMENSION_ID }),
+      ],
+    });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID,
+      accountId: ACCOUNT_ID,
+      closing: { amount: 150.00, direction: "CRDT", date: BALANCE_DATE, currency: "EUR" },
+      fallbackDate: BALANCE_DATE,
+    });
+    expect(result.warnings).toEqual([]);
+    expect(result.notes.some(note => /tolerance check is skipped/.test(note))).toBe(true);
+  });
+
   it("treats a DBIT closing balance as a negative balance", async () => {
     const api = createAccountingWorkflowApi({
       journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("C", 40.00)]) },

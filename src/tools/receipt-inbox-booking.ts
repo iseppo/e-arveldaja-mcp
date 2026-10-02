@@ -6,6 +6,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
@@ -464,7 +465,14 @@ export async function createAndMaybeMatchPurchaseInvoice(
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
     try {
       const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
-      if (isProjectTransaction(freshMatch)) {
+      // Confirming books a payment, so it needs a proven outgoing row. Without
+      // a signed statement marker the direction is unknown (the API reads every
+      // type back as "C") — a same-amount supplier refund must not be booked
+      // as the payment.
+      const matchDirection = bankTransactionDirection(freshMatch);
+      if (isProjectTransaction(freshMatch) && matchDirection !== "outgoing") {
+        notes.push(`Matched transaction ${matchedCandidate.transaction_id} has no signed outgoing direction (direction: ${matchDirection}); invoice was created without bank link — confirm the payment after checking it.`);
+      } else if (isProjectTransaction(freshMatch)) {
         // The invoice was just created from the receipt for its own supplier,
         // while the matched transaction's client came from bank counterparty
         // resolution. The supplier owns the payable sub-ledger, so this

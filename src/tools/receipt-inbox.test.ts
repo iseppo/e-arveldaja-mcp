@@ -512,7 +512,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     mockedValidateFilePath.mockResolvedValue("/tmp/receipt.pdf");
     mockedReadFile.mockResolvedValue(Buffer.from("bytes") as any);
     const { api, call } = buildCreateConfirmArgs([
-      { id: 502, status: "PROJECT", type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-22", clients_id: 7, ref_number: "REF1" },
+      { id: 502, status: "PROJECT", type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-22", clients_id: 7, ref_number: "REF1", description: "Payment\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" },
     ]);
 
     const result = await call();
@@ -524,6 +524,22 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     // matched transaction's client came from bank counterparty resolution — the
     // confirm must carry the reassignment approval or it would be refused.
     expect(api.transactions.confirm.mock.calls[0]![2]).toEqual({ reassignClientToInvoice: true });
+  });
+
+  // The API reads every type back as "C": an unsigned match could be a
+  // same-amount supplier refund, so it must not be confirmed as the payment.
+  it("does not auto-confirm a match without a signed outgoing direction", async () => {
+    mockedValidateFilePath.mockResolvedValue("/tmp/receipt.pdf");
+    mockedReadFile.mockResolvedValue(Buffer.from("bytes") as any);
+    const { api, call } = buildCreateConfirmArgs([
+      { id: 503, status: "PROJECT", type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR", date: "2026-03-22", clients_id: 7, ref_number: "REF1" },
+    ]);
+
+    const result = await call();
+
+    expect(result.status).toBe("created");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(result.notes.join(" ")).toContain("no signed outgoing direction");
   });
 
   it("uploads the exact immutable receipt snapshot bytes", async () => {

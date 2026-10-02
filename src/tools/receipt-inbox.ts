@@ -946,7 +946,8 @@ export function selectBatchBankTransactions(
     isProjectTransaction(transaction) &&
     // Receipts settle OUTGOING payments only: exclude rows signed incoming.
     // Unsigned rows ("unknown" — the API reads every type back as "C") stay
-    // candidates; a match is a proposal and the confirm books the stored type.
+    // match candidates, but auto-confirm requires proven outgoing
+    // (receipt-inbox-booking).
     bankTransactionDirection(transaction) !== "incoming" &&
     (!bounds.transaction_date_from || transaction.date >= bounds.transaction_date_from) &&
     (!bounds.transaction_date_to || transaction.date <= bounds.transaction_date_to),

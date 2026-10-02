@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bankTransactionDirection } from "./bank-transaction-direction.js";
+import { bankPostingSideForInvoiceMatch, bankTransactionDirection } from "./bank-transaction-direction.js";
 
 describe("bankTransactionDirection", () => {
   it("prefers persisted CAMT and Wise source direction over API type C", () => {
@@ -20,5 +20,17 @@ describe("bankTransactionDirection", () => {
     // stored (verified 2026-10), so the stored type proves nothing.
     expect(bankTransactionDirection({ type: "D" })).toBe("unknown");
     expect(bankTransactionDirection({ type: "C" })).toBe("unknown");
+  });
+});
+
+describe("bankPostingSideForInvoiceMatch", () => {
+  it("uses the signed direction when present", () => {
+    expect(bankPostingSideForInvoiceMatch({ description: "x\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" }, "purchase_invoice")).toBe("D");
+    expect(bankPostingSideForInvoiceMatch({ description: "WISE:T1 Vendor [source_direction=OUT]" }, "sale_invoice")).toBe("C");
+  });
+
+  it("falls back to the invoice kind for an unsigned row", () => {
+    expect(bankPostingSideForInvoiceMatch({ description: "payment" }, "sale_invoice")).toBe("D");
+    expect(bankPostingSideForInvoiceMatch({ description: "payment" }, "purchase_invoice")).toBe("C");
   });
 });
