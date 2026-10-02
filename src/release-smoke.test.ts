@@ -153,17 +153,20 @@ describe("startAndObserve", () => {
     // Benign stderr on purpose: only the early-close guard can catch this, so the
     // test fails if that guard is removed (a silently crashing bin must not pass).
     await expect(startAndObserve(process.execPath, ["-e", "process.stderr.write('bye'); process.exit(1)"], {
-      cwd: process.cwd(), minimumAliveMs: 500, timeoutMs: 2_000, terminateGraceMs: 25, env: process.env,
+      // The window must outlast a cold Node start under a loaded parallel suite.
+      cwd: process.cwd(), minimumAliveMs: 5_000, timeoutMs: 2_000, terminateGraceMs: 25, env: process.env,
     })).rejects.toThrow(/exited before smoke window/);
-  });
+  }, 15_000);
 
   it("throws when a surviving process emits a fatal load-error pattern on stderr", async () => {
     // Alive past the window but a fatal loader message was printed: only the
     // fatal-pattern guard can catch this, isolating it from the early-close guard.
     await expect(startAndObserve(process.execPath, ["-e", "process.stderr.write('ERR_MODULE_NOT_FOUND: nope'); setInterval(()=>{},1000)"], {
-      cwd: process.cwd(), minimumAliveMs: 200, timeoutMs: 2_000, terminateGraceMs: 500, env: process.env,
+      // The window must outlast a cold Node start under a loaded parallel suite,
+      // or the stderr line arrives after the check and the test flakes.
+      cwd: process.cwd(), minimumAliveMs: 3_000, timeoutMs: 2_000, terminateGraceMs: 500, env: process.env,
     })).rejects.toThrow(/ERR_MODULE_NOT_FOUND/);
-  });
+  }, 15_000);
 
   it("throws a clear error when the command cannot be spawned at all", async () => {
     await expect(startAndObserve(resolve(process.cwd(), "does", "not", "exist-binary"), [], {
