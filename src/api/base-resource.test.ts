@@ -455,6 +455,38 @@ describe("BaseResource", () => {
       expect(client.get).toHaveBeenCalledTimes(3);
     });
 
+    // Live /journals at exactly 3700 rows: pages 1-37 announce 38 pages, page 38
+    // is empty and announces total_pages 1.
+    it("ends the walk on the empty announced last page the API serves at an exact page-size multiple", async () => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+
+      vi.mocked(client.get)
+        .mockResolvedValueOnce(paginated([{ id: 1, name: "a" }], 1, 3))
+        .mockResolvedValueOnce(paginated([{ id: 2, name: "b" }], 2, 3))
+        .mockResolvedValueOnce(paginated([], 3, 1));
+
+      const items = await resource.listAll();
+      expect(items).toEqual([{ id: 1, name: "a" }, { id: 2, name: "b" }]);
+      expect(client.get).toHaveBeenCalledTimes(3);
+    });
+
+    it.each([
+      ["a non-empty last page", paginated([{ id: 3, name: "c" }], 3, 1), "total_pages must be a positive integer at least 3; received 1"],
+      ["an empty middle page", paginated([], 2, 1), "total_pages must be a positive integer at least 2; received 1"],
+      ["an empty last page announcing another count", paginated([], 3, 2), "total_pages must be a positive integer at least 3; received 2"],
+    ])("still rejects %s whose total_pages shrank", async (_label, bad, message) => {
+      const client = makeClient();
+      const resource = new BaseResource<Item>(client, "/items");
+      const pages = [paginated([{ id: 1, name: "a" }], 1, 3), paginated([{ id: 2, name: "b" }], 2, 3), bad];
+      vi.mocked(client.get).mockImplementation(async (_path, params) => {
+        const page = Number((params as { page?: number }).page ?? 1);
+        return bad.current_page === page ? bad : pages[page - 1];
+      });
+
+      await expect(resource.listAll()).rejects.toThrow(message);
+    });
+
     it("dedupes a row that shifted across a page boundary, keeping the first occurrence", async () => {
       const client = makeClient();
       const resource = new BaseResource<Item>(client, "/items");

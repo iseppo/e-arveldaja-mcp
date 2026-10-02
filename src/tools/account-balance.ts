@@ -115,6 +115,74 @@ export async function computeAccountBalance(
   };
 }
 
+/**
+ * Draft (unregistered) journals that post to the account within the same
+ * filters. Balances count registered journals only, so a tool that creates
+ * drafts (e.g. book_lightyear_trades) leaves a silent gap until they are
+ * confirmed; this surfaces it.
+ */
+export interface UnregisteredDrafts {
+  journal_count: number;
+  journal_ids: number[];
+  debit_total: number;
+  credit_total: number;
+  by_dimension: Map<number | null, number>;
+}
+
+const MAX_LISTED_DRAFT_IDS = 20;
+
+export function findUnregisteredDrafts(
+  journals: Journal[],
+  accountId: number,
+  filters: { clientId?: number; dateFrom?: string; dateTo?: string } = {},
+): UnregisteredDrafts {
+  const ids = new Set<number>();
+  const byDimension = new Map<number | null, number>();
+  let debit = 0;
+  let credit = 0;
+  for (const journal of journals) {
+    if (journal.is_deleted || journal.registered) continue;
+    if (filters.dateFrom && journal.effective_date < filters.dateFrom) continue;
+    if (filters.dateTo && journal.effective_date > filters.dateTo) continue;
+    if (filters.clientId !== undefined && journal.clients_id !== filters.clientId) continue;
+    for (const posting of journal.postings ?? []) {
+      if (posting.accounts_id !== accountId || posting.is_deleted) continue;
+      if (posting.type !== "D" && posting.type !== "C") continue;
+      const amount = posting.base_amount ?? posting.amount;
+      if (posting.type === "D") debit += amount;
+      else credit += amount;
+      if (journal.id != null) ids.add(journal.id);
+      const dim = posting.accounts_dimensions_id ?? null;
+      byDimension.set(dim, (byDimension.get(dim) ?? 0) + 1);
+    }
+  }
+  return {
+    journal_count: ids.size,
+    journal_ids: [...ids].sort((a, b) => a - b),
+    debit_total: roundMoney(debit),
+    credit_total: roundMoney(credit),
+    by_dimension: byDimension,
+  };
+}
+
+function unregisteredDraftsOutput(drafts: UnregisteredDrafts): { unregistered_drafts?: object; warning?: string } {
+  if (drafts.journal_count === 0) return {};
+  const listed = drafts.journal_ids.slice(0, MAX_LISTED_DRAFT_IDS);
+  return {
+    unregistered_drafts: {
+      journal_count: drafts.journal_count,
+      journal_ids: listed,
+      ...(drafts.journal_ids.length > listed.length && { journal_ids_truncated: true }),
+      debit_total: drafts.debit_total,
+      credit_total: drafts.credit_total,
+    },
+    warning:
+      `${drafts.journal_count} unregistered (draft) journal(s) post to this account in range ` +
+      `(D ${drafts.debit_total.toFixed(2)} / C ${drafts.credit_total.toFixed(2)}) and are NOT in the balance. ` +
+      `If they are final, offer to confirm them (batch_confirm_journals / confirm_journal) before comparing with a statement.`,
+  };
+}
+
 // The synthetic opening-balance journal is always account-level
 // (`clients_id: null`) — it carries no client attribution. Whenever a caller
 // filters by `clients_id`, `computeAccountBalance`'s
@@ -161,6 +229,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       ]);
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals);
+      const drafts = unregisteredDraftsOutput(findUnregisteredDrafts(journalsFromApi, account_id, {
+        clientId: clients_id, dateFrom: date_from, dateTo: date_to,
+      }));
 
       const summary = {
         account_id,
@@ -180,8 +251,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(include_entries && {
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
+        ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         warnings: clients_id === undefined
-          ? withOpeningBalanceStatusInRange([], {
+          ? withOpeningBalanceStatusInRange(drafts.warning ? [drafts.warning] : [], {
               captured: opening !== null,
               openingDate: opening?.openingDate,
               unmappedCodes: opening?.unmappedCodes,
@@ -189,7 +261,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               dateFrom: date_from,
               dateTo: date_to,
             })
-          : clientScopedOpeningBalanceWarnings([], opening),
+          : clientScopedOpeningBalanceWarnings(drafts.warning ? [drafts.warning] : [], opening),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
@@ -228,6 +300,14 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         groups.set(key, g);
       }
 
+      const draftScan = findUnregisteredDrafts(journalsFromApi, account_id, { dateFrom: date_from, dateTo: date_to });
+      const drafts = unregisteredDraftsOutput(draftScan);
+      // A dimension holding only drafts still gets a zero-balance row, so the
+      // draft count shows where the missing amounts will land.
+      for (const dimId of draftScan.by_dimension.keys()) {
+        if (!groups.has(dimId)) groups.set(dimId, { debit: 0, credit: 0, count: 0 });
+      }
+
       const titleById = new Map<number, string>();
       for (const d of dimensions) if (d.id !== undefined) titleById.set(d.id, d.title_est);
 
@@ -241,6 +321,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           debit_total: roundMoney(g.debit),
           credit_total: roundMoney(g.credit),
           entry_count: g.count,
+          ...(draftScan.by_dimension.has(dimId) && { unregistered_entry_count: draftScan.by_dimension.get(dimId) }),
         }))
         .sort((a, b) => (a.dimension_id ?? -1) - (b.dimension_id ?? -1));
 
@@ -257,10 +338,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         balance_type: account?.balance_type ?? "?",
         dimensions: rows,
         total,
+        ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
         ...cacheClearMetadata(cacheClear),
-        warnings: withOpeningBalanceStatusInRange([], {
+        warnings: withOpeningBalanceStatusInRange(drafts.warning ? [drafts.warning] : [], {
           captured: opening !== null,
           openingDate: opening?.openingDate,
           unmappedCodes: opening?.unmappedCodes,

@@ -944,9 +944,11 @@ export function selectBatchBankTransactions(
   return allTransactions.filter(transaction =>
     transaction.accounts_dimensions_id === accountsDimensionsId &&
     isProjectTransaction(transaction) &&
-    // Receipts settle OUTGOING payments only. Direction comes from the signed
-    // source marker first (legacy rows may all be stored type "C"), then type.
-    bankTransactionDirection(transaction) === "outgoing" &&
+    // Receipts settle OUTGOING payments only: exclude rows signed incoming.
+    // Unsigned rows ("unknown" — the API reads every type back as "C") stay
+    // match candidates, but auto-confirm requires proven outgoing
+    // (receipt-inbox-booking).
+    bankTransactionDirection(transaction) !== "incoming" &&
     (!bounds.transaction_date_from || transaction.date >= bounds.transaction_date_from) &&
     (!bounds.transaction_date_to || transaction.date <= bounds.transaction_date_to),
   );

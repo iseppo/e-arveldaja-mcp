@@ -107,7 +107,8 @@ export async function checkStatementClosingBalance(
   if (excludedIndeterminateDirection > 0) {
     notes.push(
       `${excludedIndeterminateDirection} unconfirmed transaction(s) in this dimension had an indeterminate ` +
-      `direction and were excluded from the expected balance.`,
+      `direction (no signed statement marker) and were excluded from the expected balance; ` +
+      `the tolerance check is skipped to avoid a false mismatch.`,
     );
   }
 
@@ -136,7 +137,7 @@ export async function checkStatementClosingBalance(
   // or clear the check. `difference`/`tolerance` stay euros for emission.
   const toleranceCents = Math.round(tolerance * 100);
   const withinTolerance =
-    reconcilable && !openingDimensionUnmapped
+    reconcilable && !openingDimensionUnmapped && excludedIndeterminateDirection === 0
       ? eurosWithinTolerance(expectedBalance, statementClosing, toleranceCents)
       : true;
 

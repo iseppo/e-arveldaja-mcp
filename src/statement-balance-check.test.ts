@@ -83,15 +83,18 @@ describe("checkStatementClosingBalance", () => {
   });
 
   it("closes the gap with unconfirmed PROJECT rows in the dimension", async () => {
+    // A signed marker proves direction; the stored type alone does not (the
+    // live API reads every type back as "C").
+    const SIGNED_INCOMING = "Laekumine\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]";
     const api = createAccountingWorkflowApi({
       journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 100.00)]) },
       transactionRows: [
-        // incoming (type D) PROJECT row, in-dimension, on or before the balance date
-        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: "D", accounts_dimensions_id: DIMENSION_ID }),
+        // signed incoming (CAMT CRDT) PROJECT row, in-dimension, on or before the balance date
+        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: "D", description: SIGNED_INCOMING, accounts_dimensions_id: DIMENSION_ID }),
         // out-of-dimension row must be ignored
-        fixtureTransaction({ id: 2, amount: 999.00, date: "2026-02-20", type: "D", accounts_dimensions_id: 999 }),
+        fixtureTransaction({ id: 2, amount: 999.00, date: "2026-02-20", type: "D", description: SIGNED_INCOMING, accounts_dimensions_id: 999 }),
         // after the balance date must be ignored
-        fixtureTransaction({ id: 3, amount: 999.00, date: "2026-03-05", type: "D", accounts_dimensions_id: DIMENSION_ID }),
+        fixtureTransaction({ id: 3, amount: 999.00, date: "2026-03-05", type: "D", description: SIGNED_INCOMING, accounts_dimensions_id: DIMENSION_ID }),
       ],
     });
     const result = await checkStatementClosingBalance(api, {
@@ -127,6 +130,23 @@ describe("checkStatementClosingBalance", () => {
     expect(result.unconfirmed_amount).toBe(0);
     // ...and its exclusion is surfaced as a note (no guessed sign).
     expect(result.notes.some(note => /indeterminate direction/.test(note) && /excluded/.test(note))).toBe(true);
+  });
+
+  it("skips the mismatch warning when an indeterminate row makes the expected balance partial", async () => {
+    const api = createAccountingWorkflowApi({
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 100.00)]) },
+      transactionRows: [
+        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: "C", description: "manual row", accounts_dimensions_id: DIMENSION_ID }),
+      ],
+    });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID,
+      accountId: ACCOUNT_ID,
+      closing: { amount: 150.00, direction: "CRDT", date: BALANCE_DATE, currency: "EUR" },
+      fallbackDate: BALANCE_DATE,
+    });
+    expect(result.warnings).toEqual([]);
+    expect(result.notes.some(note => /tolerance check is skipped/.test(note))).toBe(true);
   });
 
   it("treats a DBIT closing balance as a negative balance", async () => {

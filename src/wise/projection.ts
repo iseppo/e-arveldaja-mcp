@@ -138,8 +138,11 @@ export function createdTransactionMatchesApprovedPayload(
   const expectedDescription = canonicalRef.truncated && canonicalRef.full
     ? weaveFullRefIntoDescription(payload.description ?? undefined, canonicalRef.full)
     : payload.description;
+  // `type` is not compared: the live API reads every transaction back as "C"
+  // whatever was stored, so an incoming ("D") row would always look changed.
+  // The direction is still pinned by the description, whose
+  // [source_direction=IN|OUT] marker must match exactly.
   return transaction.accounts_dimensions_id === payload.accounts_dimensions_id &&
-    transaction.type === payload.type &&
     transaction.amount === payload.amount &&
     transaction.cl_currencies_id === payload.cl_currencies_id &&
     transaction.date === payload.date &&

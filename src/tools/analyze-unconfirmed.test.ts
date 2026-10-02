@@ -277,7 +277,7 @@ describe("analyze_unconfirmed_transactions", () => {
           date: "2026-03-22",
           accounts_dimensions_id: 100,
           cl_currencies_id: "EUR",
-          description: "Incoming customer payment",
+          description: "Incoming customer payment\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]",
           bank_account_name: "Acme OÜ",
           bank_account_no: null,
         }],
@@ -303,6 +303,48 @@ describe("analyze_unconfirmed_transactions", () => {
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).not.toBe("likely_duplicate");
       expect(payload.summary.likely_duplicate ?? 0).toBe(0);
+    });
+
+    it("checks both posting sides for an unsigned row whose direction is unknown", async () => {
+      // The live API reads every transaction back as type "C" whatever was
+      // stored (verified 2026-10), so an unsigned row's stored "D" proves
+      // nothing: a same-amount bank posting on EITHER side is a duplicate suspect.
+      const handler = setupTool({
+        transactions: [{
+          id: 3,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "D",
+          amount: 100,
+          date: "2026-03-22",
+          accounts_dimensions_id: 100,
+          cl_currencies_id: "EUR",
+          description: "Incoming customer payment",
+          bank_account_name: "Acme OÜ",
+          bank_account_no: null,
+        }],
+        bankAccounts: defaultBankAccounts,
+        journals: [{
+          id: 99,
+          effective_date: "2026-03-22",
+          is_deleted: false,
+          registered: true,
+          postings: [{
+            accounts_dimensions_id: 100,
+            type: "C",
+            amount: 100,
+            base_amount: null,
+            is_deleted: false,
+          }],
+        }],
+      });
+
+      const result = await handler({});
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
+      expect(payload.suggestions[0]!.duplicate_journal_id).toBe(99);
     });
 
     it("detects duplicates using base amounts for foreign-currency transactions", async () => {
@@ -552,7 +594,7 @@ describe("analyze_unconfirmed_transactions", () => {
           date: "2026-03-15",
           accounts_dimensions_id: 100,
           cl_currencies_id: "EUR",
-          description: "Konto hooldustasu",
+          description: "Konto hooldustasu\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
           bank_account_name: null,
           bank_account_no: null,
         }],
@@ -580,7 +622,7 @@ describe("analyze_unconfirmed_transactions", () => {
           date: "2026-03-15",
           accounts_dimensions_id: 100,
           cl_currencies_id: "USD",
-          description: "Service fee",
+          description: "Service fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
           bank_account_name: null,
           bank_account_no: null,
         }],

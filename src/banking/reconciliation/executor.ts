@@ -3,7 +3,7 @@ import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.
 import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankPostingSideForInvoiceMatch, bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
 import { reportProgress } from "../../progress.js";
@@ -11,7 +11,6 @@ import { MutationIndeterminateError } from "../../mutation-outcome.js";
 import {
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
-  StoredTypeDirectionMismatchError,
 } from "../../api/transactions.api.js";
 import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
@@ -92,15 +91,14 @@ import type {
 
 /**
  * Error code for a non-indeterminate confirm failure. The api's pre-mutation
- * refusals (payer/invoice client mismatch, ambiguous linked-invoice clients,
- * stored type contradicting the signed statement direction) carry their own
+ * refusals (payer/invoice client mismatch, ambiguous linked-invoice clients)
+ * carry their own
  * category so the report says why the register was refused, not a generic
  * `confirm_failed`.
  */
 function confirmRefusalErrorCode(err: unknown): string {
   if (err instanceof LinkedInvoiceClientMismatchError
-    || err instanceof LinkedInvoiceClientsAmbiguousError
-    || err instanceof StoredTypeDirectionMismatchError) {
+    || err instanceof LinkedInvoiceClientsAmbiguousError) {
     return err.category;
   }
   return "confirm_failed";
@@ -254,7 +252,7 @@ export async function runSuggestMatches(
           accountId: suggestDim.accountId,
           dimensionId: suggestDim.dimensionId,
           amount: tx.base_amount ?? tx.amount,
-          direction: bankTransactionDirection(tx) === "incoming" ? "D" : "C",
+          direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
           date: tx.date,
         });
         if (scan.scan_available && scan.suspects.length > 0) {
@@ -732,7 +730,10 @@ export async function runInterAccountMatching(
     targetAccountsDimensionsId: target_accounts_dimensions_id,
   };
 
-  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) === "outgoing");
+  // Rows without a signed marker ("unknown") stay on the outgoing side as
+  // before; same-type pairs among them confirm only when exactly one leg is
+  // signed outgoing, and a confirm books from the real stored type.
+  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) !== "incoming");
   const incoming = unconfirmed.filter(tx => bankTransactionDirection(tx) === "incoming");
 
   const matchedPairs: PairResult[] = [];
@@ -1056,9 +1057,10 @@ export async function runInterAccountMatching(
     // Both legs carry the same stored type, so the type cannot say which account
     // the money left. Confirming the wrong leg books the transfer reversed (the
     // confirmed row's own account becomes the source). Only a signed importer
-    // marker proving "outgoing" on exactly one leg — and agreeing with that
-    // leg's stored `C`, which is what the backend books from — settles it;
-    // anything else is a human decision, independent of listing order.
+    // marker proving "outgoing" on exactly one leg settles it; anything else is
+    // a human decision, independent of listing order. (The live API reads every
+    // row back as `C`, so the `type === "C"` term never discriminates — the
+    // signed marker is the whole proof.)
     const txProvenOutgoing = signedBankTransactionDirection(tx) === "outgoing" && tx.type === "C";
     const reciprocalProvenOutgoing = signedBankTransactionDirection(reciprocal) === "outgoing" && reciprocal.type === "C";
     if (txProvenOutgoing === reciprocalProvenOutgoing) {

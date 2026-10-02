@@ -13,7 +13,6 @@ import {
   getNormalizedNetworkCause,
   LinkedInvoiceClientMismatchError,
   LinkedInvoiceClientsAmbiguousError,
-  StoredTypeDirectionMismatchError,
 } from "../../api/transactions.api.js";
 import { BookingGuard } from "../../booking-guard.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
@@ -59,7 +58,7 @@ import {
 
 // Machine markers the importers write into a transaction description. They are
 // the row's dedup identity (WISE:{id} prefix, camt sig/bank ref) and the signed
-// statement direction the confirm-time guard reads — the same shapes
+// statement direction the read-side classifiers use — the same shapes
 // `signedBankTransactionDirection` / `stripWisePrefix` match.
 const WISE_IDENTITY_PREFIX = /^WISE:(?:FEE:)?\S+/i;
 const WISE_DIRECTION_MARKER = /\[source_direction=(IN|OUT)\]\s*$/i;
@@ -511,19 +510,25 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
             }, { consume: false });
             if (resolution.status === "matched") existingJournalIds.push(resolution.journal_id);
             // The target bank receives the opposite side of this row's cash leg.
-            const candidate: DuplicatePostingCandidate = {
-              accountId: bankDims.dimensions.find(d => d.dimensionId === row.related_sub_id)!.accountId,
-              dimensionId: row.related_sub_id!,
-              amount: row.amount,
-              direction: bankTransactionDirection(tx) === "incoming" ? "C" : "D",
-              date: tx.date,
-            };
-            const scan = await findDuplicateBankPostings(api, candidate);
-            if (!scan.scan_available) {
-              interAccountWarnings.push(scan.scan_note ?? "Duplicate scan unavailable.");
-            } else if (scan.suspects.length > 0) {
-              suspects.push(...scan.suspects);
-              interAccountWarnings.push(...formatDuplicatePostingWarnings(scan, candidate, t => wrapUntrustedOcr(t) ?? ""));
+            // Without a signed marker the side is unknown (the API reads every
+            // type back as "C"), so both sides are scanned.
+            const direction = bankTransactionDirection(tx);
+            const sides: Array<"D" | "C"> = direction === "incoming" ? ["C"] : direction === "outgoing" ? ["D"] : ["D", "C"];
+            for (const side of sides) {
+              const candidate: DuplicatePostingCandidate = {
+                accountId: bankDims.dimensions.find(d => d.dimensionId === row.related_sub_id)!.accountId,
+                dimensionId: row.related_sub_id!,
+                amount: row.amount,
+                direction: side,
+                date: tx.date,
+              };
+              const scan = await findDuplicateBankPostings(api, candidate);
+              if (!scan.scan_available) {
+                interAccountWarnings.push(scan.scan_note ?? "Duplicate scan unavailable.");
+              } else if (scan.suspects.length > 0) {
+                suspects.push(...scan.suspects);
+                interAccountWarnings.push(...formatDuplicatePostingWarnings(scan, candidate, t => wrapUntrustedOcr(t) ?? ""));
+              }
             }
           }
         } catch {
@@ -613,7 +618,6 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       if (
         error instanceof LinkedInvoiceClientMismatchError
         || error instanceof LinkedInvoiceClientsAmbiguousError
-        || error instanceof StoredTypeDirectionMismatchError
       ) return toolError(error);
       throw error;
     }

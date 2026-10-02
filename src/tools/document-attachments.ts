@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isAbsolute } from "path";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { toMcpJson, unwrapUntrustedOcr, wrapUntrustedOcr } from "../mcp-json.js";
 import { readOnly, destructive } from "../annotations.js";
 import { AUDIT_ENTITY_TYPES, logAudit } from "../audit-log.js";
 import { coerceId } from "./crud/shared.js";
@@ -60,17 +60,26 @@ function resolveDocumentResource(api: ApiContext, entityType: DocumentEntityType
 }
 
 /**
+ * The live API answers GET document_user on a record without a document with
+ * 409 and the message "No file found." (not 404). Only that exact message
+ * counts as "no document"; any other 409 stays an error.
+ */
+function isNoFileFoundConflict(error: HttpError): boolean {
+  return error.status === 409 && /^No file found\.?$/i.test(unwrapUntrustedOcr(error.upstream_detail ?? "").trim());
+}
+
+/**
  * Name of the document already attached to the record, or undefined when there
- * is none. "None" is accepted both as a 404 and as an empty file body; any other
- * read failure propagates, so an unknown state never falls through to a
- * silent replace.
+ * is none. "None" is accepted as a 404, as the live 409 "No file found." and as
+ * an empty file body; any other read failure propagates, so an unknown state
+ * never falls through to a silent replace.
  */
 async function existingDocumentName(resource: BaseResource<unknown>, id: number): Promise<string | undefined> {
   let file: { name?: string; contents?: string } | undefined;
   try {
     file = await resource.getDocument(id);
   } catch (error) {
-    if (error instanceof HttpError && error.status === 404) return undefined;
+    if (error instanceof HttpError && (error.status === 404 || isNoFileFoundConflict(error))) return undefined;
     throw error;
   }
   if (!file || (!file.name && !file.contents)) return undefined;
@@ -136,7 +145,19 @@ export function registerDocumentAttachmentTools(server: McpServer, api: ApiConte
     { ...readOnly, openWorldHint: true, title: "Download Source Document" },
     async ({ entity_type, id, metadata_only }) => {
       const resource = resolveDocumentResource(api, entity_type);
-      const file = await resource.getDocument(id);
+      let file;
+      try {
+        file = await resource.getDocument(id);
+      } catch (error) {
+        if (error instanceof HttpError && (error.status === 404 || isNoFileFoundConflict(error))) {
+          return toolError({
+            category: "no_document",
+            error: `${entity_type} ${id} has no source document.`,
+            target: { entity_type, id },
+          });
+        }
+        throw error;
+      }
       const sizeBytes = decodedByteEstimate(file.contents ?? "");
       const tooLarge = sizeBytes > MAX_INLINE_DOCUMENT_BYTES;
       // The stored filename originates from the uploaded document and is

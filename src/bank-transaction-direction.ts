@@ -22,28 +22,30 @@ export function signedBankTransactionDirection(transaction: {
   return undefined;
 }
 
+/**
+ * Direction of a bank transaction as far as it can be proven: the signed
+ * importer marker, else "unknown". The stored `type` is NOT a fallback — the
+ * live API reads every transaction back as "C" whatever was stored (verified
+ * 2026-10), so a `type`-based guess would call every unsigned incoming row
+ * outgoing. Callers must treat "unknown" as "could be either".
+ */
 export function bankTransactionDirection(transaction: {
-  type?: string | null;
   description?: string | null;
 }): BankTransactionDirection {
-  const signed = signedBankTransactionDirection(transaction);
-  if (signed) return signed;
-  if (transaction.type === "D") return "incoming";
-  if (transaction.type === "C") return "outgoing";
-  return "unknown";
+  return signedBankTransactionDirection(transaction) ?? "unknown";
 }
 
 /**
- * True when a signed importer marker proves a direction the stored `type`
- * contradicts. The backend books the cash leg from `type`, so confirming such a
- * row would post the bank side backwards.
+ * Bank-account posting side for a transaction matched to an invoice: the
+ * signed direction when there is one, else the invoice kind (a sale invoice is
+ * settled by money in, a purchase invoice by money out).
  */
-export function storedTypeContradictsSignedDirection(transaction: {
-  type?: string | null;
-  description?: string | null;
-}): boolean {
-  const signed = signedBankTransactionDirection(transaction);
-  if (signed === "incoming") return transaction.type === "C";
-  if (signed === "outgoing") return transaction.type === "D";
-  return false;
+export function bankPostingSideForInvoiceMatch(
+  transaction: { description?: string | null },
+  invoiceType: "sale_invoice" | "purchase_invoice",
+): "D" | "C" {
+  const direction = bankTransactionDirection(transaction);
+  if (direction === "incoming") return "D";
+  if (direction === "outgoing") return "C";
+  return invoiceType === "sale_invoice" ? "D" : "C";
 }

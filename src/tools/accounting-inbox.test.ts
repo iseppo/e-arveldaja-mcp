@@ -2313,7 +2313,7 @@ ${entryXml}
               amount: 50,
               cl_currencies_id: "EUR",
               bank_account_name: "EU Reverse Charge Softwareco",
-              description: "SaaS invoice",
+              description: "SaaS invoice\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
               is_deleted: false,
             },
             {
@@ -2325,7 +2325,7 @@ ${entryXml}
               amount: 50,
               cl_currencies_id: "EUR",
               bank_account_name: "EU Reverse Charge Softwareco",
-              description: "SaaS invoice",
+              description: "SaaS invoice\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
               is_deleted: false,
             },
           ]),

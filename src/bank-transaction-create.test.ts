@@ -84,7 +84,9 @@ describe("bank transaction create boundary", () => {
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ type: "D" }));
   });
 
-  it("falls back to the caller's legacy D/C type when direction is otherwise unknown", async () => {
+  it("ignores the caller's legacy D/C type and defaults to C when direction is otherwise unknown", async () => {
+    // The stored type is no longer a direction signal: the live API reads every
+    // transaction back as "C" whatever was stored (verified 2026-10).
     const create = vi.fn().mockResolvedValue({ created_object_id: 95 });
     const api = { transactions: { create } };
 
@@ -96,7 +98,7 @@ describe("bank transaction create boundary", () => {
       date: "2026-07-19",
     });
 
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ type: "D" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ type: "C" }));
   });
 
   it("defaults to C when there is no direction signal at all", async () => {

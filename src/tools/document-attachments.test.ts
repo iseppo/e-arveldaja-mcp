@@ -10,6 +10,7 @@ import { registerDocumentAttachmentTools } from "./document-attachments.js";
 import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 
 const notFound = () => new HttpError("Not found", 404, "GET", "/x/document_user");
 
@@ -225,6 +226,46 @@ describe("document attachment tools", () => {
 
     expect(api.transactions.uploadDocument).toHaveBeenCalledWith(6, "scan.pdf", "c2Nhbg==");
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { file_name: "scan.pdf" } }));
+  });
+
+  // Live API shape: a record without a document answers 409 "No file found."
+  // (body.messages), which HttpError carries sandbox-wrapped in upstream_detail.
+  const conflict = (detail: string) => new HttpError("API request failed: GET /purchase_invoices/7/document_user → 409", 409, "GET",
+    "/purchase_invoices/7/document_user", { upstream_detail: wrapUntrustedOcr(detail) });
+
+  it("attach_document uploads when the existing-document read is the live 409 'No file found.'", async () => {
+    const api = makeApi();
+    api.purchaseInvoices.getDocument.mockRejectedValueOnce(conflict("No file found."));
+    const handlers = register(api);
+
+    const res = await handlers.attach_document({ entity_type: "purchase_invoice", id: 7, file_path: "/x/scan.pdf" });
+
+    expect(res.isError).toBeUndefined();
+    expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledWith(7, "scan.pdf", "c2Nhbg==");
+    expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ details: { file_name: "scan.pdf" } }));
+  });
+
+  it("attach_document does not upload on any other 409 from the existing-document read", async () => {
+    const api = makeApi();
+    api.purchaseInvoices.getDocument.mockRejectedValueOnce(conflict("Record is locked. No file found."));
+    const handlers = register(api);
+
+    await expect(handlers.attach_document({ entity_type: "purchase_invoice", id: 7, file_path: "/x/scan.pdf" })).rejects.toThrow("409");
+    expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it("get_document reports no_document for the live 409 'No file found.'", async () => {
+    const api = makeApi();
+    api.purchaseInvoices.getDocument.mockRejectedValueOnce(conflict("No file found."));
+    const res = await register(api).get_document({ entity_type: "purchase_invoice", id: 7 });
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain("no_document");
+  });
+
+  it("get_document still throws any other 409", async () => {
+    const api = makeApi();
+    api.purchaseInvoices.getDocument.mockRejectedValueOnce(conflict("Record is locked.\nNo file found."));
+    await expect(register(api).get_document({ entity_type: "purchase_invoice", id: 7 })).rejects.toThrow("409");
   });
 
   it("attach_document does not upload when the existing-document read fails with a non-404 error", async () => {
