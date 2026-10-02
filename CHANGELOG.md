@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-02
+
 ### Changed
 
 - **Draft journals no longer drop out of balances silently.** `compute_account_balance` and `compute_account_dimension_balances` still count registered journals only, but now report draft journals posting to the account in range (`unregistered_drafts`: count, ids, D/C totals; `unregistered_entry_count` per dimension, including a zero-balance row for a dimension that holds only drafts) with a warning to confirm them before comparing with a statement.
