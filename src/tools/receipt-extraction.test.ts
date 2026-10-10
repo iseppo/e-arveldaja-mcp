@@ -2236,30 +2236,46 @@ describe("computeTermDays — due date before invoice date (MINOR)", () => {
 // F-GROSSPICKER — dual-display card receipts
 // ---------------------------------------------------------------------------
 
-describe("fallback gross on a dual-display card receipt (F-GROSSPICKER)", () => {
-  it("books the purchase amount, not the cardholder-currency figure, when the converted figure is smaller", () => {
-    const amounts = extractAmounts(["Shop OÜ", "Purchase amount 100.00", "Cardholder amount EUR 90.00"].join("\n"));
-    expect(amounts.total_gross).toBe(100);
+describe("dual-display card receipt pairs gross with its own currency (F-GROSSPICKER)", () => {
+  // The company is the cardholder: its cardholder-currency (EUR) figure is what
+  // the bank charged and is a valid gross. The defect is only the MISPAIRING —
+  // the converted EUR figure booked under the merchant's foreign currency.
+  const extract = (lines: string[]) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    return { gross: fields.total_gross, currency: fields.currency };
+  };
+
+  it.each([
+    ["USD purchase smaller than the EUR figure", ["NYC Shop", "Purchase amount USD 80.00", "Cardholder amount EUR 90.00"], 80, "USD"],
+    ["USD purchase larger than the EUR figure", ["NYC Shop", "Purchase amount USD 100.00", "Cardholder amount EUR 90.00"], 100, "USD"],
+    ["GBP symbol purchase", ["Pub", "Amount £20.00", "Cardholder amount EUR 23.40"], 20, "GBP"],
+    ["GBP slip with a rate line", ["Hotel London", "Transaction amount: GBP 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder amount: EUR 116.00"], 100, "GBP"],
+    ["Estonian cardholder label", ["Pood", "Ostusumma USD 80.00", "Kaardiomaniku summa EUR 90.00"], 80, "USD"],
+    ["cardholder line with a total word", ["NYC Shop", "Purchase amount USD 80.00", "Total cardholder amount EUR 90.00"], 80, "USD"],
+  ])("books the merchant amount in its currency: %s", (_label, lines, gross, currency) => {
+    expect(extract(lines)).toEqual({ gross, currency });
   });
 
-  it("books the purchase amount, not the cardholder-currency figure, when the converted figure is larger", () => {
-    const amounts = extractAmounts(["Shop OÜ", "Purchase amount 100.00", "Card holder amount EUR 110.00"].join("\n"));
-    expect(amounts.total_gross).toBe(100);
+  it.each([
+    ["unmarked purchase amount", ["Shop OÜ", "Purchase amount 100.00", "Cardholder amount EUR 90.00"], 90],
+    ["unmarked purchase amount, larger EUR figure", ["Shop OÜ", "Purchase amount 100.00", "Card holder amount EUR 110.00"], 110],
+    ["rate line on the slip", ["Hotel London", "Purchase amount 100.00", "Cardholder amount EUR 116.00", "Exchange rate 1 GBP = 1.1600 EUR"], 116],
+    ["DCC fee line on the slip", ["Pub", "Purchase amount 20.00", "DCC fee EUR 0.70", "Cardholder amount EUR 23.40"], 23.4],
+    ["unsupported merchant currency with a rate line", ["Bangkok", "Transaction amount: THB 3,500.00", "Exchange rate: 1 THB = 0.0257 EUR", "Cardholder amount: EUR 90.00"], 90],
+    ["cardholder figure among stray unlabelled numbers", ["Kohvik OÜ", "Laud 12", "Cardholder amount EUR 9.00"], 9],
+  ])("keeps the cardholder EUR figure on a EUR document: %s", (_label, lines, gross) => {
+    expect(extract(lines)).toEqual({ gross, currency: "EUR" });
   });
 
-  it("control: a cardholder figure that is the only amount is still the gross", () => {
-    const amounts = extractAmounts(["Shop OÜ", "Cardholder amount EUR 90.00"].join("\n"));
-    expect(amounts.total_gross).toBe(90);
-  });
-
-  it("control: an ordinary currency-marked fallback line keeps its currency preference", () => {
-    const amounts = extractAmounts(["Shop OÜ", "Coffee 120.00", "Paid EUR 90.00"].join("\n"));
-    expect(amounts.total_gross).toBe(90);
+  it.each([
+    ["CARDHOLDER COPY", ["Kohvik OÜ", "Cappuccino 3.80", "Kook 4.20", "EUR 8.00   CARDHOLDER COPY"]],
+    ["CARDHOLDER RECEIPT", ["CARDHOLDER RECEIPT EUR 8.00", "Cappuccino 3.80", "Kook 4.20"]],
+  ])("does not treat a %s heading as a cardholder amount", (_label, lines) => {
+    expect(extract(lines)).toEqual({ gross: 8, currency: "EUR" });
   });
 
   it("control: an explicit total line is unaffected by a cardholder line", () => {
-    const amounts = extractAmounts(["Shop OÜ", "Total 100.00", "Cardholder amount EUR 90.00"].join("\n"));
-    expect(amounts.total_gross).toBe(100);
+    expect(extract(["Shop OÜ", "Total 100.00", "Cardholder amount EUR 90.00"])).toMatchObject({ gross: 100 });
   });
 });
 
@@ -2276,6 +2292,9 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     ["lowercase labelled code", ["Shop LLC", "currency: kwd", "Total 100.000"], "KWD"],
     ["welded code", ["Shop LLC", "Total CNY100.00"], "CNY"],
     ["trailing code", ["Shop LLC", "Total 100.00 CNY"], "CNY"],
+    ["labelled currency code", ["Shop LLC", "Currency code: KWD", "Total 100.000"], "KWD"],
+    ["legacy euro-area code with no EUR on the page", ["Sofia Shop", "Total 100.00 BGN"], "BGN"],
+    ["grouped amount", ["Budapest Cafe", "Total HUF 4 000.00"], "HUF"],
   ])("flags a %s and leaves the currency undetected", (_label, lines, code) => {
     const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
     expect(fields.currency).toBeUndefined();
@@ -2304,6 +2323,15 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     ["Euro label", ["Shop OÜ", "Valuuta: Euro", "Total 10.00 €"], "EUR"],
     ["word-like codes on item lines", ["Shop OÜ", "PEN 2.50", "CUP 3.00", "Apples 2.50 KGS", "SVC 1.00", "Total 9.00 EUR"], "EUR"],
     ["currency conversion prose", ["Shop OÜ", "Currency conversion applied", "Total 10.00 EUR"], "EUR"],
+    ["Bulgarian dual display", ["Lidl Bulgaria", "TOTAL EUR 51.13", "TOTAL BGN 100.00"], "EUR"],
+    ["Croatian dual display", ["Konzum", "Ukupno 13,27 EUR", "Ukupno 100,00 HRK"], "EUR"],
+    ["reference exchange rate", ["Hotel", "1 EUR = 395.12 HUF", "Total 100.00 EUR"], "EUR"],
+    ["exchange-rate line", ["Wise", "Exchange rate 1 EUR = 4.2567 KWD", "Total 100.00 EUR"], "EUR"],
+    ["ETF ticker line", ["Lightyear", "Ost BND 72.50", "Kokku 72.50 EUR"], "EUR"],
+    ["ticker after a verb", ["Broker", "Buy COP 98.12", "Total 98.12 EUR"], "EUR"],
+    ["abbreviation lines", ["Store LLC", "Item 20.00", "SHP 5.00", "MNT 50.00", "TTD 55.00", "Total EUR 80.00"], "EUR"],
+    ["quantity between code and price", ["Kauplus", "SAR 2 1.50 amount", "Kokku 3.00 EUR"], "EUR"],
+    ["DCC slip in an unsupported merchant currency", ["Bangkok Shop", "Purchase amount THB 3,500.00", "Cardholder amount EUR 90.00"], "EUR"],
   ])("does not flag an ordinary receipt: %s", (_label, lines, currency) => {
     const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
     expect(fields.currency).toBe(currency);

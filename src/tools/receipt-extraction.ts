@@ -42,15 +42,18 @@ const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|km-ta\b|\(km-ta\)|ilma\s+
 const RECEIPT_REFERENCE_LINE_RE =
   /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|tax\s*id|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
 const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service fee|vahesumma|subtotal|handling)/i;
-// A dual-display (DCC) card slip prints the cardholder-currency CONVERSION of
-// the purchase next to the purchase amount itself ("Cardholder amount EUR
-// 90.00"). That figure is not the invoice's own amount, so its currency mark
-// must not lift it over the purchase amount in the fallback gross pick
-// (F-GROSSPICKER). Deliberately narrow: "charged", "billed in", "converted"
-// and "conversion" also label genuine payable totals or the ORIGINAL amount
-// ("Amount charged", "Converted from USD 100"), so they are not treated as
-// converted-figure labels.
-const RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE = /\bcard\s?holder\b/i;
+// A dual-display (DCC) card slip prints the purchase in the merchant's currency
+// AND its conversion into the cardholder's currency ("Cardholder amount EUR
+// 90.00"). The company is the cardholder, so that converted figure is what the
+// bank charged and is a valid gross — but only together with ITS OWN currency.
+// The defect (F-GROSSPICKER) is the mispairing: the document currency comes
+// from the merchant line (USD), so letting the cardholder figure win the gross
+// pick books "90 USD". Label vocabulary is deliberately narrow: a bare
+// "cardholder" also heads "CARDHOLDER COPY" / "CARDHOLDER RECEIPT", and
+// "charged" / "billed in" / "converted" also label genuine totals or the
+// original amount.
+const RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE =
+  /\b(?:card\s?holder\s+(?:amount|currency|total|billing)|kaardiomaniku\s+summa)\b/i;
 const SUPPLIER_LABEL_RE =
   /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
 const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
@@ -400,8 +403,12 @@ interface ReceiptAmountCandidate {
   has_currency_keyword: boolean;
   has_total_like_label: boolean;
   likely_year_amount: boolean;
-  /** Line labels a cardholder-currency conversion of the purchase (F-GROSSPICKER). */
-  cardholder_amount_label: boolean;
+  /**
+   * Line is a cardholder-currency conversion that does not carry the document's
+   * (supported, non-EUR) currency, so its amount cannot be booked in that
+   * currency (F-GROSSPICKER).
+   */
+  cardholder_currency_mismatch: boolean;
 }
 
 type AmountField = "total_net" | "total_vat" | "total_gross";
@@ -692,13 +699,15 @@ function getClientCountryFromText(text?: string): string | undefined {
 }
 
 function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate): number {
-  // A cardholder-currency figure gets no currency bonus and ranks just below an
-  // otherwise equal candidate, so the purchase amount wins on a dual-display
-  // slip whichever of the two is larger; when it is the only amount it still
-  // wins (F-GROSSPICKER).
+  // A cardholder figure in a currency other than the document's cannot be
+  // booked in that currency: it gets no label or currency bonus and ranks below
+  // every ordinary candidate, so the merchant amount — the one the document
+  // currency belongs to — wins (F-GROSSPICKER).
+  if (candidate.cardholder_currency_mismatch) {
+    return -1 - (candidate.likely_year_amount ? 10 : 0);
+  }
   return (candidate.has_total_like_label ? 4 : 0) +
-    (candidate.has_currency_keyword && !candidate.cardholder_amount_label ? 2 : 0) -
-    (candidate.cardholder_amount_label ? 1 : 0) -
+    (candidate.has_currency_keyword ? 2 : 0) -
     (candidate.likely_year_amount ? 10 : 0);
 }
 
@@ -943,37 +952,99 @@ export function detectReceiptCurrency(text: string): string | undefined {
   return undefined;
 }
 
+/**
+ * F-GROSSPICKER: a cardholder-conversion line whose amount does not carry the
+ * document currency. Applies only when the document currency is a supported
+ * non-EUR code; on a EUR (or currency-less) document the cardholder EUR figure
+ * pairs with the EUR currency and is scored as before. An unmarked cardholder
+ * line counts as mismatched — it is the cardholder's own currency.
+ */
+function isCardholderCurrencyMismatch(line: string, documentCurrency: string | undefined): boolean {
+  return documentCurrency !== undefined &&
+    documentCurrency !== "EUR" &&
+    RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(line) &&
+    !detectCurrenciesOnLine(line).includes(documentCurrency);
+}
+
 // ISO 4217 codes the receipt extractor cannot represent (F-UNSUPPORTED-CCY).
 // detectReceiptCurrency only knows RECEIPT_CURRENCY_PATTERNS, so an invoice
 // naming any other code reads as currency-less (or as EUR when a stray EUR mark
-// is present) and downstream `?? "EUR"` books it as euros. Codes that are also
-// ordinary receipt words or units (PEN, CUP, KGS "kilograms", SVC "service",
-// TRY, ALL, ...) are excluded so an item line cannot trip the gate.
+// is present) and downstream `?? "EUR"` books it as euros. A static list (not
+// Intl.supportedValuesOf) keeps the gate identical across Node/ICU builds.
+const ISO_4217_CURRENCY_CODES = `
+  AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF
+  BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CLP CNY COP CRC
+  CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL
+  GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IQD IRR
+  ISK JMD JOD JPY KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR
+  LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR
+  MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR
+  RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SLL SOS SRD SSP
+  STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD
+  UYU UZS VES VND VUV WST XAF XCD XCG XDR XOF XPF XSU YER ZAR ZMW
+  ZWG ZWL
+`.trim().split(/\s+/);
+// Codes that are also ordinary receipt words, units or abbreviations (PEN, CUP,
+// KGS "kilograms", SVC "service", TRY, ALL, ...) never trip the gate.
 const UNSUPPORTED_CURRENCY_WORD_LIKE_CODES: ReadonlySet<string> = new Set([
   "ALL", "AMD", "ANG", "BAM", "BOB", "CUP", "GEL", "KGS", "MAD", "MOP", "PEN", "SOS", "STN", "SVC", "TOP", "TRY",
 ]);
 const UNSUPPORTED_CURRENCY_CODES: ReadonlySet<string> = new Set(
-  (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("currency") : [])
-    .filter(code =>
-      code !== "EUR" &&
-      !NON_EUR_CURRENCY_CODES.has(code) &&
-      !UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)),
+  ISO_4217_CURRENCY_CODES.filter(code =>
+    code !== "EUR" &&
+    !NON_EUR_CURRENCY_CODES.has(code) &&
+    !UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)),
 );
-// "Currency: KWD" / "valuuta kwd" — an explicit currency label, any case.
-const CURRENCY_LABEL_CODE_RE = /\b(?:currency|valuuta|w[äa]hrung|devise|valuta|moneda)\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/gi;
+// Former national currencies of euro-area members. A EUR document printing its
+// old-currency figure alongside (Bulgaria 2026, Croatia 2023) is a EUR invoice,
+// so these never override a detected EUR. (EEK, LVL, LTL, … are no longer ISO
+// codes and are not in the list at all.)
+const LEGACY_EURO_AREA_CODES: ReadonlySet<string> = new Set(["BGN", "HRK"]);
+// "Currency: KWD" / "Currency code: KWD" / "valuuta kwd" — explicit label, any case.
+const CURRENCY_LABEL_CODE_RE =
+  /\b(?:currency(?:\s+code)?|valuuta(?:kood)?|w[äa]hrung|devise|valuta|moneda)\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/gi;
 // An uppercase code welded or adjacent to a decimal amount: "CNY100.00",
-// "KWD 1.250", "100.00 CNY". The decimals keep SKU/reference tokens out.
-const AMOUNT_ADJACENT_CODE_RE = /(?<![A-Za-z])([A-Z]{3})\s?-?\d[\d\s.,]*[.,]\d{2,3}(?!\d)|\d[.,]\d{2,3}\s?([A-Z]{3})(?![A-Za-z])/g;
+// "KWD 1.250", "HUF 4 000.00", "100.00 CNY". The amount must follow the code
+// directly (no "SAR 2 1.50" quantity gap) and carry decimals, which keeps SKU
+// and reference tokens out.
+const AMOUNT_ADJACENT_CODE_RE =
+  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)[.,]\d{2,3}(?!\d)|\d[.,]\d{2,3}\s?([A-Z]{3})(?![A-Za-z])/g;
+// The amount-adjacent form counts only on a total/amount line; a bare
+// "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
+const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
+// "1 EUR = 395.12 HUF": a reference rate names a currency without making it the
+// document's currency.
+const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*[A-Za-z]{3}\s*=\s*\d[\d\s.,]*[A-Za-z]{3}(?![A-Za-z])/g;
 
 /**
  * The first ISO 4217 code the text clearly names that the extractor cannot
  * represent, or undefined. Detection only — it never changes amounts.
  */
-function detectUnsupportedCurrencyCode(text: string): string | undefined {
-  for (const line of text.split(/\r?\n/).map(clampTextLine)) {
-    for (const match of [...line.matchAll(CURRENCY_LABEL_CODE_RE), ...line.matchAll(AMOUNT_ADJACENT_CODE_RE)]) {
+function detectUnsupportedCurrencyCode(
+  text: string,
+  detectedCurrency: string | undefined,
+  totalGross: number | undefined,
+): string | undefined {
+  const lines = text.split(/\r?\n/).map(clampTextLine);
+  // When the booked gross itself sits on a EUR-marked line, amount and currency
+  // already come from the same line (e.g. the cardholder EUR figure on a THB
+  // DCC slip), so only an explicit currency label can still override EUR.
+  const grossOnEurLine = detectedCurrency === "EUR" && totalGross !== undefined &&
+    lines.some(line =>
+      detectCurrenciesOnLine(line).includes("EUR") && extractAmountsFromLine(line).includes(totalGross));
+  for (const rawLine of lines) {
+    const line = rawLine.replace(EXCHANGE_RATE_EXPRESSION_RE, " ");
+    const amountLine = !grossOnEurLine &&
+      (RECEIPT_TOTAL_LABEL_RE.test(line) || CURRENCY_AMOUNT_LINE_LABEL_RE.test(line));
+    const matches = [
+      ...line.matchAll(CURRENCY_LABEL_CODE_RE),
+      ...(amountLine ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
+    ];
+    for (const match of matches) {
       const code = (match[1] ?? match[2])?.toUpperCase();
-      if (code && UNSUPPORTED_CURRENCY_CODES.has(code)) return code;
+      if (!code || !UNSUPPORTED_CURRENCY_CODES.has(code)) continue;
+      if (detectedCurrency === "EUR" && LEGACY_EURO_AREA_CODES.has(code)) continue;
+      return code;
     }
   }
   return undefined;
@@ -1659,6 +1730,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   let netMetadata: AmountProvenanceMetadata | undefined;
   let grossMetadata: AmountProvenanceMetadata | undefined;
   const classifiedLines = lines.map((_line, index) => classifyLine(lines, index));
+  const documentCurrency = detectReceiptCurrency(text);
   const hasExplicitVatLine = classifiedLines.some(classified =>
     classified.hasVatAmountLabel &&
     !classified.blockedAsReferenceInInspection &&
@@ -1670,6 +1742,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       continue;
     }
 
+    const cardholderCurrencyMismatch = isCardholderCurrencyMismatch(classified.line, documentCurrency);
     fallbackCandidates.push(...classified.amounts.map(amount => ({
       amount,
       lineIndex,
@@ -1677,13 +1750,16 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       has_currency_keyword: classified.hasCurrencyKeyword,
       has_total_like_label: classified.hasTotalLikeLabel,
       likely_year_amount: isLikelyYearAmount(amount, classified.line),
-      cardholder_amount_label: RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(classified.line),
+      cardholder_currency_mismatch: cardholderCurrencyMismatch,
     })));
 
     if (
       !classified.blockedAsReference &&
       classified.hasTotalLikeLabel &&
-      !classified.hasNetLikeLabel
+      !classified.hasNetLikeLabel &&
+      // "Total cardholder amount EUR 90.00" on a USD slip: the total belongs to
+      // another currency, so it is left to the (demoted) fallback pick.
+      !cardholderCurrencyMismatch
     ) {
       if (!bestExplicitGrossCandidate || classified.score > bestExplicitGrossCandidate.score || (classified.score === bestExplicitGrossCandidate.score && classified.pickedGross > bestExplicitGrossCandidate.amount)) {
         bestExplicitGrossCandidate = { amount: classified.pickedGross, score: classified.score, lineIndex };
@@ -2772,7 +2848,7 @@ export function extractReceiptFieldsFromText(
   // through the existing currency_defaulted review signal; the note says why.
   // A supported non-EUR detection is already reviewed and is left alone.
   const unsupportedCurrency = detectedCurrency === undefined || detectedCurrency === "EUR"
-    ? detectUnsupportedCurrencyCode(text)
+    ? detectUnsupportedCurrencyCode(text, detectedCurrency, amounts.total_gross)
     : undefined;
   const currency = unsupportedCurrency ? undefined : detectedCurrency;
   const invoiceNumber = extractInvoiceNumber(text, fileName);
