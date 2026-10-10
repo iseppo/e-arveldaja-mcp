@@ -776,11 +776,33 @@ async function analyzeYearEndClose(
   // 31 December of this year, plus YEC-RETAINED-YYYY on ANY date (its number
   // is this year's transfer even when booked years late).
   const sameYearEnd = `${year}-12-31`;
-  const offDateCandidates = allJournals.filter((journal) =>
-    !journal.is_deleted && journal.id !== -1 && !existing.transfer.includes(journal) &&
-    (journal.document_number === transferDocumentNumber ||
-      ((journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) &&
-        isRetainedTransferShape(journal, transferAccounts))));
+  // A YEC-RETAINED-/YEC-RESULT- number of another year names that year's close.
+  const numberedForOtherYear = (journal: Journal) => {
+    const numberedYear = /^YEC-(?:RETAINED|RESULT)-(\d{4})$/.exec(journal.document_number ?? "")?.[1];
+    return numberedYear !== undefined && Number(numberedYear) !== year;
+  };
+  // An unnumbered 31 December transfer is inside the year-end balances, so
+  // adding it back to the residual gives what earlier years left on 2970.
+  // When it moves exactly that (non-zero) amount it is an earlier year's late
+  // transfer; if it equally matches this year's result it is ambiguous.
+  const isUnnumberedYearEnd = (journal: Journal) =>
+    journal.effective_date === sameYearEnd && journal.document_number !== transferDocumentNumber;
+  const isEarlierYearsLateTransfer = (journal: Journal) => {
+    const residualWithout = roundMoney(priorYearResidual + netDebit([journal], ids.currentYearProfit));
+    return Math.abs(residualWithout) >= 0.01 && Math.abs(netDebit([journal], ids.currentYearProfit) - residualWithout) < 0.01;
+  };
+  const sameYearEndAmbiguous: Journal[] = [];
+  const offDateCandidates = allJournals.filter((journal) => {
+    if (journal.is_deleted || journal.id === -1 || existing.transfer.includes(journal) || numberedForOtherYear(journal)) return false;
+    if (journal.document_number === transferDocumentNumber) return true;
+    if (!(journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) ||
+      !isRetainedTransferShape(journal, transferAccounts)) return false;
+    if (isUnnumberedYearEnd(journal) && isEarlierYearsLateTransfer(journal)) {
+      if (!matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit))) return false;
+      sameYearEndAmbiguous.push(journal);
+    }
+    return true;
+  });
   // Same for YEC-RETAINED-YYYY found by number alone: it must post only
   // 2970 ↔ 2960 (+ reserve), or it is no transfer and needs manual review.
   const malformedTransferJournals = [...existing.transfer, ...offDateCandidates]
@@ -795,7 +817,7 @@ async function analyzeYearEndClose(
   // A matching off-date entry may equally be an earlier year's late transfer
   // when that earlier result is still sitting untransferred on 2970.
   // Its YEC-RETAINED-YYYY number already says which year it belongs to.
-  const offDateAmbiguous = offDateMatches.length > 1 || (offDateMatches.length === 1 &&
+  const offDateAmbiguous = sameYearEndAmbiguous.length > 0 || offDateMatches.length > 1 || (offDateMatches.length === 1 &&
     offDateMatches[0]!.document_number !== transferDocumentNumber && Math.abs(priorYearResidual) >= 0.01 &&
     Math.abs(netDebit(offDateMatches, ids.currentYearProfit) - priorYearResidual) < 0.01);
   const describeJournals = (journals: Journal[]) =>
@@ -830,7 +852,7 @@ async function analyzeYearEndClose(
       `Journal(s) ${describeJournals(found)} transfer between ${ids.currentYearProfit} and ${ids.retainedEarnings} for ${year} ` +
       `(net ${ids.currentYearProfit} debit shown), but the ${year} result to transfer is ${expectedTransfer} EUR` +
       (offDateAmbiguous
-        ? ` and it cannot be told which year each belongs to (an earlier year's ${priorYearResidual} EUR is still untransferred on ${ids.currentYearProfit}).`
+        ? ` and it cannot be told which year each belongs to (an earlier year's ${roundMoney(priorYearResidual + netDebit(sameYearEndAmbiguous, ids.currentYearProfit))} EUR is still untransferred on ${ids.currentYearProfit}).`
         : `; booked on 1 January: ${onDateBooked} EUR.`) +
       (malformedTransferJournals.length > 0
         ? ` Journal(s) ${malformedTransferJournals.map((journal) => journal.id).join(", ")} carry ${transferDocumentNumber} but also post outside ` +
@@ -853,7 +875,10 @@ async function analyzeYearEndClose(
     } else {
       blockedEntries.push({
         document_number: transferDocumentNumber,
-        reason: `The existing ${year} transfer (${describeJournals(found)}) exceeds, reverses or duplicates the result to transfer (${expectedTransfer} EUR).`,
+        reason: `The existing ${year} transfer (${describeJournals(found)}) exceeds, reverses or duplicates the result to transfer (${expectedTransfer} EUR).` +
+          (found.some(isUnnumberedYearEnd)
+            ? ` Note: an unnumbered ${ids.currentYearProfit} transfer dated ${sameYearEnd} cannot be attributed; re-date it or number it ${transferDocumentNumber}.`
+            : ""),
         resolution: "manual_review",
       });
     }

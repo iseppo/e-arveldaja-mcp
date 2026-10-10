@@ -762,8 +762,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       });
 
       // Two concurrent executions must not spend the same § 157 headroom: hold
-      // one company-wide lock from the fresh ledger read through the create
-      // (lock order: this company lock, then createJournalOnce's per-key lock).
+      // one per-connection lock from the fresh ledger read through the create
+      // (lock order: this per-connection lock, then createJournalOnce's per-key lock).
       const checkAndBook = async () => {
         // Preload journals once for the duplicate pre-check and both legality
         // checks. Prepend the synthetic opening-balance journal (clients_id: null)
