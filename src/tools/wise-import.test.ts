@@ -850,6 +850,32 @@ describe("wise import tool", () => {
     expect(payload.skipped_details.flatMap((group: any) => group.sample_ids)).toEqual(["in-fee-1", "FEE:in-fee-1"]);
   });
 
+  it("does not drop a distinct Wise payment or fee that only looks like a previously imported tagged row", async () => {
+    const stored = (id: number, description: string, amount: number, bankAccountName: string) => ({
+      id, accounts_dimensions_id: 5, type: "C", amount, cl_currencies_id: "EUR", date: "2026-06-10",
+      description, bank_account_name: bankAccountName, status: "PROJECT", is_deleted: false,
+    });
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "p-2", sourceAmount: "2.50", targetName: "Coffee Bar" }),
+      buildM04Values({ id: "b", sourceAmount: "20", targetName: "Vendor B", sourceFeeAmount: "0.41" }),
+    ]));
+    const { api, handler } = setupWiseTool([
+      // Earlier import: distinct p-1 with identical date/amount/counterparty, and
+      // another transfer's same-day 0.41 fee.
+      stored(1, "WISE:p-1 Coffee Bar [source_direction=OUT]", 2.5, "Coffee Bar"),
+      stored(2, "WISE:a Vendor A [source_direction=OUT]", 10, "Vendor A"),
+      stored(3, "WISE:FEE:a Wise teenustasu [source_direction=OUT]", 0.41, "Wise"),
+    ]);
+    await handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9, execute: true });
+
+    const descriptions = api.transactions.create.mock.calls.map(([payload]: [any]) => payload.description);
+    expect(descriptions).toEqual([
+      "WISE:p-2 Coffee Bar [source_direction=OUT]",
+      "WISE:b Vendor B [source_direction=OUT]",
+      "WISE:FEE:b Wise teenustasu [source_direction=OUT]",
+    ]);
+  });
+
   it("does not treat 'jar' inside a longer word (JARVIS reference, Jari note) as a Jar transfer", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       buildM04Values({ id: "TRANSFER-JARVIS-1", targetName: "Jarvis Consulting", reference: "JARVIS-2026-001" }),
