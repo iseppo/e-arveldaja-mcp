@@ -828,6 +828,18 @@ export async function runInterAccountMatching(
         continue;
       }
 
+      // A counterparty IBAN naming a *different* own account contradicts this
+      // pairing, and an incoming row from a known third-party IBAN is a real
+      // receipt, not a transfer mirror leg — pairing would delete it.
+      const outCounterpartyDim = outCounterpartyIban ? ownIbanToDimension.get(outCounterpartyIban) : undefined;
+      const inCounterpartyDim = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
+      if (outCounterpartyDim !== undefined && outCounterpartyDim !== txIn.accounts_dimensions_id) continue;
+      if (inCounterpartyDim !== undefined && inCounterpartyDim !== txOut.accounts_dimensions_id) continue;
+      if (
+        inCounterpartyIban && inCounterpartyDim === undefined &&
+        !(companyName && normalizeCompanyName(txIn.bank_account_name ?? "") === companyName)
+      ) continue;
+
       const hasOutgoingIbanMatchesIncomingAccount =
         Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
       const hasIncomingIbanMatchesOutgoingAccount =

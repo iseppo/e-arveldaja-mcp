@@ -1438,6 +1438,54 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.delete).toHaveBeenCalledWith(112);
   });
 
+  describe("F1 transfer pair must target the counterparty's own account", () => {
+    const threeAccounts = [
+      { id: 1, account_name_est: "LHV", account_no: "EE11AAAA", iban_code: "EE11AAAA", accounts_dimensions_id: 11 },
+      { id: 2, account_name_est: "Wise", account_no: "EE22BBBB", iban_code: "EE22BBBB", accounts_dimensions_id: 22 },
+      { id: 3, account_name_est: "Swed", account_no: "EE33CCCC", iban_code: "EE33CCCC", accounts_dimensions_id: 33 },
+    ];
+    const outAtoB = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 11, bank_account_no: "EE22BBBB", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-1 transfer [source_direction=OUT]" };
+    const customerIntoC = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 33, bank_account_no: "EE99CUSTOMER", bank_account_name: "Klient AS", clients_id: 5, description: "WISE:TRANSFER-2 arve 17 [source_direction=IN]" };
+
+    it("does not pair A->B with an unrelated receipt into C and never deletes it", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: [outAtoB, customerIntoC], bankAccounts: threeAccounts });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      for (const call of api.transactions.confirm.mock.calls) {
+        expect(call[0]).toBe(1);
+        expect(call[1][0].related_sub_id).toBe(22);
+      }
+    });
+
+    it("does not pair with an incoming row whose counterparty IBAN is a third party (two accounts)", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [outAtoB, { ...customerIntoC, accounts_dimensions_id: 22 }],
+        bankAccounts: threeAccounts.slice(0, 2),
+      });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+
+    it("still pairs with the real B leg when it is present", async () => {
+      const realB = { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 22, bank_account_no: "EE11AAAA", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-3 [source_direction=IN]" };
+      const { handler, api } = setupInterAccountTool({ transactions: [outAtoB, customerIntoC, realB], bankAccounts: threeAccounts });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(1);
+      expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
+      expect(payload.pairs[0]!.incoming_transaction_id).toBe(3);
+      expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+      expect(api.transactions.delete).toHaveBeenCalledWith(3);
+    });
+  });
+
   describe("MAJOR-1 same-type reciprocal direction", () => {
     // Real transfer: LHV (dim 100) -> SEB (dim 200). Both legs stored as C.
     const lhvOut = (description: string) => ({ id: 131, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description });
@@ -1767,18 +1815,18 @@ describe("reconcile_inter_account_transfers", () => {
   });
 
   it("skips ambiguous pair matches instead of picking the first incoming candidate", async () => {
-    // tx 25's counterparty IBAN points to a 4th own account (Savings),
-    // giving it the outgoing_counterparty_is_own_account signal. That
-    // satisfies the Phase-1 counterparty gate without biasing toward
-    // either candidate. tx 26 and tx 27 carry no counterparty IBAN,
-    // so Phase 2 (one-sided transfer) does not fire. Both pairs score
-    // 40 (amount) + 20 (date) + 15 (outgoing own) = 75 → tied →
+    // tx 25's counterparty IBAN points to SEB (dim 200), giving both SEB
+    // candidates the outgoing_iban_matches_incoming_account signal without
+    // biasing toward either. (A counterparty naming a *different* own
+    // account than the candidate's is a contradiction and is not paired.)
+    // tx 26 and tx 27 carry no counterparty IBAN. Both pairs score
+    // 40 (amount) + 20 (date) + 30 (outgoing IBAN) = 90 → tied →
     // ambiguity path.
     const { handler, api } = setupInterAccountTool({
       transactions: [
-        { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE88888888888888", bank_account_name: "Transfer" },
+        { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "Transfer" },
         { id: 26, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
-        { id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 300, bank_account_name: "Transfer" },
+        { id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
       ],
       bankAccounts: [
         ...bankAccounts,
@@ -1796,7 +1844,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect.objectContaining({
         outgoing_transaction_id: 25,
         candidate_incoming_transaction_ids: [26, 27],
-        confidence: 75,
+        confidence: 90,
       }),
     ]);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
