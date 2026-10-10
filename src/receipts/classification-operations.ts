@@ -4,7 +4,7 @@ import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-t
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Client, PurchaseInvoiceItem, Transaction } from "../types/api.js";
+import type { Client, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
@@ -179,7 +179,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
    */
   private async computeApplyFingerprint(
     groups: ClassifiedTransactionGroupResult[],
-    context: { clients: Client[]; purchaseInvoices: unknown[]; purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>; accounts: unknown[]; isVatRegistered: boolean },
+    context: { clients: Client[]; purchaseInvoices: unknown[]; openPurchases: PurchaseInvoice[]; purchaseArticlesWithVat: Awaited<ReturnType<typeof getPurchaseArticlesWithVat>>; accounts: unknown[]; isVatRegistered: boolean },
     cache: Map<number, GatherOutcome>,
   ): Promise<PlanRecord> {
     const api = this.api;
@@ -236,6 +236,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           date: transaction.date ?? null,
           accounts_dimensions_id: transaction.accounts_dimensions_id ?? null,
           clients_id: transaction.clients_id ?? null,
+          // An open invoice appearing after the preview must drift the plan.
+          matches_open_invoice: existingInvoiceMatch(transaction, [], context.openPurchases),
         };
         if (transaction.status === "CONFIRMED") {
           cache.set(stub.id, { kind: "confirmed" });
@@ -454,7 +456,10 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       api.readonly.getAccounts(),
     ]);
     const isVatRegistered = await isCompanyVatRegistered(api);
-    const fingerprintContext = { clients, purchaseInvoices, purchaseArticlesWithVat, accounts, isVatRegistered };
+    const openPurchases = purchaseInvoices.filter(invoice =>
+      invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID",
+    );
+    const fingerprintContext = { clients, purchaseInvoices, openPurchases, purchaseArticlesWithVat, accounts, isVatRegistered };
 
     // Single read-only pass: fetch every transaction ONCE, build the canonical
     // fingerprint, and cache each fetch so the mutation loop reuses it (no
@@ -573,6 +578,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           const direction = bankTransactionDirection(transaction);
           if (direction !== "outgoing") {
             notes.push(`Transaction ${transaction.id} is not an outgoing payment (direction: ${direction}); skipped — only outgoing payments are booked as purchase invoices.`);
+            continue;
+          }
+          // The payment settles an existing open purchase invoice — booking a
+          // new expense invoice for it would double the expense/payable.
+          if (existingInvoiceMatch(transaction, [], openPurchases)) {
+            notes.push(`Transaction ${transaction.id} matches an open purchase invoice; skipped — reconcile instead.`);
             continue;
           }
           const supplierResolution = await resolveSupplierFromTransaction(api, clients, transaction, !dryRun, group.category);

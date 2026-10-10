@@ -684,3 +684,55 @@ describe("classification operations — guided compact round trip", () => {
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("classification operations — a payment matching an open purchase invoice is never auto-booked", () => {
+  const SAAS_TX = { id: 42, status: "PROJECT", is_deleted: false, type: "C", amount: 25, date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI", clients_id: 7, cl_currencies_id: "EUR", description: "OpenAI subscription\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
+  const SAAS_CLIENT = { id: 7, name: "OpenAI Ireland Limited", is_supplier: true, is_client: false, cl_code_country: "IE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false };
+  const ARTS = [{ id: 501, name_est: "Software", name_eng: "Software", accounts_id: 5230, vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1 }];
+  const ACCS = [{ id: 5230, name_est: "Software expense", name_eng: "Software expense", account_type_est: "Kulud", account_type_eng: "Expenses" }];
+  const HIST = { id: 88, status: "CONFIRMED", payment_status: "PAID", clients_id: 7, client_name: "OpenAI Ireland Limited", create_date: "2026-02-22", gross_price: 25 };
+  const ITEMS = [{ custom_title: "Subscription", cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510 }];
+  const OPEN = { id: 90, status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 7, client_name: "OpenAI Ireland Limited", number: "INV-2026-03", create_date: "2026-03-22", gross_price: 25, base_gross_price: 25, cl_currencies_id: "EUR" };
+  const group = { category: "saas_subscriptions", apply_mode: "purchase_invoice", normalized_counterparty: "openai", display_counterparty: "OpenAI", recurring: true, similar_amounts: true, total_amount: 25, suggested_booking: { purchase_article_id: 501, purchase_account_id: 5230, liability_account_id: 2310, reason: "Recurring SaaS" }, reasons: ["keyword"], transactions: [SAAS_TX] };
+
+  function setup(purchaseInvoiceRows: any[]) {
+    return makeOperations({
+      transactionRows: [SAAS_TX], transactionDetails: { 42: SAAS_TX }, clientRows: [SAAS_CLIENT],
+      purchaseArticles: ARTS, accounts: ACCS, purchaseInvoiceRows,
+      purchaseInvoiceDetails: {
+        88: { id: 88, number: "OLD-88", liability_accounts_id: 2310, items: ITEMS },
+        90: { ...OPEN, liability_accounts_id: 2310, items: ITEMS },
+      },
+    } as any);
+  }
+
+  it("F5 an invoice arriving between dry_run_apply and execute_apply drifts the plan with zero writes", async () => {
+    const rows: any[] = [HIST];
+    const { api, operations } = setup(rows);
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+
+    rows.push(OPEN);
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error.code).toBe("plan_drift");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("F5 skips a payment that already matches an open purchase invoice", async () => {
+    const { api, operations } = setup([HIST, OPEN]);
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value.results.flatMap(r => r.notes).join("\n")).toContain("reconcile instead");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+});
