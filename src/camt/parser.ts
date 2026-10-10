@@ -438,7 +438,12 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         counterparty_name: textAt(party, ["Nm"]),
         counterparty_iban: extractIban(account),
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
-        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined,
+        // An entry with no transaction details (e.g. a bank charge) carries its
+        // narrative only in AddtlNtryInf; without it a ref-less charge has no
+        // description to corroborate a rerun's possible-duplicate match.
+        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") ||
+          (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined) ||
+          undefined,
         reference_number: normalizeOptionalReference(structuredRef) ??
           normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
         end_to_end_id: normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),

@@ -1447,6 +1447,51 @@ describe("camt import tool", () => {
     expect(partialPayload.summary.skipped_count).toBe(1);
   });
 
+  it("keeps AddtlNtryInf of a detail-less, ref-less charge so a rerun flags it as a possible duplicate", async () => {
+    const chargeXml = (bankRef = "") => `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-charge</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">3.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-05</Dt></BookgDt>${bankRef}
+        <AddtlNtryInf>Account maintenance fee</AddtlNtryInf>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(chargeXml());
+    const first = setupCamtTool();
+    await executeGranularWithPlan(first.handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    expect(first.api.transactions.create).toHaveBeenCalledTimes(1);
+    const created = first.api.transactions.create.mock.calls[0]![0] as Record<string, unknown>;
+    expect(created.description).toContain("Account maintenance fee");
+
+    mockedReadFile.mockResolvedValue(chargeXml());
+    const rerun = setupCamtTool({ existingTransactions: [{ ...created, id: 9301, status: "PROJECT", is_deleted: false }] });
+    const payload = parseMcpResponse((await rerun.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+
+    // A referenced charge stored by an older version (no description) is still
+    // skipped by its bank reference.
+    mockedReadFile.mockResolvedValue(chargeXml("\n        <AcctSvcrRef>FEE123</AcctSvcrRef>"));
+    const legacy = setupCamtTool({ existingTransactions: [{
+      id: 9302, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7, date: "2026-02-05", type: "C",
+      amount: 3, cl_currencies_id: "EUR", bank_ref_number: "FEE123", description: null,
+      bank_account_name: null, bank_account_no: null, ref_number: null,
+    }] });
+    const legacyPayload = parseMcpResponse((await legacy.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(legacyPayload.summary.created_count).toBe(0);
+    expect(legacyPayload.summary.skipped_count).toBe(1);
+  });
+
   // Guards the ref-less/ref-less shape, for which possible-duplicate review is
   // the ONLY defense: an entry with no bank reference has no exact key at all.
   // Any future narrowing of the candidate set must not silently drop it.
