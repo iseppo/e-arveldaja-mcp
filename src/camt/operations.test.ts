@@ -19,8 +19,9 @@ vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 const inline = (xml: string): string => `base64:${Buffer.from(xml, "utf8").toString("base64")}`;
 
-function setup(existingTransactions: unknown[] = []) {
+function setup(existingTransactions: unknown[] = [], { allowWrites = false }: { allowWrites?: boolean } = {}) {
   const api = createAccountingWorkflowApi({
+    allowWrites,
     accountDimensions: [fixtureAccountDimension({ id: 7 })],
     bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 })],
     transactionRows: existingTransactions,
@@ -93,7 +94,7 @@ describe("CamtOperations", () => {
   });
 
   it("executeImport consumes the reviewed plan and creates the transaction", async () => {
-    const { api, operations } = setup();
+    const { api, operations } = setup([], { allowWrites: true });
     const source = { file_path: inline(fixtureCamtXml()) };
     const dry = await operations.prepareImport({ source, accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined });
     expect(dry.ok).toBe(true);

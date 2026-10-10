@@ -165,9 +165,11 @@ function setupCamtTool(options: {
   findByNameImpl?: (name: string) => unknown[] | Promise<unknown[]>;
   bankAccounts?: unknown[];
   toolName?: string;
+  allowWrites?: boolean;
 } = {}) {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi({
+    allowWrites: options.allowWrites,
     accountDimensions: [fixtureAccountDimension({ id: 7 })],
     bankAccounts: options.bankAccounts ?? [fixtureBankAccount({ accounts_dimensions_id: 7 })],
     transactionRows: options.existingTransactions ?? [],
@@ -532,7 +534,7 @@ describe("camt import tool", () => {
     it("creates CAMT CRDT (incoming) rows as API type D with signed source direction", async () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
       mockedReadFile.mockResolvedValue(singleEntryXml.replace("<CdtDbtInd>DBIT</CdtDbtInd>", "<CdtDbtInd>CRDT</CdtDbtInd>"));
-      const { api, handler } = setupCamtTool();
+      const { api, handler } = setupCamtTool({ allowWrites: true });
 
       const result = await executeGranularWithPlan(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
       const payload = parseMcpResponse(result.content[0]!.text);
@@ -550,7 +552,7 @@ describe("camt import tool", () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
       mockedReadFile.mockResolvedValue(singleEntryXml);
 
-      const { api, handler } = setupCamtTool({
+      const { api, handler } = setupCamtTool({ allowWrites: true,
         existingTransactions: [{
           id: 900,
           status: "PROJECT",
@@ -647,7 +649,7 @@ describe("camt import tool", () => {
       mockedReadFile.mockResolvedValue(singleEntryXml);
 
       for (const accountsDimensionsId of [undefined, null, "7", 0, -7, 7.5, Number.NaN]) {
-        const { api, handler } = setupCamtTool({
+        const { api, handler } = setupCamtTool({ allowWrites: true,
           existingTransactions: [{
             id: 902,
             status: "PROJECT",
@@ -688,7 +690,7 @@ describe("camt import tool", () => {
       mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
       mockedReadFile.mockResolvedValue(singleEntryXml);
 
-      const { api, handler } = setupCamtTool({
+      const { api, handler } = setupCamtTool({ allowWrites: true,
         existingTransactions: [{
           id: 903,
           status: "PROJECT",
@@ -826,7 +828,7 @@ describe("camt import tool", () => {
       for (const variant of variants) {
         mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
         mockedReadFile.mockResolvedValue(variant.xml);
-        const { api, handler } = setupCamtTool({
+        const { api, handler } = setupCamtTool({ allowWrites: true,
           existingTransactions: [{
             id: variant.id,
             status: "PROJECT",
@@ -1187,7 +1189,7 @@ describe("camt import tool", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
-    const { api, handler } = setupCamtTool({
+    const { api, handler } = setupCamtTool({ allowWrites: true,
       existingTransactions: [
         {
           id: 12,
@@ -1754,7 +1756,7 @@ describe("camt import tool", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
-    const { api, handler } = setupCamtTool({
+    const { api, handler } = setupCamtTool({ allowWrites: true,
       existingTransactions: [
         {
           id: 42,
@@ -1801,7 +1803,7 @@ describe("camt import tool", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
-    const { api, handler } = setupCamtTool({
+    const { api, handler } = setupCamtTool({ allowWrites: true,
       existingTransactions: [
         {
           id: 66,
@@ -2077,7 +2079,7 @@ describe("camt import tool", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
 
-    const { handler } = setupCamtTool({
+    const { handler } = setupCamtTool({ allowWrites: true,
       existingTransactions: [
         {
           id: 77,
@@ -2525,7 +2527,7 @@ describe("camt import tool", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
 
-    const { api, handler } = setupCamtTool();
+    const { api, handler } = setupCamtTool({ allowWrites: true });
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
     const payload = parseMcpResponse((await handler({
       file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle,
@@ -2861,7 +2863,7 @@ describe("camt plan-bound execution", () => {
   it("execute consumes the handle and drives creation through the plan tracker", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
-    const { api, handler } = setupCamtTool();
+    const { api, handler } = setupCamtTool({ allowWrites: true });
 
     const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
     const payload = parseMcpResponse((await handler({
@@ -3036,7 +3038,7 @@ describe("camt plan-bound execution", () => {
   it("merged execute requires and forwards the plan handle", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
-    const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
+    const { api, handler } = setupCamtTool({ allowWrites: true, toolName: "process_camt053" });
 
     const missing = await handler({ mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
     expect(missing.isError).toBe(true);

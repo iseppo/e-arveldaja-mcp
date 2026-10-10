@@ -75,6 +75,7 @@ describe("bank transaction create boundary", () => {
       description: "omanikulaen\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
     });
 
+    expect(bankTransactionDirection({ description: "omanikulaen\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" })).toBe("outgoing");
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ type: "C" }));
   });
 
@@ -90,6 +91,7 @@ describe("bank transaction create boundary", () => {
       description: "WISE:123 Customer [source_direction=OUT]",
     });
 
+    expect(bankTransactionDirection({ description: "WISE:123 Customer [source_direction=OUT]" })).toBe("outgoing");
     expect(create).toHaveBeenCalledWith(expect.objectContaining({ type: "C" }));
   });
 

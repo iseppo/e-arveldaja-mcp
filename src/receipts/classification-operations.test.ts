@@ -313,7 +313,7 @@ describe("classification operations — P0-2 plan binding", () => {
   });
 
   it("execute_apply books using the REAL dry-run plan handle (happy path)", async () => {
-    const { operations, api } = makeSaasOperations();
+    const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
     const handle = await dryRunHandle(operations, [saasGroup()]);
     const outcome = await operations.applyClassifications({
       classificationsJson: { groups: [saasGroup()] },
@@ -328,7 +328,7 @@ describe("classification operations — P0-2 plan binding", () => {
   });
 
   it("execute_apply re-reads clients/invoices/transactions uncached before the gating reads; dry_run_apply stays cached", async () => {
-    const { operations, api } = makeSaasOperations();
+    const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
     const handle = await dryRunHandle(operations, [saasGroup()]);
     expect(api.clients.invalidateListCache).not.toHaveBeenCalled();
     expect(api.purchaseInvoices.invalidateListCache).not.toHaveBeenCalled();
@@ -366,7 +366,7 @@ describe("classification operations — P0-2 plan binding", () => {
     // resolves by counterparty name to client 7 — the invoice's client.
     const thirdPartyTx = { ...SAAS_TX, clients_id: 99 };
     const group = saasGroup({ transactions: [thirdPartyTx] });
-    const { operations, api } = makeSaasOperations(thirdPartyTx, {
+    const { operations, api } = makeSaasOperations(thirdPartyTx, { allowWrites: true,
       clientRows: [{ ...SAAS_CLIENT, id: 8, name: "OpenAI" }],
       purchaseInvoiceRows: [{ ...SAAS_HISTORY_ROWS[0]!, clients_id: 8 }],
     });
@@ -398,7 +398,7 @@ describe("classification operations — P0-2 plan binding", () => {
   });
 
   it("leaves the reassignment flag off the audit entry when the clients already match", async () => {
-    const { operations } = makeSaasOperations();
+    const { operations } = makeSaasOperations(SAAS_TX, { allowWrites: true });
     const handle = await dryRunHandle(operations, [saasGroup()]);
     vi.mocked(logAudit).mockClear();
 
@@ -646,7 +646,7 @@ describe("classification operations — guided compact round trip", () => {
   it("the classify compact's inlined classifications_json completes dry_run_apply → execute_apply", async () => {
     // Signed outgoing so apply books it (unsigned rows are direction-unknown).
     const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
-    const { operations, api } = makeOperations({
+    const { operations, api } = makeOperations({ allowWrites: true,
       transactionRows: [feeTx],
       transactionDetails: { 1: feeTx },
       clientRows: [{ ...SAAS_CLIENT, id: 9, name: "LHV Bank", cl_code_country: "EE" }],
