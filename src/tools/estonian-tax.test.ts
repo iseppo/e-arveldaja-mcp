@@ -1628,6 +1628,46 @@ describe("prepare_dividend_package", () => {
     expect(loser.content[0]!.text.toLowerCase()).toContain("insufficient retained earnings");
     expect(store.filter((journal) => String(journal.document_number ?? "").startsWith("DIV-"))).toHaveLength(1);
   });
+
+  it("serializes concurrent executions for one company even through two different API keys (connection fingerprints)", async () => {
+    // Same ledger as above, reached by two processes with different credentials.
+    const store: Journal[] = [
+      { ...makeJournal("2024-01-01", [makePosting(1000, "D", 500), makePosting(2960, "C", 500)]), id: 1, registered: true },
+      { ...makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]), id: 2, registered: true },
+      { ...makeJournal("2026-03-01", [makePosting(1000, "D", 1000), makePosting(3000, "C", 1000)]), id: 3, registered: true },
+    ];
+    let nextId = 100;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const snapshot = async () => { await tick(); return store.map((journal) => ({ ...journal })); };
+    const callbacks = ["key-a-fingerprint", "key-b-fingerprint"].map((fingerprint) => {
+      const api = makeApi([], [...makeStandardAccounts(), makeAccount(3000, "C", "Tulud", "Müük", "Sales")]);
+      Object.assign(api.readonly, {
+        getVatInfo: vi.fn(async () => ({ vat_number: null, tax_refnumber: "9000123456" })),
+      });
+      Object.assign(api.journals, {
+        connectionFingerprint: `estonian-tax-shared-ledger-${fingerprint}`,
+        apiBaseUrl: "https://rmp-api.rik.ee/v1",
+        listAll: vi.fn(snapshot),
+        listAllWithPostings: vi.fn(snapshot),
+        get: vi.fn(async (id: number) => store.find((journal) => journal.id === id)),
+        create: vi.fn(async (data: Partial<Journal>) => {
+          await tick();
+          const id = nextId++;
+          store.push({ ...data, id, registered: false, is_deleted: false } as Journal);
+          return { code: 200, created_object_id: id, messages: [] };
+        }),
+      });
+      const mock = makeMockServer();
+      registerEstonianTaxTools(mock.server, api);
+      return mock.tools.get("prepare_dividend_package")!;
+    });
+    const results = await Promise.all(callbacks.map((cb, index) =>
+      cb({ net_dividend: 400, shareholder_client_id: index + 1, effective_date: "2026-06-01" })));
+    expect(results.filter((result) => !isError(result))).toHaveLength(1);
+    const loser = results.find((result) => isError(result))!;
+    expect(loser.content[0]!.text.toLowerCase()).toContain("insufficient retained earnings");
+    expect(store.filter((journal) => String(journal.document_number ?? "").startsWith("DIV-"))).toHaveLength(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

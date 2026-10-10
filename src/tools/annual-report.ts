@@ -12,7 +12,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
-import { withBookingKeyLock } from "../booking-guard.js";
+import { companyLedgerLockScope, withBookingKeyLock } from "../booking-guard.js";
 import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
 import {
   resolveCalculatedResultAccount,
@@ -1785,9 +1785,9 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         });
       }
 
-      // One execute per connection+year at a time: concurrent runs would both
+      // One execute per company+year at a time: concurrent runs would both
       // analyse the open year before either creates, and book the close twice.
-      return withBookingKeyLock(api.journals.connectionFingerprint, { ns: "YEC", id: String(year) }, async () => {
+      return withBookingKeyLock(await companyLedgerLockScope(api), { ns: "YEC", id: String(year) }, async () => {
         // Uncached: existing-close detection (and the closing amounts) come from
         // the journals — a close booked elsewhere within the 120 s cache window
         // must be seen, or it would be booked twice.

@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { describe, it, expect, vi } from "vitest";
 import {
   BookingGuard,
+  companyLedgerLockScope,
   formatDocNumber,
   parseDocNumber,
   type DocKey,
@@ -1004,5 +1005,24 @@ describe("BookingGuard Lane B — resolveInterAccount (cardinality-aware)", () =
     for (let i = 0; i < 3; i++) {
       expect(guard.resolveInterAccount(q())).toEqual({ status: "ambiguous_refless" });
     }
+  });
+});
+
+describe("companyLedgerLockScope", () => {
+  const apiWith = (fingerprint: string, apiBaseUrl: string, getVatInfo: () => Promise<unknown>) =>
+    ({ readonly: { getVatInfo }, journals: { connectionFingerprint: fingerprint, apiBaseUrl } }) as unknown as ApiContext;
+
+  it("is the same for two credentials of one company and differs between API environments", async () => {
+    const vat = async () => ({ tax_refnumber: "9000123456" });
+    const a = await companyLedgerLockScope(apiWith("fp-a", "https://rmp-api.rik.ee/v1", vat));
+    const b = await companyLedgerLockScope(apiWith("fp-b", "https://rmp-api.rik.ee/v1", vat));
+    const demo = await companyLedgerLockScope(apiWith("fp-a", "https://demo-rmp-api.rik.ee/v1", vat));
+    expect(a).toBe(b);
+    expect(demo).not.toBe(a);
+  });
+
+  it("falls back to the connection fingerprint when no company identity can be loaded", async () => {
+    expect(await companyLedgerLockScope(apiWith("fp-a", "u", async () => ({ vat_number: null })))).toBe("fp-a");
+    expect(await companyLedgerLockScope(apiWith("fp-a", "u", async () => { throw new Error("down"); }))).toBe("fp-a");
   });
 });

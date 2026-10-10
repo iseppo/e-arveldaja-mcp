@@ -26,7 +26,7 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
-import { BookingGuard, formatDocNumber, withBookingKeyLock, type DocKey } from "../booking-guard.js";
+import { BookingGuard, companyLedgerLockScope, formatDocNumber, withBookingKeyLock, type DocKey } from "../booking-guard.js";
 import { INCOME_TAX_EXPENSE_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import {
   resolveRestrictedReserveAccounts,
@@ -1244,7 +1244,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
       };
       if (dry_run) return checkAndBook();
-      return withBookingKeyLock(api.journals.connectionFingerprint, { ns: "DIV", id: "__headroom__" }, async () => {
+      return withBookingKeyLock(await companyLedgerLockScope(api), { ns: "DIV", id: "__headroom__" }, async () => {
         api.journals.invalidateListCache();
         return checkAndBook();
       });

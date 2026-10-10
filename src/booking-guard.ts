@@ -153,6 +153,27 @@ export async function withBookingKeyLock<T>(
   return withOwnedFileLock(resolve(lockDir, `${digest}.lock`), fn, { timeoutMs: 30_000, pollMs: 25 });
 }
 
+/**
+ * Lock scope for a company-wide check-then-book (dividend § 157 headroom,
+ * year-end close). The connection fingerprint hashes the credentials, so two
+ * processes using different API keys for the same company would not serialize;
+ * the company's tax reference number (or VAT number) plus the API environment
+ * is the same for both. When no company identity can be loaded this falls back
+ * to the connection fingerprint (serializes per credential only). The lock
+ * directory is per OS user / TMPDIR (tmpdir() or EARVELDAJA_LOCK_DIR), so
+ * processes under different users or temp dirs still do not serialize.
+ */
+export async function companyLedgerLockScope(api: ApiContext): Promise<string> {
+  try {
+    const vatInfo = await api.readonly.getVatInfo();
+    const companyId = vatInfo.tax_refnumber?.trim() || vatInfo.vat_number?.trim();
+    if (companyId) return `company\0${api.journals.apiBaseUrl}\0${companyId}`;
+  } catch {
+    // No company identity available: per-credential lock below.
+  }
+  return api.journals.connectionFingerprint;
+}
+
 function isAmbiguousMutation(error: unknown): boolean {
   return classifyMutationFailure(error) === "indeterminate";
 }

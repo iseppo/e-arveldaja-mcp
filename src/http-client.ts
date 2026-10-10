@@ -66,6 +66,8 @@ const INITIAL_RETRY_DELAY_MS = 1_000;
 
 export class HttpClient {
   public readonly connectionFingerprint: string;
+  /** API environment (demo vs live server), normalised like the fingerprint's. */
+  public readonly apiBaseUrl: string;
   private lastRequest = Promise.resolve();
   private nextAllowedAt = 0;
   private readonly minIntervalMs = 100; // Max ~10 req/sec
@@ -76,6 +78,7 @@ export class HttpClient {
     private readonly requestGuard?: () => void,
   ) {
     this.connectionFingerprint = buildConnectionFingerprint(config);
+    this.apiBaseUrl = config.baseUrl.trim().replace(/\/+$/, "");
   }
 
   private assertRequestAllowed(): void {

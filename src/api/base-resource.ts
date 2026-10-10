@@ -140,6 +140,10 @@ export class BaseResource<T> {
     return this.client.connectionFingerprint;
   }
 
+  get apiBaseUrl(): string {
+    return this.client.apiBaseUrl;
+  }
+
   protected cacheKey(key: string): string {
     return `${this.client.cacheNamespace}:${key}`;
   }
