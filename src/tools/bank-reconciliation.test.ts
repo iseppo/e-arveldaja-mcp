@@ -2181,7 +2181,53 @@ describe("reconcile_inter_account_transfers", () => {
             candidate_incoming_transaction_ids: [2],
             code: "possible_fee_deducted_transfer",
           });
+          expect(payload.ambiguous_pairs[0].reason).toMatch(/outgoing 1 \(100\) and incoming 2 \(99\)/);
+          expect(payload.ambiguous_pairs[0].reason).toMatch(/otherwise confirm each separately/);
         }
+      });
+
+      it("does not flag two OUTGOING rows (opposite ways) as one fee-deducted transfer", async () => {
+        const wiseOut = { ...wiseIn, type: "C", amount: 99.5, description: "WISE:TRANSFER-9 Männipuu OÜ [source_direction=OUT]" };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseOut], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.ambiguous_pairs).toHaveLength(0);
+        expect(payload.matched_one_sided).toBe(2);
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+      });
+
+      it("does not flag two INCOMING rows (opposite ways) as one fee-deducted transfer", async () => {
+        const lhvIn = { ...lhvOut, type: "D", description: "x\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" };
+        const wiseIn2 = { ...wiseIn, amount: 99.5 };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvIn, wiseIn2], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.ambiguous_pairs).toHaveLength(0);
+        expect(payload.matched_one_sided).toBe(2);
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+      });
+
+      it("does not flag a pair whose incoming leg is larger than the outgoing leg", async () => {
+        const smallOut = { ...lhvOut, amount: 99 };
+        const bigIn = { ...wiseIn, amount: 100 };
+        const { handler } = setupInterAccountTool({ transactions: [smallOut, bigIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.ambiguous_pairs).toHaveLength(0);
+        expect(payload.matched_one_sided).toBe(2);
+      });
+
+      it("flags an unresolved-direction pair without suggesting a delete", async () => {
+        const unsignedOut = { ...lhvOut, description: "own transfer" };
+        const { handler, api } = setupInterAccountTool({ transactions: [unsignedOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(payload.ambiguous_pairs).toHaveLength(1);
+        expect(payload.ambiguous_pairs[0].code).toBe("possible_fee_deducted_transfer");
+        expect(payload.ambiguous_pairs[0].reason).toMatch(/direction/i);
+        expect(payload.ambiguous_pairs[0].reason).not.toMatch(/delete|remove/i);
       });
 
       it("still pairs the equal-amount legs in Phase 1", async () => {

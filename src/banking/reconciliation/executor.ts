@@ -1252,7 +1252,18 @@ export async function runInterAccountMatching(
         ).status !== "none";
       if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
 
-      const [out, inc] = bankTransactionDirection(a) === "incoming" ? [b, a] : [a, b];
+      // A fee-deducted transfer is one outgoing and one incoming leg with the
+      // incoming no larger than the outgoing. Two same-direction rows are two
+      // separate transfers and keep the one-sided path. An unproven direction
+      // still goes to review, but without a delete suggestion.
+      const aDir = bankTransactionDirection(a);
+      const bDir = bankTransactionDirection(b);
+      const directionsProven = aDir !== "unknown" && bDir !== "unknown";
+      if (directionsProven && aDir === bDir) continue;
+      const [out, inc] = aDir === "incoming" || bDir === "outgoing" ? [b, a] : [a, b];
+      const outAmount = out === a ? aAmount : bAmount;
+      const incAmount = out === a ? bAmount : aAmount;
+      if (directionsProven && Math.abs(outAmount) < Math.abs(incAmount)) continue;
       blockedOneSidedTxIds.add(a.id!);
       blockedOneSidedTxIds.add(b.id!);
       ambiguousPairs.push({
@@ -1264,7 +1275,9 @@ export async function runInterAccountMatching(
         candidate_incoming_dimension_ids: [inc.accounts_dimensions_id],
         confidence: Math.min(aTarget.confidence, bTarget.confidence),
         code: "possible_fee_deducted_transfer",
-        reason: `Transactions ${out.id} (${out.amount}) and ${inc.id} (${inc.amount}) look like the two legs of one own-account transfer whose amounts differ by a possible fee; booking each one-sided would double-book it. Confirm the outgoing leg inline with the fee split, then delete the mirror row.`,
+        reason: directionsProven
+          ? `Possible fee-deducted transfer: outgoing ${out.id} (${out.amount}) and incoming ${inc.id} (${inc.amount}). If they are the same transfer, confirm the outgoing leg with the fee split and remove the incoming mirror; otherwise confirm each separately.`
+          : `Possible fee-deducted transfer: transactions ${out.id} (${out.amount}) and ${inc.id} (${inc.amount}) point at each other's account with near-equal amounts, but their bank direction is unresolved. Check the bank statements: if they are the same transfer, book it once with the fee split; otherwise confirm each separately.`,
       });
     }
   }
