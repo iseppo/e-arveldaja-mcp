@@ -914,6 +914,22 @@ describe("wise import tool", () => {
     expect(payload.eligible).toBe(2);
   });
 
+  it("treats a TRANSFER-* row with Jar note/reference text and the company on both ends as a Jar transfer", async () => {
+    // Codex probe: a real Jar move exported as TRANSFER-987, category General.
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({
+        id: "TRANSFER-987", direction: "OUT", category: "General", note: "Moved to Jar Taxes",
+        reference: "Jar transfer - tax reserve", sourceName: "Seppo AI OÜ", targetName: "SEPPO AI OU",
+      }),
+    ]));
+
+    const { handler } = setupWiseTool([]);
+    const payload = parseWiseResponse(await handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 }));
+
+    expect(payload.skipped_jar_transfer_details.map((row: any) => row.wise_id)).toEqual(["TRANSFER-987"]);
+    expect(payload.eligible).toBe(0);
+  });
+
   it("does not treat a whole-word 'Jar' reference/note on a TRANSFER-* payment as a Jar transfer", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       buildM04Values({ id: "TRANSFER-123", targetName: "Jar Consulting", reference: "JAR-2026-001", note: "Jar invoice", sourceFeeAmount: "2" }),
