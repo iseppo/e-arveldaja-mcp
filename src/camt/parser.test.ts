@@ -363,6 +363,14 @@ describe("parseCamt053Xml", () => {
     ));
     expect(withCounterValue.entries.map(entry => entry.amount)).toEqual([100, 90]);
 
+    // Same foreign currency, separately converted: explicit countervalues win
+    // over a proportional split of the equal originals.
+    const sameCurrency = parseCamt053Xml(xml(
+      leg("100.00", "USD", `<CntrValAmt><Amt Ccy="EUR">90.00</Amt></CntrValAmt>`) +
+      leg("100.00", "USD", `<CntrValAmt><Amt Ccy="EUR">95.00</Amt></CntrValAmt>`),
+    ).replace(">190.00<", ">185.00<"));
+    expect(sameCurrency.entries.map(entry => entry.amount)).toEqual([90, 95]);
+
     // Without an account-currency value for the foreign leg the split is unknowable: reject.
     const unresolvable = preflightCamt053Xml(xml(leg("100.00", "EUR") + leg("100.00", "USD")));
     expect(unresolvable.ok).toBe(false);

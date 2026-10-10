@@ -385,17 +385,15 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
     // never stops validation of later entries or details.
     if (!direction || !entryDate || !entryAmount) continue;
 
-    // Legs in DIFFERENT currencies cannot be weighted by their bare original
-    // amounts (100 EUR + 100 USD is not 50/50). Weight each by its value in the
-    // entry currency instead: the original when already in that currency, else
-    // its CntrValAmt. If any leg has neither, the split is unknowable — reject.
+    // Weight each leg by its value in the entry currency: the original when
+    // already in that currency, else its CntrValAmt (separately converted legs
+    // of one foreign currency need not share a rate). Only when a leg lacks
+    // both: same-currency legs fall back to their originals (proportional);
+    // mixed currencies cannot be weighted by bare originals (100 EUR + 100 USD
+    // is not 50/50), so the split is unknowable — reject.
     let splitWeights = originalAmounts.map((amount) => amount?.amount);
-    if (
-      detailNodes.length > 1 &&
-      originalAmounts.every((amount) => amount !== undefined) &&
-      new Set(originalAmounts.map((amount) => amount!.currency)).size > 1
-    ) {
-      const resolved = capture(rejected, () => detailNodes.map((txDetails, detailIndex) => {
+    if (detailNodes.length > 1 && originalAmounts.every((amount) => amount !== undefined)) {
+      const entryValues = capture(rejected, () => detailNodes.map((txDetails, detailIndex) => {
         const original = originalAmounts[detailIndex]!;
         if (original.currency === entryAmount.currency) return original.amount;
         const counterValue = parseAmountNode(
@@ -404,18 +402,22 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
           `${entryRowId}:tx:${detailIndex + 1}`,
           "counter_value_amount",
         );
-        if (counterValue && counterValue.currency === entryAmount.currency && counterValue.amount > 0) {
-          return counterValue.amount;
-        }
-        return reject(
+        return counterValue && counterValue.currency === entryAmount.currency && counterValue.amount > 0
+          ? counterValue.amount
+          : undefined;
+      }));
+      if (!entryValues) continue;
+      if (entryValues.every((value) => value !== undefined)) {
+        splitWeights = entryValues;
+      } else if (new Set(originalAmounts.map((amount) => amount!.currency)).size > 1) {
+        capture(rejected, () => reject(
           entryRowId,
           "split_amounts",
           entryAmount.text,
           "CAMT batch entry mixes leg currencies without an account-currency counter value (CntrValAmt) for every leg, so its booked amount cannot be split",
-        );
-      }));
-      if (!resolved) continue;
-      splitWeights = resolved;
+        ));
+        continue;
+      }
     }
 
     const bookedAmounts = splitBookedAmounts(entryAmount.amount, splitWeights);
