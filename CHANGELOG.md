@@ -14,6 +14,10 @@
 - **Input files are read with a hard size cap.** PDF/receipt images, CSV and CAMT XML inputs were size-checked with `stat` and then read whole, so a file that grew between the check and the read was buffered without bound. Every user-supplied file read (`captureFileInputSnapshot`, `prepareInvoiceDocumentUpload` and the receipt-batch snapshot) now reads at most the existing limit plus one byte and fails with the same "File too large" error. The SHA-256 digest is taken over exactly the bytes read. A file snapshot (`captureFileInputSnapshot`) whose file grows past the limit after validation now fails with `file_input_unavailable` instead of `file_input_identity_invalid`.
 - **A file modified while it is read is refused.** The capped read compares `fstat` size and mtime before and after reading (and the bytes read against the final size) and fails with "File changed while reading; retry once it is no longer being written" instead of returning a torn mix of old and new bytes. File snapshots report it as `file_input_unavailable`, the receipt batch as `file_reference_path_changed`, and PDF/document uploads surface the error as is.
 
+### Dependencies
+
+- Raised `@modelcontextprotocol/sdk` to 1.32.1, `@toon-format/toon` to 4.4.0 and `dotenv` to 18.0.7; dev: `@babel/parser` 8.0.7, `@types/node` 26.6.5, `vite` 8.3.4 and `vitest` 5.0.3. `npm audit fix` updates the transitive `proxy-addr` (GHSA-jqcg-44mw-7w3h, via the SDK's express) and the dev-only `source-map-js` (GHSA-68fv-2mgg-jv7q); `npm audit` is clean. CI unit tests now run on Node 22, since Vitest 5 requires Node 22.12+ (Node 20 is end-of-life); the Node 18 package smoke test is unchanged.
+
 ## [0.28.1] - 2026-10-02
 
 ### Fixed
