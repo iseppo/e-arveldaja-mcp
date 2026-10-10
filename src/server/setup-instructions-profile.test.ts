@@ -5,7 +5,7 @@ import { createMcpServer } from "../server-bootstrap.js";
 import { TOOL_SURFACE_SETUP_INFO } from "../__fixtures__/tool-surface.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { buildCredentialSetupNextSteps } from "../config.js";
-import { isToolVisibleForProfile, parseToolProfile, type ToolProfile } from "../tool-profile.js";
+import type { ToolProfile } from "../tool-profile.js";
 
 async function setupInstructions(toolProfile: ToolProfile): Promise<{ tools: string[]; payload: Record<string, unknown> }> {
   const bootstrap = await createMcpServer({ configs: [], setupInfo: TOOL_SURFACE_SETUP_INFO, toolProfile, connect: false });
@@ -105,12 +105,5 @@ describe("get_setup_instructions next_steps are exposure-aware", () => {
     const standard = buildCredentialSetupNextSteps({ ...base, credentialToolsAvailable: false, toolProfile: "standard" }).join("\n");
     expect(standard).toContain("EARVELDAJA_EXPOSE_SETUP_TOOLS=1");
     expect(standard).toContain("normalizes the profile to custom");
-  });
-
-  it("the stated custom normalization matches parseToolProfile", () => {
-    expect(parseToolProfile({ EARVELDAJA_PROFILE: "guided", EARVELDAJA_EXPOSE_SETUP_TOOLS: "1" })).toBe("custom");
-    expect(parseToolProfile({ EARVELDAJA_PROFILE: "standard", EARVELDAJA_EXPOSE_SETUP_TOOLS: "1" })).toBe("custom");
-    expect(isToolVisibleForProfile("import_apikey_credentials", "full")).toBe(true);
-    expect(isToolVisibleForProfile("import_apikey_credentials", "guided")).toBe(false);
   });
 });

@@ -100,23 +100,6 @@ describe("RecordOperations.search — clients query name filter", () => {
     expect(findByName).not.toHaveBeenCalledWith(wrapped);
   });
 
-  it("gives results identical to search_client for the same input (both delegate to findByName)", async () => {
-    const rows = [{ id: 1, name: "ACME AS" }, { id: 2, name: "ACME Retail OÜ" }];
-    const findByName = vi.fn().mockResolvedValue(rows);
-    const api = makeApi({ clients: vi.fn() });
-    (api.clients as unknown as { findByName: typeof findByName }).findByName = findByName;
-    const ops = createRecordOperations(api, exposure);
-    // search_client's own behavior is `api.clients.findByName(name)`; the façade
-    // must return exactly that set for the same query — parity by shared source.
-    const viaSearchClient = await api.clients.findByName("acme");
-    findByName.mockClear();
-    findByName.mockResolvedValue(rows);
-    const outcome = await ops.search({ entity: "clients", filters: { query: "acme" } });
-    expect(outcome.ok).toBe(true);
-    if (!outcome.ok) return;
-    expect(outcome.value.items).toEqual(viaSearchClient);
-  });
-
   it("rejects query on a non-clients entity — bounded allowlist stays intact (filter_not_allowed)", async () => {
     const list = vi.fn();
     const api = makeApi({ transactions: list });

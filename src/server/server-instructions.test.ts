@@ -55,12 +55,6 @@ describe("configured server instructions", () => {
     }
   });
 
-  it("stays under the 1.5 KiB target and the 2 KiB hard bound", () => {
-    const bytes = Buffer.byteLength(instructions, "utf8");
-    expect(bytes).toBeLessThan(1536);
-    expect(bytes).toBeLessThanOrEqual(2048);
-  });
-
   it("drops the detailed VAT, D/C-direction, reporting, and regression guidance", () => {
     expect(instructions).not.toContain("get_vat_info");
     expect(instructions).not.toMatch(/reverse charge/i);

@@ -61,13 +61,6 @@ describe("search_accounting_records façade", () => {
     expect(findByName).toHaveBeenCalledWith("bolt");
     expect(parse(result).items.length).toBe(1);
   });
-
-  it("rejects query on a non-clients entity (bounded allowlist intact)", async () => {
-    const handler = setupSearch(makeApi());
-    const result = await handler({ entity: "transactions", query: "bolt" });
-    expect(result.isError).toBe(true);
-    expect(parse(result).category).toBe("filter_not_allowed");
-  });
 });
 
 describe("inspect_accounting_record façade", () => {
