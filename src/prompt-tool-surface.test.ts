@@ -74,7 +74,7 @@ function mentionedTools(text: string): string[] {
   return [...new Set(trusted.match(TOOL_LIKE) ?? [])].filter(token => CATALOG_NAMES.has(token)).sort();
 }
 
-async function openSurface(surface: Surface) {
+async function bootstrapSurface(surface: Surface) {
   const bootstrap = await createMcpServer({
     configs: surface.setupMode ? [] : [CONNECTION],
     setupInfo: TOOL_SURFACE_SETUP_INFO,
@@ -95,6 +95,17 @@ async function openSurface(surface: Surface) {
   }
   await client.close();
   return { tools, prompts, promptTexts, instructions: bootstrap.instructions };
+}
+
+// Each surface is bootstrapped once per file; the tests only read the result.
+const openedSurfaces = new Map<string, ReturnType<typeof bootstrapSurface>>();
+function openSurface(surface: Surface): ReturnType<typeof bootstrapSurface> {
+  let opened = openedSurfaces.get(surface.name);
+  if (!opened) {
+    opened = bootstrapSurface(surface);
+    openedSurfaces.set(surface.name, opened);
+  }
+  return opened;
 }
 
 describe.each(SURFACES.map(surface => [surface.name, surface] as const))("%s tool surface", (_name, surface) => {
