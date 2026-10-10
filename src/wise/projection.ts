@@ -457,19 +457,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const storedDesc = canonicalRef.truncated && canonicalRef.full
       ? weaveFullRefIntoDescription(desc, canonicalRef.full)
       : desc;
-    // An incoming row booked gross (after-fees + target fee) may have been
-    // stored at the after-fees amount by an older version; match that too so
-    // an untagged legacy row is not booked a second time.
-    const signatureAmounts = amount !== row.targetAmount && sourceDirection === "IN"
-      ? [amount, row.targetAmount]
-      : [amount];
     const mainSignatureCandidates = new Set(
       [counterpartyName, row.targetName || undefined, row.sourceName || undefined]
         .filter((name): name is string => Boolean(name))
-        .flatMap((name) => signatureAmounts.flatMap((signatureAmount) => [
+        .flatMap((name) => [
           buildWiseTransactionSignature(
             date,
-            signatureAmount,
+            amount,
             transactionCurrency,
             name,
             row.reference || undefined,
@@ -477,13 +471,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ),
           buildWiseTransactionSignature(
             date,
-            signatureAmount,
+            amount,
             transactionCurrency,
             name.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH),
             canonicalRef.value,
             stripWisePrefix(storedDesc),
           ),
-        ]))
+        ])
     );
     const mainAlreadyImported = seenWiseIds.has(wiseIdTag) ||
       [...mainSignatureCandidates].some(signature => alreadyStored(signature, sourceDirection));
