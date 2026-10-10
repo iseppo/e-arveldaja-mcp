@@ -91,7 +91,7 @@ describe("resolveBankAccountSync — graceful degradation (inbox path: no new in
     expect(r).toMatchObject({ status: "resolved", value: 101 });
   });
 
-  it("rung 6: unique-by-count local bank resolves when exactly one candidate", () => {
+  it("rung 4: unique-by-count local bank resolves when exactly one candidate", () => {
     const r = resolveBankAccountSync({ candidates: [local[0]!] });
     expect(r).toMatchObject({ status: "resolved", value: 101 });
     if (r.status === "resolved") expect(r.evidence.map(e => e.tag)).toContain("unique_local_bank");
@@ -111,58 +111,9 @@ describe("resolveBankAccountSync — graceful degradation (inbox path: no new in
     expect(r.status).toBe("not_found");
   });
 
-  it("stays dark to rung 3/4/5: no port/currency/history means unique-by-count still governs", () => {
-    // Two candidates, no override, no iban, no currency/history/port → ambiguous.
+  it("stays dark to rung 3: no port means unique-by-count still governs", () => {
+    // Two candidates, no override, no iban, no port → ambiguous.
     const r = resolveBankAccountSync({ candidates: local });
-    expect(r.status).toBe("ambiguous");
-  });
-});
-
-describe("resolveBankAccountSync — stricter rungs (pure-test only, never fed by inbox)", () => {
-  const local = [
-    candidate({ accounts_dimensions_id: 101, label: "LHV" }),
-    candidate({ accounts_dimensions_id: 102, label: "SEB" }),
-  ];
-
-  it("rung 4: unique currency-validated candidate resolves before unique-by-count", () => {
-    const r = resolveBankAccountSync({
-      candidates: local,
-      statementCurrency: "EUR",
-      currencyValidatedCandidates: [
-        { accounts_dimensions_id: 101, currency: "EUR" },
-        { accounts_dimensions_id: 102, currency: "USD" },
-      ],
-    });
-    expect(r).toMatchObject({ status: "resolved", value: 101 });
-    if (r.status === "resolved") expect(r.evidence.map(e => e.tag)).toContain("validated_currency_account");
-  });
-
-  it("rung 4: currency match tie does NOT silently pick — falls through to ambiguous", () => {
-    const r = resolveBankAccountSync({
-      candidates: local,
-      statementCurrency: "EUR",
-      currencyValidatedCandidates: [
-        { accounts_dimensions_id: 101, currency: "EUR" },
-        { accounts_dimensions_id: 102, currency: "EUR" },
-      ],
-    });
-    expect(r.status).toBe("ambiguous");
-  });
-
-  it("rung 5: unique confirmed-history dimension resolves", () => {
-    const r = resolveBankAccountSync({
-      candidates: local,
-      confirmedHistory: [{ accounts_dimensions_id: 102 }, { accounts_dimensions_id: 102 }],
-    });
-    expect(r).toMatchObject({ status: "resolved", value: 102 });
-    if (r.status === "resolved") expect(r.evidence.map(e => e.tag)).toContain("confirmed_history");
-  });
-
-  it("rung 5: tied confirmed history does not tie-break", () => {
-    const r = resolveBankAccountSync({
-      candidates: local,
-      confirmedHistory: [{ accounts_dimensions_id: 101 }, { accounts_dimensions_id: 102 }],
-    });
     expect(r.status).toBe("ambiguous");
   });
 });

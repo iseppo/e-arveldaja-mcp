@@ -410,9 +410,9 @@ function buildBankDefaults(
 
   const localBankCandidates = candidates.filter(candidate => candidate.accounts_dimensions_id !== wiseCandidate?.accounts_dimensions_id);
 
-  // The bank-level default = override → unique-local-bank-by-count (rungs 1/6 of
-  // the shared resolver; the inbox supplies no statement IBAN, saved-default
-  // port, currency, or history, so rungs 2/3/4/5 stay dark). The adapter
+  // The bank-level default = override → unique-local-bank-by-count (rungs 1/4 of
+  // the shared resolver; the inbox supplies no statement IBAN or saved-default
+  // port, so rungs 2/3 stay dark). The adapter
   // projects the three-way result back to today's `number | undefined`
   // (resolved → value; ambiguous | not_found → undefined → question), so the
   // emitted default is byte-identical to the former `override ?? uniqueLocalBank`.

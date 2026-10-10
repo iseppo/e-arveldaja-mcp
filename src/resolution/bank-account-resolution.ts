@@ -14,21 +14,15 @@
  *   2. exact statement IBAN, unique
  *   3. injected saved default — usable ONLY after re-verifying active +
  *      current-connection + expected-ledger + currency/IBAN (async, port)
- *   4. unique currency/account-validated candidate
- *   5. unique confirmed-history dimension
- *   6. terminal unique-local-bank-by-count (today's inbox rung, UNVALIDATED)
+ *   4. terminal unique-local-bank-by-count (today's inbox rung, UNVALIDATED)
  *   else → ambiguous (candidates present) / not_found (none)
  *
- * GRACEFUL DEGRADATION (critical for byte-identity): when the stronger-evidence
- * inputs are ABSENT (no `savedDefaultPort`, no `statementCurrency`/
- * `currencyValidatedCandidates`, no `confirmedHistory`) rungs 3/4/5 are skipped
- * and the resolver behaves EXACTLY as the inbox does today: override →
- * IBAN-unique → unique-local-bank → ambiguous/not_found. The inbox passes NONE
- * of the new inputs, so its output is unchanged; the stricter rungs are
- * exercised only by `bank-account-resolution.test.ts`.
+ * GRACEFUL DEGRADATION (critical for byte-identity): when no `savedDefaultPort`
+ * is injected rung 3 is skipped and the resolver behaves EXACTLY as the inbox
+ * does today: override → IBAN-unique → unique-local-bank → ambiguous/not_found.
  *
- * The inbox calls the SYNC core (`resolveBankAccountSync`, rungs 1/2/4/5/6 —
- * all sync). The async wrapper (`resolveBankAccount`) additionally awaits the
+ * The inbox calls the SYNC core (`resolveBankAccountSync`, rungs 1/2/4 — all
+ * sync). The async wrapper (`resolveBankAccount`) additionally awaits the
  * saved-default port for rung 3; with no port it produces the same result as
  * the sync core.
  */
@@ -62,20 +56,6 @@ export interface SavedBankDefaultPointer {
   iban?: string;
 }
 
-/** A candidate carrying the currency/ledger data the stricter rung-4 validation
- * needs. Kept separate from `BankDimensionCandidate` so the inbox-emitted
- * candidate shape never grows a field. */
-export interface CurrencyValidatedCandidate {
-  accounts_dimensions_id: number;
-  currency: string;
-  ledgerAccountId?: number;
-}
-
-/** A prior confirmed booking pointing at a bank dimension (rung 5). */
-export interface ConfirmedHistoryEntry {
-  accounts_dimensions_id: number;
-}
-
 export interface BankResolutionInput {
   /** The candidate set to resolve over (the inbox passes its local-bank set). */
   readonly candidates: readonly BankDimensionCandidate[];
@@ -83,7 +63,7 @@ export interface BankResolutionInput {
   readonly override?: number;
   /** Rung 2 — the statement IBAN to match uniquely. */
   readonly statementIban?: string;
-  /** Rung 3/4 — statement currency constraint. */
+  /** Rung 3 — statement currency constraint. */
   readonly statementCurrency?: string;
   /** Rung 3 — the bank ledger account a saved default must belong to. */
   readonly expectedLedgerAccountId?: number;
@@ -93,10 +73,6 @@ export interface BankResolutionInput {
   readonly accountDimensions?: readonly AccountDimension[];
   /** Rung 3 — INJECTED saved-default port (absent for the inbox). */
   readonly savedDefaultPort?: SavedBankDefaultPort;
-  /** Rung 4 — currency-validated candidates (absent for the inbox). */
-  readonly currencyValidatedCandidates?: readonly CurrencyValidatedCandidate[];
-  /** Rung 5 — confirmed history (absent for the inbox). */
-  readonly confirmedHistory?: readonly ConfirmedHistoryEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -179,30 +155,6 @@ function rungStatementIban(input: BankResolutionInput): Resolution<number> | und
   );
 }
 
-function rungCurrencyValidated(input: BankResolutionInput): Resolution<number> | undefined {
-  if (!input.statementCurrency || !input.currencyValidatedCandidates?.length) return undefined;
-  const candidateIds = new Set(input.candidates.map(c => c.accounts_dimensions_id));
-  const matches = input.currencyValidatedCandidates.filter(
-    c => c.currency === input.statementCurrency && candidateIds.has(c.accounts_dimensions_id),
-  );
-  const unique = new Set(matches.map(m => m.accounts_dimensions_id));
-  if (unique.size !== 1) return undefined;
-  const id = matches[0]!.accounts_dimensions_id;
-  return resolved(id, ev("validated_currency_account", `Unique ${input.statementCurrency} account dimension ${id}.`));
-}
-
-function rungConfirmedHistory(input: BankResolutionInput): Resolution<number> | undefined {
-  if (!input.confirmedHistory?.length) return undefined;
-  const candidateIds = new Set(input.candidates.map(c => c.accounts_dimensions_id));
-  const seen = input.confirmedHistory
-    .map(entry => entry.accounts_dimensions_id)
-    .filter(id => candidateIds.has(id));
-  const unique = new Set(seen);
-  if (unique.size !== 1) return undefined;
-  const id = [...unique][0]!;
-  return resolved(id, ev("confirmed_history", `Unique confirmed-history bank dimension ${id}.`));
-}
-
 function rungUniqueLocalCount(input: BankResolutionInput): Resolution<number> | undefined {
   if (input.candidates.length !== 1) return undefined;
   const only = input.candidates[0]!;
@@ -257,7 +209,7 @@ function verifySavedDefault(pointer: SavedBankDefaultPointer, input: BankResolut
 }
 
 /**
- * Synchronous resolver core — rungs 1/2/4/5/6. Complete and correct for every
+ * Synchronous resolver core — rungs 1/2/4. Complete and correct for every
  * caller that does NOT inject a saved-default port (which is how the inbox
  * calls it). Rung 3 (the async saved-default port) is skipped.
  */
@@ -265,8 +217,6 @@ export function resolveBankAccountSync(input: BankResolutionInput): Resolution<n
   return (
     rungOverride(input) ??
     rungStatementIban(input) ??
-    rungCurrencyValidated(input) ??
-    rungConfirmedHistory(input) ??
     rungUniqueLocalCount(input) ??
     terminal(input)
   );
@@ -296,12 +246,7 @@ export async function resolveBankAccount(input: BankResolutionInput): Promise<Re
     }
   }
 
-  return (
-    rungCurrencyValidated(input) ??
-    rungConfirmedHistory(input) ??
-    rungUniqueLocalCount(input) ??
-    terminal(input)
-  );
+  return rungUniqueLocalCount(input) ?? terminal(input);
 }
 
 /** Adapter projecting the three-way result back to today's `number | undefined`
