@@ -2252,6 +2252,12 @@ describe("dual-display card receipt pairs gross with its own currency (F-GROSSPI
     ["GBP slip with a rate line", ["Hotel London", "Transaction amount: GBP 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder amount: EUR 116.00"], 100, "GBP"],
     ["Estonian cardholder label", ["Pood", "Ostusumma USD 80.00", "Kaardiomaniku summa EUR 90.00"], 80, "USD"],
     ["cardholder line with a total word", ["NYC Shop", "Purchase amount USD 80.00", "Total cardholder amount EUR 90.00"], 80, "USD"],
+    // An exchange-rate figure is never the gross, even with its currency mark.
+    ["Fexco slip, rate line, unmarked amounts", ["Hotel London", "Transaction currency: GBP", "Transaction amount: 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder amount: EUR 116.00"], 100, "GBP"],
+    ["Fexco slip, separate cardholder currency line", ["Hotel London", "Transaction currency: GBP", "Transaction amount: 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder currency: EUR", "Cardholder amount: 116.00"], 100, "GBP"],
+    ["abbreviated rate label", ["Restaurant NYC", "Amount 100.00", "Exch. rate 1 USD = 0.9000 EUR", "Cardholder amount EUR 90.00"], 100, "USD"],
+    ["rate line with a margin line", ["Pub London", "Purchase amount 20.00", "Exchange rate 1 GBP = 1.1700 EUR", "Margin 3.5%", "Cardholder amount EUR 23.40"], 20, "GBP"],
+    ["rate given as a pair", ["Hotel NYC", "Purchase 100.00", "Exchange rate USD/EUR 0.9000", "Cardholder amount EUR 90.00"], 100, "USD"],
   ])("books the merchant amount in its currency: %s", (_label, lines, gross, currency) => {
     expect(extract(lines)).toEqual({ gross, currency });
   });
@@ -2263,6 +2269,7 @@ describe("dual-display card receipt pairs gross with its own currency (F-GROSSPI
     ["DCC fee line on the slip", ["Pub", "Purchase amount 20.00", "DCC fee EUR 0.70", "Cardholder amount EUR 23.40"], 23.4],
     ["unsupported merchant currency with a rate line", ["Bangkok", "Transaction amount: THB 3,500.00", "Exchange rate: 1 THB = 0.0257 EUR", "Cardholder amount: EUR 90.00"], 90],
     ["cardholder figure among stray unlabelled numbers", ["Kohvik OÜ", "Laud 12", "Cardholder amount EUR 9.00"], 9],
+    ["unsupported merchant currency with a reverse rate line", ["Prague", "Amount CZK 250.00", "Cardholder amount EUR 10.10", "Rate 1 EUR = 24.75 CZK"], 10.1],
   ])("keeps the cardholder EUR figure on a EUR document: %s", (_label, lines, gross) => {
     expect(extract(lines)).toEqual({ gross, currency: "EUR" });
   });
@@ -2272,6 +2279,10 @@ describe("dual-display card receipt pairs gross with its own currency (F-GROSSPI
     ["CARDHOLDER RECEIPT", ["CARDHOLDER RECEIPT EUR 8.00", "Cappuccino 3.80", "Kook 4.20"]],
   ])("does not treat a %s heading as a cardholder amount", (_label, lines) => {
     expect(extract(lines)).toEqual({ gross: 8, currency: "EUR" });
+  });
+
+  it("drops only the rate numbers, not the rest of the line", () => {
+    expect(extract(["Shop OÜ", "Total 100.00 EUR (1 EUR = 1.08 USD)"])).toMatchObject({ gross: 100 });
   });
 
   it("control: an explicit total line is unaffected by a cardholder line", () => {
@@ -2295,6 +2306,8 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     ["labelled currency code", ["Shop LLC", "Currency code: KWD", "Total 100.000"], "KWD"],
     ["legacy euro-area code with no EUR on the page", ["Sofia Shop", "Total 100.00 BGN"], "BGN"],
     ["grouped amount", ["Budapest Cafe", "Total HUF 4 000.00"], "HUF"],
+    ["EUR line elsewhere with the same number", ["Shop LLC", "Total CNY 100.00", "Shipping EUR 100.00"], "CNY"],
+    ["EUR equivalent on the gross line", ["Shop LLC", "Amount: KWD 30.000 = EUR 91.50"], "KWD"],
   ])("flags a %s and leaves the currency undetected", (_label, lines, code) => {
     const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
     expect(fields.currency).toBeUndefined();

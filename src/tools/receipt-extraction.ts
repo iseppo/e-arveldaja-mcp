@@ -1015,6 +1015,22 @@ const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "1 EUR = 395.12 HUF": a reference rate names a currency without making it the
 // document's currency.
 const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*[A-Za-z]{3}\s*=\s*\d[\d\s.,]*[A-Za-z]{3}(?![A-Za-z])/g;
+// "Exchange rate: 1.1600", "Exchange rate USD/EUR 0.9000": the value right after
+// an exchange-rate label. Only the number is captured for removal; the label
+// itself stays on the line.
+const EXCHANGE_RATE_LABEL_VALUE_RE =
+  /(\b(?:(?:exchange|exch\.?|fx|conversion)\s+rate|vahetuskurss|valuutakurss)\b\s*[:=-]?\s*(?:[A-Z]{3}\s*\/\s*[A-Z]{3}\s*)?)\d[\d.,]*/gi;
+
+/**
+ * Blank the numbers of an exchange-rate statement ("1 GBP = 1.1600 EUR",
+ * "Exchange rate: 1.16") so they never become amount candidates. Span-based,
+ * so "Total 100.00 EUR (1 EUR = 1.08 USD)" still yields 100.
+ */
+function blankExchangeRateNumbers(line: string): string {
+  return line
+    .replace(EXCHANGE_RATE_EXPRESSION_RE, " ")
+    .replace(EXCHANGE_RATE_LABEL_VALUE_RE, "$1 ");
+}
 
 /**
  * The first ISO 4217 code the text clearly names that the extractor cannot
@@ -1023,22 +1039,13 @@ const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*[A-Za-z]{3}\s*=\s*\d[\d\s.,]*[A
 function detectUnsupportedCurrencyCode(
   text: string,
   detectedCurrency: string | undefined,
-  totalGross: number | undefined,
+  grossSourceLine: string | undefined,
 ): string | undefined {
-  const lines = text.split(/\r?\n/).map(clampTextLine);
-  // When the booked gross itself sits on a EUR-marked line, amount and currency
-  // already come from the same line (e.g. the cardholder EUR figure on a THB
-  // DCC slip), so only an explicit currency label can still override EUR.
-  const grossOnEurLine = detectedCurrency === "EUR" && totalGross !== undefined &&
-    lines.some(line =>
-      detectCurrenciesOnLine(line).includes("EUR") && extractAmountsFromLine(line).includes(totalGross));
-  for (const rawLine of lines) {
+  const firstUnsupportedCode = (rawLine: string, includeAmountAdjacent: boolean): string | undefined => {
     const line = rawLine.replace(EXCHANGE_RATE_EXPRESSION_RE, " ");
-    const amountLine = !grossOnEurLine &&
-      (RECEIPT_TOTAL_LABEL_RE.test(line) || CURRENCY_AMOUNT_LINE_LABEL_RE.test(line));
     const matches = [
       ...line.matchAll(CURRENCY_LABEL_CODE_RE),
-      ...(amountLine ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
+      ...(includeAmountAdjacent ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
     ];
     for (const match of matches) {
       const code = (match[1] ?? match[2])?.toUpperCase();
@@ -1046,6 +1053,21 @@ function detectUnsupportedCurrencyCode(
       if (detectedCurrency === "EUR" && LEGACY_EURO_AREA_CODES.has(code)) continue;
       return code;
     }
+    return undefined;
+  };
+  // When the line the gross was picked from is EUR-marked and names no other
+  // currency, amount and currency already come from the same line (e.g. the
+  // cardholder EUR figure on a THB DCC slip), so only an explicit currency
+  // label elsewhere can still override EUR. "Amount: KWD 30.000 = EUR 91.50"
+  // names KWD on the gross line itself and is not exempt.
+  const grossOnEurLine = detectedCurrency === "EUR" && grossSourceLine !== undefined &&
+    detectCurrenciesOnLine(grossSourceLine).includes("EUR") &&
+    firstUnsupportedCode(grossSourceLine, true) === undefined;
+  for (const line of text.split(/\r?\n/).map(clampTextLine)) {
+    const amountLine = !grossOnEurLine &&
+      (RECEIPT_TOTAL_LABEL_RE.test(line) || CURRENCY_AMOUNT_LINE_LABEL_RE.test(line));
+    const code = firstUnsupportedCode(line, amountLine);
+    if (code) return code;
   }
   return undefined;
 }
@@ -1144,7 +1166,9 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // resolving it first changes ordering only, not any value.
   // Textual dates ("30. sept 2026") are blanked first so a billing-period day
   // number cannot become an amount candidate.
-  const amounts = extractAmountsFromLine(line.replace(TEXTUAL_DATE_IN_LINE_RE, " "), documentContext, {
+  // Exchange-rate figures are blanked the same way (F-GROSSPICKER): a rate is
+  // never the gross, and on a DCC slip its currency mark made it win.
+  const amounts = extractAmountsFromLine(blankExchangeRateNumbers(line.replace(TEXTUAL_DATE_IN_LINE_RE, " ")), documentContext, {
     includeZero: isExplicitVatTotalLine(line),
   });
   const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
@@ -2831,6 +2855,16 @@ export function hasAutoBookableReceiptFields(
   );
 }
 
+/** The text of the line (or layout cell) the gross was picked from, when known. */
+function grossSourceLine(text: string, amounts: ExtractedAmountsWithMetadata): string | undefined {
+  const gross = amounts.provenance.find(entry => entry.field === "total_gross");
+  if (gross?.lineIndex !== undefined) {
+    // Same line numbering as extractAmountsFromTextWithMetadata.
+    return text.split(/\r?\n/).map(clampTextLine).filter(Boolean)[gross.lineIndex];
+  }
+  return gross?.textItem?.text;
+}
+
 export function extractReceiptFieldsFromText(
   text: string,
   fileName: string,
@@ -2848,7 +2882,7 @@ export function extractReceiptFieldsFromText(
   // through the existing currency_defaulted review signal; the note says why.
   // A supported non-EUR detection is already reviewed and is left alone.
   const unsupportedCurrency = detectedCurrency === undefined || detectedCurrency === "EUR"
-    ? detectUnsupportedCurrencyCode(text, detectedCurrency, amounts.total_gross)
+    ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossSourceLine(text, amounts))
     : undefined;
   const currency = unsupportedCurrency ? undefined : detectedCurrency;
   const invoiceNumber = extractInvoiceNumber(text, fileName);
