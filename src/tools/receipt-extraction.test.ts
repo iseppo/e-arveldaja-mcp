@@ -2396,7 +2396,41 @@ describe("booked gross and booked currency stay paired (Codex review)", () => {
   it.each([
     ["hours", ["Parking time: 2 hrs = 6.00 EUR"], 6],
     ["units", ["Amount due: 1 BOX = 24.00 EUR"], 24],
+    ["kilograms", ["Market", "Amount due: 2 KGS = 6.00 EUR"], 6],
+    ["cups", ["Cafe", "Coffee: 2 CUP = 6.00 EUR"], 6],
+    ["lowercase cups", ["Cafe", "Coffee: 2 cup = 6.00 EUR"], 6],
   ])("does not treat a %s equation as an exchange rate", (_label, lines, gross) => {
     expect(extract(lines)).toEqual({ gross, currency: "EUR", unsupported: false });
+  });
+
+  it("does not let a unit equation hand the gross to an unrelated fee", () => {
+    expect(extract(["Cafe", "Coffee: 2 CUP = 6.00 EUR", "Service fee EUR 0.50"]))
+      .toEqual({ gross: 6, currency: "EUR", unsupported: false });
+  });
+
+  it("takes the mark next to the picked number on a dual-currency total line", () => {
+    expect(extract(["Hotel LLC", "Card charged EUR 90.00", "Total USD 100.00 / EUR 90.00"]))
+      .toEqual({ gross: 90, currency: "EUR", unsupported: false });
+  });
+
+  it("sends a total whose mark contradicts its subtotal and VAT lines to review", () => {
+    const fields = extractReceiptFieldsFromText(
+      ["Hotel LLC", "Subtotal USD 80.00", "VAT USD 20.00", "Total €100.00"].join("\n"), "receipt.pdf");
+    expect(fields.total_gross).toBe(100);
+    expect(fields.currency).toBeUndefined();
+    expect(fields.extraction_notes ?? []).toContain("currency_conflict_EUR_USD_verify_before_booking");
+    expect(summarizeInvoiceExtraction(fields).confidence_signals).toContain("currency_defaulted");
+  });
+
+  it.each([
+    ["DCC slip", ["NYC Shop", "Purchase amount USD 80.00", "Cardholder amount EUR 90.00"], 80, "USD"],
+    ["unmarked purchase on a DCC slip", ["Shop OÜ", "Purchase amount 100.00", "Cardholder amount EUR 90.00"], 90, "EUR"],
+    ["Fexco slip", ["Hotel London", "Transaction currency: GBP", "Transaction amount: 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder amount: EUR 116.00"], 100, "GBP"],
+    ["matching subtotal and VAT", ["Hotel LLC", "Subtotal USD 80.00", "VAT USD 20.00", "Total USD 100.00"], 100, "USD"],
+    ["unmarked subtotal and VAT", ["Hotel OÜ", "Subtotal 80.00", "VAT 20.00", "Total €100.00"], 100, "EUR"],
+  ])("does not raise a currency conflict for a %s", (_label, lines, gross, currency) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect({ gross: fields.total_gross, currency: fields.currency }).toEqual({ gross, currency });
+    expect((fields.extraction_notes ?? []).some(note => note.startsWith("currency_conflict"))).toBe(false);
   });
 });

@@ -1041,14 +1041,17 @@ const AMOUNT_ADJACENT_CODE_RE =
 // "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
 const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "1 EUR = 395.12 HUF": a reference rate names a currency without making it the
-// document's currency. Only when BOTH sides are ISO 4217 codes: "2 hrs = 6.00
-// EUR" and "1 BOX = 24.00 EUR" are quantity/unit prices, not rates.
+// document's currency. Only when BOTH sides are uppercase ISO 4217 codes that
+// are not also receipt words: "2 hrs = 6.00 EUR", "1 BOX = 24.00 EUR" and
+// "2 KGS = 6.00 EUR" (kilograms) are quantity/unit prices, not rates.
 const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*([A-Za-z]{3})\s*=\s*\d[\d\s.,]*([A-Za-z]{3})(?![A-Za-z])/g;
 const ISO_4217_CURRENCY_CODE_SET: ReadonlySet<string> = new Set(ISO_4217_CURRENCY_CODES);
 
 function removeExchangeRateExpressions(line: string): string {
+  const isRateCode = (code: string) =>
+    ISO_4217_CURRENCY_CODE_SET.has(code) && !UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code);
   return line.replace(EXCHANGE_RATE_EXPRESSION_RE, (match, from: string, to: string) =>
-    ISO_4217_CURRENCY_CODE_SET.has(from.toUpperCase()) && ISO_4217_CURRENCY_CODE_SET.has(to.toUpperCase()) ? " " : match);
+    isRateCode(from) && isRateCode(to) ? " " : match);
 }
 // "Exchange rate: 1.1600", "Exchange rate USD/EUR 0.9000": the value right after
 // an exchange-rate label. Only the number is captured for removal; the label
@@ -2898,14 +2901,44 @@ export function hasAutoBookableReceiptFields(
   );
 }
 
-/** The text of the line (or layout cell) the gross was picked from, when known. */
-function grossSourceLine(text: string, amounts: ExtractedAmountsWithMetadata): string | undefined {
-  const gross = amounts.provenance.find(entry => entry.field === "total_gross");
-  if (gross?.lineIndex !== undefined) {
+/** The text of the line (or layout cell) an amount field was picked from, when known. */
+function amountSourceLine(
+  text: string,
+  amounts: ExtractedAmountsWithMetadata,
+  field: AmountField = "total_gross",
+): string | undefined {
+  const entry = amounts.provenance.find(candidate => candidate.field === field);
+  if (entry?.lineIndex !== undefined) {
     // Same line numbering as extractAmountsFromTextWithMetadata.
-    return text.split(/\r?\n/).map(clampTextLine).filter(Boolean)[gross.lineIndex];
+    return text.split(/\r?\n/).map(clampTextLine).filter(Boolean)[entry.lineIndex];
   }
-  return gross?.textItem?.text;
+  return entry?.textItem?.text;
+}
+
+/**
+ * The currency a picked amount carries on its source line: the mark directly
+ * before or after that number ("Total USD 100.00 / EUR 90.00" → 90 is EUR);
+ * without an adjacent mark, the line's only mark. Several different marks and
+ * none adjacent (or an ambiguous adjacency) give undefined. Exchange-rate
+ * expressions are ignored.
+ */
+function currencyOfAmountOnLine(line: string, value: number, documentContext: string): string | undefined {
+  const clean = removeExchangeRateExpressions(line);
+  const adjacent = new Set<string>();
+  for (const match of clean.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)) {
+    const raw = match[0] ?? "";
+    const parsed = parseAmount(raw, clean, documentContext);
+    if (parsed === undefined || Math.abs(parsed) !== Math.abs(value)) continue;
+    const start = match.index ?? 0;
+    const before = clean.slice(0, start).match(/\S+\s*$/)?.[0] ?? "";
+    const after = clean.slice(start + raw.length).match(/^\s*\S+/)?.[0] ?? "";
+    for (const code of [...detectCurrenciesOnLine(before + raw), ...detectCurrenciesOnLine(raw + after)]) {
+      adjacent.add(code);
+    }
+  }
+  if (adjacent.size > 0) return adjacent.size === 1 ? [...adjacent][0] : undefined;
+  const lineCurrencies = detectCurrenciesOnLine(clean);
+  return lineCurrencies.length === 1 ? lineCurrencies[0] : undefined;
 }
 
 export function extractReceiptFieldsFromText(
@@ -2918,15 +2951,33 @@ export function extractReceiptFieldsFromText(
   const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
   const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
-  // The booked currency follows the line the gross was picked from: on
-  // "Paid EUR 90.00 (1 EUR = 1.1111 USD) / Total USD 100.00" the gross is the
-  // USD total, so the currency is USD. A gross line without its own mark
-  // (outside any rate expression) falls back to document-level detection.
-  const grossLine = grossSourceLine(text, amounts);
-  const grossLineCurrencies = grossLine ? detectCurrenciesOnLine(removeExchangeRateExpressions(grossLine)) : [];
-  const detectedCurrency = grossLineCurrencies.length > 0
-    ? grossLineCurrencies.find(code => NON_EUR_CURRENCY_CODES.has(code)) ?? grossLineCurrencies[0]
-    : detectReceiptCurrency(text);
+  // The booked currency follows the picked gross: on "Paid EUR 90.00 (1 EUR =
+  // 1.1111 USD) / Total USD 100.00" the gross is the USD total, so the currency
+  // is USD; on "Total USD 100.00 / EUR 90.00" with gross 90 it is EUR. A gross
+  // without its own mark falls back to document-level detection.
+  const grossLine = amountSourceLine(text, amounts);
+  const grossOwnCurrency = grossLine !== undefined && amounts.total_gross !== undefined
+    ? currencyOfAmountOnLine(grossLine, amounts.total_gross, text)
+    : undefined;
+  // A gross mark that contradicts the subtotal/net/VAT lines it is made of
+  // ("Subtotal USD 80.00 / VAT USD 20.00 / Total €100.00") is not resolved
+  // either way: the currency is left undetected (currency_defaulted review).
+  // Derived components and cardholder lines are not evidence.
+  const grossLineIndex = amounts.provenance.find(entry => entry.field === "total_gross")?.lineIndex;
+  const componentConflict = grossOwnCurrency === undefined ? undefined : amounts.provenance
+    .filter(entry =>
+      (entry.field === "total_net" || entry.field === "total_vat") &&
+      !entry.rationale.startsWith("derived") &&
+      entry.lineIndex !== undefined &&
+      entry.lineIndex !== grossLineIndex)
+    .map(entry => {
+      const line = amountSourceLine(text, amounts, entry.field);
+      return line === undefined || RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(line)
+        ? undefined
+        : currencyOfAmountOnLine(line, entry.value, text);
+    })
+    .find(code => code !== undefined && code !== grossOwnCurrency);
+  const detectedCurrency = grossOwnCurrency ?? detectReceiptCurrency(text);
   // F-UNSUPPORTED-CCY: when the document names a currency the extractor cannot
   // represent, do not report it as EUR (or let it read as unmarked, which every
   // consumer defaults to EUR). Leaving the currency undetected routes the row
@@ -2935,7 +2986,7 @@ export function extractReceiptFieldsFromText(
   const unsupportedCurrency = detectedCurrency === undefined || detectedCurrency === "EUR"
     ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossLine)
     : undefined;
-  const currency = unsupportedCurrency ? undefined : detectedCurrency;
+  const currency = unsupportedCurrency || componentConflict ? undefined : detectedCurrency;
   const invoiceNumber = extractInvoiceNumber(text, fileName);
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
   const fieldProvenance = buildFieldProvenance(
@@ -2959,6 +3010,9 @@ export function extractReceiptFieldsFromText(
     ...(supplierResult.extraction_notes ?? []),
     ...(unsupportedCurrency
       ? [`unsupported_currency_${unsupportedCurrency}_named_currency_not_detected_verify_before_booking`]
+      : []),
+    ...(componentConflict && !unsupportedCurrency
+      ? [`currency_conflict_${grossOwnCurrency}_${componentConflict}_verify_before_booking`]
       : []),
   ];
 
