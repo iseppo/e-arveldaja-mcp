@@ -2422,6 +2422,13 @@ describe("booked gross and booked currency stay paired (Codex review)", () => {
     expect(extract(lines)).toEqual({ gross, currency, unsupported: false });
   });
 
+  it("extracts a receipt with a 20,000-digit reference line in linear time (Codex slice 4 #4)", () => {
+    const lines = ["Supplier: Shop OÜ", "Invoice no: A-1", "Date: 2026-10-01", `Document reference: ${"1".repeat(20_000)}`, "Total EUR 124.00"];
+    const started = performance.now();
+    expect(extract(lines)).toEqual({ gross: 124, currency: "EUR", unsupported: false });
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
   it.each([
     ["hours", ["Parking time: 2 hrs = 6.00 EUR"], 6],
     ["units", ["Amount due: 1 BOX = 24.00 EUR"], 24],

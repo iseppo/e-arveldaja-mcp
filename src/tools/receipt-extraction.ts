@@ -1066,7 +1066,9 @@ const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "2 KGS = 6.00 EUR" (kilograms) are quantity/unit prices, not rates. A rate
 // quotes one unit (or 10/100/1000 units against a 3+ decimal rate, "100 JPY =
 // 0.6213 EUR"); "Total 100.00 USD = 90.00 EUR" is a converted amount, not a rate.
-const EXCHANGE_RATE_EXPRESSION_RE = /(\d[\d.,]*)\s*([A-Za-z]{3})\s*=\s*(\d[\d\s.,]*?)\s*([A-Za-z]{3})(?![A-Za-z])/g;
+// Number tokens are bounded and must start a number so a long digit run in
+// untrusted text cannot make the scan quadratic.
+const EXCHANGE_RATE_EXPRESSION_RE = /(?<![\d.,])(\d[\d.,]{0,20})\s*([A-Za-z]{3})\s*=\s*(\d[\d\s.,]{0,24}?)\s*([A-Za-z]{3})(?![A-Za-z])/g;
 const ISO_4217_CURRENCY_CODE_SET: ReadonlySet<string> = new Set(ISO_4217_CURRENCY_CODES);
 
 function isRateQuote(base: string, quote: string): boolean {
