@@ -59,6 +59,8 @@ describe("CAMT re-import against rows stored by the previous release", () => {
       [oldStoredRow(1, { amount: 30.56, name: "Supplier OÜ", ref: "R1b" }), oldStoredRow(2, { amount: 61.14, name: "Supplier OÜ", ref: "R1b" })]],
     ["mixed currency legs with a countervalue", wrap(ntry("190.00", "R2c", leg("100.00", "EUR") + leg("100.00", "USD", "90.00"))),
       [oldStoredRow(1, { amount: 95, name: "Supplier OÜ", ref: "R2c" }), oldStoredRow(2, { amount: 95, name: "Supplier OÜ", ref: "R2c" })]],
+    ["mixed currency legs without a countervalue (kept unsplit)", wrap(ntry("190.00", "R2", leg("100.00", "EUR") + leg("100.00", "USD")) + ntry("5.00", "R2b", leg("5.00", "EUR"))),
+      [oldStoredRow(1, { amount: 95, name: "Supplier OÜ", ref: "R2" }), oldStoredRow(2, { amount: 95, name: "Supplier OÜ", ref: "R2" }), oldStoredRow(3, { amount: 5, name: "Supplier OÜ", ref: "R2b" })]],
     ["detail-less charge sharing its bank reference with a payment", wrap(
       ntry("100.00", "R4", leg("100.00", "EUR", "", "Payee AS", "Arve 1")) + ntry("1.50", "R4", "", "Teenustasu")),
       [oldStoredRow(1, { amount: 100, name: "Payee AS", description: "Arve 1", ref: "R4" }), oldStoredRow(2, { amount: 1.5, ref: "R4" })]],
@@ -67,7 +69,7 @@ describe("CAMT re-import against rows stored by the previous release", () => {
   it.each(cases)("%s: creates nothing", async (_name, xml, oldLedger) => {
     const rerun = await project(xml, oldLedger);
     expect(rerun.descriptors).toHaveLength(0);
-    expect(rerun.skipped).toHaveLength(oldLedger.length);
+    expect(rerun.skipped).toHaveLength(rerun.parsed.entries.length);
   });
 
   it.each(cases)("%s: fresh import and its rerun are unchanged", async (_name, xml) => {
@@ -75,6 +77,13 @@ describe("CAMT re-import against rows stored by the previous release", () => {
     expect(fresh.descriptors.length).toBeGreaterThan(0);
     const rerun = await project(xml, toLedger(fresh));
     expect(rerun.descriptors).toHaveLength(0);
+  });
+
+  it("books a mixed-currency entry without countervalues as one reviewed row", async () => {
+    const xml = wrap(ntry("190.00", "R2", leg("100.00", "EUR") + leg("100.00", "USD")) + ntry("5.00", "R2b", leg("5.00", "EUR")));
+    const fresh = await project(xml, []);
+    expect(fresh.descriptors.map(d => d.payload.amount)).toEqual([190, 5]);
+    expect(fresh.descriptors[0]!.entry.review_note).toMatch(/camt:ntry:1/);
   });
 
   it("keeps the new split amounts and books only the leg a partial new-version ledger lacks", async () => {

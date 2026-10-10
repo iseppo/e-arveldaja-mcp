@@ -120,6 +120,40 @@ describe("renderCamtImportCompact", () => {
   });
 });
 
+describe("CAMT unsplit-entry review note", () => {
+  const note = "camt:ntry:1 mixes leg currencies without an account-currency counter value (CntrValAmt) for every leg";
+  const flagged = (): CamtImportRenderData => {
+    const data = makeData(2);
+    const entry: ParsedCamtEntry = {
+      ...data.projection.descriptors[0]!.entry,
+      review_note: note,
+      legacy_identities: [{ amount: 5, description: "raw statement text" }],
+    };
+    const descriptors = [{ ...data.projection.descriptors[0]!, entry }, data.projection.descriptors[1]!];
+    return {
+      ...data,
+      projection: { ...data.projection, descriptors },
+      results: descriptors.map(descriptor => camtResultRow(descriptor, "would_create")),
+    };
+  };
+
+  it("surfaces the note on the result row and as a compact warning", () => {
+    const data = flagged();
+    expect(data.results[0]).toMatchObject({ review_note: note });
+    expect(data.results[1]).not.toHaveProperty("review_note");
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.warnings).toEqual([{ code: "camt_unsplit_entry", message: note }]);
+  });
+
+  it("renders the note but never the internal legacy identities on parse output", () => {
+    const entry = flagged().projection.descriptors[0]!.entry;
+    const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);
+    const rendered = (payload.entries as Array<Record<string, unknown>>)[0]!;
+    expect(rendered.review_note).toBe(note);
+    expect(rendered.legacy_identities).toBeUndefined();
+  });
+});
+
 describe("CAMT full-envelope untrusted-text wrapping", () => {
   const OCR = /^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\n/;
 

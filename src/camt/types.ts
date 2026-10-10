@@ -68,6 +68,12 @@ export interface ParsedCamtEntry {
    * Internal: never rendered.
    */
   legacy_identities?: CamtLegacyIdentity[];
+  /**
+   * Set when the entry could not be imported as parsed and needs a human look
+   * (a mixed-currency batch without countervalues, kept unsplit). Fixed text
+   * addressed by positional row id; never carries file content.
+   */
+  review_note?: string;
   duplicate: boolean;
   duplicate_transaction_ids: number[];
 }

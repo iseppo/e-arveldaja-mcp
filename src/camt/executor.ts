@@ -328,6 +328,7 @@ function camtReviewCommands(projection: CamtImportProjection): CamtPlanReviewCom
       counterparty_name: descriptor.entry.counterparty_name,
       bank_reference: descriptor.entry.bank_reference,
       ref_number: canonicalRefNumber(descriptor.entry.reference_number).value,
+      review_note: descriptor.entry.review_note,
     }),
   }));
 }
