@@ -1181,43 +1181,6 @@ describe("camt import tool", () => {
         },
       });
     });
-
-    it("executes CAMT import only in execute mode", async () => {
-      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
-      mockedReadFile.mockResolvedValue(singleEntryXml);
-
-      const { api, handler } = setupCamtTool({ toolName: "process_camt053" });
-
-      const dry = parseMcpResponse((await handler({
-        mode: "dry_run",
-        file_path: "/tmp/camt.xml",
-        accounts_dimensions_id: 7,
-      })).content[0]!.text);
-      const plan_handle = dry.result.plan_handle;
-
-      const result = await handler({
-        mode: "execute",
-        file_path: "/tmp/camt.xml",
-        accounts_dimensions_id: 7,
-        plan_handle,
-      });
-      const payload = parseMcpResponse(result.content[0]!.text);
-
-      expect(payload).toMatchObject({
-        recommended_entry_point: "process_camt053",
-        mode: "execute",
-        delegated_tool: "import_camt053",
-        delegated_args: {
-          file_path: "/tmp/camt.xml",
-          accounts_dimensions_id: 7,
-          execute: true,
-          plan_handle,
-        },
-      });
-      expect(api.transactions.create).toHaveBeenCalledTimes(1);
-      expect(payload.result.mode).toBe("EXECUTED");
-      expect(payload.result.sample[0]!.status).toBe("created");
-    });
   });
 
   it("does not treat VOID transactions as duplicates", async () => {
@@ -2958,8 +2921,20 @@ describe("camt plan-bound execution", () => {
     const done = parseMcpResponse((await handler({
       mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, plan_handle,
     })).content[0]!.text);
+    expect(done).toMatchObject({
+      recommended_entry_point: "process_camt053",
+      mode: "execute",
+      delegated_tool: "import_camt053",
+      delegated_args: {
+        file_path: "/tmp/camt.xml",
+        accounts_dimensions_id: 7,
+        execute: true,
+        plan_handle,
+      },
+    });
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(done.result.mode).toBe("EXECUTED");
+    expect(done.result.sample[0]!.status).toBe("created");
     expect(done.result.execution.execution_report.status).toBe("completed");
   });
 

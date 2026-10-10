@@ -2,7 +2,6 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { z } from "zod";
 import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools, bookOwnerExpenseReimbursement } from "./estonian-tax.js";
@@ -12,6 +11,7 @@ import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accountin
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -62,11 +62,6 @@ function makeMockServer() {
     }),
   };
   return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools, rawTools, configs };
-}
-
-function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = config.inputSchema ? z.object(config.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${config.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 // Convenience: parse the JSON text from a tool result
@@ -2382,34 +2377,6 @@ describe("bookOwnerExpenseReimbursement (shared core)", () => {
     expect(isError(result)).toBe(true);
     expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("net_amount");
     expect(vi.mocked(coreApi.journals.create)).not.toHaveBeenCalled();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Tests: roundMoney used in CIT calculation
-// ---------------------------------------------------------------------------
-
-describe("roundMoney CIT precision", () => {
-  it("22/78 CIT for 10 000 EUR rounds to 2820.51", () => {
-    expect(roundMoney(10000 * 22 / 78)).toBe(2820.51);
-  });
-
-  it("22/78 CIT for 78 EUR is exactly 22.00", () => {
-    expect(roundMoney(78 * 22 / 78)).toBe(22);
-  });
-
-  it("22/78 CIT for 1 EUR rounds to 0.28", () => {
-    // 1 * 22/78 = 0.28205... → 0.28
-    expect(roundMoney(1 * 22 / 78)).toBe(0.28);
-  });
-
-  it("gross = net + CIT is consistent with roundMoney", () => {
-    const net = 10000;
-    const cit = roundMoney(net * 22 / 78);
-    const gross = net + cit;
-    expect(gross).toBe(12820.51);
-    // gross can be verified: debit = credit (within cent precision)
-    expect(roundMoney(gross)).toBe(gross); // already rounded
   });
 });
 

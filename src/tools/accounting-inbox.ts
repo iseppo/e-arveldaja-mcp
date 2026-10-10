@@ -238,6 +238,8 @@ export interface WorkspaceScanResult {
 export async function scanWorkspaceFiles(
   root: string,
   maxDepth: number,
+  // Test seam: production callers always use the default budget.
+  entryLimit: number = MAX_SCANNED_FILES,
 ): Promise<WorkspaceScanResult> {
   const files: ScannedFileInfo[] = [];
   let scannedDirectories = 0;
@@ -245,7 +247,7 @@ export async function scanWorkspaceFiles(
   let truncated = false;
 
   async function walk(current: string, depth: number): Promise<void> {
-    if (truncated || inspectedEntries >= MAX_SCANNED_FILES) {
+    if (truncated || inspectedEntries >= entryLimit) {
       truncated = true;
       return;
     }
@@ -266,7 +268,7 @@ export async function scanWorkspaceFiles(
       // Count EVERY traversed entry against the budget — not only matching
       // candidate files. Otherwise a workspace full of non-matching files never
       // consumes the cap and traversal cost is unbounded.
-      if (inspectedEntries >= MAX_SCANNED_FILES) {
+      if (inspectedEntries >= entryLimit) {
         truncated = true;
         return;
       }
@@ -301,7 +303,7 @@ export async function scanWorkspaceFiles(
     files,
     scanned_directories: scannedDirectories,
     inspected_entries: inspectedEntries,
-    entry_limit: MAX_SCANNED_FILES,
+    entry_limit: entryLimit,
     truncated,
     ...(truncated
       ? { continuation_guidance: "Re-run accounting_inbox with a narrower workspace_path." }

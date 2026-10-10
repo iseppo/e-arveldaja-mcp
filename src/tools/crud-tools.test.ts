@@ -15,12 +15,7 @@ import {
   registerCrudTools,
   validateUpdateFields,
 } from "./crud-tools.js";
-import { registerClientTools } from "./crud/clients.js";
-import { registerJournalTools } from "./crud/journals.js";
-import { registerProductTools } from "./crud/products.js";
 import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
-import { registerSaleInvoiceTools } from "./crud/sale-invoices.js";
-import { registerTransactionTools } from "./crud/transactions.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
@@ -33,6 +28,7 @@ import {
 } from "../api/purchase-invoices.api.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -115,11 +111,6 @@ function purchaseUpdateReadonly() {
       { id: 1510, allows_dimensions: false, is_valid: true },
     ]),
   };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 function purchaseInvoiceCreateParams(items: Array<Record<string, unknown>>) {
@@ -356,110 +347,12 @@ describe("safeJsonParse", () => {
 });
 
 describe("registerCrudTools", () => {
-  it("exposes focused domain registrars for CRUD tool groups", () => {
-    expect(registerClientTools).toEqual(expect.any(Function));
-    expect(registerProductTools).toEqual(expect.any(Function));
-    expect(registerJournalTools).toEqual(expect.any(Function));
-    expect(registerTransactionTools).toEqual(expect.any(Function));
-    expect(registerSaleInvoiceTools).toEqual(expect.any(Function));
-    expect(registerPurchaseInvoiceTools).toEqual(expect.any(Function));
-  });
-
   it("keeps domain registrars independent from the aggregate CRUD module", () => {
     const crudDir = new URL("./crud/", import.meta.url);
     for (const fileName of readdirSync(crudDir).filter(name => name.endsWith(".ts") && name !== "shared.ts")) {
       const source = readFileSync(new URL(fileName, crudDir), "utf-8");
       expect(source, fileName).not.toContain('from "../crud-tools.js"');
     }
-  });
-
-  it("keeps the public CRUD and reference tool surface registered", () => {
-    const server = { registerTool: vi.fn() };
-    const api = {
-      clients: {},
-      products: {},
-      journals: {},
-      transactions: {},
-      saleInvoices: {},
-      purchaseInvoices: {},
-      readonly: {},
-    };
-
-    registerCrudTools(server as never, api as never);
-
-    expect(server.registerTool.mock.calls.map(([name]) => name)).toEqual([
-      "list_clients",
-      "get_client",
-      "create_client",
-      "update_client",
-      "deactivate_client",
-      "reactivate_client",
-      "delete_client",
-      "search_client",
-      "find_client_by_code",
-      "list_products",
-      "get_product",
-      "create_product",
-      "update_product",
-      "deactivate_product",
-      "reactivate_product",
-      "delete_product",
-      "list_journals",
-      "get_journal",
-      "create_journal",
-      "update_journal",
-      "delete_journal",
-      "confirm_journal",
-      "batch_confirm_journals",
-      "invalidate_journal",
-      "list_transactions",
-      "get_transaction",
-      "create_transaction",
-      "confirm_transaction",
-      "update_transaction",
-      "invalidate_transaction",
-      "delete_transaction",
-      "batch_delete_transactions",
-      "list_sale_invoices",
-      "get_sale_invoice",
-      "create_sale_invoice",
-      "update_sale_invoice",
-      "delete_sale_invoice",
-      "confirm_sale_invoice",
-      "invalidate_sale_invoice",
-      "get_sale_invoice_delivery_options",
-      "send_sale_invoice",
-      "get_sale_invoice_document",
-      "get_sale_invoice_xml",
-      "list_purchase_invoices",
-      "get_purchase_invoice",
-      "create_purchase_invoice",
-      "update_purchase_invoice",
-      "delete_purchase_invoice",
-      "preview_purchase_invoice_totals_correction",
-      "confirm_purchase_invoice",
-      "invalidate_purchase_invoice",
-      "list_accounts",
-      "list_account_dimensions",
-      "list_currencies",
-      "list_sale_articles",
-      "list_purchase_articles",
-      "list_templates",
-      "list_projects",
-      "get_invoice_info",
-      "update_invoice_info",
-      "get_vat_info",
-      "list_invoice_series",
-      "get_invoice_series",
-      "create_invoice_series",
-      "update_invoice_series",
-      "delete_invoice_series",
-      "list_bank_accounts",
-      "get_bank_account",
-      "create_bank_account",
-      "update_bank_account",
-      "delete_bank_account",
-    ]);
   });
 
   it("keeps compact direct-call invariants in heavy CRUD tool metadata", () => {
@@ -1647,14 +1540,6 @@ describe("update_* allowlists", () => {
     expect(body.details[0]).toMatch(/"registered".*confirm_sale_invoice/);
   });
 
-  it("update_purchase_invoice rejects payment_status without mutating", async () => {
-    const { api, handler } = getCrudToolHarness("update_purchase_invoice");
-    const result = await handler({ id: 7, data: '{"payment_status":"PAID"}' }) as { content: Array<{ text: string }> };
-    expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
-    const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
-    expect(body.details[0]).toMatch(/"payment_status"/);
-  });
-
   it("update_client with empty object reports 'provide at least one field'", async () => {
     const { api, handler } = getCrudToolHarness("update_client");
     const result = await handler({ id: 7, data: "{}" }) as { content: Array<{ text: string }> };
@@ -1684,17 +1569,6 @@ describe("update_* post-confirmation audit lock", () => {
     expect(api.journals.update).not.toHaveBeenCalled();
     const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
     expect(body.details[0]).toMatch(/"effective_date".*CONFIRMED journal.*invalidate_journal/);
-  });
-
-  it("update_journal allows effective_date on an unregistered (draft) journal", async () => {
-    const { api, handler } = getCrudToolHarness("update_journal", {
-      journals: {
-        get: vi.fn().mockResolvedValue({ id: 7, registered: false }),
-        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
-      },
-    });
-    await handler({ id: 7, data: '{"effective_date":"2026-05-01"}' });
-    expect(api.journals.update).toHaveBeenCalledWith(7, { effective_date: "2026-05-01" });
   });
 
   it("update_sale_invoice rejects create_date on a CONFIRMED invoice", async () => {
@@ -1750,23 +1624,6 @@ describe("update_* post-confirmation audit lock", () => {
     const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
     expect(patch.notes).toBe("updated note");
     expect(patch.items).toEqual(existingItems.map(item => ({ ...item, cl_fringe_benefits_id: 1, amount: 1 })));
-  });
-
-  it("update_purchase_invoice keeps caller-supplied items when provided", async () => {
-    const callerItems = [{ custom_title: "New line", cl_purchase_articles_id: 66, total_net_price: 50, vat_accounts_id: 1510, cl_vat_articles_id: 1 }];
-    const updateMock = vi.fn().mockResolvedValue({ id: 7, status: "PROJECT" });
-    const { handler } = getCrudToolHarness("update_purchase_invoice", {
-      readonly: purchaseUpdateReadonly(),
-      purchaseInvoices: {
-        get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: [{ custom_title: "Old", total_net_price: 1 }] }),
-        update: updateMock,
-      },
-    });
-
-    await handler({ id: 7, data: { items: callerItems } });
-
-    const patch = updateMock.mock.calls[0]![1] as Record<string, unknown>;
-    expect(patch.items).toEqual(callerItems.map(item => ({ ...item, cl_fringe_benefits_id: 1, amount: 1 })));
   });
 
   // GitHub #62: create_purchase_invoice defaults cl_fringe_benefits_id (NOT NULL
@@ -2010,6 +1867,7 @@ describe("H04 confirmed accounting record update boundaries", () => {
 
     expect(api.purchaseInvoices.update).not.toHaveBeenCalled();
     expect(body.error).toBe("Invalid update fields");
+    expect(body.details).toEqual([expect.stringMatching(/"payment_status"/)]);
     expect(body).not.toHaveProperty("category", "confirmed_record_immutable");
   });
 

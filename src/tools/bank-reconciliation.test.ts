@@ -4,6 +4,7 @@ import { registerBankReconciliationTools, matchScore } from "./bank-reconciliati
 import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -136,11 +137,6 @@ function setupInterAccountTool(options: {
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
     api,
   };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("reconcile_transactions", () => {
@@ -318,36 +314,15 @@ describe("reconcile_transactions", () => {
     });
 
     it("executes exact-match confirmation only in execute_auto_confirm mode", async () => {
-      const server = { registerTool: vi.fn() } as any;
-      const api = {
-        transactions: {
-          invalidateListCache: vi.fn(),
-          listAll: vi.fn().mockResolvedValue([
-            { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 },
-          ]),
-          get: vi.fn().mockResolvedValue({ id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 }),
-          update: vi.fn().mockResolvedValue({}),
-          confirm: vi.fn().mockResolvedValue({}),
-        },
-        saleInvoices: {
-          invalidateListCache: vi.fn(),
-          listAll: vi.fn().mockResolvedValue([
-            { id: 12, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-12", clients_id: 22, client_name: "Beta OU", gross_price: 200, bank_ref_number: "RF456" },
-          ]),
-        },
-        purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-        readonly: {
-          getBankAccounts: vi.fn().mockResolvedValue([]),
-          getAccountDimensions: vi.fn().mockResolvedValue([]),
-          getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
-        },
-        journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-        clients: { findByName: vi.fn().mockResolvedValue([]) },
-      } as any;
-      registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-      const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions");
-      if (!registration) throw new Error("Tool was not registered");
-      const merged = registration[2];
+      const { handler: merged, api } = setupAutoConfirmTool({
+        transactions: [
+          { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", bank_account_name: "Beta OU", ref_number: "RF456", clients_id: 22 },
+        ],
+        sales: [
+          { id: 12, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-12", clients_id: 22, client_name: "Beta OU", gross_price: 200, bank_ref_number: "RF456" },
+        ],
+        toolName: "reconcile_bank_transactions",
+      });
 
       // Merged execute REQUIRES the reviewed plan handle from the dry run.
       const missing = parseMcpResponse((await merged({ mode: "execute_auto_confirm", min_confidence: 90 })).content[0]!.text) as any;
@@ -696,13 +671,12 @@ describe("reconcile_transactions", () => {
   });
 });
 
-function setupAutoConfirmTool(options: {
+function createAutoConfirmApi(options: {
   transactions?: unknown[];
   sales?: unknown[];
   purchases?: unknown[];
 } = {}) {
-  const server = { registerTool: vi.fn() } as any;
-  const api = {
+  return {
     transactions: {
       invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
@@ -729,11 +703,24 @@ function setupAutoConfirmTool(options: {
     journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
+}
 
-  registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
+function setupAutoConfirmTool(options: {
+  transactions?: unknown[];
+  sales?: unknown[];
+  purchases?: unknown[];
+  toolName?: string;
+  context?: ReturnType<typeof createTestRuntimeSafetyContext>;
+  api?: ReturnType<typeof createAutoConfirmApi>;
+} = {}) {
+  const server = { registerTool: vi.fn() } as any;
+  const api = options.api ?? createAutoConfirmApi(options);
 
-  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "auto_confirm_exact_matches");
-  if (!registration) throw new Error("Tool was not registered");
+  registerBankReconciliationTools(server, api, options.context ?? createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
+
+  const toolName = options.toolName ?? "auto_confirm_exact_matches";
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === toolName);
+  if (!registration) throw new Error(`Tool was not registered: ${toolName}`);
 
   return {
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
@@ -808,20 +795,6 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     await expect(handler({})).rejects.toThrow(/payment_status/);
-  });
-
-  it("still auto-confirms normally when the invoice fields are well-formed", async () => {
-    const { handler, api } = setupAutoConfirmTool({
-      transactions: [
-        { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", bank_account_name: "Acme OU", ref_number: "RF123" },
-      ],
-      sales: [
-        { id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123" },
-      ],
-    });
-
-    await executeAutoConfirm(handler, {});
-    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
   });
 
   it("ignores VOID transactions", async () => {
@@ -1052,37 +1025,6 @@ describe("bank_reconciliation plan binding", () => {
     };
   }
 
-  function autoConfirmWithContext(context: ReturnType<typeof createTestRuntimeSafetyContext>, options: {
-    transactions?: unknown[]; sales?: unknown[]; purchases?: unknown[];
-  } = {}) {
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
-        get: vi.fn().mockImplementation(async (id: number) => {
-          const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
-          return tx ?? { id, status: "PROJECT", clients_id: null };
-        }),
-        update: vi.fn().mockResolvedValue({}),
-        confirm: vi.fn().mockResolvedValue({}),
-      },
-      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.sales ?? []) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.purchases ?? []) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([]),
-        getAccountDimensions: vi.fn().mockResolvedValue([]),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
-      },
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: { findByName: vi.fn().mockResolvedValue([]) },
-    } as any;
-    registerBankReconciliationTools(server, api, context, EXPOSE_GRANULAR);
-    const handler = server.registerTool.mock.calls.find(([n]: [string]) => n === "auto_confirm_exact_matches")![2] as
-      (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
-    return { handler, api };
-  }
-
   it("exact-match dry run issues a handle; execute requires it and confirms exactly the reviewed set", async () => {
     const { handler, api } = setupAutoConfirmTool({
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
@@ -1120,7 +1062,8 @@ describe("bank_reconciliation plan binding", () => {
 
   it("rejects a foreign-domain (CAMT) handle at the reconciliation executor", async () => {
     const context = createTestRuntimeSafetyContext();
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
@@ -1132,7 +1075,8 @@ describe("bank_reconciliation plan binding", () => {
 
   it("rejects an exact-match handle after the runtime scope changed", async () => {
     const context = createTestRuntimeSafetyContext();
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
@@ -1145,7 +1089,8 @@ describe("bank_reconciliation plan binding", () => {
 
   it("refuses to confirm when the reviewed match set drifts before execute (no substitution)", async () => {
     const context = createTestRuntimeSafetyContext();
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
     });
     // Dry run sees the matching invoice; the invoice is gone by execute time.
@@ -1179,7 +1124,8 @@ describe("bank_reconciliation plan binding", () => {
   it("stops with plan_drift in the execution report when a bound transaction is no longer PROJECT before its mutate", async () => {
     const context = createTestRuntimeSafetyContext();
     const tx = { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" };
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: [tx],
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
@@ -1199,7 +1145,8 @@ describe("bank_reconciliation plan binding", () => {
       { id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" },
       { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 200, date: "2026-03-20", clients_id: 21, ref_number: "RF2" },
     ];
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: txs,
       sales: [
         { id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" },
@@ -1253,7 +1200,8 @@ describe("bank_reconciliation plan binding", () => {
     ["linked_invoice_clients_ambiguous", () => new LinkedInvoiceClientsAmbiguousError({ transactionId: 1, invoiceClientsIds: [20, 21] })],
   ])("auto-confirm reports a %s confirm refusal under its own error code", async (code, makeError) => {
     const context = createTestRuntimeSafetyContext();
-    const { handler, api } = autoConfirmWithContext(context, {
+    const { handler, api } = setupAutoConfirmTool({
+      context,
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
@@ -1285,24 +1233,7 @@ describe("bank_reconciliation plan binding", () => {
     const context = createTestRuntimeSafetyContext();
     const txs = [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }];
     const sales = [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }];
-    const api = {
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue(txs),
-        get: vi.fn().mockResolvedValue(txs[0]),
-        update: vi.fn().mockResolvedValue({}),
-        confirm: vi.fn().mockResolvedValue({}),
-      },
-      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(sales) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([]),
-        getAccountDimensions: vi.fn().mockResolvedValue([]),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
-      },
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: { findByName: vi.fn().mockResolvedValue([]) },
-    } as any;
+    const api = createAutoConfirmApi({ transactions: txs, sales });
 
     // Inbox-captured side: registerBankReconciliationTools on the shared context
     // (exactly what captureInternalToolHandlers does for the Accounting Inbox).
@@ -3135,43 +3066,20 @@ describe("exact-match confirm duplicate-posting guard", () => {
     tx?: Record<string, unknown>;
     sale?: Record<string, unknown>;
   } = {}) {
-    const server = { registerTool: vi.fn() } as any;
     const tx = options.tx ?? matchingTx;
     const sale = options.sale ?? matchingSale;
-    const listAllWithPostings = options.journalsThrows
+    const api = createAutoConfirmApi({ transactions: [tx], sales: [sale] });
+    api.transactions.get = vi.fn().mockResolvedValue({ ...tx });
+    api.readonly.getBankAccounts = options.bankDimsThrows
+      ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
+      : vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]);
+    api.readonly.getAccountDimensions = vi.fn().mockResolvedValue([
+      { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
+    ]);
+    api.journals.listAllWithPostings = options.journalsThrows
       ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
       : vi.fn().mockResolvedValue(options.journals ?? []);
-    const api = {
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([tx]),
-        get: vi.fn().mockResolvedValue({ ...tx }),
-        update: vi.fn().mockResolvedValue({}),
-        confirm: vi.fn().mockResolvedValue({}),
-      },
-      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([sale]) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getBankAccounts: options.bankDimsThrows
-          ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
-          : vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
-        ]),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Test OÜ" }),
-      },
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings },
-      clients: { findByName: vi.fn().mockResolvedValue([]) },
-    } as any;
-    registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-    const registration = server.registerTool.mock.calls.find(
-      ([name]: [string]) => name === (options.toolName ?? "auto_confirm_exact_matches"),
-    );
-    if (!registration) throw new Error("Tool was not registered");
-    return {
-      handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
-      api,
-    };
+    return setupAutoConfirmTool({ api, toolName: options.toolName });
   }
 
   it("dry run keeps would_confirm and carries possible_duplicate_postings + a POSSIBLE-duplicate warning", async () => {

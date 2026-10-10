@@ -1,6 +1,5 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import { logAudit } from "../audit-log.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
@@ -14,6 +13,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { HttpError } from "../http-client.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
 
@@ -366,11 +366,6 @@ function unwrapBookingRefsInResult(result: { content: Array<{ text: string }>; i
   let parsed: unknown;
   try { parsed = parseMcpResponse(text); } catch { return result; }
   return { ...result, content: [{ ...result.content[0]!, text: JSON.stringify(deepUnwrapBookingRefs(parsed)) }] };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("lightyear investments tools", () => {
@@ -2296,8 +2291,9 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(logAudit).toHaveBeenCalledTimes(1);
   });
 
-  it("H17 reservation prepass bounds 5000 varied A misses against 5000 conversion refs", { timeout: 10_000 }, async () => {
-    const cardinality = 5_000;
+  it("H17 reservation prepass bounds varied A misses against as many conversion refs with one candidate visit", async () => {
+    // Linearity is pinned by the reservation diagnostics below, not by row count.
+    const cardinality = 500;
     const denseConversions: string[][] = [];
     const denseTrades: string[][] = [];
     const step = 0.00000000000005;
@@ -2379,7 +2375,11 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings[0]).toMatch(/Conversion <<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nS\n<<UNTRUSTED_OCR_END:\1>>\.$/);
     const collect = (lightyearInvestments as any).collectTradeReservedConversionRefs;
     expect(collect).toBeTypeOf("function");
-    expect([...collect(statementRowsForInternalTest(rows))]).toEqual(["S"]);
+    const diagnostics: Record<string, number> = {};
+    expect([...collect(statementRowsForInternalTest(rows), diagnostics)]).toEqual(["S"]);
+    expect(diagnostics.strict_queries).toBe(cardinality);
+    expect(diagnostics.strict_candidate_visits).toBe(1);
+    expect(diagnostics.legacy_candidate_visits ?? 0).toBe(0);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
     expect(run.api.journals.listAll).not.toHaveBeenCalled();
     expect(run.api.journals.create).not.toHaveBeenCalled();
@@ -2446,29 +2446,22 @@ describe("H17 distribution currency and EUR provenance", () => {
 
   const h17RoundingRows = () => [["02/03/2026", "EUR-ROUND-H17", "", "", "Dividend", "0", "EUR", "0", "4.449", "1", "1.055", "1.775", "1.628"]];
 
-  it("H17 rounding RED emits summary review warning for unreconciled rounded EUR components", async () => {
-    const rows = h17RoundingRows();
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+  it("H17 rounding RED reviews unreconciled rounded EUR components on summary, include_rows, and atomic surfaces", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv(h17RoundingRows()));
     const summaryTool = setupLightyearTool("parse_lightyear_statement");
     const summary = parseMcpResponse((await summaryTool.handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
     expect(summary.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
     expect(summary.needs_review).toBe(true);
     expect(summary.warnings).toEqual([expect.stringContaining("distribution review [distribution_amount_conflict]")]);
     expect(summary.warnings[0]).toContain("The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent.");
-  });
 
-  it("H17 rounding RED keeps include_rows stable with a manual status and null EUR cells", async () => {
-    const rows = h17RoundingRows();
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    // include_rows stays stable with a manual status and null EUR cells.
     const includedTool = setupLightyearTool("parse_lightyear_statement");
     const included = await includedTool.handler({ file_path: "/tmp/lightyear.csv", include_rows: true });
     expect(included.content[0]!.text).toContain("manual_review:distribution_amount_conflict");
     expect(included.content[0]!.text).toContain("| — | — | — | — | manual_review:distribution_amount_conflict | source_eur |");
-  });
 
-  it("H17 rounding RED returns an exact atomic manual result without side effects", async () => {
-    const rows = h17RoundingRows();
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    // Atomic booking returns an exact manual result without side effects.
     const booked = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await booked.handler({ file_path: "/tmp/lightyear.csv", broker_account: 999, income_account: 998, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
@@ -2493,29 +2486,24 @@ describe("H17 distribution currency and EUR provenance", () => {
       ["02/03/2026", "USD-ZERO-H17", "", "", "Dividend", "0", "USD", "0", "0.004", "0", "0", "0.004", "0"],
     ];
 
-  it.each(["EUR", "foreign"] as const)("H17 rounded-zero RED marks the %s summary for mapped review", async kind => {
+  it.each(["EUR", "foreign"] as const)("H17 rounded-zero RED reviews %s on summary, include_rows, and atomic surfaces", async kind => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h17RoundedZeroRows(kind)));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
-    expect(payload.needs_review).toBe(true);
-    expect(payload.warnings).toContainEqual(expect.stringContaining("distribution review [distribution_amount_conflict]"));
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
+    expect(summary.needs_review).toBe(true);
+    expect(summary.warnings).toContainEqual(expect.stringContaining("distribution review [distribution_amount_conflict]"));
     if (kind === "foreign") {
-      expect(payload.warnings[0]).toMatch(/ Conversion <<UNTRUSTED_OCR_START:/);
-      expect(payload.unhandled.rows.filter((row: any) => row.type === "Conversion")).toHaveLength(2);
+      expect(summary.warnings[0]).toMatch(/ Conversion <<UNTRUSTED_OCR_START:/);
+      expect(summary.unhandled.rows.filter((row: any) => row.type === "Conversion")).toHaveLength(2);
     }
-  });
 
-  it.each(["EUR", "foreign"] as const)("H17 rounded-zero RED renders stable null-EUR include_rows for %s", async kind => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17RoundedZeroRows(kind)));
-    const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const text = (await handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
+    // include_rows renders stable null-EUR cells.
+    const text = (await setupLightyearTool("parse_lightyear_statement").handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
     expect(text).toContain("manual_review:distribution_amount_conflict");
     expect(text).toContain(`| — | — | — | — | manual_review:distribution_amount_conflict | ${kind === "EUR" ? "source_eur" : "—"} |`);
-  });
 
-  it.each(["EUR", "foreign"] as const)("H17 rounded-zero RED returns an atomic %s manual result with no side effects", async kind => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17RoundedZeroRows(kind)));
+    // Atomic booking returns a manual result with no side effects.
     const booked = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await booked.handler({ file_path: "/tmp/lightyear.csv", broker_account: 999, income_account: 998, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
@@ -2535,24 +2523,19 @@ describe("H17 distribution currency and EUR provenance", () => {
 
   const h17OneCentRows = () => [["02/03/2026", "EUR-CENT-H17", "", "", "Dividend", "0", "EUR", "0", "1.005", "1", "0", "0.996", "0"]];
 
-  it("H17 one-cent RED maps an exactly one-cent rounded imbalance to summary review", async () => {
+  it("H17 one-cent RED reviews an exactly one-cent rounded imbalance on summary, include_rows, and atomic surfaces (prevents D1.00 C1.01)", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h17OneCentRows()));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
-    expect(payload.needs_review).toBe(true);
-    expect(payload.warnings).toEqual([expect.stringContaining("distribution review [distribution_amount_conflict]")]);
-  });
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
+    expect(summary.needs_review).toBe(true);
+    expect(summary.warnings).toEqual([expect.stringContaining("distribution review [distribution_amount_conflict]")]);
 
-  it("H17 one-cent RED renders safe manual include_rows with null EUR values", async () => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17OneCentRows()));
-    const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const text = (await handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
+    // include_rows renders a safe manual row with null EUR values.
+    const text = (await setupLightyearTool("parse_lightyear_statement").handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
     expect(text).toContain("| — | — | — | — | manual_review:distribution_amount_conflict | source_eur |");
-  });
 
-  it("H17 one-cent RED prevents D1.00 C1.01 and returns an exact manual result without reads or writes", async () => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17OneCentRows()));
+    // Atomic booking returns an exact manual result without reads or writes.
     const booked = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await booked.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
@@ -2635,27 +2618,22 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings).toBeUndefined();
   });
 
-  it.each(h17UnsafeCentCases())("H17 unsafe-cents RED marks %s summary for finite mapped review", async (_label, rows, _currency, unhandledConversions) => {
+  it.each(h17UnsafeCentCases())("H17 unsafe-cents RED reviews %s on summary, include_rows, and atomic surfaces", async (_label, rows, currency, unhandledConversions) => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
-    expect(payload.needs_review).toBe(true);
-    expect(payload.warnings).toContainEqual(expect.stringContaining("distribution review [distribution_amount_conflict]"));
-    expect(Number.isFinite(payload.distributions.total_eur)).toBe(true);
-    expect((payload.unhandled?.rows ?? []).filter((row: any) => row.type === "Conversion")).toHaveLength(unhandledConversions);
-  });
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 1, bookable_count: 0, review_count: 1, total_eur: 0 });
+    expect(summary.needs_review).toBe(true);
+    expect(summary.warnings).toContainEqual(expect.stringContaining("distribution review [distribution_amount_conflict]"));
+    expect(Number.isFinite(summary.distributions.total_eur)).toBe(true);
+    expect((summary.unhandled?.rows ?? []).filter((row: any) => row.type === "Conversion")).toHaveLength(unhandledConversions);
 
-  it.each(h17UnsafeCentCases())("H17 unsafe-cents RED renders stable null-EUR include_rows for %s", async (_label, rows, currency) => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
-    const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const text = (await handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
+    // include_rows renders stable null-EUR cells.
+    const text = (await setupLightyearTool("parse_lightyear_statement").handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
     expect(text).toContain("manual_review:distribution_amount_conflict");
     expect(text).toContain(`| — | — | — | — | manual_review:distribution_amount_conflict | ${currency === "EUR" ? "source_eur" : "—"} |`);
-  });
 
-  it.each(h17UnsafeCentCases())("H17 unsafe-cents RED returns exact atomic manual evidence for %s without side effects", async (_label, rows, currency) => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    // Atomic booking returns exact manual evidence without side effects.
     const booked = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await booked.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, tax_account: 8610, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 0 });
@@ -2691,24 +2669,17 @@ describe("H17 distribution currency and EUR provenance", () => {
     ["02/03/2026", "USD-DECIMAL-H17", "", "", "Dividend", "0", "USD", "0", "4.02", "0", "0.58", "2.30", "1.14"],
   ];
 
-  it("H17 decimal-cents RED parses ordinary EUR 0.29 as bookable", async () => {
+  it("H17 decimal-cents RED keeps ordinary EUR 0.29 bookable on summary and include_rows and executes an exactly balanced journal", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h17DecimalEurRows()));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 1, bookable_count: 1, review_count: 0, total_eur: 0.29 });
-    expect(payload.needs_review).toBeUndefined();
-    expect(payload.warnings).toBeUndefined();
-  });
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 1, bookable_count: 1, review_count: 0, total_eur: 0.29 });
+    expect(summary.needs_review).toBeUndefined();
+    expect(summary.warnings).toBeUndefined();
 
-  it("H17 decimal-cents RED renders ordinary EUR 0.29 include_rows as bookable", async () => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17DecimalEurRows()));
-    const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const text = (await handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
+    const text = (await setupLightyearTool("parse_lightyear_statement").handler({ file_path: "/tmp/lightyear.csv", include_rows: true })).content[0]!.text;
     expect(text).toContain("| EUR | 0.29 | 0.00 | 0.00 | 0.29 | 0.29 | 0.00 | 0.00 | 0.29 | bookable | source_eur |");
-  });
 
-  it("H17 decimal-cents RED executes an exactly balanced EUR 0.29 journal", async () => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17DecimalEurRows()));
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
     expect(payload.results[0]).toMatchObject({ status: "created", currency: "EUR", gross_eur: 0.29, net_eur: 0.29, tax_eur: 0, fee_eur: 0, fx_provenance: null });
@@ -2716,17 +2687,14 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(logAudit).toHaveBeenCalledTimes(1);
   });
 
-  it("H17 decimal-cents RED proves foreign 1.15/.57/.29 components and provenance", async () => {
+  it("H17 decimal-cents RED proves foreign 1.15/.57/.29 components and executes them balanced with canonical provenance", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv(h17DecimalForeignRows()));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 1, bookable_count: 1, review_count: 0, total_eur: 2.01 });
-    expect(payload.unhandled).toBeUndefined();
-    expect(payload.needs_review).toBeUndefined();
-  });
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 1, bookable_count: 1, review_count: 0, total_eur: 2.01 });
+    expect(summary.unhandled).toBeUndefined();
+    expect(summary.needs_review).toBeUndefined();
 
-  it("H17 decimal-cents RED executes balanced foreign decimal components with canonical provenance", async () => {
-    mockedReadFile.mockResolvedValue(buildStatementCsv(h17DecimalForeignRows()));
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, tax_account: 8610, fee_account: 8610, dry_run: false })).content[0]!.text) as any;
     expect(payload.results[0]).toMatchObject({ status: "created", currency: "USD", gross_eur: 2.01, net_eur: 1.15, tax_eur: 0.57, fee_eur: 0.29 });
@@ -2817,27 +2785,23 @@ describe("H17 distribution currency and EUR provenance", () => {
     return order === "forward" ? [maximumUnambiguousAmount, ...foreign] : [...foreign, maximumUnambiguousAmount];
   };
 
-  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED applies the same all-review summary in %s EUR source order", async order => {
+  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED reviews every EUR contributor on summary and atomic surfaces in %s source order", async order => {
     const rows = h17AggregateEurRows(order);
     const references = rows.map(row => row[1]);
     mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 2, bookable_count: 0, review_count: 2, total_eur: 0 });
-    expect(payload.needs_review).toBe(true);
-    expect(payload.warnings).toHaveLength(2);
-    expect(payload.warnings[0]).toContain(references[0]);
-    expect(payload.warnings[1]).toContain(references[1]);
-    expect(payload.warnings).toEqual([
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 2, bookable_count: 0, review_count: 2, total_eur: 0 });
+    expect(summary.needs_review).toBe(true);
+    expect(summary.warnings).toHaveLength(2);
+    expect(summary.warnings[0]).toContain(references[0]);
+    expect(summary.warnings[1]).toContain(references[1]);
+    expect(summary.warnings).toEqual([
       expect.stringContaining("distribution review [distribution_amount_conflict]"),
       expect.stringContaining("distribution review [distribution_amount_conflict]"),
     ]);
-  });
 
-  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED returns source-ordered atomic EUR review results without side effects in %s order", async order => {
-    const rows = h17AggregateEurRows(order);
-    const references = rows.map(row => row[1]);
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    // Atomic booking returns source-ordered review results without side effects.
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 2, bookable_distributions: 0, review_required: 2, new_entries: 0, duplicates_skipped: 0 });
@@ -2881,26 +2845,22 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings).toHaveLength(2);
   });
 
-  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED atomically releases mixed FX evidence in %s source order", async order => {
+  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED atomically releases mixed FX evidence on summary and atomic surfaces in %s source order", async order => {
     const rows = h17MixedAggregateRows(order);
     const references = rows.filter(row => row[4] !== "Conversion").map(row => row[1]);
     mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
     const { handler } = setupLightyearTool("parse_lightyear_statement");
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
-    expect(payload.distributions).toEqual({ count: 2, bookable_count: 0, review_count: 2, total_eur: 0 });
-    const distributionWarnings = payload.warnings.filter((warning: string) => warning.includes("distribution review"));
+    const summary = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv" })).content[0]!.text) as any;
+    expect(summary.distributions).toEqual({ count: 2, bookable_count: 0, review_count: 2, total_eur: 0 });
+    const distributionWarnings = summary.warnings.filter((warning: string) => warning.includes("distribution review"));
     expect(distributionWarnings).toHaveLength(2);
     expect(distributionWarnings[0]).toContain(references[0]);
     expect(distributionWarnings[1]).toContain(references[1]);
-    const unhandledConversions = payload.unhandled.rows.filter((row: any) => row.type === "Conversion");
+    const unhandledConversions = summary.unhandled.rows.filter((row: any) => row.type === "Conversion");
     expect(unhandledConversions).toHaveLength(2);
     expect(unhandledConversions.every((row: any) => row.reference.includes("CN-MIXED-AGG-H17"))).toBe(true);
-  });
 
-  it.each(["forward", "reverse"] as const)("H17 aggregate-cents RED returns source-ordered mixed manual evidence without mutations in %s order", async order => {
-    const rows = h17MixedAggregateRows(order);
-    const references = rows.filter(row => row[4] !== "Conversion").map(row => row[1]);
-    mockedReadFile.mockResolvedValue(buildStatementCsv(rows));
+    // Atomic booking returns source-ordered manual evidence without mutations.
     const run = setupLightyearTool("book_lightyear_distributions");
     const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 2, bookable_distributions: 0, review_required: 2, new_entries: 0, duplicates_skipped: 0 });

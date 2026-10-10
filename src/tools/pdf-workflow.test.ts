@@ -9,9 +9,9 @@ import { parseDocument } from "../document-parser.js";
 import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
-import { z } from "zod";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 vi.mock("../file-validation.js", async () => ({
   ...await vi.importActual<typeof import("../file-validation.js")>("../file-validation.js"),
@@ -152,11 +152,6 @@ function setupPdfWorkflowTool(
     options: registration[1] as { description?: string; inputSchema?: Record<string, unknown> },
     api,
   };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 afterEach(() => {
