@@ -819,6 +819,37 @@ describe("wise import tool", () => {
     expect(payload.results).toEqual([]);
   });
 
+  it("books an incoming row with a target fee gross, so main IN minus the fee row nets to the credited amount", async () => {
+    // "Target amount (after fees)" on an IN row is what was actually credited.
+    const csv = buildCsvRows([
+      buildM04Values({
+        id: "in-fee-1", direction: "IN", sourceName: "Customer OÜ", sourceAmount: "100",
+        targetName: "Wise Own Account", targetAmount: "98", targetFeeAmount: "2",
+      }),
+    ]);
+    mockedReadFile.mockResolvedValue(csv);
+    const { api, handler } = setupWiseTool([]);
+    await handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9, execute: true });
+
+    const payloads = api.transactions.create.mock.calls.map(([payload]: [any]) => payload);
+    expect(payloads).toEqual([
+      expect.objectContaining({ type: "D", amount: 100, description: expect.stringMatching(/^WISE:in-fee-1 /) }),
+      expect.objectContaining({ type: "C", amount: 2, description: "WISE:FEE:in-fee-1 Wise teenustasu [source_direction=OUT]" }),
+    ]);
+
+    // A row stored net by an older version is still recognised by its WISE: tag.
+    mockedReadFile.mockResolvedValue(csv);
+    const rerun = setupWiseTool([
+      { id: 1, accounts_dimensions_id: 5, type: "D", amount: 98, cl_currencies_id: "EUR", date: "2026-06-10",
+        description: "WISE:in-fee-1 Customer OÜ [source_direction=IN]", bank_account_name: "Customer OÜ", status: "PROJECT", is_deleted: false },
+      { id: 2, accounts_dimensions_id: 5, type: "C", amount: 2, cl_currencies_id: "EUR", date: "2026-06-10",
+        description: "WISE:FEE:in-fee-1 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise", status: "PROJECT", is_deleted: false },
+    ]);
+    const payload = parseWiseResponse(await rerun.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 }));
+    expect(rerun.api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.skipped_details.flatMap((group: any) => group.sample_ids)).toEqual(["in-fee-1", "FEE:in-fee-1"]);
+  });
+
   it("does not treat 'jar' inside a longer word (JARVIS reference, Jari note) as a Jar transfer", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       buildM04Values({ id: "TRANSFER-JARVIS-1", targetName: "Jarvis Consulting", reference: "JARVIS-2026-001" }),
@@ -918,9 +949,11 @@ describe("wise import tool", () => {
       execute: true,
     });
 
+    // 92 EUR is the after-fees credited amount; the 2 EUR target fee is its own
+    // outgoing row, so the incoming row is booked gross (94) and nets to 92.
     expect(api.transactions.create).toHaveBeenNthCalledWith(1, expect.objectContaining({
       type: "D",
-      amount: 92,
+      amount: 94,
       cl_currencies_id: "EUR",
       bank_account_name: "Customer Inc",
       description: "WISE:fx-in-1 Customer Inc [100 USD @ 0.92] [source_direction=IN]",
