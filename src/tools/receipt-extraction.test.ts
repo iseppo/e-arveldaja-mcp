@@ -2376,6 +2376,20 @@ describe("booked gross and booked currency stay paired (Codex review)", () => {
       .toEqual({ gross: 100, currency: "USD", unsupported: false });
   });
 
+  it("keeps a converted total (n USD = m EUR) as an amount, not an exchange rate", () => {
+    expect(extract([
+      "Supplier: Restaurant LLC", "Invoice no: INV-123", "Date: 2026-10-01",
+      "Tax 0.00 EUR", "Tip EUR 5.00", "Total 100.00 USD = 90.00 EUR",
+    ]).gross).toBe(90);
+  });
+
+  it.each([
+    ["1 GBP = 1.1600 EUR", ["Purchase amount 100.00", "Exchange rate 1 GBP = 1.1600 EUR", "Cardholder amount EUR 116.00"], 100, "GBP"],
+    ["100 JPY = 0.6213 EUR", ["Total 5000 JPY", "Rate 100 JPY = 0.6213 EUR", "Cardholder amount EUR 31.07"], 5000, "JPY"],
+  ])("still drops the numbers of a unit rate quote (%s)", (_label, lines, gross, currency) => {
+    expect(extract(lines)).toEqual({ gross, currency, unsupported: false });
+  });
+
   it("keeps a EUR cardholder gross when a transaction-currency header names the merchant currency", () => {
     expect(extract(["Bangkok Hotel", "Transaction currency: THB", "Transaction amount THB 3500.00", "Cardholder amount EUR 90.00"]))
       .toEqual({ gross: 90, currency: "EUR", unsupported: false });

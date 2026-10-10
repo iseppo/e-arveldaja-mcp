@@ -1043,15 +1043,25 @@ const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "1 EUR = 395.12 HUF": a reference rate names a currency without making it the
 // document's currency. Only when BOTH sides are uppercase ISO 4217 codes that
 // are not also receipt words: "2 hrs = 6.00 EUR", "1 BOX = 24.00 EUR" and
-// "2 KGS = 6.00 EUR" (kilograms) are quantity/unit prices, not rates.
-const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*([A-Za-z]{3})\s*=\s*\d[\d\s.,]*([A-Za-z]{3})(?![A-Za-z])/g;
+// "2 KGS = 6.00 EUR" (kilograms) are quantity/unit prices, not rates. A rate
+// quotes one unit (or 10/100/1000 units against a 3+ decimal rate, "100 JPY =
+// 0.6213 EUR"); "Total 100.00 USD = 90.00 EUR" is a converted amount, not a rate.
+const EXCHANGE_RATE_EXPRESSION_RE = /(\d[\d.,]*)\s*([A-Za-z]{3})\s*=\s*(\d[\d\s.,]*?)\s*([A-Za-z]{3})(?![A-Za-z])/g;
 const ISO_4217_CURRENCY_CODE_SET: ReadonlySet<string> = new Set(ISO_4217_CURRENCY_CODES);
+
+function isRateQuote(base: string, quote: string): boolean {
+  if (/^1(?:[.,]0+)?$/.test(base)) return true;
+  return /^10{1,3}$/.test(base) && /[.,]\d{3,}$/.test(quote.replace(/\s+/g, ""));
+}
 
 function removeExchangeRateExpressions(line: string): string {
   const isRateCode = (code: string) =>
     ISO_4217_CURRENCY_CODE_SET.has(code) && !UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code);
-  return line.replace(EXCHANGE_RATE_EXPRESSION_RE, (match, from: string, to: string) =>
-    isRateCode(from) && isRateCode(to) ? " " : match);
+  return line.replace(
+    EXCHANGE_RATE_EXPRESSION_RE,
+    (match, base: string, from: string, quote: string, to: string) =>
+      isRateCode(from) && isRateCode(to) && isRateQuote(base, quote) ? " " : match,
+  );
 }
 // "Exchange rate: 1.1600", "Exchange rate USD/EUR 0.9000": the value right after
 // an exchange-rate label. Only the number is captured for removal; the label
