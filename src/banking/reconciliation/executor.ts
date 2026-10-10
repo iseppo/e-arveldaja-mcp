@@ -799,6 +799,29 @@ export async function runInterAccountMatching(
     return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
   }
 
+  // A pair held back from both pair matching and one-sided booking (booking
+  // each leg one-sided would double-book it) is reported, never dropped silently.
+  function reportBlockedPair(
+    out: Transaction, inc: Transaction, confidence: number,
+    code: "counterpart_lacks_own_origin" | "conflicting_transfer_amounts",
+  ): void {
+    blockedOneSidedTxIds.add(out.id!);
+    blockedOneSidedTxIds.add(inc.id!);
+    ambiguousPairs.push({
+      outgoing_transaction_id: out.id!,
+      amount: out.amount,
+      date_out: out.date,
+      from_dimension_id: out.accounts_dimensions_id,
+      candidate_incoming_transaction_ids: [inc.id!],
+      candidate_incoming_dimension_ids: [inc.accounts_dimensions_id],
+      confidence,
+      code,
+      reason: code === "counterpart_lacks_own_origin"
+        ? `Transactions ${out.id} (${out.amount}) and ${inc.id} (${inc.amount}) point at each other's account, but ${inc.id} has no evidence it came from ${out.id}'s account (its counterparty IBAN is not that account's), so it cannot be treated as a transfer mirror. Check the bank statements and confirm each row as what it is.`
+        : `Transactions ${out.id} and ${inc.id} point at each other's account with the same nominal amount but different base (EUR) amounts, so they cannot be booked as one transfer automatically. Check the bank statements and book the transfer once at the correct EUR amount.`,
+    });
+  }
+
   // --- Phase 1: C↔D pair matching ---
   for (let i = 0; i < outgoing.length; i++) {
     const txOut = outgoing[i]!;
@@ -836,8 +859,7 @@ export async function runInterAccountMatching(
           txOutOneSided.targetDimension === txIn.accounts_dimensions_id &&
           txInOneSided.targetDimension === txOut.accounts_dimensions_id;
         if (mutuallyConsistentOneSidedTargets) {
-          blockedOneSidedTxIds.add(txOut.id);
-          blockedOneSidedTxIds.add(txIn.id);
+          reportBlockedPair(txOut, txIn, compatibility.confidence, "conflicting_transfer_amounts");
         }
         continue;
       }
@@ -1034,8 +1056,7 @@ export async function runInterAccountMatching(
       if (!compatibility) continue;
 
       if (compatibility.conflictingComparableAmounts) {
-        blockedOneSidedTxIds.add(tx.id);
-        blockedOneSidedTxIds.add(other.id);
+        reportBlockedPair(tx, other, compatibility.confidence, "conflicting_transfer_amounts");
         continue;
       }
 
@@ -1109,8 +1130,7 @@ export async function runInterAccountMatching(
     if (!hasOwnOriginEvidence(counterpart, source.accounts_dimensions_id)) {
       // Not a deletable mirror, yet both legs infer each other's account:
       // booking each one-sided would double-book. Leave both for review.
-      blockedOneSidedTxIds.add(source.id!);
-      blockedOneSidedTxIds.add(counterpart.id!);
+      reportBlockedPair(source, counterpart, bestCandidate.confidence, "counterpart_lacks_own_origin");
       continue;
     }
     const sourceId = source.id!;

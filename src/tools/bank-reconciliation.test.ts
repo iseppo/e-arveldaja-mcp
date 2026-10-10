@@ -2250,6 +2250,63 @@ describe("reconcile_inter_account_transfers", () => {
       });
     });
 
+    describe("pairs blocked from one-sided booking are reported for review", () => {
+      const lhvWise = [
+        { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
+        { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
+      ];
+      const base = { status: "PROJECT", is_deleted: false, cl_currencies_id: "EUR", date: "2026-10-01", clients_id: null };
+
+      it("reports a same-type pair whose mirror leg lacks own-origin evidence (counterpart_lacks_own_origin)", async () => {
+        const lhvOut = { ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+        const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+          outgoing_transaction_id: 1,
+          candidate_incoming_transaction_ids: [2],
+          code: "counterpart_lacks_own_origin",
+        })]);
+        expect(payload.ambiguous_pairs[0].reason).not.toMatch(/delete|remove/i);
+      });
+
+      it("reports an opposite-direction pair whose base amounts conflict (conflicting_transfer_amounts)", async () => {
+        const lhvOut = { ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+        const wiseIn = { ...base, id: 2, type: "D", amount: 100, cl_currencies_id: "USD", base_amount: 95, accounts_dimensions_id: 22, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+          outgoing_transaction_id: 1,
+          candidate_incoming_transaction_ids: [2],
+          code: "conflicting_transfer_amounts",
+        })]);
+      });
+
+      it("reports a same-type pair whose base amounts conflict (conflicting_transfer_amounts)", async () => {
+        const legA = { ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "own transfer" };
+        const legB = { ...base, id: 2, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 95, accounts_dimensions_id: 22, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", description: "own transfer" };
+        const { handler, api } = setupInterAccountTool({ transactions: [legA, legB], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+          outgoing_transaction_id: 1,
+          candidate_incoming_transaction_ids: [2],
+          code: "conflicting_transfer_amounts",
+        })]);
+      });
+    });
+
     it("warns that own-transfer detection relies on IBANs when the company name has no legal form", async () => {
       const { handler } = setupInterAccountTool({ transactions: [], bankAccounts, companyName: "Seppo AI" });
       const payload = parseMcpResponse((await handler({})).content[0]!.text) as any;

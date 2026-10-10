@@ -187,8 +187,14 @@ export interface AmbiguousPairResult {
   candidate_incoming_transaction_ids: number[];
   candidate_incoming_dimension_ids: number[];
   confidence: number;
-  /** Set when the pair was found but which leg is the source is unknown. */
-  code?: "direction_unresolved" | "possible_fee_deducted_transfer";
+  /** Why the pair needs review: unknown source leg, a possible fee-deducted
+   * transfer, a mirror leg without own-origin evidence (so it cannot be
+   * deleted), or legs whose base amounts conflict. */
+  code?:
+    | "direction_unresolved"
+    | "possible_fee_deducted_transfer"
+    | "counterpart_lacks_own_origin"
+    | "conflicting_transfer_amounts";
   reason: string;
 }
 
