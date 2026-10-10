@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- **Input files are read with a hard size cap.** PDF/receipt images, CSV and CAMT XML inputs were size-checked with `stat` and then read whole, so a file that grew between the check and the read was buffered without bound. Every user-supplied file read (`captureFileInputSnapshot`, `prepareInvoiceDocumentUpload`, `readValidatedReceiptFile` and the receipt-batch snapshot) now reads at most the existing limit plus one byte and fails with the same "File too large" error. The SHA-256 digest is taken over exactly the bytes read.
+
 ## [0.28.1] - 2026-10-02
 
 ### Fixed

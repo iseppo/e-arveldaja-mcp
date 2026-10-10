@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { extname, isAbsolute } from "node:path";
+import { readFileCapped } from "./bounded-read.js";
 import { resolveFileInput } from "./file-validation.js";
 import { cloneAndFreezePlanData } from "./plan-store.js";
 import type { RuntimeSafetyContext } from "./runtime-safety-context.js";
@@ -137,7 +137,7 @@ export async function captureFileInputSnapshot(
   dependencies: FileInputSnapshotDependencies = {},
 ): Promise<FileInputSnapshot> {
   const resolveInput = dependencies.resolveFileInput ?? resolveFileInput;
-  const read = dependencies.readFile ?? (async path => readFile(path));
+  const read = dependencies.readFile ?? (async path => readFileCapped(path, options.maxSize));
   let resolvedSource: ReturnType<typeof resolveSource>;
   try {
     resolvedSource = resolveSource(source, options);

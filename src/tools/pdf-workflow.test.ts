@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { access, readFile } from "fs/promises";
+import { access } from "fs/promises";
+import { readFileCapped } from "../bounded-read.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools } from "./pdf-workflow.js";
@@ -21,17 +22,17 @@ vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
 }));
 
-vi.mock("fs/promises", async () => {
-  const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+vi.mock("../bounded-read.js", async () => {
+  const actual = await vi.importActual<typeof import("../bounded-read.js")>("../bounded-read.js");
   return {
     ...actual,
-    readFile: vi.fn(actual.readFile),
+    readFileCapped: vi.fn(actual.readFileCapped),
   };
 });
 
 const mockedResolveFileInput = vi.mocked(resolveFileInput);
 const mockedParseDocument = vi.mocked(parseDocument);
-const mockedReadFile = vi.mocked(readFile);
+const mockedReadFileCapped = vi.mocked(readFileCapped);
 
 const tempDirs: string[] = [];
 
@@ -161,7 +162,7 @@ function toolMetadataText(options: { description?: string; inputSchema?: Record<
 afterEach(() => {
   mockedResolveFileInput.mockReset();
   mockedParseDocument.mockReset();
-  mockedReadFile.mockClear();
+  mockedReadFileCapped.mockClear();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1255,7 +1256,7 @@ describe("pdf workflow tools", () => {
     mockedResolveFileInput.mockResolvedValue({ path: "C:\\Users\\Seppo\\Documents\\invoice-upload.pdf" });
     // Once, not persistent: afterEach only mockClear()s readFile, so a
     // persistent implementation would leak into later real-file tests.
-    mockedReadFile.mockResolvedValueOnce(Buffer.from("%PDF-pdf-bytes"));
+    mockedReadFileCapped.mockResolvedValueOnce(Buffer.from("%PDF-pdf-bytes"));
 
     const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
 

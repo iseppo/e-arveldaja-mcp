@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { mkdtemp, rm, writeFile } from "fs/promises";
+import { readFileCapped } from "../bounded-read.js";
 import { tmpdir } from "os";
 import { extname, join } from "path";
 import { registerTool } from "../mcp-compat.js";
@@ -76,7 +77,7 @@ export async function prepareInvoiceDocumentUpload(filePath: string, expectedSha
     if (resolved.cleanup) await resolved.cleanup().catch(() => {});
   };
   try {
-    const bytes = await readFile(resolved.path);
+    const bytes = await readFileCapped(resolved.path, MAX_INVOICE_DOCUMENT_SIZE);
     const extension = extname(resolved.path).toLowerCase();
     if (!contentMatchesExtension(bytes, extension)) {
       throw Object.assign(new Error(`Document content does not match its ${extension} extension.`), {

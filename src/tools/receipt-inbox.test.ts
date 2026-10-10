@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFile } from "fs/promises";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { validateFilePath } from "../file-validation.js";
 import {
   classifyReceiptDocument,
@@ -647,21 +650,29 @@ describe("receipt file revalidation", () => {
   });
 
   it("reads the revalidated path instead of the originally scanned path", async () => {
-    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
-    mockedReadFile.mockResolvedValueOnce(Buffer.from("pdf"));
+    const dir = mkdtempSync(join(tmpdir(), "receipt-inbox-test-"));
+    try {
+      const originalPath = join(dir, "original.pdf");
+      const revalidatedPath = join(dir, "revalidated.pdf");
+      writeFileSync(originalPath, "original pdf");
+      writeFileSync(revalidatedPath, "pdf");
+      mockedValidateFilePath.mockResolvedValueOnce(revalidatedPath);
 
-    await expect(readValidatedReceiptFile({
-      name: "receipt.pdf",
-      path: "/tmp/original.pdf",
-      extension: ".pdf",
-      file_type: "pdf",
-      size_bytes: 123,
-      modified_at: "2026-03-01T00:00:00.000Z",
-    })).resolves.toEqual(Buffer.from("pdf"));
+      // Only the revalidated file holds "pdf", so these bytes prove the
+      // revalidated path was read and the originally scanned one was not.
+      await expect(readValidatedReceiptFile({
+        name: "receipt.pdf",
+        path: originalPath,
+        extension: ".pdf",
+        file_type: "pdf",
+        size_bytes: 123,
+        modified_at: "2026-03-01T00:00:00.000Z",
+      })).resolves.toEqual(Buffer.from("pdf"));
 
-    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
-    expect(mockedReadFile).toHaveBeenCalledWith("/tmp/revalidated.pdf");
-    expect(mockedReadFile).not.toHaveBeenCalledWith("/tmp/original.pdf");
+      expect(mockedValidateFilePath).toHaveBeenCalledWith(originalPath, [".pdf"], 50 * 1024 * 1024);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

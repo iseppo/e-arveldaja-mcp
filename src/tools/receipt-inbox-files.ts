@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { mkdtemp, open, readFile, readdir, realpath, rm, stat, writeFile } from "fs/promises";
+import { mkdtemp, open, readdir, realpath, rm, stat, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { extname, join } from "path";
 import { createHash } from "crypto";
@@ -16,6 +16,7 @@ import {
   type ReceiptFileSnapshot,
   type ReceiptScanResult,
 } from "./receipt-inbox-types.js";
+import { readFileCapped, readFileHandleCapped } from "../bounded-read.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath, validateFilePath } from "../file-validation.js";
 import { FileReferenceStoreError } from "../file-reference-store.js";
 
@@ -284,7 +285,7 @@ export async function revalidateReceiptFilePath(file: ReceiptFileInfo): Promise<
 
 export async function readValidatedReceiptFile(file: ReceiptFileInfo): Promise<Buffer> {
   const validatedPath = await revalidateReceiptFilePath(file);
-  return readFile(validatedPath);
+  return readFileCapped(validatedPath, MAX_RECEIPT_SIZE);
 }
 
 export const sha256Hex = (bytes: Uint8Array): string =>
@@ -308,9 +309,7 @@ async function readBoundReceiptFile(
       throw receiptDirectoryChanged();
     }
 
-    const bytes = await handle.readFile();
-    if (bytes.length > MAX_RECEIPT_SIZE) throw receiptDirectoryChanged();
-    return bytes;
+    return await readFileHandleCapped(handle, MAX_RECEIPT_SIZE);
   } catch (error) {
     if (error instanceof FileReferenceStoreError) throw error;
     throw receiptDirectoryChanged();

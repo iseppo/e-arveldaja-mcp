@@ -38,7 +38,14 @@ vi.mock("fs/promises", async (importOriginal) => {
           ino: isFile ? 3 : 2,
           size: isFile ? 512 : 0,
         }),
-        readFile: vi.fn().mockImplementation(() => readFileMock(path)),
+        // Positional FileHandle.read over the bytes readFileMock serves for this path.
+        read: vi.fn().mockImplementation(async (buffer: Buffer, offset: number, length: number, position: number) => {
+          const bytes = Buffer.from(await readFileMock(path));
+          const bytesRead = position >= bytes.length
+            ? 0
+            : bytes.copy(buffer, offset, position, Math.min(bytes.length, position + length));
+          return { bytesRead, buffer };
+        }),
         close: vi.fn().mockResolvedValue(undefined),
       };
     }),
