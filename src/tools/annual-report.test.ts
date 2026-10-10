@@ -1238,6 +1238,23 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     expect(payload.created_journals[0].api_response.created_object_id).toBe(7701);
   });
 
+  it("serializes concurrent executes: the second sees the first's drafts instead of booking the close twice", async () => {
+    const journals = makeM20BaseJournals();
+    let nextId = 7800;
+    const journalsCreate = vi.fn(async (data: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const id = nextId++;
+      journals.push({ ...(data as Journal), id, registered: false, is_deleted: false });
+      return { created_object_id: id };
+    });
+    const handler = setupTool("execute_year_end_close", { journals, journalsCreate });
+    const results = await Promise.all([handler({ year: 2025, confirm: true }), handler({ year: 2025, confirm: true })]);
+    expect(journals.filter((journal) => String(journal.document_number ?? "").startsWith("YEC-")).map((journal) => journal.document_number).sort())
+      .toEqual(["YEC-RESULT-2025", "YEC-RETAINED-2025"]);
+    const payloads = results.map((result) => parseMcpResponse(result.content[0]!.text) as Record<string, any>);
+    expect(payloads.filter((payload) => payload.error === "Year-end close already exists")).toHaveLength(1);
+  });
+
   it("returns a structured partial result — never a bare thrown error — when a closing journal fails to create", async () => {
     const journalsCreate = vi.fn().mockRejectedValue(new Error("backend 500"));
     const handler = setupTool("execute_year_end_close", { journals: makeM20BaseJournals(), journalsCreate });
