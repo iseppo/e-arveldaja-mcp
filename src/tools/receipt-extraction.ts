@@ -866,11 +866,24 @@ export function getClientCountryFromIban(iban?: string | null): string | undefin
 }
 
 export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string | undefined {
-  // The VAT number names the supplier's tax home; an IBAN may be a foreign
-  // collection account, so the VAT country wins when both are present.
-  return getClientCountryFromVatNumber(fields.supplier_vat_no) ??
-    getClientCountryFromIban(fields.supplier_iban) ??
-    getClientCountryFromText(fields.raw_text);
+  // A VAT number, an IBAN and a supplier address naming different countries
+  // leave the jurisdiction undecided (undefined → review): a foreign company
+  // with an EE VAT registration must not be resolved against the Estonian
+  // register by its foreign registry number.
+  // A prefix that names no known country ("KMKREE…", a mis-read label) is no
+  // jurisdiction signal against the IBAN.
+  const rawVatCountry = getClientCountryFromVatNumber(fields.supplier_vat_no);
+  const vatCountry = rawVatCountry && Object.values(IBAN_COUNTRY_TO_CLIENT_COUNTRY).includes(rawVatCountry)
+    ? rawVatCountry
+    : undefined;
+  const ibanCountry = getClientCountryFromIban(fields.supplier_iban);
+  if (vatCountry && ibanCountry && vatCountry !== ibanCountry) return undefined;
+  const country = vatCountry ?? ibanCountry ?? rawVatCountry;
+  if (vatCountry === "EST" && !ibanCountry) {
+    const textCountry = getClientCountryFromText(fields.raw_text);
+    if (textCountry && textCountry !== "EST") return undefined;
+  }
+  return country ?? getClientCountryFromText(fields.raw_text);
 }
 
 // Phrases an invoice/receipt prints when VAT is shifted to the recipient
@@ -1039,6 +1052,11 @@ const CURRENCY_LABEL_CODE_RE =
 // and reference tokens out.
 const AMOUNT_ADJACENT_CODE_RE =
   /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)[.,]\d{2,3}(?!\d)|\d[.,]\d{2,3}\s?([A-Z]{3})(?![A-Za-z])/g;
+// Zero-decimal currencies print whole amounts ("Total HUF 10000", "Total
+// 10 000 HUF"). Same adjacency rule, integer amount; the amount must end there
+// (no "SAR 2 1.50" quantity gap). Only checked on a total/amount line.
+const INTEGER_AMOUNT_ADJACENT_CODE_RE =
+  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?![.,]?\d)(?!\s+\d)|(?<![\d.,])\d+(?:\s\d{3})*\s?([A-Z]{3})(?![A-Za-z])/g;
 // The amount-adjacent form counts only on a total/amount line; a bare
 // "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
 const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
@@ -1048,7 +1066,9 @@ const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "2 KGS = 6.00 EUR" (kilograms) are quantity/unit prices, not rates. A rate
 // quotes one unit (or 10/100/1000 units against a 3+ decimal rate, "100 JPY =
 // 0.6213 EUR"); "Total 100.00 USD = 90.00 EUR" is a converted amount, not a rate.
-const EXCHANGE_RATE_EXPRESSION_RE = /(\d[\d.,]*)\s*([A-Za-z]{3})\s*=\s*(\d[\d\s.,]*?)\s*([A-Za-z]{3})(?![A-Za-z])/g;
+// Number tokens are bounded and must start a number so a long digit run in
+// untrusted text cannot make the scan quadratic.
+const EXCHANGE_RATE_EXPRESSION_RE = /(?<![\d.,])(\d[\d.,]{0,20})\s*([A-Za-z]{3})\s*=\s*(\d[\d\s.,]{0,24}?)\s*([A-Za-z]{3})(?![A-Za-z])/g;
 const ISO_4217_CURRENCY_CODE_SET: ReadonlySet<string> = new Set(ISO_4217_CURRENCY_CODES);
 
 function isRateQuote(base: string, quote: string): boolean {
@@ -1096,10 +1116,18 @@ function detectUnsupportedCurrencyCode(
     skipMerchantLabels = false,
   ): string | undefined => {
     const line = removeExchangeRateExpressions(rawLine);
+    const labelMatches = [...line.matchAll(CURRENCY_LABEL_CODE_RE)].filter(match =>
+      !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index))));
+    // An uppercase word-like code printed right after an explicit currency
+    // label ("Currency: TRY") is the document currency, not a receipt word.
+    for (const match of labelMatches) {
+      const code = match[1];
+      if (code && UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)) return code;
+    }
     const matches = [
-      ...[...line.matchAll(CURRENCY_LABEL_CODE_RE)].filter(match =>
-        !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index)))),
+      ...labelMatches,
       ...(includeAmountAdjacent ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
+      ...(includeAmountAdjacent ? line.matchAll(INTEGER_AMOUNT_ADJACENT_CODE_RE) : []),
     ];
     for (const match of matches) {
       const code = (match[1] ?? match[2])?.toUpperCase();

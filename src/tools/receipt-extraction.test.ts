@@ -2294,6 +2294,61 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect(fields.currency).toBe("USD");
   });
 
+  it("flags an integer-denominated unsupported total even when a EUR payment line follows (Codex slice 4 #1)", () => {
+    const fields = extractReceiptFieldsFromText([
+      "Supplier: Budapest Software Kft", "Invoice no: HU-2026-41", "Date: 2026-10-01",
+      "Subtotal HUF 10000", "VAT HUF 0", "Total HUF 10000", "Paid EUR 25.40",
+    ].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("HUF")(fields.extraction_notes)).toBe(true);
+    expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
+  });
+
+  it.each([
+    ["trailing integer code", ["Shop LLC", "Total 10000 HUF"], "HUF"],
+    ["grouped integer", ["Shop LLC", "Total HUF 10 000"], "HUF"],
+  ])("flags an integer unsupported total: %s", (_label, lines, code) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
+  });
+
+  it.each([
+    ["Total 100 EUR", ["Shop OÜ", "Total 100 EUR"]],
+    ["Kokku EUR 100", ["Shop OÜ", "Kokku EUR 100"]],
+  ])("keeps an integer EUR total as EUR: %s", (_label, lines) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe("EUR");
+    expect(fields.total_gross).toBe(100);
+    expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
+  });
+
+  it("flags a word-like code after an explicit currency label (Codex slice 4 #2)", () => {
+    const fields = extractReceiptFieldsFromText([
+      "Supplier: Bosphorus Software Ltd", "Invoice no: TR-2026-41", "Date: 2026-10-01", "Currency: TRY",
+      "Subtotal TRY 1200.00", "VAT TRY 0.00", "Total TRY 1200.00", "Paid EUR 32.10",
+    ].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("TRY")(fields.extraction_notes)).toBe(true);
+    expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
+  });
+
+  it.each([
+    ["Valuuta: GEL", "GEL"],
+    ["Currency code: BAM", "BAM"],
+    ["Valuta ALL", "ALL"],
+  ])("flags a labelled word-like code: %s", (label, code) => {
+    const fields = extractReceiptFieldsFromText(["Shop LLC", label, "Total 100.00", "Paid EUR 2.00"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
+  });
+
+  it("does not flag a lowercase word after a currency label", () => {
+    const fields = extractReceiptFieldsFromText(["Shop OÜ", "Currency: all prices include VAT", "Total 10.00 EUR"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe("EUR");
+    expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
+  });
+
   it.each([
     ["EUR total", ["Shop OÜ", "Kokku 24,40 EUR"], "EUR"],
     ["unmarked total", ["Shop OÜ", "Kokku 24,40"], undefined],
@@ -2365,6 +2420,13 @@ describe("booked gross and booked currency stay paired (Codex review)", () => {
     ["differing from the document currency", ["Hotel London", "Transaction currency: GBP", "Transaction amount: 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder currency: EUR", "Cardholder amount: 116.00"], 100, "GBP"],
   ])("reads a separately printed cardholder currency %s", (_label, lines, gross, currency) => {
     expect(extract(lines)).toEqual({ gross, currency, unsupported: false });
+  });
+
+  it("extracts a receipt with a 20,000-digit reference line in linear time (Codex slice 4 #4)", () => {
+    const lines = ["Supplier: Shop OÜ", "Invoice no: A-1", "Date: 2026-10-01", `Document reference: ${"1".repeat(20_000)}`, "Total EUR 124.00"];
+    const started = performance.now();
+    expect(extract(lines)).toEqual({ gross: 124, currency: "EUR", unsupported: false });
+    expect(performance.now() - started).toBeLessThan(200);
   });
 
   it.each([
@@ -2845,8 +2907,35 @@ describe("supplier IBAN vs the buyer's own account", () => {
     expect(extractReceiptFieldsFromText(text, "x.pdf", { ownIbans: ["EE382200221020145685"] }).supplier_iban).toBe("DE89370400440532013000");
   });
 
-  it("the VAT-number country wins over a conflicting IBAN country", () => {
-    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: "DE812871812", raw_text: "" })).toBe("DEU");
+  it("a VAT country that conflicts with the IBAN country is left for review", () => {
+    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: "DE812871812", raw_text: "" })).toBeUndefined();
     expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: undefined, raw_text: "" })).toBe("EST");
+  });
+
+  const dutch = [
+    "Example Logistics B.V.", "Herengracht 100", "1015 BS Amsterdam", "Netherlands",
+    "Registration no: 12345678", "VAT: EE100931558", "IBAN NL91ABNA0417164300",
+    "Invoice no: NL-2026-7", "Date: 2026-10-01", "Subtotal 100.00 EUR", "VAT 24% 24.00 EUR", "Total 124.00 EUR",
+  ].join("\n");
+
+  it("does not infer Estonia for a Dutch supplier printing an EE VAT number (Codex slice 4 #3)", () => {
+    const fields = extractReceiptFieldsFromText(dutch, "x.pdf");
+    expect(fields.supplier_vat_no).toBe("EE100931558");
+    expect(fields.supplier_iban).toBe("NL91ABNA0417164300");
+    expect(inferSupplierCountry(fields)).toBeUndefined();
+  });
+
+  it("does not infer Estonia from an EE VAT number alone against a foreign supplier address", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Example Logistics B.V.\nAmsterdam\nNetherlands" })).toBeUndefined();
+  });
+
+  it("does not let a mis-read VAT prefix that names no country conflict with the IBAN", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "KMKREE102617582", supplier_iban: "EE382200221020145685", raw_text: "" })).toBe("EST");
+  });
+
+  it("infers Estonia when the VAT number and the IBAN or address agree", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", supplier_iban: "EE382200221020145685", raw_text: "" })).toBe("EST");
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Telia Eesti AS\nTallinn, Estonia" })).toBe("EST");
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Telia Eesti AS\nInvoice 1" })).toBe("EST");
   });
 });
