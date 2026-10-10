@@ -2282,7 +2282,12 @@ describe("dual-display card receipt pairs gross with its own currency (F-GROSSPI
   });
 
   it("drops only the rate numbers, not the rest of the line", () => {
-    expect(extract(["Shop OÜ", "Total 100.00 EUR (1 EUR = 1.08 USD)"])).toMatchObject({ gross: 100 });
+    expect(extract(["Shop OÜ", "Total 100.00 EUR (1 EUR = 1.08 USD)"])).toEqual({ gross: 100, currency: "EUR" });
+  });
+
+  it("takes the line's own currency, not one named only inside a rate aside", () => {
+    expect(extract(["Shop OÜ", "Total USD 50.00 (1 EUR = 1.08 USD)"])).toEqual({ gross: 50, currency: "USD" });
+    expect(extract(["Shop OÜ", "Total £20.00 (1 GBP = 1.17 EUR)"])).toEqual({ gross: 20, currency: "GBP" });
   });
 
   it("control: an explicit total line is unaffected by a cardholder line", () => {

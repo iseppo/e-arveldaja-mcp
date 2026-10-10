@@ -943,7 +943,12 @@ export function detectReceiptCurrency(text: string): string | undefined {
   ];
 
   for (const line of prioritizedLines) {
-    const matches = detectCurrenciesOnLine(line);
+    // "Total 100.00 EUR (1 EUR = 1.08 USD)": a rate aside does not set the
+    // line's currency when the line carries its own mark outside it. A bare
+    // rate line ("Exchange rate: 1 GBP = 1.16 EUR") still names the currency.
+    const withoutRate = line.replace(EXCHANGE_RATE_EXPRESSION_RE, " ");
+    const outsideRate = withoutRate === line ? [] : detectCurrenciesOnLine(withoutRate);
+    const matches = outsideRate.length > 0 ? outsideRate : detectCurrenciesOnLine(line);
     if (matches.length === 0) continue;
     const nonEur = matches.find(code => NON_EUR_CURRENCY_CODES.has(code));
     return nonEur ?? matches[0];
