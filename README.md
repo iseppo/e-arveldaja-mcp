@@ -37,7 +37,7 @@ By using this software you acknowledge that:
 4. Find your public IP address (e.g. at [api.ipify.org](https://api.ipify.org)) and enter it in the allowed IP field. Multiple IPs can be separated by `;`
 5. Save — download the `apikey.txt` file and place it in the working directory where you run your AI assistant
 
-If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes.
+If you don't have a static IP address, you will need to update the allowed IP in e-arveldaja settings whenever your IP changes. Alternatively, enter `0.0.0.0/0` to allow access from any IP address — convenient for laptops or changing IPs, but less secure, since then the `apikey.txt` file alone is enough to access your data.
 
 If requests later start failing with `401 Unauthorized`, the most common cause is that your public IP changed and no longer matches the allowed IP list. Check the current public IP yourself in a browser (for example, `https://api.ipify.org`) and update the whitelist in e-arveldaja if needed.
 
