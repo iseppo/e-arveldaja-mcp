@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import { resolve as resolvePath } from "node:path";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { withOwnedFileLock } from "../file-lock.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { normalizeCompanyName } from "../company-name.js";
@@ -580,9 +584,37 @@ export async function executeCamtImport(
   // usable id came back).
   const createdThisRun: Transaction[] = [];
   const exactKeyOccurrences = findExactKeyOccurrences(projection.parsed.entries, accountsDimensionsId);
+  // A row's duplicate recheck and its create run under one lock per connection
+  // + bank dimension (in-process queue plus file lock), held from the row's
+  // prepare until the next row's prepare or the end of the run. A concurrent
+  // execute of the same statement then rechecks only after this row's create
+  // has landed, instead of both passing on the same ledger.
+  const rowLockPath = resolvePath(
+    process.env.EARVELDAJA_LOCK_DIR ?? resolvePath(tmpdir(), "e-arveldaja-mcp-locks"),
+    `${createHash("sha256").update(`${api.transactions.connectionFingerprint}\0camt\0${accountsDimensionsId}`).digest("hex")}.lock`,
+  );
+  let releaseRowLock: (() => Promise<void>) | undefined;
+  const freeRowLock = async () => {
+    const release = releaseRowLock;
+    releaseRowLock = undefined;
+    await release?.();
+  };
+  const acquireRowLock = async () => {
+    await freeRowLock();
+    releaseRowLock = await new Promise<() => Promise<void>>((acquired, failed) => {
+      let release!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const done = withOwnedFileLock(rowLockPath, async () => {
+        acquired(async () => { release(); await done.catch(() => undefined); });
+        await held;
+      }, { timeoutMs: 30_000, pollMs: 25 });
+      done.catch(failed);
+    });
+  };
   const executionReport = await executeCamtCommands({
     count: projection.descriptors.length,
     prepareIndex: async index => {
+      await acquireRowLock();
       // Recheck this command's duplicate precondition against an UNCACHED
       // ledger read immediately before its own mutate: a row booked elsewhere
       // (UI, another process) since the plan review must still block it.
@@ -626,7 +658,7 @@ export async function executeCamtImport(
       }
       return { outcome: "completed" };
     },
-  });
+  }).finally(freeRowLock);
 
   const createdIndices = [...completedIndices].sort((left, right) => left - right);
   const results = createdIndices.map(index =>
