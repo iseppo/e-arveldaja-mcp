@@ -246,7 +246,8 @@ export function extractIban(text: string): string | undefined {
   // Scan every IBAN-shaped candidate and return the first that passes the
   // mod-97 checksum — a document can carry a malformed/partial IBAN (or a VAT
   // number) before the real one, so we continue past invalid candidates.
-  const candidateRe = /\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/gi;
+  // PDF text often groups IBANs with (narrow) no-break spaces, so accept those too.
+  const candidateRe = /\b([A-Z]{2}\d{2}(?:[ \t\u00A0\u202F]*[A-Z0-9]){11,30})\b/gi;
   let match: RegExpExecArray | null;
   while ((match = candidateRe.exec(text)) !== null) {
     // The regex allows spaces between groups, so a candidate can swallow the

@@ -160,6 +160,11 @@ describe("extractVatNumber", () => {
 });
 
 describe("extractIban", () => {
+  it("extracts IBANs grouped with no-break spaces from PDF text", () => {
+    expect(extractIban("IBAN EE38\u00A02200\u00A02210\u00A02014\u00A05685 BIC HABAEE2X")).toBe("EE382200221020145685");
+    expect(extractIban("FR76\u202F3000\u202F6000\u202F0112\u202F3456\u202F7890\u202F189")).toBe("FR7630006000011234567890189");
+  });
+
   it("extracts a valid Estonian IBAN", () => {
     // EE382200221020145685 is a well-known test IBAN with correct checksum
     expect(extractIban("IBAN: EE382200221020145685")).toBe("EE382200221020145685");
