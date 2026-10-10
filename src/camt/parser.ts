@@ -421,6 +421,8 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
     }
 
     const bookedAmounts = splitBookedAmounts(entryAmount.amount, splitWeights);
+    // What 1007fde and earlier booked: always proportional to bare originals.
+    const legacyAmounts = splitBookedAmounts(entryAmount.amount, originalAmounts.map((amount) => amount?.amount));
 
     for (const [detailIndex, txDetails] of detailNodes.entries()) {
       const { party, account } = pickCounterparty(txDetails, direction);
@@ -428,28 +430,47 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         .map(node => textAt(node, ["CdtrRefInf", "Ref"]))
         .find((value): value is string => !!value);
       const originalAmount = originalAmounts[detailIndex];
+      const amount = bookedAmounts[detailIndex] ?? entryAmount.amount;
+      const legacyAmount = legacyAmounts[detailIndex] ?? entryAmount.amount;
+      const counterpartyName = textAt(party, ["Nm"]);
+      const counterpartyIban = extractIban(account);
+      const ustrd = textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined;
+      // An entry with no transaction details (e.g. a bank charge) carries its
+      // narrative only in AddtlNtryInf; without it a ref-less charge has no
+      // description to corroborate a rerun's possible-duplicate match.
+      const description = ustrd ?? (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined);
+      const referenceNumber = normalizeOptionalReference(structuredRef) ??
+        normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"]));
+      const bankReference = normalizeOptionalReference(textAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? textAt(entryNode, ["AcctSvcrRef"]));
+      // Rows stored by 1007fde and earlier carry the bare-original split and no
+      // AddtlNtryInf description; keep them recognisable as this same leg.
+      const legacyIdentities = legacyAmount !== amount || description !== ustrd
+        ? [{
+            amount: legacyAmount,
+            description: ustrd,
+            counterparty_name: counterpartyName,
+            counterparty_iban: counterpartyIban,
+            reference_number: referenceNumber,
+            bank_reference: bankReference,
+          }]
+        : undefined;
 
       entries.push({
         date: entryDate,
-        amount: bookedAmounts[detailIndex] ?? entryAmount.amount,
+        amount,
         currency: entryAmount.currency,
         direction,
         leg_index: detailIndex,
         original_amount: originalAmount?.amount,
         original_currency: originalAmount?.currency,
-        counterparty_name: textAt(party, ["Nm"]),
-        counterparty_iban: extractIban(account),
+        counterparty_name: counterpartyName,
+        counterparty_iban: counterpartyIban,
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
-        // An entry with no transaction details (e.g. a bank charge) carries its
-        // narrative only in AddtlNtryInf; without it a ref-less charge has no
-        // description to corroborate a rerun's possible-duplicate match.
-        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") ||
-          (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined) ||
-          undefined,
-        reference_number: normalizeOptionalReference(structuredRef) ??
-          normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
+        description,
+        reference_number: referenceNumber,
         end_to_end_id: normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
-        bank_reference: normalizeOptionalReference(textAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? textAt(entryNode, ["AcctSvcrRef"])),
+        bank_reference: bankReference,
+        ...(legacyIdentities ? { legacy_identities: legacyIdentities } : {}),
         duplicate: false,
         duplicate_transaction_ids: [],
       });

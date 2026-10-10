@@ -398,6 +398,8 @@ export function renderCamtParsePayload(parsed: CamtParseResult): Record<string, 
       end_to_end_id: wrapUntrustedOcr(entry.end_to_end_id),
       counterparty_iban: wrapUntrustedOcr(entry.counterparty_iban),
       counterparty_reg_code: wrapUntrustedOcr(entry.counterparty_reg_code),
+      // Internal dedup aliases (raw statement text): never rendered.
+      legacy_identities: undefined,
       ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
       ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
     })),

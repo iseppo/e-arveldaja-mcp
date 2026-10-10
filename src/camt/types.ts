@@ -60,9 +60,20 @@ export interface ParsedCamtEntry {
   reference_number?: string;
   end_to_end_id?: string;
   bank_reference?: string;
+  /**
+   * The identity fields an earlier release stored for this leg where they
+   * differ from today's (1007fde split multi-currency legs by bare originals
+   * and left a detail-less entry's description empty). Each one adds a legacy
+   * alias exact key, so a row stored before the upgrade still matches.
+   * Internal: never rendered.
+   */
+  legacy_identities?: CamtLegacyIdentity[];
   duplicate: boolean;
   duplicate_transaction_ids: number[];
 }
+
+export type CamtLegacyIdentity = Pick<ParsedCamtEntry,
+  "amount" | "description" | "counterparty_name" | "counterparty_iban" | "reference_number" | "bank_reference">;
 
 export interface CamtParseResult {
   statement_metadata: CamtStatementMetadata;
