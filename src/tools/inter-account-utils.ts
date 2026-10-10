@@ -68,6 +68,12 @@ export interface InterAccountJournalEntry {
    * removes it from both lookups at once.
    */
   consumed?: boolean;
+  /**
+   * Every amount this entry is indexed under (a fee-deducted transfer has two
+   * leg amounts). Consumption must cover all of them, or the other leg's mirror
+   * would look uncovered once this shared entry is consumed.
+   */
+  amounts?: number[];
 }
 
 /**
@@ -161,6 +167,7 @@ export function buildInterAccountJournalIndex(
       journal_id: j.id,
       document_number: j.document_number,
       origin: "snapshot",
+      amounts: [...amounts],
     };
     // Insert in both directions so we catch it regardless of which side we're checking from
     for (const amount of amounts) {

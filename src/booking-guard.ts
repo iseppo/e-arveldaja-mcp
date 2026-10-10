@@ -498,7 +498,10 @@ export class BookingGuard {
       // nearest-first window finds it exactly where this leg found the journal.
       if (consume && isReflessEntry(match.entry)) {
         match.entry.consumed = true;
-        this.recordConsumedMarker(q.sourceDim, q.targetDim, q.amount, date);
+        // Cover every amount alias of the journal (fee-deducted legs differ).
+        for (const amount of match.entry.amounts ?? [q.amount]) {
+          this.recordConsumedMarker(q.sourceDim, q.targetDim, amount, date);
+        }
       }
       return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
     }
