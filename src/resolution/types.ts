@@ -1,6 +1,6 @@
 /**
  * Shared three-way resolution result for the safe accounting resolvers
- * (company / bank-account dimension / supplier default). A resolver either
+ * (bank-account dimension / supplier default). A resolver either
  * RESOLVES to a single value with evidence, reports it is AMBIGUOUS (a bounded
  * set of choices plus one focused question), or reports NOT_FOUND (a question).
  *

@@ -106,7 +106,7 @@ graph TB
 Server startup is composed from focused modules rather than one god-file. The
 former `src/server-bootstrap.ts` is now a thin re-export barrel (kept only so
 existing `./server-bootstrap.js` importers — `index.ts`, the tool-surface
-fixture, `tool-profile.ts`, `resolution/company-resolution.ts`, `elicitation.ts`,
+fixture, `tool-profile.ts`, `elicitation.ts`,
 and several contract tests — need zero churn). `createMcpServer` and
 `buildSetupInstructionsPayload` are re-exported from it.
 

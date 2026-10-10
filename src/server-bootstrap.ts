@@ -6,7 +6,7 @@
  * `src/server/*` (create-server orchestrator, system/domain registrations,
  * setup-mode helpers, server instructions). This file remains only as a
  * stable import surface so existing `from "./server-bootstrap.js"` importers
- * (index.ts, the tool-surface fixture, tool-profile, company-resolution,
+ * (index.ts, the tool-surface fixture, tool-profile,
  * elicitation, and several contract tests) keep working with zero churn.
  *
  * New code should import directly from the owning module.
