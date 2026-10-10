@@ -835,10 +835,16 @@ export async function runInterAccountMatching(
       const inCounterpartyDim = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
       if (outCounterpartyDim !== undefined && outCounterpartyDim !== txIn.accounts_dimensions_id) continue;
       if (inCounterpartyDim !== undefined && inCounterpartyDim !== txOut.accounts_dimensions_id) continue;
-      if (
-        inCounterpartyIban && inCounterpartyDim === undefined &&
-        !(companyName && normalizeCompanyName(txIn.bank_account_name ?? "") === companyName)
-      ) continue;
+      // Deleting the incoming row as a mirror needs positive evidence it came
+      // from an own account: an own IBAN, or a payer named as the company / an
+      // own bank account. A bare row (no IBAN, no name) keeps pairing.
+      const inCounterpartyName = normalizeCompanyName(txIn.bank_account_name ?? "");
+      const inNameIsOwn = Boolean(inCounterpartyName) && (
+        (companyName !== "" && inCounterpartyName === companyName) ||
+        [...dimensionToTitle.values()].some(title => normalizeCompanyName(title) === inCounterpartyName)
+      );
+      if (inCounterpartyIban && inCounterpartyDim === undefined && !inNameIsOwn) continue;
+      if (!inCounterpartyIban && inCounterpartyName && !inNameIsOwn) continue;
 
       const hasOutgoingIbanMatchesIncomingAccount =
         Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);

@@ -1472,6 +1472,34 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
 
+    it("does not pair with an IBAN-less incoming row whose counterparty name is a third party", async () => {
+      const namedCustomerIntoB = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Customer AS" };
+      const { handler, api } = setupInterAccountTool({
+        transactions: [outAtoB, namedCustomerIntoB],
+        bankAccounts: threeAccounts.slice(0, 2),
+      });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+
+    it("still pairs an IBAN-less incoming row named as the company or with no name", async () => {
+      for (const name of ["Test OÜ", null]) {
+        const leg = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: name, clients_id: null };
+        const { handler, api } = setupInterAccountTool({
+          transactions: [outAtoB, leg],
+          bankAccounts: threeAccounts.slice(0, 2),
+        });
+        const result = await executeInterAccount(handler);
+        const payload = parseMcpResponse(result.content[0]!.text);
+
+        expect(payload.matched_pairs).toBe(1);
+        expect(api.transactions.delete).toHaveBeenCalledWith(2);
+      }
+    });
+
     it("still pairs with the real B leg when it is present", async () => {
       const realB = { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 22, bank_account_no: "EE11AAAA", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-3 [source_direction=IN]" };
       const { handler, api } = setupInterAccountTool({ transactions: [outAtoB, customerIntoC, realB], bankAccounts: threeAccounts });
@@ -1819,14 +1847,15 @@ describe("reconcile_inter_account_transfers", () => {
     // candidates the outgoing_iban_matches_incoming_account signal without
     // biasing toward either. (A counterparty naming a *different* own
     // account than the candidate's is a contradiction and is not paired.)
-    // tx 26 and tx 27 carry no counterparty IBAN. Both pairs score
+    // tx 26 and tx 27 carry no counterparty IBAN (payer named as the company,
+    // so they are own-account mirror candidates). Both pairs score
     // 40 (amount) + 20 (date) + 30 (outgoing IBAN) = 90 → tied →
     // ambiguity path.
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "Transfer" },
-        { id: 26, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
-        { id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Transfer" },
+        { id: 26, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" },
+        { id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" },
       ],
       bankAccounts: [
         ...bankAccounts,
