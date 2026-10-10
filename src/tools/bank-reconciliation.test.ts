@@ -1485,19 +1485,51 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
 
-    it("still pairs an IBAN-less incoming row named as the company or with no name", async () => {
-      for (const name of ["Test OÜ", null]) {
-        const leg = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: name, clients_id: null };
-        const { handler, api } = setupInterAccountTool({
-          transactions: [outAtoB, leg],
-          bankAccounts: threeAccounts.slice(0, 2),
-        });
-        const result = await executeInterAccount(handler);
-        const payload = parseMcpResponse(result.content[0]!.text);
+    it("still pairs an IBAN-less incoming row named exactly as the company", async () => {
+      const leg = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "TEST OU ", clients_id: null };
+      const { handler, api } = setupInterAccountTool({
+        transactions: [outAtoB, leg],
+        bankAccounts: threeAccounts.slice(0, 2),
+      });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
 
-        expect(payload.matched_pairs).toBe(1);
-        expect(api.transactions.delete).toHaveBeenCalledWith(2);
-      }
+      expect(payload.matched_pairs).toBe(1);
+      expect(api.transactions.delete).toHaveBeenCalledWith(2);
+    });
+
+    it("leaves a bare incoming row (no IBAN, no name) untouched; the outgoing leg goes one-sided", async () => {
+      const bare = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: null, clients_id: null };
+      const { handler, api } = setupInterAccountTool({
+        transactions: [outAtoB, bare],
+        bankAccounts: threeAccounts.slice(0, 2),
+      });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(payload.matched_one_sided).toBe(1);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm.mock.calls[0]![0]).toBe(1);
+    });
+
+    it("does not delete a same-type IBAN-less receipt whose payer name only contains the company name", async () => {
+      // Codex probe: both legs read back type C, directions proven by markers;
+      // "Männipuu Client AS" contains but does not equal "Männipuu OÜ".
+      const out = { ...outAtoB, bank_account_name: "Männipuu OÜ" };
+      const receipt = { id: 2, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Männipuu Client AS", ref_number: "CUSTOMER-INVOICE-471", clients_id: null, description: "WISE:TRANSFER-2 arve [source_direction=IN]" };
+      const { handler, api } = setupInterAccountTool({
+        transactions: [out, receipt],
+        bankAccounts: threeAccounts.slice(0, 2),
+        companyName: "Männipuu OÜ",
+      });
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      for (const call of api.transactions.confirm.mock.calls) expect(call[0]).toBe(1);
     });
 
     it("still pairs with the real B leg when it is present", async () => {

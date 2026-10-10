@@ -785,6 +785,20 @@ export async function runInterAccountMatching(
 
   const oneSidedInferenceCache = new Map<number, OneSidedInference>();
 
+  // Deleting a row as a transfer mirror needs positive evidence it came from
+  // the source account: its counterparty IBAN is the source account's, or the
+  // payer is named exactly as the company / an own bank account. A bare row
+  // (no IBAN, no name) or a merely similar name is not evidence.
+  function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
+    const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+    if (iban && ownIbanToDimension.get(iban) === sourceDimensionId) return true;
+    const name = normalizeCompanyName(row.bank_account_name ?? "");
+    return Boolean(name) && (
+      (companyName !== "" && name === companyName) ||
+      [...dimensionToTitle.values()].some(title => normalizeCompanyName(title) === name)
+    );
+  }
+
   // --- Phase 1: C↔D pair matching ---
   for (let i = 0; i < outgoing.length; i++) {
     const txOut = outgoing[i]!;
@@ -835,16 +849,7 @@ export async function runInterAccountMatching(
       const inCounterpartyDim = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
       if (outCounterpartyDim !== undefined && outCounterpartyDim !== txIn.accounts_dimensions_id) continue;
       if (inCounterpartyDim !== undefined && inCounterpartyDim !== txOut.accounts_dimensions_id) continue;
-      // Deleting the incoming row as a mirror needs positive evidence it came
-      // from an own account: an own IBAN, or a payer named as the company / an
-      // own bank account. A bare row (no IBAN, no name) keeps pairing.
-      const inCounterpartyName = normalizeCompanyName(txIn.bank_account_name ?? "");
-      const inNameIsOwn = Boolean(inCounterpartyName) && (
-        (companyName !== "" && inCounterpartyName === companyName) ||
-        [...dimensionToTitle.values()].some(title => normalizeCompanyName(title) === inCounterpartyName)
-      );
-      if (inCounterpartyIban && inCounterpartyDim === undefined && !inNameIsOwn) continue;
-      if (!inCounterpartyIban && inCounterpartyName && !inNameIsOwn) continue;
+      if (!hasOwnOriginEvidence(txIn, txOut.accounts_dimensions_id)) continue;
 
       const hasOutgoingIbanMatchesIncomingAccount =
         Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
@@ -1099,6 +1104,7 @@ export async function runInterAccountMatching(
     }
     const source = txProvenOutgoing ? tx : reciprocal;
     const counterpart = txProvenOutgoing ? reciprocal : tx;
+    if (!hasOwnOriginEvidence(counterpart, source.accounts_dimensions_id)) continue;
     const sourceId = source.id!;
     const counterpartId = counterpart.id!;
     // Base EUR, the same unit the BookingGuard key and one-sided confirms use.

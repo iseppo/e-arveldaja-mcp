@@ -55,7 +55,9 @@ export function inferOneSidedTransfer(
   }
 
   if (!targetDimension && companyName.length >= 4 && counterpartyName.length >= 4) {
-    const nameMatch = counterpartyName.includes(companyName) || companyName.includes(counterpartyName);
+    // Exact normalized equality: a payer whose name merely contains the
+    // company name ("Männipuu Client AS" vs "Männipuu OÜ") is a third party.
+    const nameMatch = counterpartyName === companyName;
     if (nameMatch) {
       confidence += 60;
       reasons.push("counterparty_name_matches_company");
