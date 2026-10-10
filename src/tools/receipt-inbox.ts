@@ -973,10 +973,32 @@ export function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], 
       if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
         return true;
       }
+      if (mayPayPartialResidual(tx, invoice)) return true;
     }
   }
 
   return false;
+}
+
+/**
+ * True when `tx` may be a residual payment on the same supplier's PARTIALLY_PAID
+ * invoice. The list data carries no remaining balance, so any smaller
+ * same-currency payment to that supplier counts — booking it as a new expense
+ * invoice would double the expense while the original payable stays open.
+ */
+function mayPayPartialResidual(tx: Transaction, invoice: PurchaseInvoice): boolean {
+  if (invoice.payment_status !== "PARTIALLY_PAID") return false;
+  const txCurrency = (tx.cl_currencies_id ?? "EUR").trim().toUpperCase();
+  const invoiceCurrency = (invoice.cl_currencies_id ?? "EUR").trim().toUpperCase();
+  if (txCurrency !== invoiceCurrency) return false;
+  if (!(Math.abs(tx.amount) < (invoice.gross_price ?? 0))) return false;
+  if (tx.clients_id && invoice.clients_id && tx.clients_id === invoice.clients_id) return true;
+  const txIban = (tx.bank_account_no ?? "").replace(/\s/g, "").toUpperCase();
+  const invoiceIban = (invoice.bank_account_no ?? "").replace(/\s/g, "").toUpperCase();
+  if (txIban && txIban === invoiceIban) return true;
+  const txName = normalizeCompanyName(tx.bank_account_name ?? "");
+  const invoiceName = normalizeCompanyName(invoice.client_name ?? "");
+  return !!txName && !!invoiceName && (txName.includes(invoiceName) || invoiceName.includes(txName));
 }
 
 export async function resolveSupplierFromTransaction(
