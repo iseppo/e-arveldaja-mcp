@@ -1593,6 +1593,39 @@ describe("prepare_dividend_package", () => {
       );
     });
   });
+
+  it("serializes concurrent executions so two distributions cannot spend the same § 157 headroom", async () => {
+    // Distributable profit 500 EUR; two different shareholders each request 400 EUR net at once.
+    const store: Journal[] = [
+      { ...makeJournal("2024-01-01", [makePosting(1000, "D", 500), makePosting(2960, "C", 500)]), id: 1, registered: true },
+      { ...makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]), id: 2, registered: true },
+      // Current-year profit: lifts net assets clear of the lg 2 floor, but is not lg 1 distributable.
+      { ...makeJournal("2026-03-01", [makePosting(1000, "D", 1000), makePosting(3000, "C", 1000)]), id: 3, registered: true },
+    ];
+    let nextId = 100;
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+    const sharedApi = makeApi([], [...makeStandardAccounts(), makeAccount(3000, "C", "Tulud", "Müük", "Sales")]);
+    const snapshot = async () => { await tick(); return store.map((journal) => ({ ...journal })); };
+    Object.assign(sharedApi.journals, {
+      connectionFingerprint: "estonian-tax-concurrent-headroom",
+      listAll: vi.fn(snapshot),
+      listAllWithPostings: vi.fn(snapshot),
+      get: vi.fn(async (id: number) => store.find((journal) => journal.id === id)),
+      create: vi.fn(async (data: Partial<Journal>) => {
+        await tick();
+        const id = nextId++;
+        store.push({ ...data, id, registered: false, is_deleted: false } as Journal);
+        return { code: 200, created_object_id: id, messages: [] };
+      }),
+    });
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, sharedApi);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+    const results = await Promise.all([1, 2].map((shareholder) =>
+      cb({ net_dividend: 400, shareholder_client_id: shareholder, effective_date: "2026-06-01" })));
+    expect(results.filter((result) => !isError(result))).toHaveLength(1);
+    expect(store.filter((journal) => String(journal.document_number ?? "").startsWith("DIV-"))).toHaveLength(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
