@@ -2248,6 +2248,24 @@ describe("reconcile_inter_account_transfers", () => {
         expect(payload.ambiguous_pairs).toHaveLength(0);
         expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
       });
+      it("routes a proven reciprocal own transfer to review even when the fee exceeds the tolerance (100 out / 97 in)", async () => {
+        // Both legs' counterparty IBANs are the other own account and both
+        // directions are proven: one transfer with a €3 fee, never two bookings.
+        const provenIn = { ...wiseIn, amount: 97, bank_account_no: "EE11" };
+        for (const order of [[lhvOut, provenIn], [provenIn, lhvOut]]) {
+          const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+          expect(payload.matched_one_sided).toBe(0);
+          expect(api.transactions.confirm).not.toHaveBeenCalled();
+          expect(api.transactions.delete).not.toHaveBeenCalled();
+          expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+            outgoing_transaction_id: 1,
+            candidate_incoming_transaction_ids: [2],
+            code: "possible_fee_deducted_transfer",
+          })]);
+        }
+      });
     });
 
     describe("pairs blocked from one-sided booking are reported for review", () => {

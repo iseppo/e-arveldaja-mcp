@@ -1247,7 +1247,8 @@ export async function runInterAccountMatching(
   // fee (Phase 1 needs equal amounts, so a fee-deducted transfer reaches here).
   // Booking both would double-book it, so route both to review instead.
   // Tolerance: a non-zero difference of at most max(1 EUR, 2% of the larger
-  // leg), on the comparable (base EUR) amounts, within the pairing date gap.
+  // leg), on the comparable (base EUR) amounts, within the pairing date gap —
+  // waived when both legs' counterparty IBANs prove the reciprocal transfer.
   // Rows already covered by an existing journal keep the journal path.
   for (let i = 0; i < remaining.length; i++) {
     const a = remaining[i]!;
@@ -1261,8 +1262,14 @@ export async function runInterAccountMatching(
       const aAmount = comparableTransactionAmount(a);
       const bAmount = comparableTransactionAmount(b);
       if (sameAmountToTheCent(aAmount, bAmount)) continue;
+      // Proven reciprocal legs (each counterparty IBAN is the other own account,
+      // both directions proven) are one transfer whatever the fee: no tolerance.
+      const reciprocalProven =
+        aTarget.reasons.includes("counterparty_iban_is_own_account") &&
+        bTarget.reasons.includes("counterparty_iban_is_own_account") &&
+        bankTransactionDirection(a) !== "unknown" && bankTransactionDirection(b) !== "unknown";
       const tolerance = Math.max(1, 0.02 * Math.max(Math.abs(aAmount), Math.abs(bAmount)));
-      if (Math.abs(Math.abs(aAmount) - Math.abs(bAmount)) > tolerance) continue;
+      if (!reciprocalProven && Math.abs(Math.abs(aAmount) - Math.abs(bAmount)) > tolerance) continue;
       if (Math.abs(toUtcDay(a.date) - toUtcDay(b.date)) / 86_400_000 > maxGap) continue;
       // An existing journal already covering either leg is handled by the
       // one-sided journal check below (skip / ambiguous_refless), not here.
