@@ -121,4 +121,33 @@ describe("CamtOperations", () => {
     if (!outcome.ok) expect(outcome.error.code).toBe("plan_handle_required");
     expect(api.transactions.create).not.toHaveBeenCalled();
   });
+
+  it("two concurrent executes of the same statement create its row once", async () => {
+    // The ledger the API reads back, and a create that takes a while to land:
+    // without serialization both executes pass their duplicate recheck on the
+    // empty ledger before either create returns.
+    const ledger: Array<Record<string, unknown>> = [];
+    const { api, operations } = setup([], { allowWrites: true });
+    api.transactions.listAll.mockImplementation(async () => [...ledger]);
+    api.transactions.create.mockImplementation(async (payload: Record<string, unknown>) => {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const id = 9001 + ledger.length;
+      ledger.push({ ...payload, id, status: "PROJECT", is_deleted: false });
+      return { code: 200, created_object_id: id, messages: [] };
+    });
+    const source = { file_path: inline(fixtureCamtXml()) };
+    const args = { source, accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined };
+    const first = await operations.prepareImport(args);
+    const second = await operations.prepareImport(args);
+    if (!first.ok || !second.ok) throw new Error("dry run failed");
+
+    const outcomes = await Promise.all([
+      operations.executeImport({ ...args, planHandle: first.value.planHandle }),
+      operations.executeImport({ ...args, planHandle: second.value.planHandle }),
+    ]);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(ledger).toHaveLength(1);
+    const created = outcomes.map(outcome => outcome.ok ? outcome.value.createdCount : 0);
+    expect(created.sort()).toEqual([0, 1]);
+  });
 });

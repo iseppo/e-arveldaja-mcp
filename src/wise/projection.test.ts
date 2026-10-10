@@ -83,6 +83,50 @@ describe("Wise card payment split across two balances (same ID)", () => {
     const fresh = project(rowsOf(splitCard), []);
     expect(project(rowsOf([...splitCard].reverse()), ledgerOf(fresh.commands)).commands).toEqual([]);
   });
+
+  it("an export holding only one leg of an already-imported split creates nothing", () => {
+    const fresh = project(rowsOf(splitCard), []);
+    const ledger = ledgerOf(fresh.commands);
+    expect(project(rowsOf([splitCard[1]!]), ledger).commands).toEqual([]);
+    expect(project(rowsOf([splitCard[0]!]), ledger).commands).toEqual([]);
+    expect(project(rowsOf(splitCard), ledger).commands).toEqual([]);
+  });
+
+  const oldUsdLeg = {
+    id: 1, status: "PROJECT", accounts_dimensions_id: WISE, type: "C", amount: 12, cl_currencies_id: "USD", date: "2026-07-05",
+    description: "WISE:CARD_TRANSACTION-9001 Hoster (Software) [source_direction=OUT]", bank_account_name: "Hoster",
+  } as Transaction;
+  const oldFee = {
+    id: 2, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 0.16, cl_currencies_id: "EUR", date: "2026-07-05",
+    description: "WISE:FEE:CARD_TRANSACTION-9001 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise",
+  } as Transaction;
+
+  it("an old plain-ID row of the other leg does not hide a missing leg in a one-leg export", () => {
+    const output = project(rowsOf([splitCard[1]!]), [oldUsdLeg]);
+    expect(created(output)).toEqual(["main_create:33.23 EUR", "fee_create_and_confirm:0.16 EUR"]);
+    // A leg of a split ID is tagged by currency even when the export holds it alone.
+    expect(output.commands.map(command => command.create_payload?.description?.split(" ")[0])).toEqual([
+      "WISE:CARD_TRANSACTION-9001:EUR",
+      "WISE:FEE:CARD_TRANSACTION-9001:EUR",
+    ]);
+    const withFee = project(rowsOf([splitCard[1]!]), [oldUsdLeg, oldFee]);
+    expect(created(withFee)).toEqual(["main_create:33.23 EUR"]);
+    // The upgraded ledger is complete for the full export and for each one-leg export.
+    const upgraded = [oldUsdLeg, oldFee, ...ledgerOf(withFee.commands, 10)];
+    expect(project(rowsOf(splitCard), upgraded).commands).toEqual([]);
+    expect(project(rowsOf([splitCard[0]!]), upgraded).commands).toEqual([]);
+    expect(project(rowsOf([splitCard[1]!]), upgraded).commands).toEqual([]);
+  });
+
+  it("an old plain-ID row still covers its own single-row transaction", () => {
+    // Pre-currency-fix rows were stored as EUR at the nominal amount; incoming
+    // rows are now booked gross. Either a currency or an amount match is the
+    // same transaction.
+    const usdAsEur = { ...oldUsdLeg, cl_currencies_id: "EUR" } as Transaction;
+    expect(project(rowsOf([splitCard[0]!]), [usdAsEur]).commands).toEqual([]);
+    const otherAmount = { ...oldUsdLeg, amount: 11.5 } as Transaction;
+    expect(project(rowsOf([splitCard[0]!]), [otherAmount]).commands).toEqual([]);
+  });
 });
 
 describe("Wise inter-account row matched to a journal that already books its fee", () => {
@@ -111,6 +155,21 @@ describe("Wise inter-account row matched to a journal that already books its fee
 
   it("drops the fee row too when the journal carries the fee leg", () => {
     const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])]);
+    expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
+    expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
+  });
+
+  it("compares the journal in base EUR, like the guard that matched it", () => {
+    // A registered USD journal: nominal amounts in USD, base amounts in EUR.
+    const usdJournal = {
+      id: 9, registered: true, is_deleted: false, effective_date: "2026-02-04", document_number: "",
+      postings: [
+        { accounts_dimensions_id: LHV, accounts_id: 1020, type: "C", amount: 110, base_amount: 100 },
+        { accounts_dimensions_id: WISE, accounts_id: 1020, type: "D", amount: 109.45, base_amount: 99.5 },
+        { accounts_dimensions_id: FEE_DIM, accounts_id: 8610, type: "D", amount: 0.55, base_amount: 0.5 },
+      ],
+    } as unknown as Journal;
+    const output = run([usdJournal]);
     expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
     expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
   });

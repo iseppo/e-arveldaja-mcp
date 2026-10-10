@@ -117,4 +117,31 @@ describe("CAMT re-import against rows stored by the previous release", () => {
     expect(rerun.descriptors).toHaveLength(1);
     expect(rerun.skipped).toHaveLength(1);
   });
+
+  describe("an entry the previous release imported only in part", () => {
+    const partialNote = /previous release imported only in part/;
+
+    it("sends an unsplit mixed-currency entry to review when only some old leg rows exist", async () => {
+      const xml = wrap(ntry("190.00", "R2", leg("100.00", "EUR") + leg("100.00", "USD")));
+      const rerun = await project(xml, [oldStoredRow(1, { amount: 95, name: "Supplier OÜ", ref: "R2" })]);
+      expect(rerun.descriptors).toHaveLength(0);
+      expect(rerun.skipped).toHaveLength(1);
+      expect(rerun.skipped[0]!.review_note).toMatch(partialNote);
+      expect(rerun.skipped[0]!.duplicate_transaction_ids).toEqual([1]);
+    });
+
+    it("sends the remaining legs of a re-split entry to review instead of booking the new allocation", async () => {
+      const xml = wrap(ntry("185.00", "R1", leg("100.00", "USD", "90.00") + leg("100.00", "USD", "95.00")));
+      const rerun = await project(xml, [oldStoredRow(1, { amount: 92.5, name: "Supplier OÜ", ref: "R1" })]);
+      expect(rerun.descriptors).toHaveLength(0);
+      expect(rerun.skipped.map(row => [row.amount, row.review_note !== undefined])).toEqual([[90, false], [95, true]]);
+      expect(rerun.skipped[1]!.review_note).toMatch(partialNote);
+    });
+
+    it("leaves other entries of the statement to import normally", async () => {
+      const xml = wrap(ntry("185.00", "R1", leg("100.00", "USD", "90.00") + leg("100.00", "USD", "95.00")) + ntry("5.00", "R3", leg("5.00", "EUR")));
+      const rerun = await project(xml, [oldStoredRow(1, { amount: 92.5, name: "Supplier OÜ", ref: "R1" })]);
+      expect(rerun.descriptors.map(d => d.payload.amount)).toEqual([5]);
+    });
+  });
 });

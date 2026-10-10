@@ -162,6 +162,9 @@ export interface CamtSkippedRow {
   bank_reference?: string;
   duplicate_transaction_ids: number[];
   reason: string;
+  /** Set when the row needs a human look instead of being created or skipped
+   * as a duplicate. Fixed text; never carries file content. */
+  review_note?: string;
 }
 
 export interface CamtImportProjection {

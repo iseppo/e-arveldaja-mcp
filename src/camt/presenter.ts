@@ -299,6 +299,9 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   for (const row of data.results.filter(result => result.review_note !== undefined).slice(0, 3)) {
     warnings.push({ code: "camt_unsplit_entry", message: row.review_note! });
   }
+  for (const row of data.projection.skipped.filter(skipped => skipped.review_note !== undefined).slice(0, 3)) {
+    warnings.push({ code: "camt_partial_legacy_import", message: row.review_note! });
+  }
 
   // Errors (indeterminate / failed commands) surface as blockers — never hidden.
   const blockers: CompactReviewItem[] = [];

@@ -7,6 +7,7 @@ import {
   buildPossibleDuplicateLookup,
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
+  findPartialLegacyEntries,
   findPossibleDuplicateMatches,
   findRepeatedBankReferences,
   normalizeOptionalReference,
@@ -59,6 +60,8 @@ export function enrichWithDuplicates(
   };
 }
 
+const CAMT_PARTIAL_LEGACY_REASON = "Partially imported by a previous release; needs review";
+
 export interface CamtProjectionInput {
   readonly loaded: CamtParseResult;
   readonly accountsDimensionsId: number;
@@ -88,6 +91,11 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
   const refLessOccurrences = new Map<string, number>();
   const clientCache: ClientResolutionCache = { byCode: new Map(), byName: new Map() };
   const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accountsDimensionsId);
+  const partialLegacyEntries = findPartialLegacyEntries(
+    parsed.entries,
+    buildDuplicateLookup(existingTransactions, accountsDimensionsId),
+    accountsDimensionsId,
+  );
   const descriptors: CamtCreateDescriptor[] = [];
   const skipped: CamtSkippedRow[] = [];
 
@@ -96,6 +104,17 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
     await reportProgress(index, filteredEntries.length);
     const batchDuplicateKey = buildBatchDuplicateKey(entry);
 
+    if (partialLegacyEntries.has(entry)) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: entry.duplicate_transaction_ids,
+        reason: CAMT_PARTIAL_LEGACY_REASON,
+        review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} belongs to a statement entry a previous release imported only in part: some of its old per-leg rows are in the ledger, others are not. It was not created; compare the ledger with the statement entry and book the missing amount manually.`,
+      });
+      continue;
+    }
     if (entry.duplicate) {
       skipped.push({
         date: entry.date,

@@ -27,7 +27,9 @@ import { beforeEach, afterEach } from "vitest";
 const wrapped = (text: string): RegExp =>
   new RegExp(`^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\\n${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n<<UNTRUSTED_OCR_END:[0-9a-f]+>>$`);
 
-vi.mock("fs/promises", () => ({
+// Only readFile is faked: the execute-time row lock needs the real file API.
+vi.mock("fs/promises", async (importOriginal) => ({
+  ...await importOriginal<typeof import("fs/promises")>(),
   readFile: vi.fn(),
 }));
 

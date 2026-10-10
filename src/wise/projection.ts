@@ -350,6 +350,46 @@ export function wiseLegAmountNetOfFee(
   return roundMoney(direction === "IN" ? amount - fee.booked_amount : amount + fee.booked_amount);
 }
 
+interface StoredWiseLeg {
+  readonly tx: Transaction;
+  readonly tag: string;
+  /** Booked currency named by a WISE:{id}:{CUR} tag; undefined for a plain tag. */
+  readonly suffixCurrency: string | undefined;
+}
+
+function mainLegValue(leg: WiseRow): { amount: number; currency: string } {
+  return { amount: bookedAmountForWiseRow(leg), currency: bookedCurrencyForWiseRow(leg) };
+}
+
+function feeLegValue(leg: WiseRow): { amount: number; currency: string } | undefined {
+  return bookedFeeAmountForWiseRow(leg) > 0
+    ? { amount: bookedFeeAmountForWiseRow(leg), currency: bookedFeeCurrencyForWiseRow(leg, bookedCurrencyForWiseRow(leg)) }
+    : undefined;
+}
+
+/** Whether a stored WISE-tagged row accounts for an exported leg, by matching
+ * pass: 1 currency and amount; 2 currency; 3 (plain tag) amount only — rows
+ * stored before the currency fix carry EUR; 4 (plain tag, several exported
+ * legs) any leg, as the previous release booked the first one. A leg-suffixed
+ * tag only ever matches a leg of its own booked currency. */
+function storedLegMatches(
+  entry: StoredWiseLeg,
+  leg: WiseRow,
+  value: { amount: number; currency: string },
+  exportedLegs: number,
+  pass: number,
+): boolean {
+  if (entry.suffixCurrency !== undefined && entry.suffixCurrency !== bookedCurrencyForWiseRow(leg)) return false;
+  const sameCurrency = (entry.tx.cl_currencies_id ?? "EUR") === value.currency;
+  const sameAmount = Math.abs(entry.tx.amount! - value.amount) < 0.005;
+  switch (pass) {
+    case 1: return sameCurrency && sameAmount;
+    case 2: return sameCurrency;
+    case 3: return entry.suffixCurrency === undefined && sameAmount;
+    default: return entry.suffixCurrency === undefined && exportedLegs > 1;
+  }
+}
+
 export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionOutput {
   const {
     eligible,
@@ -421,45 +461,74 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // ID keeps the plain WISE:{id} tag.
   const legsById = new Map<string, WiseRow[]>();
   for (const row of eligible) legsById.set(row.id, [...(legsById.get(row.id) ?? []), row]);
+  // Stored rows carrying an identity of an exported ID, plain or leg-suffixed.
+  const storedTagged = (prefix: string): StoredWiseLeg[] => existingTx.flatMap((tx): StoredWiseLeg[] => {
+    const tag = tx.description?.split(" ")[0];
+    if (tag === undefined || typeof tx.amount !== "number") return [];
+    if (tag === prefix) return [{ tx, tag, suffixCurrency: undefined }];
+    const suffix = tag.startsWith(`${prefix}:`) ? tag.slice(prefix.length + 1) : undefined;
+    const match = suffix?.match(/^([A-Z]{3})(?:-\d+)?$/);
+    return match ? [{ tx, tag, suffixCurrency: match[1] }] : [];
+  });
   const legSuffix = new Map<WiseRow, string>();
-  for (const legs of legsById.values()) {
-    if (legs.length < 2) continue;
+  const storedMainLegs = new Map<string, StoredWiseLeg[]>();
+  const storedFeeLegs = new Map<string, StoredWiseLeg[]>();
+  for (const [id, legs] of legsById) {
+    const storedMain = storedTagged(`WISE:${id}`);
+    const storedFee = storedTagged(`WISE:FEE:${id}`);
+    storedMainLegs.set(id, storedMain);
+    storedFeeLegs.set(id, storedFee);
+    if (legs.length < 2) {
+      // A lone exported leg whose ID already has a stored leg-suffixed tag, or a
+      // stored row it does not match, is one leg of a split: tag it by currency
+      // too, so the identity does not depend on which legs the export holds.
+      const leg = legs[0]!;
+      const stored = [...storedMain, ...storedFee];
+      const split = stored.some(entry => entry.suffixCurrency !== undefined) ||
+        (storedMain.length > 0 && !storedMain.some(entry => [1, 2, 3].some(pass => storedLegMatches(entry, leg, mainLegValue(leg), legs.length, pass))));
+      if (!split) continue;
+      const currency = bookedCurrencyForWiseRow(leg);
+      const taken = new Set(stored.map(entry => entry.tag.slice(entry.tag.lastIndexOf(":") + 1)));
+      let suffix = currency;
+      for (let n = 1; taken.has(suffix); n++) suffix = `${currency}-${n}`;
+      legSuffix.set(leg, suffix);
+      continue;
+    }
     for (const leg of legs) {
       const currency = bookedCurrencyForWiseRow(leg);
       const sameCurrency = legs.filter(other => bookedCurrencyForWiseRow(other) === currency);
       legSuffix.set(leg, sameCurrency.length > 1 ? `${currency}-${sameCurrency.indexOf(leg) + 1}` : currency);
     }
   }
-  // Releases before split-leg tags booked only the FIRST leg (file order) as
-  // WISE:{id}, and the first fee-bearing leg's fee as WISE:FEE:{id}. Each such
-  // stored row accounts for the leg whose booked amount and currency it
-  // carries (else the first unclaimed leg in file order), so a re-import after
-  // upgrading books only the legs that are really missing.
-  const legacyMainLegs = new Set<WiseRow>();
-  const legacyFeeLegs = new Set<WiseRow>();
-  const claimLegacyLegs = (
-    tag: (id: string) => string,
+  // Each stored row accounts for at most one exported leg of its ID, matched by
+  // booked currency and amount whatever its tag form, so a one-leg export, a
+  // reordered export and a ledger written by releases before split-leg tags
+  // (which booked only the FIRST leg as WISE:{id} and the first fee-bearing
+  // leg's fee as WISE:FEE:{id}) all resolve to the legs really missing.
+  const claimStoredLegs = (
+    storedById: Map<string, StoredWiseLeg[]>,
     value: (leg: WiseRow) => { amount: number; currency: string } | undefined,
-    claimed: Set<WiseRow>,
-  ) => {
+  ): Set<WiseRow> => {
+    const claimed = new Set<WiseRow>();
     for (const [id, legs] of legsById) {
-      if (legs.length < 2) continue;
-      for (const tx of existingTx) {
-        if (tx.description?.split(" ")[0] !== tag(id)) continue;
-        const open = legs.filter(leg => !claimed.has(leg) && value(leg) !== undefined);
-        const leg = open.find(candidate => {
-          const { amount, currency } = value(candidate)!;
-          return typeof tx.amount === "number" && Math.abs(tx.amount - amount) < 0.005 &&
-            (tx.cl_currencies_id ?? "EUR") === currency;
-        }) ?? open[0];
-        if (leg) claimed.add(leg);
+      const open = new Set(storedById.get(id) ?? []);
+      for (let pass = 1; pass <= 4; pass++) {
+        for (const entry of [...open]) {
+          const leg = legs.find(candidate => {
+            const candidateValue = value(candidate);
+            return !claimed.has(candidate) && candidateValue !== undefined &&
+              storedLegMatches(entry, candidate, candidateValue, legs.length, pass);
+          });
+          if (!leg) continue;
+          claimed.add(leg);
+          open.delete(entry);
+        }
       }
     }
+    return claimed;
   };
-  claimLegacyLegs(id => `WISE:${id}`, leg => ({ amount: bookedAmountForWiseRow(leg), currency: bookedCurrencyForWiseRow(leg) }), legacyMainLegs);
-  claimLegacyLegs(id => `WISE:FEE:${id}`, leg => bookedFeeAmountForWiseRow(leg) > 0
-    ? { amount: bookedFeeAmountForWiseRow(leg), currency: bookedFeeCurrencyForWiseRow(leg, bookedCurrencyForWiseRow(leg)) }
-    : undefined, legacyFeeLegs);
+  const claimedMainLegs = claimStoredLegs(storedMainLegs, mainLegValue);
+  const claimedFeeLegs = claimStoredLegs(storedFeeLegs, feeLegValue);
 
   const created: WiseCreatedEntry[] = [];
   const skipped: WiseSkippedEntry[] = [];
@@ -546,7 +615,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ),
         ])
     );
-    const mainTagImported = seenWiseIds.has(wiseIdTag) || legacyMainLegs.has(row);
+    const mainTagImported = seenWiseIds.has(wiseIdTag) || claimedMainLegs.has(row);
     const mainAlreadyImported = mainTagImported ||
       [...mainSignatureCandidates].some(signature => alreadyStored(signature, sourceDirection));
     let mainAvailableForFee = false;
@@ -650,7 +719,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       // "wise teenustasu" — identical for every same-day, same-amount fee — so
       // this must only ever match a STORED fee, never another fee planned in
       // this same run (seenWiseIds keeps those apart by Wise ID).
-      const feeTagImported = seenWiseIds.has(feeWiseIdTag) || legacyFeeLegs.has(row);
+      const feeTagImported = seenWiseIds.has(feeWiseIdTag) || claimedFeeLegs.has(row);
       if (feeTagImported || alreadyStored(feeSignature, "OUT")) {
         skipped.push({
           wise_id: `FEE:${legId}`,
@@ -828,14 +897,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const feeIndex = commands.findIndex(command => command.row_key === feeKey);
         const feeCommand = feeIndex >= 0 ? commands[feeIndex]! : undefined;
         const postings = (existingJournal?.postings ?? []).filter(posting => !posting.is_deleted);
+        // Base EUR, the basis the guard matched the journal on: a non-EUR
+        // journal's nominal amounts are in its own currency.
         const cents = (value: number) => Math.round(value * 100);
+        const baseCents = (posting: { amount: number; base_amount?: number }) => cents(posting.base_amount ?? posting.amount);
         if (
           feeCommand &&
           feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
           postings.some(posting => posting.accounts_dimensions_id === accounts_dimensions_id &&
-            Math.abs(cents(posting.amount) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
+            Math.abs(baseCents(posting) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
           postings.some(posting => !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
-            cents(posting.amount) === cents(feeCommand.booked_amount))
+            baseCents(posting) === cents(feeCommand.booked_amount))
         ) {
           commands.splice(feeIndex, 1);
           const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
