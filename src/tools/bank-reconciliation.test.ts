@@ -2250,6 +2250,16 @@ describe("reconcile_inter_account_transfers", () => {
       });
     });
 
+    it("warns that own-transfer detection relies on IBANs when the company name has no legal form", async () => {
+      const { handler } = setupInterAccountTool({ transactions: [], bankAccounts, companyName: "Seppo AI" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text) as any;
+      expect(payload.warnings).toEqual([expect.stringMatching(/no legal form.*IBANs only/i)]);
+
+      const withForm = setupInterAccountTool({ transactions: [], bankAccounts, companyName: "Seppo AI OÜ" });
+      const formPayload = parseMcpResponse((await withForm.handler({})).content[0]!.text) as any;
+      expect(formPayload.warnings).toBeUndefined();
+    });
+
     it("does not book an owner's personal payment as a transfer when the company is named after the owner", async () => {
       const twoAccounts = [
         { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },

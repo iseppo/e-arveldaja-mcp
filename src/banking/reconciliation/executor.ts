@@ -1373,6 +1373,13 @@ export async function runInterAccountMatching(
     crossCurrencyPairs,
   });
 
+  // sameCompanyIdentity needs a legal form on both sides, so a company name
+  // without one ("Seppo AI") never yields name-based own-origin evidence.
+  const companyLegalName = (invoiceInfo.invoice_company_name ?? "").trim();
+  const warnings = companyLegalName && !sameCompanyIdentity(companyLegalName, companyLegalName)
+    ? ["Company name has no legal form; own-transfer detection relies on IBANs only."]
+    : [];
+
   return {
     totalUnconfirmed: unconfirmed.length,
     invoiceInfo,
@@ -1390,6 +1397,7 @@ export async function runInterAccountMatching(
     companyClientsId,
     normalizedArgs,
     fingerprint,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 }
 

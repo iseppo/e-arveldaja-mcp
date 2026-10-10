@@ -268,6 +268,8 @@ export interface InterAccountMatchResult {
   companyClientsId: number | null;
   normalizedArgs: Record<string, unknown>;
   fingerprint: string;
+  /** Advisory limitations of this matching run (e.g. no name-based own-origin evidence). */
+  warnings?: string[];
 }
 
 // --- Operation input / output ------------------------------------------------

@@ -463,6 +463,12 @@ describe("renderInterAccountCompact", () => {
     expect(String((summary.samples?.[0] as Record<string, unknown>).description_out)).toMatch(OCR);
   });
 
+  it("surfaces matching warnings (company name without legal form)", () => {
+    const message = "Company name has no legal form; own-transfer detection relies on IBANs only.";
+    const { summary } = renderInterAccountCompact({ mode: "DRY_RUN", match: makeInterAccount(1, { warnings: [message] }), planHandle: "P" });
+    expect(summary.warnings).toContainEqual({ code: "company_name_without_legal_form", message });
+  });
+
   it("dry run points at reconcile_bank_transactions execute_inter_account with the reviewed inputs", () => {
     const { summary } = renderInterAccountCompact({
       mode: "DRY_RUN", match: makeInterAccount(2), planHandle: "PLAN-IA", maxDateGap: 3, targetAccountsDimensionsId: 55,

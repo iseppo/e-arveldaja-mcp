@@ -327,6 +327,7 @@ export function buildInterAccountPayload(input: {
       errors: [...m.errors],
       ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     }),
+    ...(m.warnings !== undefined ? { warnings: m.warnings } : {}),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
   };
 }
@@ -758,6 +759,9 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
   }
   for (const row of m.errors.slice(0, 3)) {
     warnings.push({ code: row.code ?? "inter_account_error", message: row.reason });
+  }
+  for (const message of m.warnings ?? []) {
+    warnings.push({ code: "company_name_without_legal_form", message });
   }
 
   const executionStopped = !dryRun && input.executionReport?.stop_reason != null;
