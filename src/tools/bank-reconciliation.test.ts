@@ -1622,6 +1622,24 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.matched_one_sided).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
+
+    it("reports a one-sided transfer to a shared IBAN for review instead of dropping it", async () => {
+      const { handler } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.needs_review_ambiguous_refless).toBe(1);
+      expect(JSON.stringify(payload)).toMatch(/several own accounts/);
+    });
+
+    it("books a one-sided transfer to a shared IBAN into the given target_accounts_dimensions_id when it is one of them", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 11 })).content[0]!.text) as any;
+
+      expect(payload.matched_one_sided).toBe(1);
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm.mock.calls[0]![1][0].related_sub_id).toBe(11);
+    });
   });
 
   describe("MAJOR-1 same-type reciprocal direction", () => {
@@ -2248,6 +2266,24 @@ describe("reconcile_inter_account_transfers", () => {
         expect(payload.ambiguous_pairs).toHaveLength(0);
         expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
       });
+      it("routes a proven reciprocal own transfer to review even when the fee exceeds the tolerance (100 out / 97 in)", async () => {
+        // Both legs' counterparty IBANs are the other own account and both
+        // directions are proven: one transfer with a €3 fee, never two bookings.
+        const provenIn = { ...wiseIn, amount: 97, bank_account_no: "EE11" };
+        for (const order of [[lhvOut, provenIn], [provenIn, lhvOut]]) {
+          const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+          expect(payload.matched_one_sided).toBe(0);
+          expect(api.transactions.confirm).not.toHaveBeenCalled();
+          expect(api.transactions.delete).not.toHaveBeenCalled();
+          expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+            outgoing_transaction_id: 1,
+            candidate_incoming_transaction_ids: [2],
+            code: "possible_fee_deducted_transfer",
+          })]);
+        }
+      });
     });
 
     describe("pairs blocked from one-sided booking are reported for review", () => {
@@ -2539,6 +2575,37 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.skipped_already_handled).toBe(1);
       expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
       expect(payload.needs_review_ambiguous_refless).toBe(1);
+    });
+
+    it("does not treat a new €100 Wise receipt as covered by a fee-deducted journal's €100 LHV leg", async () => {
+      // Journal C LHV 100 / D Wise 99 / D fee 1 credited Wise only €99, so a
+      // genuinely new same-day €100 Wise receipt is not already journalized.
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ];
+
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 42, status: "PROJECT", is_deleted: false, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2025-12-05", accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: "EE123456789012345678", bank_ref_number: "NEWREF42", description: "top-up [source_direction=IN]" },
+        ],
+        bankAccounts: twoAccounts,
+        companyName: "Test OÜ",
+        journals: [{
+          id: 999, effective_date: "2025-12-05", is_deleted: false, registered: true,
+          postings: [
+            { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 100, base_amount: 100, is_deleted: false },
+            { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 99, base_amount: 99, is_deleted: false },
+            { accounts_id: 5120, type: "D", amount: 1, base_amount: 1, is_deleted: false },
+          ],
+        }],
+      });
+
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.skipped_already_handled).toBe(0);
+      expect(payload.matched_one_sided + payload.needs_review_ambiguous_refless).toBe(1);
     });
 
     it("never double-books when BOTH legs of an already-journalized transfer reach Phase 2", async () => {

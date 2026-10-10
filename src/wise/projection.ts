@@ -331,6 +331,25 @@ const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_inter_account_transfers.";
 
+/**
+ * The Wise bank leg's amount when a journal books this row's transfer net of
+ * the row's separate fee row (IN: gross − fee; OUT: gross + fee), or
+ * `undefined` when the row has no same-currency fee command.
+ */
+export function wiseLegAmountNetOfFee(
+  commands: readonly WiseImportCommand[],
+  rowIndex: number,
+  direction: "IN" | "OUT" | undefined,
+  amount: number,
+  bookedCurrency: string,
+): number | undefined {
+  const fee = commands.find(command =>
+    command.action === "fee_create_and_confirm" && command.row_key === `row:${rowIndex}:fee`
+  );
+  if (!direction || !fee || fee.booked_currency !== bookedCurrency || !(fee.booked_amount > 0)) return undefined;
+  return roundMoney(direction === "IN" ? amount - fee.booked_amount : amount + fee.booked_amount);
+}
+
 export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionOutput {
   const {
     eligible,
@@ -762,11 +781,20 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         maxGapDays: 1,
         reference: row.id,
       };
-      const resolution = guard.resolveInterAccount(query);
-      if (
-        resolution.status === "ambiguous_refless" ||
-        (resolution.status === "none" && guard.hasOtherLabelledInterAccount(query))
-      ) {
+      let resolution = guard.resolveInterAccount(query);
+      let otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(query);
+      // Lane B binds each journal amount to its own bank leg. A journal booking
+      // this transfer net of the row's separate fee row carries the Wise leg at
+      // the net amount, so look that up too.
+      const netAmount = wiseLegAmountNetOfFee(
+        commands, row.rowIndex, sourceDirectionForWiseDirection(row.direction), entry.amount, bookedCurrencyForWiseRow(row),
+      );
+      if (resolution.status === "none" && !otherLabelled && netAmount !== undefined) {
+        const netQuery = { ...query, amount: netAmount };
+        resolution = guard.resolveInterAccount(netQuery);
+        otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(netQuery);
+      }
+      if (resolution.status === "ambiguous_refless" || otherLabelled) {
         ownershipReviews.push(reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON));
         continue;
       }

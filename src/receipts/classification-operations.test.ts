@@ -722,6 +722,26 @@ describe("classification operations — a payment matching an open purchase invo
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
+  it("routes a residual payment on a partially paid invoice (100 total, 75 paid, 25 paid now) to review, not a new invoice", async () => {
+    const PARTIAL = { ...OPEN, id: 91, number: "INV-2026-01", create_date: "2026-01-15", payment_status: "PARTIALLY_PAID", gross_price: 100, base_gross_price: 100 };
+    const { api, operations } = setup([HIST, PARTIAL]);
+
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (analysis.ok) expect(analysis.value.totalUnmatched).toBe(0);
+
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value.results.flatMap(r => r.notes).join("\n")).toContain("reconcile instead");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("F5 skips a payment that already matches an open purchase invoice", async () => {
     const { api, operations } = setup([HIST, OPEN]);
     const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });

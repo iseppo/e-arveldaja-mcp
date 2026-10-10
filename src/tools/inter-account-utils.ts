@@ -76,11 +76,12 @@ export interface InterAccountJournalEntry {
    */
   consumed?: boolean;
   /**
-   * Every amount this entry is indexed under (a fee-deducted transfer has two
-   * leg amounts). Consumption must cover all of them, or the other leg's mirror
-   * would look uncovered once this shared entry is consumed.
+   * The journal's two bank legs, each with the amount that leg carries (a
+   * fee-deducted transfer's legs differ). A leg's amount is indexed only for
+   * queries on that leg's own dimension. Consumption must cover both legs, or
+   * the other leg's mirror would look uncovered once this shared entry is consumed.
    */
-  amounts?: number[];
+  legs?: Array<{ dimension: number; amount: number }>;
 }
 
 /**
@@ -136,6 +137,23 @@ export function isReflessEntry(entry: Pick<InterAccountJournalEntry, "document_n
 }
 
 /**
+ * Directional Lane B keys for a journal's two bank legs: each key is
+ * `ownDim|otherDim|amountOnOwnDim|date`, i.e. what a query on that leg's own
+ * account looks up.
+ */
+export function interAccountLegKeys(
+  legs: ReadonlyArray<{ dimension: number; amount: number }>,
+  date: string,
+): string[] {
+  const [a, b] = legs;
+  if (!a || !b) return [];
+  return [
+    `${a.dimension}|${b.dimension}|${roundMoney(a.amount)}|${date}`,
+    `${b.dimension}|${a.dimension}|${roundMoney(b.amount)}|${date}`,
+  ];
+}
+
+/**
  * Build a map from bidirectional "sourceDim|targetDim|amount|date" keys to arrays
  * of journal entries, scanning confirmed journals that have exactly 2 bank account
  * postings (one D, one C). Keys are inserted in both directions so lookups succeed
@@ -166,25 +184,27 @@ export function buildInterAccountJournalIndex(
     const rawAmount = debit.base_amount ?? debit.amount;
     if (rawAmount == null) continue;
     // A fee-deducted transfer (C A 100 / D B 99 / D fee 1) has different
-    // bank-leg amounts; index under both so a lookup by either leg's amount hits.
+    // bank-leg amounts. Bind each amount to the leg carrying it: a query keyed
+    // from A (A|B|…) sees only 100, a query keyed from B (B|A|…) only 99, so a
+    // genuinely new €100 receipt on B is not mistaken for this journal.
     const rawCreditAmount = credit.base_amount ?? credit.amount;
-    const amounts = new Set([roundMoney(rawAmount)]);
-    if (rawCreditAmount != null) amounts.add(roundMoney(rawCreditAmount));
+    const debitAmount = roundMoney(rawAmount);
+    const creditAmount = rawCreditAmount != null ? roundMoney(rawCreditAmount) : debitAmount;
+    const legs = [
+      { dimension: credit.accounts_dimensions_id!, amount: creditAmount },
+      { dimension: debit.accounts_dimensions_id!, amount: debitAmount },
+    ];
     const entry: InterAccountJournalEntry = {
       journal_id: j.id,
       document_number: j.document_number,
       origin: "snapshot",
-      amounts: [...amounts],
+      legs,
     };
-    // Insert in both directions so we catch it regardless of which side we're checking from
-    for (const amount of amounts) {
-      const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-      const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-      for (const key of [key1, key2]) {
-        const existing = index.get(key);
-        if (existing) existing.push(entry);
-        else index.set(key, [entry]);
-      }
+    // Insert keyed from each side so we catch it regardless of which side we're checking from
+    for (const key of interAccountLegKeys(legs, j.effective_date)) {
+      const existing = index.get(key);
+      if (existing) existing.push(entry);
+      else index.set(key, [entry]);
     }
   }
   return index;
