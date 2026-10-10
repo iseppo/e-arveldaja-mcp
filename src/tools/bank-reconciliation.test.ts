@@ -2139,6 +2139,52 @@ describe("reconcile_inter_account_transfers", () => {
   });
 
   describe("one-sided transfers (Phase 2)", () => {
+    describe("H2 fee-deducted transfer with both legs unconfirmed", () => {
+      const lhvWise = [
+        { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
+        { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
+      ];
+      const lhvOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x [e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+      const wiseIn = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 99, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Männipuu OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
+
+      it("routes both legs to review instead of booking each one-sided", async () => {
+        for (const order of [[lhvOut, wiseIn], [wiseIn, lhvOut]]) {
+          const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+          expect(payload.matched_pairs).toBe(0);
+          expect(payload.matched_one_sided).toBe(0);
+          expect(api.transactions.confirm).not.toHaveBeenCalled();
+          expect(api.transactions.delete).not.toHaveBeenCalled();
+          expect(payload.ambiguous_pairs).toHaveLength(1);
+          expect(payload.ambiguous_pairs[0]).toMatchObject({
+            outgoing_transaction_id: 1,
+            candidate_incoming_transaction_ids: [2],
+            code: "possible_fee_deducted_transfer",
+          });
+        }
+      });
+
+      it("still pairs the equal-amount legs in Phase 1", async () => {
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 100 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_pairs).toBe(1);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+        expect(api.transactions.delete).toHaveBeenCalledWith(2);
+      });
+
+      it("books one-sided when the opposite leg differs by more than the fee tolerance", async () => {
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 50 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_one_sided).toBe(2);
+        expect(payload.ambiguous_pairs).toHaveLength(0);
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it("does not book an owner's personal payment as a transfer when the company is named after the owner", async () => {
       const twoAccounts = [
         { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },

@@ -41,7 +41,7 @@ import {
   type ReconciliationExecutionCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
-import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, type MatchCandidate } from "./match-score.js";
+import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
   inferOneSidedTransfer,
@@ -1216,8 +1216,55 @@ export async function runInterAccountMatching(
     tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
   );
 
+  // Two rows that would each be booked one-sided against each other's account
+  // are two legs of ONE transfer when their amounts differ only by a plausible
+  // fee (Phase 1 needs equal amounts, so a fee-deducted transfer reaches here).
+  // Booking both would double-book it, so route both to review instead.
+  // Tolerance: a non-zero difference of at most max(1 EUR, 2% of the larger
+  // leg), on the comparable (base EUR) amounts, within the pairing date gap.
+  // Rows already covered by an existing journal keep the journal path.
+  for (let i = 0; i < remaining.length; i++) {
+    const a = remaining[i]!;
+    const aTarget = inferOneSidedTransfer(a, lookups, oneSidedInferenceCache);
+    if (aTarget.confidence < 50 || !aTarget.targetDimension) continue;
+    for (let j = i + 1; j < remaining.length; j++) {
+      const b = remaining[j]!;
+      if (b.accounts_dimensions_id !== aTarget.targetDimension) continue;
+      const bTarget = inferOneSidedTransfer(b, lookups, oneSidedInferenceCache);
+      if (bTarget.confidence < 50 || bTarget.targetDimension !== a.accounts_dimensions_id) continue;
+      const aAmount = comparableTransactionAmount(a);
+      const bAmount = comparableTransactionAmount(b);
+      if (sameAmountToTheCent(aAmount, bAmount)) continue;
+      const tolerance = Math.max(1, 0.02 * Math.max(Math.abs(aAmount), Math.abs(bAmount)));
+      if (Math.abs(Math.abs(aAmount) - Math.abs(bAmount)) > tolerance) continue;
+      if (Math.abs(toUtcDay(a.date) - toUtcDay(b.date)) / 86_400_000 > maxGap) continue;
+      // An existing journal already covering either leg is handled by the
+      // one-sided journal check below (skip / ambiguous_refless), not here.
+      const covered = (tx: Transaction, target: number, amount: number) =>
+        resolveExistingJournal(
+          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, tx.bank_ref_number ?? tx.ref_number, false,
+        ).status !== "none";
+      if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
+
+      const [out, inc] = bankTransactionDirection(a) === "incoming" ? [b, a] : [a, b];
+      blockedOneSidedTxIds.add(a.id!);
+      blockedOneSidedTxIds.add(b.id!);
+      ambiguousPairs.push({
+        outgoing_transaction_id: out.id!,
+        amount: out.amount,
+        date_out: out.date,
+        from_dimension_id: out.accounts_dimensions_id,
+        candidate_incoming_transaction_ids: [inc.id!],
+        candidate_incoming_dimension_ids: [inc.accounts_dimensions_id],
+        confidence: Math.min(aTarget.confidence, bTarget.confidence),
+        code: "possible_fee_deducted_transfer",
+        reason: `Transactions ${out.id} (${out.amount}) and ${inc.id} (${inc.amount}) look like the two legs of one own-account transfer whose amounts differ by a possible fee; booking each one-sided would double-book it. Confirm the outgoing leg inline with the fee split, then delete the mirror row.`,
+      });
+    }
+  }
+
   for (const tx of remaining) {
-    if (!tx.id) continue;
+    if (!tx.id || blockedOneSidedTxIds.has(tx.id)) continue;
     const { targetDimension, confidence, reasons } = inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
 
     if (confidence < 50 || !targetDimension) continue;
