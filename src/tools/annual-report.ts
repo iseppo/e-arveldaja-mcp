@@ -25,6 +25,7 @@ import { withOpeningBalanceStatusInRange } from "../opening-balance-limitations.
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import {
   isYearEndClosingJournal,
+  isNumberedForOtherYear,
   isResultEntryShape,
   isRetainedTransferShape,
   isYearEndResultEntry,
@@ -776,11 +777,6 @@ async function analyzeYearEndClose(
   // 31 December of this year, plus YEC-RETAINED-YYYY on ANY date (its number
   // is this year's transfer even when booked years late).
   const sameYearEnd = `${year}-12-31`;
-  // A YEC-RETAINED-/YEC-RESULT- number of another year names that year's close.
-  const numberedForOtherYear = (journal: Journal) => {
-    const numberedYear = /^YEC-(?:RETAINED|RESULT)-(\d{4})$/.exec(journal.document_number ?? "")?.[1];
-    return numberedYear !== undefined && Number(numberedYear) !== year;
-  };
   // An unnumbered 31 December transfer is inside the year-end balances, so
   // adding it back to the residual gives what earlier years left on 2970.
   // When it moves exactly that (non-zero) amount it is an earlier year's late
@@ -793,7 +789,7 @@ async function analyzeYearEndClose(
   };
   const sameYearEndAmbiguous: Journal[] = [];
   const offDateCandidates = allJournals.filter((journal) => {
-    if (journal.is_deleted || journal.id === -1 || existing.transfer.includes(journal) || numberedForOtherYear(journal)) return false;
+    if (journal.is_deleted || journal.id === -1 || existing.transfer.includes(journal) || isNumberedForOtherYear(journal, year)) return false;
     if (journal.document_number === transferDocumentNumber) return true;
     if (!(journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) ||
       !isRetainedTransferShape(journal, transferAccounts)) return false;

@@ -51,6 +51,17 @@ export const yearEndTransferDocumentNumber = (year: number): string => `YEC-RETA
 
 type ClosingCandidate = Pick<Journal, "document_number" | "effective_date" | "postings">;
 
+/**
+ * True when the journal carries the MCP's YEC-RESULT-/YEC-RETAINED- number of a
+ * year other than `year`: that number names the other year's close, so no
+ * structural (date + accounts) matcher may claim it for `year` — e.g. a late
+ * YEC-RETAINED-2024 dated 2026-01-01 is not 2025's transfer.
+ */
+export function isNumberedForOtherYear(journal: Pick<Journal, "document_number">, year: number): boolean {
+  const numberedYear = /^YEC-(?:RETAINED|RESULT)-(\d{4})$/.exec(journal.document_number ?? "")?.[1];
+  return numberedYear !== undefined && Number(numberedYear) !== year;
+}
+
 function postedAccountIds(journal: ClosingCandidate): Set<number> {
   return new Set((journal.postings ?? [])
     .filter((posting) => !posting.is_deleted && (posting.type === "D" || posting.type === "C"))
@@ -68,7 +79,7 @@ export function isYearEndResultEntry(
   year: number,
   accounts: { calculatedResult: number; currentYearProfit: number },
 ): boolean {
-  if (journal.effective_date !== `${year}-12-31`) return false;
+  if (journal.effective_date !== `${year}-12-31` || isNumberedForOtherYear(journal, year)) return false;
   if (journal.document_number === yearEndResultDocumentNumber(year)) return true;
   return isResultEntryShape(journal, accounts);
 }
@@ -95,7 +106,7 @@ export function isYearEndTransferEntry(
   year: number,
   accounts: { currentYearProfit: number; retainedEarnings: number; reserves: number[] },
 ): boolean {
-  if (journal.effective_date !== `${year + 1}-01-01`) return false;
+  if (journal.effective_date !== `${year + 1}-01-01` || isNumberedForOtherYear(journal, year)) return false;
   if (journal.document_number === yearEndTransferDocumentNumber(year)) return true;
   return isRetainedTransferShape(journal, accounts);
 }

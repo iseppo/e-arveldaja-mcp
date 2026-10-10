@@ -1580,11 +1580,34 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
         ["A: unnumbered on 2025-12-31", late2024("2025-12-31")],
         ["B: YEC-RETAINED-2024 on 2025-12-31", late2024("2025-12-31", "YEC-RETAINED-2024")],
         ["F: YEC-RETAINED-2024 on 2026-03-01", late2024("2026-03-01", "YEC-RETAINED-2024")],
+        ["G: YEC-RETAINED-2024 on 2026-01-01", late2024("2026-01-01", "YEC-RETAINED-2024")],
       ])("%s → 2025 proposes its own transfer", async (_label, late) => {
         const payload = await prepare([...profitYear(), ...closed2024(), handResult(), late]);
         expect(payload.blocked_entries).toEqual([]);
         expect(payload.close_status.retained_transfer_entry).toBe("proposed");
         expect(payload.proposed_journal_entries.map(postingsOf)).toEqual([[[2970, "D", 50], [2960, "C", 50]]]);
+      });
+
+      it("a YEC-RETAINED-2024 dated 1 January 2026 is 2024's transfer: 2024 closed, 2025 still books its own €50", async () => {
+        const closed2024Of50 = [
+          makeJournal("2024-05-01", [makePosting(1020, "D", 50), makePosting(3100, "C", 50)], { id: 3601 }),
+          makeJournal("2024-12-31", [makePosting(9000, "D", 50), makePosting(2970, "C", 50)], { id: 3602 }),
+        ];
+        const late = makeJournal("2026-01-01", [makePosting(2970, "D", 50), makePosting(2960, "C", 50)],
+          { id: 3603, document_number: "YEC-RETAINED-2024" });
+        const journals = [...profitYear(), ...closed2024Of50, handResult(), late];
+
+        const payload = await prepare(journals);
+        expect(payload.close_status.status).not.toBe("closed");
+        expect(payload.close_status.retained_transfer_entry).toBe("proposed");
+        expect(payload.blocked_entries).toEqual([]);
+        expect(payload.proposed_journal_entries.map(postingsOf)).toEqual([[[2970, "D", 50], [2960, "C", 50]]]);
+        const { docs } = await execute(journals);
+        expect(docs).toEqual(["YEC-RETAINED-2025"]);
+
+        const payload2024 = await prepare(journals, { year: 2024 });
+        expect(payload2024.close_status).toEqual({ status: "closed", result_entry: "exists", retained_transfer_entry: "exists" });
+        expect(payload2024.proposed_journal_entries).toEqual([]);
       });
 
       it("an unnumbered 31 December transfer equal to both the earlier residual and this year's result is ambiguous", async () => {
