@@ -54,6 +54,7 @@ import {
   transactionCommandExists,
   wisePlanCommandId,
   wisePlanReviewProjection,
+  wiseLegAmountNetOfFee,
   WISE_APPROVAL_DOMAIN,
   WISE_COMMAND_VERSION,
   WISE_PLAN_COMMAND_CATEGORY,
@@ -681,10 +682,16 @@ async function runWiseImport(
               maxGapDays: 1,
               reference: command.wise_id,
             };
-            if (
-              freshGuard.resolveInterAccount(journalQuery, { consume: false }).status !== "none" ||
-              freshGuard.hasOtherLabelledInterAccount(journalQuery)
-            ) {
+            const netAmount = wiseLegAmountNetOfFee(
+              commands, command.row_index, command.source_direction, command.booked_amount, command.booked_currency,
+            );
+            const journalQueries = netAmount === undefined
+              ? [journalQuery]
+              : [journalQuery, { ...journalQuery, amount: netAmount }];
+            if (journalQueries.some(query =>
+              freshGuard.resolveInterAccount(query, { consume: false }).status !== "none" ||
+              freshGuard.hasOtherLabelledInterAccount(query)
+            )) {
               throw new Error("Stale inter-account precondition: a matching journal appeared before confirmation");
             }
             if (command.client_update) await api.transactions.update(apiId, command.client_update);

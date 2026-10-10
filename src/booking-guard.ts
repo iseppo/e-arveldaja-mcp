@@ -8,6 +8,7 @@ import { MutationIndeterminateError, classifyMutationFailure } from "./mutation-
 import { roundMoney } from "./money.js";
 import {
   buildInterAccountJournalIndex,
+  interAccountLegKeys,
   findMatchingJournal,
   findMatchingJournalEntry,
   isReflessEntry,
@@ -498,10 +499,14 @@ export class BookingGuard {
       // nearest-first window finds it exactly where this leg found the journal.
       if (consume && isReflessEntry(match.entry)) {
         match.entry.consumed = true;
-        // Cover every amount alias of the journal (fee-deducted legs differ).
-        for (const amount of match.entry.amounts ?? [q.amount]) {
-          this.recordConsumedMarker(q.sourceDim, q.targetDim, amount, date);
-        }
+        // Cover both legs of the journal, each at its own amount (fee-deducted legs differ).
+        this.recordConsumedMarker(
+          match.entry.legs ?? [
+            { dimension: q.sourceDim, amount: q.amount },
+            { dimension: q.targetDim, amount: q.amount },
+          ],
+          date,
+        );
       }
       return { status: "matched", journal_id: match.entry.journal_id, matched_on: "refless", pool };
     }
@@ -532,22 +537,19 @@ export class BookingGuard {
   }
 
   /**
-   * Drop a ref-less in-run "tripwire" marker under both directional keys for
+   * Drop a ref-less in-run "tripwire" marker under both directional keys (each leg at its own amount) for
    * `date`, recorded when a ref-less snapshot journal is consumed. It carries no
    * reference (so any subsequent same-key row hits the in_run → ambiguous_refless
    * branch regardless of that row's reference) and the sentinel journal id (so no
    * real journal id is ever surfaced from it and it is never itself consumed).
    */
-  private recordConsumedMarker(sourceDim: number, targetDim: number, amount: number, date: string): void {
+  private recordConsumedMarker(legs: ReadonlyArray<{ dimension: number; amount: number }>, date: string): void {
     const marker: InterAccountJournalEntry = {
       journal_id: UNKNOWN_JOURNAL_ID,
       document_number: null,
       origin: "in_run",
     };
-    const amt = roundMoney(amount);
-    const key1 = `${sourceDim}|${targetDim}|${amt}|${date}`;
-    const key2 = `${targetDim}|${sourceDim}|${amt}|${date}`;
-    for (const key of [key1, key2]) {
+    for (const key of interAccountLegKeys(legs, date)) {
       const existing = this.interAccountIndex.get(key);
       if (existing) existing.push(marker);
       else this.interAccountIndex.set(key, [marker]);
