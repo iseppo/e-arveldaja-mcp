@@ -159,6 +159,21 @@ describe("Wise inter-account row matched to a journal that already books its fee
     expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
   });
 
+  it("compares the journal in base EUR, like the guard that matched it", () => {
+    // A registered USD journal: nominal amounts in USD, base amounts in EUR.
+    const usdJournal = {
+      id: 9, registered: true, is_deleted: false, effective_date: "2026-02-04", document_number: "",
+      postings: [
+        { accounts_dimensions_id: LHV, accounts_id: 1020, type: "C", amount: 110, base_amount: 100 },
+        { accounts_dimensions_id: WISE, accounts_id: 1020, type: "D", amount: 109.45, base_amount: 99.5 },
+        { accounts_dimensions_id: FEE_DIM, accounts_id: 8610, type: "D", amount: 0.55, base_amount: 0.5 },
+      ],
+    } as unknown as Journal;
+    const output = run([usdJournal]);
+    expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
+    expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
+  });
+
   it("still books the fee when the journal moved the gross amount only", () => {
     const output = run([journal(7, [[LHV, "C", 100], [WISE, "D", 100]])]);
     expect(output.commands.map(command => command.action)).toEqual(["fee_create_and_confirm", "inter_account"]);

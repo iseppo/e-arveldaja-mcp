@@ -869,14 +869,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const feeIndex = commands.findIndex(command => command.row_key === feeKey);
         const feeCommand = feeIndex >= 0 ? commands[feeIndex]! : undefined;
         const postings = (existingJournal?.postings ?? []).filter(posting => !posting.is_deleted);
+        // Base EUR, the basis the guard matched the journal on: a non-EUR
+        // journal's nominal amounts are in its own currency.
         const cents = (value: number) => Math.round(value * 100);
+        const baseCents = (posting: { amount: number; base_amount?: number }) => cents(posting.base_amount ?? posting.amount);
         if (
           feeCommand &&
           feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
           postings.some(posting => posting.accounts_dimensions_id === accounts_dimensions_id &&
-            Math.abs(cents(posting.amount) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
+            Math.abs(baseCents(posting) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
           postings.some(posting => !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
-            cents(posting.amount) === cents(feeCommand.booked_amount))
+            baseCents(posting) === cents(feeCommand.booked_amount))
         ) {
           commands.splice(feeIndex, 1);
           const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
