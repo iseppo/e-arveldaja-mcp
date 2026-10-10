@@ -866,8 +866,10 @@ export function getClientCountryFromIban(iban?: string | null): string | undefin
 }
 
 export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string | undefined {
-  return getClientCountryFromIban(fields.supplier_iban) ??
-    getClientCountryFromVatNumber(fields.supplier_vat_no) ??
+  // The VAT number names the supplier's tax home; an IBAN may be a foreign
+  // collection account, so the VAT country wins when both are present.
+  return getClientCountryFromVatNumber(fields.supplier_vat_no) ??
+    getClientCountryFromIban(fields.supplier_iban) ??
     getClientCountryFromText(fields.raw_text);
 }
 
@@ -2043,6 +2045,8 @@ export function extractAmounts(text: string): { total_net?: number; total_vat?: 
 export interface ExtractReceiptFieldsOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
+  /** The active company's own bank-account IBANs, excluded from supplier_iban. */
+  ownIbans?: readonly string[];
   /** Layout text items from the PDF parser for coordinate-based column classification. */
   textItems?: readonly LayoutTextItem[];
   /** Minimum OCR confidence reported by parser text items, when precomputed by the caller. */
@@ -2087,6 +2091,7 @@ export function extractPdfIdentifiers(
   const ids = extractIdentifiers(text, {
     excludeVat: options?.ownCompanyVat,
     excludeRegCode: options?.ownCompanyRegistryCode,
+    excludeIban: options?.ownIbans,
     textItems: options?.textItems,
   });
   return {

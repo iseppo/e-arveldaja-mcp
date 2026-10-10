@@ -17,6 +17,27 @@ import { deriveOwnCompanyRegistryCode } from "./receipt-inbox.js";
 export interface OwnCompanyIdentifiers {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
+  /** IBANs of the company's own bank accounts — never a supplier's IBAN. */
+  ownIbans?: string[];
+}
+
+/**
+ * The active company's own bank-account IBANs. Best-effort like the other
+ * identifiers: a missing method or failed read yields `undefined`.
+ */
+export async function loadOwnIbans(api: ApiContext): Promise<string[] | undefined> {
+  try {
+    const fn = api.readonly.getBankAccounts;
+    if (typeof fn !== "function") return undefined;
+    const accounts = await fn.call(api.readonly);
+    const ibans = (accounts ?? [])
+      .flatMap((account) => [account.iban_code, account.account_no])
+      .map((value) => value?.replace(/\s+/g, "").toUpperCase())
+      .filter((value): value is string => !!value);
+    return ibans.length > 0 ? ibans : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -35,8 +56,8 @@ async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_na
 }
 
 /**
- * Resolve the active company's own VAT number (from `vat_info`) and registry
- * code (derived from the clients list + `invoice_info`). Best-effort: any
+ * Resolve the active company's own VAT number (from `vat_info`), registry
+ * code (derived from the clients list + `invoice_info`) and bank-account IBANs. Best-effort: any
  * upstream failure degrades to `undefined` for that field so the caller falls
  * back to its prior no-exclusion behaviour rather than erroring.
  */
@@ -57,5 +78,6 @@ export async function resolveOwnCompanyIdentifiers(
     ownCompanyVat,
     invoiceInfo.invoice_company_name?.trim() || undefined,
   );
-  return { ownCompanyVat, ownCompanyRegistryCode };
+  const ownIbans = await loadOwnIbans(api);
+  return { ownCompanyVat, ownCompanyRegistryCode, ...(ownIbans ? { ownIbans } : {}) };
 }

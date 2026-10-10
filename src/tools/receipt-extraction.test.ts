@@ -21,6 +21,7 @@ import {
   getAutoBookedVatConfig,
   getAutoBookedVatRateDropdown,
   extractReceiptFieldsFromText,
+  inferSupplierCountry,
   extractSupplierName,
   classifyLayoutAmountLabel,
   extractAmountsFromLine,
@@ -2825,5 +2826,27 @@ describe("classifyReceiptDocument", () => {
     ].join("\n");
     expect(classifyReceiptDocument(text, "Kviitung-2036-1466-3430.pdf")).toBe("payment_receipt");
     expect(classifyReceiptDocument(text, "Quittung-2036-1466-3430.pdf")).toBe("payment_receipt");
+  });
+});
+
+describe("supplier IBAN vs the buyer's own account", () => {
+  const hetzner = "Hetzner Online GmbH\nInvoice R0012345678\nDate 05.10.2026\nCustomer: Minu OÜ\n" +
+    "The amount will be debited from your account EE38 2200 2210 2014 5685 BIC HABAEE2X\nTotal 12.40 EUR\nVAT 24% 2.40 EUR\n" +
+    "Hetzner Online GmbH VAT DE812871812 IBAN DE89 3704 0044 0532 0130 00";
+
+  it("a SEPA debit notice's own account is not the supplier IBAN; country follows the supplier", () => {
+    const fields = extractReceiptFieldsFromText(hetzner, "x.pdf");
+    expect(fields.supplier_iban).toBe("DE89370400440532013000");
+    expect(inferSupplierCountry(fields)).toBe("DEU");
+  });
+
+  it("excludes the company's own IBANs passed as ownIbans", () => {
+    const text = "Supplier GmbH\nIBAN EE382200221020145685\nIBAN DE89370400440532013000";
+    expect(extractReceiptFieldsFromText(text, "x.pdf", { ownIbans: ["EE382200221020145685"] }).supplier_iban).toBe("DE89370400440532013000");
+  });
+
+  it("the VAT-number country wins over a conflicting IBAN country", () => {
+    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: "DE812871812", raw_text: "" })).toBe("DEU");
+    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: undefined, raw_text: "" })).toBe("EST");
   });
 });

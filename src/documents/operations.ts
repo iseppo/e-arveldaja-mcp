@@ -321,9 +321,10 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       // them from supplier fields. Best-effort — offline extraction still runs.
       let ownCompanyVat: string | undefined;
       let ownCompanyRegistryCode: string | undefined;
+      let ownIbans: string[] | undefined;
       const allClients = await this.api.clients.listAll().catch(() => []);
       try {
-        ({ ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(this.api, allClients));
+        ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(this.api, allClients));
       } catch {
         // Offline / unconfigured — extract without self-exclusions.
       }
@@ -332,6 +333,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         textItems: allTextItems,
         ownCompanyVat,
         ownCompanyRegistryCode,
+        ownIbans,
       });
 
       const signals: ExtractionConfidenceSignals = {};

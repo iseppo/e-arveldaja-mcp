@@ -421,9 +421,10 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         // runs the extractor without the exclusions (its prior behaviour).
         let ownCompanyVat: string | undefined;
         let ownCompanyRegistryCode: string | undefined;
+        let ownIbans: string[] | undefined;
         try {
           const clients = await api.clients.listAll();
-          ({ ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(api, clients));
+          ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(api, clients));
         } catch {
           // Offline / unconfigured connection — extract without self-exclusions.
         }
@@ -431,6 +432,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           textItems: allTextItems,
           ownCompanyVat,
           ownCompanyRegistryCode,
+          ownIbans,
         });
         // `extractReceiptFieldsFromText` already ran `extractIdentifiers` on the
         // same text + textItems and spread the result onto `extracted`; reuse
@@ -581,7 +583,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       // mistook for the supplier would resolve (or auto-create) the buyer's
       // own company as a supplier and book a purchase against self. The
       // receipt-batch flow already threads these through; do the same here.
-      const { ownCompanyVat, ownCompanyRegistryCode } = await resolveOwnCompanyIdentifiers(api, allClients);
+      const { ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(api, allClients);
       const resolution = await resolveSupplierInternal(
         api,
         allClients,
@@ -595,6 +597,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         {
           ownCompanyVat,
           ownCompanyRegistryCode,
+          ownIbans,
           _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
       );
