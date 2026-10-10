@@ -1622,6 +1622,24 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.matched_one_sided).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
+
+    it("reports a one-sided transfer to a shared IBAN for review instead of dropping it", async () => {
+      const { handler } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.needs_review_ambiguous_refless).toBe(1);
+      expect(JSON.stringify(payload)).toMatch(/several own accounts/);
+    });
+
+    it("books a one-sided transfer to a shared IBAN into the given target_accounts_dimensions_id when it is one of them", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 11 })).content[0]!.text) as any;
+
+      expect(payload.matched_one_sided).toBe(1);
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm.mock.calls[0]![1][0].related_sub_id).toBe(11);
+    });
   });
 
   describe("MAJOR-1 same-type reciprocal direction", () => {

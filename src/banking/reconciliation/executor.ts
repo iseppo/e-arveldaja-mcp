@@ -1311,8 +1311,18 @@ export async function runInterAccountMatching(
 
   for (const tx of remaining) {
     if (!tx.id || blockedOneSidedTxIds.has(tx.id)) continue;
-    const { targetDimension, confidence, reasons } = inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
+    const { targetDimension, confidence, reasons, ambiguousTargetDimensions } =
+      inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
 
+    if (ambiguousTargetDimensions) {
+      ambiguousRefless.push({
+        transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+        source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+        target_account: ambiguousTargetDimensions.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+        reason: `The counterparty IBAN backs several own accounts (dimensions ${ambiguousTargetDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
+      });
+      continue;
+    }
     if (confidence < 50 || !targetDimension) continue;
 
     const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;

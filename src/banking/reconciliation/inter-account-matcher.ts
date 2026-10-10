@@ -18,6 +18,8 @@ export interface OneSidedInference {
   targetDimension?: number;
   confidence: number;
   reasons: string[];
+  /** The own accounts behind a shared counterparty IBAN when no single target could be chosen. */
+  ambiguousTargetDimensions?: number[];
 }
 
 /** The read-only account lookups + config the matcher closes over per run. */
@@ -56,9 +58,17 @@ export function inferOneSidedTransfer(
       reasons.push("counterparty_iban_is_own_account");
     } else if (ibanDims.length > 1) {
       // The IBAN backs several own accounts (e.g. LHV multi-currency
-      // sub-accounts): no single target, so never auto-book — leave for review.
-      ibanTargetAmbiguous = true;
-      reasons.push("counterparty_iban_maps_to_multiple_own_accounts");
+      // sub-accounts): use the caller's target_accounts_dimensions_id when it is
+      // one of them; otherwise no single target, so never auto-book — review.
+      const targetAccountsDimensionsId = lookups.targetAccountsDimensionsId;
+      if (targetAccountsDimensionsId !== undefined && ibanDims.includes(targetAccountsDimensionsId)) {
+        targetDimension = targetAccountsDimensionsId;
+        confidence += 90;
+        reasons.push("counterparty_iban_is_own_account", "target_from_parameter");
+      } else {
+        ibanTargetAmbiguous = true;
+        reasons.push("counterparty_iban_maps_to_multiple_own_accounts");
+      }
     }
   }
 
@@ -89,6 +99,9 @@ export function inferOneSidedTransfer(
     targetDimension,
     confidence: Math.min(confidence, 100),
     reasons,
+    ...(ibanTargetAmbiguous
+      ? { ambiguousTargetDimensions: [...ownIbanToDimension.get(counterpartyIban)!].filter(d => d !== tx.accounts_dimensions_id) }
+      : {}),
   };
   if (tx.id) {
     cache.set(tx.id, result);
