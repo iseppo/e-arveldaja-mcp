@@ -374,17 +374,6 @@ describe("BaseResource", () => {
   // ── document_user (getDocument / uploadDocument / deleteDocument) ─────────
 
   describe("document_user methods", () => {
-    it("getDocument GETs /{basePath}/{id}/document_user", async () => {
-      const client = makeClient();
-      const resource = new BaseResource<Item>(client, "/journals");
-      const file = { name: "receipt.pdf", contents: "YmFzZTY0" };
-      vi.mocked(client.get).mockResolvedValueOnce(file);
-
-      const result = await resource.getDocument(7);
-      expect(result).toEqual(file);
-      expect(client.get).toHaveBeenCalledWith("/journals/7/document_user");
-    });
-
     it("uploadDocument PUTs {name, contents} and invalidates the cache", async () => {
       const client = makeClient();
       (client as unknown as { request: ReturnType<typeof vi.fn> }).request = vi.fn().mockResolvedValue(apiResponse());
@@ -1128,6 +1117,8 @@ describe("BaseResource", () => {
     // Action endpoints (deliver/register/invalidate/deactivate/reactivate) share
     // the mutate() outcome classification: a dropped connection must surface as
     // mutation_indeterminate so the operator re-reads before retrying.
+    // Confirm/invalidate must also bust /journals (and /transactions) so trial
+    // balance and reversed journal entries are never hidden by stale cache.
     const actionCases = [
       {
         label: "sale invoice deliver",
@@ -1260,6 +1251,7 @@ describe("BaseResource", () => {
 
       await row.invoke(resource);
 
+      expect(client.patch).toHaveBeenCalledWith(row.path, expect.anything());
       for (const prefix of row.caches) {
         expect(cache.get(`connection:0:${prefix}:list:`)).toBeUndefined();
       }

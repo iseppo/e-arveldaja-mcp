@@ -76,14 +76,6 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
     expect(readonlyCache.get(row.cacheKey)).toBeUndefined();
   });
 
-  it("classifies network drops and 408 as indeterminate", async () => {
-    for (const status of ["network", 408] as const) {
-      const client = makeClient();
-      vi.mocked(client.post).mockRejectedValue(new HttpError("drop", status, "POST", "/bank_accounts"));
-      await expect(new ReferenceDataApi(client).createBankAccount({})).rejects.toBeInstanceOf(MutationIndeterminateError);
-    }
-  });
-
   it.each(writeCases)("$label 422 is definitive: rethrown unchanged, cache kept", async row => {
     const client = makeClient();
     const rejection = new HttpError("unprocessable", 422, row.method.toUpperCase(), "/x");

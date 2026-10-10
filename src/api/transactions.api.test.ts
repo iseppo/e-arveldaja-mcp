@@ -682,42 +682,6 @@ describe("TransactionsApi.confirm", () => {
   });
 });
 
-describe("TransactionsApi.invalidate", () => {
-  beforeEach(() => cache.invalidate());
-
-  it("busts /journals and /transactions caches when invalidating a confirmed transaction", async () => {
-    const { client, patchCalls } = makeClient();
-    const api = new TransactionsApi(client);
-    cache.set("test:/journals:list:page=1", { stale: true });
-    cache.set("test:/transactions:list:page=1", { stale: true });
-    cache.set("test:/sale_invoices:list:page=1", { stale: true });
-    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
-
-    await api.invalidate(7);
-
-    expect(patchCalls).toEqual([{ path: "/transactions/7/invalidate", body: {} }]);
-    expect(cache.get("test:/journals:list:page=1")).toBeUndefined();
-    expect(cache.get("test:/transactions:list:page=1")).toBeUndefined();
-    expect(cache.get("test:/sale_invoices:list:page=1")).toBeUndefined();
-    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
-  });
-
-  it("surfaces a network drop as indeterminate and still busts invoice caches", async () => {
-    const { client } = makeClient({
-      patchHandler: () => {
-        throw new HttpError("socket hang up", "network", "PATCH", "/transactions/7/invalidate");
-      },
-    });
-    const api = new TransactionsApi(client);
-    cache.set("test:/sale_invoices:list:page=1", { stale: true });
-    cache.set("test:/purchase_invoices:list:page=1", { stale: true });
-
-    await expect(api.invalidate(7)).rejects.toBeInstanceOf(MutationIndeterminateError);
-    expect(cache.get("test:/sale_invoices:list:page=1")).toBeUndefined();
-    expect(cache.get("test:/purchase_invoices:list:page=1")).toBeUndefined();
-  });
-});
-
 describe("TransactionsApi.confirm linked-invoice client guard", () => {
   beforeEach(() => cache.invalidate());
 

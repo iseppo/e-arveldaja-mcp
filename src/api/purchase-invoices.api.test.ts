@@ -16,42 +16,6 @@ function makeClient(namespace = "connection:0"): HttpClient {
   } as unknown as HttpClient;
 }
 
-describe("PurchaseInvoicesApi.confirm (cross-cache invalidation)", () => {
-  beforeEach(() => cache.invalidate());
-
-  it("busts /journals and /transactions caches when confirming", async () => {
-    const client = makeClient();
-    const api = new PurchaseInvoicesApi(client);
-    cache.set("connection:0:/journals:list:page=1", { stale: true });
-    cache.set("connection:0:/transactions:list:page=1", { stale: true });
-    cache.set("connection:0:/purchase_invoices:list:page=1", { stale: true });
-
-    await api.confirm(99);
-
-    expect(cache.get("connection:0:/journals:list:page=1")).toBeUndefined();
-    expect(cache.get("connection:0:/transactions:list:page=1")).toBeUndefined();
-    expect(cache.get("connection:0:/purchase_invoices:list:page=1")).toBeUndefined();
-  });
-});
-
-describe("PurchaseInvoicesApi.invalidate (cross-cache invalidation)", () => {
-  beforeEach(() => cache.invalidate());
-
-  it("busts /journals and /transactions caches when invalidating", async () => {
-    const client = makeClient();
-    const api = new PurchaseInvoicesApi(client);
-    cache.set("connection:0:/journals:list:page=1", { stale: true });
-    cache.set("connection:0:/transactions:list:page=1", { stale: true });
-    cache.set("connection:0:/purchase_invoices:99", { stale: true });
-
-    await api.invalidate(99);
-
-    expect(cache.get("connection:0:/journals:list:page=1")).toBeUndefined();
-    expect(cache.get("connection:0:/transactions:list:page=1")).toBeUndefined();
-    expect(cache.get("connection:0:/purchase_invoices:99")).toBeUndefined();
-  });
-});
-
 function h05Invoice(overrides: Record<string, unknown> = {}) {
   return {
     id: 1,
