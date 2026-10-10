@@ -850,6 +850,25 @@ describe("wise import tool", () => {
     expect(payload.skipped_details.flatMap((group: any) => group.sample_ids)).toEqual(["in-fee-1", "FEE:in-fee-1"]);
   });
 
+  it("does not re-create an untagged legacy incoming row stored at the after-fees amount", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({
+        id: "in-legacy-1", direction: "IN", sourceName: "Customer OÜ", sourceAmount: "100",
+        targetName: "Wise Own Account", targetAmount: "98", targetFeeAmount: "2",
+      }),
+    ]));
+    const { api, handler } = setupWiseTool([
+      { id: 1, accounts_dimensions_id: 5, type: "D", amount: 98, cl_currencies_id: "EUR", date: "2026-06-10",
+        description: "Customer OÜ [source_direction=IN]", bank_account_name: "Customer OÜ", status: "PROJECT", is_deleted: false },
+      { id: 2, accounts_dimensions_id: 5, type: "C", amount: 2, cl_currencies_id: "EUR", date: "2026-06-10",
+        description: "Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise", status: "PROJECT", is_deleted: false },
+    ]);
+    const payload = parseWiseResponse(await handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9, execute: true }));
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.skipped_details.flatMap((group: any) => group.sample_ids)).toEqual(expect.arrayContaining(["in-legacy-1", "FEE:in-legacy-1"]));
+  });
+
   it("does not drop a distinct Wise payment or fee that only looks like a previously imported tagged row", async () => {
     const stored = (id: number, description: string, amount: number, bankAccountName: string) => ({
       id, accounts_dimensions_id: 5, type: "C", amount, cl_currencies_id: "EUR", date: "2026-06-10",
