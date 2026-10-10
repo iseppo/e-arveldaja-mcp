@@ -1,0 +1,85 @@
+import { describe, it, expect } from "vitest";
+import { preflightWiseCsv } from "./preflight.js";
+import { projectWiseCommands } from "./projection.js";
+import type { AccountDimension, Transaction } from "../types/api.js";
+import type { WiseRow } from "./types.js";
+
+const HEADER = `ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency","Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency","Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,"Created by",Category,Note`;
+const WISE = 100;
+const FEE_DIM = 900;
+const accountDimensions = [{ id: FEE_DIM, accounts_id: 8610, is_deleted: false }] as AccountDimension[];
+
+function rowsOf(lines: string[]): WiseRow[] {
+  const preflight = preflightWiseCsv(`${HEADER}\n${lines.join("\n")}\n`);
+  if (!preflight.ok) throw new Error(JSON.stringify(preflight.rejected_fields));
+  return preflight.rows;
+}
+
+function project(eligible: WiseRow[], existingTx: Transaction[], extra: Partial<Parameters<typeof projectWiseCommands>[0]> = {}) {
+  return projectWiseCommands({
+    eligible, accountsDimensionsId: WISE, accountDimensions, feeAccountDimensionsId: FEE_DIM, wiseClientId: 7,
+    existingTx, transferDecisions: new Map(), postingDimensionsSnapshot: new Map(), journalSnapshot: [],
+    createInterAccountGuard: () => { throw new Error("no guard expected"); },
+    approvedTransferIds: new Set(), ownCompanyClientId: undefined, ownCompanyClientMatches: [], allPurchaseInvoices: [],
+    ...extra,
+  });
+}
+
+/** Stored ledger rows for the create commands, exactly as the payloads are written. */
+function ledgerOf(commands: ReturnType<typeof project>["commands"], firstId = 1): Transaction[] {
+  return commands.flatMap((command, index) => command.action === "inter_account" ? [] : [{
+    id: firstId + index, status: "PROJECT", ...command.create_payload,
+  } as Transaction]);
+}
+
+const created = (output: ReturnType<typeof project>) =>
+  output.commands.map(command => `${command.action}:${command.booked_amount} ${command.booked_currency}`);
+
+// A card payment of 50 USD funded from two balances: Wise exports it as two rows
+// with the SAME ID — the USD balance leg first, then the converted EUR leg that
+// carries the conversion fee.
+const splitCard = [
+  `CARD_TRANSACTION-9001,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.00,USD,,,"Test OÜ",12.00,USD,"Hoster",12.00,USD,1.0000000000000000,,,"Test Person","Software",`,
+  `CARD_TRANSACTION-9001,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.16,EUR,,,"Test OÜ",33.23,EUR,"Hoster",38.00,USD,1.1437000000000000,,,"Test Person","Software",`,
+];
+
+describe("Wise card payment split across two balances (same ID)", () => {
+  it("fresh import books both legs and the fee once", () => {
+    const output = project(rowsOf(splitCard), []);
+    expect(created(output)).toEqual([
+      "main_create:12 USD",
+      "main_create:33.23 EUR",
+      "fee_create_and_confirm:0.16 EUR",
+    ]);
+    // The fee belongs to the EUR leg.
+    expect(output.commands[2]!.depends_on).toBe(output.commands[1]!.row_key);
+  });
+
+  it("re-import against its own ledger creates nothing", () => {
+    const rows = rowsOf(splitCard);
+    const fresh = project(rows, []);
+    expect(project(rows, ledgerOf(fresh.commands)).commands).toEqual([]);
+  });
+
+  it("re-import against the previous release's ledger books only the missing leg", () => {
+    // The previous release booked the first leg as WISE:{id}, skipped the
+    // second as "Already imported (Wise ID match)" and still booked the second
+    // leg's fee as WISE:FEE:{id}.
+    const oldLedger = [
+      { id: 1, status: "PROJECT", accounts_dimensions_id: WISE, type: "C", amount: 12, cl_currencies_id: "USD", date: "2026-07-05",
+        description: "WISE:CARD_TRANSACTION-9001 Hoster (Software) [source_direction=OUT]", bank_account_name: "Hoster" },
+      { id: 2, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 0.16, cl_currencies_id: "EUR", date: "2026-07-05",
+        description: "WISE:FEE:CARD_TRANSACTION-9001 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise" },
+    ] as Transaction[];
+    const rows = rowsOf(splitCard);
+    const output = project(rows, oldLedger);
+    expect(created(output)).toEqual(["main_create:33.23 EUR"]);
+    // And the upgraded ledger is then complete.
+    expect(project(rows, [...oldLedger, ...ledgerOf(output.commands, 10)]).commands).toEqual([]);
+  });
+
+  it("keeps the leg identity stable when the export lists the legs in the other order", () => {
+    const fresh = project(rowsOf(splitCard), []);
+    expect(project(rowsOf([...splitCard].reverse()), ledgerOf(fresh.commands)).commands).toEqual([]);
+  });
+});
