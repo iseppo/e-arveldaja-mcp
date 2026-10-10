@@ -2018,6 +2018,8 @@ describe("camt import tool", () => {
     // Same code or no stored code still resolves by name.
     expect((await resolveWith([{ id: 44, name: "Acme Holding OÜ", code: "11111111" }])).clients_id).toBe(44);
     expect((await resolveWith([{ id: 45, name: "Acme Holding OÜ", code: null }])).clients_id).toBe(45);
+    // The same code formatted differently is not a conflict.
+    expect((await resolveWith([{ id: 46, name: "Acme Holding OÜ", code: "1111 1111" }])).clients_id).toBe(46);
   });
 
   it("flags likely duplicates against older manual transactions in dry run", async () => {
