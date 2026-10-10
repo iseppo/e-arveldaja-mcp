@@ -42,6 +42,15 @@ const RECEIPT_NET_LABEL_RE = /(neto|subtotal|vahesumma|km-ta\b|\(km-ta\)|ilma\s+
 const RECEIPT_REFERENCE_LINE_RE =
   /\b(reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat\s*(?:nr|number|no\.?)|tax\s*id|iban|viitenumber|viitenr|reference|ref\.?\s*(?:nr|number))\b/i;
 const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service fee|vahesumma|subtotal|handling)/i;
+// A dual-display (DCC) card slip prints the cardholder-currency CONVERSION of
+// the purchase next to the purchase amount itself ("Cardholder amount EUR
+// 90.00"). That figure is not the invoice's own amount, so its currency mark
+// must not lift it over the purchase amount in the fallback gross pick
+// (F-GROSSPICKER). Deliberately narrow: "charged", "billed in", "converted"
+// and "conversion" also label genuine payable totals or the ORIGINAL amount
+// ("Amount charged", "Converted from USD 100"), so they are not treated as
+// converted-figure labels.
+const RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE = /\bcard\s?holder\b/i;
 const SUPPLIER_LABEL_RE =
   /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
 const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
@@ -391,6 +400,8 @@ interface ReceiptAmountCandidate {
   has_currency_keyword: boolean;
   has_total_like_label: boolean;
   likely_year_amount: boolean;
+  /** Line labels a cardholder-currency conversion of the purchase (F-GROSSPICKER). */
+  cardholder_amount_label: boolean;
 }
 
 type AmountField = "total_net" | "total_vat" | "total_gross";
@@ -681,8 +692,13 @@ function getClientCountryFromText(text?: string): string | undefined {
 }
 
 function scoreReceiptAmountFallbackCandidate(candidate: ReceiptAmountCandidate): number {
+  // A cardholder-currency figure gets no currency bonus and ranks just below an
+  // otherwise equal candidate, so the purchase amount wins on a dual-display
+  // slip whichever of the two is larger; when it is the only amount it still
+  // wins (F-GROSSPICKER).
   return (candidate.has_total_like_label ? 4 : 0) +
-    (candidate.has_currency_keyword ? 2 : 0) -
+    (candidate.has_currency_keyword && !candidate.cardholder_amount_label ? 2 : 0) -
+    (candidate.cardholder_amount_label ? 1 : 0) -
     (candidate.likely_year_amount ? 10 : 0);
 }
 
@@ -1625,6 +1641,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       has_currency_keyword: classified.hasCurrencyKeyword,
       has_total_like_label: classified.hasTotalLikeLabel,
       likely_year_amount: isLikelyYearAmount(amount, classified.line),
+      cardholder_amount_label: RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(classified.line),
     })));
 
     if (

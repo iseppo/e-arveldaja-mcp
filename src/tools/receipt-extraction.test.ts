@@ -2230,3 +2230,34 @@ describe("computeTermDays — due date before invoice date (MINOR)", () => {
     expect(computeTermDays("2026-08-01", "2026-08-15")).toBe(14);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-GROSSPICKER — dual-display card receipts
+// ---------------------------------------------------------------------------
+
+describe("fallback gross on a dual-display card receipt (F-GROSSPICKER)", () => {
+  it("books the purchase amount, not the cardholder-currency figure, when the converted figure is smaller", () => {
+    const amounts = extractAmounts(["Shop OÜ", "Purchase amount 100.00", "Cardholder amount EUR 90.00"].join("\n"));
+    expect(amounts.total_gross).toBe(100);
+  });
+
+  it("books the purchase amount, not the cardholder-currency figure, when the converted figure is larger", () => {
+    const amounts = extractAmounts(["Shop OÜ", "Purchase amount 100.00", "Card holder amount EUR 110.00"].join("\n"));
+    expect(amounts.total_gross).toBe(100);
+  });
+
+  it("control: a cardholder figure that is the only amount is still the gross", () => {
+    const amounts = extractAmounts(["Shop OÜ", "Cardholder amount EUR 90.00"].join("\n"));
+    expect(amounts.total_gross).toBe(90);
+  });
+
+  it("control: an ordinary currency-marked fallback line keeps its currency preference", () => {
+    const amounts = extractAmounts(["Shop OÜ", "Coffee 120.00", "Paid EUR 90.00"].join("\n"));
+    expect(amounts.total_gross).toBe(90);
+  });
+
+  it("control: an explicit total line is unaffected by a cardholder line", () => {
+    const amounts = extractAmounts(["Shop OÜ", "Total 100.00", "Cardholder amount EUR 90.00"].join("\n"));
+    expect(amounts.total_gross).toBe(100);
+  });
+});
