@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFile } from "fs/promises";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
 import { validateFilePath } from "../file-validation.js";
 import {
   classifyReceiptDocument,
@@ -42,7 +39,7 @@ import {
 } from "./receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath, sha256Hex } from "./receipt-inbox-files.js";
+import { sha256Hex } from "./receipt-inbox-files.js";
 import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
@@ -630,49 +627,6 @@ describe("buildReceiptBatchSummary", () => {
       needs_review: 1,
       dry_run_preview: 1,
     });
-  });
-});
-
-describe("receipt file revalidation", () => {
-  it("revalidates the scanned path before re-reading the file", async () => {
-    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
-
-    await expect(revalidateReceiptFilePath({
-      name: "receipt.pdf",
-      path: "/tmp/original.pdf",
-      extension: ".pdf",
-      file_type: "pdf",
-      size_bytes: 123,
-      modified_at: "2026-03-01T00:00:00.000Z",
-    })).resolves.toBe("/tmp/revalidated.pdf");
-
-    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
-  });
-
-  it("reads the revalidated path instead of the originally scanned path", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "receipt-inbox-test-"));
-    try {
-      const originalPath = join(dir, "original.pdf");
-      const revalidatedPath = join(dir, "revalidated.pdf");
-      writeFileSync(originalPath, "original pdf");
-      writeFileSync(revalidatedPath, "pdf");
-      mockedValidateFilePath.mockResolvedValueOnce(revalidatedPath);
-
-      // Only the revalidated file holds "pdf", so these bytes prove the
-      // revalidated path was read and the originally scanned one was not.
-      await expect(readValidatedReceiptFile({
-        name: "receipt.pdf",
-        path: originalPath,
-        extension: ".pdf",
-        file_type: "pdf",
-        size_bytes: 123,
-        modified_at: "2026-03-01T00:00:00.000Z",
-      })).resolves.toEqual(Buffer.from("pdf"));
-
-      expect(mockedValidateFilePath).toHaveBeenCalledWith(originalPath, [".pdf"], 50 * 1024 * 1024);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 

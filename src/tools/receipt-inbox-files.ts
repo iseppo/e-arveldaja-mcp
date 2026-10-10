@@ -16,7 +16,7 @@ import {
   type ReceiptFileSnapshot,
   type ReceiptScanResult,
 } from "./receipt-inbox-types.js";
-import { readFileCapped, readFileHandleCapped } from "../bounded-read.js";
+import { readFileHandleCapped } from "../bounded-read.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath, validateFilePath } from "../file-validation.js";
 import { FileReferenceStoreError } from "../file-reference-store.js";
 
@@ -277,15 +277,6 @@ async function scanBoundReceiptDirectory(
     },
     descriptorPaths,
   };
-}
-
-export async function revalidateReceiptFilePath(file: ReceiptFileInfo): Promise<string> {
-  return validateFilePath(file.path, [file.extension], MAX_RECEIPT_SIZE);
-}
-
-export async function readValidatedReceiptFile(file: ReceiptFileInfo): Promise<Buffer> {
-  const validatedPath = await revalidateReceiptFilePath(file);
-  return readFileCapped(validatedPath, MAX_RECEIPT_SIZE);
 }
 
 export const sha256Hex = (bytes: Uint8Array): string =>

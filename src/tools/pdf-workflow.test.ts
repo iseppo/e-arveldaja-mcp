@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { access } from "fs/promises";
-import { readFileCapped } from "../bounded-read.js";
+import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped } from "../bounded-read.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools } from "./pdf-workflow.js";
@@ -1210,6 +1210,15 @@ describe("pdf workflow tools", () => {
     mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("evil.png", "<html><script>alert(1)</script></html>") });
 
     await expect(prepareInvoiceDocumentUpload("/x/evil.png")).rejects.toMatchObject({ category: "content_type_mismatch" });
+  });
+
+  it("refuses a document modified while it is read and removes the resolver's temp file", async () => {
+    const cleanup = vi.fn(async () => {});
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("torn.pdf", "%PDF-pdf-bytes"), cleanup });
+    mockedReadFileCapped.mockRejectedValueOnce(new Error(FILE_CHANGED_WHILE_READING_MESSAGE));
+
+    await expect(prepareInvoiceDocumentUpload("/x/torn.pdf")).rejects.toThrow(FILE_CHANGED_WHILE_READING_MESSAGE);
+    expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
   it("invalidates the draft invoice and returns an error when document upload fails", async () => {

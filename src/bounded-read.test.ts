@@ -1,9 +1,9 @@
-import { appendFile, mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, open, rm, writeFile, type FileHandle } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readFileCapped, readFileHandleCapped } from "./bounded-read.js";
+import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped, readFileHandleCapped } from "./bounded-read.js";
 import { validateFilePath } from "./file-validation.js";
 
 const roots: string[] = [];
@@ -25,7 +25,10 @@ describe("readFileCapped", () => {
     const content = Buffer.from("0123456789");
     const path = await tempFile("exact.csv", content);
 
-    await expect(readFileCapped(path, 10)).resolves.toEqual(content);
+    const bytes = await readFileCapped(path, 10);
+    expect(bytes).toEqual(content);
+    // Exact-size allocation: no oversized backing buffer is retained.
+    expect(bytes.buffer.byteLength).toBe(content.length);
   });
 
   it("returns an empty buffer for an empty file", async () => {
@@ -72,5 +75,61 @@ describe("readFileHandleCapped", () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+interface FakeStat { size: number; mtimeMs: number; ino: number }
+
+/**
+ * A FileHandle stand-in serving `contents[i]` for the i-th read call and
+ * `stats[j]` for the j-th stat call (the last entry repeats), so a concurrent
+ * write between the pre-read fstat, the reads and the post-read fstat can be
+ * simulated deterministically.
+ */
+function fakeHandle(contents: string[], stats: FakeStat[]): FileHandle {
+  let readCalls = 0;
+  let statCalls = 0;
+  return {
+    stat: async () => stats[Math.min(statCalls++, stats.length - 1)],
+    read: async (buffer: Buffer, offset: number, length: number, position: number) => {
+      const bytes = Buffer.from(contents[Math.min(readCalls++, contents.length - 1)]!);
+      const bytesRead = position >= bytes.length
+        ? 0
+        : bytes.copy(buffer, offset, position, Math.min(bytes.length, position + length));
+      return { bytesRead, buffer };
+    },
+  } as unknown as FileHandle;
+}
+
+describe("readFileHandleCapped consistency check", () => {
+  const stable: FakeStat = { size: 8, mtimeMs: 1000, ino: 7 };
+
+  it("returns the bytes when fstat is unchanged across the read", async () => {
+    await expect(readFileHandleCapped(fakeHandle(["original"], [stable]), 64))
+      .resolves.toEqual(Buffer.from("original"));
+  });
+
+  it.each([
+    ["size", { ...stable, size: 9 }],
+    ["mtime", { ...stable, mtimeMs: 2000 }],
+    ["inode", { ...stable, ino: 8 }],
+  ])("refuses a read whose %s changed between the fstats", async (_field, after) => {
+    await expect(readFileHandleCapped(fakeHandle(["original"], [stable, after]), 64))
+      .rejects.toThrow(FILE_CHANGED_WHILE_READING_MESSAGE);
+  });
+
+  it("refuses a read whose byte count differs from the final size (truncated mid-read)", async () => {
+    await expect(readFileHandleCapped(fakeHandle(["orig"], [stable]), 64))
+      .rejects.toThrow(FILE_CHANGED_WHILE_READING_MESSAGE);
+  });
+
+  it("refuses content that grew past the pre-read size during the read", async () => {
+    await expect(readFileHandleCapped(fakeHandle(["original", "original+more"], [stable]), 64))
+      .rejects.toThrow(FILE_CHANGED_WHILE_READING_MESSAGE);
+  });
+
+  it("reports growth past the cap during the read as too large", async () => {
+    await expect(readFileHandleCapped(fakeHandle(["original", "original+more"], [stable]), 8))
+      .rejects.toThrow("File too large");
   });
 });
