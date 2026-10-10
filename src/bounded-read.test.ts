@@ -78,7 +78,7 @@ describe("readFileHandleCapped", () => {
   });
 });
 
-interface FakeStat { size: number; mtimeMs: number; ino: number }
+interface FakeStat { size: number; mtimeMs: number }
 
 /**
  * A FileHandle stand-in serving `contents[i]` for the i-th read call and
@@ -102,7 +102,7 @@ function fakeHandle(contents: string[], stats: FakeStat[]): FileHandle {
 }
 
 describe("readFileHandleCapped consistency check", () => {
-  const stable: FakeStat = { size: 8, mtimeMs: 1000, ino: 7 };
+  const stable: FakeStat = { size: 8, mtimeMs: 1000 };
 
   it("returns the bytes when fstat is unchanged across the read", async () => {
     await expect(readFileHandleCapped(fakeHandle(["original"], [stable]), 64))
@@ -112,7 +112,6 @@ describe("readFileHandleCapped consistency check", () => {
   it.each([
     ["size", { ...stable, size: 9 }],
     ["mtime", { ...stable, mtimeMs: 2000 }],
-    ["inode", { ...stable, ino: 8 }],
   ])("refuses a read whose %s changed between the fstats", async (_field, after) => {
     await expect(readFileHandleCapped(fakeHandle(["original"], [stable, after]), 64))
       .rejects.toThrow(FILE_CHANGED_WHILE_READING_MESSAGE);

@@ -5,7 +5,7 @@
 ### Security
 
 - **Input files are read with a hard size cap.** PDF/receipt images, CSV and CAMT XML inputs were size-checked with `stat` and then read whole, so a file that grew between the check and the read was buffered without bound. Every user-supplied file read (`captureFileInputSnapshot`, `prepareInvoiceDocumentUpload` and the receipt-batch snapshot) now reads at most the existing limit plus one byte and fails with the same "File too large" error. The SHA-256 digest is taken over exactly the bytes read. A file snapshot (`captureFileInputSnapshot`) whose file grows past the limit after validation now fails with `file_input_unavailable` instead of `file_input_identity_invalid`.
-- **A file modified while it is read is refused.** The capped read compares `fstat` size, mtime and inode before and after reading (and the bytes read against the final size) and fails with "File changed while reading" instead of returning a torn mix of old and new bytes. File snapshots report it as `file_input_unavailable`, the receipt batch as `file_reference_path_changed`, and PDF/document uploads surface the error as is.
+- **A file modified while it is read is refused.** The capped read compares `fstat` size and mtime before and after reading (and the bytes read against the final size) and fails with "File changed while reading; retry once it is no longer being written" instead of returning a torn mix of old and new bytes. File snapshots report it as `file_input_unavailable`, the receipt batch as `file_reference_path_changed`, and PDF/document uploads surface the error as is.
 
 ## [0.28.1] - 2026-10-02
 
