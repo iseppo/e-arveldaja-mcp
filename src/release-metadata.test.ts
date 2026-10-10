@@ -13,19 +13,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
 import {
   generatedClaudeCommandText,
   validateReleaseMetadata,
   validateWorkflowPromptSurfaces,
 } from "../scripts/validate-release-metadata.ts";
-import {
-  MAXIMUM_VALID_PROMPT_ARGUMENTS,
-  syncWorkflowPromptSurfaces,
-} from "../scripts/prompt-surface-files.ts";
-import { PROMPT_REGISTRY, enabledPromptDefinitions } from "./prompt-registry.js";
+import { syncWorkflowPromptSurfaces } from "../scripts/prompt-surface-files.ts";
 import { PROMPT_SURFACE_LIMIT } from "./prompt-surface.js";
-import { buildWorkflowPromptSourceText } from "./workflow-prompt-source.js";
 
 const validPackage = {
   name: "e-arveldaja-mcp",
@@ -397,50 +391,6 @@ The server includes 99 built-in workflow prompts that any MCP client can discove
       await expect(validateWorkflowPromptSurfaces(root, receiptBatchRegistry)).resolves.toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  it("bounds every enabled and disabled MCP prompt at maximum arguments and every generated command", () => {
-    const allFeatures = {
-      enableLightyear: true,
-      exposeGranularTools: false,
-      exposeSetupTools: false,
-      enableTaxTools: true,
-      enableReferenceAdmin: true,
-      enableAnnualReport: true,
-      enableSales: true,
-      enableProducts: true,
-    } as const;
-    const reducedFeatures = {
-      ...allFeatures,
-      enableLightyear: false,
-      enableTaxTools: false,
-    } as const;
-    const enabledNames = new Set(enabledPromptDefinitions(reducedFeatures).map(definition => definition.name));
-    const disabledNames = PROMPT_REGISTRY
-      .filter(definition => !enabledNames.has(definition.name))
-      .map(definition => definition.name);
-
-    expect(enabledPromptDefinitions(allFeatures)).toHaveLength(PROMPT_REGISTRY.length);
-    expect(disabledNames).toEqual(["vat-registration-threshold", "lightyear-booking"]);
-    expect(Object.keys(MAXIMUM_VALID_PROMPT_ARGUMENTS).sort())
-      .toEqual(PROMPT_REGISTRY.map(definition => definition.name).sort());
-
-    for (const definition of PROMPT_REGISTRY) {
-      const wireArguments = MAXIMUM_VALID_PROMPT_ARGUMENTS[definition.name];
-      expect(Object.keys(wireArguments), `${definition.name} maximum arguments`)
-        .toEqual(Object.keys(definition.argsSchema ?? {}));
-      const parsedArguments = definition.argsSchema
-        ? z.object(definition.argsSchema).parse(wireArguments)
-        : {};
-      const renderedPrompt = buildWorkflowPromptSourceText(definition.slug, parsedArguments);
-      expect(renderedPrompt.length, `${definition.name} MCP prompt`).toBeLessThanOrEqual(PROMPT_SURFACE_LIMIT);
-
-      const workflowText = readFileSync(join(process.cwd(), "workflows", `${definition.slug}.md`), "utf8");
-      const expectedCommand = generatedClaudeCommandText(definition.slug, workflowText);
-      const commandText = readFileSync(join(process.cwd(), ".claude", "commands", `${definition.slug}.md`), "utf8");
-      expect(commandText, `${definition.slug} generated command`).toBe(expectedCommand);
-      expect(commandText.length, `${definition.slug} generated command`).toBeLessThanOrEqual(PROMPT_SURFACE_LIMIT);
     }
   });
 });

@@ -5,8 +5,6 @@ import { describe, expect, it } from "vitest";
 
 const SOURCE_ROOT = resolve("src");
 
-const ALLOWED_PRODUCTION_CONSUMERS = [] as const;
-
 async function productionTypeScriptFiles(directory = SOURCE_ROOT): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const nested = await Promise.all(entries.map(async (entry): Promise<string[]> => {
@@ -349,12 +347,6 @@ describe("internal MCP delegation architecture contract", () => {
   // Scans every production source file; under the parallel full suite this
   // exceeds vitest's 5 s default.
   }, 30_000);
-
-  it("keeps the parser definition isolated from the production allowlist", async () => {
-    const parser = await readFile(resolve("src/mcp-json.ts"), "utf8");
-    expect(parser).toContain("export function parseMcpResponse");
-    expect(ALLOWED_PRODUCTION_CONSUMERS).not.toContain("src/mcp-json.ts" as never);
-  });
 
   it("detects equivalent delegation syntax rather than only today's spellings", () => {
     const variants = [

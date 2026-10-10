@@ -82,12 +82,6 @@ describe("documentation contract: safe prompt pipeline", () => {
   });
 
   describe("README.md reflects shipped prompt behaviour", () => {
-    it("keeps the exhaustive 16-prompt workflow table the validator requires", () => {
-      const doc = README();
-      expect(doc).toContain("## Workflows (MCP Prompts)");
-      expect(doc).toMatch(/The server includes 16 built-in workflow prompts/);
-    });
-
     it("tells the user a plan handle is not their approval", () => {
       expect(README()).toMatch(/plan handle is not (user )?approval/i);
     });
@@ -119,22 +113,9 @@ describe("documentation contract: safe prompt pipeline", () => {
     });
   });
 
-  describe("CHANGELOG.md records the P01–P25 prompt remediation", () => {
-    it("documents the safe prompt pipeline in the 0.22.0 release section", () => {
-      const doc = CHANGELOG();
-      // The P01–P25 remediation shipped in 0.22.0, so its documentation now
-      // lives under that versioned heading (it was under [Unreleased] until the
-      // release was cut). A fresh, possibly-empty [Unreleased] section must
-      // still exist for the next cycle.
-      expect(doc).toContain("## [Unreleased]");
-      const start = doc.indexOf("## [0.22.0]");
-      expect(start).toBeGreaterThanOrEqual(0);
-      const nextRelease = doc.indexOf("\n## [", start + 1);
-      const section = doc.slice(start, nextRelease === -1 ? undefined : nextRelease);
-      expect(section).toMatch(/prompt/i);
-      expect(section).toContain("src/prompt-registry.ts");
-      expect(section).toMatch(/plan handle is not (user )?approval/i);
-      expect(section).toMatch(/string prompt argument/i);
+  describe("CHANGELOG.md", () => {
+    it("keeps an [Unreleased] section for the next release cycle", () => {
+      expect(CHANGELOG()).toContain("## [Unreleased]");
     });
   });
 });

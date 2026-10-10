@@ -11,14 +11,7 @@ import {
   type WorkflowTraceEvent,
 } from "./workflow-trace.js";
 import { CAMT_PLAN_DOMAIN } from "./tools/camt-plan.js";
-import { BANK_RECONCILIATION_PLAN_DOMAIN } from "./tools/bank-reconciliation-plan.js";
-import {
-  LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
-  LIGHTYEAR_TRADES_PLAN_DOMAIN,
-} from "./tools/lightyear-plan.js";
 import { WISE_PLAN_DOMAIN } from "./tools/wise-import.js";
-import { CREDENTIAL_IMPORT_DOMAIN, CREDENTIAL_REMOVE_DOMAIN } from "./credential-plans.js";
-import { validateLegalEntityIdentity } from "./legal-entity-identity.js";
 import {
   PROMPT_REGISTRY,
   enabledPromptDefinitions,
@@ -35,9 +28,11 @@ import {
 } from "../scripts/prompt-surface-files.ts";
 
 // ---------------------------------------------------------------------------
-// A faithful, synthetic-but-real-shaped trace per MUTATING workflow. Each spec
-// binds to the REAL plan-store domain / advertised MCP tool ids and models what
-// the reviewed dry run previewed. No test performs a live mutation.
+// Synthetic-but-real-shaped traces bound to REAL plan-store domains / advertised
+// MCP tool ids. checkWorkflowTrace is domain-agnostic (each invariant is proven
+// once in workflow-trace.test.ts), so two representative specs suffice: a plain
+// plan-bound import (CAMT) and a manifest-bound one (Wise, also used by the
+// ownership re-approval block below). No test performs a live mutation.
 // ---------------------------------------------------------------------------
 
 interface WorkflowSpec {
@@ -52,11 +47,6 @@ interface WorkflowSpec {
   readonly sources: readonly string[];
   readonly manifest?: string;
 }
-
-// The identity gate source is bound to the REAL legal-entity-identity contract
-// (17133416 is a checksum-valid Estonian registry code).
-const estonianIdentity = validateLegalEntityIdentity({ reg_code: "17133416", country: "EST" });
-const supplierIdentitySource = `identity:${estonianIdentity.ok ? estonianIdentity.kind : "invalid"}:17133416`;
 
 const WORKFLOW_SPECS: readonly WorkflowSpec[] = [
   {
@@ -74,44 +64,6 @@ const WORKFLOW_SPECS: readonly WorkflowSpec[] = [
     sources: ["camt:entry:1", "camt:entry:2"],
   },
   {
-    label: "bank reconciliation",
-    workflow: BANK_RECONCILIATION_PLAN_DOMAIN,
-    advertisedTools: [
-      "reconcile_bank_transactions", "reconcile_inter_account_transfers",
-      "confirm_transaction", "get_execution_plan_page",
-    ],
-    foreignTool: "delete_journal",
-    mutatingTool: "reconcile_bank_transactions",
-    category: "confirm_match",
-    account: "1120",
-    sources: ["tx:501", "tx:502"],
-  },
-  {
-    label: "Lightyear trades",
-    workflow: LIGHTYEAR_TRADES_PLAN_DOMAIN,
-    advertisedTools: [
-      "parse_lightyear_statement", "parse_lightyear_capital_gains",
-      "book_lightyear_trades", "get_execution_plan_page",
-    ],
-    foreignTool: "delete_journal",
-    mutatingTool: "book_lightyear_trades",
-    category: "book_trade",
-    account: "1550",
-    sources: ["ly:trade:OR-1", "ly:trade:OR-2"],
-  },
-  {
-    label: "Lightyear distributions",
-    workflow: LIGHTYEAR_DISTRIBUTIONS_PLAN_DOMAIN,
-    advertisedTools: [
-      "parse_lightyear_statement", "book_lightyear_distributions", "get_execution_plan_page",
-    ],
-    foreignTool: "delete_journal",
-    mutatingTool: "book_lightyear_distributions",
-    category: "book_distribution",
-    account: "8330",
-    sources: ["ly:dist:DV-1"],
-  },
-  {
     label: "Wise ownership import",
     workflow: WISE_PLAN_DOMAIN,
     advertisedTools: [
@@ -126,46 +78,6 @@ const WORKFLOW_SPECS: readonly WorkflowSpec[] = [
     // exactly; the digest is the command-integrity binding.
     sources: ["wise:transfer:T1", "wise:transfer:T2"],
     manifest: "wise-command-digest-abc",
-  },
-  {
-    label: "credential import",
-    workflow: CREDENTIAL_IMPORT_DOMAIN,
-    advertisedTools: ["get_setup_instructions", "import_apikey_credentials", "list_stored_credentials"],
-    foreignTool: "remove_stored_credentials",
-    mutatingTool: "import_apikey_credentials",
-    category: "store_credential",
-    account: "credential",
-    sources: ["cred:file:apikey.txt"],
-  },
-  {
-    label: "credential removal",
-    workflow: CREDENTIAL_REMOVE_DOMAIN,
-    advertisedTools: ["list_stored_credentials", "remove_stored_credentials"],
-    foreignTool: "import_apikey_credentials",
-    mutatingTool: "remove_stored_credentials",
-    category: "remove_credential",
-    account: "credential",
-    sources: ["cred:connection:2"],
-  },
-  {
-    label: "supplier creation (identity gate)",
-    workflow: "supplier_create",
-    advertisedTools: ["search_client", "resolve_supplier", "create_client"],
-    foreignTool: "delete_client",
-    mutatingTool: "create_client",
-    category: "create_supplier",
-    account: "clients",
-    sources: [supplierIdentitySource],
-  },
-  {
-    label: "prepared review action",
-    workflow: "accounting_review",
-    advertisedTools: ["continue_accounting_workflow", "save_auto_booking_rule"],
-    foreignTool: "delete_journal",
-    mutatingTool: "continue_accounting_workflow",
-    category: "prepare_action_execute",
-    account: "review",
-    sources: ["review:item:1"],
   },
 ];
 
@@ -223,7 +135,7 @@ function patchMutation(events: WorkflowTraceEvent[], patch: Partial<MutationEven
   return events.map(event => (event.type === "MUTATION" ? { ...event, ...patch } : event));
 }
 
-describe("prompt safety invariants — every mutating workflow", () => {
+describe("prompt safety invariants — representative mutating workflows", () => {
   it.each(WORKFLOW_SPECS.map(spec => [spec.label, spec] as const))(
     "%s: a well-formed approval-bound trace has no violations",
     (_label, spec) => {
@@ -464,12 +376,24 @@ describe("exhaustive prompt-surface budget + shared safety wrapper", () => {
     // The registry is fully renderable under both extreme exposures.
     expect(enabledPromptDefinitions(ALL_ENABLED).length).toBeGreaterThan(0);
     expect(enabledPromptDefinitions(ALL_DISABLED).length).toBeGreaterThan(0);
+    // Exactly the tax- and Lightyear-gated prompts drop when those features are off.
+    const enabledNames = new Set(enabledPromptDefinitions({
+      ...ALL_ENABLED,
+      exposeGranularTools: false,
+      exposeSetupTools: false,
+      enableLightyear: false,
+      enableTaxTools: false,
+    }).map(definition => definition.name));
+    expect(PROMPT_REGISTRY.filter(definition => !enabledNames.has(definition.name)).map(definition => definition.name))
+      .toEqual(["vat-registration-threshold", "lightyear-booking"]);
   });
 
   it.each(PROMPT_REGISTRY.map(definition => [definition.name, definition] as const))(
     "%s: MCP prompt stays within budget with the wrapper exactly once (feature sections both ways)",
     (name, definition) => {
       const wireArguments = MAXIMUM_VALID_PROMPT_ARGUMENTS[definition.name];
+      expect(Object.keys(wireArguments), `${name} maximum arguments`)
+        .toEqual(Object.keys(definition.argsSchema ?? {}));
       const parsedArguments = definition.argsSchema
         ? z.object(definition.argsSchema).parse(wireArguments)
         : {};

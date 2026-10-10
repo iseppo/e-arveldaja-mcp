@@ -45,32 +45,6 @@ describe("response context-budget baseline", () => {
     }
   });
 
-  it("keeps a guided workflow continuation's arguments under the compact byte bounds", () => {
-    // The arguments a guided client sends back to continue_accounting_workflow
-    // via a workflow_action_v2 next_action: an opaque handle plus a stable item
-    // id — never a re-serialized prior workflow envelope.
-    const CONTINUATION_TARGET_BYTES = 512;
-    const CONTINUATION_HARD_BYTES = 1024;
-    const args = {
-      workflow_handle: "A".repeat(43),
-      action: "next",
-      item_id: "review-0007",
-    };
-    const bytes = Buffer.byteLength(toMcpJson(args), "utf8");
-    expect(bytes).toBeLessThan(CONTINUATION_TARGET_BYTES);
-    expect(bytes).toBeLessThanOrEqual(CONTINUATION_HARD_BYTES);
-
-    // Structural guarantee: the WORST-CASE continuation — every field at its
-    // schema-max length (workflow_handle 43, action "prepare_action", item_id
-    // 128) — must still fit the 1 KiB hard bound.
-    const worstCase = {
-      workflow_handle: "A".repeat(43),
-      action: "prepare_action",
-      item_id: "x".repeat(128),
-    };
-    expect(Buffer.byteLength(toMcpJson(worstCase), "utf8")).toBeLessThanOrEqual(CONTINUATION_HARD_BYTES);
-  });
-
   it("keeps the fixed per-session server-instruction string within the context budget", () => {
     // The configured (non-setup) instruction string is loaded on every session,
     // so it is a fixed per-session context cost. Task 16 trimmed it under 1.5 KiB

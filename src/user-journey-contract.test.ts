@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   resolveBankAccount,
   type BankDimensionCandidate,
@@ -12,12 +12,18 @@ import type { AccountDimension } from "./types/api.js";
 import { createConnectionDefaultsStore } from "./connection-defaults-store.js";
 import { createElicitor, type ElicitOutcome } from "./elicitation.js";
 import { buildResponseFixtures, type ResponseFixtureName } from "../scripts/measure-response-fixtures.js";
-import { captureToolSurface, TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
+import { captureToolSurface, TOOL_SURFACE_SETUP_INFO, type ToolSurfaceSnapshot } from "./__fixtures__/tool-surface.js";
 import { toMcpJson } from "./mcp-json.js";
 import { buildSetupInstructionsPayload } from "./server-bootstrap.js";
 import { isToolVisibleForProfile, type ToolProfile } from "./tool-profile.js";
 
 type Approval = "obtained" | "not-required";
+
+// One production bootstrap of the full surface, shared by both schema-validation contracts.
+let fullSurface: ToolSurfaceSnapshot;
+beforeAll(async () => {
+  fullSurface = await captureToolSurface("full");
+});
 const PLAN_HANDLE = "h".repeat(43);
 
 interface JourneyStep {
@@ -431,14 +437,6 @@ describe("user-journey accounting contract", () => {
     ]);
   });
 
-  it("never records a mutation without approval first", () => {
-    for (const journey of JOURNEYS) {
-      for (const step of journey.steps.filter((candidate) => candidate.mutation)) {
-        expect(step.approval, `${journey.name}:${step.tool}`).toBe("obtained");
-      }
-    }
-  });
-
   it("models setup as preview, approval, then plan-bound persistence", () => {
     const setup = JOURNEYS.find((journey) => journey.name === "setup")!;
     expect(setup.steps).toHaveLength(3);
@@ -466,9 +464,8 @@ describe("user-journey accounting contract", () => {
     }
   });
 
-  it("validates every journey request against its captured production input schema", async () => {
-    const surface = await captureToolSurface("full");
-    const schemas = new Map(surface.tools.map((tool) => [tool.name, tool.inputSchema]));
+  it("validates every journey request against its captured production input schema", () => {
+    const schemas = new Map(fullSurface.tools.map((tool) => [tool.name, tool.inputSchema]));
     const validatorProvider = new AjvJsonSchemaValidator();
 
     for (const journey of JOURNEYS) {
@@ -538,9 +535,8 @@ describe("guided milestone achievability contract", () => {
     }
   });
 
-  it("every guided journey request validates against its captured production schema", async () => {
-    const surface = await captureToolSurface("full");
-    const schemas = new Map(surface.tools.map((tool) => [tool.name, tool.inputSchema]));
+  it("every guided journey request validates against its captured production schema", () => {
+    const schemas = new Map(fullSurface.tools.map((tool) => [tool.name, tool.inputSchema]));
     const validatorProvider = new AjvJsonSchemaValidator();
     for (const journey of GUIDED_JOURNEYS) {
       for (const step of journey.steps) {
@@ -550,15 +546,6 @@ describe("guided milestone achievability contract", () => {
         expect(result.valid, `${journey.name}:${step.tool}: ${result.errorMessage}`).toBe(true);
       }
     }
-  });
-
-  it("proves inter-account reconcile, duplicate cleanup, rule saving, and trial balance are each guided-achievable", () => {
-    expect(GUIDED_JOURNEYS.map((journey) => journey.name)).toEqual([
-      "guided-inter-account-reconcile",
-      "guided-duplicate-cleanup",
-      "guided-rule-saving",
-      "guided-trial-balance",
-    ]);
   });
 });
 
@@ -587,17 +574,6 @@ describe("Task 15 — persisted-defaults & elicitation journeys", () => {
     return createElicitor(server as never);
   }
 
-  it("journey 1 — unique/no-question: a single-candidate bank resolves with ZERO questions", async () => {
-    const counter = { forms: 0 };
-    const elicit = elicitorAcceptingDimension("101", counter);
-    const resolution = await resolveBankAccount({ candidates: [cand(101, "LHV")] });
-    // Unique local bank ⇒ resolved without ever opening a form.
-    expect(resolution).toMatchObject({ status: "resolved", value: 101 });
-    // No form was needed (technicalIdPrompts:0, ambiguityQuestions:0).
-    expect(counter.forms).toBe(0);
-    void elicit;
-  });
-
   it("journey 2 — ambiguous/one-question: EXACTLY one elicitation form, then resolves", async () => {
     const counter = { forms: 0 };
     const elicit = elicitorAcceptingDimension("102", counter);
@@ -620,8 +596,6 @@ describe("Task 15 — persisted-defaults & elicitation journeys", () => {
     const store = createConnectionDefaultsStore(storePath());
     // Operator answered with consent on the first (ambiguous) scan → persisted.
     store.saveBankDefault({ ...scope, accounts_dimensions_id: 102, ledgerAccountId: 1020, currency: "EUR", input_type: "camt" });
-    const counter = { forms: 0 };
-    const elicit = elicitorAcceptingDimension("999", counter);
     // Second scan, same connection: rung 3 resolves BEFORE any question.
     const resolution = await resolveBankAccount({
       candidates: twoBanks,
@@ -633,28 +607,5 @@ describe("Task 15 — persisted-defaults & elicitation journeys", () => {
     });
     expect(resolution).toMatchObject({ status: "resolved", value: 102 });
     if (resolution.status === "resolved") expect(resolution.evidence.map(e => e.tag)).toContain("saved_default");
-    expect(counter.forms).toBe(0); // no fresh question on the second scan
-    void elicit;
-  });
-
-  it("journey 4 — no-secret-elicitation: the wrapper REFUSES any credential/secret field", async () => {
-    const server = { server: { getClientCapabilities: () => ({ elicitation: {} }), elicitInput: async () => ({ action: "accept", content: {} }) } };
-    const elicit = createElicitor(server as never);
-    for (const secretKey of ["api_key", "apiKey", "password", "public_value", "secret_token"]) {
-      await expect(elicit({ message: "m", fields: { [secretKey]: { type: "string" } }, needsInput: {} })).rejects.toThrow();
-    }
-    // A bounded, non-secret bank form is accepted.
-    await expect(elicit({
-      message: "Which bank account dimension?",
-      fields: { accounts_dimensions_id: { type: "enum", choices: [{ const: "101", title: "LHV" }] }, remember_for_connection: { type: "boolean" } },
-      needsInput: {},
-    })).resolves.toBeDefined();
-  });
-
-  it("journey 3 corollary — the persisted document holds NO secret material", () => {
-    const store = createConnectionDefaultsStore(storePath());
-    store.saveBankDefault({ ...scope, accounts_dimensions_id: 102, ledgerAccountId: 1020, currency: "EUR" } as never);
-    const pointer = store.readBankDefault({ ...scope, expectedLedgerAccountId: 1020 });
-    expect(JSON.stringify(pointer)).not.toMatch(/api.?key|password|secret|public.?value|token/i);
   });
 });

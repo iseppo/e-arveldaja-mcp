@@ -158,14 +158,17 @@ describe("startAndObserve", () => {
     })).rejects.toThrow(/exited before smoke window/);
   }, 15_000);
 
-  it("throws when a surviving process emits a fatal load-error pattern on stderr", async () => {
-    // Alive past the window but a fatal loader message was printed: only the
+  it("throws as soon as a surviving process emits a fatal load-error pattern on stderr", async () => {
+    // The process stays alive but a fatal loader message was printed: only the
     // fatal-pattern guard can catch this, isolating it from the early-close guard.
+    // The window is long on purpose (it must outlast a cold Node start under a
+    // loaded parallel suite); the guard must fire before it ends.
+    const minimumAliveMs = 10_000;
+    const started = Date.now();
     await expect(startAndObserve(process.execPath, ["-e", "process.stderr.write('ERR_MODULE_NOT_FOUND: nope'); setInterval(()=>{},1000)"], {
-      // The window must outlast a cold Node start under a loaded parallel suite,
-      // or the stderr line arrives after the check and the test flakes.
-      cwd: process.cwd(), minimumAliveMs: 3_000, timeoutMs: 2_000, terminateGraceMs: 500, env: process.env,
+      cwd: process.cwd(), minimumAliveMs, timeoutMs: 2_000, terminateGraceMs: 500, env: process.env,
     })).rejects.toThrow(/ERR_MODULE_NOT_FOUND/);
+    expect(Date.now() - started).toBeLessThan(minimumAliveMs);
   }, 15_000);
 
   it("throws a clear error when the command cannot be spawned at all", async () => {

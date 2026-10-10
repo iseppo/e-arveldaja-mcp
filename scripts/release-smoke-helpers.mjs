@@ -164,9 +164,17 @@ export async function runCommand(command, args, { timeoutMs = 120_000, ...option
 // perfectly healthy server exit cleanly and look like a crash.
 export async function startAndObserve(command, args, { cwd, env, shell, minimumAliveMs = 1_000, timeoutMs = 10_000, terminateGraceMs = 1_000 }) {
   const child = spawn(command, args, { cwd, env, shell, stdio: ["pipe", "pipe", "pipe"] });
+  const fatalStderr = /SyntaxError|ERR_MODULE_NOT_FOUND|ENOENT.*(?:workflow|command|package)/i;
   let stderr = "";
   let spawnError;
-  child.stderr.on("data", chunk => { stderr += chunk; });
+  let reportFatal;
+  // Resolves as soon as a fatal load error appears, so a broken bin fails
+  // without waiting out the whole alive window.
+  const fatalPromise = new Promise(resolveFatal => { reportFatal = resolveFatal; });
+  child.stderr.on("data", chunk => {
+    stderr += chunk;
+    if (fatalStderr.test(stderr)) reportFatal({ kind: "fatal" });
+  });
   // A failed spawn (missing/non-executable bin) emits "error", not "close" —
   // surface it instead of silently timing into the alive window.
   const errorPromise = new Promise(resolveError => child.once("error", err => { spawnError = err; resolveError({ kind: "error" }); }));
@@ -175,6 +183,7 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
     const early = await Promise.race([
       closePromise.then(value => ({ kind: "close", value })),
       errorPromise,
+      fatalPromise,
       wait(minimumAliveMs).then(() => ({ kind: "alive" })),
     ]);
     if (early.kind === "error") {
@@ -183,7 +192,7 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
     if (early.kind === "close") {
       throw new Error(`Packed bin exited before smoke window (${early.value.code ?? early.value.signal}): ${stderr}`);
     }
-    if (/SyntaxError|ERR_MODULE_NOT_FOUND|ENOENT.*(?:workflow|command|package)/i.test(stderr)) {
+    if (early.kind === "fatal" || fatalStderr.test(stderr)) {
       await stopChild(child, closePromise, terminateGraceMs);
       throw new Error(stderr);
     }
