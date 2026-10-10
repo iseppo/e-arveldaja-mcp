@@ -226,35 +226,54 @@ export function extractVatNumber(text: string, options?: ExtractVatNumberOptions
 }
 
 /**
- * ISO 13616 registered IBAN lengths (SWIFT IBAN registry) for common
- * countries. Countries not listed keep the generic 15–34 shape check.
+ * ISO 13616 IBAN lengths for every country in the SWIFT IBAN registry.
+ * A country code not listed here cannot start a valid IBAN.
  */
 const IBAN_LENGTHS: Record<string, number> = {
-  AD: 24, AE: 23, AL: 28, AT: 20, BA: 20, BE: 16, BG: 22, CH: 21, CY: 28,
-  CZ: 24, DE: 22, DK: 18, EE: 20, ES: 24, FI: 18, FO: 18, FR: 27, GB: 22,
-  GE: 22, GI: 23, GL: 18, GR: 27, HR: 21, HU: 28, IE: 22, IL: 23, IS: 26,
-  IT: 27, LI: 21, LT: 20, LU: 20, LV: 21, MC: 27, MD: 24, ME: 22, MK: 19,
-  MT: 31, NL: 18, NO: 15, PL: 28, PT: 25, RO: 24, RS: 22, SA: 24, SE: 24,
-  SI: 19, SK: 24, SM: 27, TR: 26, UA: 29, XK: 20,
+  AD: 24, AE: 23, AL: 28, AT: 20, AZ: 28, BA: 20, BE: 16, BG: 22, BH: 22,
+  BI: 27, BR: 29, BY: 28, CH: 21, CR: 22, CY: 28, CZ: 24, DE: 22, DJ: 27,
+  DK: 18, DO: 28, EE: 20, EG: 29, ES: 24, FI: 18, FK: 18, FO: 18, FR: 27,
+  GB: 22, GE: 22, GI: 23, GL: 18, GR: 27, GT: 28, HN: 28, HR: 21, HU: 28,
+  IE: 22, IL: 23, IQ: 23, IS: 26, IT: 27, JO: 30, KW: 30, KZ: 20, LB: 28,
+  LC: 32, LI: 21, LT: 20, LU: 20, LV: 21, LY: 25, MC: 27, MD: 24, ME: 22,
+  MK: 19, MN: 20, MR: 27, MT: 31, MU: 30, NI: 28, NL: 18, NO: 15, OM: 23,
+  PK: 24, PL: 28, PS: 29, PT: 25, QA: 29, RO: 24, RS: 22, RU: 33, SA: 24,
+  SC: 31, SD: 18, SE: 24, SI: 19, SK: 24, SM: 27, SO: 23, ST: 25, SV: 28,
+  TL: 23, TN: 24, TR: 26, UA: 29, VA: 22, VG: 24, XK: 20, YE: 30,
 };
 
 export function extractIban(text: string): string | undefined {
   // Scan every IBAN-shaped candidate and return the first that passes the
-  // mod-97 checksum — a document can carry a malformed/partial IBAN before the
-  // real one, so we continue past invalid candidates instead of stopping at
-  // the first shape match.
-  for (const match of text.matchAll(/\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/gi)) {
-    let candidate = match[1]!.replace(/\s+/g, "").toUpperCase();
-    // The regex allows spaces between groups, so it can bridge an IBAN into
-    // the following token (BIC, date, amount, reference digits). For countries
-    // with a registered length, keep only that exact-length prefix; a shorter
-    // candidate cannot be a valid IBAN for that country.
-    const length = IBAN_LENGTHS[candidate.slice(0, 2)];
+  // mod-97 checksum — a document can carry a malformed/partial IBAN (or a VAT
+  // number) before the real one, so we continue past invalid candidates.
+  const candidateRe = /\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = candidateRe.exec(text)) !== null) {
+    // The regex allows spaces between groups, so a candidate can swallow the
+    // following token (BIC, date, amount, reference digits) or start on a
+    // preceding token. Keep only the country's registered-length prefix, and
+    // only when it ends on a group boundary (whitespace) or at the end of the
+    // candidate: a cut inside a token would accept a truncated IBAN plus part
+    // of the next token, or a welded token like "EE38...5685BIC".
+    const raw = match[1]!;
+    const length = IBAN_LENGTHS[raw.slice(0, 2).toUpperCase()];
+    let candidate: string | undefined;
     if (length !== undefined) {
-      if (candidate.length < length) continue;
-      candidate = candidate.slice(0, length);
+      let seen = 0;
+      let cut = 0;
+      while (cut < raw.length && seen < length) {
+        if (!/\s/.test(raw[cut]!)) seen++;
+        cut++;
+      }
+      if (seen === length && (cut === raw.length || /\s/.test(raw[cut]!))) {
+        candidate = raw.slice(0, cut).replace(/\s+/g, "").toUpperCase();
+      }
     }
-    if (isValidIban(candidate)) return candidate;
+    if (candidate !== undefined && isValidIban(candidate)) return candidate;
+    // Resume right after this candidate's start so an IBAN later inside the
+    // rejected span is still found. Each restart moves forward and a candidate
+    // spans at most ~34 characters plus spacing, so the scan stays linear-ish.
+    candidateRe.lastIndex = match.index + 1;
   }
   return undefined;
 }

@@ -233,6 +233,51 @@ describe("extractIban", () => {
     expect(extractIban("(EE38 2200 2210 2014 5685) 12.05.2026")).toBe("EE382200221020145685");
     expect(extractIban("EE38 2200 2210 2014 5685;BIC:HABAEE2X")).toBe("EE382200221020145685");
   });
+
+  it("only trims at a group boundary, so an OCR-truncated IBAN is not completed from the next token", () => {
+    // EE22 2200 2210 2014 568 is one digit short; its first 20 characters with
+    // the "2" of "2024" happen to pass mod-97 (EE222200221020145682).
+    expect(extractIban("EE22 2200 2210 2014 568 2024")).toBeUndefined();
+    // The same IBAN written in full and followed by a date is still accepted.
+    expect(extractIban("EE22 2200 2210 2014 5682 2024")).toBe("EE222200221020145682");
+  });
+
+  it("rejects an IBAN welded to the following token without a separator", () => {
+    // Deliberate: without whitespace or punctuation there is no group boundary
+    // at the registered length, so "...5685BIC" is treated like any other
+    // over-long token rather than guessed apart.
+    expect(extractIban("EE382200221020145685BIC HABAEE2X")).toBeUndefined();
+    expect(extractIban("EE382200221020145685BIC")).toBeUndefined();
+  });
+
+  it("resumes scanning after a preceding token swallows the IBAN", () => {
+    expect(extractIban("KMKR EE100931558 EE382200221020145685")).toBe("EE382200221020145685");
+    expect(extractIban("KMKR EE100931558 EE38 2200 2210 2014 5685 BIC HABAEE2X")).toBe("EE382200221020145685");
+  });
+
+  it("resumes scanning after an invalid spaced IBAN that bridged into a valid one", () => {
+    expect(extractIban("EE00 1234 5678 9012 3456 EE47 1000 0010 2014 5685")).toBe("EE471000001020145685");
+  });
+
+  it("extracts the first of two IBANs on one line separated by a space", () => {
+    expect(extractIban("EE382200221020145685 EE471000001020145685")).toBe("EE382200221020145685");
+    expect(extractIban("EE471000001020145685 EE382200221020145685")).toBe("EE471000001020145685");
+    expect(extractIban("EE38 2200 2210 2014 5685 EE47 1000 0010 2014 5685")).toBe("EE382200221020145685");
+    expect(extractIban("EE47 1000 0010 2014 5685 EE38 2200 2210 2014 5685")).toBe("EE471000001020145685");
+  });
+
+  it("trims bridged candidates for non-European registry countries", () => {
+    expect(extractIban("KZ86 125K ZT50 0410 0100 BIC KZKOKZKX")).toBe("KZ86125KZT5004100100");
+    expect(extractIban("BH67 BMAG 0000 1299 1234 56 12.05.2026")).toBe("BH67BMAG00001299123456");
+    expect(extractIban("QA58 DOHB 0000 1234 5678 90AB CDEF G 1234")).toBe("QA58DOHB00001234567890ABCDEFG");
+    expect(extractIban("LC55 HEMM 0001 0001 0012 0012 0002 3015 BIC")).toBe("LC55HEMM000100010012001200023015");
+    expect(extractIban("BR18 0036 0305 0000 1000 9795 493C 1 Summa")).toBe("BR1800360305000010009795493C1");
+  });
+
+  it("rejects a country code that is not in the IBAN registry", () => {
+    // XX042200221020145685 passes mod-97 but XX is not an IBAN country.
+    expect(extractIban("XX042200221020145685")).toBeUndefined();
+  });
 });
 
 describe("extractReferenceNumber", () => {
