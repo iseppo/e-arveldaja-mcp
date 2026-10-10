@@ -22,10 +22,8 @@ export interface MeasuredMcpSurface {
 }
 
 export const TOOL_SURFACE_PROFILES = [
-  "default",
   "setup",
   "full",
-  "lean-purchase",
   "guided",
   "guided-sales",
   "standard",
@@ -70,26 +68,11 @@ const DEFAULT_EXPOSURE: ToolExposureConfig = Object.freeze({
 });
 
 const PROFILES: Record<ToolSurfaceProfileName, SurfaceProfile> = {
-  default: { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "standard" },
   setup: { setupMode: true, exposure: DEFAULT_EXPOSURE, toolProfile: "standard" },
   full: {
     setupMode: false,
     toolProfile: "full",
     exposure: { ...DEFAULT_EXPOSURE, exposeGranularTools: true, exposeSetupTools: true },
-  },
-  "lean-purchase": {
-    setupMode: false,
-    toolProfile: "custom",
-    exposure: {
-      enableLightyear: false,
-      exposeGranularTools: false,
-      exposeSetupTools: false,
-      enableTaxTools: false,
-      enableReferenceAdmin: false,
-      enableAnnualReport: false,
-      enableSales: false,
-      enableProducts: false,
-    },
   },
   guided: { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "guided" },
   "guided-sales": { setupMode: false, exposure: DEFAULT_EXPOSURE, toolProfile: "guided-sales" },
