@@ -843,37 +843,18 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
     return setupTool("month_end_close_checklist", options);
   }
 
-  it("returns 28 days for February in a non-leap year (2025-02)", async () => {
+  // The tool uses dateTo = `${month}-${lastDay}`; a completed checklist with a
+  // summary means the last day was computed without errors.
+  it.each([
+    ["returns 28 days for February in a non-leap year (2025-02)", "2025-02"],
+    ["returns 29 days for February in a leap year (2024-02)", "2024-02"],
+    ["returns 31 days for December (2024-12)", "2024-12"],
+    ["handles month with 30 days (2024-04)", "2024-04"],
+  ])("%s", async (_name, month) => {
     const handler = setupChecklist();
-    const result = await handler({ month: "2025-02" });
+    const result = await handler({ month });
     const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload.month).toBe("2025-02");
-    // The tool uses dateTo = `${month}-${lastDay}` — we verify the overdue filter works
-    // without errors for 2025-02-28 (no errors = correct last day computed)
-    expect(payload.summary).toBeDefined();
-  });
-
-  it("returns 29 days for February in a leap year (2024-02)", async () => {
-    const handler = setupChecklist();
-    const result = await handler({ month: "2024-02" });
-    const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload.month).toBe("2024-02");
-    expect(payload.summary).toBeDefined();
-  });
-
-  it("returns 31 days for December (2024-12)", async () => {
-    const handler = setupChecklist();
-    const result = await handler({ month: "2024-12" });
-    const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload.month).toBe("2024-12");
-    expect(payload.summary).toBeDefined();
-  });
-
-  it("handles month with 30 days (2024-04)", async () => {
-    const handler = setupChecklist();
-    const result = await handler({ month: "2024-04" });
-    const payload = parseMcpResponse(result.content[0]!.text);
-    expect(payload.month).toBe("2024-04");
+    expect(payload.month).toBe(month);
     expect(payload.summary).toBeDefined();
   });
 });

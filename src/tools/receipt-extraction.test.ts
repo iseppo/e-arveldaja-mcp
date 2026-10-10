@@ -54,91 +54,36 @@ describe("bank transaction source direction classification", () => {
 // ---------------------------------------------------------------------------
 
 describe("normalizeDate", () => {
-  it("passes through ISO dates unchanged", () => {
-    expect(normalizeDate("2024-03-15")).toBe("2024-03-15");
-  });
-
-  it("rejects impossible ISO dates (calendar round-trip)", () => {
+  it.each([
+    ["passes through ISO dates unchanged", "2024-03-15", "2024-03-15"],
+    ["parses DD.MM.YYYY", "15.03.2024", "2024-03-15"],
+    ["parses single-digit day and month DD.MM.YYYY", "5.3.2024", "2024-03-05"],
+    ["parses DD/MM/YYYY", "15/03/2024", "2024-03-15"],
+    ["parses single-digit DD/MM/YYYY", "5/3/2024", "2024-03-05"],
+    ["parses 2-digit year (00-69 → 2000s)", "15.03.24", "2024-03-15"],
+    ["parses 2-digit year (70-99 → 1900s)", "15.03.99", "1999-03-15"],
+    // The Unicode-aware pattern requires "15. märts 2024" (with dot)
+    ["parses Estonian textual month with dot separator (day-first)", "15. märts 2024", "2024-03-15"],
+    ["parses English textual month (day-first)", "15 March 2024", "2024-03-15"],
+    ["parses English textual month (month-first)", "March 15 2024", "2024-03-15"],
+    ["parses English textual month with comma", "March 15, 2024", "2024-03-15"],
+    ["strips weekday prefix before parsing", "monday, 15.03.2024", "2024-03-15"],
+    ["strips Estonian weekday prefix before parsing", "esmaspäev, 15.03.2024", "2024-03-15"],
+    ["handles Estonian month abbreviation 'jaan'", "5 jaan 2024", "2024-01-05"],
+    ["handles Estonian month 'detsember'", "31 detsember 2023", "2023-12-31"],
+    ["trims surrounding whitespace", "  2024-03-15  ", "2024-03-15"],
     // ISO-format but not a real calendar day — must not pass through.
-    expect(normalizeDate("2026-02-30")).toBeUndefined();
-    expect(normalizeDate("2026-13-01")).toBeUndefined();
+    ["rejects impossible ISO dates (Feb 30)", "2026-02-30", undefined],
+    ["rejects impossible ISO dates (month 13)", "2026-13-01", undefined],
+    ["returns undefined for empty string", "", undefined],
+    ["returns undefined for invalid date", "not-a-date", undefined],
+    ["returns undefined for out-of-range date (Feb 30)", "30.02.2024", undefined],
+  ])("%s", (_name, input, expected) => {
+    expect(normalizeDate(input)).toBe(expected);
   });
 
   it("extractDates ignores an impossible ISO invoice date", () => {
     expect(extractDates("Invoice date: 2026-02-30")).toEqual({});
-  });
-
-  it("parses DD.MM.YYYY", () => {
-    expect(normalizeDate("15.03.2024")).toBe("2024-03-15");
-  });
-
-  it("parses single-digit day and month DD.MM.YYYY", () => {
-    expect(normalizeDate("5.3.2024")).toBe("2024-03-05");
-  });
-
-  it("parses DD/MM/YYYY", () => {
-    expect(normalizeDate("15/03/2024")).toBe("2024-03-15");
-  });
-
-  it("parses single-digit DD/MM/YYYY", () => {
-    expect(normalizeDate("5/3/2024")).toBe("2024-03-05");
-  });
-
-  it("parses 2-digit year (00-69 → 2000s)", () => {
-    expect(normalizeDate("15.03.24")).toBe("2024-03-15");
-  });
-
-  it("parses 2-digit year (70-99 → 1900s)", () => {
-    expect(normalizeDate("15.03.99")).toBe("1999-03-15");
-  });
-
-  it("parses Estonian textual month with dot separator (day-first)", () => {
-    // The Unicode-aware pattern requires "15. märts 2024" (with dot)
-    expect(normalizeDate("15. märts 2024")).toBe("2024-03-15");
-  });
-
-  it("parses English textual month (day-first)", () => {
-    expect(normalizeDate("15 March 2024")).toBe("2024-03-15");
-  });
-
-  it("parses English textual month (month-first)", () => {
-    expect(normalizeDate("March 15 2024")).toBe("2024-03-15");
-  });
-
-  it("parses English textual month with comma", () => {
-    expect(normalizeDate("March 15, 2024")).toBe("2024-03-15");
-  });
-
-  it("strips weekday prefix before parsing", () => {
-    expect(normalizeDate("monday, 15.03.2024")).toBe("2024-03-15");
-  });
-
-  it("strips Estonian weekday prefix before parsing", () => {
-    expect(normalizeDate("esmaspäev, 15.03.2024")).toBe("2024-03-15");
-  });
-
-  it("returns undefined for empty string", () => {
-    expect(normalizeDate("")).toBeUndefined();
-  });
-
-  it("returns undefined for invalid date", () => {
-    expect(normalizeDate("not-a-date")).toBeUndefined();
-  });
-
-  it("returns undefined for out-of-range date (Feb 30)", () => {
-    expect(normalizeDate("30.02.2024")).toBeUndefined();
-  });
-
-  it("handles Estonian month abbreviation 'jaan'", () => {
-    expect(normalizeDate("5 jaan 2024")).toBe("2024-01-05");
-  });
-
-  it("handles Estonian month 'detsember'", () => {
-    expect(normalizeDate("31 detsember 2023")).toBe("2023-12-31");
-  });
-
-  it("trims surrounding whitespace", () => {
-    expect(normalizeDate("  2024-03-15  ")).toBe("2024-03-15");
   });
 });
 
