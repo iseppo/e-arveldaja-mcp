@@ -416,18 +416,29 @@ function transactionTypesForDuplicateCompatibility(entry: ParsedCamtEntry): Arra
 }
 
 export function buildExistingDuplicateKeysForEntry(entry: ParsedCamtEntry, selectedDimensionId: number): string[] {
+  const { current, alias } = existingDuplicateKeysByKind(entry, selectedDimensionId);
+  return [...current, ...alias];
+}
+
+/** Current-identity keys, then legacy alias keys (what an earlier release stored for this same leg) not already current. */
+function existingDuplicateKeysByKind(
+  entry: ParsedCamtEntry,
+  selectedDimensionId: number,
+): { current: string[]; alias: string[] } {
   const bankReference = normalizeOptionalReference(entry.bank_reference);
   const bankReferenceKey = dimensionScopedBankReferenceLookupKey(
     bankReferenceLookupKey(bankReference),
     selectedDimensionId,
   );
-  const keys = bankReference && bankReferenceKey ? currentExistingDuplicateKeys(entry, bankReferenceKey) : [];
-  // Legacy alias keys: what an earlier release stored for this same leg.
+  const current = [...new Set(bankReference && bankReferenceKey ? currentExistingDuplicateKeys(entry, bankReferenceKey) : [])];
+  const alias = new Set<string>();
   for (const legacy of entry.legacy_identities ?? []) {
     const legacyEntry = { ...entry, ...legacy, legacy_identities: undefined };
-    keys.push(...buildExistingDuplicateKeysForEntry(legacyEntry, selectedDimensionId));
+    for (const key of buildExistingDuplicateKeysForEntry(legacyEntry, selectedDimensionId)) {
+      if (!current.includes(key)) alias.add(key);
+    }
   }
-  return [...new Set(keys)];
+  return { current, alias: [...alias] };
 }
 
 function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: string): string[] {
@@ -451,24 +462,34 @@ function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: 
  * leg_index, which the stored row does not carry: leg n is already imported only
  * when at least n stored rows match the key. Counting per key (not per key set)
  * keeps a legacy alias key shared by several entries from being satisfied by
- * fewer stored rows than entries that claim it.
+ * fewer stored rows than entries that claim it. Current-key claims are ranked
+ * before alias-key claims: an entry whose CURRENT key equals another entry's
+ * legacy alias needs only as many rows as current claims before it (a
+ * new-version ledger stores just its own row), while the alias claimant needs
+ * one row more (an old-release ledger stores one row per alias claim).
  */
 export function findExactKeyOccurrences(
   entries: ParsedCamtEntry[],
   selectedDimensionId: number,
 ): Map<string, Map<string, number>> {
   const occurrences = new Map<string, Map<string, number>>();
-  const countsByExactKey = new Map<string, number>();
+  const keysByBatchKey = new Map<string, { current: string[]; alias: string[] }>();
   for (const entry of entries) {
     const batchKey = buildBatchDuplicateKey(entry);
-    if (occurrences.has(batchKey)) continue;
-    const entryOccurrences = new Map<string, number>();
-    for (const exactKey of buildExistingDuplicateKeysForEntry(entry, selectedDimensionId)) {
-      const occurrence = (countsByExactKey.get(exactKey) ?? 0) + 1;
-      countsByExactKey.set(exactKey, occurrence);
-      entryOccurrences.set(exactKey, occurrence);
+    if (keysByBatchKey.has(batchKey)) continue;
+    keysByBatchKey.set(batchKey, existingDuplicateKeysByKind(entry, selectedDimensionId));
+    occurrences.set(batchKey, new Map<string, number>());
+  }
+  const countsByExactKey = new Map<string, number>();
+  for (const kind of ["current", "alias"] as const) {
+    for (const [batchKey, keys] of keysByBatchKey) {
+      const entryOccurrences = occurrences.get(batchKey)!;
+      for (const exactKey of keys[kind]) {
+        const occurrence = (countsByExactKey.get(exactKey) ?? 0) + 1;
+        countsByExactKey.set(exactKey, occurrence);
+        entryOccurrences.set(exactKey, occurrence);
+      }
     }
-    occurrences.set(batchKey, entryOccurrences);
   }
   return occurrences;
 }

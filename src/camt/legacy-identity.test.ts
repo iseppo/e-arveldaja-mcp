@@ -64,6 +64,12 @@ describe("CAMT re-import against rows stored by the previous release", () => {
     ["detail-less charge sharing its bank reference with a payment", wrap(
       ntry("100.00", "R4", leg("100.00", "EUR", "", "Payee AS", "Arve 1")) + ntry("1.50", "R4", "", "Teenustasu")),
       [oldStoredRow(1, { amount: 100, name: "Payee AS", description: "Arve 1", ref: "R4" }), oldStoredRow(2, { amount: 1.5, ref: "R4" })]],
+    // A leg's current key equal to another leg's legacy alias key must not
+    // demand two stored rows on a new-version ledger.
+    ["detail-less charges with and without AddtlNtryInf sharing a bank reference", wrap(ntry("1.50", "R8", "", "Teenustasu") + ntry("1.50", "R8", "")),
+      [oldStoredRow(1, { amount: 1.5, ref: "R8" }), oldStoredRow(2, { amount: 1.5, ref: "R8" })]],
+    ["three same-currency legs whose middle countervalue equals the proportional split", wrap(ntry("277.50", "R9", leg("100.00", "USD", "92.00") + leg("100.00", "USD", "92.50") + leg("100.00", "USD", "93.00"))),
+      [1, 2, 3].map(id => oldStoredRow(id, { amount: 92.5, name: "Supplier OÜ", ref: "R9" }))],
   ];
 
   it.each(cases)("%s: creates nothing", async (_name, xml, oldLedger) => {
@@ -99,6 +105,15 @@ describe("CAMT re-import against rows stored by the previous release", () => {
     // into the first and only one row was stored. Exactly that one is matched.
     const xml = wrap(ntry("1.50", "R5", "", "Teenustasu A") + ntry("1.50", "R5", "", "Teenustasu B"));
     const rerun = await project(xml, [oldStoredRow(1, { amount: 1.5, ref: "R5" })]);
+    expect(rerun.descriptors).toHaveLength(1);
+    expect(rerun.skipped).toHaveLength(1);
+  });
+
+  it("does not let one old row satisfy both a charge's current key and another charge's alias key", async () => {
+    // Old release stored only one empty-description row for these two charges;
+    // the charge whose alias key needs a second row is booked.
+    const xml = wrap(ntry("1.50", "R8", "", "Teenustasu") + ntry("1.50", "R8", ""));
+    const rerun = await project(xml, [oldStoredRow(1, { amount: 1.5, ref: "R8" })]);
     expect(rerun.descriptors).toHaveLength(1);
     expect(rerun.skipped).toHaveLength(1);
   });
