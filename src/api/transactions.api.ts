@@ -259,9 +259,11 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // not from the 120s per-id cache (RIK copies the live client into the journal).
     // It also gates registering at all: a confirm queued behind one that just
     // registered this row must see the live CONFIRMED status, not a cached PROJECT.
+    // Only CONFIRMED is refused: the invalidate -> confirm repair cycle registers
+    // the row again from its post-invalidate status (VOID or PROJECT).
     cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
     const tx = await this.get(id);
-    if (tx && typeof tx.status === "string" && tx.status !== "PROJECT") {
+    if (tx?.status === "CONFIRMED") {
       throw new Error(
         `Transaction ${id} is ${tx.status}, not PROJECT; refusing to register it again. ` +
         "Freshly read the transaction (and its journal) before retrying.",

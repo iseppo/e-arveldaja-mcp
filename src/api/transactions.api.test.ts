@@ -1039,6 +1039,40 @@ describe("TransactionsApi.confirm reads the live client before registering", () 
     }
   });
 
+  it("registers a VOID transaction (invalidate -> confirm repair cycle) but refuses a CONFIRMED one", async () => {
+    for (const status of ["VOID", "CONFIRMED"] as const) {
+      const live = { id: 8, status: status as string, clients_id: 10 as number | null };
+      const patches: string[] = [];
+      const { client } = makeClient({
+        getById: (path) => {
+          if (path === "/transactions/8") return { ...live };
+          if (path === "/sale_invoices/9") return { id: 9, clients_id: 20 };
+          return undefined;
+        },
+        patchHandler: ({ path, body }) => {
+          patches.push(path);
+          if (path.endsWith("/register")) live.status = "CONFIRMED";
+          else if (body && typeof body === "object" && "clients_id" in body) {
+            live.clients_id = (body as { clients_id: number }).clients_id;
+          }
+          return { code: 200, messages: [] };
+        },
+      });
+      const api = new TransactionsApi(client);
+      const call = api.confirm(8, [{ related_table: "sale_invoices", related_id: 9, amount: 100 }], {
+        reassignClientToInvoice: true,
+      });
+      if (status === "VOID") {
+        await call;
+        expect(patches).toContain("/transactions/8/register");
+        expect(live.clients_id).toBe(20);
+      } else {
+        await expect(call).rejects.toThrow(/CONFIRMED, not PROJECT/);
+        expect(patches).toEqual([]);
+      }
+    }
+  });
+
   it("F4 refuses to register when the client read back after the auto-fix is not the one just written", async () => {
     let txReads = 0;
     const patchCalls: string[] = [];
