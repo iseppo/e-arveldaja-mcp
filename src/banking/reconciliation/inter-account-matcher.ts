@@ -22,7 +22,7 @@ export interface OneSidedInference {
 
 /** The read-only account lookups + config the matcher closes over per run. */
 export interface InterAccountMatchLookups {
-  readonly ownIbanToDimension: Map<string, number>;
+  readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly dimensionToIban: Map<number, string>;
   readonly companyName: string;
   readonly targetAccountsDimensionsId: number | undefined;
@@ -45,16 +45,22 @@ export function inferOneSidedTransfer(
   let confidence = 0;
   const reasons: string[] = [];
 
+  let ibanTargetAmbiguous = false;
   if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
-    const ibanDim = ownIbanToDimension.get(counterpartyIban)!;
-    if (ibanDim !== tx.accounts_dimensions_id) {
-      targetDimension = ibanDim;
+    const ibanDims = [...ownIbanToDimension.get(counterpartyIban)!].filter(d => d !== tx.accounts_dimensions_id);
+    if (ibanDims.length === 1) {
+      targetDimension = ibanDims[0]!;
       confidence += 90;
       reasons.push("counterparty_iban_is_own_account");
+    } else if (ibanDims.length > 1) {
+      // The IBAN backs several own accounts (e.g. LHV multi-currency
+      // sub-accounts): no single target, so never auto-book — leave for review.
+      ibanTargetAmbiguous = true;
+      reasons.push("counterparty_iban_maps_to_multiple_own_accounts");
     }
   }
 
-  if (!targetDimension && companyName.length >= 4 && counterpartyName.length >= 4) {
+  if (!targetDimension && !ibanTargetAmbiguous && companyName.length >= 4 && counterpartyName.length >= 4) {
     // Exact normalized equality: a payer whose name merely contains the
     // company name ("Männipuu Client AS" vs "Männipuu OÜ") is a third party.
     const nameMatch = counterpartyName === companyName;

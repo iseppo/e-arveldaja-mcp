@@ -12,7 +12,12 @@ export function toUtcDay(s: string): number {
 }
 
 export interface BankAccountLookups {
-  ownIbanToDimension: Map<string, number>;
+  /**
+   * Own IBAN -> every own account dimension registered under it. One IBAN can
+   * back several accounts (LHV multi-currency sub-accounts share it), so a
+   * counterparty IBAN identifies a set of candidate accounts, not one.
+   */
+  ownIbanToDimension: Map<string, Set<number>>;
   dimensionToIban: Map<number, string>;
   dimensionToTitle: Map<number, string>;
   dimensionToAccountsId: Map<number, number>;
@@ -23,14 +28,16 @@ export function buildBankAccountLookups(
   bankAccounts: BankAccount[],
   accountDimensions: AccountDimension[],
 ): BankAccountLookups {
-  const ownIbanToDimension = new Map<string, number>();
+  const ownIbanToDimension = new Map<string, Set<number>>();
   const dimensionToIban = new Map<number, string>();
   const dimensionToTitle = new Map<number, string>();
   const dimensionToAccountsId = new Map<number, number>();
   for (const ba of bankAccounts) {
     const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
     if (iban && ba.accounts_dimensions_id) {
-      ownIbanToDimension.set(iban, ba.accounts_dimensions_id);
+      const dims = ownIbanToDimension.get(iban);
+      if (dims) dims.add(ba.accounts_dimensions_id);
+      else ownIbanToDimension.set(iban, new Set([ba.accounts_dimensions_id]));
       dimensionToIban.set(ba.accounts_dimensions_id, iban);
       dimensionToTitle.set(ba.accounts_dimensions_id, ba.account_name_est);
     }

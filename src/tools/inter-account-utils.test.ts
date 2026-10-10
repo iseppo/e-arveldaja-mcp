@@ -56,7 +56,7 @@ describe("buildBankAccountLookups", () => {
 
     const result = buildBankAccountLookups(accounts, dims);
 
-    expect(result.ownIbanToDimension.get("EE123456789")).toBe(10);
+    expect(result.ownIbanToDimension.get("EE123456789")).toEqual(new Set([10]));
     expect(result.dimensionToIban.get(10)).toBe("EE123456789");
     expect(result.dimensionToTitle.get(10)).toBe("LHV");
     expect(result.ownDimensionIds.has(10)).toBe(true);
@@ -121,9 +121,20 @@ describe("buildBankAccountLookups", () => {
     expect(result.ownIbanToDimension.size).toBe(3);
     expect(result.dimensionToIban.size).toBe(3);
     expect(result.ownDimensionIds.size).toBe(3);
-    expect(result.ownIbanToDimension.get("EE100")).toBe(100);
-    expect(result.ownIbanToDimension.get("EE200")).toBe(200);
-    expect(result.ownIbanToDimension.get("EE300")).toBe(300);
+    expect(result.ownIbanToDimension.get("EE100")).toEqual(new Set([100]));
+    expect(result.ownIbanToDimension.get("EE200")).toEqual(new Set([200]));
+    expect(result.ownIbanToDimension.get("EE300")).toEqual(new Set([300]));
+  });
+
+  it("keeps every own account registered under a shared IBAN", () => {
+    const accounts: BankAccount[] = [
+      makeBankAccount({ account_name_est: "LHV EUR", account_no: "EE11", accounts_dimensions_id: 11 }),
+      makeBankAccount({ account_name_est: "LHV USD", account_no: "EE11", accounts_dimensions_id: 12 }),
+    ];
+    const result = buildBankAccountLookups(accounts, []);
+
+    expect(result.ownIbanToDimension.get("EE11")).toEqual(new Set([11, 12]));
+    expect(result.ownDimensionIds).toEqual(new Set([11, 12]));
   });
 
   it("maps dimensionToAccountsId from AccountDimension list", () => {

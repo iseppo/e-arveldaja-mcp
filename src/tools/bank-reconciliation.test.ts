@@ -1546,6 +1546,38 @@ describe("reconcile_inter_account_transfers", () => {
     });
   });
 
+  describe("R2 own IBAN shared by several own accounts (LHV multi-currency)", () => {
+    const sharedIban = [
+      { id: 1, account_name_est: "LHV EUR", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
+      { id: 2, account_name_est: "LHV USD", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 12 },
+      { id: 3, account_name_est: "Swed", account_no: "EE33", iban_code: "EE33", accounts_dimensions_id: 33 },
+    ];
+    const swedOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 33, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+    const lhvEurIn = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 11, bank_account_no: "EE33", bank_account_name: "Männipuu OÜ", clients_id: null, description: "y\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" };
+
+    it("pairs Swed -> LHV EUR into dim 11 and books it once", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: [swedOut, lhvEurIn], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_pairs).toBe(1);
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 2, to_dimension_id: 11 });
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm.mock.calls[0]![0]).toBe(1);
+      expect(api.transactions.confirm.mock.calls[0]![1][0].related_sub_id).toBe(11);
+      expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+      expect(api.transactions.delete).toHaveBeenCalledWith(2);
+    });
+
+    it("does not auto-book a one-sided transfer to an IBAN shared by several own accounts", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+  });
+
   describe("MAJOR-1 same-type reciprocal direction", () => {
     // Real transfer: LHV (dim 100) -> SEB (dim 200). Both legs stored as C.
     const lhvOut = (description: string) => ({ id: 131, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description });

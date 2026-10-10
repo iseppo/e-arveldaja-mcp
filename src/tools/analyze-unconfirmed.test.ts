@@ -390,6 +390,35 @@ describe("analyze_unconfirmed_transactions", () => {
   });
 
   describe("inter-account detection", () => {
+    it("does not pick a single target when the counterparty IBAN backs several own accounts", async () => {
+      const handler = setupTool({
+        transactions: [{
+          id: 3, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20",
+          accounts_dimensions_id: 300, cl_currencies_id: "EUR", description: "Transfer to LHV",
+          bank_account_name: null, bank_account_no: "EE11",
+        }],
+        bankAccounts: [
+          { id: 1, account_name_est: "LHV EUR", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 100 },
+          { id: 2, account_name_est: "LHV USD", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 200 },
+          { id: 3, account_name_est: "Swed", account_no: "EE33", iban_code: "EE33", accounts_dimensions_id: 300 },
+        ],
+        accountDimensions: [
+          { id: 100, accounts_id: 1020, is_deleted: false },
+          { id: 200, accounts_id: 1021, is_deleted: false },
+          { id: 300, accounts_id: 1022, is_deleted: false },
+        ],
+      });
+
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+
+      expect(payload.suggestions).toHaveLength(1);
+      const s = payload.suggestions[0]!;
+      expect(s.suggested_action).toBe("confirm_inter_account");
+      expect(s.match_confidence).toBe(60);
+      expect(s.reason).toContain("specify target manually");
+      expect(s.distribution).toBeUndefined();
+    });
+
     it("detects inter-account by counterparty IBAN matching own account", async () => {
       const handler = setupTool({
         transactions: [{

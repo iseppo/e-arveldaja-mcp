@@ -297,13 +297,30 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         let isInterAccount = false;
 
         // Check counterparty IBAN matches own bank account
-        if (counterpartyIban && ownIbanToDimension.has(counterpartyIban)) {
-          const targetDim = ownIbanToDimension.get(counterpartyIban)!;
-          const booked = targetDim !== txDim ? alreadyBookedTransfer(targetDim) : undefined;
+        // One IBAN can back several own accounts (LHV multi-currency).
+        const ibanTargets = counterpartyIban && ownIbanToDimension.has(counterpartyIban)
+          ? [...ownIbanToDimension.get(counterpartyIban)!].filter(d => d !== txDim)
+          : [];
+        if (ibanTargets.length > 1) {
+          suggestions.push({
+            transaction_id: tx.id!,
+            date: tx.date,
+            amount: tx.amount,
+            currency: tx.cl_currencies_id,
+            description: tx.description,
+            bank_account_name: tx.bank_account_name,
+            suggested_action: "confirm_inter_account",
+            reason: `Counterparty IBAN ${counterpartyIban} belongs to several own accounts — specify target manually`,
+            match_confidence: 60,
+          });
+          isInterAccount = true;
+        } else if (ibanTargets.length === 1) {
+          const targetDim = ibanTargets[0]!;
+          const booked = alreadyBookedTransfer(targetDim);
           if (booked) {
             suggestions.push(booked);
             isInterAccount = true;
-          } else if (targetDim !== txDim) {
+          } else {
             const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
             const accountsId = dimensionToAccountsId.get(targetDim);
             suggestions.push({

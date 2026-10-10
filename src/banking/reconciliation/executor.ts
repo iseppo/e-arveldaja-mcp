@@ -791,7 +791,7 @@ export async function runInterAccountMatching(
   // (no IBAN, no name) or a merely similar name is not evidence.
   function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
     const iban = (row.bank_account_no ?? "").trim().toUpperCase();
-    if (iban && ownIbanToDimension.get(iban) === sourceDimensionId) return true;
+    if (iban && ownIbanToDimension.get(iban)?.has(sourceDimensionId)) return true;
     const name = normalizeCompanyName(row.bank_account_name ?? "");
     return Boolean(name) && (
       (companyName !== "" && name === companyName) ||
@@ -845,10 +845,12 @@ export async function runInterAccountMatching(
       // A counterparty IBAN naming a *different* own account contradicts this
       // pairing, and an incoming row from a known third-party IBAN is a real
       // receipt, not a transfer mirror leg — pairing would delete it.
-      const outCounterpartyDim = outCounterpartyIban ? ownIbanToDimension.get(outCounterpartyIban) : undefined;
-      const inCounterpartyDim = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
-      if (outCounterpartyDim !== undefined && outCounterpartyDim !== txIn.accounts_dimensions_id) continue;
-      if (inCounterpartyDim !== undefined && inCounterpartyDim !== txOut.accounts_dimensions_id) continue;
+      // An IBAN may back several own accounts, so veto only when none of them
+      // is the candidate's account.
+      const outCounterpartyDims = outCounterpartyIban ? ownIbanToDimension.get(outCounterpartyIban) : undefined;
+      const inCounterpartyDims = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
+      if (outCounterpartyDims && !outCounterpartyDims.has(txIn.accounts_dimensions_id)) continue;
+      if (inCounterpartyDims && !inCounterpartyDims.has(txOut.accounts_dimensions_id)) continue;
       if (!hasOwnOriginEvidence(txIn, txOut.accounts_dimensions_id)) continue;
 
       const hasOutgoingIbanMatchesIncomingAccount =
