@@ -1625,6 +1625,25 @@ describe("reconcile_inter_account_transfers", () => {
   });
 
   describe("MAJOR-1 same-type reciprocal direction", () => {
+    it("L5 does not book either leg one-sided when the reciprocal counterpart lacks own-origin evidence", async () => {
+      // Both rows infer each other's account by company name, but the incoming
+      // one comes from a third-party IBAN: not a deletable mirror, and booking
+      // both one-sided would double-book the transfer.
+      const accounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
+        { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
+      ];
+      const out = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: null, bank_account_name: "Test OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" };
+      const inc = { id: 2, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: "EE99THIRD", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
+      const { handler, api } = setupInterAccountTool({ transactions: [out, inc], bankAccounts: accounts });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(payload.matched_one_sided).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+
     // Real transfer: LHV (dim 100) -> SEB (dim 200). Both legs stored as C.
     const lhvOut = (description: string) => ({ id: 131, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "SEB", description });
     const sebIn = { id: 132, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", bank_account_name: "LHV", description: "Transfer from LHV" };
@@ -2144,7 +2163,7 @@ describe("reconcile_inter_account_transfers", () => {
         { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
         { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
       ];
-      const lhvOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x [e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+      const lhvOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
       const wiseIn = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 99, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Männipuu OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
 
       it("routes both legs to review instead of booking each one-sided", async () => {

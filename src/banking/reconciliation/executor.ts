@@ -1106,7 +1106,13 @@ export async function runInterAccountMatching(
     }
     const source = txProvenOutgoing ? tx : reciprocal;
     const counterpart = txProvenOutgoing ? reciprocal : tx;
-    if (!hasOwnOriginEvidence(counterpart, source.accounts_dimensions_id)) continue;
+    if (!hasOwnOriginEvidence(counterpart, source.accounts_dimensions_id)) {
+      // Not a deletable mirror, yet both legs infer each other's account:
+      // booking each one-sided would double-book. Leave both for review.
+      blockedOneSidedTxIds.add(source.id!);
+      blockedOneSidedTxIds.add(counterpart.id!);
+      continue;
+    }
     const sourceId = source.id!;
     const counterpartId = counterpart.id!;
     // Base EUR, the same unit the BookingGuard key and one-sided confirms use.
