@@ -341,12 +341,16 @@ describe("scanWorkspaceFiles traversal budget (M15)", () => {
     workspacesToClean.push(root);
     // All .txt — none match the candidate extensions, so nothing is collected;
     // only the per-entry traversal budget can stop the walk.
+    // A small injected budget exercises the same cut-off as MAX_SCANNED_FILES
+    // without writing 1500 real files.
+    const entryLimit = 20;
     await writeFiles(
       root,
-      Array.from({ length: MAX_SCANNED_FILES + 5 }, (_, i) => `note-${String(i).padStart(5, "0")}.txt`),
+      Array.from({ length: entryLimit + 5 }, (_, i) => `note-${String(i).padStart(5, "0")}.txt`),
     );
-    const result = await scanWorkspaceFiles(root, 2);
-    expect(result.inspected_entries).toBe(MAX_SCANNED_FILES);
+    const result = await scanWorkspaceFiles(root, 2, entryLimit);
+    expect(result.inspected_entries).toBe(entryLimit);
+    expect(result.entry_limit).toBe(entryLimit);
     expect(result.truncated).toBe(true);
     expect(result.continuation_guidance).toMatch(/narrower workspace/i);
     expect(result.files).toHaveLength(0);
