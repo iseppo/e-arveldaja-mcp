@@ -128,6 +128,11 @@ interface LinkedInvoiceClient {
   clientsId: number;
 }
 
+// Per-transaction confirm gate (same promise-chain pattern as the Wise execution
+// lock): two in-process confirms of one transaction must not interleave their
+// client auto-fix/reassign update with the other's register call.
+const confirmLocks = new Map<string, Promise<void>>();
+
 export class TransactionsApi extends BaseResource<Transaction> {
   constructor(client: HttpClient) {
     super(client, "/transactions");
@@ -195,6 +200,52 @@ export class TransactionsApi extends BaseResource<Transaction> {
     distributions?: TransactionDistribution[],
     options?: { autoFixClientsId?: boolean; reassignClientToInvoice?: boolean },
   ): Promise<ApiResponse> {
+    const lockKey = this.cacheKey(`${this.basePath}:${id}`);
+    const previous = confirmLocks.get(lockKey) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const tail = previous.then(() => gate);
+    confirmLocks.set(lockKey, tail);
+    await previous;
+    try {
+      return await this.confirmUnlocked(id, distributions, options);
+    } finally {
+      release();
+      if (confirmLocks.get(lockKey) === tail) confirmLocks.delete(lockKey);
+    }
+  }
+
+  /**
+   * Re-read the transaction uncached after a clients_id write and refuse to
+   * register unless it still carries the value just written — another writer
+   * (UI, other MCP client) may have changed it in between.
+   */
+  private async assertClientWritten(
+    id: number, writtenClientsId: number, invoiceTable: string, invoiceId: number,
+  ): Promise<void> {
+    cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
+    const fresh = await this.get(id);
+    if (fresh?.clients_id === writtenClientsId) return;
+    if (typeof fresh?.clients_id === "number") {
+      throw new LinkedInvoiceClientMismatchError({
+        transactionId: id,
+        transactionClientsId: fresh.clients_id,
+        invoiceTable,
+        invoiceId,
+        invoiceClientsId: writtenClientsId,
+      });
+    }
+    throw new Error(
+      `Transaction ${id} clients_id read back as ${String(fresh?.clients_id)} right after setting it to ` +
+      `${writtenClientsId}; refusing to register. Freshly read the transaction before retrying.`,
+    );
+  }
+
+  private async confirmUnlocked(
+    id: number,
+    distributions?: TransactionDistribution[],
+    options?: { autoFixClientsId?: boolean; reassignClientToInvoice?: boolean },
+  ): Promise<ApiResponse> {
     const body = distributions ?? [];
     const autoFixClientsId = options?.autoFixClientsId !== false;
     const hasInvoiceDistribution = body.some(dist =>
@@ -215,6 +266,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
           // Only a real client id is ever written (never null), and only when
           // every linked invoice agrees on it.
           const invoiceClientsIds = new Set<number>();
+          let firstInvoice: { table: string; id: number } | undefined;
           for (const dist of body) {
             let inv: PurchaseInvoice | SaleInvoice | undefined;
             if (dist.related_table === "purchase_invoices" && dist.related_id) {
@@ -222,7 +274,10 @@ export class TransactionsApi extends BaseResource<Transaction> {
             } else if (dist.related_table === "sale_invoices" && dist.related_id) {
               inv = await this.client.get<SaleInvoice>(`/sale_invoices/${dist.related_id}`);
             }
-            if (typeof inv?.clients_id === "number") invoiceClientsIds.add(inv.clients_id);
+            if (typeof inv?.clients_id === "number") {
+              invoiceClientsIds.add(inv.clients_id);
+              firstInvoice ??= { table: dist.related_table, id: dist.related_id! };
+            }
           }
 
           if (invoiceClientsIds.size > 1) {
@@ -235,6 +290,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
           if (clientsId !== undefined) {
             await this.update(id, { clients_id: clientsId });
             clientsIdRollbackValue = null;
+            await this.assertClientWritten(id, clientsId, firstInvoice!.table, firstInvoice!.id);
           }
         }
       } else if (hasInvoiceDistribution) {
@@ -254,6 +310,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
           if (options?.reassignClientToInvoice === true) {
             await this.update(id, { clients_id: invoice.clientsId });
             clientsIdRollbackValue = tx.clients_id;
+            await this.assertClientWritten(id, invoice.clientsId, invoice.table, invoice.id);
           } else {
             throw new LinkedInvoiceClientMismatchError({
               transactionId: id,

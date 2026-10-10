@@ -22,13 +22,25 @@ function makeClient(options: {
   patchHandler?: (call: PatchCall) => unknown;
 } = {}): { client: HttpClient; patchCalls: PatchCall[] } {
   const patchCalls: PatchCall[] = [];
+  // Like the real backend, a successful clients_id PATCH is visible on the next
+  // transaction GET (confirm() reads it back before registering).
+  const writtenClients = new Map<string, number | null>();
   const client = {
     cacheNamespace: "test",
-    get: vi.fn(async (path: string) => options.getById?.(path)),
+    get: vi.fn(async (path: string) => {
+      const value = options.getById?.(path);
+      return writtenClients.has(path) && value && typeof value === "object"
+        ? { ...value, clients_id: writtenClients.get(path) }
+        : value;
+    }),
     post: vi.fn(),
     patch: vi.fn(async (path: string, body: unknown) => {
       patchCalls.push({ path, body });
-      return options.patchHandler ? options.patchHandler({ path, body }) : { code: 200, messages: [] };
+      const result = options.patchHandler ? await options.patchHandler({ path, body }) : { code: 200, messages: [] };
+      if (body && typeof body === "object" && "clients_id" in body) {
+        writtenClients.set(path, (body as { clients_id: number | null }).clients_id);
+      }
+      return result;
     }),
     delete: vi.fn(),
   } as unknown as HttpClient;
@@ -369,7 +381,8 @@ describe("TransactionsApi.confirm", () => {
       getById: (path) => {
         if (path === "/transactions/9") {
           txReads += 1;
-          if (txReads === 1) return { id: 9, clients_id: null }; // pre-fix read
+          // pre-fix read + post-fix clients_id read-back
+          if (txReads <= 2) return { id: 9, clients_id: null };
           throw new HttpError("fetch failed", "network", "GET", "/transactions/9"); // re-read fails
         }
         if (path === "/purchase_invoices/88") return { id: 88, clients_id: 42 };
@@ -675,8 +688,9 @@ describe("TransactionsApi.confirm", () => {
     await expect(api.confirm(8, [{ related_table: "purchase_invoices", related_id: 88, amount: 10 }]))
       .rejects.toThrow(HttpError);
 
-    // Only the auto-fix read happened — no post-error re-read for verification.
-    expect(txReads).toBe(1);
+    // Only the auto-fix read and its post-update clients_id read-back happened —
+    // no post-error re-read for verification.
+    expect(txReads).toBe(2);
     // Rollback still occurs on the definite failure.
     expect(patchCalls).toContainEqual({ path: "/transactions/8", body: { clients_id: null } });
   });
@@ -953,5 +967,74 @@ describe("TransactionsApi.confirm reads the live client before registering", () 
     await expect(api.confirm(5, [{ related_table: "sale_invoices", related_id: 9, amount: 100 }]))
       .rejects.toBeInstanceOf(LinkedInvoiceClientMismatchError);
     expect(patchCalls).toEqual([]);
+  });
+
+  it("F4 concurrent auto-fix confirms never register under another invocation's client", async () => {
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    const live = { id: 5, status: "PROJECT", clients_id: null as number | null };
+    const registered: Array<{ invoice: number; journalClient: number | null }> = [];
+    const client = {
+      cacheNamespace: "test",
+      get: vi.fn(async (path: string) => {
+        await sleep(2);
+        if (path === "/transactions/5") return { ...live };
+        if (path === "/sale_invoices/1") return { id: 1, clients_id: 42 };
+        if (path === "/sale_invoices/2") return { id: 2, clients_id: 99 };
+        return undefined;
+      }),
+      post: vi.fn(),
+      patch: vi.fn(async (path: string, body: any) => {
+        if (path.endsWith("/register")) {
+          await sleep(20);
+          if (live.status !== "PROJECT") throw new HttpError("not project", 400, "PATCH", path);
+          live.status = "CONFIRMED";
+          registered.push({ invoice: body[0].related_id, journalClient: live.clients_id });
+          return { code: 200, messages: [] };
+        }
+        await sleep(5);
+        if (live.status !== "PROJECT") throw new HttpError("not project", 400, "PATCH", path);
+        live.clients_id = body.clients_id;
+        return { code: 200, messages: [] };
+      }),
+      delete: vi.fn(),
+    } as unknown as HttpClient;
+    const api = new TransactionsApi(client);
+
+    await Promise.allSettled([
+      api.confirm(5, [{ related_table: "sale_invoices", related_id: 1, amount: 100 }]),
+      api.confirm(5, [{ related_table: "sale_invoices", related_id: 2, amount: 100 }]),
+    ]);
+
+    expect(registered).toHaveLength(1);
+    const invoiceClient = registered[0]!.invoice === 1 ? 42 : 99;
+    expect(registered[0]!.journalClient).toBe(invoiceClient);
+  });
+
+  it("F4 refuses to register when the client read back after the auto-fix is not the one just written", async () => {
+    let txReads = 0;
+    const patchCalls: string[] = [];
+    const client = {
+      cacheNamespace: "test",
+      get: vi.fn(async (path: string) => {
+        if (path === "/transactions/6") {
+          txReads++;
+          // First read: no client. After our update: another writer set 99.
+          return { id: 6, status: "PROJECT", clients_id: txReads === 1 ? null : 99 };
+        }
+        if (path === "/sale_invoices/1") return { id: 1, clients_id: 42 };
+        return undefined;
+      }),
+      post: vi.fn(),
+      patch: vi.fn(async (path: string) => {
+        patchCalls.push(path);
+        return { code: 200, messages: [] };
+      }),
+      delete: vi.fn(),
+    } as unknown as HttpClient;
+    const api = new TransactionsApi(client);
+
+    await expect(api.confirm(6, [{ related_table: "sale_invoices", related_id: 1, amount: 100 }]))
+      .rejects.toBeInstanceOf(LinkedInvoiceClientMismatchError);
+    expect(patchCalls).not.toContain("/transactions/6/register");
   });
 });
