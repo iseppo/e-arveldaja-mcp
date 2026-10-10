@@ -80,6 +80,23 @@ describe("validatePackedFileList", () => {
   });
 });
 
+describe("validatePackedFileList stale dist outputs", () => {
+  const base = ["package/package.json", "package/workflows/a.md", "package/.claude/commands/a.md"];
+
+  it("accepts dist outputs that all come from current src modules", () => {
+    const files = [...base, "package/dist/index.js", "package/dist/index.d.ts.map", "package/dist/api/clients.api.js.map"];
+    expect(validatePackedFileList(files, validPackage, ["a"], ["index", "api/clients.api"])).toEqual([]);
+  });
+
+  it("rejects a stale output of a deleted module (e.g. the removed company resolver)", () => {
+    const files = [...base, "package/dist/index.js", "package/dist/resolution/company-resolution.js", "package/dist/resolution/company-resolution.d.ts"];
+    expect(validatePackedFileList(files, validPackage, ["a"], ["index", "resolution/bank-account-resolution"])).toEqual([
+      "packed payload contains stale dist/resolution/company-resolution.js with no src/resolution/company-resolution.ts",
+      "packed payload contains stale dist/resolution/company-resolution.d.ts with no src/resolution/company-resolution.ts",
+    ]);
+  });
+});
+
 describe("buildPackedSmokePlan", () => {
   it("imports under the supplied Node executable and invokes the installed bin shim", () => {
     const packageRoot = "/tmp/install/node_modules/e-arveldaja-mcp";
@@ -170,6 +187,14 @@ describe("startAndObserve", () => {
     })).rejects.toThrow(/ERR_MODULE_NOT_FOUND/);
     expect(Date.now() - started).toBeLessThan(minimumAliveMs);
   }, 15_000);
+
+  it("throws when a fatal load error appears on stderr after the alive window, even with exit 0", async () => {
+    await expect(startAndObserve(
+      process.execPath,
+      ["-e", "process.stdin.on('end',()=>process.stderr.write('ERR_MODULE_NOT_FOUND: late load',()=>process.exit(0))); process.stdin.resume(); setInterval(()=>{},1000)"],
+      { cwd: process.cwd(), minimumAliveMs: 50, timeoutMs: 2_000, terminateGraceMs: 500, env: process.env },
+    )).rejects.toThrow(/fatal load error.*ERR_MODULE_NOT_FOUND: late load/);
+  });
 
   it("throws a clear error when the command cannot be spawned at all", async () => {
     await expect(startAndObserve(resolve(process.cwd(), "does", "not", "exist-binary"), [], {

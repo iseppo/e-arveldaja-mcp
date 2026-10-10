@@ -6,8 +6,11 @@ import { pathToFileURL } from "node:url";
 
 // Pure check: which required files a packed payload (npm pack --json `files[].path`,
 // each prefixed with "package/") is missing. Directory requirements (trailing "/")
-// are satisfied by any packed entry under that prefix.
-export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs = null) {
+// are satisfied by any packed entry under that prefix. When `sourceModules` (src
+// module paths without extension, e.g. "api/clients.api") is given, every packed
+// dist/ output must also come from a current src/*.ts — a stale output of a
+// deleted module (tsc never removes those) would otherwise ship.
+export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs = null, sourceModules = null) {
   const names = new Set(files.map(file => file.replace(/^package\//, "")));
   const required = [packageJson.main, ...Object.values(packageJson.bin ?? {}), "package.json", "workflows/", ".claude/commands/"];
   const errors = required
@@ -32,6 +35,14 @@ export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs
   for (const slug of expected) {
     if (!workflowSlugs.has(slug)) errors.push(`packed payload missing workflows/${slug}.md`);
     if (!commandSlugs.has(slug)) errors.push(`packed payload missing .claude/commands/${slug}.md`);
+  }
+  if (sourceModules) {
+    const sources = new Set(sourceModules);
+    for (const name of names) {
+      if (!name.startsWith("dist/")) continue;
+      const module = name.slice("dist/".length).replace(/\.(?:js|d\.ts)(?:\.map)?$/, "");
+      if (!sources.has(module)) errors.push(`packed payload contains stale ${name} with no src/${module}.ts`);
+    }
   }
   return errors;
 }
@@ -215,6 +226,12 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
     if (settled.code !== 0 || settled.signal) {
       throw new Error(`Packed bin exited uncleanly on shutdown (code ${settled.code}, signal ${settled.signal}): ${stderr}`);
     }
+    // A fatal load error printed after the alive window (e.g. a lazy import
+    // during shutdown) must not pass just because the exit code was 0. "close"
+    // fires after stderr has ended, so the accumulated text is complete here.
+    if (fatalStderr.test(stderr)) {
+      throw new Error(`Packed bin emitted a fatal load error: ${stderr}`);
+    }
     return settled;
   } finally {
     child.stdin.destroy();
@@ -270,7 +287,11 @@ export async function smokePackedRuntime({ root, nodeExecutable = process.execPa
     // otherwise invisible to a set-equality check).
     const requiredWorkflowSlugs = (await readdir(resolve(root, "workflows")))
       .filter(name => name.endsWith(".md")).map(name => name.slice(0, -3));
-    const errors = validatePackedFileList(packed.files.map(file => file.path), packageJson, requiredWorkflowSlugs);
+    const sourceModules = (await readdir(resolve(root, "src"), { recursive: true }))
+      .map(name => name.replace(/\\/g, "/"))
+      .filter(name => name.endsWith(".ts") && !name.endsWith(".d.ts"))
+      .map(name => name.slice(0, -3));
+    const errors = validatePackedFileList(packed.files.map(file => file.path), packageJson, requiredWorkflowSlugs, sourceModules);
     if (errors.length) throw new Error(errors.join("\n"));
     const installRoot = resolve(temp, "install");
     await mkdir(installRoot);
