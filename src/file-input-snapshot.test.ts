@@ -1,15 +1,23 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { appendFile, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
 import { FILE_REFERENCE_OPERATIONS } from "./file-reference-store.js";
+import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped } from "./bounded-read.js";
+import { resolveFileInput } from "./file-validation.js";
 import {
   FILE_INPUT_IDENTITY_SCHEMA,
   FileInputSnapshotError,
   assertMatchingFileInputSnapshot,
   captureFileInputSnapshot,
 } from "./file-input-snapshot.js";
+
+vi.mock("./bounded-read.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./bounded-read.js")>();
+  return { ...actual, readFileCapped: vi.fn(actual.readFileCapped) };
+});
 
 const roots: string[] = [];
 const runtime = () => createTestRuntimeSafetyContext();
@@ -24,6 +32,47 @@ afterEach(async () => {
 });
 
 describe("captureFileInputSnapshot", () => {
+  it("refuses a file that grew past maxSize after validation instead of reading it unbounded", async () => {
+    const root = await mkdtemp(join(tmpdir(), "file-snapshot-grow-"));
+    roots.push(root);
+    const path = join(root, "statement.csv");
+    await writeFile(path, "a,b\n");
+    const growAfterValidation: typeof resolveFileInput = async (...args) => {
+      const resolved = await resolveFileInput(...args);
+      await appendFile(resolved.path, Buffer.alloc(4096, 0x41));
+      return resolved;
+    };
+
+    await expect(captureFileInputSnapshot({ file_path: path }, csvOptions(), {
+      resolveFileInput: growAfterValidation,
+    })).rejects.toMatchObject({ code: "file_input_unavailable" });
+  });
+
+  it("refuses a file modified while the default reader reads it as file_input_unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "file-snapshot-torn-"));
+    roots.push(root);
+    const path = join(root, "statement.csv");
+    await writeFile(path, "a,b\n");
+    vi.mocked(readFileCapped).mockRejectedValueOnce(new Error(FILE_CHANGED_WHILE_READING_MESSAGE));
+
+    await expect(captureFileInputSnapshot({ file_path: path }, csvOptions()))
+      .rejects.toMatchObject({ code: "file_input_unavailable" });
+  });
+
+  it("hashes exactly the bytes of a file at maxSize read by the default reader", async () => {
+    const root = await mkdtemp(join(tmpdir(), "file-snapshot-exact-"));
+    roots.push(root);
+    const path = join(root, "statement.csv");
+    const content = Buffer.alloc(1024, 0x42);
+    await writeFile(path, content);
+
+    const snapshot = await captureFileInputSnapshot({ file_path: path }, csvOptions());
+
+    expect(snapshot.bytes()).toEqual(content);
+    expect(snapshot.identity.size_bytes).toBe(1024);
+    expect(snapshot.identity.digest_sha256).toBe(createHash("sha256").update(content).digest("hex"));
+  });
+
   it("captures the unified bank_input snapshot under a .xml+.csv extension union", async () => {
     const root = await mkdtemp(join(tmpdir(), "file-snapshot-bank-"));
     roots.push(root);

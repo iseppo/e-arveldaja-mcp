@@ -4,6 +4,7 @@ import { existsSync, realpathSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { randomUUID } from "crypto";
 import { getProjectRoot } from "./paths.js";
+import { fileTooLargeMessage } from "./bounded-read.js";
 
 function resolveAllowedRoots(roots: string[]): string[] {
   return roots.map(root => {
@@ -156,7 +157,7 @@ export async function validateFilePath(
         throw new Error(`Not a file`);
       }
       if (info.size > maxSize) {
-        throw new Error(`File too large: ${(info.size / 1024 / 1024).toFixed(1)} MB (max ${maxSize / 1024 / 1024} MB)`);
+        throw new Error(fileTooLargeMessage(info.size, maxSize));
       }
 
       return real;

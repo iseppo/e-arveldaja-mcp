@@ -31,14 +31,23 @@ vi.mock("fs/promises", async (importOriginal) => {
       const isFile = String(path).toLowerCase().endsWith(".pdf");
       return {
         fd: 42,
-        stat: vi.fn().mockResolvedValue({
+        // fstat size tracks the served bytes: the capped read refuses a size mismatch.
+        stat: vi.fn().mockImplementation(async () => ({
           isDirectory: () => !isFile,
           isFile: () => isFile,
           dev: 1,
           ino: isFile ? 3 : 2,
-          size: isFile ? 512 : 0,
+          size: isFile ? Buffer.from(await readFileMock(path)).length : 0,
+          mtimeMs: 0,
+        })),
+        // Positional FileHandle.read over the bytes readFileMock serves for this path.
+        read: vi.fn().mockImplementation(async (buffer: Buffer, offset: number, length: number, position: number) => {
+          const bytes = Buffer.from(await readFileMock(path));
+          const bytesRead = position >= bytes.length
+            ? 0
+            : bytes.copy(buffer, offset, position, Math.min(bytes.length, position + length));
+          return { bytesRead, buffer };
         }),
-        readFile: vi.fn().mockImplementation(() => readFileMock(path)),
         close: vi.fn().mockResolvedValue(undefined),
       };
     }),

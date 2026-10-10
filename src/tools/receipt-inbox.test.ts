@@ -39,7 +39,7 @@ import {
 } from "./receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
-import { readValidatedReceiptFile, revalidateReceiptFilePath, sha256Hex } from "./receipt-inbox-files.js";
+import { sha256Hex } from "./receipt-inbox-files.js";
 import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
@@ -627,41 +627,6 @@ describe("buildReceiptBatchSummary", () => {
       needs_review: 1,
       dry_run_preview: 1,
     });
-  });
-});
-
-describe("receipt file revalidation", () => {
-  it("revalidates the scanned path before re-reading the file", async () => {
-    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
-
-    await expect(revalidateReceiptFilePath({
-      name: "receipt.pdf",
-      path: "/tmp/original.pdf",
-      extension: ".pdf",
-      file_type: "pdf",
-      size_bytes: 123,
-      modified_at: "2026-03-01T00:00:00.000Z",
-    })).resolves.toBe("/tmp/revalidated.pdf");
-
-    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
-  });
-
-  it("reads the revalidated path instead of the originally scanned path", async () => {
-    mockedValidateFilePath.mockResolvedValueOnce("/tmp/revalidated.pdf");
-    mockedReadFile.mockResolvedValueOnce(Buffer.from("pdf"));
-
-    await expect(readValidatedReceiptFile({
-      name: "receipt.pdf",
-      path: "/tmp/original.pdf",
-      extension: ".pdf",
-      file_type: "pdf",
-      size_bytes: 123,
-      modified_at: "2026-03-01T00:00:00.000Z",
-    })).resolves.toEqual(Buffer.from("pdf"));
-
-    expect(mockedValidateFilePath).toHaveBeenCalledWith("/tmp/original.pdf", [".pdf"], 50 * 1024 * 1024);
-    expect(mockedReadFile).toHaveBeenCalledWith("/tmp/revalidated.pdf");
-    expect(mockedReadFile).not.toHaveBeenCalledWith("/tmp/original.pdf");
   });
 });
 

@@ -6,6 +6,11 @@
 
 - **IBANs followed by a BIC, date, amount or other digits are extracted again.** The IBAN extractor allows spaces between groups, so on lines like "EE38 2200 2210 2014 5685 BIC HABAEE2X" or "IBAN: EE382200221020145685 12.05.2026" it glued the next token onto the IBAN, and the joined value failed the checksum. Nothing was extracted. Each candidate is now cut to its country's registered IBAN length from the full SWIFT IBAN registry (EE 20, LV 21, LT 20, FI 18, DE 22, GB 22, SE 24, KZ 20, BR 29 and so on) before the mod-97 check, but only when the cut falls on a space between groups or at the end of the candidate. A candidate shorter than the registered length, one whose cut would fall inside a token (an OCR-truncated IBAN followed by "2024", or a welded "EE38…5685BIC"), and one whose country code is not in the registry are rejected. After a rejected candidate the scan resumes just past its start, so a VAT number before the IBAN ("KMKR EE100931558 EE38…") or an invalid IBAN directly before a valid one no longer hides the valid IBAN. Groups separated by no-break spaces (U+00A0, U+202F), common in PDF text, are now accepted too.
 
+### Security
+
+- **Input files are read with a hard size cap.** PDF/receipt images, CSV and CAMT XML inputs were size-checked with `stat` and then read whole, so a file that grew between the check and the read was buffered without bound. Every user-supplied file read (`captureFileInputSnapshot`, `prepareInvoiceDocumentUpload` and the receipt-batch snapshot) now reads at most the existing limit plus one byte and fails with the same "File too large" error. The SHA-256 digest is taken over exactly the bytes read. A file snapshot (`captureFileInputSnapshot`) whose file grows past the limit after validation now fails with `file_input_unavailable` instead of `file_input_identity_invalid`.
+- **A file modified while it is read is refused.** The capped read compares `fstat` size and mtime before and after reading (and the bytes read against the final size) and fails with "File changed while reading; retry once it is no longer being written" instead of returning a torn mix of old and new bytes. File snapshots report it as `file_input_unavailable`, the receipt batch as `file_reference_path_changed`, and PDF/document uploads surface the error as is.
+
 ## [0.28.1] - 2026-10-02
 
 ### Fixed

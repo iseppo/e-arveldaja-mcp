@@ -26,6 +26,18 @@ vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
 }));
 
+// Source reads go through the capped helper; route it to the mocked readFile so
+// these fake-path fixtures keep serving their bytes (the cap itself is covered
+// in bounded-read.test.ts).
+vi.mock("../bounded-read.js", async () => {
+  const actual = await vi.importActual<typeof import("../bounded-read.js")>("../bounded-read.js");
+  const { readFile } = await import("fs/promises");
+  return {
+    ...actual,
+    readFileCapped: vi.fn(async (path: string) => readFile(path)),
+  };
+});
+
 vi.mock("../file-validation.js", () => ({
   resolveFileInput: vi.fn(),
 }));

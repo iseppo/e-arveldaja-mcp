@@ -32,14 +32,23 @@ vi.mock("fs/promises", async (importOriginal) => {
       const isFile = String(path).toLowerCase().endsWith(".pdf");
       return {
         fd: 42,
-        stat: vi.fn().mockResolvedValue({
+        // fstat size tracks the served bytes: the capped read refuses a size mismatch.
+        stat: vi.fn().mockImplementation(async () => ({
           isDirectory: () => !isFile,
           isFile: () => isFile,
           dev: 1,
           ino: isFile ? 3 : 2,
-          size: isFile ? 512 : 0,
+          size: isFile ? Buffer.from(await readFileMock(path)).length : 0,
+          mtimeMs: 0,
+        })),
+        // Positional FileHandle.read over the bytes readFileMock serves for this path.
+        read: vi.fn().mockImplementation(async (buffer: Buffer, offset: number, length: number, position: number) => {
+          const bytes = Buffer.from(await readFileMock(path));
+          const bytesRead = position >= bytes.length
+            ? 0
+            : bytes.copy(buffer, offset, position, Math.min(bytes.length, position + length));
+          return { bytesRead, buffer };
         }),
-        readFile: vi.fn().mockImplementation(() => readFileMock(path)),
         close: vi.fn().mockResolvedValue(undefined),
       };
     }),
@@ -264,6 +273,20 @@ describe("receipt batch typed operation", () => {
     expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
     expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+  });
+
+  it("refuses a receipt rewritten while its snapshot bytes are read (torn read)", async () => {
+    const { api, spies } = makeApi();
+    // Served bytes per call: open fstat, pre-read fstat, first read → original;
+    // from the end-of-file probe on, the file holds rewritten (longer) content.
+    let calls = 0;
+    vi.mocked(readFile).mockImplementation(async () =>
+      Buffer.from(++calls <= 3 ? "receipt pdf" : "receipt pdf, rewritten") as never);
+    await expect(makeOperations(api).runBatch({
+      ...baseRun, executionMode: "dry_run", dryRun: true,
+    })).rejects.toMatchObject({ code: "file_reference_path_changed" });
+    expect(calls).toBeGreaterThan(3);
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("mintPlanHandles:false previews without consuming plan-store slots", async () => {
