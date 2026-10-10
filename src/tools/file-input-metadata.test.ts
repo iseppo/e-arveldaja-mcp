@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import { registerAccountingInboxTools } from "./accounting-inbox.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerDocumentAttachmentTools } from "./document-attachments.js";
@@ -8,6 +7,7 @@ import { registerPdfWorkflowTools } from "./pdf-workflow.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const scopedRegistrars = new Set<unknown>([
   registerAccountingInboxTools,
@@ -33,11 +33,6 @@ function getToolConfig(
   const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
   if (!registration) throw new Error(`Missing tool registration for ${toolName}`);
   return registration[1] as { description?: string; inputSchema?: Record<string, unknown>; annotations?: { openWorldHint?: boolean } };
-}
-
-function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = config.inputSchema ? z.object(config.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${config.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("file input tool metadata", () => {

@@ -2,7 +2,6 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { z } from "zod";
 import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools, bookOwnerExpenseReimbursement } from "./estonian-tax.js";
@@ -12,6 +11,7 @@ import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accountin
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -62,11 +62,6 @@ function makeMockServer() {
     }),
   };
   return { server: server as unknown as import("@modelcontextprotocol/sdk/server/mcp.js").McpServer, tools, rawTools, configs };
-}
-
-function toolMetadataText(config: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = config.inputSchema ? z.object(config.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${config.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 // Convenience: parse the JSON text from a tool result

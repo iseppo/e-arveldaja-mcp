@@ -28,6 +28,7 @@ import {
 } from "../api/purchase-invoices.api.js";
 import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -110,11 +111,6 @@ function purchaseUpdateReadonly() {
       { id: 1510, allows_dimensions: false, is_valid: true },
     ]),
   };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 function purchaseInvoiceCreateParams(items: Array<Record<string, unknown>>) {

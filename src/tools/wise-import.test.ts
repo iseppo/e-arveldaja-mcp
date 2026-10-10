@@ -1,7 +1,6 @@
 import { readFile } from "fs/promises";
 import { createHash, randomBytes } from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import { resolveFileInput } from "../file-validation.js";
 import { registerWiseImportTools, WISE_PLAN_DOMAIN, buildWiseTransactionSignature, createdTransactionMatchesApprovedPayload, type TransactionCreatePayload } from "./wise-import.js";
 import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
@@ -12,6 +11,7 @@ import { reportProgress } from "../progress.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { createExecutionPlanPageHandler } from "../plan-tools.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -341,11 +341,6 @@ async function runApprovedWiseImport(
     plan_handle: dry.plan_handle,
   }));
   return { dry, executed };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("wise import tool", () => {

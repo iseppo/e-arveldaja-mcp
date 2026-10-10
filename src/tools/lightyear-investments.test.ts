@@ -1,6 +1,5 @@
 import { readFile } from "fs/promises";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { z } from "zod";
 import { logAudit } from "../audit-log.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
@@ -14,6 +13,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { HttpError } from "../http-client.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
 
@@ -366,11 +366,6 @@ function unwrapBookingRefsInResult(result: { content: Array<{ text: string }>; i
   let parsed: unknown;
   try { parsed = parseMcpResponse(text); } catch { return result; }
   return { ...result, content: [{ ...result.content[0]!, text: JSON.stringify(deepUnwrapBookingRefs(parsed)) }] };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("lightyear investments tools", () => {

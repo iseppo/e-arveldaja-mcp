@@ -4,6 +4,7 @@ import { registerBankReconciliationTools, matchScore } from "./bank-reconciliati
 import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
+import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -136,11 +137,6 @@ function setupInterAccountTool(options: {
     handler: registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
     api,
   };
-}
-
-function toolMetadataText(options: { description?: string; inputSchema?: Record<string, unknown> }): string {
-  const schema = options.inputSchema ? z.object(options.inputSchema as z.ZodRawShape).toJSONSchema() : {};
-  return `${options.description ?? ""}\n${JSON.stringify(schema)}`;
 }
 
 describe("reconcile_transactions", () => {
