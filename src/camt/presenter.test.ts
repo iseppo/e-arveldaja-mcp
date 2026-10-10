@@ -154,6 +154,16 @@ describe("CAMT unsplit-entry review note", () => {
   });
 });
 
+describe("CAMT partial legacy import review", () => {
+  it("surfaces a skipped row's review note as a compact warning", () => {
+    const data = makeData(1);
+    const note = "The 95 EUR DBIT row on 2026-02-04 belongs to a statement entry a previous release imported only in part";
+    const skipped = [{ date: "2026-02-04", amount: 95, duplicate_transaction_ids: [], reason: "r", review_note: note }];
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: { ...data, projection: { ...data.projection, skipped } } });
+    expect(summary.warnings).toEqual([{ code: "camt_partial_legacy_import", message: note }]);
+  });
+});
+
 describe("CAMT full-envelope untrusted-text wrapping", () => {
   const OCR = /^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\n/;
 

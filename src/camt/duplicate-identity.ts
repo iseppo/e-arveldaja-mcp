@@ -494,6 +494,57 @@ export function findExactKeyOccurrences(
   return occurrences;
 }
 
+/**
+ * Statement entries an earlier release imported only in part. It stored one
+ * row per leg (`legacy_identities`, or the leg's own identity where unchanged),
+ * so a multi-leg entry is fully imported only when EVERY old leg row is in the
+ * ledger. When a definitely-old row (a legacy alias key no current leg carries)
+ * is present but some old leg is not, the per-leg key match would skip an
+ * aggregate entry whole, or book the new allocation beside the old one (e.g.
+ * 92.50 stored + 95.00 new for a 185.00 entry). Returns the entries that must
+ * go to review instead: legs not matched, and legs whose own old rows are
+ * incomplete. Legs of one <Ntry> are consecutive and start at leg_index 0.
+ */
+export function findPartialLegacyEntries(
+  entries: ParsedCamtEntry[],
+  lookup: DuplicateLookup,
+  selectedDimensionId: number,
+): Set<ParsedCamtEntry> {
+  const partial = new Set<ParsedCamtEntry>();
+  const groups: ParsedCamtEntry[][] = [];
+  for (const entry of entries) {
+    if ((entry.leg_index ?? 0) === 0 || groups.length === 0) groups.push([entry]);
+    else groups[groups.length - 1]!.push(entry);
+  }
+  for (const group of groups) {
+    if (!group.some((entry) => entry.legacy_identities)) continue;
+    const currentKeys = new Set(group.flatMap((entry) => existingDuplicateKeysByKind(entry, selectedDimensionId).current));
+    const legacyLegs = group.flatMap((entry) => entry.legacy_identities
+      ? entry.legacy_identities.map((legacy) => ({
+          entry,
+          alias: true,
+          keys: buildExistingDuplicateKeysForEntry({ ...entry, ...legacy, legacy_identities: undefined }, selectedDimensionId),
+        }))
+      : [{ entry, alias: false, keys: existingDuplicateKeysByKind(entry, selectedDimensionId).current }]);
+    if (legacyLegs.length < 2) continue;
+    const oldRowPresent = legacyLegs.some((leg) => leg.alias &&
+      leg.keys.some((key) => !currentKeys.has(key) && (lookup.byEntryKey.get(key)?.length ?? 0) > 0));
+    if (!oldRowPresent) continue;
+    const used = new Set<number>();
+    const uncovered = new Set<ParsedCamtEntry>();
+    for (const leg of legacyLegs) {
+      const id = leg.keys.flatMap((key) => lookup.byEntryKey.get(key) ?? []).find((candidate) => !used.has(candidate));
+      if (id === undefined) uncovered.add(leg.entry);
+      else used.add(id);
+    }
+    if (uncovered.size === 0) continue;
+    for (const entry of group) {
+      if (!entry.duplicate || uncovered.has(entry)) partial.add(entry);
+    }
+  }
+  return partial;
+}
+
 export function findDuplicateTransactionIds(
   entry: ParsedCamtEntry,
   lookup: DuplicateLookup,
