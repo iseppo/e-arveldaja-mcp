@@ -348,6 +348,30 @@ describe("parseCamt053Xml", () => {
     ]);
   });
 
+  it("splits a mixed-currency batch by each leg's account-currency value (CntrValAmt), not bare originals", () => {
+    const leg = (amount: string, currency: string, counterValue = "") => `<TxDtls><AmtDtls>
+      <TxAmt><Amt Ccy="${currency}">${amount}</Amt></TxAmt>${counterValue}</AmtDtls>
+      <RltdPties><Cdtr><Nm>Supplier OÜ</Nm></Cdtr></RltdPties></TxDtls>`;
+    const xml = (legs: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt><Id>mix</Id>
+<Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+<Ntry><Amt Ccy="EUR">190.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-02-04</Dt></BookgDt>
+<AcctSvcrRef>MIX</AcctSvcrRef><NtryDtls>${legs}</NtryDtls></Ntry></Stmt></BkToCstmrStmt></Document>`;
+
+    const withCounterValue = parseCamt053Xml(xml(
+      leg("100.00", "EUR") + leg("100.00", "USD", `<CntrValAmt><Amt Ccy="EUR">90.00</Amt></CntrValAmt>`),
+    ));
+    expect(withCounterValue.entries.map(entry => entry.amount)).toEqual([100, 90]);
+
+    // Without an account-currency value for the foreign leg the split is unknowable: reject.
+    const unresolvable = preflightCamt053Xml(xml(leg("100.00", "EUR") + leg("100.00", "USD")));
+    expect(unresolvable.ok).toBe(false);
+    if (unresolvable.ok) throw new Error("unreachable: preflight must reject");
+    expect(unresolvable.rejected_fields).toEqual([
+      expect.objectContaining({ source_row_id: "camt:ntry:1", field: "split_amounts" }),
+    ]);
+  });
+
   it("suggests splitting the file when multiple statements are present", () => {
     expect(() => parseCamt053Xml(multiStatementXml)).toThrow(
       /Split multi-statement CAMT exports into separate XML files and import them one statement at a time/,

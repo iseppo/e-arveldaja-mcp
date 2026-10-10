@@ -1385,6 +1385,113 @@ describe("camt import tool", () => {
     ]);
   });
 
+  it("imports both identical legs of one batch entry and skips both on rerun (cardinality)", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-identical-legs</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">100.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-03</Dt></BookgDt>
+        <AcctSvcrRef>BATCH</AcctSvcrRef>
+        <NtryDtls>
+          <TxDtls>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">50.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Supplier OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>arve 1</Ustrd></RmtInf>
+          </TxDtls>
+          <TxDtls>
+            <AmtDtls><TxAmt><Amt Ccy="EUR">50.00</Amt></TxAmt></AmtDtls>
+            <RltdPties><Cdtr><Nm>Supplier OÜ</Nm></Cdtr></RltdPties>
+            <RmtInf><Ustrd>arve 1</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(xml);
+    const first = setupCamtTool();
+    first.api.transactions.create
+      .mockResolvedValueOnce({ created_object_id: 9101 })
+      .mockResolvedValueOnce({ created_object_id: 9102 });
+    await executeGranularWithPlan(first.handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const createdPayloads = first.api.transactions.create.mock.calls.map(([payload]: [any]) => payload);
+    expect(createdPayloads.map((payload: any) => payload.amount)).toEqual([50, 50]);
+
+    // Rerun against a ledger that holds both legs: nothing new.
+    mockedReadFile.mockResolvedValue(xml);
+    const rerun = setupCamtTool({
+      existingTransactions: createdPayloads.map((payload: any, index: number) => ({
+        ...payload, id: 9101 + index, status: "PROJECT", is_deleted: false,
+      })),
+    });
+    const payload = parseMcpResponse((await rerun.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(payload.summary.created_count).toBe(0);
+    expect(payload.summary.skipped_count).toBe(2);
+
+    // Only one leg stored (earlier partial import): the second leg is still new.
+    mockedReadFile.mockResolvedValue(xml);
+    const partial = setupCamtTool({
+      existingTransactions: [{ ...createdPayloads[0], id: 9101, status: "PROJECT", is_deleted: false }],
+    });
+    const partialPayload = parseMcpResponse((await partial.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(partialPayload.summary.created_count).toBe(1);
+    expect(partialPayload.summary.skipped_count).toBe(1);
+  });
+
+  it("keeps AddtlNtryInf of a detail-less, ref-less charge so a rerun flags it as a possible duplicate", async () => {
+    const chargeXml = (bankRef = "") => `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-charge</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">3.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-05</Dt></BookgDt>${bankRef}
+        <AddtlNtryInf>Account maintenance fee</AddtlNtryInf>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(chargeXml());
+    const first = setupCamtTool();
+    await executeGranularWithPlan(first.handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    expect(first.api.transactions.create).toHaveBeenCalledTimes(1);
+    const created = first.api.transactions.create.mock.calls[0]![0] as Record<string, unknown>;
+    expect(created.description).toContain("Account maintenance fee");
+
+    mockedReadFile.mockResolvedValue(chargeXml());
+    const rerun = setupCamtTool({ existingTransactions: [{ ...created, id: 9301, status: "PROJECT", is_deleted: false }] });
+    const payload = parseMcpResponse((await rerun.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+
+    // A referenced charge stored by an older version (no description) is still
+    // skipped by its bank reference.
+    mockedReadFile.mockResolvedValue(chargeXml("\n        <AcctSvcrRef>FEE123</AcctSvcrRef>"));
+    const legacy = setupCamtTool({ existingTransactions: [{
+      id: 9302, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7, date: "2026-02-05", type: "C",
+      amount: 3, cl_currencies_id: "EUR", bank_ref_number: "FEE123", description: null,
+      bank_account_name: null, bank_account_no: null, ref_number: null,
+    }] });
+    const legacyPayload = parseMcpResponse((await legacy.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(legacyPayload.summary.created_count).toBe(0);
+    expect(legacyPayload.summary.skipped_count).toBe(1);
+  });
+
   // Guards the ref-less/ref-less shape, for which possible-duplicate review is
   // the ONLY defense: an entry with no bank reference has no exact key at all.
   // Any future narrowing of the candidate set must not silently drop it.
@@ -1889,6 +1996,28 @@ describe("camt import tool", () => {
         }),
       ],
     });
+  });
+
+  it("does not assign a name-matched client whose registry code conflicts with the statement's COID", async () => {
+    const xml = singleEntryXml.replace(
+      "<Cdtr><Nm>Vendor OÜ</Nm></Cdtr>",
+      "<Cdtr><Nm>Acme</Nm><Id><OrgId><Othr><Id>11111111</Id><SchmeNm><Cd>COID</Cd></SchmeNm></Othr></OrgId></Id></Cdtr>",
+    );
+    const resolveWith = async (findByNameResult: unknown[]) => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(xml);
+      const { handler } = setupCamtTool({ findByNameResult });
+      const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+      return payload.sample[0]!;
+    };
+
+    // Substring match with a different code -> no client.
+    expect((await resolveWith([{ id: 42, name: "Acme Holding OÜ", code: "22222222" }])).clients_id).toBeUndefined();
+    // Exact-name match with a different code -> no client.
+    expect((await resolveWith([{ id: 43, name: "Acme", code: "22222222" }])).clients_id).toBeUndefined();
+    // Same code or no stored code still resolves by name.
+    expect((await resolveWith([{ id: 44, name: "Acme Holding OÜ", code: "11111111" }])).clients_id).toBe(44);
+    expect((await resolveWith([{ id: 45, name: "Acme Holding OÜ", code: null }])).clients_id).toBe(45);
   });
 
   it("flags likely duplicates against older manual transactions in dry run", async () => {

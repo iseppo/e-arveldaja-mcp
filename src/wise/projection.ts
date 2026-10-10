@@ -366,6 +366,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const existingSignatureDirections = new Map<string, Set<"IN" | "OUT" | "?">>();
   for (const tx of existingTx) {
     if (typeof tx.date !== "string" || typeof tx.amount !== "number") continue;
+    // A row carrying a WISE:{id} / WISE:FEE:{id} identity is matched by that
+    // identity (seenWiseIds below). Its identity-stripped signature would also
+    // match a DISTINCT Wise row with the same date/amount/counterparty (or any
+    // same-day same-amount fee), dropping a genuine movement. The signature
+    // fallback is kept only for untagged legacy/manual rows.
+    if (tx.description?.startsWith("WISE:")) continue;
     const signature = buildWiseTransactionSignature(
       tx.date,
       tx.amount,

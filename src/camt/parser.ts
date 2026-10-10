@@ -385,10 +385,40 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
     // never stops validation of later entries or details.
     if (!direction || !entryDate || !entryAmount) continue;
 
-    const bookedAmounts = splitBookedAmounts(
-      entryAmount.amount,
-      originalAmounts.map((amount) => amount?.amount),
-    );
+    // Legs in DIFFERENT currencies cannot be weighted by their bare original
+    // amounts (100 EUR + 100 USD is not 50/50). Weight each by its value in the
+    // entry currency instead: the original when already in that currency, else
+    // its CntrValAmt. If any leg has neither, the split is unknowable — reject.
+    let splitWeights = originalAmounts.map((amount) => amount?.amount);
+    if (
+      detailNodes.length > 1 &&
+      originalAmounts.every((amount) => amount !== undefined) &&
+      new Set(originalAmounts.map((amount) => amount!.currency)).size > 1
+    ) {
+      const resolved = capture(rejected, () => detailNodes.map((txDetails, detailIndex) => {
+        const original = originalAmounts[detailIndex]!;
+        if (original.currency === entryAmount.currency) return original.amount;
+        const counterValue = parseAmountNode(
+          valueAt(txDetails, ["AmtDtls", "CntrValAmt", "Amt"]),
+          accountCurrency,
+          `${entryRowId}:tx:${detailIndex + 1}`,
+          "counter_value_amount",
+        );
+        if (counterValue && counterValue.currency === entryAmount.currency && counterValue.amount > 0) {
+          return counterValue.amount;
+        }
+        return reject(
+          entryRowId,
+          "split_amounts",
+          entryAmount.text,
+          "CAMT batch entry mixes leg currencies without an account-currency counter value (CntrValAmt) for every leg, so its booked amount cannot be split",
+        );
+      }));
+      if (!resolved) continue;
+      splitWeights = resolved;
+    }
+
+    const bookedAmounts = splitBookedAmounts(entryAmount.amount, splitWeights);
 
     for (const [detailIndex, txDetails] of detailNodes.entries()) {
       const { party, account } = pickCounterparty(txDetails, direction);
@@ -408,7 +438,12 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         counterparty_name: textAt(party, ["Nm"]),
         counterparty_iban: extractIban(account),
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
-        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined,
+        // An entry with no transaction details (e.g. a bank charge) carries its
+        // narrative only in AddtlNtryInf; without it a ref-less charge has no
+        // description to corroborate a rerun's possible-duplicate match.
+        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") ||
+          (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined) ||
+          undefined,
         reference_number: normalizeOptionalReference(structuredRef) ??
           normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
         end_to_end_id: normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),

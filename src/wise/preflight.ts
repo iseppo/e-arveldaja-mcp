@@ -3,6 +3,7 @@ import { parseCSV } from "../csv.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { roundMoney } from "../money.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import type {
   ImportRejectedField,
@@ -578,7 +579,16 @@ export function ownAccountSideForWiseRow(row: WiseRow): "source" | "target" | un
 }
 
 export function bookedAmountForWiseRow(row: WiseRow): number {
-  return ownAccountSideForWiseRow(row) === "target" ? row.targetAmount : row.sourceAmount;
+  if (ownAccountSideForWiseRow(row) !== "target") return row.sourceAmount;
+  // "Target amount (after fees)" is what was actually credited. The target fee
+  // is booked as its own outgoing row, so the incoming row is booked gross
+  // (after-fees + fee) for the pair to net to the credited amount. Only when
+  // both are in the same currency; otherwise the two cannot be summed.
+  const fee = row.targetFeeAmount;
+  if (fee > 0 && normalizeWiseCurrency(row.targetFeeCurrency, normalizeWiseCurrency(row.targetCurrency)) === normalizeWiseCurrency(row.targetCurrency)) {
+    return roundMoney(row.targetAmount + fee);
+  }
+  return row.targetAmount;
 }
 
 export function bookedCurrencyForWiseRow(row: WiseRow): string {
@@ -609,14 +619,12 @@ export function oppositeSideForWiseRow(row: WiseRow): { amount: number; currency
  * typically have slightly different names (e.g. "OÜ" vs "OU" from bank registration).
  * If this incorrectly filters legitimate transfers, set skip_jar_transfers=false. */
 export function isJarTransfer(row: WiseRow): boolean {
-  const catLower = row.category.toLowerCase();
-  const noteLower = row.note.toLowerCase();
-  const refLower = row.reference.toLowerCase();
-
-  // Explicit Jar indicators
-  if (catLower.includes("jar")) return true;
-  if (noteLower.includes("jar")) return true;
-  if (refLower.includes("jar")) return true;
+  // Explicit Jar indicators — whole word only, so "JARVIS-2026-001" or "Jari"
+  // is not mistaken for a Jar movement.
+  const jarWord = /\bjars?\b/i;
+  if (jarWord.test(row.category)) return true;
+  if (jarWord.test(row.note)) return true;
+  if (jarWord.test(row.reference)) return true;
 
   // Self-transfer: source and target are the same person/company,
   // same currency, zero fee (to avoid false-positives on owner payments).
