@@ -1891,6 +1891,28 @@ describe("camt import tool", () => {
     });
   });
 
+  it("does not assign a name-matched client whose registry code conflicts with the statement's COID", async () => {
+    const xml = singleEntryXml.replace(
+      "<Cdtr><Nm>Vendor OÜ</Nm></Cdtr>",
+      "<Cdtr><Nm>Acme</Nm><Id><OrgId><Othr><Id>11111111</Id><SchmeNm><Cd>COID</Cd></SchmeNm></Othr></OrgId></Id></Cdtr>",
+    );
+    const resolveWith = async (findByNameResult: unknown[]) => {
+      mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+      mockedReadFile.mockResolvedValue(xml);
+      const { handler } = setupCamtTool({ findByNameResult });
+      const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+      return payload.sample[0]!;
+    };
+
+    // Substring match with a different code -> no client.
+    expect((await resolveWith([{ id: 42, name: "Acme Holding OÜ", code: "22222222" }])).clients_id).toBeUndefined();
+    // Exact-name match with a different code -> no client.
+    expect((await resolveWith([{ id: 43, name: "Acme", code: "22222222" }])).clients_id).toBeUndefined();
+    // Same code or no stored code still resolves by name.
+    expect((await resolveWith([{ id: 44, name: "Acme Holding OÜ", code: "11111111" }])).clients_id).toBe(44);
+    expect((await resolveWith([{ id: 45, name: "Acme Holding OÜ", code: null }])).clients_id).toBe(45);
+  });
+
   it("flags likely duplicates against older manual transactions in dry run", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);

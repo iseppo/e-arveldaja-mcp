@@ -217,7 +217,10 @@ async function resolveClientForEntry(
   const normalizedName = normalizeCompanyName(entry.counterparty_name);
   if (!normalizedName) return {};
 
-  const cached = cache.byName.get(cacheKey);
+  // The registry code is part of the key: the same name with a different
+  // statement code can resolve differently (code-conflict rejection below).
+  const nameCacheKey = `${cacheKey}|${entry.counterparty_reg_code ?? ""}`;
+  const cached = cache.byName.get(nameCacheKey);
   if (cached) return cached;
 
   const matches = await api.clients.findByName(entry.counterparty_name!);
@@ -232,6 +235,12 @@ async function resolveClientForEntry(
     selected = matches[0];
     matchType = "single_name_match";
   }
+  // A name match whose stored registry code contradicts the statement's code
+  // is a different legal entity — do not attach it.
+  const selectedCode = selected?.code?.trim();
+  if (entry.counterparty_reg_code && selectedCode && selectedCode !== entry.counterparty_reg_code.trim()) {
+    selected = undefined;
+  }
 
   const resolution: ClientResolution = selected?.id
     ? {
@@ -241,7 +250,7 @@ async function resolveClientForEntry(
       }
     : {};
 
-  cache.byName.set(cacheKey, resolution);
+  cache.byName.set(nameCacheKey, resolution);
   return resolution;
 }
 
