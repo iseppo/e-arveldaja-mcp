@@ -25,8 +25,10 @@ import {
 } from "../tools/camt-plan.js";
 import {
   addToDuplicateLookup,
+  buildBatchDuplicateKey,
   buildDuplicateLookup,
   findDuplicateTransactionIds,
+  findExactKeyOccurrences,
 } from "./duplicate-identity.js";
 import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
@@ -574,6 +576,7 @@ export async function executeCamtImport(
   // still sees them even when the list read does not return them yet (or no
   // usable id came back).
   const createdThisRun: Transaction[] = [];
+  const exactKeyOccurrences = findExactKeyOccurrences(projection.parsed.entries, accountsDimensionsId);
   const executionReport = await executeCamtCommands({
     count: projection.descriptors.length,
     prepareIndex: async index => {
@@ -582,13 +585,17 @@ export async function executeCamtImport(
       // (UI, another process) since the plan review must still block it.
       const descriptor = projection.descriptors[index]!;
       api.transactions.invalidateListCache();
-      const lookup = buildDuplicateLookup(
-        (await api.transactions.listAll()).filter(isNonVoidTransaction),
-        accountsDimensionsId,
-      );
-      for (const created of createdThisRun) addToDuplicateLookup(lookup, created, accountsDimensionsId);
+      const ledger = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+      const lookup = buildDuplicateLookup(ledger, accountsDimensionsId);
+      // A created row the list read already returns must not be counted twice
+      // (exact-key cardinality below counts rows).
+      const listedIds = new Set(ledger.map(transaction => transaction.id));
+      for (const created of createdThisRun) {
+        if (!listedIds.has(created.id)) addToDuplicateLookup(lookup, created, accountsDimensionsId);
+      }
       const duplicateIds = findDuplicateTransactionIds(
         descriptor.entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
+        exactKeyOccurrences.get(buildBatchDuplicateKey(descriptor.entry)),
       );
       return duplicateIds.length > 0
         ? { outcome: "drift", error_code: "duplicate_appeared" }

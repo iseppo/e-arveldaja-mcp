@@ -6,6 +6,7 @@ import {
   buildDuplicateLookup,
   buildPossibleDuplicateLookup,
   findDuplicateTransactionIds,
+  findExactKeyOccurrences,
   findPossibleDuplicateMatches,
   findRepeatedBankReferences,
   normalizeOptionalReference,
@@ -35,12 +36,14 @@ export function enrichWithDuplicates(
 ): CamtParseResult {
   const duplicateLookup = buildDuplicateLookup(ledgerTransactions, selectedDimensionId);
   const repeatedBankReferences = findRepeatedBankReferences(parsed.entries);
+  const exactKeyOccurrences = findExactKeyOccurrences(parsed.entries, selectedDimensionId);
   const entries = parsed.entries.map(entry => {
     const duplicateIds = findDuplicateTransactionIds(
       entry,
       duplicateLookup,
       repeatedBankReferences,
       selectedDimensionId,
+      exactKeyOccurrences.get(buildBatchDuplicateKey(entry)),
     );
     return {
       ...entry,
