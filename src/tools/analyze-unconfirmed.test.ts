@@ -516,6 +516,56 @@ describe("analyze_unconfirmed_transactions", () => {
     });
   });
 
+  describe("inter-account pairs reconcile would hold for review", () => {
+    const lhvWise = [
+      { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 100 },
+      { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 300 },
+    ];
+    const base = { status: "PROJECT", is_deleted: false, type: "C", date: "2026-10-01", cl_currencies_id: "EUR" };
+    const lhvOut = { ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE22", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+
+    it("does not treat a payer whose name merely contains the company name as an own transfer", async () => {
+      const handler = setupTool({
+        transactions: [{ ...base, id: 9, amount: 60, accounts_dimensions_id: 300, bank_account_no: null, bank_account_name: "Test OÜ Client AS", description: "payment" }],
+        bankAccounts: lhvWise,
+        companyName: "Test OÜ",
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]!.suggested_action).not.toBe("confirm_inter_account");
+    });
+
+    it("downgrades both legs of a possible fee-deducted transfer to review without a distribution", async () => {
+      const wiseIn = { ...base, id: 2, amount: 99, accounts_dimensions_id: 300, bank_account_no: null, bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+      const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions).toHaveLength(2);
+      for (const s of payload.suggestions) {
+        expect(s.suggested_action).toBe("manual_review");
+        expect(s.distribution).toBeUndefined();
+        expect(s.reason).toMatch(/fee-deducted/);
+      }
+    });
+
+    it("downgrades a pair whose mirror leg lacks own-origin evidence", async () => {
+      const wiseIn = { ...base, id: 2, amount: 100, accounts_dimensions_id: 300, bank_account_no: "BE99POOL", bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+      const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions).toHaveLength(2);
+      for (const s of payload.suggestions) {
+        expect(s.suggested_action).toBe("manual_review");
+        expect(s.distribution).toBeUndefined();
+        expect(s.reason).toMatch(/own-origin/);
+      }
+    });
+
+    it("keeps the confirm suggestion for two same-direction rows (separate transfers)", async () => {
+      const wiseOut = { ...base, id: 2, amount: 99, accounts_dimensions_id: 300, bank_account_no: null, bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=OUT]" };
+      const handler = setupTool({ transactions: [lhvOut, wiseOut], bankAccounts: lhvWise, companyName: "Test OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions.map((s: any) => s.suggested_action)).toEqual(["confirm_inter_account", "confirm_inter_account"]);
+    });
+  });
+
   describe("invoice matching", () => {
     it("treats explicit incoming transactions as sale-invoice candidates, not purchase-invoice payments", async () => {
       const handler = setupTool({

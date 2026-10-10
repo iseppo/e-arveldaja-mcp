@@ -3,12 +3,14 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
+import type { SaleInvoice, PurchaseInvoice, Transaction } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
-import { normalizeCompanyName } from "../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
+import { inferOneSidedTransfer, type OneSidedInference } from "../banking/reconciliation/inter-account-matcher.js";
+import { comparableTransactionAmount, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
@@ -112,7 +114,47 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
       const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
         buildBankAccountLookups(bankAccounts, accountDimensions);
-      const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
+      const companyLegalName = invoiceInfo.invoice_company_name ?? "";
+
+      // reconcile_inter_account_transfers holds a transfer for review instead
+      // of booking it when the target account carries a PROJECT row pointing
+      // back at this account that is either a possible fee-deducted leg or an
+      // equal-amount mirror without own-origin evidence (it cannot be deleted).
+      // A confirm_inter_account distribution for such a row would double-book.
+      const allProject = allTx.filter(isProjectTransaction);
+      const inferenceLookups = {
+        ownIbanToDimension, dimensionToIban, companyName: normalizeCompanyName(companyLegalName), companyLegalName,
+        targetAccountsDimensionsId: undefined,
+      };
+      const inferenceCache = new Map<number, OneSidedInference>();
+      const hasOwnOriginEvidence = (row: Transaction, sourceDim: number): boolean => {
+        const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+        if (iban) return ownIbanToDimension.get(iban)?.has(sourceDim) ?? false;
+        return sameCompanyIdentity(row.bank_account_name, companyLegalName);
+      };
+      const reconcileReviewReason = (tx: Transaction, targetDim: number): string | undefined => {
+        const txDirection = bankTransactionDirection(tx);
+        for (const other of allProject) {
+          if (other.id === tx.id || other.accounts_dimensions_id !== targetDim) continue;
+          if (Math.abs(toUtcDay(tx.date) - toUtcDay(other.date)) / MS_PER_DAY > DUPLICATE_DATE_WINDOW_DAYS) continue;
+          if (inferOneSidedTransfer(other, inferenceLookups, inferenceCache).targetDimension !== tx.accounts_dimensions_id) continue;
+          const otherDirection = bankTransactionDirection(other);
+          const directionsProven = txDirection !== "unknown" && otherDirection !== "unknown";
+          if (directionsProven && txDirection === otherDirection) continue;
+          const [source, mirror] = txDirection === "incoming" || otherDirection === "outgoing" ? [other, tx] : [tx, other];
+          const sourceAmount = Math.abs(comparableTransactionAmount(source));
+          const mirrorAmount = Math.abs(comparableTransactionAmount(mirror));
+          if (sameAmountToTheCent(sourceAmount, mirrorAmount)) {
+            if (hasOwnOriginEvidence(mirror, source.accounts_dimensions_id)) continue;
+            return `Own-account transfer with transaction ${other.id}, but ${mirror.id} has no own-origin evidence (its counterparty IBAN is not ${source.id}'s account), so reconcile holds the pair for review; check the bank statements before confirming.`;
+          }
+          if (directionsProven && sourceAmount < mirrorAmount) continue;
+          if (Math.abs(sourceAmount - mirrorAmount) <= Math.max(1, 0.02 * Math.max(sourceAmount, mirrorAmount))) {
+            return `Possible fee-deducted transfer with transaction ${other.id} (${tx.amount} vs ${other.amount}); reconcile holds the pair for review. If they are the same transfer, book it once with the fee split; otherwise confirm each separately.`;
+          }
+        }
+        return undefined;
+      };
 
       // Build a broader index: journals with any posting touching a bank account dimension.
       // Key: "dimensionId|type|amount|date" -> Array of { journal_id, document_number }.
@@ -292,8 +334,17 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             reason: `A same-amount own-account transfer ${bankTitle} <-> "${targetTitle}" collides with an existing journal that its reference cannot disambiguate; verify before confirming.`,
           };
         };
+        const heldForReview = (reason: string): Suggestion => ({
+          transaction_id: tx.id!,
+          date: tx.date,
+          amount: tx.amount,
+          currency: tx.cl_currencies_id,
+          description: tx.description,
+          bank_account_name: tx.bank_account_name,
+          suggested_action: "manual_review",
+          reason,
+        });
         const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
-        const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
         let isInterAccount = false;
 
         // Check counterparty IBAN matches own bank account
@@ -317,8 +368,12 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         } else if (ibanTargets.length === 1) {
           const targetDim = ibanTargets[0]!;
           const booked = alreadyBookedTransfer(targetDim);
+          const heldReason = booked ? undefined : reconcileReviewReason(tx, targetDim);
           if (booked) {
             suggestions.push(booked);
+            isInterAccount = true;
+          } else if (heldReason) {
+            suggestions.push(heldForReview(heldReason));
             isInterAccount = true;
           } else {
             const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
@@ -347,12 +402,17 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         }
 
         // Check counterparty name matches company name
-        if (!isInterAccount && companyName.length >= 4 && counterpartyName.length >= 4) {
-          if (counterpartyName.includes(companyName) || companyName.includes(counterpartyName)) {
+        // Same name AND legal form, as reconcile's one-sided inference requires.
+        if (!isInterAccount) {
+          if (sameCompanyIdentity(tx.bank_account_name, companyLegalName)) {
             const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== txDim);
             const booked = otherDimensions.length === 1 ? alreadyBookedTransfer(otherDimensions[0]!) : undefined;
+            const heldReason = !booked && otherDimensions.length === 1 ? reconcileReviewReason(tx, otherDimensions[0]!) : undefined;
             if (booked) {
               suggestions.push(booked);
+              isInterAccount = true;
+            } else if (heldReason) {
+              suggestions.push(heldForReview(heldReason));
               isInterAccount = true;
             } else if (otherDimensions.length === 1) {
               const targetDim = otherDimensions[0]!;
