@@ -92,6 +92,112 @@ async function receiptRealpath(path: unknown): Promise<string> {
   return value;
 }
 
+const rulesDirs: string[] = [];
+
+// Point the accounting-rules loader at a temp rules file; afterEach removes it
+// even when the test fails.
+function useRulesFile(content: string): void {
+  const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
+  rulesDirs.push(rulesDir);
+  const rulesFile = join(rulesDir, "accounting-rules.md");
+  writeFileSync(rulesFile, content, "utf-8");
+  process.env.EARVELDAJA_RULES_FILE = rulesFile;
+  resetAccountingRulesCache();
+}
+
+// A /tmp/receipts folder holding one PDF, with path validation passing through.
+function mockReceiptFolder(options: { fileName?: string; mtime?: string; bytes?: string } = {}): void {
+  vi.mocked(realpath).mockImplementation(receiptRealpath as any);
+  vi.mocked(readdir).mockResolvedValue([{ name: options.fileName ?? "receipt.pdf", isFile: () => true }] as any);
+  vi.mocked(stat).mockImplementation(async (path) => {
+    if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
+    return {
+      isDirectory: () => false,
+      isFile: () => true,
+      dev: 1,
+      ino: 3,
+      size: 512,
+      mtime: new Date(options.mtime ?? "2026-03-20T10:00:00.000Z"),
+    } as any;
+  });
+  vi.mocked(readFile).mockResolvedValue(Buffer.from(options.bytes ?? "receipt pdf") as any);
+  vi.mocked(resolveFilePath).mockImplementation((path) => path);
+  vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
+  vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+}
+
+function supplierClient(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 7,
+    name: "Runikon Retail OU",
+    is_supplier: true,
+    is_client: false,
+    cl_code_country: "EST",
+    is_member: false,
+    send_invoice_to_email: false,
+    send_invoice_to_accounting_email: false,
+    is_deleted: false,
+    ...overrides,
+  };
+}
+
+function mockResolvedSupplier(client = supplierClient(), matchType = "exact_name"): void {
+  vi.mocked(resolveSupplierInternal).mockResolvedValue({ found: true, created: false, match_type: matchType, client } as any);
+}
+
+const SOFTWARE_ACCOUNT = { id: 5230, name_est: "Software expense", name_eng: "Software expense", account_type_est: "Kulud", account_type_eng: "Expenses" };
+const SOFTWARE_ARTICLE = { id: 501, name_est: "Software", name_eng: "Software", accounts_id: 5230, vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1 };
+
+function createdDraftInvoice(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 9001,
+    clients_id: 7,
+    client_name: "Runikon Retail OU",
+    number: "POS-23-081972",
+    create_date: "2026-03-20",
+    cl_currencies_id: "EUR",
+    gross_price: 124,
+    bank_ref_number: null,
+    status: "PROJECT",
+    ...overrides,
+  };
+}
+
+function createReceiptBatchApi(options: {
+  clients?: unknown[];
+  accounts?: unknown[];
+  purchaseArticles?: unknown[];
+  transactions?: unknown[];
+  purchaseInvoices?: Record<string, unknown>;
+  readonly?: Record<string, unknown>;
+  transactionMethods?: Record<string, unknown>;
+} = {}) {
+  return {
+    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.clients ?? []) },
+    purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), ...options.purchaseInvoices },
+    readonly: {
+      getAccounts: vi.fn().mockResolvedValue(options.accounts ?? []),
+      getPurchaseArticles: vi.fn().mockResolvedValue(options.purchaseArticles ?? []),
+      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
+      ...options.readonly,
+    },
+    transactions: {
+      invalidateListCache: vi.fn(),
+      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      ...options.transactionMethods,
+    },
+  } as any;
+}
+
+function registerProcessReceiptBatch(api: unknown) {
+  const server = { registerTool: vi.fn() } as any;
+  registerReceiptInboxTools(server, api as any, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
+  const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
+  if (!registration) throw new Error("Tool was not registered");
+  return registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+}
+
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {
     delete process.env.EARVELDAJA_RULES_FILE;
@@ -99,6 +205,7 @@ afterEach(() => {
     process.env.EARVELDAJA_RULES_FILE = ORIGINAL_RULES_FILE;
   }
   resetAccountingRulesCache();
+  for (const dir of rulesDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 // P0-3: create / create_and_confirm now require BOTH the SHA-256 manifest AND
@@ -117,41 +224,15 @@ async function dryRunApproval(
 
 describe("process_receipt_batch rollback handling", () => {
   it("prefers accounting-rules.md over generic fallback suggestions in dry run", async () => {
-    const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
-    const rulesFile = join(rulesDir, "accounting-rules.md");
-    writeFileSync(rulesFile, `# Accounting Rules
+    useRulesFile(`# Accounting Rules
 
 ## Auto Booking
 | match | category | purchase_article_id | purchase_account_id | vat_rate_dropdown | reason |
 | --- | --- | --- | --- | --- | --- |
 | Runikon Retail OÜ | saas_subscriptions | 999 | 5510 | - | Supplier-specific receipt rule |
-`, "utf-8");
-    process.env.EARVELDAJA_RULES_FILE = rulesFile;
-    resetAccountingRulesCache();
+`);
 
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -182,76 +263,14 @@ describe("process_receipt_batch rollback handling", () => {
       source: "fallback",
       suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
-      purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5510,
-          name_est: "Erikulu",
-          name_eng: "Special expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 999,
-          name_est: "Erikulu",
-          name_eng: "Special expense",
-          accounts_id: 5510,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 11,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [{ id: 5510, name_est: "Erikulu", name_eng: "Special expense", account_type_est: "Kulud", account_type_eng: "Expenses" }],
+      purchaseArticles: [{ id: 999, name_est: "Erikulu", name_eng: "Special expense", accounts_id: 5510, vat_accounts_id: 1510, cl_vat_articles_id: 11, is_disabled: false, priority: 1 }],
+    });
+    const handler = registerProcessReceiptBatch(api);
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
@@ -286,8 +305,6 @@ describe("process_receipt_batch rollback handling", () => {
         }),
       ],
     });
-
-    rmSync(rulesDir, { recursive: true, force: true });
   });
 
   it("does not apply the receipt file-date window to bank transactions (M08)", async () => {
@@ -295,16 +312,7 @@ describe("process_receipt_batch rollback handling", () => {
     // even when the receipt FILE window (date_from/date_to) is July-only. If the
     // handler ever mapped date_from/date_to onto the bank filter again, the June
     // transaction would be dropped and no bank_match candidate would surface.
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      return { isDirectory: () => false, isFile: () => true, dev: 1, ino: 3, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder({ mtime: "2026-07-15T10:00:00.000Z" });
     vi.mocked(parseDocument).mockResolvedValue({ text: "ignored", pageCount: 1 } as any);
     vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
     vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
@@ -317,32 +325,16 @@ describe("process_receipt_batch rollback handling", () => {
       item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
       source: "fallback", suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true, created: false, match_type: "exact_name",
-      client: { id: 7, name: "Supplier OU", is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
-    } as any);
+    mockResolvedSupplier(supplierClient({ name: "Supplier OU" }));
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
+    const api = createReceiptBatchApi({
       // June-dated PROJECT/type-C row: exact_amount(50)+client_id(15)+reference(20)=85 ≥ 70.
       // Its date is OUTSIDE the July file window on purpose.
-      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([
+      transactions: [
         { id: 1, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-06-30", amount: 124, clients_id: 7, ref_number: "REF-JUNE" },
-      ]) },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      ],
+    });
+    const handler = registerProcessReceiptBatch(api);
 
     const result = await handler({
       folder_path: "/tmp/receipts",
@@ -359,41 +351,15 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("merges VAT-only local rules into an existing fallback booking suggestion", async () => {
-    const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
-    const rulesFile = join(rulesDir, "accounting-rules.md");
-    writeFileSync(rulesFile, `# Accounting Rules
+    useRulesFile(`# Accounting Rules
 
 ## Auto Booking
 | match | category | vat_rate_dropdown | reversed_vat_id | reason |
 | --- | --- | --- | --- | --- |
 | Runikon Retail OÜ | saas_subscriptions | - | 1 | VAT-only override |
-`, "utf-8");
-    process.env.EARVELDAJA_RULES_FILE = rulesFile;
-    resetAccountingRulesCache();
+`);
 
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -432,76 +398,14 @@ describe("process_receipt_batch rollback handling", () => {
         account_type_eng: "Expenses",
       },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
-      purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
+    });
+    const handler = registerProcessReceiptBatch(api);
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
@@ -518,46 +422,18 @@ describe("process_receipt_batch rollback handling", () => {
         reversed_vat_id: 1,
       },
     });
-
-    rmSync(rulesDir, { recursive: true, force: true });
   });
 
   it("clears stale purchase-account dimensions when a local rule switches the account", async () => {
-    const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
-    const rulesFile = join(rulesDir, "accounting-rules.md");
-    writeFileSync(rulesFile, `# Accounting Rules
+    useRulesFile(`# Accounting Rules
 
 ## Auto Booking
 | match | category | purchase_article_id | purchase_account_id | reason |
 | --- | --- | --- | --- | --- |
 | Runikon Retail OÜ | saas_subscriptions | 999 | 5510 | Switch expense account |
-`, "utf-8");
-    process.env.EARVELDAJA_RULES_FILE = rulesFile;
-    resetAccountingRulesCache();
+`);
 
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -597,97 +473,14 @@ describe("process_receipt_batch rollback handling", () => {
         account_type_eng: "Expenses",
       },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
-      purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([
-          {
-            id: 5230,
-            name_est: "Software expense",
-            name_eng: "Software expense",
-            account_type_est: "Kulud",
-            account_type_eng: "Expenses",
-          },
-          {
-            id: 5510,
-            name_est: "Special expense",
-            name_eng: "Special expense",
-            account_type_est: "Kulud",
-            account_type_eng: "Expenses",
-          },
-        ]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([
-          {
-            id: 501,
-            name_est: "Software",
-            name_eng: "Software",
-            accounts_id: 5230,
-            vat_accounts_id: 1510,
-            cl_vat_articles_id: 1,
-            is_disabled: false,
-            priority: 1,
-          },
-          {
-            id: 999,
-            name_est: "Special expense",
-            name_eng: "Special expense",
-            accounts_id: 5510,
-            vat_accounts_id: 1510,
-            cl_vat_articles_id: 11,
-            is_disabled: false,
-            priority: 1,
-          },
-        ]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT, { id: 5510, name_est: "Special expense", name_eng: "Special expense", account_type_est: "Kulud", account_type_eng: "Expenses" }],
+      purchaseArticles: [SOFTWARE_ARTICLE, { id: 999, name_est: "Special expense", name_eng: "Special expense", accounts_id: 5510, vat_accounts_id: 1510, cl_vat_articles_id: 11, is_disabled: false, priority: 1 }],
+    });
+    const handler = registerProcessReceiptBatch(api);
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
@@ -703,46 +496,18 @@ describe("process_receipt_batch rollback handling", () => {
       },
     });
     expect(payload.results[0]!.booking_suggestion.item.purchase_accounts_dimensions_id).toBeUndefined();
-
-    rmSync(rulesDir, { recursive: true, force: true });
   });
 
   it("applies liability-account-only overrides without discarding an existing fallback booking suggestion", async () => {
-    const rulesDir = mkdtempSync(join(tmpdir(), "earv-rules-"));
-    const rulesFile = join(rulesDir, "accounting-rules.md");
-    writeFileSync(rulesFile, `# Accounting Rules
+    useRulesFile(`# Accounting Rules
 
 ## Auto Booking
 | match | category | liability_account_id | reason |
 | --- | --- | --- | --- |
 | Runikon Retail OÜ | saas_subscriptions | 2315 | Liability override |
-`, "utf-8");
-    process.env.EARVELDAJA_RULES_FILE = rulesFile;
-    resetAccountingRulesCache();
+`);
 
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -781,76 +546,14 @@ describe("process_receipt_batch rollback handling", () => {
         account_type_eng: "Expenses",
       },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
-      purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
+    });
+    const handler = registerProcessReceiptBatch(api);
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
@@ -866,34 +569,10 @@ describe("process_receipt_batch rollback handling", () => {
         purchase_accounts_id: 5230,
       },
     });
-
-    rmSync(rulesDir, { recursive: true, force: true });
   });
 
   it("invalidates the created invoice when document upload fails", async () => {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -927,90 +606,20 @@ describe("process_receipt_batch rollback handling", () => {
       source: "supplier_history",
       suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-        createAndSetTotals: vi.fn().mockResolvedValue({
-          id: 9001,
-          clients_id: 7,
-          client_name: "Runikon Retail OU",
-          number: "POS-23-081972",
-          create_date: "2026-03-20",
-          cl_currencies_id: "EUR",
-          gross_price: 124,
-          bank_ref_number: null,
-          status: "PROJECT",
-        }),
+        createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice()),
         uploadDocument: vi.fn().mockRejectedValue(new Error("upload failed")),
         confirmWithTotals: vi.fn().mockResolvedValue({}),
         invalidate: vi.fn().mockResolvedValue({}),
       },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    });
+    const handler = registerProcessReceiptBatch(api);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
@@ -1061,29 +670,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("legacy execute=true creates and uploads without confirming (#19)", async () => {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -1117,90 +704,20 @@ describe("process_receipt_batch rollback handling", () => {
       source: "fallback",
       suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-        createAndSetTotals: vi.fn().mockResolvedValue({
-          id: 9001,
-          clients_id: 7,
-          client_name: "Runikon Retail OU",
-          number: "POS-23-081972",
-          create_date: "2026-03-20",
-          cl_currencies_id: "EUR",
-          gross_price: 124,
-          bank_ref_number: null,
-          status: "PROJECT",
-        }),
+        createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice()),
         uploadDocument: vi.fn().mockResolvedValue({}),
         confirmWithTotals: vi.fn().mockResolvedValue({}),
         invalidate: vi.fn().mockResolvedValue({}),
       },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    });
+    const handler = registerProcessReceiptBatch(api);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
@@ -1230,29 +747,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("H05 execution_mode=create_and_confirm uses the default-preserving confirmation call", async () => {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -1286,92 +781,21 @@ describe("process_receipt_batch rollback handling", () => {
       source: "supplier_history",
       suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "Runikon Retail OU",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "EST",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier();
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "Runikon Retail OU",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "EST",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-        createAndSetTotals: vi.fn().mockResolvedValue({
-          id: 9001,
-          clients_id: 7,
-          client_name: "Runikon Retail OU",
-          number: "POS-23-081972",
-          create_date: "2026-03-20",
-          cl_currencies_id: "EUR",
-          gross_price: 124,
-          bank_ref_number: null,
-          status: "PROJECT",
-        }),
+        createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice()),
         uploadDocument: vi.fn().mockResolvedValue({}),
         confirmWithTotals: vi.fn().mockResolvedValue({}),
         invalidate: vi.fn().mockResolvedValue({}),
       },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-        get: vi.fn(),
-        confirm: vi.fn(),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      transactionMethods: { get: vi.fn(), confirm: vi.fn() },
+    });
+    const handler = registerProcessReceiptBatch(api);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
@@ -1397,29 +821,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") {
-        return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      }
-
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-03-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
       text: "ignored",
@@ -1456,89 +858,19 @@ describe("process_receipt_batch rollback handling", () => {
       matched_invoice_id: 12,
       matched_invoice_number: "OA-2026-02",
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "exact_name",
-      client: {
-        id: 7,
-        name: "OpenAI Ireland Limited",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "IRL",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier(supplierClient({ name: "OpenAI Ireland Limited", cl_code_country: "IRL" }));
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 7,
-          name: "OpenAI Ireland Limited",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "IRL",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
+    const api = createReceiptBatchApi({
+      clients: [supplierClient({ name: "OpenAI Ireland Limited", cl_code_country: "IRL" })],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-        createAndSetTotals: vi.fn().mockResolvedValue({
-          id: 9001,
-          clients_id: 7,
-          client_name: "OpenAI Ireland Limited",
-          number: "INV-2026-03",
-          create_date: "2026-03-20",
-          cl_currencies_id: "EUR",
-          gross_price: 100,
-          bank_ref_number: null,
-          status: "PROJECT",
-        }),
+        createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice({ client_name: "OpenAI Ireland Limited", number: "INV-2026-03", gross_price: 100 })),
         uploadDocument: vi.fn().mockResolvedValue({}),
         confirmWithTotals: vi.fn().mockResolvedValue({}),
       },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    });
+    const handler = registerProcessReceiptBatch(api);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     await handler({
       folder_path: "/tmp/receipts",
@@ -1561,25 +893,7 @@ describe("process_receipt_batch rollback handling", () => {
     // the default; the row's confidence drops to medium with the
     // foreign_reverse_charge_default_unverified signal; the contract
     // gate routes it to needs_review instead of create+confirm.
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "anthropic.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-04-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("anthropic pdf") as any);
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder({ fileName: "anthropic.pdf", mtime: "2026-04-20T10:00:00.000Z", bytes: "anthropic pdf" });
     // raw_text intentionally contains NO reverse-charge phrasing in any
     // of the supported languages — we want Case 3 (foreign-supplier
     // default) to fire, not Case 2 (phrase_match), so the contract gate
@@ -1621,80 +935,21 @@ describe("process_receipt_batch rollback handling", () => {
       source: "fallback",
       suggested_purchase_article: { id: 501, name: "Software" },
     } as any));
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true,
-      created: false,
-      match_type: "name_normalized",
-      client: {
-        id: 200,
-        name: "Anthropic",
-        is_supplier: true,
-        is_client: false,
-        cl_code_country: "USA",
-        is_member: false,
-        send_invoice_to_email: false,
-        send_invoice_to_accounting_email: false,
-        is_deleted: false,
-      },
-    } as any);
+    mockResolvedSupplier(supplierClient({ id: 200, name: "Anthropic", cl_code_country: "USA" }), "name_normalized");
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([{
-          id: 200,
-          name: "Anthropic",
-          is_supplier: true,
-          is_client: false,
-          cl_code_country: "USA",
-          is_member: false,
-          send_invoice_to_email: false,
-          send_invoice_to_accounting_email: false,
-          is_deleted: false,
-        }]),
-      },
+    const api = createReceiptBatchApi({
+      clients: [supplierClient({ id: 200, name: "Anthropic", cl_code_country: "USA" })],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn(),
         uploadDocument: vi.fn(),
         confirmWithTotals: vi.fn(),
         invalidate: vi.fn(),
       },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([{
-          id: 5230,
-          name_est: "Software expense",
-          name_eng: "Software expense",
-          account_type_est: "Kulud",
-          account_type_eng: "Expenses",
-        }]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([{
-          id: 501,
-          name_est: "Software",
-          name_eng: "Software",
-          accounts_id: 5230,
-          vat_accounts_id: 1510,
-          cl_vat_articles_id: 1,
-          is_disabled: false,
-          priority: 1,
-        }]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-      transactions: {
-        invalidateListCache: vi.fn(),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+      readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }) },
+    });
+    const handler = registerProcessReceiptBatch(api);
     const approval = await dryRunApproval(handler, { folder_path: "/tmp/receipts", accounts_dimensions_id: 100 });
     const result = await handler({
       folder_path: "/tmp/receipts",
@@ -1723,25 +978,7 @@ describe("process_receipt_batch rollback handling", () => {
   });
 
   it("threads parser OCR quality metadata into receipt confidence signals", async () => {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([
-      { name: "receipt.pdf", isFile: () => true },
-    ] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      return {
-        isDirectory: () => false,
-        isFile: () => true,
-        dev: 1,
-        ino: 3,
-        size: 512,
-        mtime: new Date("2026-04-20T10:00:00.000Z"),
-      } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder({ mtime: "2026-04-20T10:00:00.000Z" });
     vi.mocked(parseDocument).mockResolvedValue({
       text: "Acme OÜ\nInvoice INV-1\nTotal 12.00 EUR",
       pageCount: 1,
@@ -1769,25 +1006,10 @@ describe("process_receipt_batch rollback handling", () => {
     } as any));
     vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(false);
 
-    const server = { registerTool: vi.fn() } as any;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }) },
+    });
+    const handler = registerProcessReceiptBatch(api);
     const result = await handler({
       folder_path: "/tmp/receipts",
       accounts_dimensions_id: 100,
@@ -1814,16 +1036,7 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
   // Build a fully-mocked, otherwise-bookable batch; `getInvoiceInfo` is supplied
   // per test so we can exercise available / transient-failure / absent-endpoint.
   function setup(getInvoiceInfo: unknown) {
-    vi.mocked(realpath).mockImplementation(receiptRealpath as any);
-    vi.mocked(readdir).mockResolvedValue([{ name: "receipt.pdf", isFile: () => true }] as any);
-    vi.mocked(stat).mockImplementation(async (path) => {
-      if (String(path) === "/tmp/receipts") return { isDirectory: () => true, isFile: () => false, dev: 1, ino: 2 } as any;
-      return { isDirectory: () => false, isFile: () => true, dev: 1, ino: 3, size: 512, mtime: new Date("2026-07-15T10:00:00.000Z") } as any;
-    });
-    vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as any);
-    vi.mocked(resolveFilePath).mockImplementation((path) => path);
-    vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
-    vi.mocked(validateFilePath).mockImplementation(async (path) => path);
+    mockReceiptFolder({ mtime: "2026-07-15T10:00:00.000Z" });
     vi.mocked(parseDocument).mockResolvedValue({ text: "ignored", pageCount: 1 } as any);
     vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
     vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
@@ -1835,31 +1048,14 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
       item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
       source: "fallback", suggested_purchase_article: { id: 501, name: "Software" },
     } as any);
-    vi.mocked(resolveSupplierInternal).mockResolvedValue({
-      found: true, created: false, match_type: "exact_name",
-      client: { id: 7, name: "Supplier OU", is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
-    } as any);
+    mockResolvedSupplier(supplierClient({ name: "Supplier OU" }));
 
     const create = vi.fn().mockResolvedValue({ id: 900, number: "INV-1", status: "PROJECT" });
-    const server = { registerTool: vi.fn() } as any;
-    const readonly: Record<string, unknown> = {
-      getAccounts: vi.fn().mockResolvedValue([]),
-      getPurchaseArticles: vi.fn().mockResolvedValue([]),
-      getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-    };
-    if (getInvoiceInfo !== undefined) readonly.getInvoiceInfo = getInvoiceInfo;
-    const api = {
-      journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), create, createAndSetTotals: create, uploadDocument: vi.fn(), invalidate: vi.fn() },
-      readonly,
-      transactions: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
-    } as any;
-
-    registerReceiptInboxTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_receipt_batch");
-    if (!registration) throw new Error("Tool was not registered");
-    const handler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+    const api = createReceiptBatchApi({
+      purchaseInvoices: { create, createAndSetTotals: create, uploadDocument: vi.fn(), invalidate: vi.fn() },
+      readonly: getInvoiceInfo === undefined ? {} : { getInvoiceInfo },
+    });
+    const handler = registerProcessReceiptBatch(api);
     return { handler, api, create };
   }
 
