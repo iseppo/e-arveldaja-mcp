@@ -72,6 +72,7 @@ export function camtResultRow(
     clients_id: descriptor.clientResolution.clients_id,
     client_match: descriptor.clientResolution.match_type,
     ...(apiId !== undefined ? { api_id: apiId } : {}),
+    ...(descriptor.entry.review_note !== undefined ? { review_note: descriptor.entry.review_note } : {}),
     ...(descriptor.storedDescription !== descriptor.entry.description
       ? { stored_description: descriptor.storedDescription }
       : {}),
@@ -294,6 +295,10 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
 
   const warnings: CompactWarning[] = (data.statementBalanceCheck?.check?.warnings ?? [])
     .map(message => ({ code: "closing_balance", message }));
+  // Bounded like the samples: the compact surface stays approximately constant.
+  for (const row of data.results.filter(result => result.review_note !== undefined).slice(0, 3)) {
+    warnings.push({ code: "camt_unsplit_entry", message: row.review_note! });
+  }
 
   // Errors (indeterminate / failed commands) surface as blockers — never hidden.
   const blockers: CompactReviewItem[] = [];
@@ -398,6 +403,8 @@ export function renderCamtParsePayload(parsed: CamtParseResult): Record<string, 
       end_to_end_id: wrapUntrustedOcr(entry.end_to_end_id),
       counterparty_iban: wrapUntrustedOcr(entry.counterparty_iban),
       counterparty_reg_code: wrapUntrustedOcr(entry.counterparty_reg_code),
+      // Internal dedup aliases (raw statement text): never rendered.
+      legacy_identities: undefined,
       ...(entry.duplicate ? { duplicate: true } : { duplicate: undefined }),
       ...(entry.duplicate_transaction_ids.length > 0 ? { duplicate_transaction_ids: entry.duplicate_transaction_ids } : { duplicate_transaction_ids: undefined }),
     })),

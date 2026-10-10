@@ -3,6 +3,7 @@ import { roundMoney } from "../money.js";
 import { capture, reject } from "./preflight.js";
 import { normalizeOptionalReference } from "./duplicate-identity.js";
 import type {
+  CamtLegacyIdentity,
   CamtParseResult,
   CamtPreflightResult,
   ImportRejectedField,
@@ -387,69 +388,119 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
 
     // Weight each leg by its value in the entry currency: the original when
     // already in that currency, else its CntrValAmt (separately converted legs
-    // of one foreign currency need not share a rate). Only when a leg lacks
-    // both: same-currency legs fall back to their originals (proportional);
-    // mixed currencies cannot be weighted by bare originals (100 EUR + 100 USD
-    // is not 50/50), so the split is unknowable — reject.
+    // of one foreign currency need not share a rate). An unparseable CntrValAmt
+    // counts as absent: it is an optional hint, not a booked amount. Only when a
+    // leg lacks both: same-currency legs fall back to their originals
+    // (proportional); mixed currencies cannot be weighted by bare originals
+    // (100 EUR + 100 USD is not 50/50), so the entry stays ONE unsplit row of
+    // its booked amount, flagged for review, and the rest of the file imports.
     let splitWeights = originalAmounts.map((amount) => amount?.amount);
+    let unsplit = false;
     if (detailNodes.length > 1 && originalAmounts.every((amount) => amount !== undefined)) {
-      const entryValues = capture(rejected, () => detailNodes.map((txDetails, detailIndex) => {
+      const entryValues = detailNodes.map((txDetails, detailIndex) => {
         const original = originalAmounts[detailIndex]!;
         if (original.currency === entryAmount.currency) return original.amount;
-        const counterValue = parseAmountNode(
+        const counterValue = capture([], () => parseAmountNode(
           valueAt(txDetails, ["AmtDtls", "CntrValAmt", "Amt"]),
           accountCurrency,
           `${entryRowId}:tx:${detailIndex + 1}`,
           "counter_value_amount",
-        );
+        ));
         return counterValue && counterValue.currency === entryAmount.currency && counterValue.amount > 0
           ? counterValue.amount
           : undefined;
-      }));
-      if (!entryValues) continue;
+      });
       if (entryValues.every((value) => value !== undefined)) {
         splitWeights = entryValues;
       } else if (new Set(originalAmounts.map((amount) => amount!.currency)).size > 1) {
-        capture(rejected, () => reject(
-          entryRowId,
-          "split_amounts",
-          entryAmount.text,
-          "CAMT batch entry mixes leg currencies without an account-currency counter value (CntrValAmt) for every leg, so its booked amount cannot be split",
-        ));
-        continue;
+        unsplit = true;
       }
     }
 
     const bookedAmounts = splitBookedAmounts(entryAmount.amount, splitWeights);
+    // What 1007fde and earlier booked: always proportional to bare originals.
+    const legacyAmounts = splitBookedAmounts(entryAmount.amount, originalAmounts.map((amount) => amount?.amount));
 
-    for (const [detailIndex, txDetails] of detailNodes.entries()) {
+    const legs = detailNodes.map((txDetails, detailIndex) => {
       const { party, account } = pickCounterparty(txDetails, direction);
       const structuredRef = asArray(valueAt(txDetails, ["RmtInf", "Strd"]))
         .map(node => textAt(node, ["CdtrRefInf", "Ref"]))
         .find((value): value is string => !!value);
-      const originalAmount = originalAmounts[detailIndex];
-
-      entries.push({
-        date: entryDate,
+      const ustrd = textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined;
+      return {
         amount: bookedAmounts[detailIndex] ?? entryAmount.amount,
-        currency: entryAmount.currency,
-        direction,
-        leg_index: detailIndex,
-        original_amount: originalAmount?.amount,
-        original_currency: originalAmount?.currency,
+        legacyAmount: legacyAmounts[detailIndex] ?? entryAmount.amount,
+        originalAmount: originalAmounts[detailIndex],
         counterparty_name: textAt(party, ["Nm"]),
         counterparty_iban: extractIban(account),
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
+        ustrd,
         // An entry with no transaction details (e.g. a bank charge) carries its
         // narrative only in AddtlNtryInf; without it a ref-less charge has no
         // description to corroborate a rerun's possible-duplicate match.
-        description: textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") ||
-          (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined) ||
-          undefined,
+        description: ustrd ?? (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined),
         reference_number: normalizeOptionalReference(structuredRef) ??
           normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
         end_to_end_id: normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
         bank_reference: normalizeOptionalReference(textAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? textAt(entryNode, ["AcctSvcrRef"])),
+      };
+    });
+    // Rows stored by 1007fde and earlier carry the bare-original split and no
+    // AddtlNtryInf description; keep them recognisable as this same entry.
+    const legacyIdentity = (leg: typeof legs[number]): CamtLegacyIdentity => ({
+      amount: leg.legacyAmount,
+      description: leg.ustrd,
+      counterparty_name: leg.counterparty_name,
+      counterparty_iban: leg.counterparty_iban,
+      reference_number: leg.reference_number,
+      bank_reference: leg.bank_reference,
+    });
+
+    if (unsplit) {
+      // Fields survive only where every leg agrees; descriptions are joined.
+      const common = <T>(values: T[]): T | undefined => values.every((value) => value === values[0]) ? values[0] : undefined;
+      entries.push({
+        date: entryDate,
+        amount: entryAmount.amount,
+        currency: entryAmount.currency,
+        direction,
+        leg_index: 0,
+        counterparty_name: common(legs.map((leg) => leg.counterparty_name)),
+        counterparty_iban: common(legs.map((leg) => leg.counterparty_iban)),
+        counterparty_reg_code: common(legs.map((leg) => leg.counterparty_reg_code)),
+        description: [...new Set(legs.map((leg) => leg.description).filter((value): value is string => !!value))].join(" | ") || undefined,
+        reference_number: common(legs.map((leg) => leg.reference_number)),
+        end_to_end_id: common(legs.map((leg) => leg.end_to_end_id)),
+        bank_reference: normalizeOptionalReference(textAt(entryNode, ["AcctSvcrRef"])) ?? legs[0]!.bank_reference,
+        // The previous release stored one row per leg; any of them means this
+        // entry was already imported.
+        legacy_identities: legs.map(legacyIdentity),
+        review_note: `${entryRowId} mixes leg currencies without an account-currency counter value (CntrValAmt) for every leg, so it is booked as one unsplit row of the entry amount; split it manually if the legs need separate counterparties.`,
+        duplicate: false,
+        duplicate_transaction_ids: [],
+      });
+      continue;
+    }
+
+    for (const [detailIndex, leg] of legs.entries()) {
+      entries.push({
+        date: entryDate,
+        amount: leg.amount,
+        currency: entryAmount.currency,
+        direction,
+        leg_index: detailIndex,
+        original_amount: leg.originalAmount?.amount,
+        original_currency: leg.originalAmount?.currency,
+        counterparty_name: leg.counterparty_name,
+        counterparty_iban: leg.counterparty_iban,
+        counterparty_reg_code: leg.counterparty_reg_code,
+        description: leg.description,
+        reference_number: leg.reference_number,
+        end_to_end_id: leg.end_to_end_id,
+        bank_reference: leg.bank_reference,
+        ...(leg.legacyAmount !== leg.amount || leg.description !== leg.ustrd
+          ? { legacy_identities: [legacyIdentity(leg)] }
+          : {}),
         duplicate: false,
         duplicate_transaction_ids: [],
       });

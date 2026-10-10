@@ -238,9 +238,11 @@ async function resolveClientForEntry(
     matchType = "single_name_match";
   }
   // A name match whose stored registry code contradicts the statement's code
-  // is a different legal entity — do not attach it.
-  const selectedCode = selected?.code?.trim();
-  if (entry.counterparty_reg_code && selectedCode && selectedCode !== entry.counterparty_reg_code.trim()) {
+  // is a different legal entity — do not attach it. Codes compare by digits
+  // only, so "1111 1111" and "11111111" are the same code.
+  const registryDigits = (code: string | null | undefined) => code?.replace(/\D/g, "") || code?.trim() || undefined;
+  const selectedCode = registryDigits(selected?.code);
+  if (entry.counterparty_reg_code && selectedCode && selectedCode !== registryDigits(entry.counterparty_reg_code)) {
     selected = undefined;
   }
 
@@ -328,6 +330,7 @@ function camtReviewCommands(projection: CamtImportProjection): CamtPlanReviewCom
       counterparty_name: descriptor.entry.counterparty_name,
       bank_reference: descriptor.entry.bank_reference,
       ref_number: canonicalRefNumber(descriptor.entry.reference_number).value,
+      review_note: descriptor.entry.review_note,
     }),
   }));
 }

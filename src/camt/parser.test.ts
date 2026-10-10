@@ -371,13 +371,52 @@ describe("parseCamt053Xml", () => {
     ).replace(">190.00<", ">185.00<"));
     expect(sameCurrency.entries.map(entry => entry.amount)).toEqual([90, 95]);
 
-    // Without an account-currency value for the foreign leg the split is unknowable: reject.
-    const unresolvable = preflightCamt053Xml(xml(leg("100.00", "EUR") + leg("100.00", "USD")));
-    expect(unresolvable.ok).toBe(false);
-    if (unresolvable.ok) throw new Error("unreachable: preflight must reject");
-    expect(unresolvable.rejected_fields).toEqual([
-      expect.objectContaining({ source_row_id: "camt:ntry:1", field: "split_amounts" }),
-    ]);
+    // Without an account-currency value for the foreign leg the split is
+    // unknowable. Rejecting the whole file for it blocked every other entry, so
+    // the entry is kept as ONE unsplit row of its booked amount, flagged for
+    // review (the legs' counterparty survives only when they agree).
+    const unresolvable = parseCamt053Xml(xml(leg("100.00", "EUR") + leg("100.00", "USD")));
+    expect(unresolvable.entries).toHaveLength(1);
+    expect(unresolvable.entries[0]).toMatchObject({
+      amount: 190,
+      currency: "EUR",
+      leg_index: 0,
+      counterparty_name: "Supplier OÜ",
+      bank_reference: "MIX",
+      review_note: expect.stringContaining("camt:ntry:1"),
+    });
+    expect(unresolvable.entries[0]!.original_amount).toBeUndefined();
+  });
+
+  it("treats an unparseable CntrValAmt as absent instead of rejecting the file", () => {
+    const leg = (amount: string, currency: string, counterValue = "") => `<TxDtls><AmtDtls>
+      <TxAmt><Amt Ccy="${currency}">${amount}</Amt></TxAmt>${counterValue}</AmtDtls>
+      <RltdPties><Cdtr><Nm>Supplier OÜ</Nm></Cdtr></RltdPties></TxDtls>`;
+    const xml = (amount: string, legs: string) => `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt><Id>mix</Id>
+<Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+<Ntry><Amt Ccy="EUR">${amount}</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-02-04</Dt></BookgDt>
+<AcctSvcrRef>MIX</AcctSvcrRef><NtryDtls>${legs}</NtryDtls></Ntry>
+<Ntry><Amt Ccy="EUR">5.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-02-04</Dt></BookgDt>
+<AcctSvcrRef>OTHER</AcctSvcrRef></Ntry></Stmt></BkToCstmrStmt></Document>`;
+
+    // Same foreign currency: a malformed countervalue falls back to the proportional split.
+    const sameCurrency = preflightCamt053Xml(xml("185.00",
+      leg("100.00", "USD", `<CntrValAmt><Amt Ccy="EUR">9O.00</Amt></CntrValAmt>`) +
+      leg("100.00", "USD", `<CntrValAmt><Amt Ccy="EUR">95.00</Amt></CntrValAmt>`)));
+    if (!sameCurrency.ok) throw new Error(JSON.stringify(sameCurrency.rejected_fields));
+    expect(sameCurrency.value.entries.map(entry => entry.amount)).toEqual([92.5, 92.5, 5]);
+
+    // Mixed currencies: a malformed countervalue (bad lexeme or currency) leaves
+    // the entry unsplit for review; the rest of the statement still imports.
+    for (const badCounterValue of [`<Amt Ccy="EUR">1e2</Amt>`, `<Amt Ccy="EURO">90.00</Amt>`]) {
+      const mixed = preflightCamt053Xml(xml("190.00",
+        leg("100.00", "EUR") + leg("100.00", "USD", `<CntrValAmt>${badCounterValue}</CntrValAmt>`)));
+      if (!mixed.ok) throw new Error(JSON.stringify(mixed.rejected_fields));
+      expect(mixed.value.entries.map(entry => entry.amount)).toEqual([190, 5]);
+      expect(mixed.value.entries[0]!.review_note).toBeDefined();
+      expect(mixed.value.entries[1]!.review_note).toBeUndefined();
+    }
   });
 
   it("suggests splitting the file when multiple statements are present", () => {

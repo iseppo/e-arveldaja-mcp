@@ -421,8 +421,16 @@ export function buildExistingDuplicateKeysForEntry(entry: ParsedCamtEntry, selec
     bankReferenceLookupKey(bankReference),
     selectedDimensionId,
   );
-  if (!bankReference || !bankReferenceKey) return [];
+  const keys = bankReference && bankReferenceKey ? currentExistingDuplicateKeys(entry, bankReferenceKey) : [];
+  // Legacy alias keys: what an earlier release stored for this same leg.
+  for (const legacy of entry.legacy_identities ?? []) {
+    const legacyEntry = { ...entry, ...legacy, legacy_identities: undefined };
+    keys.push(...buildExistingDuplicateKeysForEntry(legacyEntry, selectedDimensionId));
+  }
+  return [...new Set(keys)];
+}
 
+function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: string): string[] {
   return transactionTypesForDuplicateCompatibility(entry).map((type) => [
       bankReferenceKey,
       entry.date,
@@ -437,26 +445,30 @@ export function buildExistingDuplicateKeysForEntry(entry: ParsedCamtEntry, selec
 }
 
 /**
- * 1-based occurrence of each entry (by batch key) among the DISTINCT in-file
- * entries that share its exact ledger key. Identical legs of one batch <Ntry>
- * (same bank reference, amount, counterparty, description) differ only by
+ * 1-based occurrence of each entry (by batch key), PER exact ledger key, among
+ * the DISTINCT in-file entries that carry that key. Identical legs of one batch
+ * <Ntry> (same bank reference, amount, counterparty, description) differ only by
  * leg_index, which the stored row does not carry: leg n is already imported only
- * when at least n stored rows match the exact key.
+ * when at least n stored rows match the key. Counting per key (not per key set)
+ * keeps a legacy alias key shared by several entries from being satisfied by
+ * fewer stored rows than entries that claim it.
  */
 export function findExactKeyOccurrences(
   entries: ParsedCamtEntry[],
   selectedDimensionId: number,
-): Map<string, number> {
-  const occurrences = new Map<string, number>();
+): Map<string, Map<string, number>> {
+  const occurrences = new Map<string, Map<string, number>>();
   const countsByExactKey = new Map<string, number>();
   for (const entry of entries) {
     const batchKey = buildBatchDuplicateKey(entry);
     if (occurrences.has(batchKey)) continue;
-    const exactKey = buildExistingDuplicateKeysForEntry(entry, selectedDimensionId).join("\n");
-    if (!exactKey) continue;
-    const occurrence = (countsByExactKey.get(exactKey) ?? 0) + 1;
-    countsByExactKey.set(exactKey, occurrence);
-    occurrences.set(batchKey, occurrence);
+    const entryOccurrences = new Map<string, number>();
+    for (const exactKey of buildExistingDuplicateKeysForEntry(entry, selectedDimensionId)) {
+      const occurrence = (countsByExactKey.get(exactKey) ?? 0) + 1;
+      countsByExactKey.set(exactKey, occurrence);
+      entryOccurrences.set(exactKey, occurrence);
+    }
+    occurrences.set(batchKey, entryOccurrences);
   }
   return occurrences;
 }
@@ -466,11 +478,11 @@ export function findDuplicateTransactionIds(
   lookup: DuplicateLookup,
   repeatedBankReferences: ReadonlySet<string>,
   selectedDimensionId: number,
-  exactKeyOccurrence = 1,
+  exactKeyOccurrences?: ReadonlyMap<string, number>,
 ): number[] {
   for (const exactKey of buildExistingDuplicateKeysForEntry(entry, selectedDimensionId)) {
     const exactMatches = lookup.byEntryKey.get(exactKey) ?? [];
-    if (exactMatches.length >= exactKeyOccurrence && exactMatches.length > 0) {
+    if (exactMatches.length >= (exactKeyOccurrences?.get(exactKey) ?? 1) && exactMatches.length > 0) {
       return [...new Set(exactMatches)].sort((left, right) => left - right);
     }
   }
