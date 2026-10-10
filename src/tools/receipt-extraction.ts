@@ -1101,9 +1101,16 @@ function detectUnsupportedCurrencyCode(
     skipMerchantLabels = false,
   ): string | undefined => {
     const line = removeExchangeRateExpressions(rawLine);
+    const labelMatches = [...line.matchAll(CURRENCY_LABEL_CODE_RE)].filter(match =>
+      !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index))));
+    // An uppercase word-like code printed right after an explicit currency
+    // label ("Currency: TRY") is the document currency, not a receipt word.
+    for (const match of labelMatches) {
+      const code = match[1];
+      if (code && UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)) return code;
+    }
     const matches = [
-      ...[...line.matchAll(CURRENCY_LABEL_CODE_RE)].filter(match =>
-        !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index)))),
+      ...labelMatches,
       ...(includeAmountAdjacent ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
       ...(includeAmountAdjacent ? line.matchAll(INTEGER_AMOUNT_ADJACENT_CODE_RE) : []),
     ];

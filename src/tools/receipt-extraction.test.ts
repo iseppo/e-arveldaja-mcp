@@ -2323,6 +2323,32 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
   });
 
+  it("flags a word-like code after an explicit currency label (Codex slice 4 #2)", () => {
+    const fields = extractReceiptFieldsFromText([
+      "Supplier: Bosphorus Software Ltd", "Invoice no: TR-2026-41", "Date: 2026-10-01", "Currency: TRY",
+      "Subtotal TRY 1200.00", "VAT TRY 0.00", "Total TRY 1200.00", "Paid EUR 32.10",
+    ].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("TRY")(fields.extraction_notes)).toBe(true);
+    expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
+  });
+
+  it.each([
+    ["Valuuta: GEL", "GEL"],
+    ["Currency code: BAM", "BAM"],
+    ["Valuta ALL", "ALL"],
+  ])("flags a labelled word-like code: %s", (label, code) => {
+    const fields = extractReceiptFieldsFromText(["Shop LLC", label, "Total 100.00", "Paid EUR 2.00"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
+  });
+
+  it("does not flag a lowercase word after a currency label", () => {
+    const fields = extractReceiptFieldsFromText(["Shop OÜ", "Currency: all prices include VAT", "Total 10.00 EUR"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe("EUR");
+    expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
+  });
+
   it.each([
     ["EUR total", ["Shop OÜ", "Kokku 24,40 EUR"], "EUR"],
     ["unmarked total", ["Shop OÜ", "Kokku 24,40"], undefined],
