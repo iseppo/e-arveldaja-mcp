@@ -246,7 +246,24 @@ const IBAN_LENGTHS: Record<string, number> = {
 
 // A direct-debit notice prints the BUYER's own account the amount is taken
 // from ("debited from your account EE..."); it is never the supplier's IBAN.
-const DEBIT_MANDATE_RE = /\b(?:debited\s+from|will\s+be\s+debited|direct\s+debit|otsekorraldus\w*|debiteeritakse)\b/i;
+// The phrase only governs an IBAN that follows it closely with no other IBAN
+// or account label in between: "Makseviis: otsekorraldus  IBAN: <supplier>"
+// or "Direct debit available. Our bank account: <supplier>" name the payee.
+const DEBIT_SOURCE_RE = /\b(?:debited\s+from|kontolt)\b/gi;
+const DEBIT_GAP_BREAK_RE = /[A-Z]{2}\d{2}[ \t\u00A0\u202F]*[A-Z0-9]{4}|\b(?:iban|our\s+(?:bank\s+)?account|meie\s+(?:panga)?konto|payee|recipient|beneficiary|receiver|saaja)\b/i;
+
+function debitPhraseGovernsIban(before: string): boolean {
+  let lastEnd = -1;
+  for (const match of before.matchAll(DEBIT_SOURCE_RE)) lastEnd = match.index + match[0].length;
+  if (lastEnd < 0) return false;
+  const gap = before.slice(lastEnd);
+  return gap.length <= 40 && !DEBIT_GAP_BREAK_RE.test(gap);
+}
+
+// Buyer labels for the IBAN soft rule. Payee words (recipient, receiver,
+// saaja, payee, beneficiary, "makse saaja") label the SUPPLIER on payment
+// lines, so unlike BUYER_MARKER_RE they are not buyer evidence here.
+const IBAN_BUYER_LABEL_RE = /\b(?:maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer)\b/i;
 
 function normalizeIbanForCompare(value: string): string {
   return value.replace(/\s+/g, "").toUpperCase();
@@ -294,10 +311,10 @@ export function extractIban(text: string, options?: ExtractIbanOptions): string 
       // is the buyer's account (payer/buyer label or a debit-mandate phrase).
       const lineStart = text.lastIndexOf("\n", match.index) + 1;
       const before = text.slice(Math.max(lineStart, match.index - 80), match.index);
-      // A buyer label is weaker evidence ("Saaja" can also label the payee),
+      // A buyer label is weaker evidence than a debit phrase,
       // so such a candidate is only the fallback when no other IBAN is found.
-      if (!DEBIT_MANDATE_RE.test(before)) {
-        if (!BUYER_MARKER_RE.test(before)) return candidate;
+      if (!debitPhraseGovernsIban(before)) {
+        if (!IBAN_BUYER_LABEL_RE.test(before)) return candidate;
         buyerLineFallback ??= candidate;
       }
     }

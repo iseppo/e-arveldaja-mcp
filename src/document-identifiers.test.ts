@@ -168,6 +168,27 @@ describe("extractIban", () => {
     expect(extractIban("The amount will be debited from your account EE382200221020145685")).toBeUndefined();
   });
 
+  it("skips only the IBAN a debit phrase grammatically governs", () => {
+    const own = "EE382200221020145685";
+    const sup = "DE89370400440532013000";
+    expect(extractIban(`Makseviis: otsekorraldus   IBAN: ${sup}`)).toBe(sup);
+    expect(extractIban(`Direct debit available. Our bank account: ${sup}`)).toBe(sup);
+    expect(extractIban(`Summa debiteeritakse teie kontolt ${own} ja kantakse saaja kontole ${sup}`)).toBe(sup);
+    expect(extractIban(`Amount will be debited from ${own}; payee account ${sup}`)).toBe(sup);
+    // Hetzner-style own-account debit line stays excluded.
+    expect(extractIban(`The amount will be debited from your account ${own} BIC HABAEE2X`)).toBeUndefined();
+  });
+
+  it("does not treat payee words as a buyer label before an IBAN", () => {
+    const sup = "DE89370400440532013000";
+    const other = "EE382200221020145685";
+    expect(extractIban(`Payment recipient: Supplier Ltd IBAN ${sup}\nYour account ${other}`)).toBe(sup);
+    expect(extractIban(`Saaja: Supplier OÜ, konto ${sup}\nKonto ${other}`)).toBe(sup);
+    expect(extractIban(`Beneficiary: Supplier Ltd ${sup}\n${other}`)).toBe(sup);
+    // A real buyer label still demotes its IBAN to the fallback.
+    expect(extractIban(`Buyer account ${other}\nIBAN ${sup}`)).toBe(sup);
+  });
+
   it("excludes the company's own IBANs", () => {
     expect(extractIban("IBAN EE38 2200 2210 2014 5685\nIBAN DE89370400440532013000", { exclude: ["EE38 2200 2210 2014 5685"] }))
       .toBe("DE89370400440532013000");
