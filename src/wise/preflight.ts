@@ -623,15 +623,17 @@ export function isJarTransfer(row: WiseRow): boolean {
   // is not mistaken for a Jar movement.
   const jarWord = /\bjars?\b/i;
   if (jarWord.test(row.category)) return true;
+  // TRANSFER-* / BANK_DETAILS_* rows are real movements (payments, or transfers
+  // to/from an own bank account whose both ends carry the company name). Only
+  // the Wise category marks them as Jar — free text (an invoice ref
+  // "JAR-2026-001", payee "Jar Consulting") and the self-transfer heuristic
+  // must not drop them.
+  if (row.id.startsWith("TRANSFER-") || row.id.startsWith("BANK_DETAILS_")) return false;
   if (jarWord.test(row.note)) return true;
   if (jarWord.test(row.reference)) return true;
 
   // Self-transfer: source and target are the same person/company,
   // same currency, zero fee (to avoid false-positives on owner payments).
-  // Never for TRANSFER-* / BANK_DETAILS_* rows: those are real movements to or
-  // from an own bank account (both ends carry the company name), which must
-  // reach the ownership / inter-account path instead of being dropped.
-  if (row.id.startsWith("TRANSFER-") || row.id.startsWith("BANK_DETAILS_")) return false;
   const src = normalizeWiseText(row.sourceName);
   const tgt = normalizeWiseText(row.targetName);
   if (src && tgt && src === tgt && row.sourceCurrency === row.targetCurrency && row.sourceFeeAmount === 0) return true;

@@ -893,6 +893,23 @@ describe("wise import tool", () => {
     expect(payload.eligible).toBe(2);
   });
 
+  it("does not treat a whole-word 'Jar' reference/note on a TRANSFER-* payment as a Jar transfer", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "TRANSFER-123", targetName: "Jar Consulting", reference: "JAR-2026-001", note: "Jar invoice", sourceFeeAmount: "2" }),
+    ]));
+
+    const { handler } = setupWiseTool([]);
+    const payload = parseWiseResponse(await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+    }));
+
+    expect(payload.skipped_jar_transfers).toBeUndefined();
+    expect(payload.eligible).toBe(1);
+    expect(payload.results.map((row: any) => row.wise_id)).toContain("FEE:TRANSFER-123");
+  });
+
   it("maps IN rows to incoming transactions and uses the source side as counterparty", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-5", "COMPLETED", "IN", "2026-01-14 09:00:00", "2026-01-14 09:00:00",
