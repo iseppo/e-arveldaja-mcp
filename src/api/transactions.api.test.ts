@@ -932,3 +932,26 @@ describe("TransactionsApi.confirm client auto-fix safety", () => {
     expect(patchCalls).toEqual([]);
   });
 });
+
+describe("TransactionsApi.confirm reads the live client before registering", () => {
+  beforeEach(() => cache.invalidate());
+
+  it("F3 refuses on the live client even when a stale per-id read is cached", async () => {
+    const live = { id: 5, status: "PROJECT", clients_id: 42 as number | null };
+    const { client, patchCalls } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/5") return { ...live };
+        if (path === "/sale_invoices/9") return { id: 9, clients_id: 42 };
+        return undefined;
+      },
+    });
+    const api = new TransactionsApi(client);
+
+    await api.get(5); // primes the per-id cache with client 42
+    live.clients_id = 99; // operator changes the client in the UI
+
+    await expect(api.confirm(5, [{ related_table: "sale_invoices", related_id: 9, amount: 100 }]))
+      .rejects.toBeInstanceOf(LinkedInvoiceClientMismatchError);
+    expect(patchCalls).toEqual([]);
+  });
+});

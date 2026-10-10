@@ -3,7 +3,7 @@ import { HttpError, type HttpMethod } from "../http-client.js";
 import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice, ApiResponse } from "../types/api.js";
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { classifyMutationFailure, isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
-import { BaseResource } from "./base-resource.js";
+import { BaseResource, cache } from "./base-resource.js";
 
 function isHttpMethod(value: unknown): value is HttpMethod {
   return value === "GET" || value === "POST" || value === "PUT" ||
@@ -204,6 +204,9 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Value to restore if the register call fails after we touched clients_id
     // (`undefined` = we did not touch it, so there is nothing to roll back).
     let clientsIdRollbackValue: number | null | undefined;
+    // The client guard below gates registration on tx.clients_id: read it live,
+    // not from the 120s per-id cache (RIK copies the live client into the journal).
+    if (body.length > 0) cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
     const tx = await this.get(id);
     if (tx && body.length > 0 && (autoFixClientsId || hasInvoiceDistribution)) {
       if (!tx.clients_id) {
