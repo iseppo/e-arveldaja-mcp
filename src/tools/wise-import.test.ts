@@ -819,6 +819,23 @@ describe("wise import tool", () => {
     expect(payload.results).toEqual([]);
   });
 
+  it("does not treat 'jar' inside a longer word (JARVIS reference, Jari note) as a Jar transfer", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "TRANSFER-JARVIS-1", targetName: "Jarvis Consulting", reference: "JARVIS-2026-001" }),
+      buildM04Values({ id: "CARD_TRANSACTION-JARI-1", targetName: "Coffee Bar", note: "Jari" }),
+    ]));
+
+    const { handler } = setupWiseTool([]);
+    const payload = parseWiseResponse(await handler({
+      file_path: "/tmp/wise.csv",
+      accounts_dimensions_id: 5,
+      fee_account_dimensions_id: 9,
+    }));
+
+    expect(payload.skipped_jar_transfers).toBeUndefined();
+    expect(payload.eligible).toBe(2);
+  });
+
   it("maps IN rows to incoming transactions and uses the source side as counterparty", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-5", "COMPLETED", "IN", "2026-01-14 09:00:00", "2026-01-14 09:00:00",

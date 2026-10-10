@@ -609,14 +609,12 @@ export function oppositeSideForWiseRow(row: WiseRow): { amount: number; currency
  * typically have slightly different names (e.g. "OÜ" vs "OU" from bank registration).
  * If this incorrectly filters legitimate transfers, set skip_jar_transfers=false. */
 export function isJarTransfer(row: WiseRow): boolean {
-  const catLower = row.category.toLowerCase();
-  const noteLower = row.note.toLowerCase();
-  const refLower = row.reference.toLowerCase();
-
-  // Explicit Jar indicators
-  if (catLower.includes("jar")) return true;
-  if (noteLower.includes("jar")) return true;
-  if (refLower.includes("jar")) return true;
+  // Explicit Jar indicators — whole word only, so "JARVIS-2026-001" or "Jari"
+  // is not mistaken for a Jar movement.
+  const jarWord = /\bjars?\b/i;
+  if (jarWord.test(row.category)) return true;
+  if (jarWord.test(row.note)) return true;
+  if (jarWord.test(row.reference)) return true;
 
   // Self-transfer: source and target are the same person/company,
   // same currency, zero fee (to avoid false-positives on owner payments).
