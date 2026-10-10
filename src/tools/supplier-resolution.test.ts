@@ -746,6 +746,28 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
   });
 });
 
+describe("resolveSupplierInternal — conflicting country evidence (Codex slice 4 #3)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("does not look up or create a Dutch supplier with an EE VAT number as an Estonian company", async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
+    vi.stubGlobal("fetch", fetchSpy);
+    const create = vi.fn().mockResolvedValue({ created_object_id: 900 });
+    const api = { clients: { listAll: () => Promise.resolve([]), create, get: vi.fn() } } as unknown as ApiContext;
+    const result = await resolveSupplierInternal(api, [], {
+      supplier_name: "Example Logistics B.V.",
+      supplier_reg_code: "12345678",
+      supplier_vat_no: "EE100931558",
+      supplier_iban: "NL91ABNA0417164300",
+      raw_text: "Example Logistics B.V.\n1015 BS Amsterdam\nNetherlands",
+    }, true);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+    expect(result.created).toBe(false);
+    expect(result.preview_client?.cl_code_country).toBeUndefined();
+  });
+});
+
 describe("fetchRegistryData — live ariregister autocomplete shape (finding 8)", () => {
   function stubBody(body: unknown) {
     const text = JSON.stringify(body);

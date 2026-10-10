@@ -866,11 +866,24 @@ export function getClientCountryFromIban(iban?: string | null): string | undefin
 }
 
 export function inferSupplierCountry(fields: Pick<ExtractedReceiptFields, "supplier_iban" | "supplier_vat_no" | "raw_text">): string | undefined {
-  // The VAT number names the supplier's tax home; an IBAN may be a foreign
-  // collection account, so the VAT country wins when both are present.
-  return getClientCountryFromVatNumber(fields.supplier_vat_no) ??
-    getClientCountryFromIban(fields.supplier_iban) ??
-    getClientCountryFromText(fields.raw_text);
+  // A VAT number, an IBAN and a supplier address naming different countries
+  // leave the jurisdiction undecided (undefined → review): a foreign company
+  // with an EE VAT registration must not be resolved against the Estonian
+  // register by its foreign registry number.
+  // A prefix that names no known country ("KMKREE…", a mis-read label) is no
+  // jurisdiction signal against the IBAN.
+  const rawVatCountry = getClientCountryFromVatNumber(fields.supplier_vat_no);
+  const vatCountry = rawVatCountry && Object.values(IBAN_COUNTRY_TO_CLIENT_COUNTRY).includes(rawVatCountry)
+    ? rawVatCountry
+    : undefined;
+  const ibanCountry = getClientCountryFromIban(fields.supplier_iban);
+  if (vatCountry && ibanCountry && vatCountry !== ibanCountry) return undefined;
+  const country = vatCountry ?? ibanCountry ?? rawVatCountry;
+  if (vatCountry === "EST" && !ibanCountry) {
+    const textCountry = getClientCountryFromText(fields.raw_text);
+    if (textCountry && textCountry !== "EST") return undefined;
+  }
+  return country ?? getClientCountryFromText(fields.raw_text);
 }
 
 // Phrases an invoice/receipt prints when VAT is shifted to the recipient

@@ -2900,8 +2900,35 @@ describe("supplier IBAN vs the buyer's own account", () => {
     expect(extractReceiptFieldsFromText(text, "x.pdf", { ownIbans: ["EE382200221020145685"] }).supplier_iban).toBe("DE89370400440532013000");
   });
 
-  it("the VAT-number country wins over a conflicting IBAN country", () => {
-    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: "DE812871812", raw_text: "" })).toBe("DEU");
+  it("a VAT country that conflicts with the IBAN country is left for review", () => {
+    expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: "DE812871812", raw_text: "" })).toBeUndefined();
     expect(inferSupplierCountry({ supplier_iban: "EE382200221020145685", supplier_vat_no: undefined, raw_text: "" })).toBe("EST");
+  });
+
+  const dutch = [
+    "Example Logistics B.V.", "Herengracht 100", "1015 BS Amsterdam", "Netherlands",
+    "Registration no: 12345678", "VAT: EE100931558", "IBAN NL91ABNA0417164300",
+    "Invoice no: NL-2026-7", "Date: 2026-10-01", "Subtotal 100.00 EUR", "VAT 24% 24.00 EUR", "Total 124.00 EUR",
+  ].join("\n");
+
+  it("does not infer Estonia for a Dutch supplier printing an EE VAT number (Codex slice 4 #3)", () => {
+    const fields = extractReceiptFieldsFromText(dutch, "x.pdf");
+    expect(fields.supplier_vat_no).toBe("EE100931558");
+    expect(fields.supplier_iban).toBe("NL91ABNA0417164300");
+    expect(inferSupplierCountry(fields)).toBeUndefined();
+  });
+
+  it("does not infer Estonia from an EE VAT number alone against a foreign supplier address", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Example Logistics B.V.\nAmsterdam\nNetherlands" })).toBeUndefined();
+  });
+
+  it("does not let a mis-read VAT prefix that names no country conflict with the IBAN", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "KMKREE102617582", supplier_iban: "EE382200221020145685", raw_text: "" })).toBe("EST");
+  });
+
+  it("infers Estonia when the VAT number and the IBAN or address agree", () => {
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", supplier_iban: "EE382200221020145685", raw_text: "" })).toBe("EST");
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Telia Eesti AS\nTallinn, Estonia" })).toBe("EST");
+    expect(inferSupplierCountry({ supplier_vat_no: "EE100931558", raw_text: "Telia Eesti AS\nInvoice 1" })).toBe("EST");
   });
 });
