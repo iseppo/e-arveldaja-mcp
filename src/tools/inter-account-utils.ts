@@ -152,19 +152,25 @@ export function buildInterAccountJournalIndex(
     const credit = a.type === "C" ? a : b;
     const rawAmount = debit.base_amount ?? debit.amount;
     if (rawAmount == null) continue;
-    const amount = roundMoney(rawAmount);
+    // A fee-deducted transfer (C A 100 / D B 99 / D fee 1) has different
+    // bank-leg amounts; index under both so a lookup by either leg's amount hits.
+    const rawCreditAmount = credit.base_amount ?? credit.amount;
+    const amounts = new Set([roundMoney(rawAmount)]);
+    if (rawCreditAmount != null) amounts.add(roundMoney(rawCreditAmount));
     const entry: InterAccountJournalEntry = {
       journal_id: j.id,
       document_number: j.document_number,
       origin: "snapshot",
     };
     // Insert in both directions so we catch it regardless of which side we're checking from
-    const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-    const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
-    for (const key of [key1, key2]) {
-      const existing = index.get(key);
-      if (existing) existing.push(entry);
-      else index.set(key, [entry]);
+    for (const amount of amounts) {
+      const key1 = `${credit.accounts_dimensions_id}|${debit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
+      const key2 = `${debit.accounts_dimensions_id}|${credit.accounts_dimensions_id}|${amount}|${j.effective_date}`;
+      for (const key of [key1, key2]) {
+        const existing = index.get(key);
+        if (existing) existing.push(entry);
+        else index.set(key, [entry]);
+      }
     }
   }
   return index;

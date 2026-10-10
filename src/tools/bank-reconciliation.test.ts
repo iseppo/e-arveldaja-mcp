@@ -2140,6 +2140,37 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.already_handled[0]!.existing_journal_id).toBe(999);
     });
 
+    it("skips the source withdrawal of a fee-deducted transfer already journalized (C A 100 / D B 99 / D fee 1)", async () => {
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+      ];
+
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 31, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2025-12-05", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: "BE08905767222113", description: "WISE:T31 top-up [source_direction=OUT]" },
+        ],
+        bankAccounts: twoAccounts,
+        companyName: "Test OÜ",
+        journals: [{
+          id: 998, effective_date: "2025-12-05", is_deleted: false, registered: true,
+          postings: [
+            { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 100, base_amount: 100, is_deleted: false },
+            { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 99, base_amount: 99, is_deleted: false },
+            { accounts_id: 5120, type: "D", amount: 1, base_amount: 1, is_deleted: false },
+          ],
+        }],
+      });
+
+      const result = await executeInterAccount(handler);
+      const payload = parseMcpResponse(result.content[0]!.text);
+
+      expect(payload.skipped_already_handled).toBe(1);
+      expect(payload.already_handled[0]!.transaction_id).toBe(31);
+      expect(payload.already_handled[0]!.existing_journal_id).toBe(998);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
     it("never double-books when BOTH legs of an already-journalized transfer reach Phase 2", async () => {
       // Regression: an existing ref-less snapshot journal (id 999) already covers
       // a 100<->300 transfer, and BOTH of its bank legs are still PROJECT rows
