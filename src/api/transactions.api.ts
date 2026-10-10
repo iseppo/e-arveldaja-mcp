@@ -257,8 +257,16 @@ export class TransactionsApi extends BaseResource<Transaction> {
     let clientsIdRollbackValue: number | null | undefined;
     // The client guard below gates registration on tx.clients_id: read it live,
     // not from the 120s per-id cache (RIK copies the live client into the journal).
-    if (body.length > 0) cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
+    // It also gates registering at all: a confirm queued behind one that just
+    // registered this row must see the live CONFIRMED status, not a cached PROJECT.
+    cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
     const tx = await this.get(id);
+    if (tx && typeof tx.status === "string" && tx.status !== "PROJECT") {
+      throw new Error(
+        `Transaction ${id} is ${tx.status}, not PROJECT; refusing to register it again. ` +
+        "Freshly read the transaction (and its journal) before retrying.",
+      );
+    }
     if (tx && body.length > 0 && (autoFixClientsId || hasInvoiceDistribution)) {
       if (!tx.clients_id) {
         // Auto-fix missing clients_id from linked invoice

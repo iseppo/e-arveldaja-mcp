@@ -1010,6 +1010,35 @@ describe("TransactionsApi.confirm reads the live client before registering", () 
     expect(registered[0]!.journalClient).toBe(invoiceClient);
   });
 
+  it("L4 a confirm queued behind a successful one refuses instead of registering again", async () => {
+    const live = { id: 7, status: "PROJECT", clients_id: 42 as number | null };
+    const registers: string[] = [];
+    const { client } = makeClient({
+      getById: (path) => {
+        if (path === "/transactions/7") return { ...live };
+        if (path === "/sale_invoices/9") return { id: 9, clients_id: 42 };
+        return undefined;
+      },
+      patchHandler: ({ path }) => {
+        if (path.endsWith("/register")) {
+          registers.push(path);
+          live.status = "CONFIRMED";
+        }
+        return { code: 200, messages: [] };
+      },
+    });
+    const api = new TransactionsApi(client);
+    const dist = [{ related_table: "sale_invoices", related_id: 9, amount: 100 }];
+
+    const results = await Promise.allSettled([api.confirm(7, dist), api.confirm(7, dist), api.confirm(7)]);
+
+    expect(registers).toEqual(["/transactions/7/register"]);
+    expect(results.map(r => r.status)).toEqual(["fulfilled", "rejected", "rejected"]);
+    for (const r of results.slice(1)) {
+      expect(String((r as PromiseRejectedResult).reason)).toMatch(/CONFIRMED, not PROJECT/);
+    }
+  });
+
   it("F4 refuses to register when the client read back after the auto-fix is not the one just written", async () => {
     let txReads = 0;
     const patchCalls: string[] = [];
