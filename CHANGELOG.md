@@ -37,6 +37,13 @@
 - `prepare_year_end_close` / `execute_year_end_close`: an earlier year's late profit transfer no longer blocks this year's close. A journal numbered `YEC-RETAINED-`/`YEC-RESULT-` of another year is never taken as this year's transfer, and an unnumbered 31 December transfer that moves exactly the earlier years' untransferred 2970 balance counts as that earlier transfer (it is `ambiguous` only if it also equals this year's result). The manual-review reason for an unnumbered 31 December transfer now says how to fix it: re-date it, or number it `YEC-RETAINED-<year>`.
 - PDF/receipt extraction no longer returns the company's own bank account as `supplier_iban`. An example is the account a SEPA direct-debit notice says it debits ("debited from your account EE…"). The company's own bank-account IBANs are now excluded in `extract_pdf_invoice`, `process_accounting_document`, receipt batch and the `resolve_supplier` preview. IBANs right after a debit-mandate phrase are skipped. An IBAN on a buyer-labelled line is used only when no other IBAN is found.
 - When the supplier's VAT number and IBAN give different countries, the VAT-number country is used.
+- Inter-account reconciliation: the fee-deducted pre-pass flags only one outgoing + one incoming leg with outgoing ≥ incoming; two same-direction rows are booked one-sided as before. The review text no longer says to delete a row when the directions are unproven.
+- Inter-account reconciliation: pairs held back from one-sided booking are now listed in `ambiguous_pairs` (`counterpart_lacks_own_origin`, `conflicting_transfer_amounts`) instead of disappearing from the output.
+- Inter-account reconciliation warns when the company name has no legal form: own-transfer detection then relies on IBANs only.
+- `analyze_unconfirmed_transactions` matches the company name with the same name + legal-form rule as reconcile, and suggests review (no distribution) for transfers reconcile would hold back (possible fee-deducted pairs, mirrors without own-origin evidence).
+- CAMT re-import on a ledger written by this version no longer re-creates a row when one leg's current key equals another leg's legacy alias key (detail-less charges with and without `AddtlNtryInf`; same-currency legs whose middle countervalue equals the proportional split).
+- PDF IBAN extraction: a debit phrase skips only the IBAN it governs ("debited from …" / "kontolt" right before it), so "Makseviis: otsekorraldus IBAN: …" returns the supplier IBAN; payee labels (recipient, saaja, beneficiary) no longer demote an IBAN as buyer-side.
+- Note: downgrading to an earlier version after importing Wise split-funded card payments re-books those legs (older versions don't recognise the per-currency tags).
 
 ### Security
 
