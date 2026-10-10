@@ -794,7 +794,9 @@ async function analyzeYearEndClose(
       matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit)));
   // A matching off-date entry may equally be an earlier year's late transfer
   // when that earlier result is still sitting untransferred on 2970.
-  const offDateAmbiguous = offDateMatches.length > 1 || (offDateMatches.length === 1 && Math.abs(priorYearResidual) >= 0.01 &&
+  // Its YEC-RETAINED-YYYY number already says which year it belongs to.
+  const offDateAmbiguous = offDateMatches.length > 1 || (offDateMatches.length === 1 &&
+    offDateMatches[0]!.document_number !== transferDocumentNumber && Math.abs(priorYearResidual) >= 0.01 &&
     Math.abs(netDebit(offDateMatches, ids.currentYearProfit) - priorYearResidual) < 0.01);
   const describeJournals = (journals: Journal[]) =>
     journals.map((journal) => `${journal.id} (${journal.effective_date}: ${netDebit([journal], ids.currentYearProfit)} EUR)`).join(", ");

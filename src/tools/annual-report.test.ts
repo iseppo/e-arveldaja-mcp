@@ -1571,6 +1571,14 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
       expect((await execute(journals)).docs).toEqual(["YEC-RESULT-2025"]);
     });
 
+    it("a numbered YEC-RETAINED-YYYY off-date transfer is this year's even when an older result is still open", async () => {
+      const prior2024 = makeJournal("2024-05-01", [makePosting(1020, "D", 50), makePosting(3100, "C", 50)], { id: 3502 });
+      const keyed = makeJournal("2026-12-01", [makePosting(2970, "D", 50), makePosting(2960, "C", 50)],
+        { id: 3508, document_number: "YEC-RETAINED-2025" });
+      const payload = await prepare([...profitYear(), prior2024, keyed]);
+      expect(payload.close_status.retained_transfer_entry).toBe("exists");
+    });
+
     it("a partial 1 January transfer (30 of 50) is partially_closed with booked vs expected; only the 20 remainder, and only on acknowledgement", async () => {
       const journals = [...profitYear(), handResult(), handTransfer({ postings: [makePosting(2970, "D", 30), makePosting(2960, "C", 30)] })];
       const payload = await prepare(journals);
