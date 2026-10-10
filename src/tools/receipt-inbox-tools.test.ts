@@ -89,10 +89,12 @@ function setupReceiptTool(
     purchaseInvoices?: unknown[];
     purchaseInvoiceDetails?: Record<number, unknown>;
     directoryAccess?: Omit<ReceiptDirectoryAccessOptions, "expectedCanonicalPath">;
+    allowWrites?: boolean;
   } = {},
 ) {
   const server = createMockToolServer();
   const apiOptions: AccountingWorkflowApiOptions = {
+    allowWrites: options.allowWrites,
     clientRows: options.clients,
     saleInvoiceRows: options.saleInvoices,
     purchaseInvoiceRows: options.purchaseInvoices,
@@ -163,8 +165,12 @@ const H14_INVOICE = {
   items: [],
 };
 
-function setupH14Tool(toolName: "apply_transaction_classifications" | "classify_bank_transactions") {
+function setupH14Tool(
+  toolName: "apply_transaction_classifications" | "classify_bank_transactions",
+  { allowWrites = false }: { allowWrites?: boolean } = {},
+) {
   const setup = setupReceiptTool(toolName, createTestRuntimeSafetyContext(), {
+    allowWrites,
     getImpl: vi.fn().mockImplementation(async (id: number) =>
       id === 100 ? { ...H14_TX, id: 100, date: "2026-03-23" } : H14_TX),
     clients: [{
@@ -377,7 +383,7 @@ describe("H14 post-create recovery state", () => {
 
   for (const testCase of cases) {
     it(testCase.name, async () => {
-      const { handler, api } = setupH14Tool("apply_transaction_classifications");
+      const { handler, api } = setupH14Tool("apply_transaction_classifications", { allowWrites: true });
       const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION]);
       api.purchaseInvoices.createAndSetTotals.mockResolvedValue({
         ...H14_INVOICE,
@@ -448,7 +454,7 @@ describe("H14 accumulator and invalidation recovery", () => {
   }
 
   it("H14 merged wrapper preserves granular partial mutations unchanged", async () => {
-    const { handler, api } = setupH14Tool("classify_bank_transactions");
+    const { handler, api } = setupH14Tool("classify_bank_transactions", { allowWrites: true });
     const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION], { merged: true });
     api.transactions.confirm.mockRejectedValueOnce(h14StructuredAmbiguity("transaction_confirmation"));
 
@@ -513,7 +519,7 @@ describe("H14 accumulator and invalidation recovery", () => {
   });
 
   it("H14 multi-transaction partial plus success preserves both outcomes", async () => {
-    const { handler, api } = setupH14Tool("apply_transaction_classifications");
+    const { handler, api } = setupH14Tool("apply_transaction_classifications", { allowWrites: true });
     const planHandle = await mintApplyHandle(handler, api, [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }]);
     configureDistinctInvoices(api);
     api.purchaseInvoices.confirmWithTotals.mockImplementation(async (id: number) => {
@@ -546,7 +552,7 @@ describe("H14 accumulator and invalidation recovery", () => {
   });
 
   it("H14 partial state is isolated across multiple groups", async () => {
-    const { handler, api } = setupH14Tool("apply_transaction_classifications");
+    const { handler, api } = setupH14Tool("apply_transaction_classifications", { allowWrites: true });
     const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION, group100]);
     configureDistinctInvoices(api);
     api.transactions.confirm.mockImplementation(async (id: number) => {
@@ -2234,7 +2240,7 @@ describe("receipt inbox tool status handling", () => {
   });
 
   it("apply_transaction_classifications still marks group applied when a non-EUR row is skipped but the EUR row succeeds", async () => {
-    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), { allowWrites: true,
       clients: [
         {
           id: 7,
@@ -2403,7 +2409,7 @@ describe("receipt inbox tool status handling", () => {
         clients_id: 7,
       });
 
-    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), { allowWrites: true,
       clients: [
         {
           id: 7,
@@ -2531,7 +2537,7 @@ describe("receipt inbox tool status handling", () => {
         : base;
     });
 
-    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), {
+    const { handler, api } = setupReceiptTool("apply_transaction_classifications", createTestRuntimeSafetyContext(), { allowWrites: true,
       clients: [
         {
           id: 7,

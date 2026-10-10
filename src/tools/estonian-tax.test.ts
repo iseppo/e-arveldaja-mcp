@@ -1624,6 +1624,8 @@ describe("prepare_dividend_package", () => {
     const results = await Promise.all([1, 2].map((shareholder) =>
       cb({ net_dividend: 400, shareholder_client_id: shareholder, effective_date: "2026-06-01" })));
     expect(results.filter((result) => !isError(result))).toHaveLength(1);
+    const loser = results.find((result) => isError(result))!;
+    expect(loser.content[0]!.text.toLowerCase()).toContain("insufficient retained earnings");
     expect(store.filter((journal) => String(journal.document_number ?? "").startsWith("DIV-"))).toHaveLength(1);
   });
 });

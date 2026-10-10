@@ -388,6 +388,17 @@ describe("exhaustive prompt-surface budget + shared safety wrapper", () => {
       .toEqual(["vat-registration-threshold", "lightyear-booking"]);
   });
 
+  it("the exposure reaches the prompt renderer: feature sections differ with every feature on vs off", () => {
+    // Strip the per-render run-data nonce so surfaces compare by content.
+    const render = (slug: (typeof PROMPT_REGISTRY)[number]["slug"], toolExposure: ToolExposureConfig) =>
+      buildWorkflowPromptSourceText(slug, {}, undefined, { toolExposure, toolProfile: "full" })
+        .replace(/RUN_DATA:[A-Za-z0-9_-]+/g, "RUN_DATA:nonce");
+    const differing = PROMPT_REGISTRY
+      .filter(definition => render(definition.slug, ALL_ENABLED) !== render(definition.slug, ALL_DISABLED))
+      .map(definition => definition.name);
+    expect(differing).toEqual(expect.arrayContaining(["setup-credentials", "month-end-close", "company-overview"]));
+  });
+
   it.each(PROMPT_REGISTRY.map(definition => [definition.name, definition] as const))(
     "%s: MCP prompt stays within budget with the wrapper exactly once (feature sections both ways)",
     (name, definition) => {
@@ -404,7 +415,7 @@ describe("exhaustive prompt-surface budget + shared safety wrapper", () => {
           definition.slug,
           parsedArguments,
           undefined,
-          exposure,
+          { toolExposure: exposure, toolProfile: "full" },
         );
         expect(rendered.length, `${name} MCP prompt length`).toBeLessThanOrEqual(PROMPT_SURFACE_LIMIT);
         expect(wrapperCount(rendered), `${name} MCP prompt wrapper count`).toBe(1);

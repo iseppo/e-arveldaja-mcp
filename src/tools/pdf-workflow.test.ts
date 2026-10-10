@@ -1398,6 +1398,22 @@ describe("pdf workflow tools", () => {
     );
   });
 
+  it("extract_pdf_invoice never returns the company's own bank-account IBAN as the supplier IBAN", async () => {
+    const text = "Supplier GmbH\nIBAN EE382200221020145685\nIBAN DE89370400440532013000\nTotal 120.00 EUR";
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("own-iban.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue({
+      text, pageCount: 1, ocrPartialFailure: false,
+      result: { text: "", pages: [{ pageNum: 1, text, width: 600, height: 800, textItems: [] }] } as any,
+    });
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", {
+      clients: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: { getBankAccounts: vi.fn().mockResolvedValue([{ account_name_est: "LHV", account_no: "EE38 2200 2210 2014 5685" }]) },
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/own-iban.pdf" })).content[0]!.text);
+    expect(payload.extracted.supplier_iban).toBe("DE89370400440532013000");
+    expect(payload.hints.supplier_iban).toBe("DE89370400440532013000");
+  });
+
   it("does not emit OCR quality signals for digital PDFs (no OCR, no confidence)", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("native.pdf", "%PDF-1.4") });
     mockedParseDocument.mockResolvedValue({

@@ -82,6 +82,8 @@ export interface SupplierResolutionOptions {
    * their own client record from before VAT registration (issue #22).
    */
   ownCompanyRegistryCode?: string;
+  /** The active company's own IBANs: never stored as the supplier's bank account. */
+  ownIbans?: readonly string[];
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
@@ -266,7 +268,10 @@ export async function resolveSupplierInternal(
     send_invoice_to_email: false,
     send_invoice_to_accounting_email: false,
     invoice_vat_no: previewVatNo,
-    bank_account_no: fields.supplier_iban,
+    bank_account_no: fields.supplier_iban &&
+      options?.ownIbans?.includes(fields.supplier_iban.replace(/\s+/g, "").toUpperCase())
+      ? undefined
+      : fields.supplier_iban,
     address_text: registryData?.address !== undefined ? desandboxText(registryData.address) : undefined,
   };
 

@@ -17,9 +17,10 @@ vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 const inline = (xml: string): string => `base64:${Buffer.from(xml, "utf8").toString("base64")}`;
 
-function setup() {
+function setup({ allowWrites = false }: { allowWrites?: boolean } = {}) {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi({
+    allowWrites,
     accountDimensions: [fixtureAccountDimension({ id: 7 })],
     bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7 })],
     transactionRows: [],
@@ -67,7 +68,7 @@ describe("CAMT compact profile routing", () => {
   });
 
   it("guided execute issues an operation-result handle and references get_operation_result_page", async () => {
-    const { api, handler } = setup();
+    const { api, handler } = setup({ allowWrites: true });
     await runWithToolProfile("guided", async () => {
       const dry = await call(handler, { file_path: inline(fixtureCamtXml()), accounts_dimensions_id: 7, execute: false });
       const planHandle = dry.summary.plan_handle as string;

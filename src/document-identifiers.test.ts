@@ -160,6 +160,20 @@ describe("extractVatNumber", () => {
 });
 
 describe("extractIban", () => {
+  it("skips the buyer's own account on a debit-mandate or buyer line and returns the supplier IBAN", () => {
+    expect(extractIban("The amount will be debited from your account EE38 2200 2210 2014 5685 BIC HABAEE2X\nIBAN DE89 3704 0044 0532 0130 00"))
+      .toBe("DE89370400440532013000");
+    expect(extractIban("Summa debiteeritakse kontolt EE382200221020145685\nIBAN DE89370400440532013000")).toBe("DE89370400440532013000");
+    expect(extractIban("Maksja: Minu OÜ, EE382200221020145685\nIBAN DE89370400440532013000")).toBe("DE89370400440532013000");
+    expect(extractIban("The amount will be debited from your account EE382200221020145685")).toBeUndefined();
+  });
+
+  it("excludes the company's own IBANs", () => {
+    expect(extractIban("IBAN EE38 2200 2210 2014 5685\nIBAN DE89370400440532013000", { exclude: ["EE38 2200 2210 2014 5685"] }))
+      .toBe("DE89370400440532013000");
+    expect(extractIban("IBAN EE382200221020145685", { exclude: "EE382200221020145685" })).toBeUndefined();
+  });
+
   it("extracts IBANs grouped with no-break spaces from PDF text", () => {
     expect(extractIban("IBAN EE38\u00A02200\u00A02210\u00A02014\u00A05685 BIC HABAEE2X")).toBe("EE382200221020145685");
     expect(extractIban("FR76\u202F3000\u202F6000\u202F0112\u202F3456\u202F7890\u202F189")).toBe("FR7630006000011234567890189");

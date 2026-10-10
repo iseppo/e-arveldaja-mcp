@@ -843,19 +843,21 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
     return setupTool("month_end_close_checklist", options);
   }
 
-  // The tool uses dateTo = `${month}-${lastDay}`; a completed checklist with a
-  // summary means the last day was computed without errors.
+  // The tool uses dateTo = `${month}-${lastDay}`: an unconfirmed journal on
+  // the last day is in the month, one dated the day after (as a string) is not.
   it.each([
-    ["returns 28 days for February in a non-leap year (2025-02)", "2025-02"],
-    ["returns 29 days for February in a leap year (2024-02)", "2024-02"],
-    ["returns 31 days for December (2024-12)", "2024-12"],
-    ["handles month with 30 days (2024-04)", "2024-04"],
-  ])("%s", async (_name, month) => {
-    const handler = setupChecklist();
+    ["returns 28 days for February in a non-leap year (2025-02)", "2025-02", 28],
+    ["returns 29 days for February in a leap year (2024-02)", "2024-02", 29],
+    ["returns 31 days for December (2024-12)", "2024-12", 31],
+    ["handles month with 30 days (2024-04)", "2024-04", 30],
+  ])("%s", async (_name, month, lastDay) => {
+    const unconfirmed = (id: number, day: number) =>
+      ({ id, effective_date: `${month}-${day}`, registered: false, is_deleted: false, postings: [] }) as unknown as Journal;
+    const handler = setupChecklist({ journals: [unconfirmed(1, lastDay), unconfirmed(2, lastDay + 1)] });
     const result = await handler({ month });
     const payload = parseMcpResponse(result.content[0]!.text);
     expect(payload.month).toBe(month);
-    expect(payload.summary).toBeDefined();
+    expect(payload.unconfirmed_journals.items.map((item: { id: number }) => item.id)).toEqual([1]);
   });
 });
 

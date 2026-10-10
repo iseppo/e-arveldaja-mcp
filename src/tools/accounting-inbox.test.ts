@@ -470,6 +470,8 @@ describe("accounting_inbox (scan mode)", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
     expect(payload.scan.scanned_candidate_files).toBe(4);
+    // Seam: the tool output reports the scanner's real default budget.
+    expect(payload.scan.entry_limit).toBe(MAX_SCANNED_FILES);
     expect(payload.detected_inputs.camt_files).toHaveLength(1);
     expect(payload.detected_inputs.wise_csv_files).toHaveLength(1);
     expect(payload.detected_inputs.receipt_folders).toHaveLength(1);

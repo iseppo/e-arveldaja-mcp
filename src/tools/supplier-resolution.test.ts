@@ -181,6 +181,18 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
     expect(result.preview_client?.invoice_vat_no).toBeUndefined();
   });
 
+  it("never previews the company's own IBAN as the new supplier's bank account", async () => {
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [],
+      { supplier_name: "Hetzner Online GmbH", supplier_iban: "ee38 2200 2210 2014 5685" },
+      false,
+      { ownIbans: ["EE382200221020145685"] },
+    );
+    expect(result.preview_client?.name).toBe("Hetzner Online GmbH");
+    expect(result.preview_client?.bank_account_no).toBeUndefined();
+  });
+
   it("normalizes whitespace and case when comparing ownCompanyVat", async () => {
     const ownCompany = makeClient({
       id: 100,

@@ -51,6 +51,7 @@ import {
   scanReceiptFolderInternal,
 } from "../tools/receipt-inbox-files.js";
 import { findDuplicateInvoice } from "../tools/receipt-inbox-matching.js";
+import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
@@ -314,6 +315,7 @@ async function extractReceiptFields(
   snapshot: ReceiptFileSnapshot,
   ownCompanyVat?: string,
   ownCompanyRegistryCode?: string,
+  ownIbans?: string[],
 ): Promise<ExtractedReceiptFields> {
   // Parse the immutable snapshot bytes (snapshot_path), never the live folder
   // file, so the parser and the later uploader observe byte-identical content.
@@ -327,6 +329,7 @@ async function extractReceiptFields(
   return extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
+    ownIbans,
     textItems: allTextItems,
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
@@ -336,6 +339,7 @@ async function extractReceiptFields(
 interface ProcessSingleReceiptOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
+  ownIbans?: string[];
   bankTransactions: Transaction[];
   executionMode: ReceiptBatchExecutionMode;
   legacyExecuteCreate: boolean;
@@ -354,7 +358,7 @@ async function processSingleReceipt(
   const notes: string[] = [];
 
   try {
-    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode);
+    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode, options.ownIbans);
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
     const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
     const signals: ExtractionConfidenceSignals = {};
@@ -718,6 +722,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         ownCompanyVat,
         input.ownCompanyName,
       );
+      const ownIbans = await loadOwnIbans(this.api);
       const allTransactions = await this.api.transactions.listAll();
       const bankTransactions = selectBatchBankTransactions(allTransactions, input.accountsDimensionsId, {
         ...(input.transactionDateFrom ? { transaction_date_from: input.transactionDateFrom } : {}),
@@ -740,6 +745,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
           results.push(await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,
+            ownIbans,
             bankTransactions,
             executionMode,
             legacyExecuteCreate,

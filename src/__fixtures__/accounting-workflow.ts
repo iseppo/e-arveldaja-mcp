@@ -57,6 +57,11 @@ export interface MockAccountingWorkflowApi {
 }
 
 export interface AccountingWorkflowApiOptions {
+  /**
+   * Write methods reject by default so scan / dry-run tests fail loudly on an
+   * accidental mutation. Execute-mode tests opt in (or override the method).
+   */
+  allowWrites?: boolean;
   clientRows?: unknown[];
   transactionRows?: unknown[];
   transactionDetails?: Record<number, unknown>;
@@ -89,12 +94,15 @@ export function getRegisteredToolHandler(server: MockToolServer, toolName: strin
 }
 
 export function createAccountingWorkflowApi(options: AccountingWorkflowApiOptions = {}): MockAccountingWorkflowApi & ApiContext {
+  const write = (result: unknown) => options.allowWrites
+    ? vi.fn().mockResolvedValue(result)
+    : vi.fn().mockRejectedValue(new Error("unexpected mutation in test fixture (pass allowWrites: true)"));
   const api: MockAccountingWorkflowApi = {
     clients: {
       findByCode: vi.fn().mockResolvedValue(undefined),
       findByName: vi.fn().mockResolvedValue([]),
       listAll: vi.fn().mockResolvedValue(options.clientRows ?? []),
-      create: vi.fn().mockResolvedValue({ id: 7001 }),
+      create: write({ id: 7001 }),
       invalidateListCache: vi.fn(),
       ...options.clients,
     },
@@ -115,9 +123,9 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
         if (!detail) throw new Error(`Missing purchase invoice ${id}`);
         return detail;
       }),
-      createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001 }),
-      confirmWithTotals: vi.fn().mockResolvedValue({}),
-      invalidate: vi.fn().mockResolvedValue({}),
+      createAndSetTotals: write({ id: 9001 }),
+      confirmWithTotals: write({}),
+      invalidate: write({}),
       invalidateListCache: vi.fn(),
       ...options.purchaseInvoices,
     },
@@ -133,10 +141,10 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
           ? undefined
           : { id, status: "CONFIRMED", is_deleted: false });
       }),
-      create: vi.fn().mockResolvedValue({ created_object_id: 9001 }),
-      update: vi.fn().mockResolvedValue({}),
-      delete: vi.fn().mockResolvedValue({}),
-      confirm: vi.fn().mockResolvedValue({}),
+      create: write({ created_object_id: 9001 }),
+      update: write({}),
+      delete: write({}),
+      confirm: write({}),
       ...options.transactions,
     },
     readonly: {

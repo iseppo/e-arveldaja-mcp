@@ -135,6 +135,8 @@ export interface ExtractedIdentifiers {
 export interface ExtractIdentifiersOptions {
   excludeVat?: string | readonly string[];
   excludeRegCode?: string | readonly string[];
+  /** The active company's own IBANs (bank accounts), never the supplier IBAN. */
+  excludeIban?: string | readonly string[];
   /**
    * Text items with 2-D coordinates from the PDF parser. When provided,
    * identifier candidates are reclassified as supplier-side or buyer-side
@@ -242,11 +244,28 @@ const IBAN_LENGTHS: Record<string, number> = {
   TL: 23, TN: 24, TR: 26, UA: 29, VA: 22, VG: 24, XK: 20, YE: 30,
 };
 
-export function extractIban(text: string): string | undefined {
+// A direct-debit notice prints the BUYER's own account the amount is taken
+// from ("debited from your account EE..."); it is never the supplier's IBAN.
+const DEBIT_MANDATE_RE = /\b(?:debited\s+from|will\s+be\s+debited|direct\s+debit|otsekorraldus\w*|debiteeritakse)\b/i;
+
+function normalizeIbanForCompare(value: string): string {
+  return value.replace(/\s+/g, "").toUpperCase();
+}
+
+export interface ExtractIbanOptions {
+  /** The active company's own IBANs — never returned as the supplier IBAN. */
+  exclude?: string | readonly string[];
+}
+
+export function extractIban(text: string, options?: ExtractIbanOptions): string | undefined {
+  const excluded = new Set(
+    (typeof options?.exclude === "string" ? [options.exclude] : options?.exclude ?? []).map(normalizeIbanForCompare),
+  );
   // Scan every IBAN-shaped candidate and return the first that passes the
   // mod-97 checksum — a document can carry a malformed/partial IBAN (or a VAT
   // number) before the real one, so we continue past invalid candidates.
   // PDF text often groups IBANs with (narrow) no-break spaces, so accept those too.
+  let buyerLineFallback: string | undefined;
   const candidateRe = /\b([A-Z]{2}\d{2}(?:[ \t\u00A0\u202F]*[A-Z0-9]){11,30})\b/gi;
   let match: RegExpExecArray | null;
   while ((match = candidateRe.exec(text)) !== null) {
@@ -270,13 +289,24 @@ export function extractIban(text: string): string | undefined {
         candidate = raw.slice(0, cut).replace(/\s+/g, "").toUpperCase();
       }
     }
-    if (candidate !== undefined && isValidIban(candidate)) return candidate;
+    if (candidate !== undefined && isValidIban(candidate) && !excluded.has(candidate)) {
+      // Only the text just before the IBAN on its own line decides whether it
+      // is the buyer's account (payer/buyer label or a debit-mandate phrase).
+      const lineStart = text.lastIndexOf("\n", match.index) + 1;
+      const before = text.slice(Math.max(lineStart, match.index - 80), match.index);
+      // A buyer label is weaker evidence ("Saaja" can also label the payee),
+      // so such a candidate is only the fallback when no other IBAN is found.
+      if (!DEBIT_MANDATE_RE.test(before)) {
+        if (!BUYER_MARKER_RE.test(before)) return candidate;
+        buyerLineFallback ??= candidate;
+      }
+    }
     // Resume right after this candidate's start so an IBAN later inside the
     // rejected span is still found. Each restart moves forward and a candidate
     // spans at most ~34 characters plus spacing, so the scan stays linear-ish.
     candidateRe.lastIndex = match.index + 1;
   }
-  return undefined;
+  return buyerLineFallback;
 }
 
 export function extractReferenceNumber(text: string): string | undefined {
@@ -843,7 +873,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
 export function extractIdentifiers(text: string, options?: ExtractIdentifiersOptions): ExtractedIdentifiers {
   const excludeVat = normalizeVatForCompare(options?.excludeVat);
   const excludeReg = normalizeRegCode(options?.excludeRegCode);
-  const iban = extractIban(text);
+  const iban = extractIban(text, { exclude: options?.excludeIban });
   const ref_number = extractReferenceNumber(text);
   const regCode = resolveRegCode(text, options);
   const vatNo = resolveVatNo(text, options);
