@@ -2,7 +2,7 @@ import type { ApiContext } from "../../tools/crud/shared.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
 import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
-import { normalizeCompanyName } from "../../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { bankPostingSideForInvoiceMatch, bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { logAudit } from "../../audit-log.js";
@@ -727,6 +727,7 @@ export async function runInterAccountMatching(
     ownIbanToDimension,
     dimensionToIban,
     companyName,
+    companyLegalName: invoiceInfo.invoice_company_name ?? "",
     targetAccountsDimensionsId: target_accounts_dimensions_id,
   };
 
@@ -786,17 +787,16 @@ export async function runInterAccountMatching(
   const oneSidedInferenceCache = new Map<number, OneSidedInference>();
 
   // Deleting a row as a transfer mirror needs positive evidence it came from
-  // the source account: its counterparty IBAN is the source account's, or the
-  // payer is named exactly as the company / an own bank account. A bare row
-  // (no IBAN, no name) or a merely similar name is not evidence.
+  // the source account: its counterparty IBAN is the source account's, or (with
+  // no IBAN) the payer is the company itself — same name AND same legal form.
+  // A row from any other IBAN (third party or another own account) is never a
+  // mirror of this source, whatever its name says. A bare row (no IBAN, no
+  // name), a merely similar name, or an own account's display title (a bank's
+  // own refund "Swedbank AS" vs an account titled "Swedbank") is not evidence.
   function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
     const iban = (row.bank_account_no ?? "").trim().toUpperCase();
-    if (iban && ownIbanToDimension.get(iban)?.has(sourceDimensionId)) return true;
-    const name = normalizeCompanyName(row.bank_account_name ?? "");
-    return Boolean(name) && (
-      (companyName !== "" && name === companyName) ||
-      [...dimensionToTitle.values()].some(title => normalizeCompanyName(title) === name)
-    );
+    if (iban) return ownIbanToDimension.get(iban)?.has(sourceDimensionId) ?? false;
+    return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
   }
 
   // --- Phase 1: C↔D pair matching ---

@@ -52,3 +52,41 @@ export function normalizeCompanyName(name?: string | null, options?: NormalizeCo
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// Spelled-out Estonian legal forms, folded to their abbreviation so
+// "Osaühing Foo" and "Foo OÜ" compare equal. Applied after diacritic stripping.
+const SPELLED_OUT_LEGAL_FORMS: Array<[RegExp, string]> = [
+  [/\bosauhing\b/g, "ou"],
+  [/\baktsiaselts\b/g, "as"],
+  [/\bmittetulundusuhing\b/g, "mtu"],
+  [/\btaisuhing\b/g, "tu"],
+  [/\bfuusilisest isikust ettevotja\b/g, "fie"],
+];
+
+function legalIdentityKey(name?: string | null): { base: string; form: string } {
+  let folded = (name ?? "").trim().toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "");
+  for (let i = 0; i < 3; i++) {
+    const before = folded;
+    folded = folded.replace(/(\b[a-z])\.\s*(?=[a-z]\b)/g, "$1");
+    if (folded === before) break;
+  }
+  for (const [pattern, abbreviation] of SPELLED_OUT_LEGAL_FORMS) folded = folded.replace(pattern, abbreviation);
+  const forms = [...new Set(folded.match(LEGAL_SUFFIXES) ?? [])].sort();
+  return { base: normalizeCompanyName(folded), form: forms.join(" ") };
+}
+
+/**
+ * Strict "same legal person" name comparison for decisions that move money
+ * (transfer-mirror deletion, one-sided own-transfer inference). Unlike
+ * {@link normalizeCompanyName} equality, the legal form must also agree
+ * ("Foo AS" is not "Foo OÜ"), and a name carrying no legal form at all — a
+ * natural person such as "JAAN TAMM" vs the company "Jaan Tamm OÜ" — never
+ * matches.
+ */
+export function sameCompanyIdentity(a?: string | null, b?: string | null): boolean {
+  const left = legalIdentityKey(a);
+  const right = legalIdentityKey(b);
+  return left.base !== "" && left.form !== "" && left.base === right.base && left.form === right.form;
+}

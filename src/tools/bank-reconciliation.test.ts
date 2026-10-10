@@ -1472,6 +1472,52 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
 
+    it("does not pair with an incoming row named as the company but from a third-party IBAN", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [outAtoB, { ...customerIntoC, accounts_dimensions_id: 22, bank_account_name: "Test OÜ", clients_id: null }],
+        bankAccounts: threeAccounts.slice(0, 2),
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+
+    it("does not delete a receipt from a same-stem company with a different legal form", async () => {
+      // "Männipuu AS" is a different legal person from the company "Männipuu OÜ".
+      for (const bankAccountNo of ["EE77THIRD", null]) {
+        const out = { ...outAtoB, bank_account_name: "Männipuu OÜ" };
+        const receipt = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: bankAccountNo, bank_account_name: "Männipuu AS", clients_id: null };
+        const { handler, api } = setupInterAccountTool({
+          transactions: [out, receipt],
+          bankAccounts: threeAccounts.slice(0, 2),
+          companyName: "Männipuu OÜ",
+        });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        for (const call of api.transactions.confirm.mock.calls) expect(call[0]).toBe(1);
+      }
+    });
+
+    it("does not delete a bank's own refund named like an own account title", async () => {
+      // Own account titled "Swedbank"; the bank itself ("Swedbank AS") refunds a fee.
+      const accounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE11AAAA", iban_code: "EE11AAAA", accounts_dimensions_id: 11 },
+        { id: 2, account_name_est: "Swedbank", account_no: "EE22BBBB", iban_code: "EE22BBBB", accounts_dimensions_id: 22 },
+      ];
+      for (const bankAccountNo of ["EE55SWEDBANKOWN", null]) {
+        const out = { ...outAtoB, amount: 25, bank_account_name: "Männipuu OÜ" };
+        const refund = { ...customerIntoC, amount: 25, accounts_dimensions_id: 22, bank_account_no: bankAccountNo, bank_account_name: "Swedbank AS", clients_id: null };
+        const { handler, api } = setupInterAccountTool({ transactions: [out, refund], bankAccounts: accounts, companyName: "Männipuu OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
+    });
+
     it("does not pair with an IBAN-less incoming row whose counterparty name is a third party", async () => {
       const namedCustomerIntoB = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Customer AS" };
       const { handler, api } = setupInterAccountTool({
@@ -2093,6 +2139,26 @@ describe("reconcile_inter_account_transfers", () => {
   });
 
   describe("one-sided transfers (Phase 2)", () => {
+    it("does not book an owner's personal payment as a transfer when the company is named after the owner", async () => {
+      const twoAccounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
+        { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
+      ];
+      for (const name of ["JAAN TAMM", "Jaan Tamm AS"]) {
+        const { handler, api } = setupInterAccountTool({
+          transactions: [
+            { id: 10, status: "PROJECT", is_deleted: false, type: "D", amount: 500, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: null, bank_account_name: name, description: "laen [e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" },
+          ],
+          bankAccounts: twoAccounts,
+          companyName: "Jaan Tamm OÜ",
+        });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+
+        expect(payload.matched_one_sided).toBe(0);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      }
+    });
+
     it("detects one-sided transfer by company name when only 2 bank accounts", async () => {
       const twoAccounts = [
         { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },

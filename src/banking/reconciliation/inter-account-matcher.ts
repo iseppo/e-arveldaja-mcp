@@ -1,5 +1,5 @@
 import type { Transaction } from "../../types/api.js";
-import { normalizeCompanyName } from "../../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
@@ -25,6 +25,8 @@ export interface InterAccountMatchLookups {
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly dimensionToIban: Map<number, string>;
   readonly companyName: string;
+  /** The company's raw registered name (with legal form), for {@link sameCompanyIdentity}. */
+  readonly companyLegalName: string;
   readonly targetAccountsDimensionsId: number | undefined;
 }
 
@@ -61,9 +63,11 @@ export function inferOneSidedTransfer(
   }
 
   if (!targetDimension && !ibanTargetAmbiguous && companyName.length >= 4 && counterpartyName.length >= 4) {
-    // Exact normalized equality: a payer whose name merely contains the
-    // company name ("Männipuu Client AS" vs "Männipuu OÜ") is a third party.
-    const nameMatch = counterpartyName === companyName;
+    // Same name AND same legal form: a payer whose name merely contains the
+    // company name ("Männipuu Client AS" vs "Männipuu OÜ"), a same-stem company
+    // with another legal form ("Männipuu AS"), or the owner as a natural person
+    // ("JAAN TAMM" vs "Jaan Tamm OÜ") is a third party.
+    const nameMatch = sameCompanyIdentity(tx.bank_account_name, lookups.companyLegalName);
     if (nameMatch) {
       confidence += 60;
       reasons.push("counterparty_name_matches_company");

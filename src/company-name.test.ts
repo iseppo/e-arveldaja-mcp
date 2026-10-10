@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCompanyName } from "./company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "./company-name.js";
 
 describe("normalizeCompanyName", () => {
   it("removes punctuation left behind by legal suffix stripping", () => {
@@ -63,5 +63,32 @@ describe("normalizeCompanyName", () => {
     expect(normalizeCompanyName("NV Holdings")).toBe("holdings");
     expect(normalizeCompanyName("BV Solutions")).toBe("solutions");
     expect(normalizeCompanyName("Co Brand Studio")).toBe("brand studio");
+  });
+});
+
+describe("sameCompanyIdentity", () => {
+  it("matches the same base name with an equivalent legal form", () => {
+    expect(sameCompanyIdentity("TEST OU ", "Test OÜ")).toBe(true);
+    expect(sameCompanyIdentity("Männipuu O.Ü.", "Männipuu OÜ")).toBe(true);
+    expect(sameCompanyIdentity("Osaühing Männipuu", "Männipuu OÜ")).toBe(true);
+    expect(sameCompanyIdentity('OÜ "Männipuu"', "Männipuu OÜ")).toBe(true);
+    expect(sameCompanyIdentity("Aktsiaselts Männipuu", "Männipuu AS")).toBe(true);
+  });
+
+  it("rejects a different legal form for the same base name", () => {
+    expect(sameCompanyIdentity("Männipuu AS", "Männipuu OÜ")).toBe(false);
+    expect(sameCompanyIdentity("MANNIPUU FIE", "Männipuu OÜ")).toBe(false);
+  });
+
+  it("rejects a name without a legal form (e.g. a natural person)", () => {
+    expect(sameCompanyIdentity("JAAN TAMM", "Jaan Tamm OÜ")).toBe(false);
+    expect(sameCompanyIdentity("MANNIPUU", "Männipuu OÜ")).toBe(false);
+    expect(sameCompanyIdentity("Männipuu", "Männipuu")).toBe(false);
+  });
+
+  it("rejects different base names and empty input", () => {
+    expect(sameCompanyIdentity("Männipuu Client OÜ", "Männipuu OÜ")).toBe(false);
+    expect(sameCompanyIdentity("", "Männipuu OÜ")).toBe(false);
+    expect(sameCompanyIdentity(null, "Männipuu OÜ")).toBe(false);
   });
 });
