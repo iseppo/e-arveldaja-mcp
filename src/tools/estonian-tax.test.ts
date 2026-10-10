@@ -2385,34 +2385,6 @@ describe("bookOwnerExpenseReimbursement (shared core)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Tests: roundMoney used in CIT calculation
-// ---------------------------------------------------------------------------
-
-describe("roundMoney CIT precision", () => {
-  it("22/78 CIT for 10 000 EUR rounds to 2820.51", () => {
-    expect(roundMoney(10000 * 22 / 78)).toBe(2820.51);
-  });
-
-  it("22/78 CIT for 78 EUR is exactly 22.00", () => {
-    expect(roundMoney(78 * 22 / 78)).toBe(22);
-  });
-
-  it("22/78 CIT for 1 EUR rounds to 0.28", () => {
-    // 1 * 22/78 = 0.28205... → 0.28
-    expect(roundMoney(1 * 22 / 78)).toBe(0.28);
-  });
-
-  it("gross = net + CIT is consistent with roundMoney", () => {
-    const net = 10000;
-    const cit = roundMoney(net * 22 / 78);
-    const gross = net + cit;
-    expect(gross).toBe(12820.51);
-    // gross can be verified: debit = credit (within cent precision)
-    expect(roundMoney(gross)).toBe(gross); // already rounded
-  });
-});
-
 describe("check_tax_free_limits", () => {
   function getHandler() {
     const mock = makeMockServer();

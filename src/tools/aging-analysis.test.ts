@@ -146,111 +146,25 @@ describe("addDaysToDate (via due date computation)", () => {
 // ---------------------------------------------------------------------------
 
 describe("bucketLabel boundaries", () => {
-  // For each scenario we create a single invoice, set create_date + term_days
-  // so we know the due date, then pass as_of_date = due_date + daysOverdue.
-  // addDaysToDate(create_date, term_days) must equal due_date for the math to work.
-  // We use term_days=0 so due_date = create_date, then offset as_of_date.
-
-  function invoiceWithDueOffset(daysAfterDue: number, asOfDate: string) {
-    // due date = "2024-06-01" (create_date="2024-06-01", term_days=0)
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    return { inv, asOfDate };
-  }
-
-  it("exactly 0 days overdue → current", async () => {
-    const { inv } = invoiceWithDueOffset(0, "2024-06-01");
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-06-01" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "current")).toBeDefined();
-    expect(buckets.find(b => b.label === "1-30")).toBeUndefined();
-  });
-
-  it("1 day overdue → 1-30 bucket", async () => {
+  // Single invoice due 2024-06-01 (create_date 2024-06-01, term_days 0); the
+  // as_of_date offset places it in exactly one bucket. (0 days → current is
+  // covered by the daysBetween test above.)
+  it.each([
+    ["1 day overdue → 1-30 bucket", "2024-06-02", "1-30", "current"],
+    ["30 days overdue → 1-30 bucket (upper boundary)", "2024-07-01", "1-30", "31-60"],
+    ["31 days overdue → 31-60 bucket", "2024-07-02", "31-60", "1-30"],
+    ["60 days overdue → 31-60 bucket (upper boundary)", "2024-07-31", "31-60", "61-90"],
+    ["61 days overdue → 61-90 bucket", "2024-08-01", "61-90", undefined],
+    ["90 days overdue → 61-90 bucket (upper boundary)", "2024-08-30", "61-90", "90+"],
+    ["91 days overdue → 90+ bucket", "2024-08-31", "90+", undefined],
+  ] as const)("%s", async (_name, asOfDate, present, absent) => {
     const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
     const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-06-02" });
+    const result = await handler({ as_of_date: asOfDate });
     const data = parse((result.content[0] as { text: string }).text);
     const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "1-30")).toBeDefined();
-    expect(buckets.find(b => b.label === "current")).toBeUndefined();
-  });
-
-  it("30 days overdue → 1-30 bucket (upper boundary)", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-07-01" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "1-30")).toBeDefined();
-    expect(buckets.find(b => b.label === "31-60")).toBeUndefined();
-  });
-
-  it("31 days overdue → 31-60 bucket", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-07-02" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "31-60")).toBeDefined();
-    expect(buckets.find(b => b.label === "1-30")).toBeUndefined();
-  });
-
-  it("60 days overdue → 31-60 bucket (upper boundary)", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-07-31" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "31-60")).toBeDefined();
-    expect(buckets.find(b => b.label === "61-90")).toBeUndefined();
-  });
-
-  it("61 days overdue → 61-90 bucket", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-08-01" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "61-90")).toBeDefined();
-  });
-
-  it("90 days overdue → 61-90 bucket (upper boundary)", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-08-30" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "61-90")).toBeDefined();
-    expect(buckets.find(b => b.label === "90+")).toBeUndefined();
-  });
-
-  it("91 days overdue → 90+ bucket", async () => {
-    const inv = invoice({ id: 1, create_date: "2024-06-01", term_days: 0 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-08-31" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string }>;
-    expect(buckets.find(b => b.label === "90+")).toBeDefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Invoice exactly on due date
-// ---------------------------------------------------------------------------
-
-describe("invoice on due date", () => {
-  it("shows days_overdue=0 and lands in current bucket when queried on due date", async () => {
-    // due date = create_date + term_days = 2024-03-01 + 14 = 2024-03-15
-    const inv = invoice({ id: 1, create_date: "2024-03-01", term_days: 14 });
-    const handler = setupReceivables([inv]);
-    const result = await handler({ as_of_date: "2024-03-15" });
-    const data = parse((result.content[0] as { text: string }).text);
-    const buckets = data.aging_buckets as Array<{ label: string; invoices: Array<{ days_overdue: number }> }>;
-    const currentBucket = buckets.find(b => b.label === "current");
-    expect(currentBucket).toBeDefined();
-    expect(currentBucket!.invoices[0]!.days_overdue).toBe(0);
+    expect(buckets.find(b => b.label === present)).toBeDefined();
+    if (absent) expect(buckets.find(b => b.label === absent)).toBeUndefined();
   });
 });
 

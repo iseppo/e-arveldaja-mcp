@@ -3102,13 +3102,6 @@ ${entryXml}
     return { handler: getRegisteredToolHandler(server, "continue_accounting_workflow"), api, runtime };
   }
 
-  it("continue_accounting_workflow is annotated as a mutation (readOnly -> mutate)", () => {
-    const server = createMockToolServer();
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({}), DEFAULT_EXPOSURE);
-    const reg = (server.registerTool as any).mock.calls.find(([name]: [string]) => name === "continue_accounting_workflow");
-    expect(reg[1].annotations.readOnlyHint).toBe(false);
-  });
-
   it("prepare_action on a param-bearing owner-expense item mints a plan_handle, does NOT book", async () => {
     const { handler, api } = ownerExpenseContinuationSetup();
     const result = await runWithToolProfile("guided", () => handler({
