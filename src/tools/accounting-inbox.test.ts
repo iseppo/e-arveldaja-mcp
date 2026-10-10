@@ -577,68 +577,35 @@ describe("accounting_inbox (scan mode)", () => {
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 9,
-            name: "Seppo Sepp",
-            is_physical_entity: true,
-            is_related_party: true,
-            is_deleted: false,
-          },
-        ]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 5,
-            status: "PROJECT",
-            is_deleted: false,
-            type: "C",
-            amount: 150,
-            date: "2026-03-21",
-            accounts_dimensions_id: 101,
-            bank_account_name: "Seppo Sepp",
-            description: "Transfer",
-            cl_currencies_id: "EUR",
-          },
-        ]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-          {
-            accounts_dimensions_id: 102,
-            account_name_est: "SEB põhikonto",
-            account_no: "EE381010220123456789",
-            iban_code: "EE381010220123456789",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      clientRows: [
+        {
+          id: 9,
+          name: "Seppo Sepp",
+          is_physical_entity: true,
+          is_related_party: true,
+          is_deleted: false,
+        },
+      ],
+      transactionRows: [
+        {
+          id: 5,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 150,
+          date: "2026-03-21",
+          accounts_dimensions_id: 101,
+          bank_account_name: "Seppo Sepp",
+          description: "Transfer",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      bankAccounts: [
+        fixtureBankAccount(),
+        fixtureBankAccount({ accounts_dimensions_id: 102, account_name_est: "SEB põhikonto", account_no: "EE381010220123456789", iban_code: "EE381010220123456789" }),
+      ],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
@@ -741,48 +708,10 @@ describe("accounting_inbox (scan mode)", () => {
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    }));
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
@@ -849,75 +778,40 @@ describe("accounting_inbox (scan mode)", () => {
 
     const server = { registerTool: vi.fn() } as any;
     const runtimeSafetyContext = createTestRuntimeSafetyContext();
-    registerAccountingInboxTools(server, runtimeSafetyContext, {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 7,
-            name: "Acme Software OÜ",
-            is_deleted: false,
-            is_supplier: true,
-          },
-        ]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([
-          {
-            id: 5230,
-            name_est: "Muud tegevuskulud",
-            name_eng: "General expense",
-            account_type_est: "Kulud",
-            account_type_eng: "Expenses",
-          },
-        ]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([
-          {
-            id: 99,
-            name_est: "Muu kulu",
-            name_eng: "Other general expense",
-            accounts_id: 5230,
-            vat_accounts_id: 1510,
-            cl_vat_articles_id: 1,
-            vat_rate_dropdown: "24",
-            is_disabled: false,
-            priority: 1,
-          },
-        ]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any, EXPOSE_GRANULAR);
+    registerAccountingInboxTools(server, runtimeSafetyContext, createAccountingWorkflowApi({
+      clientRows: [
+        {
+          id: 7,
+          name: "Acme Software OÜ",
+          is_deleted: false,
+          is_supplier: true,
+        },
+      ],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+      accounts: [
+        {
+          id: 5230,
+          name_est: "Muud tegevuskulud",
+          name_eng: "General expense",
+          account_type_est: "Kulud",
+          account_type_eng: "Expenses",
+        },
+      ],
+      purchaseArticles: [
+        {
+          id: 99,
+          name_est: "Muu kulu",
+          name_eng: "Other general expense",
+          accounts_id: 5230,
+          vat_accounts_id: 1510,
+          cl_vat_articles_id: 1,
+          vat_rate_dropdown: "24",
+          is_disabled: false,
+          priority: 1,
+        },
+      ],
+    }), EXPOSE_GRANULAR);
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
@@ -1019,77 +913,40 @@ describe("accounting_inbox (scan mode)", () => {
     );
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 77,
-            status: "CONFIRMED",
-            accounts_dimensions_id: 101,
-            date: "2026-02-01",
-            type: "C",
-            amount: 10,
-            cl_currencies_id: "EUR",
-            bank_ref_number: null,
-            bank_account_name: "Vendor OÜ",
-            ref_number: null,
-            description: "Test payment one",
-            is_deleted: false,
-          },
-          {
-            id: 88,
-            status: "PROJECT",
-            accounts_dimensions_id: 101,
-            date: "2026-02-02",
-            type: "C",
-            amount: 20,
-            cl_currencies_id: "EUR",
-            bank_ref_number: null,
-            bank_account_name: "Other Vendor OÜ",
-            ref_number: null,
-            description: "Test payment two",
-            is_deleted: false,
-          },
-        ]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      transactionRows: [
+        {
+          id: 77,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 101,
+          date: "2026-02-01",
+          type: "C",
+          amount: 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: "Vendor OÜ",
+          ref_number: null,
+          description: "Test payment one",
+          is_deleted: false,
+        },
+        {
+          id: 88,
+          status: "PROJECT",
+          accounts_dimensions_id: 101,
+          date: "2026-02-02",
+          type: "C",
+          amount: 20,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: "Other Vendor OÜ",
+          ref_number: null,
+          description: "Test payment two",
+          is_deleted: false,
+        },
+      ],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
@@ -1172,64 +1029,27 @@ ${entryXml}
     );
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue(Array.from({ length: 6 }, (_, index) => {
-          const entryNo = index + 1;
-          return {
-            id: 200 + entryNo,
-            status: "CONFIRMED",
-            accounts_dimensions_id: 101,
-            date: `2026-02-0${entryNo}`,
-            type: "C",
-            amount: entryNo * 10,
-            cl_currencies_id: "EUR",
-            bank_ref_number: null,
-            bank_account_name: `Vendor ${entryNo} OÜ`,
-            ref_number: null,
-            description: `Test payment ${entryNo}`,
-            is_deleted: false,
-          };
-        })),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      transactionRows: Array.from({ length: 6 }, (_, index) => {
+        const entryNo = index + 1;
+        return {
+          id: 200 + entryNo,
+          status: "CONFIRMED",
+          accounts_dimensions_id: 101,
+          date: `2026-02-0${entryNo}`,
+          type: "C",
+          amount: entryNo * 10,
+          cl_currencies_id: "EUR",
+          bank_ref_number: null,
+          bank_account_name: `Vendor ${entryNo} OÜ`,
+          ref_number: null,
+          description: `Test payment ${entryNo}`,
+          is_deleted: false,
+        };
+      }),
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
@@ -1250,34 +1070,14 @@ ${entryXml}
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
       readonly: {
         getBankAccounts: vi.fn().mockRejectedValue(setupError),
         getAccountDimensions: vi.fn().mockRejectedValue(setupError),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
         getVatInfo: vi.fn().mockResolvedValue({}),
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
-    } as any);
+    }));
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
@@ -1309,69 +1109,33 @@ ${entryXml}
     workspacesToClean.push(workspace);
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 9,
-            name: "Seppo Sepp",
-            is_physical_entity: true,
-            is_related_party: true,
-            is_deleted: false,
-          },
-        ]),
-      },
-      journals: {
-        listAllWithPostings: vi.fn().mockResolvedValue([]),
-      },
-      products: {},
-      saleInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      purchaseInvoices: {
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([
-          {
-            id: 5,
-            status: "PROJECT",
-            is_deleted: false,
-            type: "C",
-            amount: 150,
-            date: "2026-03-21",
-            accounts_dimensions_id: 101,
-            bank_account_name: "Seppo Sepp",
-            description: "Transfer",
-            cl_currencies_id: "EUR",
-          },
-        ]),
-      },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          {
-            accounts_dimensions_id: 101,
-            account_name_est: "LHV põhikonto",
-            account_no: "EE637700771011212909",
-            iban_code: "EE637700771011212909",
-          },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          {
-            id: 101,
-            accounts_id: 1020,
-            title_est: "LHV põhikonto",
-            is_deleted: false,
-          },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      clientRows: [
+        {
+          id: 9,
+          name: "Seppo Sepp",
+          is_physical_entity: true,
+          is_related_party: true,
+          is_deleted: false,
+        },
+      ],
+      transactionRows: [
+        {
+          id: 5,
+          status: "PROJECT",
+          is_deleted: false,
+          type: "C",
+          amount: 150,
+          date: "2026-03-21",
+          accounts_dimensions_id: 101,
+          bank_account_name: "Seppo Sepp",
+          description: "Transfer",
+          cl_currencies_id: "EUR",
+        },
+      ],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
@@ -2407,26 +2171,10 @@ ${entryXml}
     workspacesToClean.push(workspace1);
 
     const server1 = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server1, createTestRuntimeSafetyContext(), {
-      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server1, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount({ account_name_est: "LHV" })],
+      accountDimensions: [fixtureAccountDimension({ title_est: "LHV" })],
+    }));
     const reg1 = server1.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     const handler1 = reg1![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const result1 = await handler1({ mode: "dry_run", workspace_path: workspace1, bank_account_dimension_id: 101 });
@@ -2444,22 +2192,14 @@ ${entryXml}
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
     const server2 = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server2, createTestRuntimeSafetyContext(), {
-      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+    registerAccountingInboxTools(server2, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
       readonly: {
         getBankAccounts: vi.fn().mockRejectedValue(setupError),
         getAccountDimensions: vi.fn().mockRejectedValue(setupError),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
         getVatInfo: vi.fn().mockResolvedValue({}),
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
-    } as any);
+    }));
     const reg2 = server2.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     const handler2 = reg2![2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const result2 = await handler2({ mode: "dry_run", workspace_path: workspace2 });
@@ -2521,30 +2261,11 @@ ${entryXml}
     }));
 
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: { listAll: vi.fn().mockResolvedValue(existingTransactions) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      transactionRows: existingTransactions,
+      bankAccounts: [fixtureBankAccount({ account_name_est: "LHV" })],
+      accountDimensions: [fixtureAccountDimension({ title_est: "LHV" })],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
@@ -2639,31 +2360,15 @@ ${entryXml}
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: {
-        findByCode: vi.fn().mockResolvedValue(undefined),
-        findByName: vi.fn().mockResolvedValue([]),
-        listAll: vi.fn().mockResolvedValue([]),
-      },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: {
-        listAll: vi.fn().mockResolvedValue([]),
-        get: vi.fn().mockResolvedValue({ id: 1, status: "CONFIRMED", is_deleted: false }),
-        update: vi.fn().mockResolvedValue({}),
-        delete: vi.fn().mockResolvedValue({}),
-      },
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      transactions: { get: vi.fn().mockResolvedValue({ id: 1, status: "CONFIRMED", is_deleted: false }), update: vi.fn().mockResolvedValue({}), delete: vi.fn().mockResolvedValue({}) },
       readonly: {
         getBankAccounts: vi.fn().mockRejectedValue(setupError),
         getAccountDimensions: vi.fn().mockRejectedValue(setupError),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
         getVatInfo: vi.fn().mockResolvedValue({}),
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
-    } as any);
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
@@ -2713,27 +2418,10 @@ ${entryXml}
 
     const server = { registerTool: vi.fn() } as any;
     const runtimeSafetyContext = createTestRuntimeSafetyContext();
-    registerAccountingInboxTools(server, runtimeSafetyContext, {
-      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([
-          { accounts_dimensions_id: 101, account_name_est: "LHV", account_no: "EE637700771011212909", iban_code: "EE637700771011212909" },
-        ]),
-        getAccountDimensions: vi.fn().mockResolvedValue([
-          { id: 101, accounts_id: 1020, title_est: "LHV", is_deleted: false },
-          { id: 202, accounts_id: 1020, title_est: "Wise", is_deleted: false },
-        ]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, runtimeSafetyContext, createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount({ account_name_est: "LHV" })],
+      accountDimensions: [fixtureAccountDimension({ title_est: "LHV" }), fixtureAccountDimension({ id: 202, title_est: "Wise" })],
+    }));
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "accounting_inbox");
     if (!registration) throw new Error("Tool not registered");
@@ -2780,22 +2468,7 @@ ${entryXml}
 
   it("continue_accounting_workflow returns the next user-facing action from a previous inbox response", async () => {
     const server = { registerTool: vi.fn() } as any;
-    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), {
-      clients: { findByCode: vi.fn().mockResolvedValue(undefined), findByName: vi.fn().mockResolvedValue([]), listAll: vi.fn().mockResolvedValue([]) },
-      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
-      products: {},
-      saleInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      purchaseInvoices: { listAll: vi.fn().mockResolvedValue([]) },
-      transactions: { listAll: vi.fn().mockResolvedValue([]) },
-      readonly: {
-        getBankAccounts: vi.fn().mockResolvedValue([]),
-        getAccountDimensions: vi.fn().mockResolvedValue([]),
-        getAccounts: vi.fn().mockResolvedValue([]),
-        getPurchaseArticles: vi.fn().mockResolvedValue([]),
-        getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }),
-        getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Seppo AI OÜ" }),
-      },
-    } as any);
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi());
 
     const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "continue_accounting_workflow");
     if (!registration) throw new Error("continue_accounting_workflow was not registered");
