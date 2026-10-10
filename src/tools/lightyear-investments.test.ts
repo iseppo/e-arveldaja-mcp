@@ -1153,9 +1153,10 @@ describe("H17 distribution currency and EUR provenance", () => {
     ];
   };
 
+  // EUR→USD: the direction that funds a buy (a buy never owns a USD→EUR conversion).
   const combinedTradeDistributionOwnershipRows = (): string[][] => [
-    ["03/03/2026 12:00:00", "CN-COMBINED-H17", "", "", "Conversion", "", "USD", "", "-85.014", "0.9", "0", "-85.014", ""],
-    ["03/03/2026 12:00:00", "CN-COMBINED-H17", "", "", "Conversion", "", "EUR", "", "76.5126", "1.111111111111", "0", "76.5126", ""],
+    ["03/03/2026 12:00:00", "CN-COMBINED-H17", "", "", "Conversion", "", "USD", "", "85.014", "0.9", "0", "85.014", ""],
+    ["03/03/2026 12:00:00", "CN-COMBINED-H17", "", "", "Conversion", "", "EUR", "", "-76.5126", "1.111111111111", "0", "-76.5126", ""],
     ["03/03/2026 09:00:00", "OR-COMBINED-H16", "AAPL", "US0378331005", "Buy", "1", "USD", "85", "85.000", "", "0", "85.000", ""],
     ["03/03/2026 10:00:00", "DIV-COMBINED-H17", "USCO", "US0000000001", "Dividend", "0", "USD", "0", "100.014", "0", "0", "85.014", "15",],
   ];
@@ -1494,8 +1495,11 @@ describe("H17 distribution currency and EUR provenance", () => {
   });
 
   it.each([
-    ["valid ordinary trade", ["01/03/2026", "OR-RES", "AAPL", "US037", "Buy", "1", "USD", "85", "85", "0", "0", "85", "0"], 1, 0, 0],
-    ["cash equivalent", ["01/03/2026", "OR-RES", "ICSUSSDP", "IE00", "Buy", "1", "USD", "85", "85", "0", "0", "85", "0"], 1, 0, 3],
+    // A buy cannot use the distribution's USD→EUR conversion (wrong FX direction),
+    // so it stays unconsumed; the conservative reservation still sends the
+    // distribution to review.
+    ["valid ordinary trade", ["01/03/2026", "OR-RES", "AAPL", "US037", "Buy", "1", "USD", "85", "85", "0", "0", "85", "0"], 1, 2, 0],
+    ["cash equivalent", ["01/03/2026", "OR-RES", "ICSUSSDP", "IE00", "Buy", "1", "USD", "85", "85", "0", "0", "85", "0"], 1, 2, 1],
     ["rejected malformed trade", ["01/03/2026", "OR-RES", "AAPL", "US037", "Buy", "1", "USD", "85", "85", "0", "2", "1", "0"], 1, 2, 0],
     ["blank-currency conservative trade", ["01/03/2026", "OR-RES", "AAPL", "US037", "Buy", "1", " ", "85", "85", "0", "0", "85", "0"], 1, 2, 0],
     ["explicit EUR trade", ["01/03/2026", "OR-RES", "VWCE", "IE00", "Buy", "1", "EUR", "85", "85", "1", "0", "85", "0"], 0, 0, 0],
@@ -1546,6 +1550,27 @@ describe("H17 distribution currency and EUR provenance", () => {
     const collect = (lightyearInvestments as any).collectTradeReservedConversionRefs;
     expect(collect).toBeTypeOf("function");
     expect([...collect(statementRowsForInternalTest(rows as string[][]))].sort()).toEqual(expectedReferences);
+  });
+
+  it("pairs a trade only with a conversion in its own FX direction (buy: foreign in, sell: foreign out)", () => {
+    const extract = (lightyearInvestments as any).extractTradesForTesting;
+    // A: a USD buy funded from an existing USD balance must not take a same-day USD→EUR conversion.
+    const wrongWay = extract(statementRowsForInternalTest([
+      ["01/03/2026 12:00:00", "OR-BUY", "AAPL", "US0378331005", "Buy", "1", "USD", "100", "100.00", "", "0", "100.00", ""],
+      ["01/03/2026 13:00:00", "CN-WRONG-WAY", "", "", "Conversion", "", "USD", "", "-100.00", "0.9", "0", "-100.00", ""],
+      ["01/03/2026 13:00:00", "CN-WRONG-WAY", "", "", "Conversion", "", "EUR", "", "90.00", "1.111111111111", "0", "90.00", ""],
+    ])).trades;
+    expect(wrongWay).toEqual([expect.objectContaining({ reference: "OR-BUY", conversion_ref: null, fx_review_reason: expect.objectContaining({ code: "invalid_conversion_pair" }) })]);
+    // C: a same-day sell must not take the buy's EUR→USD conversion; the buy keeps it.
+    const rowsC = statementRowsForInternalTest([
+      ["01/03/2026 10:00:00", "OR-SELL", "MSFT", "US5949181045", "Sell", "1", "USD", "100", "100.00", "", "0", "100.00", ""],
+      ["01/03/2026 12:00:00", "OR-BUY", "AAPL", "US0378331005", "Buy", "1", "USD", "100", "100.00", "", "0", "100.00", ""],
+      ["01/03/2026 11:00:00", "CN-BUYS", "", "", "Conversion", "", "USD", "", "100.00", "0.9", "0", "100.00", ""],
+      ["01/03/2026 11:00:00", "CN-BUYS", "", "", "Conversion", "", "EUR", "", "-90.00", "1.111111111111", "0", "-90.00", ""],
+    ]);
+    const byRef = new Map(extract(rowsC).trades.map((trade: any) => [trade.reference, trade]));
+    expect(byRef.get("OR-SELL")).toMatchObject({ conversion_ref: null, fx_review_reason: { code: "invalid_conversion_pair" } });
+    expect(byRef.get("OR-BUY")).toMatchObject({ conversion_ref: "CN-BUYS", eur_amount: 90, fx_review_reason: null });
   });
 
   it("reserves the conversion a fee-bearing sell actually funded, not its gross", () => {

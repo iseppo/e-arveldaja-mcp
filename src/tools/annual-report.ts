@@ -12,6 +12,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
+import { withBookingKeyLock } from "../booking-guard.js";
 import { getCashFlowCategoryRule, getCurrentYearProfitAccountRule, getLiabilityClassificationRule } from "../accounting-rules.js";
 import {
   resolveCalculatedResultAccount,
@@ -771,16 +772,26 @@ async function analyzeYearEndClose(
   // 1 December), so those count when their 2970 debit equals the result.
   const transferAccounts = { currentYearProfit: ids.currentYearProfit, retainedEarnings: ids.retainedEarnings, reserves: ids.reserves };
   const onDateBooked = netDebit(existing.transfer, ids.currentYearProfit);
+  // Off-date candidates: transfer-shaped journals of the next year or of
+  // 31 December of this year, plus YEC-RETAINED-YYYY on ANY date (its number
+  // is this year's transfer even when booked years late).
+  const sameYearEnd = `${year}-12-31`;
+  const offDateCandidates = allJournals.filter((journal) =>
+    !journal.is_deleted && journal.id !== -1 && !existing.transfer.includes(journal) &&
+    (journal.document_number === transferDocumentNumber ||
+      ((journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) &&
+        isRetainedTransferShape(journal, transferAccounts))));
   // Same for YEC-RETAINED-YYYY found by number alone: it must post only
   // 2970 ↔ 2960 (+ reserve), or it is no transfer and needs manual review.
-  const malformedTransferJournals = existing.transfer.filter((journal) => !isRetainedTransferShape(journal, transferAccounts));
-  const offDateCandidates = allJournals.filter((journal) =>
-    !journal.is_deleted && journal.id !== -1 &&
-    journal.effective_date.startsWith(`${year + 1}-`) && journal.effective_date !== `${year + 1}-01-01` &&
-    isRetainedTransferShape(journal, transferAccounts));
+  const malformedTransferJournals = [...existing.transfer, ...offDateCandidates]
+    .filter((journal) => !isRetainedTransferShape(journal, transferAccounts));
+  // An unnumbered 31 December transfer is inside the year-end balances, so the
+  // prior-year residual cannot tell whose it is — never accept it as a match.
   const offDateMatches = malformedTransferJournals.length > 0 || (existing.transfer.length > 0 && matchesExpected(onDateBooked))
     ? []
-    : offDateCandidates.filter((journal) => matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit)));
+    : offDateCandidates.filter((journal) =>
+      (journal.effective_date !== sameYearEnd || journal.document_number === transferDocumentNumber) &&
+      matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit)));
   // A matching off-date entry may equally be an earlier year's late transfer
   // when that earlier result is still sitting untransferred on 2970.
   const offDateAmbiguous = offDateMatches.length > 1 || (offDateMatches.length === 1 && Math.abs(priorYearResidual) >= 0.01 &&
@@ -1751,163 +1762,167 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
         });
       }
 
-      // Uncached: existing-close detection (and the closing amounts) come from
-      // the journals — a close booked elsewhere within the 120 s cache window
-      // must be seen, or it would be booked twice.
-      api.journals.invalidateListCache();
-      const analysis = await analyzeYearEndClose(api, year, {
-        reserveCapitalAmount: reserve_capital_amount,
-        reserveCapitalAccount: reserve_capital_account,
-        allowAdditionalTransfer: allow_additional_transfer === true,
-      });
-      if ("error" in analysis) {
-        return toolError(analysis);
-      }
-
-      const executableProposals = analysis.proposed_journal_entries
-        .filter((proposal) => proposal.auto_executable)
-        .filter((proposal) => Math.abs(proposal.totals.difference) < 0.01);
-
-      if (executableProposals.length === 0 && analysis.blocked_entries.length > 0) {
-        return toolError({
-          error: "Year-end close entry blocked",
-          close_status: analysis.close_status,
-          blocked_entries: analysis.blocked_entries,
-          existing_year_end_close_journals: analysis.existing_year_end_close_journals,
-          warnings: analysis.warnings,
-          hint: "No journals were created. Correct the existing closing entries (or, for resolution allow_additional_transfer, " +
-            "re-run with allow_additional_transfer=true after checking the existing transfer) and re-run execute_year_end_close.",
+      // One execute per connection+year at a time: concurrent runs would both
+      // analyse the open year before either creates, and book the close twice.
+      return withBookingKeyLock(api.journals.connectionFingerprint, { ns: "YEC", id: String(year) }, async () => {
+        // Uncached: existing-close detection (and the closing amounts) come from
+        // the journals — a close booked elsewhere within the 120 s cache window
+        // must be seen, or it would be booked twice.
+        api.journals.invalidateListCache();
+        const analysis = await analyzeYearEndClose(api, year, {
+          reserveCapitalAmount: reserve_capital_amount,
+          reserveCapitalAccount: reserve_capital_account,
+          allowAdditionalTransfer: allow_additional_transfer === true,
         });
-      }
+        if ("error" in analysis) {
+          return toolError(analysis);
+        }
 
-      if (executableProposals.length === 0 && analysis.existing_year_end_close_journals.length > 0) {
-        return toolError({
-          error: "Year-end close already exists",
-          close_status: analysis.close_status,
-          existing_year_end_close_journals: analysis.existing_year_end_close_journals,
-          hint: "Delete or invalidate the existing close manually if you need to recreate it.",
-        });
-      }
+        const executableProposals = analysis.proposed_journal_entries
+          .filter((proposal) => proposal.auto_executable)
+          .filter((proposal) => Math.abs(proposal.totals.difference) < 0.01);
 
-      if (executableProposals.length === 0) {
+        if (executableProposals.length === 0 && analysis.blocked_entries.length > 0) {
+          return toolError({
+            error: "Year-end close entry blocked",
+            close_status: analysis.close_status,
+            blocked_entries: analysis.blocked_entries,
+            existing_year_end_close_journals: analysis.existing_year_end_close_journals,
+            warnings: analysis.warnings,
+            hint: "No journals were created. Correct the existing closing entries (or, for resolution allow_additional_transfer, " +
+              "re-run with allow_additional_transfer=true after checking the existing transfer) and re-run execute_year_end_close.",
+          });
+        }
+
+        if (executableProposals.length === 0 && analysis.existing_year_end_close_journals.length > 0) {
+          return toolError({
+            error: "Year-end close already exists",
+            close_status: analysis.close_status,
+            existing_year_end_close_journals: analysis.existing_year_end_close_journals,
+            hint: "Delete or invalidate the existing close manually if you need to recreate it.",
+          });
+        }
+
+        if (executableProposals.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: toMcpJson({
+                message: "No executable year-end close entries were generated.",
+                analysis,
+              }),
+            }],
+          };
+        }
+
+        // Validate every posting's dimension before the first create: 9000/2970/
+        // 2960/2940 may carry dimensions in some charts, and a dimensioned account
+        // needs accounts_dimensions_id (auto-filled when it has exactly one) or the
+        // API rejects the journal part-way through the close.
+        const [validationAccounts, accountDimensions] = await Promise.all([
+          api.readonly.getAccounts(),
+          api.readonly.getAccountDimensions(),
+        ]);
+        const postingsByProposal = executableProposals.map((proposal) => proposal.postings.map((posting): Posting => ({
+          accounts_id: posting.accounts_id,
+          ...(posting.accounts_dimensions_id !== undefined ? { accounts_dimensions_id: posting.accounts_dimensions_id } : {}),
+          type: posting.type,
+          amount: posting.amount,
+        })));
+        const dimensionErrors = postingsByProposal.flatMap((postings, index) =>
+          validatePostingDimensions(postings, validationAccounts, accountDimensions)
+            .map((message) => `${executableProposals[index]!.document_number}: ${message}`),
+        );
+        if (dimensionErrors.length > 0) {
+          return toolError({
+            error: "Account validation failed",
+            details: dimensionErrors,
+            hint: "No journals were created. Fix the account dimensions (sub-accounts) and re-run execute_year_end_close.",
+          });
+        }
+
+        // Partial mutation must be VISIBLE (invariant 9): a failure after the
+        // first created journal returns a structured `partial` result naming the
+        // already-created journal IDs and the concrete next action — never a
+        // generic error that hides the committed drafts.
+        const created = [];
+        for (const [proposalIndex, proposal] of executableProposals.entries()) {
+          let result;
+          try {
+            result = await api.journals.create({
+              title: proposal.title,
+              effective_date: proposal.effective_date,
+              document_number: proposal.document_number,
+              cl_currencies_id: "EUR",
+              postings: postingsByProposal[proposalIndex]!,
+            });
+          } catch (error: unknown) {
+            const outcomeUnknown = isMutationIndeterminate(error);
+            const createdIds = created
+              .map((entry) => entry.api_response.created_object_id)
+              .filter((id): id is number => id !== undefined);
+            return toolError({
+              error: "Year-end close stopped part-way: a closing journal failed to create.",
+              status: "partial",
+              failed_proposal: { title: proposal.title, effective_date: proposal.effective_date, document_number: proposal.document_number },
+              failure: error instanceof Error ? error.message : String(error),
+              created_journals: created.map((entry) => ({
+                journal_id: entry.api_response.created_object_id,
+                title: entry.title,
+                effective_date: entry.effective_date,
+                document_number: entry.document_number,
+              })),
+              remaining_proposals: executableProposals.slice(created.length + 1).length,
+              ...(outcomeUnknown ? { outcome_unknown: true } : {}),
+              next_action: outcomeUnknown
+                ? `The create request for ${proposal.document_number} may have reached e-arveldaja before the connection failed. ` +
+                  `Check for a ${proposal.document_number} draft journal dated ${proposal.effective_date} (list_journals) before doing anything else` +
+                  (createdIds.length > 0 ? `; draft closing journals ${createdIds.join(", ")} were also already created` : "") +
+                  ". Re-running execute_year_end_close is safe either way: it detects existing closing entries (drafts included) and creates only the missing ones."
+                : createdIds.length > 0
+                  ? `Draft closing journals ${createdIds.join(", ")} were already created. Fix the failure and re-run execute_year_end_close — it detects those drafts and creates only the missing entry.`
+                  : "No journals were created. Fix the failure and re-run execute_year_end_close.",
+            });
+          }
+          logAudit({
+            tool: "execute_year_end_close", action: "CREATED", entity_type: "journal",
+            entity_id: result.created_object_id,
+            summary: `Created year-end closing journal "${proposal.title}" for ${proposal.effective_date}`,
+            details: {
+              effective_date: proposal.effective_date,
+              document_number: proposal.document_number,
+              postings: proposal.postings,
+            },
+          });
+
+          created.push({
+            title: proposal.title,
+            effective_date: proposal.effective_date,
+            document_number: proposal.document_number,
+            api_response: result,
+            postings: proposal.postings,
+          });
+        }
+
         return {
           content: [{
             type: "text",
             text: toMcpJson({
-              message: "No executable year-end close entries were generated.",
-              analysis,
+              year,
+              close_status_before: analysis.close_status,
+              created_journals: created,
+              ...(analysis.blocked_entries.length > 0 ? { skipped_blocked_entries: analysis.blocked_entries } : {}),
+              preflight: {
+                execution_status: analysis.execution_status,
+                unresolved_items: analysis.unresolved_items,
+                balance_sheet_check: analysis.balance_sheet_check,
+                warnings: analysis.warnings,
+              },
+              note: "Closing journals were created as drafts. Review and confirm them separately.",
             }),
           }],
         };
-      }
-
-      // Validate every posting's dimension before the first create: 9000/2970/
-      // 2960/2940 may carry dimensions in some charts, and a dimensioned account
-      // needs accounts_dimensions_id (auto-filled when it has exactly one) or the
-      // API rejects the journal part-way through the close.
-      const [validationAccounts, accountDimensions] = await Promise.all([
-        api.readonly.getAccounts(),
-        api.readonly.getAccountDimensions(),
-      ]);
-      const postingsByProposal = executableProposals.map((proposal) => proposal.postings.map((posting): Posting => ({
-        accounts_id: posting.accounts_id,
-        ...(posting.accounts_dimensions_id !== undefined ? { accounts_dimensions_id: posting.accounts_dimensions_id } : {}),
-        type: posting.type,
-        amount: posting.amount,
-      })));
-      const dimensionErrors = postingsByProposal.flatMap((postings, index) =>
-        validatePostingDimensions(postings, validationAccounts, accountDimensions)
-          .map((message) => `${executableProposals[index]!.document_number}: ${message}`),
-      );
-      if (dimensionErrors.length > 0) {
-        return toolError({
-          error: "Account validation failed",
-          details: dimensionErrors,
-          hint: "No journals were created. Fix the account dimensions (sub-accounts) and re-run execute_year_end_close.",
-        });
-      }
-
-      // Partial mutation must be VISIBLE (invariant 9): a failure after the
-      // first created journal returns a structured `partial` result naming the
-      // already-created journal IDs and the concrete next action — never a
-      // generic error that hides the committed drafts.
-      const created = [];
-      for (const [proposalIndex, proposal] of executableProposals.entries()) {
-        let result;
-        try {
-          result = await api.journals.create({
-            title: proposal.title,
-            effective_date: proposal.effective_date,
-            document_number: proposal.document_number,
-            cl_currencies_id: "EUR",
-            postings: postingsByProposal[proposalIndex]!,
-          });
-        } catch (error: unknown) {
-          const outcomeUnknown = isMutationIndeterminate(error);
-          const createdIds = created
-            .map((entry) => entry.api_response.created_object_id)
-            .filter((id): id is number => id !== undefined);
-          return toolError({
-            error: "Year-end close stopped part-way: a closing journal failed to create.",
-            status: "partial",
-            failed_proposal: { title: proposal.title, effective_date: proposal.effective_date, document_number: proposal.document_number },
-            failure: error instanceof Error ? error.message : String(error),
-            created_journals: created.map((entry) => ({
-              journal_id: entry.api_response.created_object_id,
-              title: entry.title,
-              effective_date: entry.effective_date,
-              document_number: entry.document_number,
-            })),
-            remaining_proposals: executableProposals.slice(created.length + 1).length,
-            ...(outcomeUnknown ? { outcome_unknown: true } : {}),
-            next_action: outcomeUnknown
-              ? `The create request for ${proposal.document_number} may have reached e-arveldaja before the connection failed. ` +
-                `Check for a ${proposal.document_number} draft journal dated ${proposal.effective_date} (list_journals) before doing anything else` +
-                (createdIds.length > 0 ? `; draft closing journals ${createdIds.join(", ")} were also already created` : "") +
-                ". Re-running execute_year_end_close is safe either way: it detects existing closing entries (drafts included) and creates only the missing ones."
-              : createdIds.length > 0
-                ? `Draft closing journals ${createdIds.join(", ")} were already created. Fix the failure and re-run execute_year_end_close — it detects those drafts and creates only the missing entry.`
-                : "No journals were created. Fix the failure and re-run execute_year_end_close.",
-          });
-        }
-        logAudit({
-          tool: "execute_year_end_close", action: "CREATED", entity_type: "journal",
-          entity_id: result.created_object_id,
-          summary: `Created year-end closing journal "${proposal.title}" for ${proposal.effective_date}`,
-          details: {
-            effective_date: proposal.effective_date,
-            document_number: proposal.document_number,
-            postings: proposal.postings,
-          },
-        });
-
-        created.push({
-          title: proposal.title,
-          effective_date: proposal.effective_date,
-          document_number: proposal.document_number,
-          api_response: result,
-          postings: proposal.postings,
-        });
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            year,
-            close_status_before: analysis.close_status,
-            created_journals: created,
-            ...(analysis.blocked_entries.length > 0 ? { skipped_blocked_entries: analysis.blocked_entries } : {}),
-            preflight: {
-              execution_status: analysis.execution_status,
-              unresolved_items: analysis.unresolved_items,
-              balance_sheet_check: analysis.balance_sheet_check,
-              warnings: analysis.warnings,
-            },
-            note: "Closing journals were created as drafts. Review and confirm them separately.",
-          }),
-        }],
-      };
+      });
     },
   );
 }

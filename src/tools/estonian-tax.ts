@@ -26,7 +26,7 @@ import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
-import { BookingGuard, formatDocNumber, type DocKey } from "../booking-guard.js";
+import { BookingGuard, formatDocNumber, withBookingKeyLock, type DocKey } from "../booking-guard.js";
 import { INCOME_TAX_EXPENSE_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import {
   resolveRestrictedReserveAccounts,
@@ -761,483 +761,493 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           "shareholder, use a different effective_date.",
       });
 
-      // Preload journals once for the duplicate pre-check and both legality
-      // checks. Prepend the synthetic opening-balance journal (clients_id: null)
-      // exactly once here — both checks compute account-level equity with no
-      // client filter, so the opening balance correctly feeds the lg1 ceiling
-      // and the lg2 net-assets floor.
-      const opening = await loadOpeningBalanceJournal(api);
-      const allJournals = [...(opening ? [opening.journal] : []), ...(await api.journals.listAllWithPostings())];
+      // Two concurrent executions must not spend the same § 157 headroom: hold
+      // one company-wide lock from the fresh ledger read through the create
+      // (lock order: this company lock, then createJournalOnce's per-key lock).
+      const checkAndBook = async () => {
+        // Preload journals once for the duplicate pre-check and both legality
+        // checks. Prepend the synthetic opening-balance journal (clients_id: null)
+        // exactly once here — both checks compute account-level equity with no
+        // client filter, so the opening balance correctly feeds the lg1 ceiling
+        // and the lg2 net-assets floor.
+        const opening = await loadOpeningBalanceJournal(api);
+        const allJournals = [...(opening ? [opening.journal] : []), ...(await api.journals.listAllWithPostings())];
 
-      // Duplicate pre-check BEFORE the legality checks: once a dividend is
-      // booked, the ledger already reflects it, so re-running the § 157 checks
-      // on a retry would report e.g. "insufficient retained earnings" for a
-      // distribution that is in fact already recorded. Same key + same postings
-      // → report the existing journal; same key + different postings → conflict.
-      const existingSameKey = allJournals.find(j => j.id != null && !j.is_deleted && j.document_number === documentNumber);
-      if (existingSameKey) {
-        const existingId = existingSameKey.id!;
-        const existingPostings = await loadExistingPostings(existingId, existingSameKey.postings);
-        if (!existingPostings || postingSignature(existingPostings).join() !== requestedSignature.join()) {
-          return keyConflict(existingId, existingPostings);
-        }
-        const echoed = echoPostings(existingPostings);
-        if (!dry_run) {
-          logAudit({
-            tool: "prepare_dividend_package",
-            action: "UPDATED",
-            entity_type: "journal",
-            entity_id: existingId,
-            summary: `Existing dividend journal ${existingId} reused for ${net_dividend} EUR net to ${shareholderName}`,
-            details: {
-              effective_date, client_name: shareholderName, amount: grossDividend,
-              total_net: net_dividend, total_gross: grossDividend,
-              postings: echoed.map(p => ({ accounts_id: p.account, type: p.type, amount: p.amount })),
-              booking_key: documentNumber,
-              booking_status: "duplicate",
-            },
-          });
-        }
-        return {
-          content: [{
-            type: "text",
-            text: toMcpJson({
-              ...(dry_run && { dry_run: true }),
-              calculation,
-              booking: bookingSummary,
-              shareholder: shareholderEcho,
-              journal_entry: {
-                api_response: {
-                  code: 200,
-                  messages: [`Existing dividend journal ${existingId} reused.`],
-                  created_object_id: existingId,
-                },
-                booking_status: "duplicate",
-                registered: existingSameKey.registered === true,
-                postings: echoed,
-              },
-              note:
-                `An identical dividend journal ${existingId} (${documentNumber}) already exists — no new journal ` +
-                `${dry_run ? "would be" : "was"} created. ÄS § 157 legality checks were not re-run: the ledger already ` +
-                "includes this distribution (or its unconfirmed draft).",
-              compliance_notes: complianceNotes,
-            }),
-          }],
-        };
-      }
-
-      // ÄS § 157 lg 1 distributable profit, as of the distribution date:
-      //  - retained earnings (Eelmiste perioodide jaotamata kasum, 2960);
-      //  - the closed prior-year result on "Aruandeaasta kasum" (2970), which
-      //    RIK's year-end result entry (D 9000 / K 2970, Dec 31) credits and
-      //    which is transferred to 2960 only later (Jan 1 entry) — ignoring it
-      //    understates the ceiling;
-      //  - prior-year P&L not yet closed: Σ Tulud/Kulud before Jan 1 of the
-      //    distribution year, INCLUDING the calculated-result account 9000:
-      //    its debit from the result entry cancels the still-open revenue/
-      //    expense balances (RIK does not zero them), so a closed year counts
-      //    once (via 2970/2960) and only the unclosed residual counts here.
-      //    Legacy YECL journals are included too (they zero P&L into 2970).
-      // The distribution year's own result is NOT distributable (no approved
-      // annual report yet), so its closing entry (RIK result entry or legacy
-      // YECL, dated Dec 31 of that year) is excluded from the 2960/2970
-      // balances and its P&L is outside the window.
-      const distributionYear = Number(effective_date.slice(0, 4));
-      const distributionYearStart = `${distributionYear}-01-01`;
-      const currentYearProfitAccount = resolveCurrentYearProfitAccount(accounts, getCurrentYearProfitAccountRule());
-      const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
-      const registeredAsOf = (j: Journal) =>
-        j.registered === true && j.effective_date <= effective_date && !isYearEndClosingJournal(j, distributionYear) &&
-        !isYearEndResultEntry(j, distributionYear, { calculatedResult: calculatedResultAccount, currentYearProfit: currentYearProfitAccount });
-      const retainedBalance = roundMoney(sumCreditMinusDebit(allJournals, id => id === retainedAccount, registeredAsOf));
-      const closedPriorYearResult = currentYearProfitAccount === retainedAccount
-        ? 0
-        : roundMoney(sumCreditMinusDebit(allJournals, id => id === currentYearProfitAccount, registeredAsOf));
-      const plAccountIds = new Set(accounts
-        .filter(a => a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
-        .map(a => a.id));
-      plAccountIds.add(calculatedResultAccount);
-      const unclosedPriorYearPL = roundMoney(sumCreditMinusDebit(
-        allJournals,
-        id => plAccountIds.has(id),
-        j => j.registered === true && j.effective_date < distributionYearStart,
-      ));
-      const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
-
-      // Unconfirmed (PROJECT) dividend drafts: this tool creates its journals
-      // unconfirmed, and every balance read skips unregistered journals — so a
-      // pending draft would otherwise be invisible and a second shareholder's
-      // dividend could pass against the same retained earnings. Identify drafts
-      // by this tool's DIV- document number OR a credit to the dividend-payable
-      // account (manual drafts). Their reduction is measured from their actual
-      // postings, so an over-included non-dividend draft only counts what it
-      // really does to the lg1 pool / net assets. The same-key journal of this
-      // call is never counted (it was handled by the duplicate pre-check).
-      const equityOrPlAccountIds = new Set(accounts
-        .filter(a => a.account_type_est === "Omakapital" || a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
-        .map(a => a.id));
-      const pendingDividendDrafts = allJournals
-        .filter(j =>
-          j.id != null && !j.is_deleted && j.registered !== true && j.document_number !== documentNumber &&
-          ((j.document_number ?? "").startsWith("DIV-") ||
-            (j.postings ?? []).some(p => !p.is_deleted && p.accounts_id === payableAccount && p.type === "C")))
-        .map(j => ({
-          journal_id: j.id!,
-          document_number: j.document_number ?? null,
-          effective_date: j.effective_date,
-          retained_earnings_reduction: roundMoney(-sumCreditMinusDebit([j], id => lg1Accounts.has(id), () => true)),
-          net_assets_reduction: roundMoney(-sumCreditMinusDebit([j], id => equityOrPlAccountIds.has(id), () => true)),
-        }))
-        .filter(d => d.retained_earnings_reduction !== 0 || d.net_assets_reduction !== 0);
-      const pendingRetainedReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.retained_earnings_reduction, 0));
-      const pendingNetAssetsReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.net_assets_reduction, 0));
-      const distributableProfit = roundMoney(retainedBalance + closedPriorYearResult + unclosedPriorYearPL - pendingRetainedReduction);
-      const lg1Components = {
-        retained_earnings_account: retainedAccount,
-        retained_earnings_balance: retainedBalance,
-        current_year_profit_account: currentYearProfitAccount,
-        closed_prior_year_result: closedPriorYearResult,
-        unclosed_prior_year_profit_and_loss: unclosedPriorYearPL,
-        pending_unconfirmed_dividends: pendingRetainedReduction,
-        note:
-          `lg 1 distributable = retained earnings + closed prior-year result (${currentYearProfitAccount}) + ` +
-          `unclosed P&L before ${distributionYearStart} − pending unconfirmed dividend drafts. ` +
-          `${distributionYear} P&L is excluded (no approved annual report yet).`,
-      };
-      const warnings: string[] = [];
-      if (pendingDividendDrafts.length > 0) {
-        warnings.push(
-          `Pending unconfirmed dividend drafts counted: ${pendingDividendDrafts
-            .map(d => `journal ${d.journal_id}${d.document_number ? ` (${d.document_number})` : ""} ` +
-              `−${d.retained_earnings_reduction} EUR distributable / −${d.net_assets_reduction} EUR net assets`)
-            .join(", ")}. Confirm or delete them; they already reserve part of the § 157 headroom.`
-        );
-      }
-
-      // Guard the manual override: auto-detection only ever picks a Kulud
-      // account, but an explicit income_tax_expense_account is existence-checked,
-      // not type-checked. A mistyped override (e.g. an equity or liability
-      // account) would silently book the CIT to the wrong statement line, so
-      // warn — non-blocking — when the resolved account is not an expense.
-      const incomeTaxExpenseRecord = accounts.find(a => a.id === incomeTaxExpenseAccount);
-      if (incomeTaxExpenseRecord && incomeTaxExpenseRecord.account_type_est !== "Kulud") {
-        warnings.push(
-          `Income-tax expense account ${incomeTaxExpenseAccount} (${incomeTaxExpenseRecord.name_est}) is not an expense (Kulud) account. ` +
-          `The dividend CIT belongs on the P&L 'Tulumaks' expense line (Kulud, usually 8900–8999). Verify income_tax_expense_account.`
-        );
-      }
-
-      const balances = await computeAllBalances(api, undefined, effective_date, {
-        preloadedAccounts: accounts,
-        preloadedJournals: allJournals,
-      });
-      // Net assets = equity + current-year P&L. Revenue/expense accounts
-      // (Tulud/Kulud) are not closed into Omakapital until year-end, so the
-      // equity total alone understates net assets mid-year. Fold current-year
-      // P&L in explicitly — shares `sumCategory` with `compute_balance_sheet`
-      // so both tools agree bit-identically on the same ledger.
-      const byCategory = (cat: string): AccountBalance[] =>
-        balances.filter(b => b.account_type_est === cat);
-      const totalAssets = sumCategory(byCategory("Varad"), "D");
-      const totalLiabilities = sumCategory(byCategory("Kohustused"), "C");
-      const totalEquity = sumCategory(byCategory("Omakapital"), "C");
-      const totalRevenue = sumCategory(byCategory("Tulud"), "C");
-      const totalExpenses = sumCategory(byCategory("Kulud"), "D");
-      const currentYearPL = roundMoney(totalRevenue - totalExpenses);
-      const shareCapital = balances.find(balance => balance.account_id === shareCapitalAccount)?.balance ?? 0;
-      const netAssetsBeforeDistribution = roundMoney(totalEquity + currentYearPL);
-      // Pending unconfirmed dividend drafts will reduce net assets once
-      // confirmed — the lg 2 floor is tested against what remains after them.
-      const netAssetsAvailable = roundMoney(netAssetsBeforeDistribution - pendingNetAssetsReduction);
-      const netAssetsAfterDistribution = roundMoney(netAssetsAvailable - grossDividend);
-      const roundedShareCapital = roundMoney(shareCapital);
-
-      // ÄS § 157(2): statutory/articles-mandated reserves (reservkapital) are not
-      // distributable — the net-assets floor is share capital PLUS these reserves,
-      // not share capital alone. restrictedReserveAccounts was resolved/validated
-      // above (default: name-detect "Kohustuslik reservkapital", standard 2940,
-      // and included only when it carries a non-zero balance; override via
-      // restricted_reserve_accounts).
-      const restrictedReserveDetails = restrictedReserveAccounts
-        .map(id => ({ account: id, balance: roundMoney(balances.find(b => b.account_id === id)?.balance ?? 0) }))
-        .filter(r => r.balance !== 0);
-      const restrictedReserveTotal = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + r.balance, 0));
-      // The § 157 net-assets floor: share capital + non-distributable reserves.
-      // Clamp each component to ≥ 0 — PER reserve account, not just the summed
-      // total — so a data anomaly (a debit balance on the share-capital or a
-      // reserve account, which should never happen on a clean ledger) can only
-      // make the floor, and therefore the distribution block, more conservative,
-      // never silently lower it. Clamping only the total would let a negative
-      // reserve balance offset a positive one and pull the floor down; summing
-      // max(0, balance) per account prevents that. The reported restricted_reserves
-      // echo keeps the raw signed total so the anomaly stays visible.
-      const restrictedReserveFloor = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + Math.max(0, r.balance), 0));
-      const legalCapitalFloor = roundMoney(Math.max(0, roundedShareCapital) + restrictedReserveFloor);
-
-      // Cross-check: on a balanced ledger, Assets − Liabilities must equal
-      // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
-      // journals, which means the retained-earnings and §157 net-assets checks
-      // below are computed from an untrustworthy ledger. Hard-block — force=true
-      // does NOT override this: force exists for a lawful distribution the
-      // ledger cannot prove (e.g. alongside a capital reduction), not for
-      // producing legal-distribution output from a broken balance sheet.
-      // Tolerance 0.05 accounts for rounding drift across the 5 sub-totals
-      // (each rounded independently at up to 0.005 EUR).
-      const assetsMinusLiabilities = roundMoney(totalAssets - totalLiabilities);
-      const ledgerImbalance = Math.abs(assetsMinusLiabilities - netAssetsBeforeDistribution) > 0.05;
-      if (ledgerImbalance) {
-        warnings.push(
-          `Ledger imbalance: Assets − Liabilities (${assetsMinusLiabilities} EUR) ` +
-          `does not equal Equity + current-year P&L (${netAssetsBeforeDistribution} EUR). ` +
-          `Retained-earnings and §157 net-assets checks are unreliable on this ledger. ` +
-          `Investigate unregistered/deleted journals before distributing.`
-        );
-      }
-
-      // ÄS § 157 lg 1 ceiling is NET-based: the statutory limit applies to the
-      // distribution decided by the shareholders (the net dividend). The CIT is
-      // the company's own current-period income-tax expense (TuMS § 50, booked
-      // to the P&L "Tulumaks" line below), not part of the payout — so the
-      // ENTIRE distributable profit is distributable as net dividend.
-      // The § 157 lg 2 net-assets floor below stays GROSS-based, because the
-      // payout does create both a dividend payable and a tax liability.
-      const retainedShortfall = distributableProfit < net_dividend;
-      const netAssetsBreach = netAssetsAfterDistribution < legalCapitalFloor - 0.01;
-      // Report the same verdict the block uses (same 0.01 tolerance), so the
-      // echoed net_assets_check.sufficient never says "false" on a distribution
-      // the tool actually books, or vice versa.
-      const netAssetsSufficient = !netAssetsBreach;
-
-      // Maximum lawful NET dividend under both § 157 clauses, floored to whole
-      // cents so booking exactly this amount always passes both checks:
-      //  - lg 1: net ≤ distributable profit (after pending drafts);
-      //  - lg 2: netAssetsAvailable − net×(1+rate) ≥ floor  ⇔  net ≤ (netAssetsAvailable − floor)/(1+rate).
-      const maxNetByRetained = Math.max(0, distributableProfit);
-      const maxNetByNetAssets = Math.max(0, (netAssetsAvailable - legalCapitalFloor) / (1 + taxRate));
-      const maxNetDividend = floorMoney(Math.min(maxNetByRetained, maxNetByNetAssets));
-      const maximumDistributable = {
-        max_net_dividend: maxNetDividend,
-        limited_by: maxNetByRetained <= maxNetByNetAssets ? "retained_earnings" : "net_assets",
-        max_net_by_retained_earnings: floorMoney(maxNetByRetained),
-        max_net_by_net_assets: floorMoney(maxNetByNetAssets),
-        ...(pendingDividendDrafts.length > 0 && { pending_unconfirmed_dividend_drafts: pendingDividendDrafts }),
-        note:
-          "Largest lawful NET dividend on this ledger: min(distributable profit [ÄS § 157 lg 1: retained earnings + closed prior-year result + unclosed prior-year P&L], " +
-          `(net assets − §157 lg 2 floor) × ${citRate.den}/${citRate.den + citRate.num} [tax comes on top of the payout]), ` +
-          "both after pending unconfirmed dividend drafts.",
-      };
-      const retainedEarningsCheck = {
-        account: retainedAccount,
-        balance_before: distributableProfit,
-        components: lg1Components,
-        net_dividend_required: net_dividend,
-        sufficient: !retainedShortfall,
-      };
-      const netAssetsCheck = {
-        net_assets_before_distribution: netAssetsBeforeDistribution,
-        ...(pendingNetAssetsReduction !== 0 && { pending_unconfirmed_dividends: pendingNetAssetsReduction }),
-        gross_dividend: grossDividend,
-        net_assets_after_distribution: netAssetsAfterDistribution,
-        share_capital_account: shareCapitalAccount,
-        share_capital: roundedShareCapital,
-        restricted_reserves: restrictedReserveTotal,
-        restricted_reserve_accounts: restrictedReserveDetails,
-        minimum_net_assets: legalCapitalFloor,
-        sufficient: netAssetsSufficient,
-      };
-
-      // Opening-balance status: share capital and retained earnings are commonly
-      // entered as "Algbilansi kanded" (opening-balance entries). When a stored
-      // algbilanss is captured, it was folded into allJournals above and this
-      // reports what was applied; otherwise it's the actionable "paste it"
-      // warning, since the § 157 / retained-earnings checks would otherwise run
-      // on incomplete data.
-      warnings.push(...withOpeningBalanceStatus([], {
-        captured: opening !== null,
-        openingDate: opening?.openingDate,
-        unmappedCodes: opening?.unmappedCodes,
-      }));
-
-      // Transparency: when reservkapital was auto-detected (no explicit override)
-      // and carries a balance, tell the operator the floor was raised above bare
-      // share capital — they may not realise reserves are being ring-fenced. A
-      // mandatory reserve is not universal (it applies only when the company's
-      // articles / põhikiri require it), and the account exists in every standard
-      // e-arveldaja chart, so the floor is keyed on the BOOKED BALANCE, not the
-      // account's mere presence — an unfunded reserve (0 balance) adds no floor.
-      if (restricted_reserve_accounts === undefined && restrictedReserveFloor > 0) {
-        warnings.push(
-          `ÄS § 157(2) restricted-reserve floor applied: reservkapital ` +
-          `${restrictedReserveDetails.map(r => `${r.account} (${r.balance} EUR)`).join(", ")} ` +
-          `raises the minimum net-assets floor to ${legalCapitalFloor} EUR ` +
-          `(share capital ${Math.max(0, roundedShareCapital)} + reserves ${restrictedReserveFloor}). ` +
-          `This assumes the company's articles (põhikiri) mandate this statutory reserve; ` +
-          `if they do not, pass restricted_reserve_accounts=[] to exclude it from the floor.`
-        );
-      }
-      const violations: string[] = [];
-      if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
-      if (retainedShortfall) violations.push("Insufficient retained earnings");
-      if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
-
-      // force overrides the two § 157 clauses only — never a ledger imbalance.
-      if (ledgerImbalance || (violations.length > 0 && !force)) {
-        // Report every triggered legality violation in one response so the
-        // operator sees the full picture. ÄS § 157 is explicitly the
-        // framework for retained-earnings distribution legality, so a
-        // retained shortfall is already a § 157 signal; the net-assets
-        // check covers the separate share-capital clause.
-        return toolError({
-          error: violations.join("; "),
-          ...(retainedShortfall && {
-            retained_earnings_check: {
-              balance: distributableProfit,
-              components: lg1Components,
-              net_dividend_required: net_dividend,
-              shortfall: roundMoney(net_dividend - distributableProfit),
-              note: "ÄS § 157 lg 1 limit is NET-based: the CIT is a current-period expense, not part of the distribution.",
-            },
-          }),
-          ...(netAssetsBreach && {
-            net_assets_check: {
-              net_assets_before_distribution: netAssetsBeforeDistribution,
-              ...(pendingNetAssetsReduction !== 0 && { pending_unconfirmed_dividends: pendingNetAssetsReduction }),
-              gross_dividend: grossDividend,
-              net_assets_after_distribution: netAssetsAfterDistribution,
-              share_capital: roundedShareCapital,
-              share_capital_account: shareCapitalAccount,
-              restricted_reserves: restrictedReserveTotal,
-              restricted_reserve_accounts: restrictedReserveDetails,
-              minimum_net_assets: legalCapitalFloor,
-              shortfall: roundMoney(legalCapitalFloor - netAssetsAfterDistribution),
-            },
-          }),
-          maximum_distributable: maximumDistributable,
-          calculation,
-          // Surface non-blocking warnings (esp. the opening-balance caveat) on the
-          // blocked path too: a "0 retained earnings" block is often exactly the
-          // symptom of opening balances the /journals API omits, so the operator
-          // must see that the check may have run on incomplete data.
-          ...(warnings.length > 0 && { warnings }),
-          compliance_notes: complianceNotes,
-          hint:
-            ledgerImbalance
-              ? "The ledger is imbalanced (Assets − Liabilities ≠ Equity + P&L); force=true does not override this. Find and fix the unbalanced or partially-deleted journals, then re-run."
-              : retainedShortfall && netAssetsBreach
-                ? `Both retained-earnings and § 157 net-assets clauses fail (max lawful net dividend: ${maxNetDividend} EUR). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`
-                : retainedShortfall
-                  ? `Net dividend exceeds distributable profit (ÄS § 157 lg 1). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Set force=true to create the journal anyway.`
-                  : `Distribution would push net assets below the ÄS § 157 lg 2 floor (share capital + restricted reserves; the check is gross-based because the CIT liability also reduces net assets). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`,
-        });
-      }
-
-      if (retainedShortfall) {
-        warnings.push(
-          `Distributable profit (${distributableProfit} EUR) is less than the net dividend (${net_dividend} EUR). ` +
-          `Verify that distribution is lawful per ÄS § 157 lg 1. Journal created because force=true.`
-        );
-      }
-      if (netAssetsBreach) {
-        warnings.push(
-          `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below the ÄS § 157 floor of ${legalCapitalFloor} EUR ` +
-          `(share capital ${Math.max(0, roundedShareCapital)} EUR on account ${shareCapitalAccount}` +
-          `${restrictedReserveFloor > 0 ? ` + restricted reserves ${restrictedReserveFloor} EUR` : ""}). ` +
-          `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
-        );
-      }
-
-      if (dry_run) {
-        return {
-          content: [{
-            type: "text",
-            text: toMcpJson({
-              dry_run: true,
-              calculation,
-              booking: bookingSummary,
-              proposed_journal: { ...journalData, title: wrapUntrustedOcr(journalData.title), document_number: documentNumber },
-              shareholder: shareholderEcho,
-              // Mirror the executed path so the preview doesn't hide legality
-              // context: an operator running dry_run with force=true must see
-              // the same § 157 / retained-earnings signals they would on execute.
-              retained_earnings_check: retainedEarningsCheck,
-              maximum_distributable: maximumDistributable,
-              net_assets_check: netAssetsCheck,
-              ...(warnings.length > 0 && { warnings }),
-              compliance_notes: complianceNotes,
-              note: "No journal created. Set dry_run=false to execute.",
-            }),
-          }],
-        };
-      }
-
-      const guard = await BookingGuard.load(api);
-      const booking = await guard.createJournalOnce(dividendKey, journalData, { confirm: false });
-      const createdId = booking.journal_id;
-      const recovered = booking.status === "created" && booking.recovered === true;
-      // A duplicate (a same-key journal appeared after the pre-check) or a
-      // recovered ambiguous create may be SOMEONE ELSE's journal: verify its
-      // actual postings match this request before reporting success, and echo
-      // what is really in the ledger.
-      let echoedPostings = echoPostings(postings);
-      if (booking.status === "duplicate" || recovered) {
-        const existingPostings = await loadExistingPostings(createdId);
-        if (!existingPostings || postingSignature(existingPostings).join() !== requestedSignature.join()) {
-          return keyConflict(createdId, existingPostings);
-        }
-        echoedPostings = echoPostings(existingPostings);
-      }
-      const apiResponse = booking.status === "created" && booking.upstream_response
-        ? {
-            code: booking.upstream_response.code,
-            messages: booking.upstream_response.messages,
-            created_object_id: createdId,
+        // Duplicate pre-check BEFORE the legality checks: once a dividend is
+        // booked, the ledger already reflects it, so re-running the § 157 checks
+        // on a retry would report e.g. "insufficient retained earnings" for a
+        // distribution that is in fact already recorded. Same key + same postings
+        // → report the existing journal; same key + different postings → conflict.
+        const existingSameKey = allJournals.find(j => j.id != null && !j.is_deleted && j.document_number === documentNumber);
+        if (existingSameKey) {
+          const existingId = existingSameKey.id!;
+          const existingPostings = await loadExistingPostings(existingId, existingSameKey.postings);
+          if (!existingPostings || postingSignature(existingPostings).join() !== requestedSignature.join()) {
+            return keyConflict(existingId, existingPostings);
           }
-        : {
-            code: 200,
-            messages: [booking.status === "duplicate"
-              ? `Existing dividend journal ${createdId} reused.`
-              : `Dividend journal ${createdId} recovered after an ambiguous create.`],
-            created_object_id: createdId,
+          const echoed = echoPostings(existingPostings);
+          if (!dry_run) {
+            logAudit({
+              tool: "prepare_dividend_package",
+              action: "UPDATED",
+              entity_type: "journal",
+              entity_id: existingId,
+              summary: `Existing dividend journal ${existingId} reused for ${net_dividend} EUR net to ${shareholderName}`,
+              details: {
+                effective_date, client_name: shareholderName, amount: grossDividend,
+                total_net: net_dividend, total_gross: grossDividend,
+                postings: echoed.map(p => ({ accounts_id: p.account, type: p.type, amount: p.amount })),
+                booking_key: documentNumber,
+                booking_status: "duplicate",
+              },
+            });
+          }
+          return {
+            content: [{
+              type: "text",
+              text: toMcpJson({
+                ...(dry_run && { dry_run: true }),
+                calculation,
+                booking: bookingSummary,
+                shareholder: shareholderEcho,
+                journal_entry: {
+                  api_response: {
+                    code: 200,
+                    messages: [`Existing dividend journal ${existingId} reused.`],
+                    created_object_id: existingId,
+                  },
+                  booking_status: "duplicate",
+                  registered: existingSameKey.registered === true,
+                  postings: echoed,
+                },
+                note:
+                  `An identical dividend journal ${existingId} (${documentNumber}) already exists — no new journal ` +
+                  `${dry_run ? "would be" : "was"} created. ÄS § 157 legality checks were not re-run: the ledger already ` +
+                  "includes this distribution (or its unconfirmed draft).",
+                compliance_notes: complianceNotes,
+              }),
+            }],
           };
-      logAudit({
-        tool: "prepare_dividend_package",
-        action: booking.status === "created" ? "CREATED" : "UPDATED",
-        entity_type: "journal",
-        entity_id: createdId,
-        summary: booking.status === "created"
-          ? `Dividend journal: ${net_dividend} EUR net to ${shareholderName}, CIT ${cit} EUR`
-          : `Existing dividend journal ${createdId} reused for ${net_dividend} EUR net to ${shareholderName}`,
-        details: {
-          effective_date, client_name: shareholderName, amount: grossDividend,
-          total_net: net_dividend, total_gross: grossDividend,
-          postings: echoedPostings.map(p => ({ accounts_id: p.account, type: p.type, amount: p.amount })),
-          booking_key: documentNumber,
-          booking_status: booking.status,
-          ...(warnings.length > 0 && { warnings }),
-        },
-      });
+        }
 
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            calculation,
-            booking: bookingSummary,
-            retained_earnings_check: retainedEarningsCheck,
-            net_assets_check: netAssetsCheck,
+        // ÄS § 157 lg 1 distributable profit, as of the distribution date:
+        //  - retained earnings (Eelmiste perioodide jaotamata kasum, 2960);
+        //  - the closed prior-year result on "Aruandeaasta kasum" (2970), which
+        //    RIK's year-end result entry (D 9000 / K 2970, Dec 31) credits and
+        //    which is transferred to 2960 only later (Jan 1 entry) — ignoring it
+        //    understates the ceiling;
+        //  - prior-year P&L not yet closed: Σ Tulud/Kulud before Jan 1 of the
+        //    distribution year, INCLUDING the calculated-result account 9000:
+        //    its debit from the result entry cancels the still-open revenue/
+        //    expense balances (RIK does not zero them), so a closed year counts
+        //    once (via 2970/2960) and only the unclosed residual counts here.
+        //    Legacy YECL journals are included too (they zero P&L into 2970).
+        // The distribution year's own result is NOT distributable (no approved
+        // annual report yet), so its closing entry (RIK result entry or legacy
+        // YECL, dated Dec 31 of that year) is excluded from the 2960/2970
+        // balances and its P&L is outside the window.
+        const distributionYear = Number(effective_date.slice(0, 4));
+        const distributionYearStart = `${distributionYear}-01-01`;
+        const currentYearProfitAccount = resolveCurrentYearProfitAccount(accounts, getCurrentYearProfitAccountRule());
+        const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
+        const registeredAsOf = (j: Journal) =>
+          j.registered === true && j.effective_date <= effective_date && !isYearEndClosingJournal(j, distributionYear) &&
+          !isYearEndResultEntry(j, distributionYear, { calculatedResult: calculatedResultAccount, currentYearProfit: currentYearProfitAccount });
+        const retainedBalance = roundMoney(sumCreditMinusDebit(allJournals, id => id === retainedAccount, registeredAsOf));
+        const closedPriorYearResult = currentYearProfitAccount === retainedAccount
+          ? 0
+          : roundMoney(sumCreditMinusDebit(allJournals, id => id === currentYearProfitAccount, registeredAsOf));
+        const plAccountIds = new Set(accounts
+          .filter(a => a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
+          .map(a => a.id));
+        plAccountIds.add(calculatedResultAccount);
+        const unclosedPriorYearPL = roundMoney(sumCreditMinusDebit(
+          allJournals,
+          id => plAccountIds.has(id),
+          j => j.registered === true && j.effective_date < distributionYearStart,
+        ));
+        const lg1Accounts = new Set([retainedAccount, currentYearProfitAccount]);
+
+        // Unconfirmed (PROJECT) dividend drafts: this tool creates its journals
+        // unconfirmed, and every balance read skips unregistered journals — so a
+        // pending draft would otherwise be invisible and a second shareholder's
+        // dividend could pass against the same retained earnings. Identify drafts
+        // by this tool's DIV- document number OR a credit to the dividend-payable
+        // account (manual drafts). Their reduction is measured from their actual
+        // postings, so an over-included non-dividend draft only counts what it
+        // really does to the lg1 pool / net assets. The same-key journal of this
+        // call is never counted (it was handled by the duplicate pre-check).
+        const equityOrPlAccountIds = new Set(accounts
+          .filter(a => a.account_type_est === "Omakapital" || a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
+          .map(a => a.id));
+        const pendingDividendDrafts = allJournals
+          .filter(j =>
+            j.id != null && !j.is_deleted && j.registered !== true && j.document_number !== documentNumber &&
+            ((j.document_number ?? "").startsWith("DIV-") ||
+              (j.postings ?? []).some(p => !p.is_deleted && p.accounts_id === payableAccount && p.type === "C")))
+          .map(j => ({
+            journal_id: j.id!,
+            document_number: j.document_number ?? null,
+            effective_date: j.effective_date,
+            retained_earnings_reduction: roundMoney(-sumCreditMinusDebit([j], id => lg1Accounts.has(id), () => true)),
+            net_assets_reduction: roundMoney(-sumCreditMinusDebit([j], id => equityOrPlAccountIds.has(id), () => true)),
+          }))
+          .filter(d => d.retained_earnings_reduction !== 0 || d.net_assets_reduction !== 0);
+        const pendingRetainedReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.retained_earnings_reduction, 0));
+        const pendingNetAssetsReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.net_assets_reduction, 0));
+        const distributableProfit = roundMoney(retainedBalance + closedPriorYearResult + unclosedPriorYearPL - pendingRetainedReduction);
+        const lg1Components = {
+          retained_earnings_account: retainedAccount,
+          retained_earnings_balance: retainedBalance,
+          current_year_profit_account: currentYearProfitAccount,
+          closed_prior_year_result: closedPriorYearResult,
+          unclosed_prior_year_profit_and_loss: unclosedPriorYearPL,
+          pending_unconfirmed_dividends: pendingRetainedReduction,
+          note:
+            `lg 1 distributable = retained earnings + closed prior-year result (${currentYearProfitAccount}) + ` +
+            `unclosed P&L before ${distributionYearStart} − pending unconfirmed dividend drafts. ` +
+            `${distributionYear} P&L is excluded (no approved annual report yet).`,
+        };
+        const warnings: string[] = [];
+        if (pendingDividendDrafts.length > 0) {
+          warnings.push(
+            `Pending unconfirmed dividend drafts counted: ${pendingDividendDrafts
+              .map(d => `journal ${d.journal_id}${d.document_number ? ` (${d.document_number})` : ""} ` +
+                `−${d.retained_earnings_reduction} EUR distributable / −${d.net_assets_reduction} EUR net assets`)
+              .join(", ")}. Confirm or delete them; they already reserve part of the § 157 headroom.`
+          );
+        }
+
+        // Guard the manual override: auto-detection only ever picks a Kulud
+        // account, but an explicit income_tax_expense_account is existence-checked,
+        // not type-checked. A mistyped override (e.g. an equity or liability
+        // account) would silently book the CIT to the wrong statement line, so
+        // warn — non-blocking — when the resolved account is not an expense.
+        const incomeTaxExpenseRecord = accounts.find(a => a.id === incomeTaxExpenseAccount);
+        if (incomeTaxExpenseRecord && incomeTaxExpenseRecord.account_type_est !== "Kulud") {
+          warnings.push(
+            `Income-tax expense account ${incomeTaxExpenseAccount} (${incomeTaxExpenseRecord.name_est}) is not an expense (Kulud) account. ` +
+            `The dividend CIT belongs on the P&L 'Tulumaks' expense line (Kulud, usually 8900–8999). Verify income_tax_expense_account.`
+          );
+        }
+
+        const balances = await computeAllBalances(api, undefined, effective_date, {
+          preloadedAccounts: accounts,
+          preloadedJournals: allJournals,
+        });
+        // Net assets = equity + current-year P&L. Revenue/expense accounts
+        // (Tulud/Kulud) are not closed into Omakapital until year-end, so the
+        // equity total alone understates net assets mid-year. Fold current-year
+        // P&L in explicitly — shares `sumCategory` with `compute_balance_sheet`
+        // so both tools agree bit-identically on the same ledger.
+        const byCategory = (cat: string): AccountBalance[] =>
+          balances.filter(b => b.account_type_est === cat);
+        const totalAssets = sumCategory(byCategory("Varad"), "D");
+        const totalLiabilities = sumCategory(byCategory("Kohustused"), "C");
+        const totalEquity = sumCategory(byCategory("Omakapital"), "C");
+        const totalRevenue = sumCategory(byCategory("Tulud"), "C");
+        const totalExpenses = sumCategory(byCategory("Kulud"), "D");
+        const currentYearPL = roundMoney(totalRevenue - totalExpenses);
+        const shareCapital = balances.find(balance => balance.account_id === shareCapitalAccount)?.balance ?? 0;
+        const netAssetsBeforeDistribution = roundMoney(totalEquity + currentYearPL);
+        // Pending unconfirmed dividend drafts will reduce net assets once
+        // confirmed — the lg 2 floor is tested against what remains after them.
+        const netAssetsAvailable = roundMoney(netAssetsBeforeDistribution - pendingNetAssetsReduction);
+        const netAssetsAfterDistribution = roundMoney(netAssetsAvailable - grossDividend);
+        const roundedShareCapital = roundMoney(shareCapital);
+
+        // ÄS § 157(2): statutory/articles-mandated reserves (reservkapital) are not
+        // distributable — the net-assets floor is share capital PLUS these reserves,
+        // not share capital alone. restrictedReserveAccounts was resolved/validated
+        // above (default: name-detect "Kohustuslik reservkapital", standard 2940,
+        // and included only when it carries a non-zero balance; override via
+        // restricted_reserve_accounts).
+        const restrictedReserveDetails = restrictedReserveAccounts
+          .map(id => ({ account: id, balance: roundMoney(balances.find(b => b.account_id === id)?.balance ?? 0) }))
+          .filter(r => r.balance !== 0);
+        const restrictedReserveTotal = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + r.balance, 0));
+        // The § 157 net-assets floor: share capital + non-distributable reserves.
+        // Clamp each component to ≥ 0 — PER reserve account, not just the summed
+        // total — so a data anomaly (a debit balance on the share-capital or a
+        // reserve account, which should never happen on a clean ledger) can only
+        // make the floor, and therefore the distribution block, more conservative,
+        // never silently lower it. Clamping only the total would let a negative
+        // reserve balance offset a positive one and pull the floor down; summing
+        // max(0, balance) per account prevents that. The reported restricted_reserves
+        // echo keeps the raw signed total so the anomaly stays visible.
+        const restrictedReserveFloor = roundMoney(restrictedReserveDetails.reduce((sum, r) => sum + Math.max(0, r.balance), 0));
+        const legalCapitalFloor = roundMoney(Math.max(0, roundedShareCapital) + restrictedReserveFloor);
+
+        // Cross-check: on a balanced ledger, Assets − Liabilities must equal
+        // Equity + P&L. A mismatch indicates unbalanced or partially-deleted
+        // journals, which means the retained-earnings and §157 net-assets checks
+        // below are computed from an untrustworthy ledger. Hard-block — force=true
+        // does NOT override this: force exists for a lawful distribution the
+        // ledger cannot prove (e.g. alongside a capital reduction), not for
+        // producing legal-distribution output from a broken balance sheet.
+        // Tolerance 0.05 accounts for rounding drift across the 5 sub-totals
+        // (each rounded independently at up to 0.005 EUR).
+        const assetsMinusLiabilities = roundMoney(totalAssets - totalLiabilities);
+        const ledgerImbalance = Math.abs(assetsMinusLiabilities - netAssetsBeforeDistribution) > 0.05;
+        if (ledgerImbalance) {
+          warnings.push(
+            `Ledger imbalance: Assets − Liabilities (${assetsMinusLiabilities} EUR) ` +
+            `does not equal Equity + current-year P&L (${netAssetsBeforeDistribution} EUR). ` +
+            `Retained-earnings and §157 net-assets checks are unreliable on this ledger. ` +
+            `Investigate unregistered/deleted journals before distributing.`
+          );
+        }
+
+        // ÄS § 157 lg 1 ceiling is NET-based: the statutory limit applies to the
+        // distribution decided by the shareholders (the net dividend). The CIT is
+        // the company's own current-period income-tax expense (TuMS § 50, booked
+        // to the P&L "Tulumaks" line below), not part of the payout — so the
+        // ENTIRE distributable profit is distributable as net dividend.
+        // The § 157 lg 2 net-assets floor below stays GROSS-based, because the
+        // payout does create both a dividend payable and a tax liability.
+        const retainedShortfall = distributableProfit < net_dividend;
+        const netAssetsBreach = netAssetsAfterDistribution < legalCapitalFloor - 0.01;
+        // Report the same verdict the block uses (same 0.01 tolerance), so the
+        // echoed net_assets_check.sufficient never says "false" on a distribution
+        // the tool actually books, or vice versa.
+        const netAssetsSufficient = !netAssetsBreach;
+
+        // Maximum lawful NET dividend under both § 157 clauses, floored to whole
+        // cents so booking exactly this amount always passes both checks:
+        //  - lg 1: net ≤ distributable profit (after pending drafts);
+        //  - lg 2: netAssetsAvailable − net×(1+rate) ≥ floor  ⇔  net ≤ (netAssetsAvailable − floor)/(1+rate).
+        const maxNetByRetained = Math.max(0, distributableProfit);
+        const maxNetByNetAssets = Math.max(0, (netAssetsAvailable - legalCapitalFloor) / (1 + taxRate));
+        const maxNetDividend = floorMoney(Math.min(maxNetByRetained, maxNetByNetAssets));
+        const maximumDistributable = {
+          max_net_dividend: maxNetDividend,
+          limited_by: maxNetByRetained <= maxNetByNetAssets ? "retained_earnings" : "net_assets",
+          max_net_by_retained_earnings: floorMoney(maxNetByRetained),
+          max_net_by_net_assets: floorMoney(maxNetByNetAssets),
+          ...(pendingDividendDrafts.length > 0 && { pending_unconfirmed_dividend_drafts: pendingDividendDrafts }),
+          note:
+            "Largest lawful NET dividend on this ledger: min(distributable profit [ÄS § 157 lg 1: retained earnings + closed prior-year result + unclosed prior-year P&L], " +
+            `(net assets − §157 lg 2 floor) × ${citRate.den}/${citRate.den + citRate.num} [tax comes on top of the payout]), ` +
+            "both after pending unconfirmed dividend drafts.",
+        };
+        const retainedEarningsCheck = {
+          account: retainedAccount,
+          balance_before: distributableProfit,
+          components: lg1Components,
+          net_dividend_required: net_dividend,
+          sufficient: !retainedShortfall,
+        };
+        const netAssetsCheck = {
+          net_assets_before_distribution: netAssetsBeforeDistribution,
+          ...(pendingNetAssetsReduction !== 0 && { pending_unconfirmed_dividends: pendingNetAssetsReduction }),
+          gross_dividend: grossDividend,
+          net_assets_after_distribution: netAssetsAfterDistribution,
+          share_capital_account: shareCapitalAccount,
+          share_capital: roundedShareCapital,
+          restricted_reserves: restrictedReserveTotal,
+          restricted_reserve_accounts: restrictedReserveDetails,
+          minimum_net_assets: legalCapitalFloor,
+          sufficient: netAssetsSufficient,
+        };
+
+        // Opening-balance status: share capital and retained earnings are commonly
+        // entered as "Algbilansi kanded" (opening-balance entries). When a stored
+        // algbilanss is captured, it was folded into allJournals above and this
+        // reports what was applied; otherwise it's the actionable "paste it"
+        // warning, since the § 157 / retained-earnings checks would otherwise run
+        // on incomplete data.
+        warnings.push(...withOpeningBalanceStatus([], {
+          captured: opening !== null,
+          openingDate: opening?.openingDate,
+          unmappedCodes: opening?.unmappedCodes,
+        }));
+
+        // Transparency: when reservkapital was auto-detected (no explicit override)
+        // and carries a balance, tell the operator the floor was raised above bare
+        // share capital — they may not realise reserves are being ring-fenced. A
+        // mandatory reserve is not universal (it applies only when the company's
+        // articles / põhikiri require it), and the account exists in every standard
+        // e-arveldaja chart, so the floor is keyed on the BOOKED BALANCE, not the
+        // account's mere presence — an unfunded reserve (0 balance) adds no floor.
+        if (restricted_reserve_accounts === undefined && restrictedReserveFloor > 0) {
+          warnings.push(
+            `ÄS § 157(2) restricted-reserve floor applied: reservkapital ` +
+            `${restrictedReserveDetails.map(r => `${r.account} (${r.balance} EUR)`).join(", ")} ` +
+            `raises the minimum net-assets floor to ${legalCapitalFloor} EUR ` +
+            `(share capital ${Math.max(0, roundedShareCapital)} + reserves ${restrictedReserveFloor}). ` +
+            `This assumes the company's articles (põhikiri) mandate this statutory reserve; ` +
+            `if they do not, pass restricted_reserve_accounts=[] to exclude it from the floor.`
+          );
+        }
+        const violations: string[] = [];
+        if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
+        if (retainedShortfall) violations.push("Insufficient retained earnings");
+        if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
+
+        // force overrides the two § 157 clauses only — never a ledger imbalance.
+        if (ledgerImbalance || (violations.length > 0 && !force)) {
+          // Report every triggered legality violation in one response so the
+          // operator sees the full picture. ÄS § 157 is explicitly the
+          // framework for retained-earnings distribution legality, so a
+          // retained shortfall is already a § 157 signal; the net-assets
+          // check covers the separate share-capital clause.
+          return toolError({
+            error: violations.join("; "),
+            ...(retainedShortfall && {
+              retained_earnings_check: {
+                balance: distributableProfit,
+                components: lg1Components,
+                net_dividend_required: net_dividend,
+                shortfall: roundMoney(net_dividend - distributableProfit),
+                note: "ÄS § 157 lg 1 limit is NET-based: the CIT is a current-period expense, not part of the distribution.",
+              },
+            }),
+            ...(netAssetsBreach && {
+              net_assets_check: {
+                net_assets_before_distribution: netAssetsBeforeDistribution,
+                ...(pendingNetAssetsReduction !== 0 && { pending_unconfirmed_dividends: pendingNetAssetsReduction }),
+                gross_dividend: grossDividend,
+                net_assets_after_distribution: netAssetsAfterDistribution,
+                share_capital: roundedShareCapital,
+                share_capital_account: shareCapitalAccount,
+                restricted_reserves: restrictedReserveTotal,
+                restricted_reserve_accounts: restrictedReserveDetails,
+                minimum_net_assets: legalCapitalFloor,
+                shortfall: roundMoney(legalCapitalFloor - netAssetsAfterDistribution),
+              },
+            }),
             maximum_distributable: maximumDistributable,
-            shareholder: shareholderEcho,
-            journal_entry: {
-              api_response: apiResponse,
-              booking_status: booking.status,
-              ...(recovered ? { recovered: true } : {}),
-              postings: echoedPostings,
-            },
+            calculation,
+            // Surface non-blocking warnings (esp. the opening-balance caveat) on the
+            // blocked path too: a "0 retained earnings" block is often exactly the
+            // symptom of opening balances the /journals API omits, so the operator
+            // must see that the check may have run on incomplete data.
             ...(warnings.length > 0 && { warnings }),
             compliance_notes: complianceNotes,
-          }),
-        }],
+            hint:
+              ledgerImbalance
+                ? "The ledger is imbalanced (Assets − Liabilities ≠ Equity + P&L); force=true does not override this. Find and fix the unbalanced or partially-deleted journals, then re-run."
+                : retainedShortfall && netAssetsBreach
+                  ? `Both retained-earnings and § 157 net-assets clauses fail (max lawful net dividend: ${maxNetDividend} EUR). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`
+                  : retainedShortfall
+                    ? `Net dividend exceeds distributable profit (ÄS § 157 lg 1). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Set force=true to create the journal anyway.`
+                    : `Distribution would push net assets below the ÄS § 157 lg 2 floor (share capital + restricted reserves; the check is gross-based because the CIT liability also reduces net assets). Max lawful net dividend on this ledger: ${maxNetDividend} EUR. Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`,
+          });
+        }
+
+        if (retainedShortfall) {
+          warnings.push(
+            `Distributable profit (${distributableProfit} EUR) is less than the net dividend (${net_dividend} EUR). ` +
+            `Verify that distribution is lawful per ÄS § 157 lg 1. Journal created because force=true.`
+          );
+        }
+        if (netAssetsBreach) {
+          warnings.push(
+            `Net assets after distribution (${netAssetsAfterDistribution} EUR) would fall below the ÄS § 157 floor of ${legalCapitalFloor} EUR ` +
+            `(share capital ${Math.max(0, roundedShareCapital)} EUR on account ${shareCapitalAccount}` +
+            `${restrictedReserveFloor > 0 ? ` + restricted reserves ${restrictedReserveFloor} EUR` : ""}). ` +
+            `Journal created because force=true. Verify ÄS § 157 compliance through a separate legal action (e.g. capital reduction).`
+          );
+        }
+
+        if (dry_run) {
+          return {
+            content: [{
+              type: "text",
+              text: toMcpJson({
+                dry_run: true,
+                calculation,
+                booking: bookingSummary,
+                proposed_journal: { ...journalData, title: wrapUntrustedOcr(journalData.title), document_number: documentNumber },
+                shareholder: shareholderEcho,
+                // Mirror the executed path so the preview doesn't hide legality
+                // context: an operator running dry_run with force=true must see
+                // the same § 157 / retained-earnings signals they would on execute.
+                retained_earnings_check: retainedEarningsCheck,
+                maximum_distributable: maximumDistributable,
+                net_assets_check: netAssetsCheck,
+                ...(warnings.length > 0 && { warnings }),
+                compliance_notes: complianceNotes,
+                note: "No journal created. Set dry_run=false to execute.",
+              }),
+            }],
+          };
+        }
+
+        const guard = await BookingGuard.load(api);
+        const booking = await guard.createJournalOnce(dividendKey, journalData, { confirm: false });
+        const createdId = booking.journal_id;
+        const recovered = booking.status === "created" && booking.recovered === true;
+        // A duplicate (a same-key journal appeared after the pre-check) or a
+        // recovered ambiguous create may be SOMEONE ELSE's journal: verify its
+        // actual postings match this request before reporting success, and echo
+        // what is really in the ledger.
+        let echoedPostings = echoPostings(postings);
+        if (booking.status === "duplicate" || recovered) {
+          const existingPostings = await loadExistingPostings(createdId);
+          if (!existingPostings || postingSignature(existingPostings).join() !== requestedSignature.join()) {
+            return keyConflict(createdId, existingPostings);
+          }
+          echoedPostings = echoPostings(existingPostings);
+        }
+        const apiResponse = booking.status === "created" && booking.upstream_response
+          ? {
+              code: booking.upstream_response.code,
+              messages: booking.upstream_response.messages,
+              created_object_id: createdId,
+            }
+          : {
+              code: 200,
+              messages: [booking.status === "duplicate"
+                ? `Existing dividend journal ${createdId} reused.`
+                : `Dividend journal ${createdId} recovered after an ambiguous create.`],
+              created_object_id: createdId,
+            };
+        logAudit({
+          tool: "prepare_dividend_package",
+          action: booking.status === "created" ? "CREATED" : "UPDATED",
+          entity_type: "journal",
+          entity_id: createdId,
+          summary: booking.status === "created"
+            ? `Dividend journal: ${net_dividend} EUR net to ${shareholderName}, CIT ${cit} EUR`
+            : `Existing dividend journal ${createdId} reused for ${net_dividend} EUR net to ${shareholderName}`,
+          details: {
+            effective_date, client_name: shareholderName, amount: grossDividend,
+            total_net: net_dividend, total_gross: grossDividend,
+            postings: echoedPostings.map(p => ({ accounts_id: p.account, type: p.type, amount: p.amount })),
+            booking_key: documentNumber,
+            booking_status: booking.status,
+            ...(warnings.length > 0 && { warnings }),
+          },
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              calculation,
+              booking: bookingSummary,
+              retained_earnings_check: retainedEarningsCheck,
+              net_assets_check: netAssetsCheck,
+              maximum_distributable: maximumDistributable,
+              shareholder: shareholderEcho,
+              journal_entry: {
+                api_response: apiResponse,
+                booking_status: booking.status,
+                ...(recovered ? { recovered: true } : {}),
+                postings: echoedPostings,
+              },
+              ...(warnings.length > 0 && { warnings }),
+              compliance_notes: complianceNotes,
+            }),
+          }],
+        };
       };
+      if (dry_run) return checkAndBook();
+      return withBookingKeyLock(api.journals.connectionFingerprint, { ns: "DIV", id: "__headroom__" }, async () => {
+        api.journals.invalidateListCache();
+        return checkAndBook();
+      });
     }
   );
 

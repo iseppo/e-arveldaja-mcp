@@ -44,7 +44,7 @@ import {
  * verifies ambiguous create/confirm outcomes without retrying a POST.
  */
 
-export type DocNamespace = "FX" | "LY" | "DIV";
+export type DocNamespace = "FX" | "LY" | "DIV" | "YEC";
 
 export interface DocKey {
   ns: DocNamespace;

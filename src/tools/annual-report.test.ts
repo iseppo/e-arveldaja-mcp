@@ -1238,6 +1238,23 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     expect(payload.created_journals[0].api_response.created_object_id).toBe(7701);
   });
 
+  it("serializes concurrent executes: the second sees the first's drafts instead of booking the close twice", async () => {
+    const journals = makeM20BaseJournals();
+    let nextId = 7800;
+    const journalsCreate = vi.fn(async (data: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const id = nextId++;
+      journals.push({ ...(data as Journal), id, registered: false, is_deleted: false });
+      return { created_object_id: id };
+    });
+    const handler = setupTool("execute_year_end_close", { journals, journalsCreate });
+    const results = await Promise.all([handler({ year: 2025, confirm: true }), handler({ year: 2025, confirm: true })]);
+    expect(journals.filter((journal) => String(journal.document_number ?? "").startsWith("YEC-")).map((journal) => journal.document_number).sort())
+      .toEqual(["YEC-RESULT-2025", "YEC-RETAINED-2025"]);
+    const payloads = results.map((result) => parseMcpResponse(result.content[0]!.text) as Record<string, any>);
+    expect(payloads.filter((payload) => payload.error === "Year-end close already exists")).toHaveLength(1);
+  });
+
   it("returns a structured partial result — never a bare thrown error — when a closing journal fails to create", async () => {
     const journalsCreate = vi.fn().mockRejectedValue(new Error("backend 500"));
     const handler = setupTool("execute_year_end_close", { journals: makeM20BaseJournals(), journalsCreate });
@@ -1520,6 +1537,27 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
       expect(payload.close_status.status).not.toBe("closed");
       expect(payload.blocked_entries).toEqual([expect.objectContaining({ document_number: "YEC-RETAINED-2025", resolution: "manual_review" })]);
       expect(payload.proposed_journal_entries).toEqual([]);
+    });
+
+    it("a YEC-RETAINED-YYYY transfer on a later year's date is still this year's entry 2 — never a second 1 January transfer", async () => {
+      const keyed = makeJournal("2027-06-01", [makePosting(2970, "D", 50), makePosting(2960, "C", 50)],
+        { id: 3506, document_number: "YEC-RETAINED-2025" });
+      const journals = [...profitYear(), handResult(), keyed];
+      const payload = await prepare(journals);
+      expect(payload.close_status.retained_transfer_entry).toBe("exists");
+      expect(docNumbers(payload)).toEqual([]);
+      const { docs } = await execute(journals);
+      expect(docs).toEqual([]);
+    });
+
+    it("a transfer-shaped D 2970 / K 2960 on 31 December of the close year blocks entry 2 for manual review", async () => {
+      const journals = [...profitYear(), handResult(), transferOn("2025-12-31", 50, 3507)];
+      const payload = await prepare(journals);
+      expect(payload.close_status.status).not.toBe("closed");
+      expect(payload.blocked_entries).toEqual([expect.objectContaining({ document_number: "YEC-RETAINED-2025", resolution: "manual_review" })]);
+      expect(docNumbers(payload)).toEqual([]);
+      const { docs } = await execute(journals, { allow_additional_transfer: true });
+      expect(docs).toEqual([]);
     });
 
     it("an off-date transfer that could equally be an earlier year's late transfer is ambiguous: warned, not booked", async () => {
