@@ -107,6 +107,7 @@ describe("createElicitor — NEVER elicit credentials", () => {
     { label: "password key", fields: { password: { type: "string" } } },
     { label: "apiKey camel key", fields: { apiKey: { type: "string" } } },
     { label: "public_value key", fields: { public_value: { type: "string" } } },
+    { label: "secret_token key", fields: { secret_token: { type: "string" } } },
     { label: "secret in title", fields: { blob: { type: "string", title: "Your API Secret" } } },
     { label: "password in title", fields: { blob: { type: "string", title: "Account Password" } } },
     { label: "secret in description", fields: { blob: { type: "string", description: "Enter your API password" } } },
