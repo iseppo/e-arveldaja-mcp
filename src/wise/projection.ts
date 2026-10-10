@@ -792,6 +792,31 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           reason: `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
         });
         dependsOn = null;
+        // A journal that books the transfer NET of the fee — the Wise leg
+        // differs from the booked amount by exactly the fee and a non-bank leg
+        // carries the fee — already books the fee too: booking the fee row
+        // would expense it twice.
+        const feeKey = `row:${row.rowIndex}:fee`;
+        const feeIndex = commands.findIndex(command => command.row_key === feeKey);
+        const feeCommand = feeIndex >= 0 ? commands[feeIndex]! : undefined;
+        const postings = (existingJournal?.postings ?? []).filter(posting => !posting.is_deleted);
+        const cents = (value: number) => Math.round(value * 100);
+        if (
+          feeCommand &&
+          feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
+          postings.some(posting => posting.accounts_dimensions_id === accounts_dimensions_id &&
+            Math.abs(cents(posting.amount) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
+          postings.some(posting => !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
+            cents(posting.amount) === cents(feeCommand.booked_amount))
+        ) {
+          commands.splice(feeIndex, 1);
+          const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
+          if (feeEntryIndex >= 0) created.splice(feeEntryIndex, 1);
+          skipped.push({
+            wise_id: feeCommand.wise_id,
+            reason: `Fee already journalized: inter-account journal ${existingJournalId} books this transfer net of the fee`,
+          });
+        }
       }
 
       const direction = sourceDirectionForWiseDirection(row.direction)!;

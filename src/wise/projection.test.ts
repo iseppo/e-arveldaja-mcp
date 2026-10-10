@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { preflightWiseCsv } from "./preflight.js";
 import { projectWiseCommands } from "./projection.js";
-import type { AccountDimension, Transaction } from "../types/api.js";
-import type { WiseRow } from "./types.js";
+import { BookingGuard } from "../booking-guard.js";
+import type { AccountDimension, Journal, Transaction } from "../types/api.js";
+import type { WiseRow, WiseTransferDecision } from "./types.js";
 
 const HEADER = `ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency","Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency","Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,"Created by",Category,Note`;
 const WISE = 100;
@@ -81,5 +82,41 @@ describe("Wise card payment split across two balances (same ID)", () => {
   it("keeps the leg identity stable when the export lists the legs in the other order", () => {
     const fresh = project(rowsOf(splitCard), []);
     expect(project(rowsOf([...splitCard].reverse()), ledgerOf(fresh.commands)).commands).toEqual([]);
+  });
+});
+
+describe("Wise inter-account row matched to a journal that already books its fee", () => {
+  const LHV = 200;
+  const transfer = `TRANSFER-1,COMPLETED,IN,"2026-02-04 10:00:00","2026-02-04 10:00:01",0,EUR,0.50,EUR,"Firma OÜ",100.00,EUR,"Firma OÜ",99.50,EUR,1,,,,"Money added",`;
+  const dims = [
+    { id: WISE, accounts_id: 1020, is_deleted: false },
+    { id: LHV, accounts_id: 1020, is_deleted: false },
+    { id: FEE_DIM, accounts_id: 8610, is_deleted: false },
+  ] as AccountDimension[];
+  const run = (journals: Journal[]) => {
+    const rows = rowsOf([transfer]);
+    const decision = { targetDimensionId: LHV, sourceVerified: true, targetVerified: true, ownershipBasis: "verified_endpoints" } as unknown as WiseTransferDecision;
+    return project(rows, [], {
+      accountDimensions: dims,
+      transferDecisions: new Map([[rows[0]!, decision]]),
+      postingDimensionsSnapshot: new Map(dims.map(dim => [dim.id!, dim])),
+      journalSnapshot: journals,
+      createInterAccountGuard: own => BookingGuard.fromSnapshot({} as never, journals, own),
+    });
+  };
+  const journal = (id: number, postings: Array<[number, "D" | "C", number, number?]>) => ({
+    id, registered: true, is_deleted: false, effective_date: "2026-02-04", document_number: "",
+    postings: postings.map(([dim, type, amount, accountsId]) => ({ accounts_dimensions_id: dim, accounts_id: accountsId ?? 1020, type, amount })),
+  }) as unknown as Journal;
+
+  it("drops the fee row too when the journal carries the fee leg", () => {
+    const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])]);
+    expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
+    expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
+  });
+
+  it("still books the fee when the journal moved the gross amount only", () => {
+    const output = run([journal(7, [[LHV, "C", 100], [WISE, "D", 100]])]);
+    expect(output.commands.map(command => command.action)).toEqual(["fee_create_and_confirm", "inter_account"]);
   });
 });
