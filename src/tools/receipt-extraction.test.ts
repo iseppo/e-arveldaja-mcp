@@ -2356,3 +2356,47 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex review regressions — gross and currency must come from the same line
+// ---------------------------------------------------------------------------
+
+describe("booked gross and booked currency stay paired (Codex review)", () => {
+  const extract = (lines: string[]) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    return {
+      gross: fields.total_gross,
+      currency: fields.currency,
+      unsupported: (fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency")),
+    };
+  };
+
+  it("takes the currency from the gross line, not from an earlier EUR line with a rate aside", () => {
+    expect(extract(["Hotel LLC", "Paid EUR 90.00 (1 EUR = 1.1111 USD)", "Total USD 100.00", "VAT USD 10.00"]))
+      .toEqual({ gross: 100, currency: "USD", unsupported: false });
+  });
+
+  it("keeps a EUR cardholder gross when a transaction-currency header names the merchant currency", () => {
+    expect(extract(["Bangkok Hotel", "Transaction currency: THB", "Transaction amount THB 3500.00", "Cardholder amount EUR 90.00"]))
+      .toEqual({ gross: 90, currency: "EUR", unsupported: false });
+  });
+
+  it("still reviews a bare currency label that contradicts a EUR cardholder gross", () => {
+    expect(extract(["Bangkok Hotel", "Currency: THB", "Transaction amount THB 3500.00", "Cardholder amount EUR 90.00"]))
+      .toEqual({ gross: 90, currency: undefined, unsupported: true });
+  });
+
+  it.each([
+    ["matching the document currency", ["Shop", "Purchase amount USD 80.00", "Cardholder currency: USD", "Total cardholder amount: 82.00"], 82, "USD"],
+    ["differing from the document currency", ["Hotel London", "Transaction currency: GBP", "Transaction amount: 100.00", "Exchange rate: 1 GBP = 1.1600 EUR", "Cardholder currency: EUR", "Cardholder amount: 116.00"], 100, "GBP"],
+  ])("reads a separately printed cardholder currency %s", (_label, lines, gross, currency) => {
+    expect(extract(lines)).toEqual({ gross, currency, unsupported: false });
+  });
+
+  it.each([
+    ["hours", ["Parking time: 2 hrs = 6.00 EUR"], 6],
+    ["units", ["Amount due: 1 BOX = 24.00 EUR"], 24],
+  ])("does not treat a %s equation as an exchange rate", (_label, lines, gross) => {
+    expect(extract(lines)).toEqual({ gross, currency: "EUR", unsupported: false });
+  });
+});

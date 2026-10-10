@@ -946,7 +946,7 @@ export function detectReceiptCurrency(text: string): string | undefined {
     // "Total 100.00 EUR (1 EUR = 1.08 USD)": a rate aside does not set the
     // line's currency when the line carries its own mark outside it. A bare
     // rate line ("Exchange rate: 1 GBP = 1.16 EUR") still names the currency.
-    const withoutRate = line.replace(EXCHANGE_RATE_EXPRESSION_RE, " ");
+    const withoutRate = removeExchangeRateExpressions(line);
     const outsideRate = withoutRate === line ? [] : detectCurrenciesOnLine(withoutRate);
     const matches = outsideRate.length > 0 ? outsideRate : detectCurrenciesOnLine(line);
     if (matches.length === 0) continue;
@@ -962,13 +962,34 @@ export function detectReceiptCurrency(text: string): string | undefined {
  * document currency. Applies only when the document currency is a supported
  * non-EUR code; on a EUR (or currency-less) document the cardholder EUR figure
  * pairs with the EUR currency and is scored as before. An unmarked cardholder
- * line counts as mismatched — it is the cardholder's own currency.
+ * line carries the separately printed cardholder currency ("Cardholder
+ * currency: USD") when there is one; otherwise it counts as mismatched — it is
+ * the cardholder's own currency.
  */
-function isCardholderCurrencyMismatch(line: string, documentCurrency: string | undefined): boolean {
-  return documentCurrency !== undefined &&
-    documentCurrency !== "EUR" &&
-    RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(line) &&
-    !detectCurrenciesOnLine(line).includes(documentCurrency);
+function isCardholderCurrencyMismatch(
+  line: string,
+  documentCurrency: string | undefined,
+  cardholderCurrency: string | undefined,
+): boolean {
+  if (documentCurrency === undefined || documentCurrency === "EUR" || !RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(line)) {
+    return false;
+  }
+  const lineCurrencies = detectCurrenciesOnLine(line);
+  const carried = lineCurrencies.length === 0 && cardholderCurrency !== undefined ? [cardholderCurrency] : lineCurrencies;
+  return !carried.includes(documentCurrency);
+}
+
+// "Cardholder currency: USD", "Card currency: EUR", "Billing currency: EUR".
+const CARDHOLDER_CURRENCY_LABEL_RE =
+  /\b(?:card\s?holder|card|billing)\s+currency\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/i;
+
+/** The ISO code a cardholder-currency label names, if any. */
+function detectCardholderCurrency(lines: string[]): string | undefined {
+  for (const line of lines) {
+    const code = line.match(CARDHOLDER_CURRENCY_LABEL_RE)?.[1]?.toUpperCase();
+    if (code && ISO_4217_CURRENCY_CODE_SET.has(code)) return code;
+  }
+  return undefined;
 }
 
 // ISO 4217 codes the receipt extractor cannot represent (F-UNSUPPORTED-CCY).
@@ -1006,6 +1027,8 @@ const UNSUPPORTED_CURRENCY_CODES: ReadonlySet<string> = new Set(
 // codes and are not in the list at all.)
 const LEGACY_EURO_AREA_CODES: ReadonlySet<string> = new Set(["BGN", "HRK"]);
 // "Currency: KWD" / "Currency code: KWD" / "valuuta kwd" — explicit label, any case.
+// "Transaction currency:", "Merchant currency:" — the purchase side of a card slip.
+const MERCHANT_CURRENCY_LABEL_PREFIX_RE = /\b(?:transaction|merchant|original|local|purchase)\s*$/i;
 const CURRENCY_LABEL_CODE_RE =
   /\b(?:currency(?:\s+code)?|valuuta(?:kood)?|w[äa]hrung|devise|valuta|moneda)\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/gi;
 // An uppercase code welded or adjacent to a decimal amount: "CNY100.00",
@@ -1018,8 +1041,15 @@ const AMOUNT_ADJACENT_CODE_RE =
 // "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
 const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
 // "1 EUR = 395.12 HUF": a reference rate names a currency without making it the
-// document's currency.
-const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*[A-Za-z]{3}\s*=\s*\d[\d\s.,]*[A-Za-z]{3}(?![A-Za-z])/g;
+// document's currency. Only when BOTH sides are ISO 4217 codes: "2 hrs = 6.00
+// EUR" and "1 BOX = 24.00 EUR" are quantity/unit prices, not rates.
+const EXCHANGE_RATE_EXPRESSION_RE = /\d[\d.,]*\s*([A-Za-z]{3})\s*=\s*\d[\d\s.,]*([A-Za-z]{3})(?![A-Za-z])/g;
+const ISO_4217_CURRENCY_CODE_SET: ReadonlySet<string> = new Set(ISO_4217_CURRENCY_CODES);
+
+function removeExchangeRateExpressions(line: string): string {
+  return line.replace(EXCHANGE_RATE_EXPRESSION_RE, (match, from: string, to: string) =>
+    ISO_4217_CURRENCY_CODE_SET.has(from.toUpperCase()) && ISO_4217_CURRENCY_CODE_SET.has(to.toUpperCase()) ? " " : match);
+}
 // "Exchange rate: 1.1600", "Exchange rate USD/EUR 0.9000": the value right after
 // an exchange-rate label. Only the number is captured for removal; the label
 // itself stays on the line.
@@ -1032,8 +1062,7 @@ const EXCHANGE_RATE_LABEL_VALUE_RE =
  * so "Total 100.00 EUR (1 EUR = 1.08 USD)" still yields 100.
  */
 function blankExchangeRateNumbers(line: string): string {
-  return line
-    .replace(EXCHANGE_RATE_EXPRESSION_RE, " ")
+  return removeExchangeRateExpressions(line)
     .replace(EXCHANGE_RATE_LABEL_VALUE_RE, "$1 ");
 }
 
@@ -1046,10 +1075,15 @@ function detectUnsupportedCurrencyCode(
   detectedCurrency: string | undefined,
   grossSourceLine: string | undefined,
 ): string | undefined {
-  const firstUnsupportedCode = (rawLine: string, includeAmountAdjacent: boolean): string | undefined => {
-    const line = rawLine.replace(EXCHANGE_RATE_EXPRESSION_RE, " ");
+  const firstUnsupportedCode = (
+    rawLine: string,
+    includeAmountAdjacent: boolean,
+    skipMerchantLabels = false,
+  ): string | undefined => {
+    const line = removeExchangeRateExpressions(rawLine);
     const matches = [
-      ...line.matchAll(CURRENCY_LABEL_CODE_RE),
+      ...[...line.matchAll(CURRENCY_LABEL_CODE_RE)].filter(match =>
+        !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index)))),
       ...(includeAmountAdjacent ? line.matchAll(AMOUNT_ADJACENT_CODE_RE) : []),
     ];
     for (const match of matches) {
@@ -1064,14 +1098,17 @@ function detectUnsupportedCurrencyCode(
   // currency, amount and currency already come from the same line (e.g. the
   // cardholder EUR figure on a THB DCC slip), so only an explicit currency
   // label elsewhere can still override EUR. "Amount: KWD 30.000 = EUR 91.50"
-  // names KWD on the gross line itself and is not exempt.
+  // names KWD on the gross line itself and is not exempt. A "Transaction
+  // currency: THB" header names the merchant side of such a slip, not the
+  // currency of the EUR gross, so it does not override either; a bare
+  // "Currency: THB" stays ambiguous and still does.
   const grossOnEurLine = detectedCurrency === "EUR" && grossSourceLine !== undefined &&
     detectCurrenciesOnLine(grossSourceLine).includes("EUR") &&
     firstUnsupportedCode(grossSourceLine, true) === undefined;
   for (const line of text.split(/\r?\n/).map(clampTextLine)) {
     const amountLine = !grossOnEurLine &&
       (RECEIPT_TOTAL_LABEL_RE.test(line) || CURRENCY_AMOUNT_LINE_LABEL_RE.test(line));
-    const code = firstUnsupportedCode(line, amountLine);
+    const code = firstUnsupportedCode(line, amountLine, grossOnEurLine);
     if (code) return code;
   }
   return undefined;
@@ -1760,6 +1797,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   let grossMetadata: AmountProvenanceMetadata | undefined;
   const classifiedLines = lines.map((_line, index) => classifyLine(lines, index));
   const documentCurrency = detectReceiptCurrency(text);
+  const cardholderCurrency = detectCardholderCurrency(lines);
   const hasExplicitVatLine = classifiedLines.some(classified =>
     classified.hasVatAmountLabel &&
     !classified.blockedAsReferenceInInspection &&
@@ -1771,7 +1809,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       continue;
     }
 
-    const cardholderCurrencyMismatch = isCardholderCurrencyMismatch(classified.line, documentCurrency);
+    const cardholderCurrencyMismatch = isCardholderCurrencyMismatch(classified.line, documentCurrency, cardholderCurrency);
     fallbackCandidates.push(...classified.amounts.map(amount => ({
       amount,
       lineIndex,
@@ -2880,14 +2918,22 @@ export function extractReceiptFieldsFromText(
   const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
   const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
-  const detectedCurrency = detectReceiptCurrency(text);
+  // The booked currency follows the line the gross was picked from: on
+  // "Paid EUR 90.00 (1 EUR = 1.1111 USD) / Total USD 100.00" the gross is the
+  // USD total, so the currency is USD. A gross line without its own mark
+  // (outside any rate expression) falls back to document-level detection.
+  const grossLine = grossSourceLine(text, amounts);
+  const grossLineCurrencies = grossLine ? detectCurrenciesOnLine(removeExchangeRateExpressions(grossLine)) : [];
+  const detectedCurrency = grossLineCurrencies.length > 0
+    ? grossLineCurrencies.find(code => NON_EUR_CURRENCY_CODES.has(code)) ?? grossLineCurrencies[0]
+    : detectReceiptCurrency(text);
   // F-UNSUPPORTED-CCY: when the document names a currency the extractor cannot
   // represent, do not report it as EUR (or let it read as unmarked, which every
   // consumer defaults to EUR). Leaving the currency undetected routes the row
   // through the existing currency_defaulted review signal; the note says why.
   // A supported non-EUR detection is already reviewed and is left alone.
   const unsupportedCurrency = detectedCurrency === undefined || detectedCurrency === "EUR"
-    ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossSourceLine(text, amounts))
+    ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossLine)
     : undefined;
   const currency = unsupportedCurrency ? undefined : detectedCurrency;
   const invoiceNumber = extractInvoiceNumber(text, fileName);
