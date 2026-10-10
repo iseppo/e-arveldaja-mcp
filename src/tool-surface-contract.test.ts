@@ -28,8 +28,8 @@ describe("MCP tool-surface contract", () => {
     });
   }
 
-  it("captures a deterministic surface across repeated bootstraps", async () => {
-    expect(await captureToolSurface("standard")).toEqual(snapshots.get("standard"));
+  it.each(TOOL_SURFACE_PROFILES)("captures a deterministic %s surface across repeated bootstraps", async (profile) => {
+    expect(await captureToolSurface(profile)).toEqual(snapshots.get(profile));
   });
 
   it("keeps opt-in profile budgets", () => {

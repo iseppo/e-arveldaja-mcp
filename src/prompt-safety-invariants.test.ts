@@ -398,7 +398,8 @@ describe("exhaustive prompt-surface budget + shared safety wrapper", () => {
         ? z.object(definition.argsSchema).parse(wireArguments)
         : {};
 
-      for (const exposure of [ALL_ENABLED, ALL_DISABLED]) {
+      // undefined = the default exposure the server uses when none is passed.
+      for (const exposure of [undefined, ALL_ENABLED, ALL_DISABLED]) {
         const rendered = buildWorkflowPromptSourceText(
           definition.slug,
           parsedArguments,

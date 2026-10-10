@@ -1123,86 +1123,86 @@ describe("BaseResource", () => {
       {
         label: "sale invoice deliver",
         make: (c: HttpClient) => new SaleInvoicesApi(c),
-        invoke: (r: unknown) => (r as SaleInvoicesApi).sendEinvoice(5, {} as never),
+        invoke: (r: unknown) => (r as SaleInvoicesApi).sendEinvoice(5, { send_einvoice: true }),
         path: "/sale_invoices/5/deliver", operation: "update", entity: "sale_invoice",
-        businessKey: "/sale_invoices:5:deliver", caches: ["/sale_invoices", "/journals"],
+        body: { send_einvoice: true }, businessKey: "/sale_invoices:5:deliver", caches: ["/sale_invoices", "/journals"],
       },
       {
         label: "sale invoice confirm",
         make: (c: HttpClient) => new SaleInvoicesApi(c),
         invoke: (r: unknown) => (r as SaleInvoicesApi).confirm(5),
         path: "/sale_invoices/5/register", operation: "confirm", entity: "sale_invoice",
-        businessKey: "/sale_invoices:5:register", caches: ["/sale_invoices", "/journals", "/transactions"],
+        body: {}, businessKey: "/sale_invoices:5:register", caches: ["/sale_invoices", "/journals", "/transactions"],
       },
       {
         label: "sale invoice invalidate",
         make: (c: HttpClient) => new SaleInvoicesApi(c),
         invoke: (r: unknown) => (r as SaleInvoicesApi).invalidate(5),
         path: "/sale_invoices/5/invalidate", operation: "invalidate", entity: "sale_invoice",
-        businessKey: "/sale_invoices:5:invalidate", caches: ["/sale_invoices", "/journals", "/transactions"],
+        body: {}, businessKey: "/sale_invoices:5:invalidate", caches: ["/sale_invoices", "/journals", "/transactions"],
       },
       {
         label: "purchase invoice confirm",
         make: (c: HttpClient) => new PurchaseInvoicesApi(c),
         invoke: (r: unknown) => (r as PurchaseInvoicesApi).confirm(5),
         path: "/purchase_invoices/5/register", operation: "confirm", entity: "purchase_invoice",
-        businessKey: "/purchase_invoices:5:register", caches: ["/purchase_invoices", "/journals", "/transactions"],
+        body: {}, businessKey: "/purchase_invoices:5:register", caches: ["/purchase_invoices", "/journals", "/transactions"],
       },
       {
         label: "purchase invoice invalidate",
         make: (c: HttpClient) => new PurchaseInvoicesApi(c),
         invoke: (r: unknown) => (r as PurchaseInvoicesApi).invalidate(5),
         path: "/purchase_invoices/5/invalidate", operation: "invalidate", entity: "purchase_invoice",
-        businessKey: "/purchase_invoices:5:invalidate", caches: ["/purchase_invoices", "/journals", "/transactions"],
+        body: {}, businessKey: "/purchase_invoices:5:invalidate", caches: ["/purchase_invoices", "/journals", "/transactions"],
       },
       {
         label: "journal confirm",
         make: (c: HttpClient) => new JournalsApi(c),
         invoke: (r: unknown) => (r as JournalsApi).confirm(5),
         path: "/journals/5/register", operation: "confirm", entity: "journal",
-        businessKey: "/journals:5:register", caches: ["/journals", "/transactions"],
+        body: {}, businessKey: "/journals:5:register", caches: ["/journals", "/transactions"],
       },
       {
         label: "journal invalidate",
         make: (c: HttpClient) => new JournalsApi(c),
         invoke: (r: unknown) => (r as JournalsApi).invalidate(5),
         path: "/journals/5/invalidate", operation: "invalidate", entity: "journal",
-        businessKey: "/journals:5:invalidate", caches: ["/journals", "/transactions"],
+        body: {}, businessKey: "/journals:5:invalidate", caches: ["/journals", "/transactions"],
       },
       {
         label: "transaction invalidate",
         make: (c: HttpClient) => new TransactionsApi(c),
         invoke: (r: unknown) => (r as TransactionsApi).invalidate(5),
         path: "/transactions/5/invalidate", operation: "invalidate", entity: "transaction",
-        businessKey: "transaction:5", caches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
+        body: {}, businessKey: "transaction:5", caches: ["/transactions", "/journals", "/sale_invoices", "/purchase_invoices"],
       },
       {
         label: "client deactivate",
         make: (c: HttpClient) => new ClientsApi(c),
         invoke: (r: unknown) => (r as ClientsApi).deactivate(5),
         path: "/clients/5/deactivate", operation: "update", entity: "client",
-        businessKey: "/clients:5:deactivate", caches: ["/clients"],
+        body: {}, businessKey: "/clients:5:deactivate", caches: ["/clients"],
       },
       {
         label: "client reactivate",
         make: (c: HttpClient) => new ClientsApi(c),
         invoke: (r: unknown) => (r as ClientsApi).restore(5),
         path: "/clients/5/reactivate", operation: "update", entity: "client",
-        businessKey: "/clients:5:reactivate", caches: ["/clients"],
+        body: {}, businessKey: "/clients:5:reactivate", caches: ["/clients"],
       },
       {
         label: "product deactivate",
         make: (c: HttpClient) => new ProductsApi(c),
         invoke: (r: unknown) => (r as ProductsApi).deactivate(5),
         path: "/products/5/deactivate", operation: "update", entity: "product",
-        businessKey: "/products:5:deactivate", caches: ["/products"],
+        body: {}, businessKey: "/products:5:deactivate", caches: ["/products"],
       },
       {
         label: "product reactivate",
         make: (c: HttpClient) => new ProductsApi(c),
         invoke: (r: unknown) => (r as ProductsApi).restore(5),
         path: "/products/5/reactivate", operation: "update", entity: "product",
-        businessKey: "/products:5:reactivate", caches: ["/products"],
+        body: {}, businessKey: "/products:5:reactivate", caches: ["/products"],
       },
     ] as const;
 
@@ -1249,9 +1249,10 @@ describe("BaseResource", () => {
       for (const prefix of row.caches) cache.set(`connection:0:${prefix}:list:`, "stale");
       vi.mocked(client.patch).mockResolvedValueOnce(apiResponse());
 
-      await row.invoke(resource);
+      await expect(row.invoke(resource)).resolves.toEqual(apiResponse());
 
-      expect(client.patch).toHaveBeenCalledWith(row.path, expect.anything());
+      expect(client.patch).toHaveBeenCalledTimes(1);
+      expect(client.patch).toHaveBeenCalledWith(row.path, row.body);
       for (const prefix of row.caches) {
         expect(cache.get(`connection:0:${prefix}:list:`)).toBeUndefined();
       }
@@ -1281,6 +1282,49 @@ describe("BaseResource", () => {
         businessKey: `${path}:5`,
         affectedCaches: [path],
       });
+    });
+
+    // JournalsApi overrides create/update to narrow the request type; the
+    // override must still forward the exact payload and evict on success.
+    it.each([
+      {
+        label: "create",
+        invoke: (api: JournalsApi) => api.create({
+          title: "Manual entry",
+          effective_date: "2026-07-24",
+          document_number: "BANK:stmt-1",
+          cl_currencies_id: "EUR",
+          postings: [{ accounts_id: 1020, type: "D", amount: 10 }],
+        }),
+        method: "post" as const,
+        call: ["/journals", {
+          title: "Manual entry",
+          effective_date: "2026-07-24",
+          document_number: "BANK:stmt-1",
+          cl_currencies_id: "EUR",
+          postings: [{ accounts_id: 1020, type: "D", amount: 10 }],
+        }],
+        evicted: "connection:0:/journals:list:page=1",
+      },
+      {
+        label: "update",
+        invoke: (api: JournalsApi) => api.update(55, { title: "renamed" }),
+        method: "patch" as const,
+        call: ["/journals/55", { title: "renamed" }],
+        evicted: "connection:0:/journals:55",
+      },
+    ])("JournalsApi.$label forwards the exact payload, returns the response, and evicts", async row => {
+      const client = makeClient();
+      const api = new JournalsApi(client);
+      const response = { code: 200, created_object_id: 7, messages: [] };
+      vi.mocked(client[row.method]).mockResolvedValueOnce(response);
+      cache.set(row.evicted, "stale");
+
+      await expect(row.invoke(api)).resolves.toEqual(response);
+
+      expect(client[row.method]).toHaveBeenCalledTimes(1);
+      expect(client[row.method]).toHaveBeenCalledWith(...row.call);
+      expect(cache.get(row.evicted)).toBeUndefined();
     });
   });
 });

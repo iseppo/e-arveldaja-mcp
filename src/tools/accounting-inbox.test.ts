@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, opendir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,12 @@ import {
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
+// Pass-through opendir spy so the default-budget scan can be fed a large
+// synthetic directory without writing MAX_SCANNED_FILES real files.
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  return { ...actual, opendir: vi.fn(actual.opendir) };
+});
 
 const mockedParseDocument = vi.mocked(parseDocument);
 
@@ -354,6 +360,28 @@ describe("scanWorkspaceFiles traversal budget (M15)", () => {
     expect(result.truncated).toBe(true);
     expect(result.continuation_guidance).toMatch(/narrower workspace/i);
     expect(result.files).toHaveLength(0);
+  });
+
+  it("stops at the default MAX_SCANNED_FILES budget when called without an explicit limit", async () => {
+    const entries = Array.from({ length: MAX_SCANNED_FILES + 5 }, (_, i) => ({
+      name: `note-${String(i).padStart(5, "0")}.txt`,
+      isDirectory: () => false,
+      isFile: () => true,
+    }));
+    let yielded = 0;
+    vi.mocked(opendir).mockImplementationOnce(async () => (async function* () {
+      for (const entry of entries) { yielded += 1; yield entry; }
+    })() as never);
+
+    const result = await scanWorkspaceFiles("/synthetic-workspace", 2);
+
+    expect(result.inspected_entries).toBe(MAX_SCANNED_FILES);
+    expect(result.entry_limit).toBe(MAX_SCANNED_FILES);
+    expect(result.truncated).toBe(true);
+    expect(result.continuation_guidance).toMatch(/narrower workspace/i);
+    expect(result.files).toHaveLength(0);
+    // Streaming stops reading the directory right after the budget is hit.
+    expect(yielded).toBe(MAX_SCANNED_FILES + 1);
   });
 
   it("does not truncate or emit guidance for a small workspace", async () => {

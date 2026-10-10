@@ -11,6 +11,18 @@ describe("tool profiles", () => {
     expect(() => parseToolProfile({ EARVELDAJA_PROFILE: "guided-investments" } as NodeJS.ProcessEnv)).toThrow("Invalid EARVELDAJA_PROFILE");
   });
 
+  // Literal list (not LEGACY_TOOL_EXPOSURE_ENV_KEYS) so dropping a flag from the
+  // constant fails here. EXPOSE_SETUP_TOOLS on guided is the credential-exposure case.
+  it.each([
+    "EARVELDAJA_DISABLE_LIGHTYEAR", "EARVELDAJA_EXPOSE_GRANULAR_TOOLS", "EARVELDAJA_EXPOSE_SETUP_TOOLS",
+    "EARVELDAJA_DISABLE_TAX_TOOLS", "EARVELDAJA_DISABLE_REFERENCE_ADMIN", "EARVELDAJA_DISABLE_ANNUAL_REPORT",
+    "EARVELDAJA_DISABLE_SALES", "EARVELDAJA_DISABLE_PRODUCTS",
+  ])("normalizes guided and standard to custom when %s=1 is present", flag => {
+    for (const profile of ["guided", "standard"]) {
+      expect(parseToolProfile({ EARVELDAJA_PROFILE: profile, [flag]: "1" } as NodeJS.ProcessEnv)).toBe("custom");
+    }
+  });
+
   it("pins the one-choice setup mapping without inventing guided-investments", () => {
     expect(SETUP_PROFILE_CHOICES).toEqual([
       { label: "Daily bookkeeping", profile: "guided", enableLightyear: false },

@@ -95,8 +95,8 @@ describe("classification analysis compact", () => {
     expect(canonicalBusinessText(parsed[0]!.normalized_counterparty)).toBe("lhv 0");
   });
 
-  it("omits next_action and warns to narrow the range when groups exceed the budget", () => {
-    const compact = renderClassificationAnalysisCompact({ result: analysis(100), accountsDimensionsId: 100 });
+  it.each([100, 2000])("omits next_action and warns to narrow the range when %i groups exceed the budget", (groupCount) => {
+    const compact = renderClassificationAnalysisCompact({ result: analysis(groupCount), accountsDimensionsId: 100 });
     // A dry_run_apply without classifications_json would fail, so none is offered.
     expect(compact.summary.next_action).toBeUndefined();
     const warning = compact.summary.warnings!.find(w => w.code === "classifications_too_large");

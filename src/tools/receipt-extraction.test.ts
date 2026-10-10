@@ -18,6 +18,8 @@ import {
   looksLikePersonCounterparty,
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
+  getAutoBookedVatConfig,
+  getAutoBookedVatRateDropdown,
   extractReceiptFieldsFromText,
   extractSupplierName,
   classifyLayoutAmountLabel,
@@ -950,6 +952,16 @@ describe("looksLikePersonCounterparty", () => {
 // ---------------------------------------------------------------------------
 // deriveAutoBookedNetAmount
 // ---------------------------------------------------------------------------
+
+describe("automatic VAT fallback default", () => {
+  it("defaults unmatched auto-bookings to no VAT and keeps gross as net", () => {
+    const vatConfig = getAutoBookedVatConfig();
+    expect(vatConfig).toEqual({ vat_rate_dropdown: "-" });
+    expect(getAutoBookedVatRateDropdown()).toBe("-");
+    expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
+    expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);
+  });
+});
 
 describe("deriveAutoBookedNetAmount", () => {
   it("returns gross rounded to 2 decimals when VAT rate is '-' (exempt)", () => {

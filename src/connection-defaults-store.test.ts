@@ -107,10 +107,11 @@ describe("connection-defaults-store — SECURITY", () => {
   it("NEVER persists a secret field even if one is smuggled into the entry", () => {
     const path = tempStorePath();
     const store = createConnectionDefaultsStore(path);
-    store.saveBankDefault({ ...bankEntry, apiKey: "SECRET", password: "hunter2" } as never);
+    store.saveBankDefault({ ...bankEntry, apiKey: "SECRET", password: "hunter2", token: "tok-abc123" } as never);
     const raw = readFileSync(path, "utf8");
     expect(raw).not.toContain("SECRET");
     expect(raw).not.toContain("hunter2");
+    expect(raw).not.toContain("tok-abc123");
   });
 
   it("caps stored entry count", () => {

@@ -194,6 +194,8 @@ describe("prepare_dividend_package", () => {
     expect(calc.cit_amount).toBe(roundMoney(10000 * 22 / 78));
     expect(calc.cit_amount).toBe(2820.51);
     expect(calc.gross_dividend).toBe(roundMoney(10000 + 10000 * 22 / 78));
+    expect(calc.gross_dividend).toBe(12820.51);
+    expect(roundMoney(calc.gross_dividend)).toBe(calc.gross_dividend);
   });
 
   it("calculates CIT correctly for amount that triggers rounding (78 EUR net)", async () => {
@@ -212,19 +214,23 @@ describe("prepare_dividend_package", () => {
     expect(calc.gross_dividend).toBe(100);
   });
 
-  it("rounds CIT to cents for fractional result (100 EUR net)", async () => {
-    // 100 * 22/78 = 28.2051282... → 28.21
+  // 100 * 22/78 = 28.2051282... → 28.21; 1 * 22/78 = 0.28205... → 0.28
+  it.each([
+    [100, 28.21, 128.21],
+    [1, 0.28, 1.28],
+  ])("rounds CIT to cents for fractional result (%s EUR net)", async (net, cit, gross) => {
     const cb = tools.get("prepare_dividend_package")!;
     const result = await cb({
-      net_dividend: 100,
+      net_dividend: net,
       shareholder_client_id: 1,
       effective_date: "2026-06-01",
     });
 
     expect(isError(result)).toBe(false);
     const data = parseResult(result);
-    const calc = data.calculation as { cit_amount: number };
-    expect(calc.cit_amount).toBe(28.21);
+    const calc = data.calculation as { cit_amount: number; gross_dividend: number };
+    expect(calc.cit_amount).toBe(cit);
+    expect(calc.gross_dividend).toBe(gross);
   });
 
   // -------------------------------------------------------------------------

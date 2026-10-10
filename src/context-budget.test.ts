@@ -45,6 +45,31 @@ describe("response context-budget baseline", () => {
     }
   });
 
+  it("keeps a guided workflow continuation request under the compact byte bounds", async () => {
+    // The args a client sends back to continue_accounting_workflow from a
+    // workflow_action_v2 next_action: an opaque handle plus a stable item id,
+    // never a re-serialized prior workflow envelope.
+    const CONTINUATION_TARGET_BYTES = 512;
+    const CONTINUATION_HARD_BYTES = 1024;
+    const normal = { action: "next", workflow_handle: "A".repeat(43), item_id: "review-0007" };
+    const bytes = Buffer.byteLength(toMcpJson(normal), "utf8");
+    expect(bytes).toBeLessThan(CONTINUATION_TARGET_BYTES);
+    expect(bytes).toBeLessThanOrEqual(CONTINUATION_HARD_BYTES);
+
+    // Worst case derived from the advertised schema: every handle field at its
+    // pattern length, the longest action, item_id at maxLength.
+    const surface = JSON.parse(await readFile(new URL("../testdata/tool-surface/standard.json", import.meta.url), "utf8"));
+    const props = surface.tools.find((tool: { name: string }) => tool.name === "continue_accounting_workflow").inputSchema.properties;
+    expect(props.workflow_handle.pattern).toBe("^[A-Za-z0-9_-]{43}$");
+    const worstCase = {
+      action: [...props.action.enum as string[]].sort((a, b) => b.length - a.length)[0],
+      workflow_handle: "A".repeat(43),
+      item_id: "x".repeat(props.item_id.maxLength),
+    };
+    expect(worstCase.item_id.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(toMcpJson(worstCase), "utf8")).toBeLessThanOrEqual(CONTINUATION_HARD_BYTES);
+  });
+
   it("keeps the fixed per-session server-instruction string within the context budget", () => {
     // The configured (non-setup) instruction string is loaded on every session,
     // so it is a fixed per-session context cost. Task 16 trimmed it under 1.5 KiB

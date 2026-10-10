@@ -55,9 +55,14 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
     expect(readonlyCache.get("connection:0:/accounts:all")).toBe("unrelated");
   });
 
-  it.each(writeCases)("$label 500 → MutationIndeterminateError with cache eviction", async row => {
+  // Every ambiguous transport outcome must be classified by each adapter, not
+  // only by the shared classifier unit tests.
+  const ambiguousCases = writeCases.flatMap(row =>
+    (["network", 408, 500] as const).map(status => ({ ...row, status })));
+
+  it.each(ambiguousCases)("$label $status → MutationIndeterminateError with cache eviction", async row => {
     const client = makeClient();
-    vi.mocked(client[row.method]).mockRejectedValue(new HttpError("server error", 500, row.method.toUpperCase(), "/x"));
+    vi.mocked(client[row.method]).mockRejectedValue(new HttpError("ambiguous", row.status, row.method.toUpperCase(), "/x"));
     readonlyCache.set(row.cacheKey, "stale");
 
     const error = await row.call(new ReferenceDataApi(client)).catch((e: unknown) => e);
@@ -70,7 +75,7 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
       entity: row.entity,
       entityId: row.entityId,
       businessKey: row.businessKey,
-      cause: { status: 500 },
+      cause: { status: row.status },
     });
     expect((error as MutationIndeterminateError).nextAction).toMatch(/^Re-read .* before deciding whether to retry/);
     expect(readonlyCache.get(row.cacheKey)).toBeUndefined();

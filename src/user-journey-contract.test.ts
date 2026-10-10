@@ -524,6 +524,15 @@ const GUIDED_JOURNEYS: GuidedJourney[] = [
 ];
 
 describe("guided milestone achievability contract", () => {
+  it("covers the required guided milestones (inter-account, duplicate cleanup, rule saving, trial balance)", () => {
+    expect(GUIDED_JOURNEYS.map((journey) => journey.name)).toEqual([
+      "guided-inter-account-reconcile",
+      "guided-duplicate-cleanup",
+      "guided-rule-saving",
+      "guided-trial-balance",
+    ]);
+  });
+
   it("every guided journey step is visible in its profile", () => {
     for (const journey of GUIDED_JOURNEYS) {
       for (const step of journey.steps) {

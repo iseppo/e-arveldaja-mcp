@@ -117,5 +117,19 @@ describe("documentation contract: safe prompt pipeline", () => {
     it("keeps an [Unreleased] section for the next release cycle", () => {
       expect(CHANGELOG()).toContain("## [Unreleased]");
     });
+
+    // The 0.22.0 entry backs the point-of-use release notice and stays a
+    // maintained contract until that notice is removed.
+    it("documents the safe prompt pipeline in the 0.22.0 release section", () => {
+      const doc = CHANGELOG();
+      const start = doc.indexOf("## [0.22.0]");
+      expect(start).toBeGreaterThanOrEqual(0);
+      const nextRelease = doc.indexOf("\n## [", start + 1);
+      const section = doc.slice(start, nextRelease === -1 ? undefined : nextRelease);
+      expect(section).toMatch(/prompt/i);
+      expect(section).toContain("src/prompt-registry.ts");
+      expect(section).toMatch(/plan handle is not (user )?approval/i);
+      expect(section).toMatch(/string prompt argument/i);
+    });
   });
 });

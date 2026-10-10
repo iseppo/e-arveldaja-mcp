@@ -215,7 +215,7 @@ describe("process_bank_input — capability-aware elicitation + persisted defaul
 
     // The persisted document holds NO secret material.
     expect(JSON.stringify(store.readBankDefault({ connectionId: "test-fingerprint", environmentKind: "demo", expectedLedgerAccountId: 1020 })))
-      .not.toMatch(/api.?key|password|secret|public.?value/i);
+      .not.toMatch(/api.?key|password|secret|public.?value|token/i);
 
     // Second scan, SAME connection/store: rung 3 resolves silently. The elicitor
     // throws if consulted — proving no fresh question was asked.

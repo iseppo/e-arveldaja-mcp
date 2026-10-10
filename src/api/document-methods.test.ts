@@ -46,7 +46,7 @@ describe("document_user methods inherited on each document-capable API class", (
         body: { name: "scan.pdf", contents: "Zm9v" },
       });
 
-      await api.getDocument(7);
+      await expect(api.getDocument(7)).resolves.toEqual({ name: "doc.pdf", contents: "YmFzZTY0" });
       expect(client.get).toHaveBeenCalledWith(`${base}/7/document_user`);
 
       await api.deleteDocument(7);
