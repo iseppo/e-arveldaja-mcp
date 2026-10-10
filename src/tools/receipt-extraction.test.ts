@@ -2294,6 +2294,35 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect(fields.currency).toBe("USD");
   });
 
+  it("flags an integer-denominated unsupported total even when a EUR payment line follows (Codex slice 4 #1)", () => {
+    const fields = extractReceiptFieldsFromText([
+      "Supplier: Budapest Software Kft", "Invoice no: HU-2026-41", "Date: 2026-10-01",
+      "Subtotal HUF 10000", "VAT HUF 0", "Total HUF 10000", "Paid EUR 25.40",
+    ].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("HUF")(fields.extraction_notes)).toBe(true);
+    expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
+  });
+
+  it.each([
+    ["trailing integer code", ["Shop LLC", "Total 10000 HUF"], "HUF"],
+    ["grouped integer", ["Shop LLC", "Total HUF 10 000"], "HUF"],
+  ])("flags an integer unsupported total: %s", (_label, lines, code) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
+  });
+
+  it.each([
+    ["Total 100 EUR", ["Shop OÜ", "Total 100 EUR"]],
+    ["Kokku EUR 100", ["Shop OÜ", "Kokku EUR 100"]],
+  ])("keeps an integer EUR total as EUR: %s", (_label, lines) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe("EUR");
+    expect(fields.total_gross).toBe(100);
+    expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
+  });
+
   it.each([
     ["EUR total", ["Shop OÜ", "Kokku 24,40 EUR"], "EUR"],
     ["unmarked total", ["Shop OÜ", "Kokku 24,40"], undefined],
