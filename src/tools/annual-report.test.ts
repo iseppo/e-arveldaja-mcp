@@ -1522,6 +1522,27 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
       expect(payload.proposed_journal_entries).toEqual([]);
     });
 
+    it("a YEC-RETAINED-YYYY transfer on a later year's date is still this year's entry 2 — never a second 1 January transfer", async () => {
+      const keyed = makeJournal("2027-06-01", [makePosting(2970, "D", 50), makePosting(2960, "C", 50)],
+        { id: 3506, document_number: "YEC-RETAINED-2025" });
+      const journals = [...profitYear(), handResult(), keyed];
+      const payload = await prepare(journals);
+      expect(payload.close_status.retained_transfer_entry).toBe("exists");
+      expect(docNumbers(payload)).toEqual([]);
+      const { docs } = await execute(journals);
+      expect(docs).toEqual([]);
+    });
+
+    it("a transfer-shaped D 2970 / K 2960 on 31 December of the close year blocks entry 2 for manual review", async () => {
+      const journals = [...profitYear(), handResult(), transferOn("2025-12-31", 50, 3507)];
+      const payload = await prepare(journals);
+      expect(payload.close_status.status).not.toBe("closed");
+      expect(payload.blocked_entries).toEqual([expect.objectContaining({ document_number: "YEC-RETAINED-2025", resolution: "manual_review" })]);
+      expect(docNumbers(payload)).toEqual([]);
+      const { docs } = await execute(journals, { allow_additional_transfer: true });
+      expect(docs).toEqual([]);
+    });
+
     it("an off-date transfer that could equally be an earlier year's late transfer is ambiguous: warned, not booked", async () => {
       // 2024 left a 50 profit open (not closed/transferred); 2026-12-01 moves 50 — 2024's or 2025's?
       const prior2024 = makeJournal("2024-05-01", [makePosting(1020, "D", 50), makePosting(3100, "C", 50)], { id: 3502 });

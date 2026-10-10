@@ -771,16 +771,26 @@ async function analyzeYearEndClose(
   // 1 December), so those count when their 2970 debit equals the result.
   const transferAccounts = { currentYearProfit: ids.currentYearProfit, retainedEarnings: ids.retainedEarnings, reserves: ids.reserves };
   const onDateBooked = netDebit(existing.transfer, ids.currentYearProfit);
+  // Off-date candidates: transfer-shaped journals of the next year or of
+  // 31 December of this year, plus YEC-RETAINED-YYYY on ANY date (its number
+  // is this year's transfer even when booked years late).
+  const sameYearEnd = `${year}-12-31`;
+  const offDateCandidates = allJournals.filter((journal) =>
+    !journal.is_deleted && journal.id !== -1 && !existing.transfer.includes(journal) &&
+    (journal.document_number === transferDocumentNumber ||
+      ((journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) &&
+        isRetainedTransferShape(journal, transferAccounts))));
   // Same for YEC-RETAINED-YYYY found by number alone: it must post only
   // 2970 ↔ 2960 (+ reserve), or it is no transfer and needs manual review.
-  const malformedTransferJournals = existing.transfer.filter((journal) => !isRetainedTransferShape(journal, transferAccounts));
-  const offDateCandidates = allJournals.filter((journal) =>
-    !journal.is_deleted && journal.id !== -1 &&
-    journal.effective_date.startsWith(`${year + 1}-`) && journal.effective_date !== `${year + 1}-01-01` &&
-    isRetainedTransferShape(journal, transferAccounts));
+  const malformedTransferJournals = [...existing.transfer, ...offDateCandidates]
+    .filter((journal) => !isRetainedTransferShape(journal, transferAccounts));
+  // An unnumbered 31 December transfer is inside the year-end balances, so the
+  // prior-year residual cannot tell whose it is — never accept it as a match.
   const offDateMatches = malformedTransferJournals.length > 0 || (existing.transfer.length > 0 && matchesExpected(onDateBooked))
     ? []
-    : offDateCandidates.filter((journal) => matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit)));
+    : offDateCandidates.filter((journal) =>
+      (journal.effective_date !== sameYearEnd || journal.document_number === transferDocumentNumber) &&
+      matchesExpected(onDateBooked + netDebit([journal], ids.currentYearProfit)));
   // A matching off-date entry may equally be an earlier year's late transfer
   // when that earlier result is still sitting untransferred on 2970.
   const offDateAmbiguous = offDateMatches.length > 1 || (offDateMatches.length === 1 && Math.abs(priorYearResidual) >= 0.01 &&
