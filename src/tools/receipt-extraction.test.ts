@@ -28,6 +28,7 @@ import {
   categorizeTransactionGroup,
 } from "./receipt-extraction.js";
 import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
+import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 
 describe("bank transaction source direction classification", () => {
   it("classifies API type C with signed incoming metadata as revenue, not an expense", () => {
@@ -2259,5 +2260,53 @@ describe("fallback gross on a dual-display card receipt (F-GROSSPICKER)", () => 
   it("control: an explicit total line is unaffected by a cardholder line", () => {
     const amounts = extractAmounts(["Shop OÜ", "Total 100.00", "Cardholder amount EUR 90.00"].join("\n"));
     expect(amounts.total_gross).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-UNSUPPORTED-CCY — unsupported ISO currency must not be booked as EUR
+// ---------------------------------------------------------------------------
+
+describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
+  const unsupportedNote = (code: string) => (notes: string[] | undefined) =>
+    (notes ?? []).some(note => note.includes(`unsupported_currency_${code}`));
+
+  it.each([
+    ["labelled code", ["Shop LLC", "Currency: KWD", "Total 100.000"], "KWD"],
+    ["lowercase labelled code", ["Shop LLC", "currency: kwd", "Total 100.000"], "KWD"],
+    ["welded code", ["Shop LLC", "Total CNY100.00"], "CNY"],
+    ["trailing code", ["Shop LLC", "Total 100.00 CNY"], "CNY"],
+  ])("flags a %s and leaves the currency undetected", (_label, lines, code) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
+    const summary = summarizeInvoiceExtraction(fields);
+    expect(summary.confidence).toBe("low");
+    expect(summary.confidence_signals).toContain("currency_defaulted");
+  });
+
+  it("does not let a stray EUR mark book an invoice that names an unsupported currency as EUR", () => {
+    const fields = extractReceiptFieldsFromText(["Shop LLC", "Total CNY100.00", "VAT 0.00 EUR"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("CNY")(fields.extraction_notes)).toBe(true);
+    expect(fields.total_gross).toBe(100);
+  });
+
+  it("leaves a supported non-EUR currency alone", () => {
+    const fields = extractReceiptFieldsFromText(["Shop LLC", "Currency: KWD", "Total 100.00 USD"].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe("USD");
+  });
+
+  it.each([
+    ["EUR total", ["Shop OÜ", "Kokku 24,40 EUR"], "EUR"],
+    ["unmarked total", ["Shop OÜ", "Kokku 24,40"], undefined],
+    ["labelled EUR", ["Shop OÜ", "Currency: EUR", "Total 10.00"], "EUR"],
+    ["Euro label", ["Shop OÜ", "Valuuta: Euro", "Total 10.00 €"], "EUR"],
+    ["word-like codes on item lines", ["Shop OÜ", "PEN 2.50", "CUP 3.00", "Apples 2.50 KGS", "SVC 1.00", "Total 9.00 EUR"], "EUR"],
+    ["currency conversion prose", ["Shop OÜ", "Currency conversion applied", "Total 10.00 EUR"], "EUR"],
+  ])("does not flag an ordinary receipt: %s", (_label, lines, currency) => {
+    const fields = extractReceiptFieldsFromText(lines.join("\n"), "receipt.pdf");
+    expect(fields.currency).toBe(currency);
+    expect((fields.extraction_notes ?? []).some(note => note.includes("unsupported_currency"))).toBe(false);
   });
 });

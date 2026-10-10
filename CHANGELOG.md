@@ -5,6 +5,7 @@
 ### Fixed
 
 - **Dual-display card slips no longer book the cardholder-currency figure as the total.** When a receipt had no total line, the gross fell back to the amount with a currency mark, so a slip printing `Purchase amount 100.00` and `Cardholder amount EUR 90.00` was read as 90. A line labelled "cardholder" / "card holder" no longer gets the currency preference and ranks just below an otherwise equal amount, so the purchase amount is the gross whichever is larger; a cardholder figure that is the only amount is still used. Explicit total lines are unchanged.
+- **A currency the extractor does not know is no longer read as EUR.** An invoice naming only an unsupported ISO code (`Currency: KWD`, `currency: kwd`, `CNY100.00`, `100.00 CNY`) came out with no currency, or as EUR when a stray EUR mark was present, and booking defaults that to euros. Such a document now reports no currency, which routes it to review (`currency_defaulted`), and carries an `unsupported_currency_<CODE>_…` extraction note. Amounts, supported currencies and ordinary EUR receipts are unchanged; codes that are also receipt words or units (PEN, CUP, KGS, SVC, TRY, ALL, …) are ignored next to an amount.
 
 ## [0.28.1] - 2026-10-02
 

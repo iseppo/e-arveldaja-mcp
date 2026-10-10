@@ -943,6 +943,42 @@ export function detectReceiptCurrency(text: string): string | undefined {
   return undefined;
 }
 
+// ISO 4217 codes the receipt extractor cannot represent (F-UNSUPPORTED-CCY).
+// detectReceiptCurrency only knows RECEIPT_CURRENCY_PATTERNS, so an invoice
+// naming any other code reads as currency-less (or as EUR when a stray EUR mark
+// is present) and downstream `?? "EUR"` books it as euros. Codes that are also
+// ordinary receipt words or units (PEN, CUP, KGS "kilograms", SVC "service",
+// TRY, ALL, ...) are excluded so an item line cannot trip the gate.
+const UNSUPPORTED_CURRENCY_WORD_LIKE_CODES: ReadonlySet<string> = new Set([
+  "ALL", "AMD", "ANG", "BAM", "BOB", "CUP", "GEL", "KGS", "MAD", "MOP", "PEN", "SOS", "STN", "SVC", "TOP", "TRY",
+]);
+const UNSUPPORTED_CURRENCY_CODES: ReadonlySet<string> = new Set(
+  (typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("currency") : [])
+    .filter(code =>
+      code !== "EUR" &&
+      !NON_EUR_CURRENCY_CODES.has(code) &&
+      !UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)),
+);
+// "Currency: KWD" / "valuuta kwd" — an explicit currency label, any case.
+const CURRENCY_LABEL_CODE_RE = /\b(?:currency|valuuta|w[äa]hrung|devise|valuta|moneda)\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/gi;
+// An uppercase code welded or adjacent to a decimal amount: "CNY100.00",
+// "KWD 1.250", "100.00 CNY". The decimals keep SKU/reference tokens out.
+const AMOUNT_ADJACENT_CODE_RE = /(?<![A-Za-z])([A-Z]{3})\s?-?\d[\d\s.,]*[.,]\d{2,3}(?!\d)|\d[.,]\d{2,3}\s?([A-Z]{3})(?![A-Za-z])/g;
+
+/**
+ * The first ISO 4217 code the text clearly names that the extractor cannot
+ * represent, or undefined. Detection only — it never changes amounts.
+ */
+function detectUnsupportedCurrencyCode(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/).map(clampTextLine)) {
+    for (const match of [...line.matchAll(CURRENCY_LABEL_CODE_RE), ...line.matchAll(AMOUNT_ADJACENT_CODE_RE)]) {
+      const code = (match[1] ?? match[2])?.toUpperCase();
+      if (code && UNSUPPORTED_CURRENCY_CODES.has(code)) return code;
+    }
+  }
+  return undefined;
+}
+
 export function normalizeDate(raw: string): string | undefined {
   const trimmed = raw
     .trim()
@@ -2729,7 +2765,16 @@ export function extractReceiptFieldsFromText(
   const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
   const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
-  const currency = detectReceiptCurrency(text);
+  const detectedCurrency = detectReceiptCurrency(text);
+  // F-UNSUPPORTED-CCY: when the document names a currency the extractor cannot
+  // represent, do not report it as EUR (or let it read as unmarked, which every
+  // consumer defaults to EUR). Leaving the currency undetected routes the row
+  // through the existing currency_defaulted review signal; the note says why.
+  // A supported non-EUR detection is already reviewed and is left alone.
+  const unsupportedCurrency = detectedCurrency === undefined || detectedCurrency === "EUR"
+    ? detectUnsupportedCurrencyCode(text)
+    : undefined;
+  const currency = unsupportedCurrency ? undefined : detectedCurrency;
   const invoiceNumber = extractInvoiceNumber(text, fileName);
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
   const fieldProvenance = buildFieldProvenance(
@@ -2751,6 +2796,9 @@ export function extractReceiptFieldsFromText(
   const extractionNotes = [
     ...(amountNotes ?? []),
     ...(supplierResult.extraction_notes ?? []),
+    ...(unsupportedCurrency
+      ? [`unsupported_currency_${unsupportedCurrency}_named_currency_not_detected_verify_before_booking`]
+      : []),
   ];
 
   return {
