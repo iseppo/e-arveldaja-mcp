@@ -225,13 +225,35 @@ export function extractVatNumber(text: string, options?: ExtractVatNumberOptions
   return ids.vat_no;
 }
 
+/**
+ * ISO 13616 registered IBAN lengths (SWIFT IBAN registry) for common
+ * countries. Countries not listed keep the generic 15–34 shape check.
+ */
+const IBAN_LENGTHS: Record<string, number> = {
+  AD: 24, AE: 23, AL: 28, AT: 20, BA: 20, BE: 16, BG: 22, CH: 21, CY: 28,
+  CZ: 24, DE: 22, DK: 18, EE: 20, ES: 24, FI: 18, FO: 18, FR: 27, GB: 22,
+  GE: 22, GI: 23, GL: 18, GR: 27, HR: 21, HU: 28, IE: 22, IL: 23, IS: 26,
+  IT: 27, LI: 21, LT: 20, LU: 20, LV: 21, MC: 27, MD: 24, ME: 22, MK: 19,
+  MT: 31, NL: 18, NO: 15, PL: 28, PT: 25, RO: 24, RS: 22, SA: 24, SE: 24,
+  SI: 19, SK: 24, SM: 27, TR: 26, UA: 29, XK: 20,
+};
+
 export function extractIban(text: string): string | undefined {
   // Scan every IBAN-shaped candidate and return the first that passes the
   // mod-97 checksum — a document can carry a malformed/partial IBAN before the
   // real one, so we continue past invalid candidates instead of stopping at
   // the first shape match.
   for (const match of text.matchAll(/\b([A-Z]{2}\d{2}(?:[ \t]*[A-Z0-9]){11,30})\b/gi)) {
-    const candidate = match[1]!.replace(/\s+/g, "").toUpperCase();
+    let candidate = match[1]!.replace(/\s+/g, "").toUpperCase();
+    // The regex allows spaces between groups, so it can bridge an IBAN into
+    // the following token (BIC, date, amount, reference digits). For countries
+    // with a registered length, keep only that exact-length prefix; a shorter
+    // candidate cannot be a valid IBAN for that country.
+    const length = IBAN_LENGTHS[candidate.slice(0, 2)];
+    if (length !== undefined) {
+      if (candidate.length < length) continue;
+      candidate = candidate.slice(0, length);
+    }
     if (isValidIban(candidate)) return candidate;
   }
   return undefined;

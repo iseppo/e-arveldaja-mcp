@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **IBANs followed by a BIC, date, amount or other digits are extracted again.** The IBAN extractor allows spaces between groups, so on lines like "EE38 2200 2210 2014 5685 BIC HABAEE2X" or "IBAN: EE382200221020145685 12.05.2026" it glued the next token onto the IBAN, and the joined value failed the checksum. Nothing was extracted. Each candidate is now cut to its country's registered IBAN length (EE 20, LV 21, LT 20, FI 18, DE 22, GB 22, SE 24 and other common European countries) before the mod-97 check. A candidate shorter than the registered length is rejected. Countries outside the table keep the previous behaviour.
+
 ## [0.28.1] - 2026-10-02
 
 ### Fixed

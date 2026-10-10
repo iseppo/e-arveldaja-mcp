@@ -200,6 +200,39 @@ describe("extractIban", () => {
   it("extracts a lowercase/mixed-case IBAN (OCR normalisation)", () => {
     expect(extractIban("iban: ee38 2200 2210 2014 5685")).toBe("EE382200221020145685");
   });
+
+  it("does not bridge an IBAN into the following BIC, date, amount or digits", () => {
+    // The regex allows spaces between groups, so the trailing token used to be
+    // glued onto the IBAN and the whole candidate failed mod-97. Candidates are
+    // trimmed to the country's registered IBAN length (EE = 20).
+    expect(extractIban("EE38 2200 2210 2014 5685 BIC HABAEE2X")).toBe("EE382200221020145685");
+    expect(extractIban("EE382200221020145685 BIC HABAEE2X")).toBe("EE382200221020145685");
+    expect(extractIban("IBAN EE38 2200 2210 2014 5685 SWIFT HABAEE2X")).toBe("EE382200221020145685");
+    expect(extractIban("IBAN: EE382200221020145685 12.05.2026")).toBe("EE382200221020145685");
+    expect(extractIban("EE38 2200 2210 2014 5685 1234")).toBe("EE382200221020145685");
+    expect(extractIban("EE38 2200 2210 2014 5685 Summa 120.00")).toBe("EE382200221020145685");
+    expect(extractIban("EE38 2200 2210 2014 5685 Viitenumber 1234567")).toBe("EE382200221020145685");
+  });
+
+  it("trims bridged candidates to the registered length for other countries", () => {
+    expect(extractIban("FI21 1234 5600 0007 85 BIC NDEAFIHH")).toBe("FI2112345600000785");
+    expect(extractIban("DE89 3704 0044 0532 0130 00 COBADEFFXXX")).toBe("DE89370400440532013000");
+    expect(extractIban("GB29 NWBK 6016 1331 9268 19 1234")).toBe("GB29NWBK60161331926819");
+    expect(extractIban("LV80 BANK 0000 4351 9500 1 HABALV22")).toBe("LV80BANK0000435195001");
+    expect(extractIban("LT12 1000 0111 0100 1000 HABALT22")).toBe("LT121000011101001000");
+  });
+
+  it("rejects a known-country candidate shorter than the registered length", () => {
+    // EE61220022102014568 passes mod-97 but is 19 characters; an EE IBAN is
+    // exactly 20, so it must not be accepted.
+    expect(extractIban("EE61 2200 2210 2014 568")).toBeUndefined();
+  });
+
+  it("keeps punctuation-delimited IBANs working alongside bridge trimming", () => {
+    expect(extractIban("IBAN:EE382200221020145685 BIC HABAEE2X")).toBe("EE382200221020145685");
+    expect(extractIban("(EE38 2200 2210 2014 5685) 12.05.2026")).toBe("EE382200221020145685");
+    expect(extractIban("EE38 2200 2210 2014 5685;BIC:HABAEE2X")).toBe("EE382200221020145685");
+  });
 });
 
 describe("extractReferenceNumber", () => {
