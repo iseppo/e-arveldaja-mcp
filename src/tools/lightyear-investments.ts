@@ -907,6 +907,20 @@ function tradeConversionAmountCcy(
   return Math.abs(trade.type === "Sell" ? trade.net_amount : trade.gross_amount);
 }
 
+/**
+ * A buy is funded by a conversion INTO the trade currency (foreign leg
+ * positive); a sell's proceeds leave by one OUT of it (foreign leg negative).
+ * A conversion clearly in the opposite direction is someone else's; zero or
+ * sign-conflicting legs are left to validateConversionAmounts.
+ */
+function conversionMatchesTradeDirection(
+  trade: Pick<AccountStatementRow, "type">,
+  foreignConversion: Pick<AccountStatementRow, "gross_amount" | "net_amount">,
+): boolean {
+  const wrongSign = trade.type === "Sell" ? 1 : -1;
+  return Math.sign(foreignConversion.gross_amount) !== wrongSign && Math.sign(foreignConversion.net_amount) !== wrongSign;
+}
+
 function validateTradeAmounts(row: AccountStatementRow): FxReviewReason | null {
   const gross = Math.abs(row.gross_amount);
   const net = Math.abs(row.net_amount);
@@ -1037,6 +1051,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
       const hasMatchingForeignRow = conversionRows.some(conversionRow =>
         normalizedCurrency(conversionRow.ccy) === tradeCurrency &&
         conversionRow.date.split(/[\sT]/)[0] === orderDatePrefix &&
+        conversionMatchesTradeDirection(row, conversionRow) &&
         agreesToCent(Math.abs(conversionRow.gross_amount), tradeConversionAmountCcy(row))
       );
       if (hasMatchingForeignRow) shortlisted.push({ ref, rows: conversionRows });
