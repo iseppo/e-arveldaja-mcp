@@ -46,27 +46,52 @@ export function hasUnverifiableCamtMarker(tx: Transaction): boolean {
 }
 
 /**
- * The bank reference used to match an existing inter-account journal: the
+ * The bank references to match an existing inter-account journal with: the
  * direct `bank_ref_number`, else the reference of a checksum-verified CAMT
  * marker (MCP-CAMT rows store it only there), else `ref_number`. A verified
  * marker that kept only the reference hash (a reference over the marker cap)
- * is matched by the shared lookup key: the document number of a journal whose
- * reference keys (with or without "BANK:") include it is returned.
+ * yields the document numbers of every live registered journal whose
+ * reference keys (with or without "BANK:") include its lookup key — each
+ * literal alias, so a draft or stale alias never hides the booking journal.
  */
-export function transferReferenceOf(tx: Transaction, journals: readonly Journal[] = []): string | undefined {
+export function transferReferencesOf(tx: Transaction, journals: readonly Journal[] = []): string[] {
   const direct = normalizeOptionalReference(tx.bank_ref_number ?? undefined);
-  if (direct) return direct;
+  if (direct) return [direct];
   const metadata = extractCamtDescriptionMetadata(tx.description);
   if (isTrustedCamtDescriptionMetadata(tx, metadata)) {
     const markerReference = normalizeOptionalReference(metadata.bank_ref_number);
-    if (markerReference) return markerReference;
+    if (markerReference) return [markerReference];
     const key = storedBankReferenceLookupKey(tx);
-    const journal = key
-      ? journals.find(j => !j.is_deleted && journalDocumentReferenceKeys(j.document_number).includes(key))
-      : undefined;
-    if (journal?.document_number) return journal.document_number;
+    const aliases = key
+      ? [...new Set(journals
+          .filter(j => !j.is_deleted && j.registered === true && journalDocumentReferenceKeys(j.document_number).includes(key))
+          .map(j => j.document_number!))]
+      : [];
+    if (aliases.length > 0) return aliases;
   }
-  return tx.ref_number ?? undefined;
+  return tx.ref_number ? [tx.ref_number] : [];
+}
+
+/** The first of {@link transferReferencesOf}, for recording an in-run journal. */
+export function transferReferenceOf(tx: Transaction, journals: readonly Journal[] = []): string | undefined {
+  return transferReferencesOf(tx, journals)[0];
+}
+
+/**
+ * Resolve a transfer against its candidate references: the first reference
+ * that matches a journal wins (probed without consuming); with none, the
+ * first reference's outcome stands.
+ */
+export function resolveWithReferences<R extends { status: string }>(
+  references: readonly string[],
+  resolve: (reference: string | undefined, consume: boolean) => R,
+  consume: boolean,
+): R {
+  if (references.length > 1) {
+    const matching = references.find(reference => resolve(reference, false).status === "matched");
+    if (matching !== undefined) return resolve(matching, consume);
+  }
+  return resolve(references[0], consume);
 }
 
 export interface OneSidedInference {

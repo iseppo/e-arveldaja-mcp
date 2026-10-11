@@ -47,7 +47,9 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  resolveWithReferences,
   transferReferenceOf,
+  transferReferencesOf,
   unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
   getSameTypeReciprocalEvidence,
@@ -770,12 +772,12 @@ export async function runInterAccountMatching(
 
   function resolveExistingJournal(
     sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number,
-    referenceNumber: string | null | undefined, consume: boolean,
+    references: readonly string[], consume: boolean,
   ): InterAccountResolution {
-    return guard.resolveInterAccount(
-      { sourceDim, targetDim, amount, date, maxGapDays, reference: referenceNumber },
-      { consume },
-    );
+    return resolveWithReferences(references, (reference, consumeNow) => guard.resolveInterAccount(
+      { sourceDim, targetDim, amount, date, maxGapDays, reference },
+      { consume: consumeNow },
+    ), consume);
   }
 
   function recordInterAccountJournal(
@@ -985,7 +987,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       txOut.accounts_dimensions_id, txIn.accounts_dimensions_id,
       bestCandidate.comparableAmount, txOut.date, maxGap,
-      transferReferenceOf(txOut, guard.journals), true,
+      transferReferencesOf(txOut, guard.journals), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(txOut.id);
@@ -1176,7 +1178,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       source.accounts_dimensions_id, counterpart.accounts_dimensions_id,
       distributionAmount, source.date, maxGap,
-      transferReferenceOf(source, guard.journals), true,
+      transferReferencesOf(source, guard.journals), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(sourceId);
@@ -1307,7 +1309,7 @@ export async function runInterAccountMatching(
       // one-sided journal check below (skip / ambiguous_refless), not here.
       const covered = (tx: Transaction, target: number, amount: number) =>
         resolveExistingJournal(
-          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferenceOf(tx, guard.journals), false,
+          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferencesOf(tx, guard.journals), false,
         ).status !== "none";
       if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
 
@@ -1430,7 +1432,7 @@ export async function runInterAccountMatching(
       amountEur,
       tx.date,
       maxGap,
-      transferReferenceOf(tx, guard.journals),
+      transferReferencesOf(tx, guard.journals),
       true,
     );
     if (resolution.status === "matched") {
@@ -1463,12 +1465,12 @@ export async function runInterAccountMatching(
         // amount within the date gap that is ref-less or carries the member's
         // reference is a competing claim.
         const competingJournalIds = (member: Transaction): number[] => {
-          const reference = normalizeReference(transferReferenceOf(member, guard.journals));
+          const references = new Set(transferReferencesOf(member, guard.journals).map(normalizeReference));
           return guard.journals.filter(j => {
             if (j.id == null || j.is_deleted || j.registered !== true) return false;
             if (Math.abs(toUtcDay(j.effective_date) - toUtcDay(member.date)) / 86_400_000 > maxGap) return false;
             const journalReference = normalizeReference(j.document_number);
-            if (journalReference !== "" && journalReference !== reference) return false;
+            if (journalReference !== "" && !references.has(journalReference)) return false;
             const legOn = (dim: number) => j.postings.some(p =>
               !p.is_deleted && p.accounts_dimensions_id === dim && sameAmountToTheCent(Math.abs(p.base_amount ?? p.amount), amountEur));
             return legOn(member.accounts_dimensions_id) && legOn(targetDimension);

@@ -13,7 +13,8 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
-  transferReferenceOf,
+  resolveWithReferences,
+  transferReferencesOf,
   unverifiedMarkerTransferClaim,
   type OneSidedInference,
 } from "../banking/reconciliation/inter-account-matcher.js";
@@ -310,14 +311,14 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         // inter-account journal already covers it (e.g. the mirror leg was
         // confirmed first). Returns a replacement suggestion, or undefined.
         const alreadyBookedTransfer = (targetDim: number): Suggestion | undefined => {
-          const resolution = guard.resolveInterAccount({
+          const resolution = resolveWithReferences(transferReferencesOf(tx, guard.journals), reference => guard.resolveInterAccount({
             sourceDim: txDim,
             targetDim,
             amount: txDuplicateAmount,
             date: tx.date,
             maxGapDays: DUPLICATE_DATE_WINDOW_DAYS,
-            reference: transferReferenceOf(tx, guard.journals),
-          }, { consume: false });
+            reference,
+          }, { consume: false }), false);
           if (resolution.status === "none") return undefined;
           const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
           const base = {

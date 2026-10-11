@@ -4215,6 +4215,25 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
     });
 
+    it("a draft or stale journal with another alias of the hash-only reference does not hide the booking journal (both orders)", async () => {
+      const longRef = "LONG-REFERENCE-" + "A".repeat(100);
+      const booking = journal({ document_number: longRef });
+      const aliases = [
+        journal({ id: 9000, registered: false, document_number: `BANK:${longRef}` }),
+        journal({ id: 9000, effective_date: "2026-08-01", document_number: `BANK:${longRef}` }),
+      ];
+      for (const alias of aliases) {
+        for (const journals of [[alias, booking], [booking, alias]]) {
+          const row = camtRow(5002, { name: "Wise Payments", ref: longRef, text: null });
+          const { handler, api } = setup([counterpart(), row], journals);
+          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+          expect(api.transactions.confirm).not.toHaveBeenCalled();
+          expect(payload.matched_one_sided).toBe(0);
+          expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+        }
+      }
+    });
+
     it("Codex counterexample: a consumed ref-less journal does not hide a reviewed member's claim on another journal (all orders)", async () => {
       const withRef = (id: number, ref: string, date: string) => ({ ...camtRow(id, { ref, date }), bank_ref_number: ref });
       const rows = [withRef(5011, "R1", "2026-09-24"), withRef(5012, "R2", "2026-09-25"), withRef(5013, "R2", "2026-09-27")];
