@@ -340,4 +340,115 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       "TRANSFER-9999:wise_transfer_journal_ambiguous",
     ]);
   });
+
+  const mapped = (...pairs: Array<[string, number]>) => ({
+    journalizedTransferIds: pairs.map(([wise_id, journal_id]) => ({ wise_id, journal_id })),
+  });
+  const reviewCodes = (output: ReturnType<typeof project>) =>
+    output.ownershipReviews.map(review => `${review.wise_id}:${review.code}${review.journal_id !== undefined ? `:${review.journal_id}` : ""}`);
+
+  it("an operator mapping records the row as already journalized by that journal, with no create", () => {
+    const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+    expect(output.ownershipReviews).toEqual([]);
+    expect(output.created).toEqual([]);
+  });
+
+  it("the mapped journal still never absorbs a distinct same-key Wise ID", () => {
+    const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-9999")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual([
+      "main_create:TRANSFER-9999",
+      "inter_account:TRANSFER-1001:create_only_already_journalized:701",
+    ]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-9999:wise_transfer_journal_ambiguous"]);
+  });
+
+  it.each([
+    ["the journal moves the money the other way", [labelledJournal({}, "C")]],
+    ["the journal amount differs", [labelledJournal({}, "D", 100.01)]],
+    ["the journal is more than one day away", [labelledJournal({ effective_date: "2026-03-25" })]],
+    ["the journal is not registered", [labelledJournal({ registered: false })]],
+    ["the journal is deleted", [labelledJournal({ is_deleted: true })]],
+    ["the journal is not in the ledger", []],
+    ["the journal does not move money between the two bank accounts", [labelledJournal({
+      postings: [
+        { accounts_dimensions_id: WISE, accounts_id: 1020, type: "D", amount: 100 },
+        { accounts_dimensions_id: FEE_DIM, accounts_id: 8610, type: "C", amount: 100 },
+      ],
+    })]],
+    ["the journal carries no reference (ref-less journals are matched automatically)", [labelledJournal({ document_number: "" })]],
+  ] as Array<[string, Journal[]]>)("a mapping is rejected when %s: the row is still created, with a review", (_case, journals) => {
+    const output = run([transferIn("TRANSFER-1001")], journals, mapped(["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+  });
+
+  it("two Wise IDs mapped to one journal: both mappings are rejected and both rows created", () => {
+    const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1002")], [labelledJournal()],
+      mapped(["TRANSFER-1001", 701], ["TRANSFER-1002", 701]));
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-1002"]);
+    expect(reviewCodes(output)).toEqual([
+      "TRANSFER-1001:wise_transfer_mapping_rejected:701",
+      "TRANSFER-1002:wise_transfer_mapping_rejected:701",
+    ]);
+  });
+
+  it("a Wise ID listed twice in the mapping is rejected, even with the same journal", () => {
+    const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701], ["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+  });
+
+  it("a mapped Wise ID shared by several statement rows is ambiguous: rejected, every row created", () => {
+    const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
+    expect(output.commands.map(command => command.action)).toEqual(["main_create", "main_create"]);
+    expect(output.ownershipReviews.filter(review => review.code === "wise_transfer_mapping_rejected")).toHaveLength(2);
+  });
+
+  it("a mapped row that is not an approved own transfer is rejected and created", () => {
+    const rows = rowsOf([transferIn("TRANSFER-1001")]);
+    const output = project(rows, [counterpartTx], {
+      accountDimensions: dims, journalSnapshot: [labelledJournal()], ...mapped(["TRANSFER-1001", 701]),
+    });
+    expect(output.commands.map(command => command.action)).toEqual(["main_create"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+  });
+
+  it("a mapping for a Wise ID that is not in the statement, or already imported, is reported as unused", () => {
+    const absent = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-5555", 701]));
+    expect(actions(absent)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(reviewCodes(absent)).toEqual([
+      "TRANSFER-1001:wise_transfer_journal_ambiguous",
+      "TRANSFER-5555:unused_mapping:701",
+    ]);
+    const storedRow = {
+      id: 9, status: "PROJECT", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-03-23",
+      description: "WISE:TRANSFER-1001 Firma OÜ [source_direction=IN]",
+    } as Transaction;
+    const imported = run([transferIn("TRANSFER-1001")], [labelledJournal()], { ...mapped(["TRANSFER-1001", 701]), existingTx: [counterpartTx, storedRow] });
+    expect(imported.commands).toEqual([]);
+    expect(reviewCodes(imported)).toEqual(["TRANSFER-1001:unused_mapping:701"]);
+  });
+
+  // A2: exact-reference claims are reserved across the whole run before any
+  // mapping is accepted, whatever the CSV order.
+  it.each([["A first", ["TRANSFER-A", "TRANSFER-B"]], ["B first", ["TRANSFER-B", "TRANSFER-A"]]])(
+    "a journal labelled with another statement row's Wise ID belongs to that row; the mapping is rejected (%s)",
+    (_order, ids) => {
+      const journal = labelledJournal({ id: 801, document_number: "TRANSFER-B", operation_type: "JOURNAL", operations_id: undefined });
+      const output = run(ids.map(id => transferIn(id)), [journal], mapped(["TRANSFER-A", 801]));
+      expect(actions(output).sort()).toEqual([
+        "inter_account:TRANSFER-B:create_only_already_journalized:801",
+        "main_create:TRANSFER-A",
+      ]);
+      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_mapping_rejected:801"]);
+    },
+  );
+
+  it("a row whose own exact-reference journal exists cannot be mapped to a different journal", () => {
+    const own = labelledJournal({ id: 802, document_number: "TRANSFER-1001", operation_type: "JOURNAL", operations_id: undefined });
+    const output = run([transferIn("TRANSFER-1001")], [labelledJournal(), own], mapped(["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+  });
 });

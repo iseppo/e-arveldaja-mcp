@@ -36,7 +36,9 @@ export interface WiseTransferReview {
     | "wise_transfer_cross_currency"
     | "wise_transfer_journal_ambiguous"
     | "wise_transfer_already_imported"
-    | "wise_legacy_leg_ambiguous";
+    | "wise_legacy_leg_ambiguous"
+    | "wise_transfer_mapping_rejected"
+    | "unused_mapping";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -45,6 +47,14 @@ export interface WiseTransferReview {
    * could not be told apart from. */
   candidate_journal_ids?: number[];
   candidates?: WiseTransferJournalCandidate[];
+  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
+  journal_id?: number;
+}
+
+/** One operator-reviewed journalized_transfer_ids entry. */
+export interface WiseJournalizedTransferMapping {
+  wise_id: string;
+  journal_id: number;
 }
 
 export interface WiseTransferJournalCandidate {
