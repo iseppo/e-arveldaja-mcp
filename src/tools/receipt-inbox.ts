@@ -19,7 +19,7 @@ import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { normalizeVatValue } from "../document-identifiers.js";
-import { normalizeCompanyName } from "../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import {
   type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
@@ -996,9 +996,11 @@ function mayPayPartialResidual(tx: Transaction, invoice: PurchaseInvoice): boole
   const txIban = (tx.bank_account_no ?? "").replace(/\s/g, "").toUpperCase();
   const invoiceIban = (invoice.bank_account_no ?? "").replace(/\s/g, "").toUpperCase();
   if (txIban && txIban === invoiceIban) return true;
-  const txName = normalizeCompanyName(tx.bank_account_name ?? "");
-  const invoiceName = normalizeCompanyName(invoice.client_name ?? "");
-  return !!txName && !!invoiceName && (txName.includes(invoiceName) || invoiceName.includes(txName));
+  // Name-only: the same legal person, and no identifier pointing elsewhere
+  // ("ABC OÜ" paid from another client/IBAN is not "ABC Ehitus OÜ").
+  if (tx.clients_id && invoice.clients_id) return false;
+  if (txIban && invoiceIban) return false;
+  return sameCompanyIdentity(tx.bank_account_name, invoice.client_name);
 }
 
 export async function resolveSupplierFromTransaction(

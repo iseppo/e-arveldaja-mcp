@@ -742,6 +742,20 @@ describe("classification operations — a payment matching an open purchase invo
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
+  it("does not hold back a payment to another supplier whose name merely contains the partially paid supplier's (Codex verify #8)", async () => {
+    const ABC_TX = { ...SAAS_TX, bank_account_name: "ABC OÜ", clients_id: 10, bank_account_no: "EE382200221020145685" };
+    const PARTIAL = { ...OPEN, id: 91, clients_id: 20, client_name: "ABC Ehitus OÜ", bank_account_no: "EE471000001020145685", number: "INV-2026-01", create_date: "2026-01-15", payment_status: "PARTIALLY_PAID", gross_price: 100, base_gross_price: 100 };
+    const { operations } = makeOperations({
+      transactionRows: [ABC_TX], transactionDetails: { 42: ABC_TX }, clientRows: [SAAS_CLIENT],
+      purchaseArticles: ARTS, accounts: ACCS, purchaseInvoiceRows: [PARTIAL],
+      purchaseInvoiceDetails: { 91: { ...PARTIAL, liability_accounts_id: 2310, items: ITEMS } },
+    } as any);
+
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (analysis.ok) expect(analysis.value.totalUnmatched).toBe(1);
+  });
+
   it("F5 skips a payment that already matches an open purchase invoice", async () => {
     const { api, operations } = setup([HIST, OPEN]);
     const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
