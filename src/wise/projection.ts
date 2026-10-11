@@ -371,22 +371,29 @@ function feeLegValue(leg: WiseRow): { amount: number; currency: string } | undef
  * pass: 1 currency and amount; 2 currency; 3 (plain tag) amount only — rows
  * stored before the currency fix carry EUR; 4 (plain tag, several exported
  * legs) any leg, as the previous release booked the first one. A leg-suffixed
- * tag only ever matches a leg of its own booked currency. */
+ * tag only ever matches a leg of its own booked currency. Passes 3 and 4 serve
+ * only that EUR-stored legacy row, and only while no exported leg of the ID is
+ * in EUR: a row stored in another explicit currency is its own leg, so it never
+ * hides a missing leg of a different currency. */
 function storedLegMatches(
   entry: StoredWiseLeg,
   leg: WiseRow,
   value: { amount: number; currency: string },
   exportedLegs: number,
+  exportedCurrencies: readonly string[],
   pass: number,
 ): boolean {
   if (entry.suffixCurrency !== undefined && entry.suffixCurrency !== bookedCurrencyForWiseRow(leg)) return false;
-  const sameCurrency = (entry.tx.cl_currencies_id ?? "EUR") === value.currency;
+  const storedCurrency = entry.tx.cl_currencies_id ?? "EUR";
+  const sameCurrency = storedCurrency === value.currency;
   const sameAmount = Math.abs(entry.tx.amount! - value.amount) < 0.005;
+  const legacyEurRow = entry.suffixCurrency === undefined && storedCurrency === "EUR" &&
+    !exportedCurrencies.includes(storedCurrency);
   switch (pass) {
     case 1: return sameCurrency && sameAmount;
     case 2: return sameCurrency;
-    case 3: return entry.suffixCurrency === undefined && sameAmount;
-    default: return entry.suffixCurrency === undefined && exportedLegs > 1;
+    case 3: return legacyEurRow && sameAmount;
+    default: return legacyEurRow && exportedLegs > 1;
   }
 }
 
@@ -485,7 +492,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const leg = legs[0]!;
       const stored = [...storedMain, ...storedFee];
       const split = stored.some(entry => entry.suffixCurrency !== undefined) ||
-        (storedMain.length > 0 && !storedMain.some(entry => [1, 2, 3].some(pass => storedLegMatches(entry, leg, mainLegValue(leg), legs.length, pass))));
+        (storedMain.length > 0 && !storedMain.some(entry => [1, 2, 3].some(pass => storedLegMatches(entry, leg, mainLegValue(leg), legs.length, [mainLegValue(leg).currency], pass))));
       if (!split) continue;
       const currency = bookedCurrencyForWiseRow(leg);
       const taken = new Set(stored.map(entry => entry.tag.slice(entry.tag.lastIndexOf(":") + 1)));
@@ -512,12 +519,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const claimed = new Set<WiseRow>();
     for (const [id, legs] of legsById) {
       const open = new Set(storedById.get(id) ?? []);
+      const currencies = legs.flatMap(leg => value(leg)?.currency ?? []);
       for (let pass = 1; pass <= 4; pass++) {
         for (const entry of [...open]) {
           const leg = legs.find(candidate => {
             const candidateValue = value(candidate);
             return !claimed.has(candidate) && candidateValue !== undefined &&
-              storedLegMatches(entry, candidate, candidateValue, legs.length, pass);
+              storedLegMatches(entry, candidate, candidateValue, legs.length, currencies, pass);
           });
           if (!leg) continue;
           claimed.add(leg);

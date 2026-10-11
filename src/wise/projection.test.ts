@@ -118,6 +118,14 @@ describe("Wise card payment split across two balances (same ID)", () => {
     expect(project(rowsOf([splitCard[1]!]), upgraded).commands).toEqual([]);
   });
 
+  it("an old plain-ID row of another explicit currency does not hide an equal-amount missing leg", () => {
+    // The stored plain row is the USD12 leg; the EUR leg of the same nominal
+    // amount is genuinely missing.
+    const eurLeg = `CARD_TRANSACTION-9001,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.10,EUR,,,"Test OÜ",12.00,EUR,"Hoster",14.00,USD,1.1666666666666667,,,"Test Person","Software",`;
+    expect(created(project(rowsOf([eurLeg]), [oldUsdLeg]))).toEqual(["main_create:12 EUR", "fee_create_and_confirm:0.1 EUR"]);
+    expect(created(project(rowsOf([splitCard[0]!, eurLeg]), [oldUsdLeg]))).toEqual(["main_create:12 EUR", "fee_create_and_confirm:0.1 EUR"]);
+  });
+
   it("an old plain-ID row still covers its own single-row transaction", () => {
     // Pre-currency-fix rows were stored as EUR at the nominal amount; incoming
     // rows are now booked gross. Either a currency or an amount match is the
