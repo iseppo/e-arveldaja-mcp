@@ -4204,6 +4204,34 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         expect(api.transactions.delete).not.toHaveBeenCalled();
       }
     });
+
+    it("matches a hash-only marker to a journal whose document number is BANK:<reference>", async () => {
+      const longRef = "LONG-REFERENCE-" + "A".repeat(100);
+      const row = camtRow(5002, { name: "Wise Payments", ref: longRef, text: null });
+      const { handler, api } = setup([counterpart(), row], [journal({ document_number: `BANK:${longRef}` })]);
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+    });
+
+    it("Codex counterexample: a consumed ref-less journal does not hide a reviewed member's claim on another journal (all orders)", async () => {
+      const withRef = (id: number, ref: string, date: string) => ({ ...camtRow(id, { ref, date }), bank_ref_number: ref });
+      const rows = [withRef(5011, "R1", "2026-09-24"), withRef(5012, "R2", "2026-09-25"), withRef(5013, "R2", "2026-09-27")];
+      const counterparts = [counterpart({ id: 5008, date: "2026-09-24" }), counterpart({ id: 5009, date: "2026-09-26" })];
+      const journals = [
+        journal({ id: 9001, effective_date: "2026-09-24", document_number: null, operations_id: 5008 }),
+        journal({ id: 9002, effective_date: "2026-09-26", document_number: "R2", operations_id: 5009 }),
+      ];
+      const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+      for (const order of orders) {
+        const { handler, api } = setup([...counterparts, ...order.map(i => rows[i]!)], journals);
+        const payload = parseMcpResponse((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
+    });
   });
 
   it("reports a company-name transfer with no single target for review instead of dropping it (F4c)", async () => {

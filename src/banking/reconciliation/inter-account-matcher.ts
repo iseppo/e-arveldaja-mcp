@@ -4,9 +4,9 @@ import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 import {
-  bankReferenceLookupKey,
   extractCamtDescriptionMetadata,
   isTrustedCamtDescriptionMetadata,
+  journalDocumentReferenceKeys,
   normalizeOptionalReference,
   storedBankAccountNo,
   storedBankReferenceLookupKey,
@@ -51,7 +51,7 @@ export function hasUnverifiableCamtMarker(tx: Transaction): boolean {
  * marker (MCP-CAMT rows store it only there), else `ref_number`. A verified
  * marker that kept only the reference hash (a reference over the marker cap)
  * is matched by the shared lookup key: the document number of a journal whose
- * reference has the same key is returned.
+ * reference keys (with or without "BANK:") include it is returned.
  */
 export function transferReferenceOf(tx: Transaction, journals: readonly Journal[] = []): string | undefined {
   const direct = normalizeOptionalReference(tx.bank_ref_number ?? undefined);
@@ -62,7 +62,7 @@ export function transferReferenceOf(tx: Transaction, journals: readonly Journal[
     if (markerReference) return markerReference;
     const key = storedBankReferenceLookupKey(tx);
     const journal = key
-      ? journals.find(j => !j.is_deleted && bankReferenceLookupKey(j.document_number ?? undefined) === key)
+      ? journals.find(j => !j.is_deleted && journalDocumentReferenceKeys(j.document_number).includes(key))
       : undefined;
     if (journal?.document_number) return journal.document_number;
   }

@@ -16,7 +16,7 @@ import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
 import { BookingGuard, type InterAccountResolution } from "../../booking-guard.js";
 import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
-import { buildBankAccountLookups, toUtcDay } from "../../tools/inter-account-utils.js";
+import { buildBankAccountLookups, normalizeReference, toUtcDay } from "../../tools/inter-account-utils.js";
 import {
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,
@@ -1458,14 +1458,23 @@ export async function runInterAccountMatching(
         }
         // Every member's journal claim counts, not only this row's: a later
         // row must not become the sole claimant of a journal a member matched.
-        const claimedJournalIds = [resolution.journal_id];
-        for (const other of sameKeyCandidates) {
-          const otherResolution = resolveExistingJournal(
-            other.accounts_dimensions_id, targetDimension, amountEur, other.date, maxGap,
-            transferReferenceOf(other, guard.journals), false,
-          );
-          if (otherResolution.status === "matched") claimedJournalIds.push(otherResolution.journal_id);
-        }
+        // Read straight from the journal snapshot, independent of what this run
+        // has consumed: any live journal on this account pair with this EUR
+        // amount within the date gap that is ref-less or carries the member's
+        // reference is a competing claim.
+        const competingJournalIds = (member: Transaction): number[] => {
+          const reference = normalizeReference(transferReferenceOf(member, guard.journals));
+          return guard.journals.filter(j => {
+            if (j.id == null || j.is_deleted || j.registered !== true) return false;
+            if (Math.abs(toUtcDay(j.effective_date) - toUtcDay(member.date)) / 86_400_000 > maxGap) return false;
+            const journalReference = normalizeReference(j.document_number);
+            if (journalReference !== "" && journalReference !== reference) return false;
+            const legOn = (dim: number) => j.postings.some(p =>
+              !p.is_deleted && p.accounts_dimensions_id === dim && sameAmountToTheCent(Math.abs(p.base_amount ?? p.amount), amountEur));
+            return legOn(member.accounts_dimensions_id) && legOn(targetDimension);
+          }).map(j => j.id!);
+        };
+        const claimedJournalIds = new Set([resolution.journal_id, ...[tx, ...sameKeyCandidates].flatMap(competingJournalIds)]);
         for (const journalId of claimedJournalIds) {
           mirrorReviewJournalClaims.set(journalId, (mirrorReviewJournalClaims.get(journalId) ?? 0) + 1);
         }
