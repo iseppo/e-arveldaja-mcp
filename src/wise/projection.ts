@@ -21,13 +21,11 @@ import {
   bookedFeeAmountForWiseRow,
   bookedFeeCurrencyForWiseRow,
   buildAccountDistributionFromDimension,
-  buildWiseTransactionSignature,
   counterpartyNameForWiseRow,
   normalizeWiseCompanyName,
   normalizeWiseCurrency,
   oppositeSideForWiseRow,
   sourceDirectionForWiseDirection,
-  stripWisePrefix,
   transactionTypeForWiseDirection,
   wiseDate,
   withWiseSourceDirection,
@@ -85,39 +83,10 @@ export function transactionCommandExists(
 ): boolean {
   const live = transactions.filter(isNonVoidTransaction);
   const wiseTag = `WISE:${command.wise_id}`;
-  if (live.some(transaction => transaction.description?.startsWith(`${wiseTag} `) || transaction.description === wiseTag)) {
-    return true;
-  }
-  const payload = command.create_payload;
-  if (typeof payload.date !== "string" || typeof payload.amount !== "number") return false;
-  const expectedSignature = buildWiseTransactionSignature(
-    payload.date,
-    payload.amount,
-    payload.cl_currencies_id ?? "EUR",
-    payload.bank_account_name,
-    payload.ref_number,
-    stripWisePrefix(payload.description),
-  );
-  // Signature fallback for rows imported before descriptions carried a WISE tag.
-  // A row that DOES carry one has an explicit identity, and the exact-tag check
-  // above already handled the matching case — so any other WISE-tagged row is a
-  // different Wise transaction, not evidence that this command already ran.
-  // Without this exclusion the row created moments ago in this same run refuses
-  // its identical-looking sibling (two same-day payments to one merchant, a
-  // payment and its refund, two identical fees) at the execute-time
-  // precondition, after the projection had correctly planned both.
-  return live.some(transaction =>
-    !transaction.description?.startsWith("WISE:") &&
-    typeof transaction.date === "string" && typeof transaction.amount === "number" &&
-    buildWiseTransactionSignature(
-      transaction.date,
-      transaction.amount,
-      transaction.cl_currencies_id ?? "EUR",
-      transaction.bank_account_name,
-      transaction.ref_number,
-      stripWisePrefix(transaction.description),
-    ) === expectedSignature
-  );
+  // No signature fallback: an untagged stored row (e.g. one entered by hand)
+  // is not this command's identity. The projection reports it as the advisory
+  // wise_untagged_ledger_match; it never silently suppresses the create.
+  return live.some(transaction => transaction.description?.startsWith(`${wiseTag} `) || transaction.description === wiseTag);
 }
 
 export function createdTransactionMatchesApprovedPayload(
@@ -428,43 +397,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   } = input;
   const accounts_dimensions_id = accountsDimensionsId;
 
-  // Signatures of ALREADY-STORED ledger rows, bucketed by the direction the
-  // importer recorded for them. The signature itself is direction-blind
-  // (stripWisePrefix removes the [source_direction=…] marker), so a same-day
-  // same-amount refund from a counterparty we paid earlier would otherwise be
-  // dropped as a duplicate of that payment. Only the EXPLICIT marker counts:
-  // deriving direction from the legacy `type` would mis-read rows written
-  // during the 0.22.0 forced-"C" window and re-import them (double booking).
-  // An unmarked row buckets as "?" and keeps the previous match-anything
-  // behaviour, so this can never cause a re-import — only prevent a false drop.
+  // The explicit direction marker a stored row carries, "?" when it has none.
+  // Only the marker counts: the read-back `type` is unreliable (0.22.0 forced "C").
   const markedWiseDirection = (description?: string | null): "IN" | "OUT" | "?" => {
     const marked = description?.match(/\[source_direction=(IN|OUT)\]\s*$/i)?.[1];
     return marked === undefined ? "?" : (marked.toUpperCase() as "IN" | "OUT");
-  };
-  const existingSignatureDirections = new Map<string, Set<"IN" | "OUT" | "?">>();
-  for (const tx of existingTx) {
-    if (typeof tx.date !== "string" || typeof tx.amount !== "number") continue;
-    // A row carrying a WISE:{id} / WISE:FEE:{id} identity is matched by that
-    // identity (seenWiseIds below). Its identity-stripped signature would also
-    // match a DISTINCT Wise row with the same date/amount/counterparty (or any
-    // same-day same-amount fee), dropping a genuine movement. The signature
-    // fallback is kept only for untagged legacy/manual rows.
-    if (tx.description?.startsWith("WISE:")) continue;
-    const signature = buildWiseTransactionSignature(
-      tx.date,
-      tx.amount,
-      tx.cl_currencies_id ?? "EUR",
-      tx.bank_account_name,
-      tx.ref_number,
-      stripWisePrefix(tx.description),
-    );
-    const bucket = existingSignatureDirections.get(signature);
-    if (bucket) bucket.add(markedWiseDirection(tx.description));
-    else existingSignatureDirections.set(signature, new Set([markedWiseDirection(tx.description)]));
-  }
-  const alreadyStored = (signature: string, direction: "IN" | "OUT"): boolean => {
-    const bucket = existingSignatureDirections.get(signature);
-    return bucket !== undefined && (bucket.has("?") || bucket.has(direction));
   };
   // Also check by Wise ID in description
   const seenWiseIds = new Set(
@@ -620,7 +557,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       narrativeParts.push(`[${oppositeSide.amount} ${oppositeSide.currency} @ ${row.exchangeRate}]`);
     }
     const narrative = narrativeParts.join(" ");
-    const uncappedDesc = withWiseSourceDirection(narrative ? `${wiseIdTag} ${narrative}` : wiseIdTag, sourceDirection);
     // Transactions.description maxLength is 150: trim only the narrative so the
     // WISE:{id} identity prefix and the trailing [source_direction=…] marker
     // always survive (mirrors CAMT's metadata-marker budget).
@@ -630,47 +566,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       : narrative;
     const desc = withWiseSourceDirection(cappedNarrative ? `${wiseIdTag} ${cappedNarrative}` : wiseIdTag, sourceDirection);
     const bankAccountName = counterpartyName?.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH);
-    // Two signature forms per name: the legacy uncapped one (rows imported
-    // before the caps) and the exact stored form — capped name, the description
-    // as createBankTransaction stores it (full over-cap ref woven in when it
-    // fits) and the capped ref — so the stored row re-hashes identically.
-    const canonicalRef = canonicalRefNumber(row.reference || undefined);
-    const storedDesc = canonicalRef.truncated && canonicalRef.full
-      ? weaveFullRefIntoDescription(desc, canonicalRef.full)
-      : desc;
-    const mainSignatureCandidates = new Set(
-      [counterpartyName, row.targetName || undefined, row.sourceName || undefined]
-        .filter((name): name is string => Boolean(name))
-        .flatMap((name) => [
-          buildWiseTransactionSignature(
-            date,
-            amount,
-            transactionCurrency,
-            name,
-            row.reference || undefined,
-            stripWisePrefix(uncappedDesc),
-          ),
-          buildWiseTransactionSignature(
-            date,
-            amount,
-            transactionCurrency,
-            name.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH),
-            canonicalRef.value,
-            stripWisePrefix(storedDesc),
-          ),
-        ])
-    );
     const mainTagImported = seenWiseIds.has(wiseIdTag) || claimedMainLegs.has(row);
-    const mainAlreadyImported = mainTagImported ||
-      [...mainSignatureCandidates].some(signature => alreadyStored(signature, sourceDirection));
+    // Only a WISE: identity proves the row is stored: an untagged lookalike
+    // gets the wise_untagged_ledger_match advisory below, never a silent skip.
+    const mainAlreadyImported = mainTagImported;
     let mainAvailableForFee = false;
 
     if (mainAlreadyImported) {
       skipped.push({
         wise_id: legId,
-        reason: mainTagImported
-          ? "Already imported (Wise ID match)"
-          : "Already imported (date/amount/counterparty/reference match)",
+        reason: "Already imported (Wise ID match)",
       });
       if (approvedTransferIds.has(row.id)) {
         const decision = transferDecisions.get(row);
@@ -752,25 +657,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const feeWiseIdTag = `WISE:FEE:${legId}`;
       const feeDesc = withWiseSourceDirection(`${feeWiseIdTag} Wise teenustasu`, "OUT");
       const feeCurrency = bookedFeeCurrencyForWiseRow(row, transactionCurrency);
-      const feeSignature = buildWiseTransactionSignature(
-        date,
-        fee,
-        feeCurrency,
-        "Wise",
-        undefined,
-        stripWisePrefix(feeDesc),
-      );
-      // Fees are always outgoing. The fee signature is date|amount|EUR|"Wise"||
-      // "wise teenustasu" — identical for every same-day, same-amount fee — so
-      // this must only ever match a STORED fee, never another fee planned in
-      // this same run (seenWiseIds keeps those apart by Wise ID).
       const feeTagImported = seenWiseIds.has(feeWiseIdTag) || claimedFeeLegs.has(row);
-      if (feeTagImported || alreadyStored(feeSignature, "OUT")) {
+      if (feeTagImported) {
         skipped.push({
           wise_id: `FEE:${legId}`,
-          reason: feeTagImported
-            ? "Fee already imported (Wise ID match)"
-            : "Fee already imported (date/amount/counterparty match)",
+          reason: "Fee already imported (Wise ID match)",
         });
         continue;
       }
@@ -862,8 +753,10 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const pendingMappings = new Map<WiseRow, number>();
   const acceptedMappings = new Map<WiseRow, number>();
   const rejectedMappingRows = new Set<WiseRow>();
-  const rejectMapping = (row: WiseRow, journalId: number, why: string) => {
-    rejectedMappingRows.add(row);
+  // `useIdentity`: the row's own exact-reference journal exists, so the row
+  // resolves through the guard as if unmapped (never a second booking).
+  const rejectMapping = (row: WiseRow, journalId: number, why: string, useIdentity = false) => {
+    if (!useIdentity) rejectedMappingRows.add(row);
     mappingReviews.push(mappingReview(row.id, "wise_transfer_mapping_rejected", journalId, why, transferDecisions.get(row)));
   };
   for (const [index, mapping] of journalizedTransferIds.entries()) {
@@ -931,6 +824,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           : "other",
       };
     };
+    const OWN_IDENTITY_JOURNAL = "another journal already books this Wise transfer by exact reference";
     const mappingRejection = (row: WiseRow, journalId: number): string | undefined => {
       const decision = transferDecisions.get(row);
       const targetDimensionId = decision?.targetDimensionId;
@@ -947,6 +841,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const label = normalizeReference(journal.document_number);
       if (label === "") {
         return "the journal carries no document number; a ref-less journal is matched automatically, or reviewed when ambiguous";
+      }
+      // Lane B and the checks below compare base EUR: a foreign posting without
+      // a base amount cannot show the EUR the row moved.
+      if ((journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
+        (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) {
+        return "the journal has foreign-currency postings without an EUR base amount";
       }
       const amount = bookedAmountForWiseRow(row);
       const candidateIds = laneBCandidateIds(targetDimensionId, [amount], wiseDate(row.finishedOn || row.createdOn));
@@ -967,15 +867,19 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       if (label !== normalizeReference(row.id) && eligibleIds.has(label)) {
         return "the journal is labelled with another Wise transfer of this statement, which owns it by exact reference";
       }
-      if (candidateIds.some(id => id !== journalId &&
+      // The guard also looks the row up net of its fee, so reserve there too.
+      const netAmount = wiseLegAmountNetOfFee(row, amount);
+      const identityIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [amount] : [amount, netAmount],
+        wiseDate(row.finishedOn || row.createdOn));
+      if (identityIds.some(id => id !== journalId &&
         normalizeReference(journalSnapshot.find(candidate => candidate.id === id)?.document_number) === normalizeReference(row.id))) {
-        return "another journal already books this Wise transfer by exact reference";
+        return OWN_IDENTITY_JOURNAL;
       }
       return undefined;
     };
     for (const [row, journalId] of pendingMappings) {
       const why = mappingRejection(row, journalId);
-      if (why !== undefined) rejectMapping(row, journalId, why);
+      if (why !== undefined) rejectMapping(row, journalId, why, why === OWN_IDENTITY_JOURNAL);
       else acceptedMappings.set(row, journalId);
     }
     pendingMappings.clear();
@@ -1158,9 +1062,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // same movement on this account, e.g. a card payment entered by hand. A
   // stored direction marker, when present, must agree.
   for (const entry of created) {
-    const row = entry.source_row;
-    if (!row) continue;
-    const currency = bookedCurrencyForWiseRow(row);
+    const currency = entry.source_row ? bookedCurrencyForWiseRow(entry.source_row) : entry.booked_currency;
+    if (currency === undefined) continue;
     const matches = existingTx.filter(tx =>
       isNonVoidTransaction(tx) &&
       tx.id !== undefined &&
