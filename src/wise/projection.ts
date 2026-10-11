@@ -368,8 +368,8 @@ function feeLegValue(leg: WiseRow): { amount: number; currency: string } | undef
  * stored before the currency fix carry EUR; 4 (plain tag, several exported
  * legs) any leg, as the previous release booked the first one. A leg-suffixed
  * tag only ever matches a leg of its own booked currency. Passes 3 and 4 serve
- * only that EUR-stored legacy row, and only while no exported leg of the ID is
- * in EUR: a row stored in another explicit currency is its own leg, so it never
+ * only that EUR-stored legacy row, and only while no still-unclaimed exported
+ * leg of the ID is in EUR: a row stored in another explicit currency is its own leg, so it never
  * hides a missing leg of a different currency. */
 function storedLegMatches(
   entry: StoredWiseLeg,
@@ -515,9 +515,10 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const claimed = new Set<WiseRow>();
     for (const [id, legs] of legsById) {
       const open = new Set(storedById.get(id) ?? []);
-      const currencies = legs.flatMap(leg => value(leg)?.currency ?? []);
       for (let pass = 1; pass <= 4; pass++) {
         for (const entry of [...open]) {
+          // Legs another stored row already accounts for are out of the EUR gate.
+          const currencies = legs.filter(leg => !claimed.has(leg)).flatMap(leg => value(leg)?.currency ?? []);
           const leg = legs.find(candidate => {
             const candidateValue = value(candidate);
             return !claimed.has(candidate) && candidateValue !== undefined &&

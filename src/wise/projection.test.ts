@@ -126,6 +126,18 @@ describe("Wise card payment split across two balances (same ID)", () => {
     expect(created(project(rowsOf([splitCard[0]!, eurLeg]), [oldUsdLeg]))).toEqual(["main_create:12 EUR", "fee_create_and_confirm:0.1 EUR"]);
   });
 
+  it("an old EUR-stored plain row still covers its foreign leg when the EUR leg is already tagged", () => {
+    // The GBP12 leg was stored by the pre-currency-fix release as plain EUR12;
+    // the EUR leg is stored under its own leg tag.
+    const gbpLeg = splitCard[0]!.replaceAll("USD", "GBP");
+    const ledger = [
+      { ...oldUsdLeg, cl_currencies_id: "EUR" },
+      { ...oldUsdLeg, id: 3, amount: 33.23, cl_currencies_id: "EUR", description: "WISE:CARD_TRANSACTION-9001:EUR Hoster (Software) [source_direction=OUT]" },
+      { ...oldFee, description: "WISE:FEE:CARD_TRANSACTION-9001:EUR Wise teenustasu [source_direction=OUT]" },
+    ] as Transaction[];
+    expect(project(rowsOf([gbpLeg, splitCard[1]!]), ledger).commands).toEqual([]);
+  });
+
   it("an old plain-ID row still covers its own single-row transaction", () => {
     // Pre-currency-fix rows were stored as EUR at the nominal amount; incoming
     // rows are now booked gross. Either a currency or an amount match is the
