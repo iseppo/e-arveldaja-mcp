@@ -3,7 +3,12 @@ import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js
 import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
-import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, storedBankAccountNo } from "../../camt/duplicate-identity.js";
+import {
+  extractCamtDescriptionMetadata,
+  isTrustedCamtDescriptionMetadata,
+  normalizeOptionalReference,
+  storedBankAccountNo,
+} from "../../camt/duplicate-identity.js";
 
 // ---------------------------------------------------------------------------
 // Reciprocal-transfer TRANSACTION pairing. PURE: the reciprocal/one-sided
@@ -30,9 +35,25 @@ export function counterpartyIbanOf(tx: Transaction): string {
  * must not act on it automatically. A marker without a `sig` is not CAMT-signed.
  */
 export function hasUnverifiableCamtMarker(tx: Transaction): boolean {
-  const marker = (tx.description ?? "").match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]\s*$/i)?.[1];
+  // Same line-break normalisation as the CAMT metadata parser: an encoded
+  // newline (&#10; / &#xA;) before the marker must not hide it.
+  const description = (tx.description ?? "").replace(/&#(?:10|x0*a);/gi, "\n");
+  const marker = description.match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]\s*$/i)?.[1];
   if (marker === undefined || !/(?:^|\s)(?:entry_sig|sig|s)=/i.test(marker)) return false;
   return !isTrustedCamtDescriptionMetadata(tx);
+}
+
+/**
+ * The bank reference used to match an existing inter-account journal: the
+ * direct `bank_ref_number`, else the reference of a checksum-verified CAMT
+ * marker (MCP-CAMT rows store it only there), else `ref_number`.
+ */
+export function transferReferenceOf(tx: Transaction): string | undefined {
+  const direct = normalizeOptionalReference(tx.bank_ref_number ?? undefined);
+  if (direct) return direct;
+  const metadata = extractCamtDescriptionMetadata(tx.description);
+  const markerReference = isTrustedCamtDescriptionMetadata(tx, metadata) ? normalizeOptionalReference(metadata.bank_ref_number) : undefined;
+  return markerReference ?? tx.ref_number ?? undefined;
 }
 
 export interface OneSidedInference {
@@ -140,7 +161,9 @@ export function unverifiedMarkerTransferClaim(
   tx: Transaction,
   lookups: InterAccountMatchLookups,
 ): OneSidedInference | undefined {
-  const claimedIban = tx.bank_account_no ?? extractCamtDescriptionMetadata(tx.description).bank_account_no ?? null;
+  // An empty or blank direct IBAN is missing: it must not hide the marker's claim.
+  const claimedIban = normalizeOptionalReference(tx.bank_account_no ?? undefined) ??
+    extractCamtDescriptionMetadata(tx.description).bank_account_no ?? null;
   const inference = inferOneSidedTransfer({ ...tx, bank_account_no: claimedIban }, lookups, new Map());
   return inference.confidence > 0 || inference.ambiguousTargetDimensions ? inference : undefined;
 }

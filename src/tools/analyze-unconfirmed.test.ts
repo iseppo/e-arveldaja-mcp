@@ -951,6 +951,32 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
     expect(payload.suggestions[0]!.distribution).toMatchObject({ related_sub_id: 300 });
   });
 
+  const tamper = (description: string) => description.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`);
+
+  it("an encoded line break before the marker does not hide a tampered sig", async () => {
+    for (const encoded of ["&#10;", "&#xA;"]) {
+      const row = camtRow(5002);
+      const tampered = { ...row, bank_account_name: "Näide OÜ", description: tamper(row.description!).replace("\n[e-arveldaja-mcp:camt", `${encoded}[e-arveldaja-mcp:camt`) };
+      const handler = setupTool({ transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
+    }
+  });
+
+  it("an empty direct IBAN does not hide a tampered marker's own-account claim (no confirm_invoice)", async () => {
+    for (const direct of ["", "   "]) {
+      const row = camtRow(5002);
+      const tampered = { ...row, bank_account_name: "Wise", bank_account_no: direct, clients_id: 77, description: tamper(row.description!) };
+      const handler = setupTool({
+        transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ",
+        purchases: [{ id: 901, status: "CONFIRMED", payment_status: "NOT_PAID", number: "OST-901", clients_id: 77, client_name: "Wise", gross_price: 600, cl_currencies_id: "EUR" }],
+      });
+      const payload = parseMcpResponse((await handler({ min_confidence: 0 })).content[0]!.text);
+      expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
+      expect(payload.suggestions[0]!.distribution).toBeUndefined();
+    }
+  });
+
   it("gives no confirm_inter_account suggestion for a marker whose sig fails the checksum", async () => {
     const row = camtRow(5002);
     const tampered = { ...row, bank_account_name: "Näide OÜ", description: row.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
