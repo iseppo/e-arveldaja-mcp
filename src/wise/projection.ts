@@ -514,19 +514,24 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   ): Set<WiseRow> => {
     const claimed = new Set<WiseRow>();
     for (const [id, legs] of legsById) {
-      const open = new Set(storedById.get(id) ?? []);
-      for (let pass = 1; pass <= 4; pass++) {
-        for (const entry of [...open]) {
-          // Legs another stored row already accounts for are out of the EUR gate.
-          const currencies = legs.filter(leg => !claimed.has(leg)).flatMap(leg => value(leg)?.currency ?? []);
-          const leg = legs.find(candidate => {
-            const candidateValue = value(candidate);
-            return !claimed.has(candidate) && candidateValue !== undefined &&
-              storedLegMatches(entry, candidate, candidateValue, legs.length, currencies, pass);
-          });
-          if (!leg) continue;
-          claimed.add(leg);
-          open.delete(entry);
+      const stored = storedById.get(id) ?? [];
+      // Leg-tagged rows (WISE:{id}:{CUR}) claim their legs first, then plain
+      // rows run the passes against the legs left, whatever the ledger order.
+      for (const legTagged of [true, false]) {
+        const open = new Set(stored.filter(entry => (entry.suffixCurrency !== undefined) === legTagged));
+        for (let pass = 1; pass <= 4; pass++) {
+          for (const entry of [...open]) {
+            // Legs another stored row already accounts for are out of the EUR gate.
+            const currencies = legs.filter(leg => !claimed.has(leg)).flatMap(leg => value(leg)?.currency ?? []);
+            const leg = legs.find(candidate => {
+              const candidateValue = value(candidate);
+              return !claimed.has(candidate) && candidateValue !== undefined &&
+                storedLegMatches(entry, candidate, candidateValue, legs.length, currencies, pass);
+            });
+            if (!leg) continue;
+            claimed.add(leg);
+            open.delete(entry);
+          }
         }
       }
     }

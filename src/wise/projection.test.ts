@@ -138,6 +138,36 @@ describe("Wise card payment split across two balances (same ID)", () => {
     expect(project(rowsOf([gbpLeg, splitCard[1]!]), ledger).commands).toEqual([]);
   });
 
+  const permutations = <T,>(items: readonly T[]): T[][] => items.length <= 1
+    ? [[...items]]
+    : items.flatMap((item, index) => permutations([...items.slice(0, index), ...items.slice(index + 1)]).map(rest => [item, ...rest]));
+  const leg = (amount: string, currency: string, target = `${amount},${currency}`) =>
+    `CARD_TRANSACTION-9001,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.10,${currency},,,"Test OÜ",${amount},${currency},"Hoster",${target},1,,,"Test Person","Software",`;
+  const stored = (id: number, tag: string, amount: number, currency = "EUR") => ({
+    id, status: "PROJECT", accounts_dimensions_id: WISE, type: "C", amount, cl_currencies_id: currency, date: "2026-07-05",
+    description: `${tag} Hoster (Software) [source_direction=OUT]`, bank_account_name: "Hoster",
+  }) as Transaction;
+
+  // The GBP12 leg and its fee were stored by the pre-currency-fix release as
+  // plain EUR rows; the EUR leg and its fee carry their own leg tags.
+  const caseA = {
+    csv: [leg("12.00", "GBP"), leg("12.00", "EUR", "14.00,USD")],
+    ledger: [
+      stored(1, "WISE:CARD_TRANSACTION-9001", 12),
+      stored(2, "WISE:CARD_TRANSACTION-9001:EUR", 12),
+      stored(3, "WISE:FEE:CARD_TRANSACTION-9001", 0.1),
+      stored(4, "WISE:FEE:CARD_TRANSACTION-9001:EUR", 0.1),
+    ],
+  };
+  it.each(permutations(caseA.csv).flatMap(csv => permutations(caseA.ledger).map(ledger => [csv, ledger] as const)))(
+    "leg-tagged rows claim first: a plain EUR-stored row still covers its foreign leg in any order (%#)",
+    (csv, ledger) => {
+      const output = project(rowsOf(csv), ledger);
+      expect(output.commands).toEqual([]);
+      expect(output.ownershipReviews).toEqual([]);
+    },
+  );
+
   it("an old plain-ID row still covers its own single-row transaction", () => {
     // Pre-currency-fix rows were stored as EUR at the nominal amount; incoming
     // rows are now booked gross. Either a currency or an amount match is the
