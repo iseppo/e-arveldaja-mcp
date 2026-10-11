@@ -3617,6 +3617,34 @@ describe("F3 / minors on transactions", () => {
     expect(logAudit).toHaveBeenCalledWith(expect.objectContaining({ action: "MUTATION_INDETERMINATE", entity_id: 2 }));
   });
 
+  it.each([
+    ["flagged 409 \"No such object.\"", "skipped_missing", new HttpError("gone", 409, "GET", "/transactions/2", { upstream_not_found: true })],
+    ["404", "skipped_missing", new HttpError("gone", 404, "GET", "/transactions/2")],
+    ["unflagged 409", "lookup_failed", new HttpError("conflict", 409, "GET", "/transactions/2")],
+  ])("batch_delete_transactions treats a %s lookup as %s", async (_label, expected, error) => {
+    const del = vi.fn();
+    const { handler } = getCrudToolHarness("batch_delete_transactions", {
+      transactions: { get: vi.fn().mockRejectedValue(error), delete: del },
+    });
+    const body = parseMcpResponse(((await handler({ ids: [2], reason: "cleanup" })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(body.results[0]).toMatchObject({ id: 2, status: expected });
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["flagged 409 \"No such object.\"", "skipped_missing", new HttpError("gone", 409, "GET", "/journals/5", { upstream_not_found: true })],
+    ["404", "skipped_missing", new HttpError("gone", 404, "GET", "/journals/5")],
+    ["unflagged 409", "lookup_failed", new HttpError("conflict", 409, "GET", "/journals/5")],
+  ])("batch_confirm_journals treats a %s lookup as %s", async (_label, expected, error) => {
+    const confirm = vi.fn();
+    const { handler } = getCrudToolHarness("batch_confirm_journals", {
+      journals: { listAllCached: vi.fn().mockResolvedValue([]), get: vi.fn().mockRejectedValue(error), confirm },
+    });
+    const body = parseMcpResponse(((await handler({ ids: [5], reason: "r" })) as { content: Array<{ text: string }> }).content[0]!.text) as any;
+    expect(body.results[0]).toMatchObject({ id: 5, status: expected });
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it("batch_confirm_journals reports indeterminate confirms separately", async () => {
     const indeterminate = new MutationIndeterminateError({
       operation: "confirm", entity: "journal", entityId: 5, businessKey: "journal:5",

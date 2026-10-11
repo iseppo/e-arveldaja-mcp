@@ -10,7 +10,7 @@ import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
-import { HttpError } from "../http-client.js";
+import { isNotFoundHttpError } from "../http-client.js";
 // canonicalBusinessText strips the display sandbox to recover the EXECUTABLE
 // business value (M10). It is NOT wrapUntrustedOcr — the operation never wraps
 // for output; the presenter owns all output-time sandboxing. Where the mutation
@@ -209,7 +209,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           // in the mutation loop so the affected GROUP fails (never a benign
           // skip), while the fingerprint marks it as an unresolved read so preview
           // and execute agree deterministically.
-          if (error instanceof HttpError && error.status === 404) {
+          if (isNotFoundHttpError(error)) {
             cache.set(stub.id, { kind: "gone" });
             txFingerprints.push({ id: stub.id, present: false });
             continue;

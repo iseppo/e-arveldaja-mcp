@@ -7,7 +7,7 @@ import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
-import { HttpError } from "../../http-client.js";
+import { HttpError, isNotFoundHttpError } from "../../http-client.js";
 import { MutationIndeterminateError, classifyMutationFailure, isMutationIndeterminate } from "../../mutation-outcome.js";
 import {
   getNormalizedNetworkCause,
@@ -801,7 +801,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           // gone (skip and move on); transient errors (500/timeout/auth drop)
           // shouldn't be treated as "gone" because the caller may drop the ID
           // from reconciliation decisions.
-          const isNotFound = error instanceof HttpError && error.status === 404;
+          const isNotFound = isNotFoundHttpError(error);
           results.push({
             id,
             status: isNotFound ? "skipped_missing" : "lookup_failed",

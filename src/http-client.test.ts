@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HttpClient } from "./http-client.js";
+import { HttpClient, HttpError, isNotFoundHttpError } from "./http-client.js";
 
 const config = {
   apiKeyId: "test-key-id",
@@ -228,6 +228,102 @@ describe("HttpClient", () => {
         expect.objectContaining({ tool: nextTool }),
       ]));
     }
+  });
+
+  describe("409 \"No such object.\" is flagged as upstream not-found (F7)", () => {
+    async function rejectWith(
+      method: "DELETE" | "PATCH" | "GET",
+      path: string,
+      body: string,
+    ): Promise<HttpError> {
+      const fetchMock = vi.fn().mockResolvedValueOnce(new Response(body, {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      const client = new HttpClient(config);
+      const call = method === "DELETE"
+        ? client.delete(path)
+        : method === "PATCH" ? client.patch(path, {}) : client.get(path);
+      try {
+        await call;
+      } catch (err) {
+        expect(err).toBeInstanceOf(HttpError);
+        return err as HttpError;
+      }
+      return expect.fail("should have thrown");
+    }
+
+    it.each([
+      ["DELETE", "/transactions/14090193"],
+      ["PATCH", "/transactions/14090193/invalidate"],
+    ] as const)("%s %s answering 409 [\"No such object.\"] gets not-found advice, status stays 409", async (method, path) => {
+      const e = await rejectWith(method, path, JSON.stringify({ code: 409, messages: ["No such object."] }));
+      expect(e.status).toBe(409);
+      expect(e.upstream_not_found).toBe(true);
+      expect(e.recovery_hint).toContain("Verify that the referenced record still exists");
+      expect(e.next_actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ tool: "get_transaction", args: { id: 14090193 } }),
+      ]));
+      expect(e.next_actions!.map(action => action.tool)).not.toContain("reconcile_bank_transactions");
+      expect(isNotFoundHttpError(e)).toBe(true);
+    });
+
+    it.each([
+      ["every message matches", ["No such object.", "No such object."]],
+      ["no trailing period", ["No such object"]],
+      ["surrounding whitespace", ["  No such object.  "]],
+      ["case-insensitive", ["no such object."]],
+    ])("flags a 409 whose messages are all \"No such object.\" (%s)", async (_label, messages) => {
+      const e = await rejectWith("DELETE", "/transactions/1", JSON.stringify({ messages }));
+      expect(e.status).toBe(409);
+      expect(e.upstream_not_found).toBe(true);
+      expect(isNotFoundHttpError(e)).toBe(true);
+    });
+
+    it.each([
+      ["a mixed message list", JSON.stringify({ messages: ["No such object.", "Other"] })],
+      ["a message that only contains the phrase", JSON.stringify({ messages: ["Record is locked. No such object."] })],
+      ["the document-missing conflict", JSON.stringify({ messages: ["No file found."] })],
+      ["an empty message list", JSON.stringify({ messages: [] })],
+      ["a missing message list", JSON.stringify({ code: 409 })],
+      ["a non-array messages value", JSON.stringify({ messages: "No such object." })],
+      ["a non-string message element", JSON.stringify({ messages: [null] })],
+      ["a mixed string / non-string list", JSON.stringify({ messages: ["No such object.", 42] })],
+      ["a nested-array element that stringifies to the phrase", JSON.stringify({ messages: [["No such object."]] })],
+      ["a malformed JSON body", "{not json"],
+    ])("keeps the conflict advice for %s", async (_label, body) => {
+      const e = await rejectWith("DELETE", "/transactions/1", body);
+      expect(e.status).toBe(409);
+      expect(e.upstream_not_found).toBeUndefined();
+      expect(e.recovery_hint).toContain("Resolve the conflict before retrying");
+      expect(isNotFoundHttpError(e)).toBe(false);
+    });
+
+    it("only a 409 is flagged: a 422 \"No such object.\" keeps validation advice", async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ messages: ["No such object."] }), {
+        status: 422,
+        headers: { "content-type": "application/json" },
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+      const client = new HttpClient(config);
+      const err = await client.delete("/transactions/1").catch((e: unknown) => e) as HttpError;
+      expect(err).toBeInstanceOf(HttpError);
+      expect(err.status).toBe(422);
+      expect(err.upstream_not_found).toBeUndefined();
+      expect(err.recovery_hint).toContain("Validate the request body");
+      expect(isNotFoundHttpError(err)).toBe(false);
+    });
+
+    it("isNotFoundHttpError truth table", () => {
+      expect(isNotFoundHttpError(new HttpError("x", 404, "GET", "/transactions/1"))).toBe(true);
+      expect(isNotFoundHttpError(new HttpError("x", 409, "GET", "/transactions/1", { upstream_not_found: true }))).toBe(true);
+      expect(isNotFoundHttpError(new HttpError("x", 409, "GET", "/transactions/1"))).toBe(false);
+      expect(isNotFoundHttpError(new HttpError("x", 500, "GET", "/transactions/1"))).toBe(false);
+      expect(isNotFoundHttpError(new HttpError("x", "network", "GET", "/transactions/1"))).toBe(false);
+      expect(isNotFoundHttpError(Object.assign(new Error("x"), { status: 404 }))).toBe(false);
+      expect(isNotFoundHttpError(undefined)).toBe(false);
+    });
   });
 
   it("adds a rate-limit recovery hint without advertising a non-existent retry tool", async () => {

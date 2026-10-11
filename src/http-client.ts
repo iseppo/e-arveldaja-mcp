@@ -24,6 +24,12 @@ export class HttpError extends Error {
    */
   readonly upstream_detail?: string;
   readonly recovery_hint?: string;
+  /**
+   * Set on a 409 whose upstream messages are all "No such object." — RIK's
+   * answer for a record that no longer exists. `status` stays 409; use
+   * `isNotFoundHttpError` to treat it like a 404.
+   */
+  readonly upstream_not_found?: true;
   readonly next_actions?: Array<{
     tool: string;
     args?: Record<string, unknown>;
@@ -38,6 +44,7 @@ export class HttpError extends Error {
     options?: {
       upstream_detail?: string;
       recovery_hint?: string;
+      upstream_not_found?: boolean;
       next_actions?: Array<{ tool: string; args?: Record<string, unknown>; why: string }>;
     },
   ) {
@@ -49,10 +56,28 @@ export class HttpError extends Error {
     if (options?.recovery_hint !== undefined) {
       this.recovery_hint = options.recovery_hint;
     }
+    if (options?.upstream_not_found === true) {
+      this.upstream_not_found = true;
+    }
     if (options?.next_actions !== undefined) {
       this.next_actions = options.next_actions;
     }
   }
+}
+
+/** True for a 404, or a 409 the upstream flagged as "No such object." (record gone). */
+export function isNotFoundHttpError(error: unknown): boolean {
+  return error instanceof HttpError && (error.status === 404 || error.upstream_not_found === true);
+}
+
+/**
+ * Strict: a non-empty array whose every element is a string matching
+ * "No such object." after trimming. Anything else stays a conflict.
+ */
+function isNoSuchObjectMessages(messages: unknown): boolean {
+  return Array.isArray(messages)
+    && messages.length > 0
+    && messages.every(message => typeof message === "string" && /^No such object\.?$/i.test(message.trim()));
 }
 
 export interface RequestOptions {
@@ -394,8 +419,10 @@ export class HttpClient {
           // the detail through tool-error serialization, sandboxed.
           let errorMessage = `API request failed: ${method} ${path} → ${response.status}`;
           let upstreamDetail: string | undefined;
+          let upstreamNotFound = false;
           try {
             const body = await response.json() as { code?: number; messages?: string[] };
+            upstreamNotFound = response.status === 409 && isNoSuchObjectMessages(body.messages);
             if (body.messages && Array.isArray(body.messages)) {
               const msgs = body.messages.join("; ").substring(0, 500);
               upstreamDetail = wrapUntrustedOcr(msgs);
@@ -415,7 +442,8 @@ export class HttpClient {
 
           throw new HttpError(errorMessage, response.status, method, path, {
             upstream_detail: upstreamDetail,
-            ...HttpClient.buildRecoveryAdvice(response.status, method, path),
+            ...(upstreamNotFound ? { upstream_not_found: true } : {}),
+            ...HttpClient.buildRecoveryAdvice(upstreamNotFound ? 404 : response.status, method, path),
           });
         }
 

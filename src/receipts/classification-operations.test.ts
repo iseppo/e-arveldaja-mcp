@@ -5,6 +5,7 @@ import {
   createClassificationOperations,
 } from "./classification-operations.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { HttpError } from "../http-client.js";
 import { renderApplyClassificationsCompact, renderClassificationAnalysisCompact } from "./classification-presenter.js";
 import {
   createAccountingWorkflowApi,
@@ -299,6 +300,35 @@ describe("classification operations — untrusted counterparty in notes", () => 
     const errorNote = failed!.notes.find(note => note.includes(INJECTION));
     expect(errorNote).toBeDefined();
     expect(errorNote).toContain("UNTRUSTED_OCR_START");
+  });
+});
+
+describe("classification operations — upstream not-found read (F7)", () => {
+  it.each([
+    ["a 404", new HttpError("gone", 404, "GET", "/transactions/42")],
+    ["a flagged 409 \"No such object.\"", new HttpError("gone", 409, "GET", "/transactions/42", { upstream_not_found: true })],
+  ])("treats %s transaction read as gone (skipped, not failed)", async (_label, error) => {
+    const { api, operations } = makeSaasOperations();
+    api.transactions.get.mockRejectedValue(error);
+    const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const row = outcome.value.results[0]!;
+    expect(row.status).not.toBe("failed");
+    expect(row.notes).toContain("Transaction 42 no longer exists.");
+    expectNoWrites(api);
+  });
+
+  it("keeps an unflagged 409 transaction read as a read error (group fails)", async () => {
+    const { api, operations } = makeSaasOperations();
+    api.transactions.get.mockRejectedValue(new HttpError("conflict", 409, "GET", "/transactions/42"));
+    const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    const row = outcome.value.results[0]!;
+    expect(row.status).toBe("failed");
+    expect(row.notes).not.toContain("Transaction 42 no longer exists.");
+    expectNoWrites(api);
   });
 });
 

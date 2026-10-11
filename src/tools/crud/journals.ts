@@ -7,7 +7,7 @@ import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
-import { HttpError } from "../../http-client.js";
+import { isNotFoundHttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { withOpeningBalanceStatus } from "../../opening-balance-limitations.js";
 import { readOpeningBalances } from "../../opening-balance-store.js";
@@ -487,7 +487,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
             alreadyRegistered = existing.registered === true;
           } catch (error: unknown) {
             const message = error instanceof Error ? error.message : String(error);
-            const isNotFound = error instanceof HttpError && error.status === 404;
+            const isNotFound = isNotFoundHttpError(error);
             results.push({
               id,
               status: isNotFound ? "skipped_missing" : "lookup_failed",
