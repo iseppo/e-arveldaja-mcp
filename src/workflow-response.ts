@@ -324,6 +324,17 @@ function actionFromQuestion(question: unknown): WorkflowAction | undefined {
 function actionFromReviewItem(reviewItem: unknown): WorkflowAction | undefined {
   if (!isRecord(reviewItem)) return undefined;
   const resolverInput = recordAt(reviewItem, "resolver_input") ?? reviewItem;
+  // Without a review_type, resolve_review can only answer unsupported_review_type:
+  // such an item is a direct action whose recommendation is the next step.
+  if (!stringAt(resolverInput, "review_type")) {
+    return {
+      kind: "review_item",
+      label: "Act on the first accounting review item",
+      why: stringAt(reviewItem, "summary") ?? "A review item needs accounting judgement before execution.",
+      recommendation: stringAt(reviewItem, "recommendation"),
+      approval_required: false,
+    };
+  }
   return {
     kind: "review_item",
     label: "Resolve the first accounting review item",

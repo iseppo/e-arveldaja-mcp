@@ -97,17 +97,32 @@ describe("workflow response helpers", () => {
       tool: "import_camt053",
       approval_required: false,
     });
+    // No resolver_input and no review_type: resolve_review would only answer
+    // unsupported_review_type, so the item is a direct action (its recommendation).
     expect(workflow.available_actions[1]).toMatchObject({
       kind: "review_item",
-      tool: "continue_accounting_workflow",
-      args: {
-        action: "resolve_review",
-        review_item_json: {
-          summary: "Review a supplier match.",
-          recommendation: "Confirm the supplier before booking.",
-        },
-      },
+      recommendation: "Confirm the supplier before booking.",
+      why: "Review a supplier match.",
     });
+    expect(workflow.available_actions[1]!.tool).toBeUndefined();
+    expect(workflow.available_actions[1]!.args).toBeUndefined();
+  });
+
+  it("routes a review item to resolve_review only when it carries a resolvable review_type", () => {
+    const resolvable = { review_type: "classification_group", source_tool: "classify_unmatched_transactions", group: { category: "saas_subscriptions" } };
+    const workflow = buildWorkflowEnvelope({
+      summary: "Prepared inbox.",
+      needs_review: [
+        { summary: "Group needs review.", resolver_input: resolvable },
+        { summary: "Inline typed item.", ...resolvable },
+        { id: "classify_unmatched_transactions:abc", summary: "Transaction 42 is already booked by journal 7001.", recommendation: "verify that journal 7001 books this movement, then delete_transaction 42 (the PROJECT row)" },
+      ],
+    });
+    const [grouped, inline, direct] = workflow.available_actions;
+    expect(grouped).toMatchObject({ tool: "continue_accounting_workflow", args: { action: "resolve_review", review_item_json: resolvable } });
+    expect(inline).toMatchObject({ tool: "continue_accounting_workflow", args: { action: "resolve_review" } });
+    expect(direct).toMatchObject({ kind: "review_item", recommendation: expect.stringContaining("delete_transaction 42") });
+    expect(direct!.tool).toBeUndefined();
   });
 
   it("creates receipt approval previews from dry-run preview counts", () => {

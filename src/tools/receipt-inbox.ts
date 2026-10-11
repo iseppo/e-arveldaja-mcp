@@ -622,6 +622,24 @@ export async function resolveClassificationSuggestion(
     return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
   }
 
+  // A saved rule that names the booking outranks supplier-invoice history.
+  const autoBookingRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
+  if (autoBookingRule && (
+    classification.category === "bank_fees" ||
+    hasConcreteAutoBookingRuleBookingTarget(autoBookingRule)
+  )) {
+    return {
+      applyMode: classification.apply_mode,
+      suggestion: buildClassificationSuggestion(
+        context.purchaseArticlesWithVat,
+        context.accounts,
+        classification.category,
+        group.normalized_counterparty,
+        { autoBookingRule },
+      ),
+    };
+  }
+
   const supplierResolution = await resolveSupplierFromTransaction(api, clients, sample, false, classification.category);
   const supplierId = supplierResolution.client?.id;
   if (supplierId) {
@@ -643,23 +661,6 @@ export async function resolveClassificationSuggestion(
         ),
       };
     }
-  }
-
-  const autoBookingRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
-  if (autoBookingRule && (
-    classification.category === "bank_fees" ||
-    hasConcreteAutoBookingRuleBookingTarget(autoBookingRule)
-  )) {
-    return {
-      applyMode: classification.apply_mode,
-      suggestion: buildClassificationSuggestion(
-        context.purchaseArticlesWithVat,
-        context.accounts,
-        classification.category,
-        group.normalized_counterparty,
-        { autoBookingRule },
-      ),
-    };
   }
 
   if (

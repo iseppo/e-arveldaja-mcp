@@ -51,6 +51,8 @@ export interface CamtJournalCoverageInput {
   /** Every statement entry, already enriched with its transaction duplicates. */
   readonly entries: readonly ParsedCamtEntry[];
   readonly ledgerTransactions: readonly Transaction[];
+  /** Per entry: the stored lookup key when its marker kept only the reference hash. */
+  readonly entryReferenceKeys?: ReadonlyArray<string | undefined>;
 }
 
 export interface CamtJournalCoverageContext {
@@ -60,7 +62,7 @@ export interface CamtJournalCoverageContext {
   readonly journalsById: Map<number, Journal>;
   readonly sameDimensionTransactions: Map<number, Transaction>;
   readonly repeatedBankReferences: Set<string>;
-  /** Journal id → distinct statement references its document number matches. */
+  /** Journal id → distinct statement reference keys its document number matches. */
   readonly identityClaims: Map<number, Set<string>>;
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly laneB: InterAccountResolver;
@@ -75,7 +77,7 @@ const REVIEW_PRIORITY: CamtJournalReviewCode[] = [
 const cents = (value: number) => Math.round(value * 100);
 
 export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput): CamtJournalCoverageContext {
-  const { snapshot, dimensionId, entries, ledgerTransactions } = input;
+  const { snapshot, dimensionId, entries, ledgerTransactions, entryReferenceKeys } = input;
   // A same-dimension TRANSACTION journal books a statement entry the
   // transaction dedup already matched; only those are excluded. Any other
   // same-dimension transaction journal stays in the scan.
@@ -106,12 +108,12 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
   const identityClaims = new Map<number, Set<string>>();
   for (const journal of journals) {
     const documentKeys = journalDocumentReferenceKeys(journal.document_number);
-    for (const entry of entries) {
-      const reference = normalizeOptionalReference(entry.bank_reference);
-      const key = bankReferenceLookupKey(reference);
-      if (!reference || !key || !documentKeys.includes(key)) continue;
+    for (const [index, entry] of entries.entries()) {
+      // Distinct references have distinct keys, so a hash-only entry competes too.
+      const key = bankReferenceLookupKey(entry.bank_reference) ?? entryReferenceKeys?.[index];
+      if (!key || !documentKeys.includes(key)) continue;
       const claims = identityClaims.get(journal.id!) ?? new Set<string>();
-      claims.add(reference);
+      claims.add(key);
       identityClaims.set(journal.id!, claims);
     }
   }

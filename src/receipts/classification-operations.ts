@@ -14,7 +14,6 @@ import { isNotFoundHttpError } from "../http-client.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
 import { normalizeCompanyName } from "../company-name.js";
-import { findAutoBookingRule, hasConcreteAutoBookingRuleBookingTarget } from "../accounting-rules.js";
 import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
 import {
   bankReferenceLookupKey,
@@ -304,6 +303,17 @@ function partitionByLedgerContext(
     const direction = trustedDirection(transaction);
     return direction ? [coverageEntry(transaction, toCamt(direction))] : [coverageEntry(transaction, "CRDT"), coverageEntry(transaction, "DBIT")];
   };
+  // Exclusivity (one journal books one movement) is judged over every PROJECT
+  // row of the dimension, not only the date-filtered selection being classified.
+  const selectedIds = new Set(rows.map(transaction => transaction.id));
+  const competing = [
+    ...rows,
+    ...ledgerTransactions.filter(transaction => transaction.accounts_dimensions_id === dimensionId &&
+      isProjectTransaction(transaction) && !selectedIds.has(transaction.id)),
+  ];
+  const hashOnlyKey = (transaction: Transaction) => coverageEntry(transaction, "CRDT").bank_reference === undefined
+    ? storedBankReferenceLookupKey(transaction)
+    : undefined;
   const coverageContext = buildCamtJournalCoverageContext({
     snapshot: {
       journals: ledger.journals,
@@ -313,7 +323,8 @@ function partitionByLedgerContext(
       interAccountResolver: (journals, ownDimensionIds) => BookingGuard.fromSnapshot(api, journals, ownDimensionIds),
     },
     dimensionId,
-    entries: rows.map(transaction => entriesFor(transaction)[0]!),
+    entries: competing.map(transaction => entriesFor(transaction)[0]!),
+    entryReferenceKeys: competing.map(hashOnlyKey),
     ledgerTransactions,
   });
   const inferenceLookups = {
@@ -337,7 +348,7 @@ function partitionByLedgerContext(
     }),
   };
   const storedKeyCounts = new Map<string, number>();
-  for (const transaction of rows) {
+  for (const transaction of competing) {
     const key = storedBankReferenceLookupKey(transaction);
     if (key !== undefined) storedKeyCounts.set(key, (storedKeyCounts.get(key) ?? 0) + 1);
   }
@@ -354,13 +365,12 @@ function partitionByLedgerContext(
     };
 
     // A marker that kept only the reference hash still carries the identity key.
-    const storedKey = storedBankReferenceLookupKey(transaction);
-    const hashOnly = storedKey !== undefined && coverageEntry(transaction, "CRDT").bank_reference === undefined;
+    const storedKey = hashOnlyKey(transaction);
     const hits = entriesFor(transaction)
-      .map(entry => classifyCamtJournalCoverage(entry, coverageContext, hashOnly ? storedKey : undefined))
+      .map(entry => classifyCamtJournalCoverage(entry, coverageContext, storedKey))
       .filter((coverage): coverage is Exclude<CamtJournalCoverage, { kind: "none" }> => coverage.kind !== "none")
       // A repeated hash-only key cannot prove which row a journal books.
-      .map(coverage => hashOnly && coverage.kind === "identity" && (storedKeyCounts.get(storedKey) ?? 0) > 1
+      .map(coverage => storedKey !== undefined && coverage.kind === "identity" && (storedKeyCounts.get(storedKey) ?? 0) > 1
         ? { kind: "review" as const, code: "camt_journal_conflict" as const, journal_ids: coverage.journal_ids }
         : coverage);
     if (hits.length === 1 && hits[0]!.kind === "identity" && trustedDirection(transaction)) {
@@ -700,12 +710,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       let suggestion = resolved.suggestion;
       // Precedence: statutory category > saved rule > transaction history >
       // supplier-invoice history > keyword. History is review-only, never a rule.
-      // A saved rule outranks history even when supplier-invoice history
-      // resolved first (the resolver returns it before looking at rules).
-      const savedRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
-      const ruleApplies = savedRule !== undefined &&
-        (classification.category === "bank_fees" || hasConcreteAutoBookingRuleBookingTarget(savedRule));
-      const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules" || ruleApplies;
+      const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
       if (!fixedBySource && history) {
         suggestion = historyBookingSuggestion(history, accounts);
         applyMode = "review_only";
