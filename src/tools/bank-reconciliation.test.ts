@@ -5,6 +5,7 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -1540,7 +1541,7 @@ describe("reconcile_inter_account_transfers", () => {
       const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(api.transactions.delete).toHaveBeenCalledWith(2);
     });
 
@@ -1584,7 +1585,7 @@ describe("reconcile_inter_account_transfers", () => {
       const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
       expect(payload.pairs[0]!.incoming_transaction_id).toBe(3);
       expect(api.transactions.delete).toHaveBeenCalledTimes(1);
@@ -1605,7 +1606,7 @@ describe("reconcile_inter_account_transfers", () => {
       const { handler, api } = setupInterAccountTool({ transactions: [swedOut, lhvEurIn], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
       const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 2, to_dimension_id: 11 });
       expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
@@ -2252,7 +2253,7 @@ describe("reconcile_inter_account_transfers", () => {
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 100 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
 
-        expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
         expect(payload.matched_one_sided).toBe(0);
         expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
         expect(api.transactions.delete).toHaveBeenCalledWith(2);
@@ -3352,7 +3353,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
       const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.pairs[0]).toMatchObject({
         outgoing_transaction_id: 9101, incoming_transaction_id: 9102,
@@ -3730,5 +3731,60 @@ describe("exact-match confirm duplicate-posting guard", () => {
     expect(mergedResult.result.matches[0]!.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
     ]);
+  });
+});
+
+// --- WP3 (F4): CAMT marker IBAN, unverifiable markers, mirror proposals -------
+// Local fixtures only: the shared setupInterAccountTool is reused unchanged.
+describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
+  const LHV_IBAN = "EE123456789012345678";
+  const WISE_IBAN = "BE08905767222113";
+  const threeAccounts = [
+    { id: 1, account_name_est: "LHV", account_no: LHV_IBAN, iban_code: LHV_IBAN, accounts_dimensions_id: 100 },
+    { id: 2, account_name_est: "Wise", account_no: WISE_IBAN, iban_code: WISE_IBAN, accounts_dimensions_id: 300 },
+    { id: 3, account_name_est: "Lightyear", account_no: "EE999999999999999999", iban_code: "EE999999999999999999", accounts_dimensions_id: 400 },
+  ];
+
+  /** A PROJECT row as MCP-CAMT stores it: bank_account_no null, the IBAN only in the signed marker. */
+  function camtRow(id: number, o: { iban?: string; dir?: "DBIT" | "CRDT"; amount?: number; date?: string; dim?: number; name?: string; ref?: string } = {}) {
+    const amount = o.amount ?? 600;
+    const date = o.date ?? "2026-09-26";
+    const name = o.name ?? "Näide OU";
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "C", amount, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: o.dim ?? 100, bank_account_name: name, bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Näide OU", {
+        date, amount, currency: "EUR", direction: o.dir ?? "DBIT", counterparty_name: name,
+        counterparty_iban: o.iban ?? WISE_IBAN, bank_reference: o.ref ?? `REF${id}`, description: "Näide OU",
+      }),
+    };
+  }
+  /** Flip one hex character of the marker sig, keeping it syntactically valid. */
+  function tamperSig<T extends { description?: string }>(tx: T): T {
+    return { ...tx, description: tx.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+  }
+
+  it("books a one-sided transfer to the account behind a verified marker IBAN among three accounts", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.matched_one_sided).toBe(1);
+    expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
+    expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
+  });
+
+  it("pairs a verified-marker outgoing with the incoming row on the marker IBAN's account", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        camtRow(5002),
+        { id: 5003, status: "PROJECT", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null, description: "WISE:T5003 top-up [source_direction=IN]" },
+      ],
+      bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 5002, incoming_transaction_id: 5003 });
+    expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
   });
 });

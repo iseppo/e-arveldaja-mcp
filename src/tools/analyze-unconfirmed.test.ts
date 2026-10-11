@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 
 function setupTool(options: {
   transactions?: unknown[];
@@ -821,5 +822,34 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       sales: [{ id: 10, status: "CONFIRMED", payment_status: 42, number: "ARV-10", clients_id: 20, client_name: "Acme OÜ", gross_price: 100, bank_ref_number: "RF1" }],
     });
     await expect(handler({})).rejects.toThrow(/payment_status/);
+  });
+});
+
+// --- WP3 (F4): CAMT marker IBAN in inter-account suggestions ------------------
+describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
+  const WISE_IBAN = "BE08905767222113";
+  const threeAccounts = [
+    ...defaultBankAccounts,
+    { id: 3, account_name_est: "Wise", account_no: WISE_IBAN, iban_code: WISE_IBAN, accounts_dimensions_id: 300 },
+  ];
+  /** A PROJECT row as MCP-CAMT stores it: bank_account_no null, the IBAN only in the signed marker. */
+  function camtRow(id: number) {
+    const amount = 600;
+    const date = "2026-09-26";
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "C", amount, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: 100, bank_account_name: "Näide OU", bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Näide OU", {
+        date, amount, currency: "EUR", direction: "DBIT", counterparty_name: "Näide OU",
+        counterparty_iban: WISE_IBAN, bank_reference: `REF${id}`, description: "Näide OU",
+      }),
+    };
+  }
+
+  it("suggests confirm_inter_account to the verified marker IBAN's account", async () => {
+    const handler = setupTool({ transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ" });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "confirm_inter_account", match_confidence: 90 });
+    expect(payload.suggestions[0]!.distribution).toMatchObject({ related_sub_id: 300 });
   });
 });

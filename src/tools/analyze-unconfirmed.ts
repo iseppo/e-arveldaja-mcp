@@ -9,7 +9,7 @@ import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import { inferOneSidedTransfer, type OneSidedInference } from "../banking/reconciliation/inter-account-matcher.js";
+import { counterpartyIbanOf, inferOneSidedTransfer, type OneSidedInference } from "../banking/reconciliation/inter-account-matcher.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
@@ -128,7 +128,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       };
       const inferenceCache = new Map<number, OneSidedInference>();
       const hasOwnOriginEvidence = (row: Transaction, sourceDim: number): boolean => {
-        const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+        const iban = counterpartyIbanOf(row);
         if (iban) return ownIbanToDimension.get(iban)?.has(sourceDim) ?? false;
         return sameCompanyIdentity(row.bank_account_name, companyLegalName);
       };
@@ -344,7 +344,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           suggested_action: "manual_review",
           reason,
         });
-        const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
+        const counterpartyIban = counterpartyIbanOf(tx);
         let isInterAccount = false;
 
         // Check counterparty IBAN matches own bank account

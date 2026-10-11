@@ -44,6 +44,7 @@ import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
+  counterpartyIbanOf,
   inferOneSidedTransfer,
   getTransferPairCompatibility,
   getSameTypeReciprocalEvidence,
@@ -794,7 +795,7 @@ export async function runInterAccountMatching(
   // name), a merely similar name, or an own account's display title (a bank's
   // own refund "Swedbank AS" vs an account titled "Swedbank") is not evidence.
   function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
-    const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+    const iban = counterpartyIbanOf(row);
     if (iban) return ownIbanToDimension.get(iban)?.has(sourceDimensionId) ?? false;
     return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
   }
@@ -847,8 +848,8 @@ export async function runInterAccountMatching(
       const txOutComparableAmount = compatibility.txAComparableAmount;
       const conflictingComparableAmounts = compatibility.conflictingComparableAmounts;
 
-      const outCounterpartyIban = (txOut.bank_account_no ?? "").trim().toUpperCase();
-      const inCounterpartyIban = (txIn.bank_account_no ?? "").trim().toUpperCase();
+      const outCounterpartyIban = counterpartyIbanOf(txOut);
+      const inCounterpartyIban = counterpartyIbanOf(txIn);
       const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
       const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
 
