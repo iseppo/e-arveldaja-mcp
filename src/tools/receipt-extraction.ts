@@ -1058,8 +1058,9 @@ const AMOUNT_ADJACENT_CODE_RE =
 // Zero-decimal currencies print whole amounts ("Total HUF 10000", "Total
 // 10 000 HUF"). Same adjacency rule, integer amount; the amount must end there
 // (no "SAR 2 1.50" quantity gap). Only checked on a total/amount line.
+// Thousand-groups are bounded so a long "111 111 ..." run stays linear.
 const INTEGER_AMOUNT_ADJACENT_CODE_RE =
-  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?![.,]?\d)(?!\s+\d)|(?<![\d.,])\d+(?:\s\d{3})*\s?([A-Z]{3})(?![A-Za-z])/g;
+  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3}){1,6}|\d+)(?![.,]?\d)(?!\s+\d)|(?<![\d.,])\d+(?:\s\d{3}){0,6}\s?([A-Z]{3})(?![A-Za-z])/g;
 // The amount-adjacent form counts only on a total/amount line; a bare
 // "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
 const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;

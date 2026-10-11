@@ -2313,6 +2313,17 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect(unsupportedNote(code)(fields.extraction_notes)).toBe(true);
   });
 
+  it("stays linear on a long run of integer groups on an amount line (Codex verify #7)", () => {
+    const text = [
+      "Supplier: Shop LLC", "Invoice no: INV-1", "Date: 2026-10-01", "Total 124", "Paid EUR124",
+      "Amount reference: " + "111 ".repeat(32 * 1024),
+    ].join("\n");
+    const started = performance.now();
+    const fields = extractReceiptFieldsFromText(text, "receipt.pdf");
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(fields.total_gross).toBe(124);
+  });
+
   it.each([
     ["Total 100 EUR", ["Shop OÜ", "Total 100 EUR"]],
     ["Kokku EUR 100", ["Shop OÜ", "Kokku EUR 100"]],
