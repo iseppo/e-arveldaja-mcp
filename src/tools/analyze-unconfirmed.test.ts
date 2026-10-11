@@ -874,4 +874,13 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
     expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "confirm_inter_account", match_confidence: 90 });
     expect(payload.suggestions[0]!.distribution).toMatchObject({ related_sub_id: 300 });
   });
+
+  it("gives no confirm_inter_account suggestion for a marker whose sig fails the checksum", async () => {
+    const row = camtRow(5002);
+    const tampered = { ...row, bank_account_name: "Näide OÜ", description: row.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+    const handler = setupTool({ transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ" });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
+    expect(payload.suggestions[0]!.distribution).toBeUndefined();
+  });
 });

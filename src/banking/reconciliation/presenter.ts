@@ -752,7 +752,7 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
     warnings.push({ item_id: String(pair.outgoing_transaction_id), code: "ambiguous_pair", message: pair.reason });
   }
   for (const row of m.ambiguousRefless.slice(0, 3)) {
-    warnings.push({ code: "ambiguous_refless", message: row.reason });
+    warnings.push({ code: row.code ?? "ambiguous_refless", message: row.reason });
   }
   for (const row of m.crossCurrencyPairs.slice(0, 3)) {
     warnings.push({ code: "cross_currency_review", message: row.reason });

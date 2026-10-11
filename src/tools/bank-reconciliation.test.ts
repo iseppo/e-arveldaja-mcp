@@ -3809,4 +3809,56 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 5002, incoming_transaction_id: 5003 });
     expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
   });
+
+  describe("a CAMT marker whose sig fails the checksum fails closed (camt_marker_unverified)", () => {
+    const twoAccounts = threeAccounts.slice(0, 2);
+
+    it("(a) 2 own accounts and the exact company name: not confirmed, reported for review", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: twoAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.ambiguous_refless).toEqual([
+        expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }),
+      ]);
+    });
+
+    it("(b) 3 accounts with an explicit target: not confirmed, reported for review", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: threeAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 300 })).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.ambiguous_refless).toEqual([
+        expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }),
+      ]);
+    });
+
+    it("(c) a marker without a sig keeps the name-only behaviour", async () => {
+      const unsigned = { ...camtRow(5002, { name: "Näide OÜ" }), description: `Näide OU\n[e-arveldaja-mcp:camt br=REF5002 iban=${WISE_IBAN} dir=DBIT]` };
+      const { handler } = setupInterAccountTool({ transactions: [unsigned], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.matched_one_sided).toBe(1);
+      expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
+      expect(payload.ambiguous_refless).toEqual([]);
+    });
+
+    it("never pairs (and so never deletes) a tampered row even when the other leg's IBAN points at its account", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 5003, status: "PROJECT", is_deleted: false, type: "C", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Someone", bank_account_no: LHV_IBAN, description: "WISE:T5003 out [source_direction=OUT]" },
+          tamperSig(camtRow(5002, { dir: "CRDT", iban: WISE_IBAN, name: "Näide OÜ" })),
+        ],
+        bankAccounts: twoAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalledWith(5002, expect.anything(), expect.anything());
+      expect(payload.ambiguous_refless).toContainEqual(expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }));
+    });
+  });
 });

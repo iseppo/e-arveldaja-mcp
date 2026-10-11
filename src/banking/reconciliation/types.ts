@@ -229,6 +229,9 @@ export interface AmbiguousReflessRow {
   transaction_ids: number[]; amount: number; date: string;
   currency?: string; amount_eur?: number;
   source_account: string; target_account: string; reason: string;
+  /** Why the row needs review when it is not a plain ref-less collision:
+   * its CAMT marker sig does not verify. */
+  code?: "camt_marker_unverified";
 }
 
 export interface CrossCurrencyRow {

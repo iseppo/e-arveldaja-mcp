@@ -45,7 +45,9 @@ import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, com
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
   counterpartyIbanOf,
+  hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
   getSameTypeReciprocalEvidence,
   type InterAccountMatchLookups,
@@ -732,11 +734,17 @@ export async function runInterAccountMatching(
     targetAccountsDimensionsId: target_accounts_dimensions_id,
   };
 
+  // A row whose CAMT marker sig fails the checksum has an unverifiable
+  // statement identity (IBAN, direction): it never takes part in automatic
+  // pairing, one-sided confirms or mirror handling. Rows it would otherwise
+  // have touched as an own transfer are reported for review below.
+  const pairable = unconfirmed.filter(tx => !hasUnverifiableCamtMarker(tx));
+
   // Rows without a signed marker ("unknown") stay on the outgoing side as
   // before; same-type pairs among them confirm only when exactly one leg is
   // signed outgoing, and a confirm books from the real stored type.
-  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) !== "incoming");
-  const incoming = unconfirmed.filter(tx => bankTransactionDirection(tx) === "incoming");
+  const outgoing = pairable.filter(tx => bankTransactionDirection(tx) !== "incoming");
+  const incoming = pairable.filter(tx => bankTransactionDirection(tx) === "incoming");
 
   const matchedPairs: PairResult[] = [];
   const ambiguousPairs: AmbiguousPairResult[] = [];
@@ -786,6 +794,20 @@ export async function runInterAccountMatching(
   }
 
   const oneSidedInferenceCache = new Map<number, OneSidedInference>();
+
+  for (const tx of unconfirmed) {
+    if (!tx.id || !hasUnverifiableCamtMarker(tx)) continue;
+    const claim = unverifiedMarkerTransferClaim(tx, lookups);
+    if (!claim) continue;
+    const claimedTargets = claim.targetDimension !== undefined ? [claim.targetDimension] : claim.ambiguousTargetDimensions ?? [];
+    ambiguousRefless.push({
+      transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+      source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+      target_account: claimedTargets.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+      code: "camt_marker_unverified",
+      reason: `Transaction ${tx.id} looks like an own-account transfer, but its CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified. It is excluded from automatic matching; check the bank statement and resolve it manually.`,
+    });
+  }
 
   // Deleting a row as a transfer mirror needs positive evidence it came from
   // the source account: its counterparty IBAN is the source account's, or (with
@@ -1025,7 +1047,7 @@ export async function runInterAccountMatching(
   }
 
   // --- Phase 1b: reciprocal same-type pairs with strong mutual target evidence ---
-  const phaseOneRemaining = unconfirmed.filter(
+  const phaseOneRemaining = pairable.filter(
     tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
   );
 
@@ -1239,7 +1261,7 @@ export async function runInterAccountMatching(
   }
 
   // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
-  const remaining = unconfirmed.filter(
+  const remaining = pairable.filter(
     tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
   );
 
