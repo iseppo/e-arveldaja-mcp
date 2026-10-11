@@ -62,6 +62,7 @@ const PURE_DOMAIN_FILES = [
   "src/wise/projection.ts",
   "src/banking/reconciliation/amount-resolution.ts",
   "src/banking/reconciliation/duplicate-policy.ts",
+  "src/receipts/counterparty-booking-history.ts",
 ];
 
 function resolutionModules(): string[] {
