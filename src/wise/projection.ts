@@ -334,20 +334,16 @@ const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
 /**
  * The Wise bank leg's amount when a journal books this row's transfer net of
  * the row's separate fee row (IN: gross − fee; OUT: gross + fee), or
- * `undefined` when the row has no same-currency fee command.
+ * `undefined` when the row has no same-currency fee. Read from the row itself,
+ * so a fee row already stored by an interrupted import (whose fee command is
+ * deduplicated away) still counts.
  */
-export function wiseLegAmountNetOfFee(
-  commands: readonly WiseImportCommand[],
-  rowIndex: number,
-  direction: "IN" | "OUT" | undefined,
-  amount: number,
-  bookedCurrency: string,
-): number | undefined {
-  const fee = commands.find(command =>
-    command.action === "fee_create_and_confirm" && command.row_key === `row:${rowIndex}:fee`
-  );
-  if (!direction || !fee || fee.booked_currency !== bookedCurrency || !(fee.booked_amount > 0)) return undefined;
-  return roundMoney(direction === "IN" ? amount - fee.booked_amount : amount + fee.booked_amount);
+export function wiseLegAmountNetOfFee(row: WiseRow, amount: number): number | undefined {
+  const direction = sourceDirectionForWiseDirection(row.direction);
+  const fee = bookedFeeAmountForWiseRow(row);
+  const bookedCurrency = bookedCurrencyForWiseRow(row);
+  if (!direction || !(fee > 0) || bookedFeeCurrencyForWiseRow(row, bookedCurrency) !== bookedCurrency) return undefined;
+  return roundMoney(direction === "IN" ? amount - fee : amount + fee);
 }
 
 interface StoredWiseLeg {
@@ -863,9 +859,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       // Lane B binds each journal amount to its own bank leg. A journal booking
       // this transfer net of the row's separate fee row carries the Wise leg at
       // the net amount, so look that up too.
-      const netAmount = wiseLegAmountNetOfFee(
-        commands, row.rowIndex, sourceDirectionForWiseDirection(row.direction), entry.amount, bookedCurrencyForWiseRow(row),
-      );
+      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
       if (resolution.status === "none" && !otherLabelled && netAmount !== undefined) {
         const netQuery = { ...query, amount: netAmount };
         resolution = guard.resolveInterAccount(netQuery);

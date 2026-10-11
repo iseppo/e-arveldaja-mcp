@@ -5883,6 +5883,46 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     })]);
   });
 
+  it("a stored fee row from an interrupted import does not hide a net-of-fee journal", async () => {
+    // Journal C LHV100 / D Wise99.50 / D fee0.50 books the transfer net of the
+    // fee; an interrupted earlier import already stored the fee row.
+    const row = transferIn("TRANSFER-NET-FEE", "2026-02-02", "100", { targetAmount: "99.50", targetFeeAmount: "0.50" });
+    const storedFee = {
+      id: 77, status: "PROJECT", accounts_dimensions_id: 5, type: "C", amount: 0.5, cl_currencies_id: "EUR", date: "2026-02-02",
+      description: "WISE:FEE:TRANSFER-NET-FEE Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise",
+    };
+    const netJournal = (id: number) => ({
+      id, is_deleted: false, registered: true, effective_date: "2026-02-02",
+      postings: [
+        { is_deleted: false, accounts_dimensions_id: 20, type: "C", amount: 100, base_amount: 100 },
+        { is_deleted: false, accounts_dimensions_id: 5, type: "D", amount: 99.5, base_amount: 99.5 },
+        { is_deleted: false, accounts_id: 8610, type: "D", amount: 0.5, base_amount: 0.5 },
+      ],
+    });
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([row]));
+    const setup = setupWiseTool([storedFee], undefined, transferOptions([netJournal(701)]));
+    const { dry } = await runApprovedWiseImport(setup, transferArgs);
+    expect(dry.execution.commands).toEqual([expect.objectContaining({
+      action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 701,
+    })]);
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+
+    // The same journal appearing only before confirmation is caught by the
+    // execute recheck.
+    mockedReadFile.mockResolvedValue(buildCsvRows([row]));
+    const stale = setupWiseTool([storedFee], undefined, transferOptions());
+    let journalReads = 0;
+    stale.api.journals.listAllWithPostings.mockImplementation(async () => ++journalReads > 2 ? [netJournal(702)] : []);
+    const staleRun = await runApprovedWiseImport(stale, transferArgs);
+    expect(stale.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(staleRun.executed.execution.errors).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-NET-FEE",
+      reason: expect.stringMatching(wrapped("Inter-account confirmation failed: Stale inter-account precondition: a matching journal appeared before confirmation")),
+    })]);
+  });
+
   it("M2: a cross-currency or non-EUR own transfer gets no inter_account command — it goes to cross-currency review", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       transferIn("TRANSFER-M2-FX", "2026-02-03", "92", { sourceAmount: "100", sourceCurrency: "USD", exchangeRate: "0.92" }),

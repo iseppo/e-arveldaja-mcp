@@ -682,9 +682,8 @@ async function runWiseImport(
               maxGapDays: 1,
               reference: command.wise_id,
             };
-            const netAmount = wiseLegAmountNetOfFee(
-              commands, command.row_index, command.source_direction, command.booked_amount, command.booked_currency,
-            );
+            const sourceRow = eligible.find(row => row.rowIndex === command.row_index);
+            const netAmount = sourceRow === undefined ? undefined : wiseLegAmountNetOfFee(sourceRow, command.booked_amount);
             const journalQueries = netAmount === undefined
               ? [journalQuery]
               : [journalQuery, { ...journalQuery, amount: netAmount }];

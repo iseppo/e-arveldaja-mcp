@@ -145,10 +145,10 @@ describe("Wise inter-account row matched to a journal that already books its fee
     { id: LHV, accounts_id: 1020, is_deleted: false },
     { id: FEE_DIM, accounts_id: 8610, is_deleted: false },
   ] as AccountDimension[];
-  const run = (journals: Journal[]) => {
+  const run = (journals: Journal[], existingTx: Transaction[] = []) => {
     const rows = rowsOf([transfer]);
     const decision = { targetDimensionId: LHV, sourceVerified: true, targetVerified: true, ownershipBasis: "verified_endpoints" } as unknown as WiseTransferDecision;
-    return project(rows, [], {
+    return project(rows, existingTx, {
       accountDimensions: dims,
       transferDecisions: new Map([[rows[0]!, decision]]),
       postingDimensionsSnapshot: new Map(dims.map(dim => [dim.id!, dim])),
@@ -165,6 +165,16 @@ describe("Wise inter-account row matched to a journal that already books its fee
     const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])]);
     expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
     expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
+  });
+
+  it("still recognises the net-of-fee journal when the fee row is already stored", () => {
+    // An interrupted earlier import stored the fee row, so no fee command survives.
+    const storedFee = {
+      id: 3, status: "PROJECT", accounts_dimensions_id: WISE, type: "C", amount: 0.5, cl_currencies_id: "EUR", date: "2026-02-04",
+      description: "WISE:FEE:TRANSFER-1 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise",
+    } as Transaction;
+    const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])], [storedFee]);
+    expect(output.commands).toEqual([expect.objectContaining({ action: "inter_account", existing_journal_id: 8 })]);
   });
 
   it("compares the journal in base EUR, like the guard that matched it", () => {
