@@ -1,7 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
 import { parseMcpResponse } from "../mcp-json.js";
-import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
+
+/**
+ * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
+ * a row whose marker sig fails verification (camt_marker_unverified), so a
+ * fixture standing for a signed CAMT row must carry a sig that verifies.
+ */
+function camtSigned<T extends Record<string, any>>(tx: T): T {
+  const description = String(tx.description ?? "");
+  const direction = description.match(/\b(?:dir|d)=(CRDT|DBIT)\b/)?.[1] as "CRDT" | "DBIT";
+  const clean = description.replace(/\n?\[e-arveldaja-mcp:camt [^\]]*\]$/, "") || undefined;
+  const signed = {
+    ...tx,
+    description: buildCamtDescriptionWithMetadata(clean, {
+      date: tx.date, amount: tx.amount, currency: tx.cl_currencies_id ?? "", direction,
+      counterparty_name: tx.bank_account_name ?? undefined, counterparty_iban: tx.bank_account_no ?? undefined,
+      bank_reference: tx.bank_ref_number ?? `FIXTURE-${tx.id}`, reference_number: tx.ref_number ?? undefined, description: clean,
+    }),
+  };
+  if (!isTrustedCamtDescriptionMetadata(signed as any)) throw new Error(`fixture ${tx.id}: CAMT marker does not verify`);
+  return signed;
+}
+
 
 function setupTool(options: {
   transactions?: unknown[];
@@ -523,7 +545,7 @@ describe("analyze_unconfirmed_transactions", () => {
       { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 300 },
     ];
     const base = { status: "PROJECT", is_deleted: false, type: "C", date: "2026-10-01", cl_currencies_id: "EUR" };
-    const lhvOut = { ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE22", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+    const lhvOut = camtSigned({ ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE22", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
 
     it("does not treat a payer whose name merely contains the company name as an own transfer", async () => {
       const handler = setupTool({
