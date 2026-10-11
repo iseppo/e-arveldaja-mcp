@@ -37,9 +37,19 @@ function bankReferenceHash(value: string): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
 }
 
-function bankReferenceLookupKey(value: string | undefined): string | undefined {
+export function bankReferenceLookupKey(value: string | undefined): string | undefined {
   const normalized = normalizeOptionalReference(value);
   return normalized ? bankReferenceHash(normalized) : undefined;
+}
+
+/** Bank-reference lookup keys a journal document number can carry, with and without the "BANK:" prefix. */
+export function journalDocumentReferenceKeys(documentNumber: string | null | undefined): string[] {
+  const trimmed = documentNumber?.trim() ?? "";
+  const bare = trimmed.startsWith("BANK:") ? trimmed.slice("BANK:".length).trim() : trimmed;
+  if (!bare) return [];
+  const keys = [bankReferenceLookupKey(trimmed), bankReferenceLookupKey(bare)]
+    .filter((key): key is string => key !== undefined);
+  return [...new Set(keys)];
 }
 
 function dimensionScopedBankReferenceLookupKey(
@@ -292,7 +302,7 @@ export function storedBankReferenceLookupKey(transaction: Pick<Transaction,
   return bankReferenceLookupKey(metadata.bank_ref_number) ?? metadata.bank_ref_hash;
 }
 
-function storedBankAccountNo(transaction: Pick<Transaction,
+export function storedBankAccountNo(transaction: Pick<Transaction,
   "bank_account_no" |
   "bank_ref_number" |
   "date" |
