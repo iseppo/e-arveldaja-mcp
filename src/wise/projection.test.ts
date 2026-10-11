@@ -538,6 +538,32 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     },
   );
 
+  // Codex r5: every journal the guard matches (exact reference gross or net
+  // of the fee, or ref-less) must move the Wise leg in the row's direction
+  // before it may stand in for the row; otherwise the row is created and reviewed.
+  const oppositeOwnGross = journalOf(701, "TRANSFER-A", [[LHV, "D", 100], [WISE, "C", 100]]);
+  const oppositeRefless = journalOf(701, "", [[LHV, "D", 100], [WISE, "C", 100]]);
+  it.each([
+    ["own gross, alone, no mapping", [oppositeOwnGross], undefined, transferIn("TRANSFER-A")],
+    ["own gross, alone, mapped to it", [oppositeOwnGross], 701, transferIn("TRANSFER-A")],
+    ["own gross first, mapped to it", [oppositeOwnGross, otherGross], 701, transferIn("TRANSFER-A")],
+    ["own gross last, mapped to it", [otherGross, oppositeOwnGross], 701, transferIn("TRANSFER-A")],
+    ["own gross first, no mapping", [oppositeOwnGross, otherGross], undefined, transferIn("TRANSFER-A")],
+    ["own gross last, no mapping", [otherGross, oppositeOwnGross], undefined, transferIn("TRANSFER-A")],
+    ["own net, alone, no mapping", [oppositeOwnNet], undefined, transferInWithFee("TRANSFER-A")],
+    ["own net, alone, mapped to it", [oppositeOwnNet], 701, transferInWithFee("TRANSFER-A")],
+    ["ref-less, alone, no mapping", [oppositeRefless], undefined, transferIn("TRANSFER-A")],
+  ] as Array<[string, Journal[], number | undefined, string]>)(
+    "an opposite-direction journal never stands in for an incoming transfer: created and reviewed (%s)",
+    (_case, journals, mappedTo, line) => {
+      const output = run([line], journals, mappedTo === undefined ? {} : mapped(["TRANSFER-A", mappedTo]));
+      expect(actions(output)).toContain("main_create:TRANSFER-A");
+      expect(output.commands.some(command => command.action === "inter_account")).toBe(false);
+      expect(reviewCodes(output)).toContain("TRANSFER-A:wise_transfer_journal_ambiguous");
+      if (mappedTo !== undefined) expect(reviewCodes(output)).toContain(`TRANSFER-A:wise_transfer_mapping_rejected:${mappedTo}`);
+    },
+  );
+
   it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is created", () => {
     const usd = labelledJournal({
       document_number: "LHVREF-USD",

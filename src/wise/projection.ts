@@ -822,6 +822,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           : "other",
       };
     };
+    const hasForeignPostingWithoutBase = (journal: Journal): boolean =>
+      (journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
+        (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR");
     // Whether the journal's Wise-dimension postings net to `amount` in the
     // row's direction (IN debits the Wise account), in base EUR.
     const wiseLegMoves = (journal: Journal | undefined, row: WiseRow, amount: number): boolean => {
@@ -851,8 +854,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       }
       // Lane B and the checks below compare base EUR: a foreign posting without
       // a base amount cannot show the EUR the row moved.
-      if ((journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
-        (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) {
+      if (hasForeignPostingWithoutBase(journal)) {
         return "the journal has foreign-currency postings without an EUR base amount";
       }
       const amount = bookedAmountForWiseRow(row);
@@ -974,7 +976,18 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
             otherLabelled = false;
           }
         }
-        if (resolution.status === "ambiguous_refless" || otherLabelled) {
+        // Lane B keys are direction-blind: a matched journal (exact reference,
+        // gross or net of the fee, or ref-less) stands in for the row only when
+        // its Wise leg moves this row's gross or net amount in the row's
+        // direction, in EUR. Otherwise the row is created and reviewed.
+        const matchedJournal = resolution.status === "matched"
+          ? journalSnapshot.find(journal => journal.id === resolution.journal_id)
+          : undefined;
+        const matchUncovered = resolution.status === "matched" && (
+          matchedJournal === undefined || hasForeignPostingWithoutBase(matchedJournal) ||
+          ![entry.amount, netAmount].some(amount => amount !== undefined && wiseLegMoves(matchedJournal, row, amount))
+        );
+        if (resolution.status === "ambiguous_refless" || otherLabelled || matchUncovered) {
           const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
           // The row stays for review, but a candidate journal that already books
           // its fee keeps the fee out of the plan: confirming it would expense
