@@ -66,7 +66,40 @@ export function renderUnmatchedAnalysisFull(input: { result: UnmatchedAnalysisRe
     total_unmatched: result.totalUnmatched,
     category_counts: result.categoryCounts,
     groups: sanitizedGroups,
+    // F6: rows the ledger check took out of classification (never dropped).
+    total_partitioned_out: result.totalPartitionedOut,
+    already_booked: result.alreadyBooked.map(wrapPartitionedRow),
+    own_transfers: result.ownTransfers.map(wrapPartitionedRow),
+    possible_duplicates: result.possibleDuplicates.map(wrapPartitionedRow),
+    ...(result.ledgerContextUnavailable !== undefined ? { ledger_context_unavailable: result.ledgerContextUnavailable } : {}),
   };
+}
+
+/** The counterparty is remitter-controlled bank-statement text. */
+function wrapPartitionedRow<T extends { counterparty?: string }>(row: T): T {
+  return row.counterparty !== undefined ? { ...row, counterparty: wrapUntrustedOcr(row.counterparty) ?? row.counterparty } : row;
+}
+
+/** One aggregate warning per non-empty partition list, so the size stays constant. */
+function partitionWarnings(result: UnmatchedAnalysisResult): CompactWarning[] {
+  const lists: Array<[string, Array<{ transaction_id: number }>, string]> = [
+    ["already_booked", result.alreadyBooked, "already booked by a journal carrying their bank reference; verify, then delete the PROJECT row"],
+    ["own_transfers", result.ownTransfers, "transfers between own accounts; reconcile with reconcile_bank_transactions mode=\"inter_account_dry_run\""],
+    ["possible_duplicates", result.possibleDuplicates, "may already be booked by a journal; compare before deleting or classifying"],
+  ];
+  const warnings: CompactWarning[] = lists
+    .filter(([, rows]) => rows.length > 0)
+    .map(([code, rows, text]) => {
+      const shown = rows.slice(0, 5).map(row => row.transaction_id).join(", ");
+      return {
+        code,
+        message: `${rows.length} transaction(s) ${text} (${shown}${rows.length > 5 ? ", …" : ""})`,
+      };
+    });
+  if (result.ledgerContextUnavailable !== undefined) {
+    warnings.push({ code: "ledger_context_unavailable", message: result.ledgerContextUnavailable });
+  }
+  return warnings;
 }
 
 // --- FULL apply envelope (standard/full — byte-identical to the tool) ---------
@@ -178,6 +211,10 @@ export function renderClassificationAnalysisCompact(
     unmatched: result.totalUnmatched,
     groups: groups.length,
     unresolved: unresolvedGroups.length,
+    partitioned_out: result.totalPartitionedOut,
+    already_booked: result.alreadyBooked.length,
+    own_transfers: result.ownTransfers.length,
+    possible_duplicates: result.possibleDuplicates.length,
     ...result.categoryCounts,
   };
 
@@ -198,8 +235,12 @@ export function renderClassificationAnalysisCompact(
     total_amount: group.total_amount,
   }));
 
-  const status: OperationSummaryV1["status"] = unresolvedGroups.length > 0 ? "needs_review" : "completed";
-  const message = `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s); ${unresolvedGroups.length} need manual review.`;
+  const ledgerWarnings = partitionWarnings(result);
+  const status: OperationSummaryV1["status"] = unresolvedGroups.length > 0 || ledgerWarnings.length > 0 ? "needs_review" : "completed";
+  const message = `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s); ${unresolvedGroups.length} need manual review.`
+    + (result.totalPartitionedOut > 0
+      ? ` ${result.totalPartitionedOut} more were taken out by the ledger check: ${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s).`
+      : "");
 
   const period = {
     ...(input.dateFrom !== undefined ? { from: input.dateFrom } : {}),
@@ -243,7 +284,7 @@ export function renderClassificationAnalysisCompact(
     message,
     counts,
     scope,
-    warnings: [...extraWarnings, ...warnings],
+    warnings: [...extraWarnings, ...ledgerWarnings, ...warnings],
     samples,
     // Without the inlined groups a dry_run_apply call cannot succeed, and a
     // re-classify with the same dates would return the same oversized result,

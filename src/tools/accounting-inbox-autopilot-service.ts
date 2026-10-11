@@ -546,14 +546,57 @@ function summarizeAutopilotToolResult(
       const reviewGroups = groups.filter((group) =>
         isRecord(group) && stringAt(group, "apply_mode") !== "purchase_invoice"
       );
+      // F6: rows the ledger check took out of classification must stay in the
+      // inbox as review items, or they would vanish from it.
+      const partitionFollowUp = (
+        reviewType: string,
+        row: { transaction_id: number; date: string; amount: number; counterparty?: string; next_action: string },
+        what: string,
+      ) => {
+        const counterparty = row.counterparty !== undefined ? wrapUntrustedOcr(row.counterparty) : undefined;
+        return toAutopilotFollowUp(
+          tool,
+          `Transaction ${row.transaction_id} (${row.date} ${row.amount}${counterparty ? ` ${counterparty}` : ""}) ${what}`,
+          { recommendation: row.next_action },
+          {
+            review_type: reviewType,
+            source_tool: tool,
+            item: { ...row, ...(counterparty !== undefined ? { counterparty } : {}) },
+          },
+        );
+      };
+      const partitionFollowUps: AutopilotFollowUp[] = [
+        ...result.alreadyBooked.map((row) => partitionFollowUp(
+          "classification_already_booked", row, `is already booked by journal ${row.journal_ids.join(", ")} (same bank reference).`)),
+        ...result.ownTransfers.map((row) => partitionFollowUp(
+          "classification_own_transfer", row, row.target_dimension_id !== null
+            ? `is a transfer to/from own account dimension ${row.target_dimension_id}.`
+            : "is a transfer between own accounts with no single target account.")),
+        ...result.possibleDuplicates.map((row) => partitionFollowUp(
+          "classification_possible_duplicate", row, `may already be booked (${row.code}).`)),
+        ...(result.ledgerContextUnavailable !== undefined
+          ? [{
+              source: tool,
+              summary: result.ledgerContextUnavailable,
+              recommendation: "Re-run the classification once the journals and bank accounts can be read, before booking anything from it.",
+            }]
+          : []),
+      ];
       return {
-        summary: `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`,
+        summary: `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`
+          + (result.totalPartitionedOut > 0
+            ? ` ${result.totalPartitionedOut} more were taken out by the ledger check (${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s)).`
+            : ""),
         preview: {
           total_unmatched: result.totalUnmatched,
           group_count: groups.length,
           category_counts: result.categoryCounts,
+          total_partitioned_out: result.totalPartitionedOut,
+          already_booked: result.alreadyBooked.length,
+          own_transfers: result.ownTransfers.length,
+          possible_duplicates: result.possibleDuplicates.length,
         },
-        followUps: reviewGroups.map((group) => {
+        followUps: [...partitionFollowUps, ...reviewGroups.map((group) => {
           const record = group as Record<string, unknown>;
           const displayCounterparty = stringAt(record, "display_counterparty") ?? "transaction group";
           const category = stringAt(record, "category") ?? "review_only";
@@ -569,7 +612,7 @@ function summarizeAutopilotToolResult(
               group: record,
             },
           );
-        }),
+        })],
       };
     }
     case "reconcile_inter_account_transfers": {

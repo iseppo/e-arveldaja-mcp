@@ -3,6 +3,7 @@ import {
   renderApplyClassificationsCompact,
   renderApplyClassificationsFull,
   renderClassificationAnalysisCompact,
+  renderUnmatchedAnalysisFull,
 } from "./classification-presenter.js";
 import type {
   ApplyClassificationsResult,
@@ -44,6 +45,10 @@ function analysis(groupCount: number): UnmatchedAnalysisResult {
     totalUnmatched: groupCount,
     categoryCounts: { bank_fees: groupCount },
     groups,
+    alreadyBooked: [],
+    ownTransfers: [],
+    possibleDuplicates: [],
+    totalPartitionedOut: 0,
   };
 }
 
@@ -112,6 +117,59 @@ describe("classification analysis compact", () => {
     expect(compact.summary.warnings![0]!.item_id).toContain("UNTRUSTED_OCR_START");
     // Nothing is auto-bookable, so there is no apply step to point at.
     expect(compact.summary.next_action).toBeUndefined();
+  });
+});
+
+describe("classification analysis — ledger partitions (F6)", () => {
+  function partitioned(): UnmatchedAnalysisResult {
+    const result = analysis(1); // one clean, auto-bookable group
+    result.ownTransfers = [{
+      transaction_id: 41, date: "2026-09-14", amount: 900, counterparty: "Näide OU",
+      target_dimension_id: 200, confidence: 90, reasons: ["counterparty_iban_is_own_account"],
+      next_action: 'reconcile_bank_transactions mode="inter_account_dry_run" (target dimension 200)',
+    }];
+    result.alreadyBooked = [{
+      transaction_id: 42, date: "2026-09-24", amount: 10500, counterparty: "Laenaja OÜ",
+      journal_ids: [7001], strength: "reference", next_action: "verify that journal 7001 books this movement, then delete_transaction 42 (the PROJECT row)",
+    }];
+    result.possibleDuplicates = [{
+      transaction_id: 43, date: "2026-09-24", amount: 50, counterparty: "Laenaja OÜ",
+      journal_ids: [7002], code: "camt_journal_posting_review", next_action: "compare with journal 7002; if it books this movement, delete the PROJECT row; otherwise classify normally",
+    }];
+    result.totalPartitionedOut = 3;
+    return result;
+  }
+
+  it("needs review when every group is resolved but rows were partitioned out, and shows their counts", () => {
+    const compact = renderClassificationAnalysisCompact({ result: partitioned(), accountsDimensionsId: 100 });
+    expect(compact.summary.status).toBe("needs_review");
+    expect(compact.summary.counts).toMatchObject({
+      unmatched: 1, unresolved: 0, partitioned_out: 3, already_booked: 1, own_transfers: 1, possible_duplicates: 1,
+    });
+    expect(compact.summary.message).toContain("3");
+    const codes = compact.summary.warnings!.map(warning => warning.code);
+    expect(codes).toEqual(expect.arrayContaining(["already_booked", "own_transfers", "possible_duplicates"]));
+    // The bookable group is still offered for dry_run_apply.
+    expect(compact.summary.next_action?.args.mode).toBe("dry_run_apply");
+  });
+
+  it("needs review when the ledger context could not be read", () => {
+    const result = analysis(1);
+    result.ledgerContextUnavailable = "The journals or bank accounts could not be read.";
+    const compact = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
+    expect(compact.summary.status).toBe("needs_review");
+    expect(compact.summary.warnings!.map(warning => warning.code)).toContain("ledger_context_unavailable");
+  });
+
+  it("lists every partition in the full envelope with the counterparty sandboxed", () => {
+    const full = renderUnmatchedAnalysisFull({ result: partitioned() });
+    expect(full.total_unmatched).toBe(1);
+    expect(full.total_partitioned_out).toBe(3);
+    const ownTransfers = full.own_transfers as Array<Record<string, unknown>>;
+    expect(ownTransfers[0]).toMatchObject({ transaction_id: 41, target_dimension_id: 200 });
+    expect(ownTransfers[0]!.counterparty).toContain("UNTRUSTED_OCR_START");
+    expect((full.already_booked as Array<Record<string, unknown>>)[0]!.counterparty).toContain("UNTRUSTED_OCR_START");
+    expect((full.possible_duplicates as Array<Record<string, unknown>>)[0]).toMatchObject({ journal_ids: [7002] });
   });
 });
 

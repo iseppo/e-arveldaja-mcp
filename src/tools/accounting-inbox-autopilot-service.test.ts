@@ -62,6 +62,7 @@ function classificationReviewGroups(count: number): Array<Record<string, unknown
 
 async function summarizePipelineWithClassificationGroups(
   groups: Array<Record<string, unknown>> | number,
+  ledgerPartitions: Record<string, unknown> = {},
 ) {
   const resolvedGroups = typeof groups === "number" ? classificationReviewGroups(groups) : groups;
   // The typed op returns the UNWRAPPED analysis value (camelCase counts + the
@@ -72,6 +73,11 @@ async function summarizePipelineWithClassificationGroups(
     totalUnmatched: resolvedGroups.length,
     categoryCounts: {},
     groups: resolvedGroups,
+    alreadyBooked: [],
+    ownTransfers: [],
+    possibleDuplicates: [],
+    totalPartitionedOut: 0,
+    ...ledgerPartitions,
   }));
   return runAccountingInboxDryRunPipeline({
     prepared: preparedInbox({
@@ -185,6 +191,40 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(output.review_page).toMatchObject({ total: 7, complete: true });
   });
 
+  it("raises a resumable follow-up for every row the classify ledger check partitioned out (F6)", async () => {
+    const output = await summarizePipelineWithClassificationGroups(0, {
+      alreadyBooked: [{ transaction_id: 42, date: "2026-09-24", amount: 10500, counterparty: "Laenaja OÜ", journal_ids: [7001], strength: "reference", next_action: "verify that journal 7001 books this movement, then delete_transaction 42 (the PROJECT row)" }],
+      ownTransfers: [
+        { transaction_id: 41, date: "2026-09-14", amount: 900, counterparty: "Näide OU", target_dimension_id: 200, confidence: 90, reasons: [], next_action: "reconcile_bank_transactions mode=\"inter_account_dry_run\" (target dimension 200)" },
+        { transaction_id: 44, date: "2026-09-15", amount: 50, counterparty: "Näide OÜ", target_dimension_id: null, candidate_dimension_ids: [200, 300], confidence: 0, reasons: [], next_action: "reconcile_bank_transactions mode=\"inter_account_dry_run\" with target_accounts_dimensions_id chosen by the operator from 200, 300" },
+      ],
+      possibleDuplicates: [{ transaction_id: 43, date: "2026-09-24", amount: 50, counterparty: "Laenaja OÜ", journal_ids: [7002], code: "camt_journal_posting_review", next_action: "compare with journal 7002; if it books this movement, delete the PROJECT row; otherwise classify normally" }],
+      totalPartitionedOut: 4,
+      ledgerContextUnavailable: undefined,
+    });
+    const reviews = output.needs_accountant_review;
+    const types = reviews.map((item) => item.resolver_input?.review_type);
+    expect(types).toEqual([
+      "classification_already_booked",
+      "classification_own_transfer",
+      "classification_own_transfer",
+      "classification_possible_duplicate",
+    ]);
+    expect(new Set(reviews.map((item) => item.id)).size).toBe(4);
+    expect(reviews[0]!.summary).toContain("42");
+    expect(reviews[0]!.recommendation).toContain("delete_transaction 42");
+    expect(reviews[3]!.recommendation).toContain("compare with journal 7002");
+    // The remitter-controlled counterparty is sandboxed in the summary.
+    expect(reviews[1]!.summary).toContain("UNTRUSTED_OCR_START");
+  });
+
+  it("raises a follow-up when the classify ledger check could not run (F6)", async () => {
+    const output = await summarizePipelineWithClassificationGroups(0, {
+      ledgerContextUnavailable: "The journals or bank accounts could not be read, so already-booked rows, own transfers and booking history were not checked.",
+    });
+    expect(output.needs_accountant_review.map((item) => item.summary).join("\n")).toContain("could not be read");
+  });
+
   it("assigns the same review ID across runs even when the counterparty arrives sandbox-wrapped (M11)", async () => {
     // wrapUntrustedOcr uses a fresh nonce per call, so the two wrapped strings
     // differ byte-for-byte; the stable ID must canonicalize the counterparty so
@@ -250,6 +290,10 @@ describe("runAccountingInboxDryRunPipeline", () => {
       totalUnmatched: 1,
       categoryCounts: {},
       groups: classificationReviewGroups(1),
+      alreadyBooked: [],
+      ownTransfers: [],
+      possibleDuplicates: [],
+      totalPartitionedOut: 0,
     }));
     const result = await runAccountingInboxDryRunPipeline({
       prepared: preparedInbox({

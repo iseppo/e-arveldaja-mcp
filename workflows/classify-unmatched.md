@@ -44,8 +44,22 @@ Show the compact `result.summary`: `counts` (unmatched transactions, groups, aut
 
 ### Step 2: Explain what can be applied and choose the groups
 
+Rows the ledger check took out of the groups are never applied here; report each with its `next_action`:
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+- `result.already_booked`: a journal already carries the row's bank reference. Verify that journal, then the PROJECT row can be deleted (`delete_transaction`, after approval).
+- `result.own_transfers`: transfers between own accounts. Reconcile them with `reconcile_bank_transactions` mode `inter_account_dry_run`; a `target_dimension_id` of null means the operator picks the target from `candidate_dimension_ids`.
+- `result.possible_duplicates`: a journal may already book the row. Compare first; never delete by default.
+- `result.ledger_context_unavailable`: the check could not run; say so and do not treat the groups as complete.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+- the `already_booked`, `own_transfers`, `possible_duplicates` and `ledger_context_unavailable` warnings in `result.summary` name those rows; already-booked rows are deleted only after verification and approval, own transfers go to `reconcile_bank_transactions` mode `inter_account_dry_run`, and possible duplicates are compared first.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->
+
 - `apply_mode="purchase_invoice"` groups are auto-bookable
 - review-only categories are reported back as skipped
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+- a group whose `suggested_booking.source` is `transaction_history` repeats how this counterparty's last rows were booked (`transaction_history.streak`). It is review-only: after the user confirms the substance, book it with `confirm_transaction` using `suggested_booking.suggested_distribution`; never save it as a rule without asking
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
 - for review-only categories, start with `review_guidance.recommendation`, explain the compliance basis briefly, and ask only the listed follow-up questions that are still unresolved
 - when a review-only group already exposes `review_guidance.resolver_input` with concrete IDs, do NOT close the workflow with "handle this manually in e-arveldaja". Offer to chain into `continue_accounting_workflow` with `action="prepare_action"` (or the `prepare-accounting-review-action` workflow) so the user can approve the next concrete tool call inline.
 
