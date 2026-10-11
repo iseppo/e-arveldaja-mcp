@@ -103,6 +103,10 @@ export type CamtPreflightResult =
 export interface DuplicateLookup {
   byBankRef: Map<string, number[]>;
   byEntryKey: Map<string, number[]>;
+  /** Rows by their CAMT marker `sig`, trusted or not (corroborated before use). */
+  bySignature: Map<string, Transaction[]>;
+  /** Rows by the dimension-scoped bank-reference key their CAMT marker carries (trusted or not). */
+  byMarkerReference: Map<string, Transaction[]>;
 }
 
 export interface PossibleDuplicateLookup {

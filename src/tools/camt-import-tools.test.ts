@@ -10,6 +10,8 @@ import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { preflightCamt053Xml } from "../camt/parser.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import {
   createAccountingWorkflowApi,
   createMockToolServer,
@@ -1752,6 +1754,40 @@ describe("camt import tool", () => {
         reason: "Existing transaction matched by bank reference",
       }),
     ]);
+  });
+
+  it("skips a confirmed row whose stored description was cut to the cap (F3, the 682 shape)", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt><Id>stmt-682</Id>
+<Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+<Ntry><Amt Ccy="EUR">682.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-24</Dt></BookgDt><AcctSvcrRef>TRUNC-REF-0001</AcctSvcrRef>
+<NtryDtls><TxDtls><RltdPties><Dbtr><Nm>Payer Ministry</Nm></Dbtr><DbtrAcct><Id><IBAN>EE471000001020145685</IBAN></Id></DbtrAcct></RltdPties>
+<RmtInf><Ustrd>RKID:20260924000400000001 EXAMPLE FOUNDATION FOR INNOVATION SA 2026 14 09.09.2026</Ustrd><Strd><CdtrRefInf><Ref>57700816</Ref></CdtrRefInf></Strd></RmtInf>
+</TxDtls></NtryDtls></Ntry></Stmt></BkToCstmrStmt></Document>`;
+    const preflight = preflightCamt053Xml(xml);
+    if (!preflight.ok) throw new Error("preflight rejected");
+    const entry = preflight.value.entries[0]!;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(xml);
+    // As the API reads it back: identity fields null, type "C", confirmed to another client.
+    const { api, handler } = setupCamtTool({ allowWrites: true,
+      existingTransactions: [{
+        id: 9001, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: 7, date: "2026-09-24", type: "C",
+        amount: 682, cl_currencies_id: "EUR", bank_ref_number: null, bank_account_no: null, clients_id: 4242,
+        bank_account_name: "Payer Ministry", ref_number: "57700816",
+        description: buildCamtDescriptionWithMetadata(entry.description, entry),
+      }],
+    });
+
+    const payload = parseMcpResponse((await executeGranularWithPlan(handler, {
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    })).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(0);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.summary.possible_duplicate_count).toBe(0);
   });
 
   it("does not auto-skip prior transactions that only have an unsigned CAMT marker", async () => {
