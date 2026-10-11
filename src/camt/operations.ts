@@ -160,7 +160,9 @@ class CamtOperationsImpl implements CamtOperations {
     });
     return result.ok
       ? ok(result.execution)
-      : fail(result.code, result.message, "never");
+      // A failed company identity lookup refuses before any mutation and keeps
+      // the reviewed plan, so the same call is safe to retry.
+      : fail(result.code, result.message, result.code === "company_identity_unavailable" ? "safe" : "never");
   }
 }
 

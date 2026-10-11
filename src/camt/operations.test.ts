@@ -191,6 +191,8 @@ describe("CamtOperations", () => {
     if (!refused.ok) {
       expect(refused.error.code).toBe("company_identity_unavailable");
       expect(refused.error.message).toContain("Could not determine company identity for the booking lock; retry");
+      // A non-mutating refusal with the plan intact: safe to retry.
+      expect(refused.error.retry).toBe("safe");
     }
     expect(api.transactions.create).not.toHaveBeenCalled();
 
