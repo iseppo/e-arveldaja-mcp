@@ -451,6 +451,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
+
 });
 
 describe("Wise row next to an untagged stored row of the same movement (F2b)", () => {
@@ -492,6 +493,21 @@ describe("Wise row next to an untagged stored row of the same movement (F2b)", (
   it("an agreeing direction marker still matches", () => {
     const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual({ description: "Booking.com käsitsi [source_direction=OUT]" })]);
     expect(advisories(output)).toEqual(["CARD_TRANSACTION-3970533149:13875420"]);
+  });
+
+  it("an untagged row matching date, currency, counterparty and narrative is advisory too, never a silent skip (Codex r2)", () => {
+    const lookalike = manual({ id: 77, bank_account_name: "Booking.com", ref_number: null, description: "Booking.com (Travel)" });
+    const output = project(rowsOf([card("CARD_TRANSACTION-NEW")]), [lookalike]);
+    expect(created(output)).toEqual(["main_create:226.8 EUR"]);
+    expect(advisories(output)).toEqual(["CARD_TRANSACTION-NEW:77"]);
+  });
+
+  it("an untagged stored fee lookalike does not hide the row's fee; the fee gets the advisory", () => {
+    const feeCard = `CARD_TRANSACTION-NEW,COMPLETED,OUT,"2026-06-25 17:48:24","2026-06-25 17:48:24",1.20,EUR,,,"Seppo AI OÜ",226.80,EUR,Booking.com,226.80,EUR,1,,,"Test Person",Travel,`;
+    const storedFee = manual({ id: 78, amount: 1.2, bank_account_name: "Wise", ref_number: null, description: "Wise teenustasu [source_direction=OUT]" });
+    const output = project(rowsOf([feeCard]), [storedFee]);
+    expect(created(output)).toEqual(["main_create:226.8 EUR", "fee_create_and_confirm:1.2 EUR"]);
+    expect(advisories(output)).toEqual(["FEE:CARD_TRANSACTION-NEW:78"]);
   });
 
   it("a genuinely new same-key payment is still created: both rows carry the advisory, nothing is claimed", () => {

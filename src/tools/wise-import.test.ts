@@ -489,7 +489,7 @@ describe("wise import tool", () => {
     expect(payload.skipped_details).toEqual([]);
   });
 
-  it("skips legacy duplicates even when existing rows do not contain a WISE id prefix", async () => {
+  it("an untagged lookalike row does not hide a Wise row: it is created with a wise_untagged_ledger_match advisory", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-1", "COMPLETED", "OUT", "2026-01-10 09:00:00", "2026-01-10 09:00:00",
       "0", "EUR", "0", "EUR",
@@ -499,6 +499,8 @@ describe("wise import tool", () => {
     ]));
 
     const { api, handler } = setupWiseTool([{
+      id: 41,
+      accounts_dimensions_id: 5,
       date: "2026-01-10",
       amount: 12.5,
       bank_account_name: "Acme Ltd",
@@ -515,13 +517,13 @@ describe("wise import tool", () => {
 
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(api.transactions.create).not.toHaveBeenCalled();
-    expect(payload.skipped_details).toEqual([
-      { reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), count: 1, sample_ids: ["abc-1"] },
-    ]);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "abc-1", code: "wise_untagged_ledger_match", ledger_transaction_ids: [41],
+    })]);
   });
 
-  it("dedupes an over-cap reference row against its previously-stored truncated transaction (Task 9)", async () => {
+  it("an over-cap reference row next to an untagged stored lookalike is created with the advisory (Task 9, untagged = advisory)", async () => {
     // A Wise row whose reference exceeds the 20-char ref_number cap. The prior
     // import stored the transaction with the *truncated* ref_number (what the
     // write boundary persists), so the candidate signature must canonicalize its
@@ -550,6 +552,8 @@ describe("wise import tool", () => {
       fullReference,
     );
     const { api, handler } = setupWiseTool([{
+      id: 42,
+      accounts_dimensions_id: 5,
       date: "2026-01-13",
       amount: 12.5,
       bank_account_name: "Acme Ltd",
@@ -566,13 +570,13 @@ describe("wise import tool", () => {
 
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(api.transactions.create).not.toHaveBeenCalled();
-    expect(payload.skipped_details).toEqual([
-      { reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), count: 1, sample_ids: ["cap-1"] },
-    ]);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(payload.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "cap-1", code: "wise_untagged_ledger_match", ledger_transaction_ids: [42],
+    })]);
   });
 
-  it("skips duplicate fee rows independently from the main transaction", async () => {
+  it("an untagged stored fee lookalike does not hide the fee row: both rows are created, the fee carries the advisory", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRow([
       "abc-2", "COMPLETED", "OUT", "2026-01-11 09:00:00", "2026-01-11 09:00:00",
       "1.2", "EUR", "0", "EUR",
@@ -583,6 +587,8 @@ describe("wise import tool", () => {
 
     const create = vi.fn().mockResolvedValue({ created_object_id: 9002 });
     const { api, handler } = setupWiseTool([{
+      id: 43,
+      accounts_dimensions_id: 5,
       date: "2026-01-11",
       amount: 1.2,
       bank_account_name: "Wise",
@@ -598,10 +604,10 @@ describe("wise import tool", () => {
 
     const payload = parseMcpResponse(result.content[0]!.text);
 
-    expect(api.transactions.create).toHaveBeenCalledTimes(1);
-    expect(payload.skipped_details).toEqual([
-      { reason: expect.stringMatching(wrapped("Fee already imported (date/amount/counterparty match)")), count: 1, sample_ids: ["FEE:abc-2"] },
-    ]);
+    expect(api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(payload.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "FEE:abc-2", code: "wise_untagged_ledger_match", ledger_transaction_ids: [43],
+    })]);
   });
 
   it("can create a missing fee row on rerun even when the main Wise transaction already exists", async () => {
@@ -619,7 +625,7 @@ describe("wise import tool", () => {
       amount: 40,
       bank_account_name: "Acme Ltd",
       ref_number: "INV-3",
-      description: "Acme Ltd",
+      description: "WISE:abc-3 Acme Ltd",
     }], create);
 
     const result = await handler({
@@ -639,7 +645,7 @@ describe("wise import tool", () => {
       description: "WISE:FEE:abc-3 Wise teenustasu [source_direction=OUT]",
     }));
     expect(payload.skipped_details).toContainEqual(
-      expect.objectContaining({ reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")), sample_ids: expect.arrayContaining(["abc-3"]) }),
+      expect.objectContaining({ reason: expect.stringMatching(wrapped("Already imported (Wise ID match)")), sample_ids: expect.arrayContaining(["abc-3"]) }),
     );
     expect(payload.results).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -6002,7 +6008,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
   });
 
-  it("m1: caps description (150) and bank_account_name (100) keeping WISE:{id} and the direction marker, and still dedups the stored row", async () => {
+  it("m1: caps description (150) and bank_account_name (100) keeping WISE:{id} and the direction marker, and still dedups the stored row by its tag", async () => {
     const longName = `Vendor ${"x".repeat(130)}`;
     const fullReference = "REF-1234567890-ABCDEFGHIJ";
     mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
@@ -6028,20 +6034,18 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(stored.description).toMatch(/ \[source_direction=OUT\]$/);
     expect(stored.bank_account_name).toBe(longName.slice(0, 100));
 
-    // Re-import against the stored row (WISE tag dropped so the signature path,
-    // not the tag short-circuit, has to recognise it).
+    // Re-import against the stored, capped row: its WISE: tag survived the cap.
     const second = setupWiseTool([{
       ...stored,
       id: 7001,
       status: "CONFIRMED",
       is_deleted: false,
-      description: stored.description.replace(/^WISE:M-LONG-1 /, ""),
     }]);
     const payload = parseWiseResponse(await second.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
 
     expect(payload.execution.commands).toEqual([]);
     expect(payload.skipped_details).toEqual([expect.objectContaining({
-      reason: expect.stringMatching(wrapped("Already imported (date/amount/counterparty/reference match)")),
+      reason: expect.stringMatching(wrapped("Already imported (Wise ID match)")),
       sample_ids: ["M-LONG-1"],
     })]);
   });
