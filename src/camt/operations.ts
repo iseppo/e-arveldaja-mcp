@@ -6,6 +6,7 @@ import {
   assertStatementAccountMatchesDimension,
   buildImportProjection,
   camtNormalizedArgs,
+  CamtJournalSnapshotError,
   CamtPreflightRejectedError,
   ensureAccountDimensionExists,
   executeCamtImport,
@@ -93,7 +94,13 @@ class CamtOperationsImpl implements CamtOperations {
     await ensureAccountDimensionExists(this.api, accountsDimensionsId);
     await assertStatementAccountMatchesDimension(this.api, loaded.statement_metadata.iban, accountsDimensionsId);
 
-    const projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo);
+    let projection;
+    try {
+      projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo);
+    } catch (error) {
+      if (!(error instanceof CamtJournalSnapshotError)) throw error;
+      return fail(error.code, error.message, error.code === "journal_snapshot_unavailable" ? "safe" : "never");
+    }
     const closingBalance = loaded.statement_metadata.closing_balance;
     const balanceDate = closingBalance?.date ?? loaded.statement_metadata.period.to;
     // Project the rows this import would create (dated within the balance

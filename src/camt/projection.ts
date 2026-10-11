@@ -12,6 +12,12 @@ import {
   findRepeatedBankReferences,
   normalizeOptionalReference,
 } from "./duplicate-identity.js";
+import {
+  buildCamtJournalCoverageContext,
+  classifyCamtJournalCoverage,
+  type CamtJournalCoverage,
+  type CamtJournalSnapshot,
+} from "./journal-coverage.js";
 import type {
   CamtCreateDescriptor,
   CamtImportProjection,
@@ -62,6 +68,28 @@ export function enrichWithDuplicates(
 
 const CAMT_PARTIAL_LEGACY_REASON = "Partially imported by a previous release; needs review";
 
+function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJournalCoverage, { kind: "none" }>): CamtSkippedRow {
+  const ids = coverage.journal_ids.join(", ");
+  const base = {
+    date: entry.date,
+    amount: entry.amount,
+    bank_reference: entry.bank_reference,
+    duplicate_transaction_ids: [],
+    journal_ids: coverage.journal_ids,
+  };
+  if (coverage.kind !== "review") {
+    return { ...base, reason: `Already booked by journal ${ids}` };
+  }
+  return {
+    ...base,
+    reason: "An existing journal may already book this movement; needs review",
+    review_code: coverage.code,
+    review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} may already be booked by ` +
+      `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids || "(unidentified own transfer)"} (${coverage.code}). ` +
+      "It was not created; check the journal and create the transaction manually only if the movement is not booked yet.",
+  };
+}
+
 export interface CamtProjectionInput {
   readonly loaded: CamtParseResult;
   readonly accountsDimensionsId: number;
@@ -69,6 +97,9 @@ export interface CamtProjectionInput {
   readonly dateTo: string | undefined;
   /** Non-void ledger transactions, already fetched by the operation layer. */
   readonly ledgerTransactions: Transaction[];
+  /** Journals that may already book a statement entry. Required: an
+   * unavailable snapshot refuses the import upstream, never reads as empty. */
+  readonly journalCoverage: CamtJournalSnapshot;
   /** Injected client resolver; the api + cache live in the operation layer. */
   readonly resolveClient: (entry: ParsedCamtEntry, cache: ClientResolutionCache) => Promise<ClientResolution>;
   /** Injected progress reporter; the transport lives in the operation layer. */
@@ -78,6 +109,12 @@ export interface CamtProjectionInput {
 export async function computeCamtImportProjection(input: CamtProjectionInput): Promise<CamtImportProjection> {
   const { loaded, accountsDimensionsId, dateFrom, dateTo, ledgerTransactions, resolveClient, reportProgress } = input;
   const parsed = enrichWithDuplicates(loaded, ledgerTransactions, accountsDimensionsId);
+  const journalCoverage = buildCamtJournalCoverageContext({
+    snapshot: input.journalCoverage,
+    dimensionId: accountsDimensionsId,
+    entries: parsed.entries,
+    ledgerTransactions,
+  });
   const existingTransactions = ledgerTransactions;
   const filteredEntries = parsed.entries.filter(entry => {
     if (dateFrom && entry.date < dateFrom) return false;
@@ -144,6 +181,11 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
         duplicate_transaction_ids: [],
         reason: "Duplicate CAMT entry inside current import batch",
       });
+      continue;
+    }
+    const coverage = classifyCamtJournalCoverage(entry, journalCoverage);
+    if (coverage.kind !== "none") {
+      skipped.push(journalCoverageSkip(entry, coverage));
       continue;
     }
 

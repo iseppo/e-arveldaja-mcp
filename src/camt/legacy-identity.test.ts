@@ -29,6 +29,7 @@ async function project(xml: string, ledger: Transaction[]) {
     dateFrom: undefined,
     dateTo: undefined,
     ledgerTransactions: ledger,
+    journalCoverage: { journals: [], accountId: 1020, bankAccounts: [], accountDimensions: [], interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
     resolveClient: async () => ({}) as never,
     reportProgress: async () => {},
   });
