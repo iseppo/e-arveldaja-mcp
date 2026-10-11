@@ -305,6 +305,8 @@ export function buildReceiptReviewGuidance(params: {
 export function buildClassificationReviewGuidance(params: {
   category: TransactionClassificationCategory;
   displayCounterparty: string;
+  /** Set when the group's suggestion comes from the counterparty's booking history. */
+  history?: { accountId: number; dimensionId: number | null; streak: number; historyTotal: number };
 }): ReviewGuidance | undefined {
   // The counterparty is bank-statement text a remitter controls (bank_account_name,
   // falling back to description), and it is interpolated into server-authored prose
@@ -315,6 +317,25 @@ export function buildClassificationReviewGuidance(params: {
   const displayCounterparty = wrapUntrustedOcr(
     capUntrustedText(params.displayCounterparty, 200).text,
   ) ?? params.displayCounterparty;
+  // A history hint replaces the category text: the category guess (e.g. revenue
+  // for any incoming row) contradicts how this counterparty was actually booked.
+  if (params.history) {
+    const { accountId, dimensionId, streak, historyTotal } = params.history;
+    const target = dimensionId !== null ? `kontole ${accountId} dimensiooniga ${dimensionId}` : `kontole ${accountId}`;
+    const distribution = dimensionId !== null
+      ? `{ related_table: "accounts", related_id: ${accountId}, related_sub_id: ${dimensionId} }`
+      : `{ related_table: "accounts", related_id: ${accountId} }`;
+    return {
+      recommendation: `Soovitus: osapoole ${displayCounterparty} viimased ${streak} kinnitatud pangakannet (kokku ${historyTotal}) on järjest kirjendatud ${target}. Kui see tehing on sama sisuga, kinnita see confirm_transaction kaudu jaotusega ${distribution}. See on ainult vihje varasemate kannete põhjal: kontrolli enne kinnitamist tehingu sisu ja alusdokumenti.`,
+      compliance_basis: [
+        BASIS_RPS_DOCUMENT,
+        BASIS_RPS_SUBSTANCE,
+      ],
+      follow_up_questions: [
+        "Kas sellel tehingul on sama sisu ja alusdokument (nt sama laenuleping) mis varasematel kannetel?",
+      ],
+    };
+  }
   switch (params.category) {
     case "tax_payments":
       return {

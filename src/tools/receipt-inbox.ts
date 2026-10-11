@@ -104,6 +104,7 @@ import {
   type ReceiptBatchFileRefProjection,
 } from "../receipts/presenter.js";
 import { createClassificationOperations } from "../receipts/classification-operations.js";
+import type { CounterpartyHistorySuggestion } from "../receipts/counterparty-booking-history.js";
 import {
   renderApplyClassificationsCompact,
   renderApplyClassificationsFull,
@@ -157,10 +158,14 @@ export interface ClassifiedTransactionSuggestion {
   liability_account_id?: number;
   vat_rate_dropdown?: string;
   reversed_vat_id?: number;
-  source?: "supplier_history" | "keyword_match" | "fallback" | "local_rules" | "category_default";
+  source?: "supplier_history" | "keyword_match" | "fallback" | "local_rules" | "category_default" | "transaction_history";
   matched_invoice_id?: number;
   matched_invoice_number?: string;
   reason: string;
+  /** source "transaction_history": the counterparty's newest unbroken run of one booking (review-only). */
+  transaction_history?: CounterpartyHistorySuggestion;
+  /** source "transaction_history": the confirm_transaction distribution the history points at. */
+  suggested_distribution?: { related_table: "accounts"; related_id: number; related_sub_id?: number };
 }
 
 export interface ClassifiedTransactionGroupResult {

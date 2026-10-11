@@ -109,6 +109,15 @@ describe("counterparty booking history — chronological streak", () => {
     expect(lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "incoming" }).suggestion).toBeUndefined();
   });
 
+  it("(3b) never suggests an own-bank-dimension or invoice-ledger contra, however long its run", () => {
+    for (const contra of [[1020, 200], [2310, null], [1210, null]] as Array<[number, number | null]>) {
+      const index = history([1, 2, 3, 4].map((m) => ({ date: month(m), contra: [contra] })));
+      const result = lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "incoming" });
+      expect(result.suggestion).toBeUndefined();
+      expect(result.history_total).toBe(4);
+    }
+  });
+
   it("(4) keeps directions separate", () => {
     const index = history([
       { date: month(1) }, { date: month(2) }, { date: month(3) },

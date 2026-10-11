@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resetAccountingRulesCache } from "../accounting-rules.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { logAudit } from "../audit-log.js";
 import {
   BANK_CLASSIFICATION_PLAN_DOMAIN,
@@ -798,5 +803,271 @@ describe("classification operations — a payment matching an open purchase invo
     expect(out.value.results.flatMap(r => r.notes).join("\n")).toContain("reconcile instead");
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
     expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F6: ledger context. Anonymised: company "Näide OÜ" with own IBANs on dims
+// 100/200, related company "Laenaja OÜ", loan dim 900 on account 2110.
+// ---------------------------------------------------------------------------
+
+describe("classification operations — ledger context (F6)", () => {
+  const OWN_LHV = "EE110000000000000100";
+  const OWN_WISE = "BE22000000000200";
+  const LAENAJA_IBAN = "EE330000000000000900";
+  const BANK_ACCOUNTS = [
+    { accounts_dimensions_id: 100, iban_code: OWN_LHV, account_name_est: "LHV" },
+    { accounts_dimensions_id: 200, iban_code: OWN_WISE, account_name_est: "Wise" },
+  ];
+  const DIMENSIONS = [
+    { id: 100, accounts_id: 1020, is_deleted: false },
+    { id: 200, accounts_id: 1020, is_deleted: false },
+    { id: 900, accounts_id: 2110, is_deleted: false },
+    { id: 901, accounts_id: 1410, is_deleted: false },
+  ];
+  const LOAN_ACCOUNTS = [
+    { id: 2110, name_est: "Laenud", account_type_est: "Kohustused" },
+    { id: 1410, name_est: "Laenunõuded", account_type_est: "Varad" },
+  ];
+
+  /** A PROJECT row with a genuine, checksum-valid CAMT marker. */
+  function camtRow(spec: {
+    id: number; amount: number; date: string; direction: "CRDT" | "DBIT"; name: string;
+    iban?: string; reference?: string; description?: string; dim?: number;
+  }) {
+    const description = buildCamtDescriptionWithMetadata(spec.description ?? "laen", {
+      date: spec.date,
+      amount: spec.amount,
+      currency: "EUR",
+      direction: spec.direction,
+      counterparty_name: spec.name,
+      counterparty_iban: spec.iban,
+      // Only a marker with a bank reference is signed (checksummed).
+      bank_reference: spec.reference ?? `REF${spec.id}`,
+      description: spec.description ?? "laen",
+      duplicate: false,
+      duplicate_transaction_ids: [],
+    });
+    return {
+      id: spec.id, status: "PROJECT", is_deleted: false, type: "C", amount: spec.amount, date: spec.date,
+      accounts_id: 1020, accounts_dimensions_id: spec.dim ?? 100, bank_account_name: spec.name,
+      bank_account_no: null, bank_ref_number: null, ref_number: null, cl_currencies_id: "EUR", description,
+    };
+  }
+
+  /** Confirmed history rows, each with its one registered TRANSACTION journal. */
+  function historyRows(name: string, side: "D" | "C", contra: [number, number | null], dates: string[], startId = 500) {
+    const transactions = dates.map((date, index) => ({
+      id: startId + index, status: "CONFIRMED", is_deleted: false, type: "C", amount: 100, date,
+      accounts_id: 1020, accounts_dimensions_id: 100, bank_account_name: name, cl_currencies_id: "EUR",
+    }));
+    const journals = transactions.map(row => ({
+      id: row.id * 10, operation_type: "TRANSACTION", operations_id: row.id, registered: true, is_deleted: false,
+      effective_date: row.date,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: side, amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+        { accounts_id: contra[0], accounts_dimensions_id: contra[1], type: side === "D" ? "C" : "D", amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+      ],
+    }));
+    return { transactions, journals };
+  }
+
+  function ledgerOperations(options: {
+    rows: unknown[]; journals?: unknown[]; bankAccounts?: unknown[]; companyName?: string;
+    purchaseArticles?: unknown[]; accounts?: unknown[];
+  }) {
+    return makeOperations({
+      transactionRows: options.rows,
+      clientRows: [],
+      purchaseArticles: options.purchaseArticles ?? [],
+      accounts: options.accounts ?? LOAN_ACCOUNTS,
+      bankAccounts: options.bankAccounts ?? BANK_ACCOUNTS,
+      accountDimensions: DIMENSIONS,
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue(options.journals ?? []) },
+      readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: options.companyName ?? "Näide OÜ" }) },
+    });
+  }
+
+  async function analyze(operations: ReturnType<typeof makeOperations>["operations"]) {
+    const outcome = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) throw new Error("analyze failed");
+    return outcome.value;
+  }
+
+  const LAENAJA_HISTORY = historyRows("Laenaja OÜ", "D", [2110, 900], ["2026-06-01", "2026-07-01", "2026-08-01"]);
+
+  it("(a) suggests the recent booking history of 'Laenaja OÜ' as a review-only transaction_history booking", async () => {
+    const loan = camtRow({ id: 1, amount: 5000, date: "2026-09-10", direction: "CRDT", name: "Laenaja OÜ", iban: LAENAJA_IBAN });
+    const { operations } = ledgerOperations({
+      rows: [loan, ...LAENAJA_HISTORY.transactions],
+      journals: LAENAJA_HISTORY.journals,
+    });
+    const result = await analyze(operations);
+    expect(result.groups).toHaveLength(1);
+    const group = result.groups[0]!;
+    expect(group.apply_mode).toBe("review_only");
+    expect(group.suggested_booking).toMatchObject({
+      source: "transaction_history",
+      purchase_account_id: 2110,
+      purchase_account_dimensions_id: 900,
+      suggested_distribution: { related_table: "accounts", related_id: 2110, related_sub_id: 900 },
+      transaction_history: { account_id: 2110, dimension_id: 900, streak: 3, history_total: 3, latest_date: "2026-08-01" },
+    });
+    expect(group.suggested_booking.purchase_article_id).toBeUndefined();
+    // The guidance follows the history hint, never the sales-invoice text.
+    const guidance = JSON.stringify(group.review_guidance);
+    expect(guidance).toContain("2110");
+    expect(guidance).toContain("900");
+    expect(guidance).toContain("confirm_transaction");
+    expect(guidance).not.toMatch(/müügi/i);
+  });
+
+  it("(b) a row whose marker IBAN is the own account of dim 200 is an own transfer with target 200, not a group", async () => {
+    const transfer = camtRow({ id: 2, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE });
+    const { operations } = ledgerOperations({ rows: [transfer] });
+    const result = await analyze(operations);
+    expect(result.groups).toEqual([]);
+    expect(result.ownTransfers).toEqual([expect.objectContaining({ transaction_id: 2, target_dimension_id: 200 })]);
+    expect(result.ownTransfers[0]!.next_action).toContain("inter_account_dry_run");
+    expect(result.totalUnmatched).toBe(0);
+    expect(result.totalPartitionedOut).toBe(1);
+  });
+
+  it("(c) a reference-strength journal (marker br=ABC123, ENTRY BANK:ABC123) is alreadyBooked end to end", async () => {
+    const loanOut = camtRow({ id: 3, amount: 10500, date: "2026-09-24", direction: "DBIT", name: "Laenaja OÜ", iban: LAENAJA_IBAN, reference: "ABC123", description: "loan" });
+    const entry = {
+      id: 7001, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-09-24", document_number: "BANK:ABC123",
+      postings: [
+        { accounts_id: 1410, accounts_dimensions_id: 901, type: "D", amount: 10500, base_amount: 10500, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 10500, base_amount: 10500, cl_currencies_id: "EUR" },
+      ],
+    };
+    const { operations } = ledgerOperations({ rows: [loanOut], journals: [entry] });
+    const result = await analyze(operations);
+    expect(result.alreadyBooked).toEqual([expect.objectContaining({ transaction_id: 3, journal_ids: [7001], strength: "reference" })]);
+    expect(result.possibleDuplicates).toEqual([]);
+    expect(result.groups).toEqual([]);
+  });
+
+  it("(d) an amount-only posting hit is a possible duplicate with a compare-first next action, not alreadyBooked", async () => {
+    const loanOut = camtRow({ id: 4, amount: 10500, date: "2026-09-24", direction: "DBIT", name: "Laenaja OÜ", iban: LAENAJA_IBAN, description: "loan" });
+    const entry = {
+      id: 7002, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-09-24", document_number: null,
+      postings: [
+        { accounts_id: 1410, accounts_dimensions_id: 901, type: "D", amount: 10500, base_amount: 10500, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 10500, base_amount: 10500, cl_currencies_id: "EUR" },
+      ],
+    };
+    const { operations } = ledgerOperations({ rows: [loanOut], journals: [entry] });
+    const result = await analyze(operations);
+    expect(result.alreadyBooked).toEqual([]);
+    expect(result.possibleDuplicates).toEqual([expect.objectContaining({ transaction_id: 4, journal_ids: [7002] })]);
+    const nextAction = result.possibleDuplicates[0]!.next_action;
+    expect(nextAction).toContain("compare with journal 7002");
+    expect(nextAction).toContain("otherwise classify normally");
+  });
+
+  it("(e) a saved auto-booking rule beats the transaction history", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-f6-rules-"));
+    const rulesFile = join(dir, "accounting-rules.md");
+    writeFileSync(rulesFile, "# Accounting Rules\n\n## Auto Booking\n| match | purchase_account_id |\n| --- | --- |\n| Laenaja | 1410 |\n", "utf-8");
+    const previous = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesFile;
+    resetAccountingRulesCache();
+    try {
+      const loan = camtRow({ id: 5, amount: 5000, date: "2026-09-10", direction: "CRDT", name: "Laenaja OÜ", iban: LAENAJA_IBAN });
+      const { operations } = ledgerOperations({ rows: [loan, ...LAENAJA_HISTORY.transactions], journals: LAENAJA_HISTORY.journals });
+      const result = await analyze(operations);
+      expect(result.groups[0]!.suggested_booking).toMatchObject({ source: "local_rules", purchase_account_id: 1410 });
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+      else process.env.EARVELDAJA_RULES_FILE = previous;
+      resetAccountingRulesCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("(f) a bank-fee group without history stays bookable, and its analysis round-trips through dry_run_apply", async () => {
+    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
+    const { operations } = makeOperations({
+      transactionRows: [feeTx],
+      transactionDetails: { 1: feeTx },
+      clientRows: [{ id: 9, name: "LHV Bank", is_supplier: true, cl_code_country: "EE", is_deleted: false }],
+      purchaseArticles: PURCHASE_ARTICLES,
+      accounts: ACCOUNTS,
+      bankAccounts: BANK_ACCOUNTS,
+      accountDimensions: DIMENSIONS,
+    });
+    const result = await analyze(operations);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]).toMatchObject({ category: "bank_fees", apply_mode: "purchase_invoice" });
+    const dryRun = await operations.applyClassifications({ classificationsJson: { groups: result.groups } });
+    expect(dryRun.ok).toBe(true);
+    if (dryRun.ok) expect(dryRun.value.results[0]!.status).toBe("dry_run_preview");
+  });
+
+  it("(g) a marker IBAN shared by own dims 200 and 300 is an own-transfer review with no target", async () => {
+    const shared = "EE440000000000000200";
+    const transfer = camtRow({ id: 6, amount: 50, date: "2026-09-14", direction: "DBIT", name: "Näide OÜ", iban: shared });
+    const { operations } = ledgerOperations({
+      rows: [transfer],
+      bankAccounts: [
+        { accounts_dimensions_id: 100, iban_code: OWN_LHV, account_name_est: "LHV" },
+        { accounts_dimensions_id: 200, iban_code: shared, account_name_est: "LHV EUR" },
+        { accounts_dimensions_id: 300, iban_code: shared, account_name_est: "LHV USD" },
+      ],
+    });
+    const result = await analyze(operations);
+    expect(result.groups).toEqual([]);
+    expect(result.ownTransfers).toEqual([expect.objectContaining({
+      transaction_id: 6, target_dimension_id: null, candidate_dimension_ids: [200, 300],
+    })]);
+  });
+
+  it("(h) a flipped marker sig is never an own transfer: it goes to review", async () => {
+    const genuine = camtRow({ id: 7, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE });
+    const flipped = { ...genuine, description: genuine.description!.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+    expect(flipped.description).not.toBe(genuine.description);
+    const { operations } = ledgerOperations({ rows: [flipped] });
+    const result = await analyze(operations);
+    expect(result.ownTransfers).toEqual([]);
+    expect(result.possibleDuplicates).toEqual([expect.objectContaining({ transaction_id: 7, code: "camt_marker_unverified" })]);
+  });
+
+  it("(A6) a 'Näide OÜ' / 'Näide AS' group is split so only the identity-compatible rows carry the history", async () => {
+    const naideHistory = historyRows("Näide OÜ", "D", [2110, 900], ["2026-06-01", "2026-07-01", "2026-08-01"]);
+    const ou = camtRow({ id: 8, amount: 300, date: "2026-09-10", direction: "CRDT", name: "Näide OÜ" });
+    const as = camtRow({ id: 9, amount: 400, date: "2026-09-11", direction: "CRDT", name: "Näide AS" });
+    const { operations } = ledgerOperations({
+      rows: [ou, as, ...naideHistory.transactions],
+      journals: naideHistory.journals,
+      companyName: "Firma OÜ",
+      purchaseArticles: [{ id: 61, name_est: "Muu kulu", name_eng: "Other", accounts_id: 1830, is_disabled: false, priority: 1 }],
+      accounts: [...LOAN_ACCOUNTS, { id: 1830, name_est: "Muu põhivara", account_type_est: "Varad" }],
+    });
+    const result = await analyze(operations);
+    const byTransaction = (id: number) => result.groups.find(group => group.transactions.some(tx => tx.id === id))!;
+    expect(byTransaction(8)).not.toBe(byTransaction(9));
+    expect(byTransaction(8).transactions.map(tx => tx.id)).toEqual([8]);
+    expect(byTransaction(8).suggested_booking.source).toBe("transaction_history");
+    expect(byTransaction(9).transactions.map(tx => tx.id)).toEqual([9]);
+    expect(byTransaction(9).suggested_booking.source).not.toBe("transaction_history");
+    // No keyword purchase-article guess for an incoming row with no history or rule.
+    expect(byTransaction(9).suggested_booking.purchase_account_id).toBeUndefined();
+  });
+
+  it("reports an unavailable journal snapshot instead of failing, and partitions nothing", async () => {
+    const transfer = camtRow({ id: 10, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE });
+    const { operations } = makeOperations({
+      transactionRows: [transfer], clientRows: [], bankAccounts: BANK_ACCOUNTS, accountDimensions: DIMENSIONS,
+      journals: { listAllWithPostings: vi.fn().mockRejectedValue(new Error("503")) },
+    });
+    const result = await analyze(operations);
+    expect(result.ledgerContextUnavailable).toBeDefined();
+    expect(result.ownTransfers).toEqual([]);
+    expect(result.groups).toHaveLength(1);
   });
 });

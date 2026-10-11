@@ -9,8 +9,31 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { bankTransactionDirection, signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import { isNotFoundHttpError } from "../http-client.js";
+import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
+import { BookingGuard } from "../booking-guard.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
+import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
+import {
+  bankReferenceLookupKey,
+  extractCamtDescriptionMetadata,
+  storedBankReferenceLookupKey,
+} from "../camt/duplicate-identity.js";
+import { buildCamtJournalCoverageContext, classifyCamtJournalCoverage, type CamtJournalCoverage } from "../camt/journal-coverage.js";
+import type { ParsedCamtEntry } from "../camt/types.js";
+import {
+  counterpartyIbanOf,
+  hasUnverifiableCamtMarker,
+  inferOneSidedTransfer,
+  type OneSidedInference,
+} from "../banking/reconciliation/inter-account-matcher.js";
+import {
+  buildCounterpartyBookingHistory,
+  lookupCounterpartyHistory,
+  type CounterpartyBookingHistory,
+  type CounterpartyHistorySuggestion,
+} from "./counterparty-booking-history.js";
 // canonicalBusinessText strips the display sandbox to recover the EXECUTABLE
 // business value (M10). It is NOT wrapUntrustedOcr — the operation never wraps
 // for output; the presenter owns all output-time sandboxing. Where the mutation
@@ -37,6 +60,7 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 // is used only inside function bodies, never at module-evaluation time.
 import {
   type ClassifiedTransactionGroupResult,
+  type ClassifiedTransactionSuggestion,
   type PartialClassificationMutation,
   type PartialClassificationStatus,
   type TransactionGroup,
@@ -92,6 +116,37 @@ export interface UnmatchedAnalysisInput {
   dateTo?: string;
 }
 
+/** A row the ledger context took out of classification. `counterparty` is raw
+ * bank-statement text — the presenter wraps it. */
+interface PartitionedRowBase {
+  transaction_id: number;
+  date: string;
+  amount: number;
+  counterparty?: string;
+  next_action: string;
+}
+
+/** A journal books this row's bank reference: the PROJECT row is redundant. */
+export interface AlreadyBookedRow extends PartitionedRowBase {
+  journal_ids: number[];
+  strength: "reference";
+}
+
+/** A transfer between own accounts; never classified or booked here. */
+export interface OwnTransferRow extends PartitionedRowBase {
+  /** null: no single own target (shared own IBAN, or a name-only match). */
+  target_dimension_id: number | null;
+  candidate_dimension_ids?: number[];
+  confidence: number;
+  reasons: string[];
+}
+
+/** Something in the ledger may already book this row; compare before acting. */
+export interface PossibleDuplicateRow extends PartitionedRowBase {
+  journal_ids: number[];
+  code: string;
+}
+
 /** UNWRAPPED analysis result. `groups[].{normalized_counterparty,
  * display_counterparty}` and `transactions[].{description,bank_account_name}`
  * carry raw bank-statement text — the presenter wraps them. */
@@ -100,9 +155,17 @@ export interface UnmatchedAnalysisResult {
   dateFrom?: string;
   dateTo?: string;
   totalUnconfirmed: number;
+  /** Rows classified into `groups` (the partitioned rows below are not counted). */
   totalUnmatched: number;
   categoryCounts: Record<string, number>;
   groups: ClassifiedTransactionGroupResult[];
+  alreadyBooked: AlreadyBookedRow[];
+  ownTransfers: OwnTransferRow[];
+  possibleDuplicates: PossibleDuplicateRow[];
+  /** alreadyBooked + ownTransfers + possibleDuplicates. */
+  totalPartitionedOut: number;
+  /** Set when journals/bank accounts could not be read: no partition and no history ran. */
+  ledgerContextUnavailable?: string;
 }
 
 export interface ApplyClassificationsInput {
@@ -154,6 +217,238 @@ type GatherOutcome =
   | { readonly kind: "confirmed" }
   | { readonly kind: "non_project"; readonly status?: string }
   | { readonly kind: "error"; readonly error: unknown };
+
+// --- F6 ledger context --------------------------------------------------------
+
+interface LedgerContext {
+  readonly journals: Journal[];
+  readonly bankAccounts: BankAccount[];
+  readonly accountDimensions: AccountDimension[];
+  readonly companyLegalName: string;
+}
+
+interface LedgerPartition {
+  alreadyBooked: AlreadyBookedRow[];
+  ownTransfers: OwnTransferRow[];
+  possibleDuplicates: PossibleDuplicateRow[];
+  remaining: Transaction[];
+  history: CounterpartyBookingHistory;
+}
+
+async function loadLedgerContext(api: ApiContext): Promise<LedgerContext | undefined> {
+  try {
+    const [journals, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
+      api.journals.listAllWithPostings(),
+      api.readonly.getBankAccounts(),
+      api.readonly.getAccountDimensions(),
+      api.readonly.getInvoiceInfo(),
+    ]);
+    return { journals, bankAccounts, accountDimensions, companyLegalName: invoiceInfo.invoice_company_name ?? "" };
+  } catch {
+    return undefined;
+  }
+}
+
+/** The direction a row proves: a signed marker whose checksum (when it has one) verifies. */
+function trustedDirection(transaction: Transaction): "incoming" | "outgoing" | undefined {
+  return hasUnverifiableCamtMarker(transaction) ? undefined : signedBankTransactionDirection(transaction);
+}
+
+/** The stored row as a CAMT entry, so WP1's journal-coverage predicate judges it. */
+function coverageEntry(transaction: Transaction, direction: ParsedCamtEntry["direction"]): ParsedCamtEntry {
+  // The raw reference whose key is the row's stored (checksum-verified) key.
+  const key = storedBankReferenceLookupKey(transaction);
+  const reference = key === undefined
+    ? undefined
+    : [transaction.bank_ref_number ?? undefined, extractCamtDescriptionMetadata(transaction.description).bank_ref_number]
+      .find(candidate => bankReferenceLookupKey(candidate) === key);
+  return {
+    date: transaction.date,
+    amount: transaction.amount,
+    currency: transaction.cl_currencies_id || "EUR",
+    direction,
+    counterparty_iban: counterpartyIbanOf(transaction) || undefined,
+    bank_reference: reference,
+    duplicate: false,
+    duplicate_transaction_ids: [],
+  };
+}
+
+function compareAction(journalIds: number[]): string {
+  const target = journalIds.length > 0 ? `journal ${journalIds.join(", ")}` : "the own-account transfer journals of this date and amount";
+  return `compare with ${target}; if it books this movement, delete the PROJECT row; otherwise classify normally`;
+}
+
+/**
+ * Take out of classification every row the ledger already explains: a journal
+ * that books its bank reference (alreadyBooked), any weaker journal hit
+ * (possibleDuplicates), and transfers between own accounts (ownTransfers).
+ * Returns a reason string when the bank account cannot be resolved.
+ */
+function partitionByLedgerContext(
+  api: ApiContext,
+  rows: Transaction[],
+  ledgerTransactions: Transaction[],
+  ledger: LedgerContext,
+  dimensionId: number,
+): LedgerPartition | string {
+  const accountId: unknown = ledger.accountDimensions.find(dimension => dimension.id === dimensionId && !dimension.is_deleted)?.accounts_id;
+  if (typeof accountId !== "number" || !Number.isSafeInteger(accountId) || accountId <= 0) {
+    return `The bank account of dimension ${dimensionId} could not be resolved, so journals, own transfers and booking history were not checked.`;
+  }
+  const lookups = buildBankAccountLookups(ledger.bankAccounts, ledger.accountDimensions);
+  const toCamt = (direction: "incoming" | "outgoing") => direction === "incoming" ? "CRDT" as const : "DBIT" as const;
+  // An unproven direction is checked both ways and can only reach review.
+  const entriesFor = (transaction: Transaction): ParsedCamtEntry[] => {
+    const direction = trustedDirection(transaction);
+    return direction ? [coverageEntry(transaction, toCamt(direction))] : [coverageEntry(transaction, "CRDT"), coverageEntry(transaction, "DBIT")];
+  };
+  const coverageContext = buildCamtJournalCoverageContext({
+    snapshot: {
+      journals: ledger.journals,
+      accountId,
+      bankAccounts: ledger.bankAccounts,
+      accountDimensions: ledger.accountDimensions,
+      interAccountResolver: (journals, ownDimensionIds) => BookingGuard.fromSnapshot(api, journals, ownDimensionIds),
+    },
+    dimensionId,
+    entries: rows.map(transaction => entriesFor(transaction)[0]!),
+    ledgerTransactions,
+  });
+  const inferenceLookups = {
+    ownIbanToDimension: lookups.ownIbanToDimension,
+    dimensionToIban: lookups.dimensionToIban,
+    companyName: normalizeCompanyName(ledger.companyLegalName),
+    companyLegalName: ledger.companyLegalName,
+    targetAccountsDimensionsId: undefined,
+  };
+  const inferenceCache = new Map<number, OneSidedInference>();
+
+  const partition: LedgerPartition = {
+    alreadyBooked: [],
+    ownTransfers: [],
+    possibleDuplicates: [],
+    remaining: [],
+    history: buildCounterpartyBookingHistory({
+      transactions: ledgerTransactions,
+      journals: ledger.journals,
+      ownBankDimensionIds: lookups.ownDimensionIds,
+    }),
+  };
+  for (const transaction of rows) {
+    if (transaction.id === undefined) {
+      partition.remaining.push(transaction);
+      continue;
+    }
+    const base = {
+      transaction_id: transaction.id,
+      date: transaction.date,
+      amount: transaction.amount,
+      ...(transaction.bank_account_name ? { counterparty: transaction.bank_account_name } : {}),
+    };
+
+    const hits = entriesFor(transaction)
+      .map(entry => classifyCamtJournalCoverage(entry, coverageContext))
+      .filter((coverage): coverage is Exclude<CamtJournalCoverage, { kind: "none" }> => coverage.kind !== "none");
+    if (hits.length === 1 && hits[0]!.kind === "identity" && trustedDirection(transaction)) {
+      partition.alreadyBooked.push({
+        ...base,
+        journal_ids: hits[0]!.journal_ids,
+        strength: "reference",
+        next_action: `verify that journal ${hits[0]!.journal_ids.join(", ")} books this movement, then delete_transaction ${transaction.id} (the PROJECT row)`,
+      });
+      continue;
+    }
+    if (hits.length > 0) {
+      const journalIds = [...new Set(hits.flatMap(hit => hit.journal_ids))].sort((left, right) => left - right);
+      partition.possibleDuplicates.push({
+        ...base,
+        journal_ids: journalIds,
+        code: hits[0]!.kind === "review" ? hits[0]!.code : `journal_${hits[0]!.kind}`,
+        next_action: compareAction(journalIds),
+      });
+      continue;
+    }
+
+    // An unverifiable CAMT marker proves neither IBAN nor direction: never an
+    // own transfer (WP3); a row that only looks like one goes to review.
+    if (hasUnverifiableCamtMarker(transaction)) {
+      const markerIban = extractCamtDescriptionMetadata(transaction.description).bank_account_no?.replace(/\s+/g, "").toUpperCase();
+      if ((markerIban && lookups.ownIbanToDimension.has(markerIban)) || sameCompanyIdentity(transaction.bank_account_name, ledger.companyLegalName)) {
+        partition.possibleDuplicates.push({
+          ...base,
+          journal_ids: [],
+          code: "camt_marker_unverified",
+          next_action: "check the row against the bank statement: its CAMT marker checksum does not verify, so it is not treated as an own transfer; if it is one, reconcile it manually, otherwise classify normally",
+        });
+      } else {
+        partition.remaining.push(transaction);
+      }
+      continue;
+    }
+
+    const inference = inferOneSidedTransfer({ ...transaction, bank_account_no: counterpartyIbanOf(transaction) }, inferenceLookups, inferenceCache);
+    const candidates = inference.ambiguousTargetDimensions ?? [];
+    if (inference.confidence >= 50 || candidates.length > 0) {
+      const target = inference.confidence >= 50 ? inference.targetDimension ?? null : null;
+      partition.ownTransfers.push({
+        ...base,
+        target_dimension_id: target,
+        ...(candidates.length > 0 ? { candidate_dimension_ids: [...candidates].sort((left, right) => left - right) } : {}),
+        confidence: inference.confidence,
+        reasons: inference.reasons,
+        next_action: target !== null
+          ? `reconcile_bank_transactions mode="inter_account_dry_run" (target dimension ${target})`
+          : `reconcile_bank_transactions mode="inter_account_dry_run" with target_accounts_dimensions_id chosen by the operator${candidates.length > 0 ? ` from ${candidates.join(", ")}` : ""}`,
+      });
+      continue;
+    }
+    partition.remaining.push(transaction);
+  }
+  return partition;
+}
+
+/**
+ * A6: grouping strips legal forms ("Näide OÜ" and "Näide AS" share a group) and
+ * the suggestion is resolved from the group, so a history hint must hold for
+ * every member. Members with a different (or no) history get their own group.
+ */
+function splitGroupByHistory(
+  group: TransactionGroup,
+  historyOf: (transaction: Transaction) => CounterpartyHistorySuggestion | undefined,
+): Array<{ group: TransactionGroup; history?: CounterpartyHistorySuggestion }> {
+  const parts = new Map<string, { rows: Transaction[]; history?: CounterpartyHistorySuggestion }>();
+  for (const transaction of group.transactions) {
+    const history = historyOf(transaction);
+    const key = history ? JSON.stringify([history.account_id, history.dimension_id, history.streak, history.history_total]) : "";
+    const part = parts.get(key) ?? { rows: [], history };
+    part.rows.push(transaction);
+    parts.set(key, part);
+  }
+  if (parts.size === 1) return [{ group, history: [...parts.values()][0]!.history }];
+  return [...parts.values()].map(part => ({ group: groupTransactionsByCounterparty(part.rows)[0]!, history: part.history }));
+}
+
+function historyBookingSuggestion(
+  history: CounterpartyHistorySuggestion,
+  accounts: Array<{ id?: number; name_est?: string }>,
+): ClassifiedTransactionSuggestion {
+  const account = accounts.find(candidate => candidate.id === history.account_id);
+  const dimension = history.dimension_id !== null ? ` dimension ${history.dimension_id}` : "";
+  return {
+    purchase_account_id: history.account_id,
+    purchase_account_name: account ? `${history.account_id} ${account.name_est}` : undefined,
+    ...(history.dimension_id !== null ? { purchase_account_dimensions_id: history.dimension_id } : {}),
+    source: "transaction_history",
+    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}. Review-only: confirm the substance before booking.`,
+    transaction_history: history,
+    suggested_distribution: {
+      related_table: "accounts",
+      related_id: history.account_id,
+      ...(history.dimension_id !== null ? { related_sub_id: history.dimension_id } : {}),
+    },
+  };
+}
 
 class ClassificationOperationsImpl implements ClassificationOperations {
   constructor(
@@ -339,13 +634,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
   async analyzeUnmatched(input: UnmatchedAnalysisInput): Promise<OperationOutcome<UnmatchedAnalysisResult>> {
     const api = this.api;
     const { accountsDimensionsId, dateFrom, dateTo } = input;
-    const [transactions, saleInvoices, purchaseInvoices, clients, purchaseArticlesWithVat, accounts] = await Promise.all([
+    const [transactions, saleInvoices, purchaseInvoices, clients, purchaseArticlesWithVat, accounts, ledger] = await Promise.all([
       api.transactions.listAll(),
       api.saleInvoices.listAll(),
       api.purchaseInvoices.listAll(),
       api.clients.listAll(),
       getPurchaseArticlesWithVat(api),
       api.readonly.getAccounts(),
+      loadLedgerContext(api),
     ]);
 
     const openSales = saleInvoices.filter(invoice =>
@@ -364,7 +660,19 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     );
 
     const unmatched = unconfirmed.filter(transaction => !existingInvoiceMatch(transaction, openSales, openPurchases));
-    const groups = groupTransactionsByCounterparty(unmatched);
+    const partition = ledger
+      ? partitionByLedgerContext(api, unmatched, transactions, ledger, accountsDimensionsId)
+      : "The journals or bank accounts could not be read, so already-booked rows, own transfers and booking history were not checked.";
+    const ledgerContextUnavailable = typeof partition === "string" ? partition : undefined;
+    const classifiable = typeof partition === "string" ? unmatched : partition.remaining;
+    const historyOf = (transaction: Transaction) => typeof partition === "string"
+      ? undefined
+      : lookupCounterpartyHistory(partition.history, {
+          name: transaction.bank_account_name,
+          iban: counterpartyIbanOf(transaction) || undefined,
+          direction: trustedDirection(transaction) ?? "unknown",
+        }).suggestion;
+    const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
     const context = {
       purchaseInvoices,
       purchaseArticlesWithVat,
@@ -372,7 +680,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     };
     const classifiedGroups: ClassifiedTransactionGroupResult[] = [];
 
-    for (const group of groups) {
+    for (const { group, history } of groups) {
       const classification = categorizeTransactionGroup({
         normalized_counterparty: group.normalized_counterparty,
         display_counterparty: group.display_counterparty,
@@ -380,7 +688,27 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         owner_counterparties: ownerCounterparties,
       });
       const resolved = await resolveClassificationSuggestion(api, context, clients, group, classification);
-      const applyMode = resolved.applyMode;
+      let applyMode = resolved.applyMode;
+      let suggestion = resolved.suggestion;
+      // Precedence: statutory category > saved rule > transaction history >
+      // supplier-invoice history > keyword. History is review-only, never a rule.
+      const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
+      if (!fixedBySource && history) {
+        suggestion = historyBookingSuggestion(history, accounts);
+        applyMode = "review_only";
+      } else if (
+        !fixedBySource &&
+        (suggestion.source === "keyword_match" || suggestion.source === "fallback") &&
+        (classification.category === "revenue_without_invoice" || classification.category === "unknown")
+      ) {
+        // A keyword purchase-article guess (e.g. a sales-transport or fixed-asset
+        // account) for an incoming or unknown row is noise, not a suggestion.
+        suggestion = {
+          liability_account_id: suggestion.liability_account_id,
+          source: "fallback",
+          reason: `${suggestion.reason} No booking history or saved rule names a contra account for this counterparty; choose it from the transaction's substance.`,
+        };
+      }
       // Build the RAW classified group (no wrapping). The presenter reproduces
       // the double-wrap of transaction description/bank_account_name and the
       // single-wrap of counterparty fields. Key order matches the former
@@ -393,12 +721,15 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         recurring: classification.recurring,
         similar_amounts: classification.similar_amounts,
         total_amount: roundMoney(group.transactions.reduce((sum, transaction) => sum + transaction.amount, 0)),
-        suggested_booking: resolved.suggestion,
+        suggested_booking: suggestion,
         reasons: classification.reasons,
         review_guidance: applyMode !== "purchase_invoice"
           ? buildClassificationReviewGuidance({
               category: classification.category,
               displayCounterparty: group.display_counterparty,
+              ...(suggestion.source === "transaction_history" && history
+                ? { history: { accountId: history.account_id, dimensionId: history.dimension_id, streak: history.streak, historyTotal: history.history_total } }
+                : {}),
             })
           : undefined,
         transactions: group.transactions.map(transaction => ({
@@ -425,9 +756,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       ...(dateFrom !== undefined ? { dateFrom } : {}),
       ...(dateTo !== undefined ? { dateTo } : {}),
       totalUnconfirmed: unconfirmed.length,
-      totalUnmatched: unmatched.length,
+      totalUnmatched: classifiable.length,
       categoryCounts,
       groups: classifiedGroups,
+      alreadyBooked: typeof partition === "string" ? [] : partition.alreadyBooked,
+      ownTransfers: typeof partition === "string" ? [] : partition.ownTransfers,
+      possibleDuplicates: typeof partition === "string" ? [] : partition.possibleDuplicates,
+      totalPartitionedOut: unmatched.length - classifiable.length,
+      ...(ledgerContextUnavailable !== undefined ? { ledgerContextUnavailable } : {}),
     });
   }
 

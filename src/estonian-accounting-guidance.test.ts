@@ -68,6 +68,21 @@ describe("estonian accounting guidance", () => {
     ]));
   });
 
+  it("gives history guidance instead of the sales-invoice text for a history-suggested incoming loan (F6)", () => {
+    const guidance = buildClassificationReviewGuidance({
+      category: "revenue_without_invoice",
+      displayCounterparty: "Laenaja OÜ",
+      history: { accountId: 2110, dimensionId: 900, streak: 3, historyTotal: 8 },
+    });
+
+    expect(guidance).toBeDefined();
+    expect(guidance!.recommendation).toContain("confirm_transaction");
+    expect(guidance!.recommendation).toContain("related_id: 2110");
+    expect(guidance!.recommendation).toContain("related_sub_id: 900");
+    expect(guidance!.recommendation).toContain("viimased 3");
+    expect(JSON.stringify(guidance)).not.toMatch(/müügi/i);
+  });
+
   it("does not ask extra questions for CAMT duplicates when the payload already determines the default", () => {
     const guidance = buildCamtDuplicateReviewGuidance({ hasConfirmedMatch: true });
 
