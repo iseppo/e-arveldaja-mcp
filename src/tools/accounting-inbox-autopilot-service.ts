@@ -426,25 +426,24 @@ function summarizeAutopilotToolResult(
         // or because a previous release imported their entry only in part.
         ...preview.projection.skipped.filter((row) => row.review_note !== undefined).map((row) => {
           const journalReview = row.review_code !== undefined;
-          return toAutopilotFollowUp(
-            tool,
-            `CAMT row ${row.date} ${row.amount} was not created: ${journalReview
-              ? "an existing journal may already book it"
-              : "a previous release imported its statement entry only in part"}.`,
-            { recommendation: row.review_note },
-            {
-              review_type: journalReview ? "camt_journal_review" : "camt_partial_legacy",
-              source_tool: tool,
-              item: {
-                date: row.date,
-                amount: row.amount,
-                bank_reference: wrapUntrustedOcr(row.bank_reference),
-                journal_ids: row.journal_ids ?? [],
-                ...(journalReview ? { review_code: row.review_code } : {}),
-                review_note: row.review_note,
-              },
-            },
-          );
+          // A direct action, not a continuation: no resolver handles these rows,
+          // so there is no resolver_input; the id still makes the item resumable.
+          return {
+            id: stableReviewId(tool, {
+              category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
+              date: row.date,
+              amount: row.amount,
+              bank_reference: row.bank_reference,
+              existing_transactions: (row.journal_ids ?? []).map(id => ({ id })),
+            }),
+            ...toAutopilotFollowUp(
+              tool,
+              `CAMT row ${row.date} ${row.amount} was not created: ${journalReview
+                ? "an existing journal may already book it"
+                : "a previous release imported its statement entry only in part"}.`,
+              { recommendation: row.review_note },
+            ),
+          };
         })],
       };
     }

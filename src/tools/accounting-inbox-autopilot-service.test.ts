@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { buildWorkflowEnvelope } from "../workflow-response.js";
 import {
   runAccountingInboxDryRunPipeline,
   stableReviewId,
@@ -164,12 +165,21 @@ describe("runAccountingInboxDryRunPipeline", () => {
       operations: mockOperations({ prepareCamtImport }),
     });
 
-    const reviews = result.needs_accountant_review.map(item => item.resolver_input?.review_type);
-    expect(reviews).toEqual(["camt_journal_review", "camt_partial_legacy"]);
-    const journalReview = result.needs_accountant_review[0]!;
-    expect(journalReview.id).toBeDefined();
-    expect(journalReview.resolver_input?.item).toMatchObject({ journal_ids: [28424939], review_code: "camt_journal_posting_review" });
-    expect(String((journalReview.resolver_input?.item as Record<string, unknown>).bank_reference)).toContain("UNTRUSTED_OCR_START");
+    // Direct actions: continue_accounting_workflow has no resolver for these
+    // rows, so they carry no resolver_input; the review note is the action.
+    const reviews = result.needs_accountant_review;
+    expect(reviews.map(item => item.resolver_input)).toEqual([undefined, undefined]);
+    expect(reviews.map(item => item.summary)).toEqual([
+      "CAMT row 2026-06-20 12.83 was not created: an existing journal may already book it.",
+      "CAMT row 2026-02-04 95 was not created: a previous release imported its statement entry only in part.",
+    ]);
+    expect(reviews[0]!.recommendation).toContain("journal 28424939");
+    expect(reviews[1]!.recommendation).toContain("imported only in part");
+    expect(reviews.every(item => typeof item.id === "string" && item.id.startsWith("import_camt053:"))).toBe(true);
+    expect(new Set(reviews.map(item => item.id)).size).toBe(2);
+    // The workflow envelope offers them as direct actions, never resolve_review.
+    const envelope = buildWorkflowEnvelope({ summary: "Inbox.", needs_review: reviews });
+    expect(envelope.available_actions.map(action => [action.kind, action.tool])).toEqual([["review_item", undefined], ["review_item", undefined]]);
   });
 
   it("marks reconciliation deferred when an import dry run has pending rows (M12)", async () => {

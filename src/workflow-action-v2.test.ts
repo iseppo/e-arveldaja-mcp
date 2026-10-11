@@ -161,6 +161,40 @@ describe("workflow_action_v2", () => {
     ]);
   });
 
+  it("keeps a tool-less review item a direct action: its recommendation, no question, no inbox rerun", () => {
+    const runtime = guidedRuntime();
+    const recommendation = 'reconcile_bank_transactions mode="inter_account_dry_run" (target dimension 200)';
+    const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
+      summary: "One row is an own transfer.",
+      needs_review: [{ id: "classify_unmatched_transactions:abc", summary: "Transaction 43 is a transfer to/from own account dimension 200.", recommendation }],
+    }));
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore, {
+      questionRerun: { tool: "accounting_inbox", args: { mode: "scan" } },
+    }));
+    expect(v2.status).toBe("needs_review");
+    expect(v2.next_action).toEqual({
+      args: {},
+      approval_required: false,
+      recommendation,
+      instruction: "Carry out this review item's recommendation (a write still needs the user's approval); it asks no question, so do not rerun accounting_inbox for it.",
+    });
+    expect(v2.next_action!.tool).toBeUndefined();
+    expect(v2.next_action!.question).toBeUndefined();
+  });
+
+  it("still routes a blocked dry run (a tool-less review item with args) to the inbox rerun", () => {
+    const runtime = guidedRuntime();
+    const envelope = {
+      ...runWithToolProfile("guided", () => buildWorkflowEnvelope({ summary: "Blocked dry run." })),
+      recommended_next_action: {
+        kind: "review_item" as const, label: "Resolve the blocked CAMT dry run", why: "Blocked by duplicates.",
+        approval_required: false, args: { source_tool: "import_camt053" },
+      },
+    };
+    const v2 = runWithToolProfile("guided", () => buildWorkflowActionV2(envelope, runtime.workflowStateStore));
+    expect(v2.next_action).toMatchObject({ tool: "accounting_inbox", question: "Resolve the blocked CAMT dry run" });
+  });
+
   it("names the input that answers a mapped question and carries the rerun args", () => {
     const runtime = guidedRuntime();
     const envelope = runWithToolProfile("guided", () => buildWorkflowEnvelope({
