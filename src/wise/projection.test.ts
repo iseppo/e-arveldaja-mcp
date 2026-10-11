@@ -448,10 +448,48 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   it("a row whose own exact-reference journal exists cannot be mapped to a different journal", () => {
     const own = labelledJournal({ id: 802, document_number: "TRANSFER-1001", operation_type: "JOURNAL", operations_id: undefined });
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal(), own], mapped(["TRANSFER-1001", 701]));
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    // The rejected mapping is ignored: the row's own identity journal books it, as without a mapping.
+    expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:802"]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
+  // Codex r2: the exact-reference reservation also covers the net-of-fee
+  // amount, and the row's own journal (which books the fee) still wins.
+  const transferInWithFee = (id: string) =>
+    `${id},COMPLETED,IN,"2026-03-23 10:00:00","2026-03-23 10:00:01",0,EUR,0.50,EUR,"Firma OÜ",100.00,EUR,"Firma OÜ",99.50,EUR,1,,,,"Money added",`;
+  const journalOf = (id: number, documentNumber: string, postings: Array<[number, "D" | "C", number, number?]>) => ({
+    id, registered: true, is_deleted: false, effective_date: "2026-03-23", operation_type: "JOURNAL", document_number: documentNumber,
+    postings: postings.map(([dim, type, amount, accountsId]) => ({ accounts_dimensions_id: dim, accounts_id: accountsId ?? 1020, type, amount })),
+  }) as unknown as Journal;
+  const ownNet = journalOf(701, "TRANSFER-A", [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]]);
+  const otherGross = journalOf(702, "OTHER-LABEL", [[LHV, "C", 100], [WISE, "D", 100]]);
+  it.each([["own journal first", [ownNet, otherGross]], ["own journal last", [otherGross, ownNet]]] as Array<[string, Journal[]]>)(
+    "a mapping cannot take a row whose own exact-reference journal books it net of the fee: rejected, and the row resolves as if unmapped (%s)",
+    (_order, journals) => {
+      const unmapped = run([transferInWithFee("TRANSFER-A")], journals);
+      const output = run([transferInWithFee("TRANSFER-A")], journals, mapped(["TRANSFER-A", 702]));
+      expect(actions(output)).not.toContain("inter_account:TRANSFER-A:create_only_already_journalized:702");
+      expect(actions(output)).toEqual(actions(unmapped));
+      expect(reviewCodes(output)).toEqual([...reviewCodes(unmapped), "TRANSFER-A:wise_transfer_mapping_rejected:702"]);
+      // Alone, the own journal books the row and its fee: no fee is created again.
+      const own = run([transferInWithFee("TRANSFER-A")], [ownNet]);
+      expect(actions(own)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+    },
+  );
+
+  it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is created", () => {
+    const usd = labelledJournal({
+      document_number: "LHVREF-USD",
+      cl_currencies_id: "USD",
+      postings: [
+        { accounts_dimensions_id: LHV, accounts_id: 1020, type: "C", amount: 100, cl_currencies_id: "USD" },
+        { accounts_dimensions_id: WISE, accounts_id: 1020, type: "D", amount: 100, cl_currencies_id: "USD" },
+      ],
+    });
+    const output = run([transferIn("TRANSFER-1001")], [usd], mapped(["TRANSFER-1001", 701]));
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+  });
 });
 
 describe("Wise row next to an untagged stored row of the same movement (F2b)", () => {

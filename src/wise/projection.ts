@@ -753,8 +753,10 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const pendingMappings = new Map<WiseRow, number>();
   const acceptedMappings = new Map<WiseRow, number>();
   const rejectedMappingRows = new Set<WiseRow>();
-  const rejectMapping = (row: WiseRow, journalId: number, why: string) => {
-    rejectedMappingRows.add(row);
+  // `useIdentity`: the row's own exact-reference journal exists, so the row
+  // resolves through the guard as if unmapped (never a second booking).
+  const rejectMapping = (row: WiseRow, journalId: number, why: string, useIdentity = false) => {
+    if (!useIdentity) rejectedMappingRows.add(row);
     mappingReviews.push(mappingReview(row.id, "wise_transfer_mapping_rejected", journalId, why, transferDecisions.get(row)));
   };
   for (const [index, mapping] of journalizedTransferIds.entries()) {
@@ -822,6 +824,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           : "other",
       };
     };
+    const OWN_IDENTITY_JOURNAL = "another journal already books this Wise transfer by exact reference";
     const mappingRejection = (row: WiseRow, journalId: number): string | undefined => {
       const decision = transferDecisions.get(row);
       const targetDimensionId = decision?.targetDimensionId;
@@ -838,6 +841,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const label = normalizeReference(journal.document_number);
       if (label === "") {
         return "the journal carries no document number; a ref-less journal is matched automatically, or reviewed when ambiguous";
+      }
+      // Lane B and the checks below compare base EUR: a foreign posting without
+      // a base amount cannot show the EUR the row moved.
+      if ((journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
+        (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) {
+        return "the journal has foreign-currency postings without an EUR base amount";
       }
       const amount = bookedAmountForWiseRow(row);
       const candidateIds = laneBCandidateIds(targetDimensionId, [amount], wiseDate(row.finishedOn || row.createdOn));
@@ -858,15 +867,19 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       if (label !== normalizeReference(row.id) && eligibleIds.has(label)) {
         return "the journal is labelled with another Wise transfer of this statement, which owns it by exact reference";
       }
-      if (candidateIds.some(id => id !== journalId &&
+      // The guard also looks the row up net of its fee, so reserve there too.
+      const netAmount = wiseLegAmountNetOfFee(row, amount);
+      const identityIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [amount] : [amount, netAmount],
+        wiseDate(row.finishedOn || row.createdOn));
+      if (identityIds.some(id => id !== journalId &&
         normalizeReference(journalSnapshot.find(candidate => candidate.id === id)?.document_number) === normalizeReference(row.id))) {
-        return "another journal already books this Wise transfer by exact reference";
+        return OWN_IDENTITY_JOURNAL;
       }
       return undefined;
     };
     for (const [row, journalId] of pendingMappings) {
       const why = mappingRejection(row, journalId);
-      if (why !== undefined) rejectMapping(row, journalId, why);
+      if (why !== undefined) rejectMapping(row, journalId, why, why === OWN_IDENTITY_JOURNAL);
       else acceptedMappings.set(row, journalId);
     }
     pendingMappings.clear();
