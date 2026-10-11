@@ -165,6 +165,26 @@ describe("classifyCamtJournalCoverage", () => {
       .toEqual({ kind: "review", code: "camt_journal_posting_review", journal_ids: [601] });
   });
 
+  it.each([["R first", false], ["BANK:R first", true]])("one journal never covers two entries whose references alias it (%s)", (_name, reversed) => {
+    const entries = [outgoing("R"), outgoing("BANK:R")];
+    const coverages = classifyAll([journal(601, [p(1020, LHV, "C", 100), p(5000, null, "D", 100)], { document_number: "BANK:R" })],
+      reversed ? entries.reverse() : entries);
+    expect(coverages.map(c => c.kind)).toEqual(["review", "review"]);
+  });
+
+  it.each([["R first", false], ["R2 first", true]])("A1: a contradictory journal is not hidden because its transaction matched another entry (%s)", (_name, reversed) => {
+    const matched = { ...outgoing("R2"), duplicate: true, duplicate_transaction_ids: [801] };
+    const entries = [outgoing("R"), matched];
+    const [coverage] = classifyAll([txJournal("BANK:R")], reversed ? entries.reverse() : entries, { ledger: [tx(801, { bank_ref_number: "R2" })] });
+    expect(coverage).toEqual({ kind: "review", code: "camt_journal_conflict", journal_ids: [601] });
+  });
+
+  it("A1: the journal of a matched transaction carrying that transaction's own reference stays excluded", () => {
+    const matched = { ...outgoing("R2"), duplicate: true, duplicate_transaction_ids: [801] };
+    const [coverage] = classifyAll([txJournal("BANK:R2")], [outgoing("R"), matched], { ledger: [tx(801, { bank_ref_number: "R2" })] });
+    expect(coverage).toEqual({ kind: "none" });
+  });
+
   it("17: offsetting bank postings (net 0) → review", () => {
     const offsetting = journal(601, [p(1020, LHV, "D", 10500), p(1020, LHV, "C", 10500)], { document_number: "BANK:REF-LOAN-1" });
     expect(classify([offsetting], loanEntry()).kind).toBe("review");

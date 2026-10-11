@@ -60,6 +60,8 @@ export interface CamtJournalCoverageContext {
   readonly journalsById: Map<number, Journal>;
   readonly sameDimensionTransactions: Map<number, Transaction>;
   readonly repeatedBankReferences: Set<string>;
+  /** Journal id → distinct statement references its document number matches. */
+  readonly identityClaims: Map<number, Set<string>>;
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly laneB: InterAccountResolver;
 }
@@ -77,14 +79,42 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
   // A same-dimension TRANSACTION journal books a statement entry the
   // transaction dedup already matched; only those are excluded. Any other
   // same-dimension transaction journal stays in the scan.
-  const matchedTransactionIds = new Set(entries.flatMap((entry) => entry.duplicate_transaction_ids));
-  const journals = snapshot.journals.filter((journal) =>
-    journal.id != null &&
-    !journal.is_deleted &&
-    !(journal.operation_type === "TRANSACTION" && journal.operations_id != null && matchedTransactionIds.has(journal.operations_id)));
+  // A journal whose document reference is not the matched entry's own is
+  // kept, so the identity channel can report the contradiction.
+  const matchedEntryKeys = new Map<number, Set<string | undefined>>();
+  for (const entry of entries) {
+    for (const id of entry.duplicate_transaction_ids) {
+      const keys = matchedEntryKeys.get(id) ?? new Set<string | undefined>();
+      keys.add(bankReferenceLookupKey(entry.bank_reference));
+      matchedEntryKeys.set(id, keys);
+    }
+  }
+  const journals = snapshot.journals.filter((journal) => {
+    if (journal.id == null || journal.is_deleted) return false;
+    const matchedKeys = journal.operation_type === "TRANSACTION" && journal.operations_id != null
+      ? matchedEntryKeys.get(journal.operations_id)
+      : undefined;
+    if (!matchedKeys) return true;
+    const documentKeys = journalDocumentReferenceKeys(journal.document_number);
+    return documentKeys.length > 0 && !documentKeys.some((key) => matchedKeys.has(key));
+  });
   const statementReferenceKeys = new Set(entries
     .map((entry) => bankReferenceLookupKey(entry.bank_reference))
     .filter((key): key is string => key !== undefined));
+  // One journal books one movement: a journal whose document reference
+  // aliases two different statement references can cover neither.
+  const identityClaims = new Map<number, Set<string>>();
+  for (const journal of journals) {
+    const documentKeys = journalDocumentReferenceKeys(journal.document_number);
+    for (const entry of entries) {
+      const reference = normalizeOptionalReference(entry.bank_reference);
+      const key = bankReferenceLookupKey(reference);
+      if (!reference || !key || !documentKeys.includes(key)) continue;
+      const claims = identityClaims.get(journal.id!) ?? new Set<string>();
+      claims.add(reference);
+      identityClaims.set(journal.id!, claims);
+    }
+  }
   // A journal labelled with a statement reference is judged by the identity
   // channel; Lane B would only see it as some other labelled transfer.
   const laneBJournals = journals.filter((journal) =>
@@ -99,6 +129,7 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
       .filter((transaction) => transaction.accounts_dimensions_id === dimensionId && transaction.id)
       .map((transaction) => [transaction.id!, transaction])),
     repeatedBankReferences: findRepeatedBankReferences([...entries]),
+    identityClaims,
     ownIbanToDimension: lookups.ownIbanToDimension,
     laneB: snapshot.interAccountResolver(laneBJournals, lookups.ownDimensionIds),
   };
@@ -149,7 +180,11 @@ export function classifyCamtJournalCoverage(
     for (const journal of context.journals) {
       if (!journalDocumentReferenceKeys(journal.document_number).includes(entryKey)) continue;
       const id = journal.id!;
-      if (context.repeatedBankReferences.has(reference) || journal.registered !== true) review("camt_journal_conflict", id);
+      if (
+        context.repeatedBankReferences.has(reference) ||
+        (context.identityClaims.get(id)?.size ?? 0) > 1 ||
+        journal.registered !== true
+      ) review("camt_journal_conflict", id);
       else if (bankNetCents(journal, context) === undefined) review("camt_journal_inconsistent_amounts", id);
       else if (Math.abs(toUtcDay(journal.effective_date) - toUtcDay(entry.date)) > IDENTITY_WINDOW_DAYS * 86_400_000) {
         review("camt_journal_identity_stale", id);
