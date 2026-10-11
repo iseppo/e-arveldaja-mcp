@@ -1046,6 +1046,9 @@ const LEGACY_EURO_AREA_CODES: ReadonlySet<string> = new Set(["BGN", "HRK"]);
 const MERCHANT_CURRENCY_LABEL_PREFIX_RE = /\b(?:transaction|merchant|original|local|purchase)\s*$/i;
 const CURRENCY_LABEL_CODE_RE =
   /\b(?:currency(?:\s+code)?|valuuta(?:kood)?|w[äa]hrung|devise|valuta|moneda)\b\s*[:=-]?\s*([A-Za-z]{3})(?![A-Za-z])/gi;
+// What may follow a labelled code for it to be the label's whole value: end of
+// line or a non-letter delimiter, not further words.
+const CURRENCY_LABEL_WHOLE_VALUE_END_RE = /^\s*(?:$|[^\s\p{L}])/u;
 // An uppercase code welded or adjacent to a decimal amount: "CNY100.00",
 // "KWD 1.250", "HUF 4 000.00", "100.00 CNY". The amount must follow the code
 // directly (no "SAR 2 1.50" quantity gap) and carry decimals, which keeps SKU
@@ -1055,8 +1058,9 @@ const AMOUNT_ADJACENT_CODE_RE =
 // Zero-decimal currencies print whole amounts ("Total HUF 10000", "Total
 // 10 000 HUF"). Same adjacency rule, integer amount; the amount must end there
 // (no "SAR 2 1.50" quantity gap). Only checked on a total/amount line.
+// Thousand-groups are bounded so a long "111 111 ..." run stays linear.
 const INTEGER_AMOUNT_ADJACENT_CODE_RE =
-  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3})+|\d+)(?![.,]?\d)(?!\s+\d)|(?<![\d.,])\d+(?:\s\d{3})*\s?([A-Z]{3})(?![A-Za-z])/g;
+  /(?<![A-Za-z])([A-Z]{3})\s?-?(?:\d{1,3}(?:[.,\s]\d{3}){1,6}|\d+)(?![.,]?\d)(?!\s+\d)|(?<![\d.,])\d+(?:\s\d{3}){0,6}\s?([A-Z]{3})(?![A-Za-z])/g;
 // The amount-adjacent form counts only on a total/amount line; a bare
 // "BND 72.50" / "TTD 55.00" item or ticker line is not a document currency.
 const CURRENCY_AMOUNT_LINE_LABEL_RE = /(amount|summa)/i;
@@ -1120,9 +1124,14 @@ function detectUnsupportedCurrencyCode(
       !(skipMerchantLabels && MERCHANT_CURRENCY_LABEL_PREFIX_RE.test(line.slice(0, match.index))));
     // An uppercase word-like code printed right after an explicit currency
     // label ("Currency: TRY") is the document currency, not a receipt word.
+    // In any case only when it is the label's whole value ("Currency: try",
+    // not "Currency: all prices include VAT").
     for (const match of labelMatches) {
       const code = match[1];
-      if (code && UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(code)) return code;
+      if (!code) continue;
+      const wholeValue = CURRENCY_LABEL_WHOLE_VALUE_END_RE.test(line.slice(match.index + match[0].length));
+      const upper = code.toUpperCase();
+      if ((code === upper || wholeValue) && UNSUPPORTED_CURRENCY_WORD_LIKE_CODES.has(upper)) return upper;
     }
     const matches = [
       ...labelMatches,
