@@ -328,6 +328,8 @@ const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
   "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
+const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
+  "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_inter_account_transfers.";
 
@@ -508,6 +510,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // reordered export and a ledger written by releases before split-leg tags
   // (which booked only the FIRST leg as WISE:{id} and the first fee-bearing
   // leg's fee as WISE:FEE:{id}) all resolve to the legs really missing.
+  // A plain row whose amount-only / any-leg pass still fits several legs
+  // cannot say which one it is: the ID's unclaimed legs go to review.
+  const ambiguousLegacyIds = new Set<string>();
   const claimStoredLegs = (
     storedById: Map<string, StoredWiseLeg[]>,
     value: (leg: WiseRow) => { amount: number; currency: string } | undefined,
@@ -517,19 +522,23 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       const stored = storedById.get(id) ?? [];
       // Leg-tagged rows (WISE:{id}:{CUR}) claim their legs first, then plain
       // rows run the passes against the legs left, whatever the ledger order.
-      for (const legTagged of [true, false]) {
+      phases: for (const legTagged of [true, false]) {
         const open = new Set(stored.filter(entry => (entry.suffixCurrency !== undefined) === legTagged));
         for (let pass = 1; pass <= 4; pass++) {
           for (const entry of [...open]) {
             // Legs another stored row already accounts for are out of the EUR gate.
             const currencies = legs.filter(leg => !claimed.has(leg)).flatMap(leg => value(leg)?.currency ?? []);
-            const leg = legs.find(candidate => {
+            const candidates = legs.filter(candidate => {
               const candidateValue = value(candidate);
               return !claimed.has(candidate) && candidateValue !== undefined &&
                 storedLegMatches(entry, candidate, candidateValue, legs.length, currencies, pass);
             });
-            if (!leg) continue;
-            claimed.add(leg);
+            if (candidates.length === 0) continue;
+            if (pass >= 3 && candidates.length > 1) {
+              ambiguousLegacyIds.add(id);
+              break phases;
+            }
+            claimed.add(candidates[0]!);
             open.delete(entry);
           }
         }
@@ -545,6 +554,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const commands: WiseImportCommand[] = [];
   const mainCommandKeysByRow = new Map<number, string>();
   const alreadyImportedApprovalReviews: WiseTransferReview[] = [];
+  const legacyLegReviews: WiseTransferReview[] = [];
   let feeResolutionRequired = false;
 
   for (let i = 0; i < eligible.length; i++) {
@@ -561,6 +571,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const transactionCurrency = bookedCurrencyForWiseRow(row);
     const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
     const wiseIdTag = `WISE:${legId}`;
+    if (ambiguousLegacyIds.has(row.id) && (!claimedMainLegs.has(row) || (fee > 0 && !claimedFeeLegs.has(row)))) {
+      legacyLegReviews.push({
+        wise_id: legId,
+        code: "wise_legacy_leg_ambiguous",
+        reason: WISE_LEGACY_LEG_AMBIGUOUS_REASON,
+        source_verified: false,
+        target_verified: false,
+        approval_required: false,
+      });
+      continue;
+    }
     // The WISE:{id} tag is the dedup identity and the source-direction marker is
     // mandatory, so neither is ever truncated: a row whose main (or fee)
     // description cannot fit them within the description cap is not booked.
@@ -806,7 +827,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const review = transferDecisions.get(entry.source_row)?.review;
     return review ? [review] : [];
   });
-  ownershipReviews.push(...alreadyImportedApprovalReviews);
+  ownershipReviews.push(...alreadyImportedApprovalReviews, ...legacyLegReviews);
 
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,

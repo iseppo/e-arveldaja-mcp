@@ -35,7 +35,8 @@ export interface WiseTransferReview {
     | "wise_transfer_ownership_unverified"
     | "wise_transfer_cross_currency"
     | "wise_transfer_journal_ambiguous"
-    | "wise_transfer_already_imported";
+    | "wise_transfer_already_imported"
+    | "wise_legacy_leg_ambiguous";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;

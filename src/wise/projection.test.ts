@@ -168,6 +168,29 @@ describe("Wise card payment split across two balances (same ID)", () => {
     },
   );
 
+  // Same plain EUR12 row, but USD12 and GBP12 legs both fit it: the stored row
+  // cannot say which one is missing.
+  const caseB = {
+    csv: [leg("12.00", "USD"), leg("12.00", "GBP"), leg("33.23", "EUR", "38.00,USD")],
+    ledger: [
+      stored(1, "WISE:CARD_TRANSACTION-9001", 12),
+      stored(2, "WISE:CARD_TRANSACTION-9001:EUR", 33.23),
+      stored(3, "WISE:FEE:CARD_TRANSACTION-9001", 0.1),
+      stored(4, "WISE:FEE:CARD_TRANSACTION-9001:EUR", 0.1),
+    ],
+  };
+  it.each(permutations(caseB.csv).flatMap(csv => permutations(caseB.ledger).map(ledger => [csv, ledger] as const)))(
+    "a plain legacy row fitting several legs routes the unclaimed legs to review, never a guess (%#)",
+    (csv, ledger) => {
+      const output = project(rowsOf(csv), ledger);
+      expect(output.commands).toEqual([]);
+      expect(output.ownershipReviews.map(review => `${review.code}:${review.wise_id}`).sort()).toEqual([
+        "wise_legacy_leg_ambiguous:CARD_TRANSACTION-9001:GBP",
+        "wise_legacy_leg_ambiguous:CARD_TRANSACTION-9001:USD",
+      ]);
+    },
+  );
+
   it("an old plain-ID row still covers its own single-row transaction", () => {
     // Pre-currency-fix rows were stored as EUR at the nominal amount; incoming
     // rows are now booked gross. Either a currency or an amount match is the

@@ -5883,6 +5883,30 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     })]);
   });
 
+  it("surfaces an ambiguous legacy split leg as a review row in the preview, with nothing to create", async () => {
+    const leg = (amount: string, currency: string) => buildM04Values({
+      id: "CARD_TRANSACTION-9001", date: "2026-07-05", sourceAmount: amount, sourceCurrency: currency, sourceFeeAmount: "0.10",
+    });
+    const storedRow = (id: number, tag: string, amount: number) => ({
+      id, status: "PROJECT", accounts_dimensions_id: 5, type: "C", amount, cl_currencies_id: "EUR", date: "2026-07-05",
+      description: `${tag} Ordinary Vendor [source_direction=OUT]`, bank_account_name: "Ordinary Vendor",
+    });
+    mockedReadFile.mockResolvedValue(buildCsvRows([leg("12", "USD"), leg("12", "GBP"), leg("33.23", "EUR")]));
+    const setup = setupWiseTool([
+      storedRow(1, "WISE:CARD_TRANSACTION-9001", 12),
+      storedRow(2, "WISE:CARD_TRANSACTION-9001:EUR", 33.23),
+      storedRow(3, "WISE:FEE:CARD_TRANSACTION-9001", 0.1),
+      storedRow(4, "WISE:FEE:CARD_TRANSACTION-9001:EUR", 0.1),
+    ]);
+    const dry = parseWiseResponse(await setup.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.needs_review.map((review: any) => `${review.code}:${review.wise_id}`).sort()).toEqual([
+      "wise_legacy_leg_ambiguous:CARD_TRANSACTION-9001:GBP",
+      "wise_legacy_leg_ambiguous:CARD_TRANSACTION-9001:USD",
+    ]);
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("a stored fee row from an interrupted import does not hide a net-of-fee journal", async () => {
     // Journal C LHV100 / D Wise99.50 / D fee0.50 books the transfer net of the
     // fee; an interrupted earlier import already stored the fee row.
