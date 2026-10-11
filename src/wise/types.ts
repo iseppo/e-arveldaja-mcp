@@ -41,6 +41,21 @@ export interface WiseTransferReview {
   source_verified: boolean;
   target_verified: boolean;
   approval_required: boolean;
+  /** wise_transfer_journal_ambiguous: the same-key (±1 day) journals the row
+   * could not be told apart from. */
+  candidate_journal_ids?: number[];
+  candidates?: WiseTransferJournalCandidate[];
+}
+
+export interface WiseTransferJournalCandidate {
+  journal_id: number;
+  /** The journal's source bank transaction, when it is a live row on another
+   * own bank dimension. */
+  counterpart_transaction_id?: number;
+  /** "counterpart_bank_ref" when the journal's document_number is that bank
+   * row's bank_ref_number. Informational only: it tells where the label came
+   * from, not which Wise movement the journal books. */
+  label_source: "counterpart_bank_ref" | "other";
 }
 
 export interface WiseTransferDecision {

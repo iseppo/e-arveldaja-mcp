@@ -262,3 +262,82 @@ describe("Wise inter-account row matched to a journal that already books its fee
     expect(output.commands.map(command => command.action)).toEqual(["fee_create_and_confirm", "inter_account"]);
   });
 });
+
+describe("Wise transfer next to a journal labelled with the counterpart bank reference (F2a)", () => {
+  const LHV = 200;
+  const BANK_REF = "861769266426F111B46B001DD8D11D14";
+  const dims = [
+    { id: WISE, accounts_id: 1020, is_deleted: false },
+    { id: LHV, accounts_id: 1020, is_deleted: false },
+    { id: FEE_DIM, accounts_id: 8610, is_deleted: false },
+  ] as AccountDimension[];
+  const transferIn = (id: string, date = "2026-03-23", amount = "100.00") =>
+    `${id},COMPLETED,IN,"${date} 10:00:00","${date} 10:00:01",0,EUR,,,"Firma OÜ",${amount},EUR,"Firma OÜ",${amount},EUR,1,,,,"Money added",`;
+  // The LHV-side bank row, natively confirmed: its journal carries the LHV
+  // bank_ref_number as document_number.
+  const counterpartTx = {
+    id: 5001, status: "CONFIRMED", accounts_dimensions_id: LHV, type: "C", amount: 100, cl_currencies_id: "EUR",
+    date: "2026-03-23", description: "SEPPO AI OU", bank_account_name: "Seppo AI OÜ", bank_ref_number: BANK_REF,
+  } as Transaction;
+  const labelledJournal = (overrides: Record<string, unknown> = {}, wiseType: "D" | "C" = "D", amount = 100) => ({
+    id: 701, registered: true, is_deleted: false, effective_date: "2026-03-23",
+    operation_type: "TRANSACTION", operations_id: 5001, document_number: BANK_REF,
+    postings: [
+      { accounts_dimensions_id: LHV, accounts_id: 1020, type: wiseType === "D" ? "C" : "D", amount },
+      { accounts_dimensions_id: WISE, accounts_id: 1020, type: wiseType, amount },
+    ],
+    ...overrides,
+  }) as unknown as Journal;
+  const run = (
+    lines: string[],
+    journals: Journal[],
+    extra: Partial<Parameters<typeof projectWiseCommands>[0]> = {},
+  ) => {
+    const rows = rowsOf(lines);
+    const decision = { targetDimensionId: LHV, sourceVerified: true, targetVerified: true, ownershipBasis: "verified_endpoints" } as WiseTransferDecision;
+    return project(rows, [counterpartTx], {
+      accountDimensions: dims,
+      transferDecisions: new Map(rows.map(row => [row, decision])),
+      postingDimensionsSnapshot: new Map(dims.map(dim => [dim.id!, dim])),
+      journalSnapshot: journals,
+      createInterAccountGuard: own => BookingGuard.fromSnapshot({} as never, journals, own),
+      ...extra,
+    });
+  };
+  const actions = (output: ReturnType<typeof project>) =>
+    output.commands.map(command => `${command.action}:${command.wise_id}${command.action === "inter_account" ? `:${command.mutation_mode}:${command.existing_journal_id}` : ""}`);
+
+  it("without a mapping the row is still created, and the review names the candidate journal and its counterpart bank row", () => {
+    const output = run([transferIn("TRANSFER-1001")], [labelledJournal()]);
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(output.ownershipReviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-1001",
+      code: "wise_transfer_journal_ambiguous",
+      candidate_journal_ids: [701],
+      candidates: [{ journal_id: 701, counterpart_transaction_id: 5001, label_source: "counterpart_bank_ref" }],
+    })]);
+    expect(output.ownershipReviews[0]!.reason).toContain("journalized_transfer_ids");
+  });
+
+  it("a BANK:-prefixed label still reads as the counterpart bank reference; an unrelated label does not", () => {
+    const prefixed = run([transferIn("TRANSFER-1001")], [labelledJournal({ document_number: `BANK:${BANK_REF}` })]);
+    expect(prefixed.ownershipReviews[0]!.candidates).toEqual([
+      { journal_id: 701, counterpart_transaction_id: 5001, label_source: "counterpart_bank_ref" },
+    ]);
+    const other = run([transferIn("TRANSFER-1001")], [labelledJournal({ document_number: "BANK:abc" })]);
+    expect(other.ownershipReviews[0]!.candidates).toEqual([
+      { journal_id: 701, counterpart_transaction_id: 5001, label_source: "other" },
+    ]);
+    const manual = run([transferIn("TRANSFER-1001")], [labelledJournal({ operation_type: "JOURNAL", operations_id: undefined, document_number: "X-1" })]);
+    expect(manual.ownershipReviews[0]!.candidates).toEqual([{ journal_id: 701, label_source: "other" }]);
+  });
+
+  it("a distinct Wise ID with the same key is never absorbed by the labelled journal (Codex counterexample)", () => {
+    const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-9999")], [labelledJournal()]);
+    expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-9999"]);
+    expect(output.ownershipReviews.map(review => `${review.wise_id}:${review.code}`)).toEqual([
+      "TRANSFER-1001:wise_transfer_journal_ambiguous",
+      "TRANSFER-9999:wise_transfer_journal_ambiguous",
+    ]);
+  });
+});

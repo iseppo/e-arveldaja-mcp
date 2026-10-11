@@ -13,6 +13,8 @@ import type { BookingGuard } from "../booking-guard.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { TRANSACTION_DESCRIPTION_MAX_LENGTH, weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
+import { bankReferenceLookupKey, journalDocumentReferenceKeys } from "../camt/duplicate-identity.js";
+import { buildInterAccountJournalIndex, toUtcDay, UNKNOWN_JOURNAL_ID } from "../tools/inter-account-utils.js";
 import {
   bookedAmountForWiseRow,
   bookedCurrencyForWiseRow,
@@ -41,6 +43,7 @@ import {
   type WiseRow,
   type WiseSkippedEntry,
   type WiseTransferDecision,
+  type WiseTransferJournalCandidate,
   type WiseTransferReview,
 } from "./types.js";
 
@@ -327,7 +330,7 @@ const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
 const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
-  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
+  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed. Either reconcile it with reconcile_inter_account_transfers, or, if you have checked that one of the candidate journals books exactly this Wise transfer, re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so the row is recorded as already journalized instead of created.";
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
   "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
@@ -842,6 +845,34 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     // recorded back: every row here is a Wise-side leg with a unique Wise ID,
     // so two of them are never the two legs of one transfer.
     const guard = createInterAccountGuard(ownDimensionIds);
+    // The same Lane B index, read-only, to name the journals a review is about.
+    const laneBIndex = buildInterAccountJournalIndex(journalSnapshot, ownDimensionIds);
+    const laneBCandidateIds = (targetDim: number, amounts: number[], date: string): number[] => {
+      const day = toUtcDay(date);
+      const dates = Number.isFinite(day)
+        ? [-1, 0, 1].map(offset => new Date(day + offset * 86400000).toISOString().slice(0, 10))
+        : [date];
+      const ids = new Set(amounts.flatMap(amount => dates.flatMap(candidateDate =>
+        (laneBIndex.get(`${accounts_dimensions_id}|${targetDim}|${roundMoney(amount)}|${candidateDate}`) ?? [])
+          .map(entry => entry.journal_id))));
+      ids.delete(UNKNOWN_JOURNAL_ID);
+      return [...ids].sort((left, right) => left - right);
+    };
+    const describeCandidate = (journalId: number): WiseTransferJournalCandidate => {
+      const journal = journalSnapshot.find(candidate => candidate.id === journalId);
+      const counterpart = journal?.operation_type === "TRANSACTION" && journal.operations_id !== undefined
+        ? existingTx.find(tx => tx.id === journal.operations_id && isNonVoidTransaction(tx) &&
+            tx.accounts_dimensions_id !== accounts_dimensions_id && ownDimensionIds.has(tx.accounts_dimensions_id))
+        : undefined;
+      const counterpartKey = bankReferenceLookupKey(counterpart?.bank_ref_number ?? undefined);
+      return {
+        journal_id: journalId,
+        ...(counterpart?.id !== undefined ? { counterpart_transaction_id: counterpart.id } : {}),
+        label_source: counterpartKey !== undefined && journalDocumentReferenceKeys(journal?.document_number).includes(counterpartKey)
+          ? "counterpart_bank_ref"
+          : "other",
+      };
+    };
 
     for (const entry of [...created]) {
       const row = entry.source_row;
@@ -893,7 +924,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(netQuery);
       }
       if (resolution.status === "ambiguous_refless" || otherLabelled) {
-        ownershipReviews.push(reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON));
+        const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
+        ownershipReviews.push({
+          ...reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON),
+          candidate_journal_ids: candidateIds,
+          candidates: candidateIds.map(describeCandidate),
+        });
         continue;
       }
       const existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
