@@ -728,6 +728,8 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
   const m = input.match;
   const dryRun = input.mode === "DRY_RUN";
   const errorCount = m.errors.length;
+  // Report-only: the operator deletes a proposed mirror with delete_transaction.
+  const proposedMirrors = m.skippedAlreadyHandled.filter(row => row.mirror_proposal !== undefined);
 
   const counts = {
     total_unconfirmed: m.totalUnconfirmed,
@@ -735,6 +737,7 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
     matched_one_sided: m.matchedOneSided.length,
     skipped_ambiguous: m.ambiguousPairs.length,
     duplicates: m.skippedAlreadyHandled.length,
+    proposed_mirrors: proposedMirrors.length,
     needs_review_ambiguous_refless: m.ambiguousRefless.length,
     needs_review_cross_currency: m.crossCurrencyPairs.length,
     errors: errorCount,
@@ -750,6 +753,9 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
   const warnings: CompactWarning[] = [];
   for (const pair of m.ambiguousPairs.slice(0, 3)) {
     warnings.push({ item_id: String(pair.outgoing_transaction_id), code: "ambiguous_pair", message: pair.reason });
+  }
+  for (const row of proposedMirrors.slice(0, 3)) {
+    warnings.push({ item_id: String(row.transaction_id), code: "mirror_proposal", message: row.reason });
   }
   for (const row of m.ambiguousRefless.slice(0, 3)) {
     warnings.push({ code: row.code ?? "ambiguous_refless", message: row.reason });
@@ -817,7 +823,7 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
   });
 
   const message = dryRun
-    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s).`
+    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s)${proposedMirrors.length > 0 ? `; ${proposedMirrors.length} proposed mirror deletion(s) to resolve with delete_transaction` : ""}.`
     : `Inter-account reconcile handled ${m.matchedPairs.length} transfer pair(s) and ${m.matchedOneSided.length} one-sided transfer(s); ${errorCount} error(s).`;
 
   const status = dryRun

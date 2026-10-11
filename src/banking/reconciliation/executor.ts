@@ -1332,8 +1332,45 @@ export async function runInterAccountMatching(
     }
   }
 
+  // Positive evidence that `tx` (a Phase 2 row already covered by `journalId`)
+  // mirrors that journal's confirmed counterpart transaction, or undefined.
+  // Report-only: the operator resolves a proposal with delete_transaction.
+  const isPlainEur = (row: Transaction) =>
+    row.cl_currencies_id === "EUR" && (row.base_amount == null || sameAmountToTheCent(row.base_amount, row.amount));
+  function mirrorProposalFor(tx: Transaction, targetDimension: number, journalId: number): NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> | undefined {
+    const journal = guard.journals.find(j => j.id === journalId);
+    if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION") return undefined;
+    const counterpart = journal.operations_id != null ? allTx.find(row => row.id === journal.operations_id) : undefined;
+    if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED") return undefined;
+    if (counterpart.accounts_dimensions_id !== targetDimension || !sameAmountToTheCent(counterpart.amount, tx.amount)) return undefined;
+    if (!isPlainEur(tx) || !isPlainEur(counterpart)) return undefined;
+    if (!hasOwnOriginEvidence(tx, targetDimension)) return undefined;
+    const direction = signedBankTransactionDirection(tx);
+    if (!direction) return undefined;
+    const ownSide = direction === "incoming" ? "D" : "C";
+    const legsOn = (dim: number) => journal.postings.filter(p => !p.is_deleted && p.accounts_dimensions_id === dim);
+    const ownLegs = legsOn(tx.accounts_dimensions_id);
+    const targetLegs = legsOn(targetDimension);
+    if (ownLegs.length === 0 || ownLegs.some(p => p.type !== ownSide)) return undefined;
+    if (targetLegs.length === 0 || targetLegs.some(p => p.type === ownSide)) return undefined;
+    if (signedBankTransactionDirection(counterpart) === direction) return undefined;
+    return {
+      counterpart_transaction_id: counterpart.id!,
+      journal_id: journalId,
+      evidence: [
+        "journal_is_counterpart_transaction",
+        "counterpart_confirmed_on_target_account",
+        "same_eur_amount",
+        "own_origin_evidence",
+        "posting_side_matches_signed_direction",
+        "sole_same_key_candidate",
+      ],
+    };
+  }
+  const mirrorProposals: Array<{ row: SkippedAlreadyHandledRow; proposal: NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> }> = [];
+
   for (const tx of remaining) {
-    if (!tx.id || blockedOneSidedTxIds.has(tx.id)) continue;
+    if (!tx.id || blockedOneSidedTxIds.has(tx.id) || consumedTxIds.has(tx.id)) continue;
     const { targetDimension, confidence, reasons, ambiguousTargetDimensions } =
       inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
 
@@ -1385,13 +1422,41 @@ export async function runInterAccountMatching(
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(tx.id);
-      skippedAlreadyHandled.push({
+      // Other unhandled rows with this transfer's key (same account and
+      // target, same EUR cents, ±1 day) — including rows with an unverifiable
+      // marker. The journal covers one movement; with several candidates it
+      // cannot be told which is its mirror, so all of them go to review.
+      const sameKeyCandidates = [...remaining, ...unconfirmed.filter(hasUnverifiableCamtMarker)].filter(other =>
+        other.id !== undefined && other.id !== tx.id && !consumedTxIds.has(other.id) &&
+        other.accounts_dimensions_id === tx.accounts_dimensions_id &&
+        Math.abs(toUtcDay(other.date) - toUtcDay(tx.date)) / 86_400_000 <= 1 &&
+        (hasUnverifiableCamtMarker(other)
+          ? sameAmountToTheCent(comparableTransactionAmount(other), amountEur) &&
+            [unverifiedMarkerTransferClaim(other, lookups)].some(claim =>
+              claim?.targetDimension === targetDimension || claim?.ambiguousTargetDimensions?.includes(targetDimension))
+          // A row whose own EUR amount does not resolve is already an error row.
+          : [resolveOneSidedTransferAmount(other)].some(resolved => resolved.ok && sameAmountToTheCent(resolved.amountEur, amountEur)) &&
+            inferOneSidedTransfer(other, lookups, oneSidedInferenceCache).targetDimension === targetDimension));
+      if (sameKeyCandidates.length > 0) {
+        const ids = [tx.id, ...sameKeyCandidates.map(other => other.id!)];
+        for (const id of ids) consumedTxIds.add(id);
+        ambiguousRefless.push({
+          transaction_ids: ids, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
+          source_account: sourceTitle, target_account: targetTitle,
+          reason: `Transactions ${ids.join(", ")} are same-amount transfers from ${sourceTitle} to ${targetTitle} within a day of each other, but journal #${resolution.journal_id} books only one movement, so it cannot be told which of them (if any) is its mirror. Check the bank statements: delete the mirror row and confirm any genuine transfer inline.`,
+        });
+        continue;
+      }
+      const row: SkippedAlreadyHandledRow = {
         transaction_id: tx.id, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
         source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
         target_account: targetTitle, target_dimension_id: targetDimension,
         existing_journal_id: resolution.journal_id,
         reason: "Already journalized from the other account side",
-      });
+      };
+      skippedAlreadyHandled.push(row);
+      const proposal = mirrorProposalFor(tx, targetDimension, resolution.journal_id);
+      if (proposal) mirrorProposals.push({ row, proposal });
       continue;
     }
     if (resolution.status === "ambiguous_refless") {
@@ -1428,6 +1493,15 @@ export async function runInterAccountMatching(
       undefined, tx.bank_ref_number ?? tx.ref_number,
     );
     if (tx.clients_id == null) await resolveCompanyClientsId();
+  }
+
+  // A proposal needs the journal to have no other claimant in this run.
+  for (const { row, proposal } of mirrorProposals) {
+    const claimants = skippedAlreadyHandled.filter(other => other.existing_journal_id === proposal.journal_id).length;
+    if (claimants !== 1) continue;
+    row.mirror_proposal = proposal;
+    row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };
+    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction; reconcile never deletes it automatically.`;
   }
 
   const companyClientsId = await resolveCompanyClientsId();

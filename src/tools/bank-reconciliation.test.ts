@@ -3810,6 +3810,107 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
   });
 
+  describe("Phase 2 mirror proposals (F4b): report-only, never deleted", () => {
+    const counterpart = (o: Record<string, unknown> = {}) => ({
+      id: 5001, status: "CONFIRMED", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26",
+      accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null,
+      description: "WISE:TRANSFER-1 top-up [source_direction=IN]", ...o,
+    });
+    const journal = (o: Record<string, unknown> = {}) => ({
+      id: 9001, effective_date: "2026-09-26", is_deleted: false, registered: true, operation_type: "TRANSACTION", operations_id: 5001,
+      document_number: null,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 600, base_amount: 600, is_deleted: false },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 600, base_amount: 600, is_deleted: false },
+      ],
+      ...o,
+    });
+    const setup = (transactions: unknown[], journals: unknown[] = [journal()]) =>
+      setupInterAccountTool({ transactions, journals, bankAccounts: threeAccounts, companyName: "Näide OÜ" });
+    const proposals = (payload: any) => payload.already_handled.filter((row: any) => row.mirror_proposal);
+
+    it("proposes the sole same-key mirror for explicit deletion, in dry run and execute, and never deletes it", async () => {
+      const { handler, api } = setup([counterpart(), camtRow(5002)]);
+      const dry = parseMcpResponse((await handler({})).content[0]!.text);
+      const executed = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      for (const payload of [dry, executed]) {
+        expect(payload.matched_one_sided).toBe(0);
+        expect(payload.already_handled).toEqual([expect.objectContaining({
+          transaction_id: 5002, existing_journal_id: 9001,
+          mirror_proposal: expect.objectContaining({ counterpart_transaction_id: 5001, journal_id: 9001, evidence: expect.any(Array) }),
+          next_action: { tool: "delete_transaction", args: { id: 5002 }, approval_required: true },
+        })]);
+      }
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("Codex counterexample: two same-day outgoings to the own Wise IBAN and one journal → no proposal, both reviewed", async () => {
+      for (const order of [[5002, 5003], [5003, 5002]]) {
+        const rows = order.map(id => camtRow(id));
+        const { handler, api } = setup([counterpart(), ...rows]);
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(payload.already_handled).toEqual([]);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(payload.ambiguous_refless).toEqual([
+          expect.objectContaining({ transaction_ids: expect.arrayContaining([5002, 5003]) }),
+        ]);
+        expect(payload.ambiguous_refless[0].transaction_ids).toHaveLength(2);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      }
+    });
+
+    it("makes no proposal when the journal is not the counterpart's TRANSACTION journal (ENTRY)", async () => {
+      const { handler } = setup([counterpart(), camtRow(5002)], [journal({ operation_type: "ENTRY" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal when the counterpart is not CONFIRMED", async () => {
+      for (const status of ["PROJECT", "VOID"]) {
+        const { handler, api } = setup([counterpart({ status }), camtRow(5002)]);
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
+    });
+
+    it("Codex counterexample: a verified mirror plus a same-day row with a tampered marker → no proposal, both reviewed", async () => {
+      const { handler } = setup([counterpart(), camtRow(5002), tamperSig(camtRow(5003))]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+      expect(payload.ambiguous_refless).toContainEqual(expect.objectContaining({ transaction_ids: [5002, 5003] }));
+    });
+
+    it("makes no proposal when the mirror's signed direction contradicts its journal posting", async () => {
+      // The counterpart carries no signed direction, so only the posting side can veto.
+      const { handler } = setup([counterpart({ description: "top-up" }), camtRow(5002, { dir: "CRDT" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal for a non-EUR counterpart (EUR-only)", async () => {
+      const { handler } = setup([counterpart({ cl_currencies_id: "USD", base_amount: 600 }), camtRow(5002)]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal when the journal has another claimant", async () => {
+      // A Phase 1 pair (5006 -> 5007) already claims journal 9001 by its
+      // reference; the Phase 2 row 5002 carrying the same reference is the
+      // sole same-key Phase 2 row but not the journal's only claimant.
+      const withRef = (id: number) => ({ ...camtRow(id, { ref: "R1" }), bank_ref_number: "R1" });
+      const wiseIn = { id: 5007, status: "PROJECT", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null, description: "WISE:T5007 top-up [source_direction=IN]" };
+      const { handler } = setup([counterpart(), withRef(5006), withRef(5002), wiseIn], [journal({ document_number: "R1" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.already_handled).toEqual(expect.arrayContaining([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]));
+      expect(proposals(payload)).toEqual([]);
+    });
+  });
+
   it("reports a company-name transfer with no single target for review instead of dropping it (F4c)", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [{ id: 5004, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 100, bank_account_name: "Näide OÜ", bank_account_no: null }],

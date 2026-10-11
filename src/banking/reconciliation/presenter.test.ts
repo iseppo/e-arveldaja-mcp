@@ -513,6 +513,23 @@ describe("renderInterAccountCompact", () => {
     expect(summary.counts?.needs_review_ambiguous_refless).toBe(1);
     expect(summary.warnings?.some(w => w.code === "ambiguous_refless")).toBe(true);
   });
+
+  it("counts mirror proposals and surfaces them as delete-for-review warnings, never as a command", () => {
+    const proposal = { counterpart_transaction_id: 70, journal_id: 900, evidence: ["sole_same_key_candidate"] };
+    const match = makeInterAccount(0, {
+      skippedAlreadyHandled: [
+        { transaction_id: 71, amount: 600, date: "2026-03-03", source_account: "LHV", existing_journal_id: 900, reason: "Likely mirror", mirror_proposal: proposal, next_action: { tool: "delete_transaction", args: { id: 71 }, approval_required: true } },
+        { transaction_id: 74, amount: 10, date: "2026-03-03", source_account: "LHV", existing_journal_id: 901, reason: "Already journalized" },
+      ],
+    });
+    const { summary } = renderInterAccountCompact({ mode: "DRY_RUN", match, planHandle: "P" });
+    expect(summary.counts?.proposed_mirrors).toBe(1);
+    expect(summary.counts?.duplicates).toBe(2);
+    expect(summary.warnings).toContainEqual({ item_id: "71", code: "mirror_proposal", message: "Likely mirror" });
+    expect(summary.message).toContain("1 proposed mirror deletion(s)");
+    const clean = renderInterAccountCompact({ mode: "DRY_RUN", match: makeInterAccount(1), planHandle: "P" });
+    expect(clean.summary.counts?.proposed_mirrors).toBe(0);
+  });
 });
 
 describe("renderSuspects untrusted text", () => {
