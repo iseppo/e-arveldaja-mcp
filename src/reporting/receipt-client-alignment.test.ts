@@ -3,6 +3,7 @@ import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import { createReportingOperations } from "./operations.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { Journal, Transaction } from "../types/api.js";
+import { todayInTallinn } from "../local-date.js";
 
 const PAYER = 2309260;
 const INVOICE_CLIENT = 2327264;
@@ -299,7 +300,7 @@ describe("ReportingOperations receipt_client_alignment", () => {
     if (!outcome.ok || outcome.value.report !== "receipt_client_alignment") return;
     const { from, to, defaulted } = outcome.value.window;
     expect(defaulted).toBe(true);
-    expect(to).toBe(new Date().toISOString().split("T")[0]!);
+    expect(to).toBe(todayInTallinn());
     const [year, month, day] = to.split("-").map(Number);
     expect(from).toBe(new Date(Date.UTC(year!, month! - 1 - 12, day!)).toISOString().split("T")[0]!);
     expect(api.transactions.listAll).toHaveBeenCalledWith({ status: "CONFIRMED", start_date: from, end_date: to });
