@@ -2333,6 +2333,16 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
   });
 
+  it.each(["try", "Try", "TRY"])("flags a word-like code that is the whole currency-label value, any case: Currency: %s", (code) => {
+    const fields = extractReceiptFieldsFromText([
+      "Supplier: Bosphorus Software Ltd", "Invoice no: TR-2026-41", "Date: 2026-10-01", `Currency: ${code}`,
+      "Subtotal TRY1200", "VAT 0", "Total TRY1200", "Paid EUR32.10",
+    ].join("\n"), "receipt.pdf");
+    expect(fields.currency).toBeUndefined();
+    expect(unsupportedNote("TRY")(fields.extraction_notes)).toBe(true);
+    expect(summarizeInvoiceExtraction(fields).confidence).toBe("low");
+  });
+
   it.each([
     ["Valuuta: GEL", "GEL"],
     ["Currency code: BAM", "BAM"],
