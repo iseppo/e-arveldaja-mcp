@@ -53,9 +53,12 @@ type ClosingCandidate = Pick<Journal, "document_number" | "effective_date" | "po
 
 /**
  * True when the journal carries the MCP's YEC-RESULT-/YEC-RETAINED- number of a
- * year other than `year`: that number names the other year's close, so no
- * structural (date + accounts) matcher may claim it for `year` — e.g. a late
- * YEC-RETAINED-2024 dated 2026-01-01 is not 2025's transfer.
+ * year other than `year`: that number names the other year's close, so the
+ * year-end close analysis must not claim it for `year` — e.g. a late
+ * YEC-RETAINED-2024 dated 2026-01-01 is not 2025's transfer. The shared date +
+ * shape predicates below deliberately do NOT apply this: the dividend lg 1
+ * calculation relies on them to exclude a late YEC-RESULT-2024 dated
+ * 2025-12-31 from 2970, where its 9000 debit falls outside the prior-year P&L.
  */
 export function isNumberedForOtherYear(journal: Pick<Journal, "document_number">, year: number): boolean {
   const numberedYear = /^YEC-(?:RETAINED|RESULT)-(\d{4})$/.exec(journal.document_number ?? "")?.[1];
@@ -79,7 +82,7 @@ export function isYearEndResultEntry(
   year: number,
   accounts: { calculatedResult: number; currentYearProfit: number },
 ): boolean {
-  if (journal.effective_date !== `${year}-12-31` || isNumberedForOtherYear(journal, year)) return false;
+  if (journal.effective_date !== `${year}-12-31`) return false;
   if (journal.document_number === yearEndResultDocumentNumber(year)) return true;
   return isResultEntryShape(journal, accounts);
 }
@@ -106,7 +109,7 @@ export function isYearEndTransferEntry(
   year: number,
   accounts: { currentYearProfit: number; retainedEarnings: number; reserves: number[] },
 ): boolean {
-  if (journal.effective_date !== `${year + 1}-01-01` || isNumberedForOtherYear(journal, year)) return false;
+  if (journal.effective_date !== `${year + 1}-01-01`) return false;
   if (journal.document_number === yearEndTransferDocumentNumber(year)) return true;
   return isRetainedTransferShape(journal, accounts);
 }

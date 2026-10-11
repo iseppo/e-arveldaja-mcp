@@ -453,6 +453,12 @@ function resolveCloseAccounts(accounts: Account[], reserveOverride?: number): Cl
 
 type ExistingCloseKind = "legacy_yecl" | "result_entry" | "retained_transfer";
 
+// The close analysis never claims a journal numbered for another year's close
+// (the shared predicate keeps it, for the dividend lg 1 calculation).
+function isCloseResultEntry(journal: Journal, year: number, ids: CloseAccounts): boolean {
+  return !isNumberedForOtherYear(journal, year) && isYearEndResultEntry(journal, year, ids);
+}
+
 interface ExistingCloseJournals {
   legacy: Journal[];
   result: Journal[];
@@ -469,8 +475,8 @@ function findExistingCloseJournals(allJournals: Journal[], year: number, ids: Cl
     (journal.postings ?? []).some((posting) => !posting.is_deleted && posting.accounts_id === ids.currentYearProfit));
   return {
     legacy,
-    result: live.filter((journal) => !legacy.includes(journal) && isYearEndResultEntry(journal, year, ids)),
-    transfer: live.filter((journal) => isYearEndTransferEntry(journal, year, {
+    result: live.filter((journal) => !legacy.includes(journal) && isCloseResultEntry(journal, year, ids)),
+    transfer: live.filter((journal) => !isNumberedForOtherYear(journal, year) && isYearEndTransferEntry(journal, year, {
       currentYearProfit: ids.currentYearProfit,
       retainedEarnings: ids.retainedEarnings,
       reserves: ids.reserves,
@@ -513,7 +519,7 @@ function buildCalculatedResultWarnings(
   const outside = allJournals.filter((journal) =>
     !journal.is_deleted && journal.registered &&
     journal.effective_date >= from && journal.effective_date <= to &&
-    !isYearEndResultEntry(journal, year, ids),
+    !isCloseResultEntry(journal, year, ids),
   );
   const outsideAmount = roundMoney(-netCredit(outside, ids.calculatedResult));
   if (Math.abs(outsideAmount) >= 0.01) {
@@ -524,7 +530,7 @@ function buildCalculatedResultWarnings(
     );
   }
   const resultEntries = allJournals.filter((journal) =>
-    !journal.is_deleted && journal.id !== -1 && isYearEndResultEntry(journal, year, ids),
+    !journal.is_deleted && journal.id !== -1 && isCloseResultEntry(journal, year, ids),
   );
   if (resultEntries.length > 0) {
     const booked = netCredit(resultEntries, ids.currentYearProfit);

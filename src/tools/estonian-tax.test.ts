@@ -1967,6 +1967,24 @@ describe("prepare_dividend_package remediation", () => {
     expect(check.balance_before).toBe(5000);
   });
 
+  it("RIK counts a prior year once when its YEC-RESULT entry is booked late on the distribution year's 31 Dec", async () => {
+    // 2024 profit 500 closed only on 2025-12-31 (YEC-RESULT-2024); 2025's own
+    // 1000 is not distributable yet. 2024's 500 is the whole lg 1 ceiling.
+    const journals = [
+      ...base(0),
+      makeJournal("2024-06-01", [makePosting(1000, "D", 500), makePosting(4000, "C", 500)]),
+      makeJournal("2025-06-01", [makePosting(1000, "D", 1000), makePosting(4000, "C", 1000)]),
+      makeJournal("2025-12-31", [makePosting(9000, "D", 500), makePosting(2970, "C", 500)], { document_number: "YEC-RESULT-2024" }),
+    ];
+    const { api, cb } = setup(journals, rikAccounts());
+    const result = await cb({ net_dividend: 800, shareholder_client_id: 1, effective_date: "2025-12-31", dry_run: false });
+    expect(isError(result)).toBe(true);
+    expect(String(parseResult(result).error)).toContain("Insufficient retained earnings");
+    expect(api.journals.create).not.toHaveBeenCalled();
+    const check = await lg1(journals, "2025-12-31");
+    expect(check.balance_before).toBe(500);
+  });
+
   // ---- MINOR 8: shareholder name sandboxing ---------------------------------
 
   it("MINOR-8 desandboxes the shareholder name for the journal title and wraps it at MCP output", async () => {
