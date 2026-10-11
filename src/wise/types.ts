@@ -38,7 +38,8 @@ export interface WiseTransferReview {
     | "wise_transfer_already_imported"
     | "wise_legacy_leg_ambiguous"
     | "wise_transfer_mapping_rejected"
-    | "unused_mapping";
+    | "unused_mapping"
+    | "wise_untagged_ledger_match";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -49,6 +50,8 @@ export interface WiseTransferReview {
   candidates?: WiseTransferJournalCandidate[];
   /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
   journal_id?: number;
+  /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
+  ledger_transaction_ids?: number[];
 }
 
 /** One operator-reviewed journalized_transfer_ids entry. */

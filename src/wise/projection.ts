@@ -341,6 +341,8 @@ const WISE_TRANSFER_MAPPING_REJECTED_REASON =
   "The journalized_transfer_ids mapping for this Wise transfer was not accepted, so the row is imported unconfirmed as usual. Check the mapping and reconcile the row with reconcile_inter_account_transfers. Rejected because";
 const WISE_TRANSFER_MAPPING_UNUSED_REASON =
   "This journalized_transfer_ids mapping was not used:";
+const WISE_UNTAGGED_LEDGER_MATCH_REASON =
+  "A bank row without a WISE: identity tag, already stored on this Wise account, has the same date, amount and currency. It may be this movement entered by hand. Advisory only: the row is still imported; if it duplicates the stored row, remove one of them.";
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_inter_account_transfers.";
 
@@ -1151,6 +1153,35 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     rejectMapping(row, journalId, "the row is not an own transfer approved for inter-account booking");
   }
   ownershipReviews.push(...mappingReviews);
+
+  // Advisory only (never a claim or a skip): an untagged stored row of the
+  // same movement on this account, e.g. a card payment entered by hand. A
+  // stored direction marker, when present, must agree.
+  for (const entry of created) {
+    const row = entry.source_row;
+    if (!row) continue;
+    const currency = bookedCurrencyForWiseRow(row);
+    const matches = existingTx.filter(tx =>
+      isNonVoidTransaction(tx) &&
+      tx.id !== undefined &&
+      !tx.description?.startsWith("WISE:") &&
+      tx.accounts_dimensions_id === accounts_dimensions_id &&
+      tx.date === entry.date &&
+      typeof tx.amount === "number" && Math.abs(tx.amount - entry.amount) < 0.005 &&
+      (tx.cl_currencies_id ?? "EUR") === currency &&
+      [entry.source_direction, "?"].includes(markedWiseDirection(tx.description))
+    );
+    if (matches.length === 0) continue;
+    ownershipReviews.push({
+      wise_id: entry.wise_id,
+      code: "wise_untagged_ledger_match",
+      reason: WISE_UNTAGGED_LEDGER_MATCH_REASON,
+      source_verified: false,
+      target_verified: false,
+      approval_required: false,
+      ledger_transaction_ids: matches.map(tx => tx.id!),
+    });
+  }
 
   // --- Post-import: scan eligible payment rows for unpaid purchase invoices
   // that could be repriced to Wise's actual EUR conversion. ADVISORY ONLY: the

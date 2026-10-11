@@ -452,3 +452,51 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 });
+
+describe("Wise row next to an untagged stored row of the same movement (F2b)", () => {
+  const card = (id: string) =>
+    `${id},COMPLETED,OUT,"2026-06-25 17:48:24","2026-06-25 17:48:24",0.00,EUR,,,"Seppo AI OÜ",226.80,EUR,Booking.com,226.80,EUR,1,,,"Test Person",Travel,`;
+  // Entered by hand on the Wise account, without a WISE: identity tag.
+  const manual = (overrides: Record<string, unknown> = {}) => ({
+    id: 13875420, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: WISE, type: "C", amount: 226.8,
+    cl_currencies_id: "EUR", date: "2026-06-25", bank_account_name: "ROYAL APARTMENTS OÜ", ref_number: "3970533149",
+    description: "WISE kaardimakse — Tartu majutus (Royal Apartments OÜ), Booking.com kaudu",
+    ...overrides,
+  }) as Transaction;
+  const advisories = (output: ReturnType<typeof project>) => output.ownershipReviews
+    .filter(review => review.code === "wise_untagged_ledger_match")
+    .map(review => `${review.wise_id}:${review.ledger_transaction_ids?.join(",")}`);
+
+  it("creates the row and names the stored untagged row in an advisory", () => {
+    const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual()]);
+    expect(created(output)).toEqual(["main_create:226.8 EUR"]);
+    expect(advisories(output)).toEqual(["CARD_TRANSACTION-3970533149:13875420"]);
+    expect(output.ownershipReviews[0]).toMatchObject({ approval_required: false });
+  });
+
+  it.each([
+    ["the stored row is marked as the opposite direction", { description: "Booking.com tagasimakse [source_direction=IN]" }],
+    ["the stored row is in another currency", { cl_currencies_id: "USD" }],
+    ["the stored row is deleted", { is_deleted: true }],
+    ["the stored row is VOID", { status: "VOID" }],
+    ["the stored row is on another bank account", { accounts_dimensions_id: 200 }],
+    ["the stored row is on another date", { date: "2026-06-26" }],
+    ["the stored row differs by more than half a cent", { amount: 226.81 }],
+    ["the stored row carries a WISE: identity of another movement", { description: "WISE:CARD_TRANSACTION-1 Booking.com [source_direction=OUT]" }],
+  ])("no advisory when %s", (_case, overrides) => {
+    const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual(overrides)]);
+    expect(created(output)).toEqual(["main_create:226.8 EUR"]);
+    expect(advisories(output)).toEqual([]);
+  });
+
+  it("an agreeing direction marker still matches", () => {
+    const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual({ description: "Booking.com käsitsi [source_direction=OUT]" })]);
+    expect(advisories(output)).toEqual(["CARD_TRANSACTION-3970533149:13875420"]);
+  });
+
+  it("a genuinely new same-key payment is still created: both rows carry the advisory, nothing is claimed", () => {
+    const output = project(rowsOf([card("CARD_TRANSACTION-1"), card("CARD_TRANSACTION-2")]), [manual()]);
+    expect(created(output)).toEqual(["main_create:226.8 EUR", "main_create:226.8 EUR"]);
+    expect(advisories(output)).toEqual(["CARD_TRANSACTION-1:13875420", "CARD_TRANSACTION-2:13875420"]);
+  });
+});
