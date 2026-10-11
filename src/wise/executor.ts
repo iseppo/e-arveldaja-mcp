@@ -65,6 +65,7 @@ import type {
   MainCreateCommand,
   WiseImportCommand,
   WiseInterAccountResult,
+  WiseJournalizedTransferMapping,
   WiseRow,
   WiseTransferDecision,
 } from "./types.js";
@@ -129,6 +130,8 @@ export interface WiseRunInput {
   readonly feeAccountRelationId: number | undefined;
   readonly interAccountDimensionId: number | undefined;
   readonly confirmOwnTransferIds: string[] | undefined;
+  /** Operator-reviewed Wise ID → labelled journal mappings (journalized_transfer_ids). */
+  readonly journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
   readonly approvedCommandDigest: string | undefined;
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
@@ -168,6 +171,7 @@ async function runWiseImport(
     feeAccountRelationId: fee_account_relation_id,
     interAccountDimensionId: inter_account_dimension_id,
     confirmOwnTransferIds: confirm_own_transfer_ids,
+    journalizedTransferIds: journalized_transfer_ids,
     approvedCommandDigest: approved_command_digest,
     dateFrom: date_from,
     dateTo: date_to,
@@ -329,6 +333,7 @@ async function runWiseImport(
     createInterAccountGuard: (ownDimensionIds: Set<number>) =>
       BookingGuard.fromSnapshot(api, journalSnapshot, ownDimensionIds),
     approvedTransferIds: new Set(approvedTransferIds),
+    journalizedTransferIds: journalized_transfer_ids,
     ownCompanyClientId,
     ownCompanyClientMatches,
     allPurchaseInvoices,
@@ -367,6 +372,15 @@ async function runWiseImport(
     inter_account_dimension_id,
     resolved_inter_account_dimension_id: inter_account_dimension_id ?? autoDetectedInterAccountDimId,
     confirm_own_transfer_ids: [...approvedTransferIds].sort(),
+    // The mapping changes which rows are created, so it binds the digest and
+    // the plan scope. Omitted when empty, keeping earlier plans byte-identical.
+    ...(journalized_transfer_ids !== undefined && journalized_transfer_ids.length > 0
+      ? {
+          journalized_transfer_ids: journalized_transfer_ids
+            .map(({ wise_id, journal_id }) => ({ wise_id, journal_id }))
+            .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : left.journal_id - right.journal_id),
+        }
+      : {}),
     date_from,
     date_to,
     skip_jar_transfers: skipJars,
@@ -795,6 +809,7 @@ async function runWiseImport(
       feeAccountRelationId: fee_account_relation_id,
       interAccountDimensionId: inter_account_dimension_id,
       confirmOwnTransferIds: confirm_own_transfer_ids,
+      journalizedTransferIds: journalized_transfer_ids,
       dateFrom: date_from,
       dateTo: date_to,
       skipJarTransfers: skip_jar_transfers,

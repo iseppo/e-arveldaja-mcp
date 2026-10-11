@@ -5883,6 +5883,43 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     })]);
   });
 
+  it("F2a: a reviewed journalized_transfer_ids mapping records the transfer as already journalized and is bound to the plan", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-MAP", "2026-02-02")]));
+    const journals = [lhvWiseJournal(510, "2026-02-02", 500, { document_number: "LHVREF510" })];
+    const mapping = { journalized_transfer_ids: [{ wise_id: "TRANSFER-M1-MAP", journal_id: 510 }] };
+
+    const plainSetup = setupWiseTool([], undefined, transferOptions(journals));
+    expect(Object.keys(plainSetup.options.inputSchema ?? {})).toContain("journalized_transfer_ids");
+    const plain = parseWiseResponse(await plainSetup.handler({ ...transferArgs, execute: false }));
+    expect(plain.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(plain.execution.needs_review).toEqual([expect.objectContaining({
+      code: "wise_transfer_journal_ambiguous",
+      candidate_journal_ids: [510],
+    })]);
+
+    const setup = setupWiseTool([], undefined, transferOptions(journals));
+    const { dry, executed } = await runApprovedWiseImport(setup, { ...transferArgs, ...mapping });
+    expect(dry.execution.commands).toEqual([expect.objectContaining({
+      action: "inter_account",
+      mutation_mode: "create_only_already_journalized",
+      existing_journal_id: 510,
+    })]);
+    expect(dry.approved_command_digest).not.toBe(plain.approved_command_digest);
+    expect(dry.workflow.approval_previews[0].execute_args.journalized_transfer_ids).toEqual(mapping.journalized_transfer_ids);
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(executed.inter_account_reconciliation).toMatchObject({ already_journalized: 1, confirmed: 0 });
+
+    // Executing without the mapping after a dry run with it is drift, never a create.
+    const drift = setupWiseTool([], undefined, transferOptions(journals));
+    const reviewed = parseWiseResponse(await drift.handler({ ...transferArgs, ...mapping, execute: false }));
+    clearWiseCallHistory(drift.api);
+    const drifted = parseWiseResponse(await drift.rawHandler({
+      ...transferArgs, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expect(drift.api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("surfaces an ambiguous legacy split leg as a review row in the preview, with nothing to create", async () => {
     const leg = (amount: string, currency: string) => buildM04Values({
       id: "CARD_TRANSACTION-9001", date: "2026-07-05", sourceAmount: amount, sourceCurrency: currency, sourceFeeAmount: "0.10",
