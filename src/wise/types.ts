@@ -50,6 +50,9 @@ export interface WiseTransferReview {
   candidates?: WiseTransferJournalCandidate[];
   /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
   journal_id?: number;
+  /** wise_transfer_journal_ambiguous: candidate journals that already book the
+   * row's fee, so the fee row is held out of the plan with the review. */
+  fee_held_journal_ids?: number[];
   /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
   ledger_transaction_ids?: number[];
 }

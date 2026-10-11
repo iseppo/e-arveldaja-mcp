@@ -477,6 +477,38 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     },
   );
 
+  // Codex r3: a differently labelled gross journal must not hide the row's own
+  // net-of-fee identity journal, and the fee it books is never booked again.
+  it.each([
+    ["own journal first, no mapping", [ownNet, otherGross], undefined],
+    ["own journal last, no mapping", [otherGross, ownNet], undefined],
+    ["own journal first, mapped to the other", [ownNet, otherGross], 702],
+    ["own journal last, mapped to the other", [otherGross, ownNet], 702],
+  ] as Array<[string, Journal[], number | undefined]>)(
+    "the own exact-reference journal net of the fee books the row and its fee; no fee is confirmed again (%s)",
+    (_case, journals, mappedTo) => {
+      const output = run([transferInWithFee("TRANSFER-A")], journals, mappedTo === undefined ? {} : mapped(["TRANSFER-A", mappedTo]));
+      expect(actions(output)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+      expect(output.commands.some(command => command.action === "fee_create_and_confirm")).toBe(false);
+      expect(reviewCodes(output)).toEqual(mappedTo === undefined ? [] : ["TRANSFER-A:wise_transfer_mapping_rejected:702"]);
+    },
+  );
+
+  it.each([["net journal first", true], ["net journal last", false]])(
+    "when the row goes to review and a candidate journal already books its fee, the fee is held out of the plan (%s)",
+    (_order, netFirst) => {
+      const otherNet = journalOf(703, "LHVREF-703", [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]]);
+      const output = run([transferInWithFee("TRANSFER-A")], netFirst ? [otherNet, otherGross] : [otherGross, otherNet]);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-A"]);
+      expect(output.ownershipReviews).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-A",
+        code: "wise_transfer_journal_ambiguous",
+        fee_held_journal_ids: [703],
+      })]);
+      expect(output.created.map(entry => entry.wise_id)).toEqual(["TRANSFER-A"]);
+    },
+  );
+
   it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is created", () => {
     const usd = labelledJournal({
       document_number: "LHVREF-USD",
