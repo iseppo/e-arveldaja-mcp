@@ -377,10 +377,11 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       ],
     })]],
     ["the journal carries no reference (ref-less journals are matched automatically)", [labelledJournal({ document_number: "" })]],
-  ] as Array<[string, Journal[]]>)("a mapping is rejected when %s: the row is still created, with a review", (_case, journals) => {
+  ] as Array<[string, Journal[]]>)("a mapping is rejected when %s: the row resolves exactly as unmapped, plus a review", (_case, journals) => {
+    const unmapped = run([transferIn("TRANSFER-1001")], journals);
     const output = run([transferIn("TRANSFER-1001")], journals, mapped(["TRANSFER-1001", 701]));
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
-    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+    expect(actions(output)).toEqual(actions(unmapped));
+    expect(reviewCodes(output)).toEqual([...reviewCodes(unmapped), "TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
   it("two Wise IDs mapped to one journal: both mappings are rejected and both rows created", () => {
@@ -388,6 +389,8 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       mapped(["TRANSFER-1001", 701], ["TRANSFER-1002", 701]));
     expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-1002"]);
     expect(reviewCodes(output)).toEqual([
+      "TRANSFER-1001:wise_transfer_journal_ambiguous",
+      "TRANSFER-1002:wise_transfer_journal_ambiguous",
       "TRANSFER-1001:wise_transfer_mapping_rejected:701",
       "TRANSFER-1002:wise_transfer_mapping_rejected:701",
     ]);
@@ -396,7 +399,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   it("a Wise ID listed twice in the mapping is rejected, even with the same journal", () => {
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701], ["TRANSFER-1001", 701]));
     expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
-    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous", "TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
   it("a mapped Wise ID shared by several statement rows is ambiguous: rejected, every row created", () => {
@@ -441,7 +444,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
         "inter_account:TRANSFER-B:create_only_already_journalized:801",
         "main_create:TRANSFER-A",
       ]);
-      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_mapping_rejected:801"]);
+      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_ambiguous", "TRANSFER-A:wise_transfer_mapping_rejected:801"]);
     },
   );
 
@@ -509,6 +512,32 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     },
   );
 
+  // Codex r4: the net-of-fee identity must move the money in the row's
+  // direction, and a rejected mapping never skips the fee-coverage check.
+  const oppositeOwnNet = journalOf(701, "TRANSFER-A", [[LHV, "D", 100], [WISE, "C", 99.5], [FEE_DIM, "C", 0.5, 8610]]);
+  it.each([["own journal first", [oppositeOwnNet, otherGross]], ["own journal last", [otherGross, oppositeOwnNet]]] as Array<[string, Journal[]]>)(
+    "an own-reference journal net of the fee in the opposite direction does not book the row: it is created and reviewed (%s)",
+    (_order, journals) => {
+      const output = run([transferInWithFee("TRANSFER-A")], journals);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-A", "fee_create_and_confirm:FEE:TRANSFER-A"]);
+      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_ambiguous"]);
+      expect(output.ownershipReviews[0]!.fee_held_journal_ids).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ["own journal alone", [ownNet]],
+    ["own journal first", [ownNet, otherGross]],
+    ["own journal last", [otherGross, ownNet]],
+  ] as Array<[string, Journal[]]>)(
+    "a mapping to a missing journal is rejected and the row resolves as unmapped: its own journal books it and the fee (%s)",
+    (_case, journals) => {
+      const output = run([transferInWithFee("TRANSFER-A")], journals, mapped(["TRANSFER-A", 999]));
+      expect(actions(output)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_mapping_rejected:999"]);
+    },
+  );
+
   it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is created", () => {
     const usd = labelledJournal({
       document_number: "LHVREF-USD",
@@ -520,7 +549,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     });
     const output = run([transferIn("TRANSFER-1001")], [usd], mapped(["TRANSFER-1001", 701]));
     expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
-    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+    expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous", "TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 });
 
