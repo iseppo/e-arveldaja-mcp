@@ -255,3 +255,31 @@ describe("computeExactMatchProjection exact_invoice_base_amount (F5)", () => {
     expect(projection.skipped).toEqual([{ transaction_id: 903, reason: expect.stringContaining("Cross-currency match") }]);
   });
 });
+
+describe("computeExactMatchProjection Tier A when the foreign gross equals its base", () => {
+  const row = tx({ id: 950, type: "C", amount: 100, base_amount: undefined, cl_currencies_id: "EUR", clients_id: 77, ref_number: "RF-7001" } as Partial<Transaction>);
+  const usdEqual = {
+    id: 7001, number: "INV-7001", clients_id: 77, client_name: "Acme Cloud LLC", cl_currencies_id: "USD",
+    gross_price: 100, currency_rate: 1, base_gross_price: 100, bank_ref_number: "RF-7001",
+    payment_status: "NOT_PAID", status: "CONFIRMED",
+  } as unknown as PurchaseInvoice;
+  const eurInvoice = { ...usdEqual, id: 7002, cl_currencies_id: "EUR" } as unknown as PurchaseInvoice;
+
+  it("does not confirm at the default threshold of 90 (capped at 85)", () => {
+    const projection = computeExactMatchProjection([row], [], [usdEqual], 90);
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it.each([
+    ["EUR invoice first", [eurInvoice, usdEqual]],
+    ["USD invoice first", [usdEqual, eurInvoice]],
+  ])("skips the EUR 100 / USD 100 (base 100) tie as ambiguous (%s)", (_label, purchases) => {
+    // No reference: both score 55 (amount 40 + client 15), a true top-score tie.
+    const refless = { ...row, ref_number: undefined } as Transaction;
+    const unref = purchases.map(p => ({ ...p, bank_ref_number: undefined }) as unknown as PurchaseInvoice);
+    const projection = computeExactMatchProjection([refless], [], unref, 40);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 950, reason: expect.stringContaining("ambiguous_foreign_invoice_base") }]);
+  });
+});
+

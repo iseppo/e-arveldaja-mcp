@@ -960,3 +960,29 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
     expect(payload.suggestions[0]!.distribution).toBeUndefined();
   });
 });
+
+describe("analyze_unconfirmed_transactions F5 Tier A when the foreign gross equals its base", () => {
+  const row = {
+    id: 950, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-09-15",
+    accounts_dimensions_id: 100, cl_currencies_id: "EUR", clients_id: 77, description: "Card payment",
+    bank_account_name: "Acme Cloud LLC", bank_account_no: null,
+  };
+  const usdEqual = {
+    id: 7001, status: "CONFIRMED", payment_status: "NOT_PAID", number: "INV-7001", clients_id: 77,
+    client_name: "Acme Cloud LLC", cl_currencies_id: "USD", gross_price: 100, currency_rate: 1, base_gross_price: 100,
+  };
+  const eurInvoice = { ...usdEqual, id: 7002, number: "INV-7002", cl_currencies_id: "EUR" };
+
+  it.each([
+    ["EUR invoice first", [eurInvoice, usdEqual]],
+    ["USD invoice first", [usdEqual, eurInvoice]],
+  ])("holds the EUR 100 / USD 100 (base 100) tie for review (%s)", async (_label, purchases) => {
+    const handler = setupTool({ transactions: [row], bankAccounts: defaultBankAccounts, purchases });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const s = payload.suggestions[0]!;
+    expect(s.suggested_action).toBe("manual_review");
+    expect(s.distribution).toBeUndefined();
+    expect(s.reason).toContain("ambiguous_foreign_invoice_base");
+  });
+});
+
