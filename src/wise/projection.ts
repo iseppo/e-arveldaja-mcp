@@ -752,11 +752,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const mappingReviews: WiseTransferReview[] = [];
   const pendingMappings = new Map<WiseRow, number>();
   const acceptedMappings = new Map<WiseRow, number>();
-  const rejectedMappingRows = new Set<WiseRow>();
-  // `useIdentity`: the row's own exact-reference journal exists, so the row
-  // resolves through the guard as if unmapped (never a second booking).
-  const rejectMapping = (row: WiseRow, journalId: number, why: string, useIdentity = false) => {
-    if (!useIdentity) rejectedMappingRows.add(row);
+  // A rejected mapping is reported and otherwise ignored: the row resolves as
+  // if unmapped (guard, fee coverage, review), never a forced second booking.
+  const rejectMapping = (row: WiseRow, journalId: number, why: string) => {
     mappingReviews.push(mappingReview(row.id, "wise_transfer_mapping_rejected", journalId, why, transferDecisions.get(row)));
   };
   for (const [index, mapping] of journalizedTransferIds.entries()) {
@@ -824,7 +822,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           : "other",
       };
     };
-    const OWN_IDENTITY_JOURNAL = "another journal already books this Wise transfer by exact reference";
+    // Whether the journal's Wise-dimension postings net to `amount` in the
+    // row's direction (IN debits the Wise account), in base EUR.
+    const wiseLegMoves = (journal: Journal | undefined, row: WiseRow, amount: number): boolean => {
+      const cents = (value: number) => Math.round(value * 100);
+      const signedWiseCents = (journal?.postings ?? [])
+        .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
+        .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
+      return journal !== undefined &&
+        signedWiseCents === (sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1) * cents(amount);
+    };
     const mappingRejection = (row: WiseRow, journalId: number): string | undefined => {
       const decision = transferDecisions.get(row);
       const targetDimensionId = decision?.targetDimensionId;
@@ -853,11 +860,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       if (!candidateIds.includes(journalId)) {
         return "the journal is not a same-amount transfer between this Wise account and the counterpart account within one day";
       }
-      const cents = (value: number) => Math.round(value * 100);
-      const signedWiseCents = (journal.postings ?? [])
-        .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
-        .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
-      if (signedWiseCents !== (sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1) * cents(amount)) {
+      if (!wiseLegMoves(journal, row, amount)) {
         return "the journal's Wise-account posting does not move this amount in this row's direction";
       }
       // Exact-reference claims are reserved across the whole statement, before
@@ -873,13 +876,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         wiseDate(row.finishedOn || row.createdOn));
       if (identityIds.some(id => id !== journalId &&
         normalizeReference(journalSnapshot.find(candidate => candidate.id === id)?.document_number) === normalizeReference(row.id))) {
-        return OWN_IDENTITY_JOURNAL;
+        return "another journal already books this Wise transfer by exact reference";
       }
       return undefined;
     };
     for (const [row, journalId] of pendingMappings) {
       const why = mappingRejection(row, journalId);
-      if (why !== undefined) rejectMapping(row, journalId, why, why === OWN_IDENTITY_JOURNAL);
+      if (why !== undefined) rejectMapping(row, journalId, why);
       else acceptedMappings.set(row, journalId);
     }
     pendingMappings.clear();
@@ -894,8 +897,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         ? undefined
         : postingDimensionsSnapshot.get(targetDimensionId);
       if (!decision || !ownershipBasis || targetDimensionId === undefined || !targetDim?.id) continue;
-      // A rejected mapping keeps the row as created, unconfirmed.
-      if (rejectedMappingRows.has(row)) continue;
       const mappedJournalId = acceptedMappings.get(row);
 
       const reviewFor = (code: WiseTransferReview["code"], reason: string): WiseTransferReview => ({
@@ -938,8 +939,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const postings = (journal?.postings ?? []).filter(posting => !posting.is_deleted);
         return feeCommand !== undefined &&
           feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
-          postings.some(posting => posting.accounts_dimensions_id === accounts_dimensions_id &&
-            Math.abs(baseCents(posting) - cents(entry.amount)) === cents(feeCommand.booked_amount)) &&
+          wiseLegMoves(journal, row,
+            entry.amount + (sourceDirectionForWiseDirection(row.direction) === "IN" ? -1 : 1) * feeCommand.booked_amount) &&
           postings.some(posting => !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
             baseCents(posting) === cents(feeCommand.booked_amount));
       };
@@ -966,7 +967,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           // exact-reference journal net of the fee: identity wins (a reference
           // match is never consumed, so this probe has no side effect).
           const netIdentity = guard.resolveInterAccount({ ...query, amount: netAmount }, { consume: false });
-          if (netIdentity.status === "matched" && netIdentity.matched_on === "reference") {
+          // The identity must also move the net amount in this row's direction.
+          if (netIdentity.status === "matched" && netIdentity.matched_on === "reference" &&
+            wiseLegMoves(journalSnapshot.find(journal => journal.id === netIdentity.journal_id), row, netAmount)) {
             resolution = netIdentity;
             otherLabelled = false;
           }
