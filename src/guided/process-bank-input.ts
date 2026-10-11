@@ -349,6 +349,7 @@ export function registerProcessBankInputTool(
     fee_account_dimensions_id?: number;
     inter_account_dimension_id?: number;
     confirm_own_transfer_ids?: string[];
+    journalized_transfer_ids?: Array<{ wise_id: string; journal_id: number }>;
     approved_command_digest?: string;
     skip_jar_transfers?: boolean;
     operation_handle?: string;
@@ -410,6 +411,7 @@ export function registerProcessBankInputTool(
       feeAccountRelationId: undefined,
       interAccountDimensionId: args.inter_account_dimension_id,
       confirmOwnTransferIds: args.confirm_own_transfer_ids,
+      journalizedTransferIds: args.journalized_transfer_ids,
       approvedCommandDigest: args.approved_command_digest,
       dateFrom: args.date_from,
       dateTo: args.date_to,
@@ -444,6 +446,7 @@ export function registerProcessBankInputTool(
       fee_account_dimensions_id: z.number().optional().describe("Wise only: account dimension ID for the Wise fee expense account."),
       inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers."),
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe("Wise only: exact Wise IDs explicitly approved as own transfers."),
+      journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe("Wise only: checked { wise_id, journal_id } pairs whose labelled journal already books that transfer; each is validated."),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe("Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'."),
       skip_jar_transfers: z.boolean().optional().describe("Wise only: skip Jar (savings pot) transfers (default true)."),
       operation_handle: z.string().regex(HANDLE_PATTERN).optional().describe("mode='show_details' only: operation-result handle from a prior execute."),

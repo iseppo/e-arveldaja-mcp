@@ -173,6 +173,26 @@ describe("process_bank_input", () => {
   });
 });
 
+describe("process_bank_input — Wise journalized_transfer_ids", () => {
+  const header = `ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency","Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency","Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,"Created by",Category,Note`;
+  const card = `CARD_TRANSACTION-1,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.00,EUR,,,"Test OÜ",12.00,EUR,"Hoster",12.00,EUR,1,,,"Test Person","Software",`;
+  const csv = `base64:csv:${Buffer.from(`${header}\n${card}\n`, "utf8").toString("base64")}`;
+
+  it("accepts the mapping and forwards it to the Wise import", async () => {
+    const { handler } = setup();
+    const server = { registerTool: vi.fn() } as any;
+    registerProcessBankInputTool(server, createAccountingWorkflowApi({ transactionRows: [] }), createTestRuntimeSafetyContext(), {});
+    const schema = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_bank_input")[1].inputSchema;
+    expect(Object.keys(schema)).toContain("journalized_transfer_ids");
+
+    const result = parse(await handler({
+      mode: "prepare", file_path: csv, accounts_dimensions_id: 7,
+      journalized_transfer_ids: [{ wise_id: "TRANSFER-ABSENT", journal_id: 9 }],
+    }));
+    expect(JSON.stringify(result)).toContain("unused_mapping");
+  });
+});
+
 describe("process_bank_input — capability-aware elicitation + persisted default", () => {
   const storePath = () => {
     const dir = mkdtempSync(join(tmpdir(), "pbi-defaults-"));

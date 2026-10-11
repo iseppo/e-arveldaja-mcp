@@ -119,6 +119,9 @@ export function registerWiseImportTools(
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe(
         "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only."
       ),
+      journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe(
+        "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row is still created."
+      ),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe(
         "Exact lowercase SHA-256 command digest returned by the reviewed dry run. Required for execute=true when mutations are planned."
       ),
@@ -139,6 +142,7 @@ export function registerWiseImportTools(
       fee_account_relation_id,
       inter_account_dimension_id,
       confirm_own_transfer_ids,
+      journalized_transfer_ids,
       approved_command_digest,
       plan_handle,
       execute,
@@ -168,6 +172,7 @@ export function registerWiseImportTools(
         feeAccountRelationId: fee_account_relation_id,
         interAccountDimensionId: inter_account_dimension_id,
         confirmOwnTransferIds: confirm_own_transfer_ids,
+        journalizedTransferIds: journalized_transfer_ids,
         approvedCommandDigest: approved_command_digest,
         dateFrom: date_from,
         dateTo: date_to,

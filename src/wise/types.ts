@@ -36,11 +36,39 @@ export interface WiseTransferReview {
     | "wise_transfer_cross_currency"
     | "wise_transfer_journal_ambiguous"
     | "wise_transfer_already_imported"
-    | "wise_legacy_leg_ambiguous";
+    | "wise_legacy_leg_ambiguous"
+    | "wise_transfer_mapping_rejected"
+    | "unused_mapping"
+    | "wise_untagged_ledger_match";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
   approval_required: boolean;
+  /** wise_transfer_journal_ambiguous: the same-key (±1 day) journals the row
+   * could not be told apart from. */
+  candidate_journal_ids?: number[];
+  candidates?: WiseTransferJournalCandidate[];
+  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
+  journal_id?: number;
+  /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
+  ledger_transaction_ids?: number[];
+}
+
+/** One operator-reviewed journalized_transfer_ids entry. */
+export interface WiseJournalizedTransferMapping {
+  wise_id: string;
+  journal_id: number;
+}
+
+export interface WiseTransferJournalCandidate {
+  journal_id: number;
+  /** The journal's source bank transaction, when it is a live row on another
+   * own bank dimension. */
+  counterpart_transaction_id?: number;
+  /** "counterpart_bank_ref" when the journal's document_number is that bank
+   * row's bank_ref_number. Informational only: it tells where the label came
+   * from, not which Wise movement the journal books. */
+  label_source: "counterpart_bank_ref" | "other";
 }
 
 export interface WiseTransferDecision {

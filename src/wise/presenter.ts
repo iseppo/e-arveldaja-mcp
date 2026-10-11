@@ -25,6 +25,7 @@ import type {
   WiseInvoiceFixCandidate,
   WiseSkippedEntry,
   WiseSkippedJarRow,
+  WiseJournalizedTransferMapping,
   WiseTransferReview,
 } from "./types.js";
 
@@ -182,6 +183,7 @@ export interface WiseImportRenderData {
     feeAccountRelationId: number | undefined;
     interAccountDimensionId: number | undefined;
     confirmOwnTransferIds: string[] | undefined;
+    journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
     dateFrom: string | undefined;
     dateTo: string | undefined;
     skipJarTransfers: boolean | undefined;
@@ -280,6 +282,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...(fee_account_relation_id !== undefined ? { fee_account_relation_id } : {}),
     ...(inter_account_dimension_id !== undefined ? { inter_account_dimension_id } : {}),
     ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
+    ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
     ...(date_from ? { date_from } : {}),
     ...(date_to ? { date_to } : {}),
     ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
@@ -566,6 +569,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
           ...(data.args.feeAccountDimensionsId !== undefined ? { fee_account_dimensions_id: data.args.feeAccountDimensionsId } : {}),
           ...(data.args.interAccountDimensionId !== undefined ? { inter_account_dimension_id: data.args.interAccountDimensionId } : {}),
           ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
+          ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
           ...(data.args.skipJarTransfers !== undefined ? { skip_jar_transfers: data.args.skipJarTransfers } : {}),
           plan_handle: data.planHandle,
           approved_command_digest: data.approvedCommandDigest,

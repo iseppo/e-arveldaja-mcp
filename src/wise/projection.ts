@@ -13,6 +13,8 @@ import type { BookingGuard } from "../booking-guard.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { TRANSACTION_DESCRIPTION_MAX_LENGTH, weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
+import { bankReferenceLookupKey, journalDocumentReferenceKeys } from "../camt/duplicate-identity.js";
+import { buildInterAccountJournalIndex, normalizeReference, toUtcDay, UNKNOWN_JOURNAL_ID } from "../tools/inter-account-utils.js";
 import {
   bookedAmountForWiseRow,
   bookedCurrencyForWiseRow,
@@ -38,9 +40,11 @@ import {
   type WiseCreatedEntry,
   type WiseImportCommand,
   type WiseInvoiceFixCandidate,
+  type WiseJournalizedTransferMapping,
   type WiseRow,
   type WiseSkippedEntry,
   type WiseTransferDecision,
+  type WiseTransferJournalCandidate,
   type WiseTransferReview,
 } from "./types.js";
 
@@ -304,6 +308,9 @@ export interface WiseProjectionInput {
   readonly createInterAccountGuard: (ownDimensionIds: Set<number>) => BookingGuard;
   /** Exact Wise IDs the operator passed in confirm_own_transfer_ids. */
   readonly approvedTransferIds: ReadonlySet<string>;
+  /** Operator-reviewed journalized_transfer_ids: Wise ID → the labelled
+   * inter-account journal that already books it. */
+  readonly journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
   readonly ownCompanyClientId: number | undefined;
   readonly ownCompanyClientMatches: unknown;
   readonly allPurchaseInvoices: PurchaseInvoice[];
@@ -327,9 +334,15 @@ const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
 const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
-  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
+  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed. Either reconcile it with reconcile_inter_account_transfers, or, if you have checked that one of the candidate journals books exactly this Wise transfer, re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so the row is recorded as already journalized instead of created.";
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
   "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
+const WISE_TRANSFER_MAPPING_REJECTED_REASON =
+  "The journalized_transfer_ids mapping for this Wise transfer was not accepted, so the row is imported unconfirmed as usual. Check the mapping and reconcile the row with reconcile_inter_account_transfers. Rejected because";
+const WISE_TRANSFER_MAPPING_UNUSED_REASON =
+  "This journalized_transfer_ids mapping was not used:";
+const WISE_UNTAGGED_LEDGER_MATCH_REASON =
+  "A bank row without a WISE: identity tag, already stored on this Wise account, has the same date, amount and currency. It may be this movement entered by hand. Advisory only: the row is still imported; if it duplicates the stored row, remove one of them.";
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_inter_account_transfers.";
 
@@ -408,6 +421,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     journalSnapshot,
     createInterAccountGuard,
     approvedTransferIds,
+    journalizedTransferIds = [],
     ownCompanyClientId,
     ownCompanyClientMatches,
     allPurchaseInvoices,
@@ -829,6 +843,53 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   });
   ownershipReviews.push(...alreadyImportedApprovalReviews, ...legacyLegReviews);
 
+  // journalized_transfer_ids: an operator-reviewed claim that a labelled
+  // journal (identity-only for Lane B) books this Wise transfer. Accepted only
+  // when every check below holds; otherwise the row is created as usual and a
+  // review names the reason. Checks on the mapping list itself come first, so
+  // the verdict never depends on the CSV or mapping order.
+  const mappingReview = (wiseId: string, code: "wise_transfer_mapping_rejected" | "unused_mapping", journalId: number, why: string,
+    decision?: WiseTransferDecision): WiseTransferReview => ({
+    wise_id: wiseId,
+    code,
+    reason: `${code === "unused_mapping" ? WISE_TRANSFER_MAPPING_UNUSED_REASON : WISE_TRANSFER_MAPPING_REJECTED_REASON} ${why}.`,
+    source_verified: decision?.sourceVerified ?? false,
+    target_verified: decision?.targetVerified ?? false,
+    approval_required: false,
+    journal_id: journalId,
+  });
+  const mappingReviews: WiseTransferReview[] = [];
+  const pendingMappings = new Map<WiseRow, number>();
+  const acceptedMappings = new Map<WiseRow, number>();
+  const rejectedMappingRows = new Set<WiseRow>();
+  const rejectMapping = (row: WiseRow, journalId: number, why: string) => {
+    rejectedMappingRows.add(row);
+    mappingReviews.push(mappingReview(row.id, "wise_transfer_mapping_rejected", journalId, why, transferDecisions.get(row)));
+  };
+  for (const [index, mapping] of journalizedTransferIds.entries()) {
+    if (journalizedTransferIds.findIndex(other => other.wise_id === mapping.wise_id) !== index) continue;
+    const legs = eligible.filter(row => row.id === mapping.wise_id);
+    const pending = created.filter(entry => entry.source_row !== undefined && legs.includes(entry.source_row));
+    if (pending.length === 0) {
+      mappingReviews.push(mappingReview(mapping.wise_id, "unused_mapping", mapping.journal_id, legs.length === 0
+        ? "no eligible row of this statement has this Wise ID"
+        : "this Wise transfer was already imported by an earlier run"));
+      continue;
+    }
+    const why = journalizedTransferIds.filter(other => other.wise_id === mapping.wise_id).length > 1
+      ? "the Wise ID is listed more than once in journalized_transfer_ids"
+      : legs.length > 1
+        ? "several rows of this statement share the Wise ID, so the mapping cannot say which one the journal books"
+        : new Set(journalizedTransferIds.filter(other => other.journal_id === mapping.journal_id).map(other => other.wise_id)).size > 1
+          ? "another Wise ID is mapped to the same journal"
+          : undefined;
+    for (const entry of pending) {
+      if (why !== undefined) rejectMapping(entry.source_row!, mapping.journal_id, why);
+      else pendingMappings.set(entry.source_row!, mapping.journal_id);
+    }
+  }
+  const eligibleIds = new Set(eligible.map(row => normalizeReference(row.id)));
+
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,
   );
@@ -842,6 +903,82 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     // recorded back: every row here is a Wise-side leg with a unique Wise ID,
     // so two of them are never the two legs of one transfer.
     const guard = createInterAccountGuard(ownDimensionIds);
+    // The same Lane B index, read-only, to name the journals a review is about.
+    const laneBIndex = buildInterAccountJournalIndex(journalSnapshot, ownDimensionIds);
+    const laneBCandidateIds = (targetDim: number, amounts: number[], date: string): number[] => {
+      const day = toUtcDay(date);
+      const dates = Number.isFinite(day)
+        ? [-1, 0, 1].map(offset => new Date(day + offset * 86400000).toISOString().slice(0, 10))
+        : [date];
+      const ids = new Set(amounts.flatMap(amount => dates.flatMap(candidateDate =>
+        (laneBIndex.get(`${accounts_dimensions_id}|${targetDim}|${roundMoney(amount)}|${candidateDate}`) ?? [])
+          .map(entry => entry.journal_id))));
+      ids.delete(UNKNOWN_JOURNAL_ID);
+      return [...ids].sort((left, right) => left - right);
+    };
+    const describeCandidate = (journalId: number): WiseTransferJournalCandidate => {
+      const journal = journalSnapshot.find(candidate => candidate.id === journalId);
+      const counterpart = journal?.operation_type === "TRANSACTION" && journal.operations_id !== undefined
+        ? existingTx.find(tx => tx.id === journal.operations_id && isNonVoidTransaction(tx) &&
+            tx.accounts_dimensions_id !== accounts_dimensions_id && ownDimensionIds.has(tx.accounts_dimensions_id))
+        : undefined;
+      const counterpartKey = bankReferenceLookupKey(counterpart?.bank_ref_number ?? undefined);
+      return {
+        journal_id: journalId,
+        ...(counterpart?.id !== undefined ? { counterpart_transaction_id: counterpart.id } : {}),
+        label_source: counterpartKey !== undefined && journalDocumentReferenceKeys(journal?.document_number).includes(counterpartKey)
+          ? "counterpart_bank_ref"
+          : "other",
+      };
+    };
+    const mappingRejection = (row: WiseRow, journalId: number): string | undefined => {
+      const decision = transferDecisions.get(row);
+      const targetDimensionId = decision?.targetDimensionId;
+      if (!decision?.ownershipBasis || targetDimensionId === undefined || !postingDimensionsSnapshot.get(targetDimensionId)?.id) {
+        return "the row is not an own transfer approved for inter-account booking";
+      }
+      if (bookedCurrencyForWiseRow(row) !== "EUR" || normalizeWiseCurrency(row.sourceCurrency) !== normalizeWiseCurrency(row.targetCurrency)) {
+        return "the row is not a same-currency EUR transfer";
+      }
+      const journal = journalSnapshot.find(candidate => candidate.id === journalId);
+      if (!journal) return "the journal is not in the ledger";
+      if (journal.is_deleted) return "the journal is deleted";
+      if (journal.registered !== true) return "the journal is not registered";
+      const label = normalizeReference(journal.document_number);
+      if (label === "") {
+        return "the journal carries no document number; a ref-less journal is matched automatically, or reviewed when ambiguous";
+      }
+      const amount = bookedAmountForWiseRow(row);
+      const candidateIds = laneBCandidateIds(targetDimensionId, [amount], wiseDate(row.finishedOn || row.createdOn));
+      if (!candidateIds.includes(journalId)) {
+        return "the journal is not a same-amount transfer between this Wise account and the counterpart account within one day";
+      }
+      const cents = (value: number) => Math.round(value * 100);
+      const signedWiseCents = (journal.postings ?? [])
+        .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
+        .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
+      if (signedWiseCents !== (sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1) * cents(amount)) {
+        return "the journal's Wise-account posting does not move this amount in this row's direction";
+      }
+      // Exact-reference claims are reserved across the whole statement, before
+      // any mapping: a journal labelled with another row's Wise ID belongs to
+      // that row, and a row whose own exact-reference journal exists is that
+      // journal's.
+      if (label !== normalizeReference(row.id) && eligibleIds.has(label)) {
+        return "the journal is labelled with another Wise transfer of this statement, which owns it by exact reference";
+      }
+      if (candidateIds.some(id => id !== journalId &&
+        normalizeReference(journalSnapshot.find(candidate => candidate.id === id)?.document_number) === normalizeReference(row.id))) {
+        return "another journal already books this Wise transfer by exact reference";
+      }
+      return undefined;
+    };
+    for (const [row, journalId] of pendingMappings) {
+      const why = mappingRejection(row, journalId);
+      if (why !== undefined) rejectMapping(row, journalId, why);
+      else acceptedMappings.set(row, journalId);
+    }
+    pendingMappings.clear();
 
     for (const entry of [...created]) {
       const row = entry.source_row;
@@ -853,6 +990,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         ? undefined
         : postingDimensionsSnapshot.get(targetDimensionId);
       if (!decision || !ownershipBasis || targetDimensionId === undefined || !targetDim?.id) continue;
+      // A rejected mapping keeps the row as created, unconfirmed.
+      if (rejectedMappingRows.has(row)) continue;
+      const mappedJournalId = acceptedMappings.get(row);
 
       const reviewFor = (code: WiseTransferReview["code"], reason: string): WiseTransferReview => ({
         wise_id: row.id,
@@ -866,8 +1006,10 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       // cross-currency row's booked nominal is not that amount, so it is left
       // unconfirmed for reconcile_inter_account_transfers.
       if (
-        bookedCurrencyForWiseRow(row) !== "EUR" ||
-        normalizeWiseCurrency(row.sourceCurrency) !== normalizeWiseCurrency(row.targetCurrency)
+        mappedJournalId === undefined && (
+          bookedCurrencyForWiseRow(row) !== "EUR" ||
+          normalizeWiseCurrency(row.sourceCurrency) !== normalizeWiseCurrency(row.targetCurrency)
+        )
       ) {
         ownershipReviews.push(reviewFor("wise_transfer_cross_currency", WISE_TRANSFER_CROSS_CURRENCY_REASON));
         continue;
@@ -881,22 +1023,30 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         maxGapDays: 1,
         reference: row.id,
       };
-      let resolution = guard.resolveInterAccount(query);
-      let otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(query);
-      // Lane B binds each journal amount to its own bank leg. A journal booking
-      // this transfer net of the row's separate fee row carries the Wise leg at
-      // the net amount, so look that up too.
-      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
-      if (resolution.status === "none" && !otherLabelled && netAmount !== undefined) {
-        const netQuery = { ...query, amount: netAmount };
-        resolution = guard.resolveInterAccount(netQuery);
-        otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(netQuery);
+      let existingJournalId = mappedJournalId;
+      if (existingJournalId === undefined) {
+        let resolution = guard.resolveInterAccount(query);
+        let otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(query);
+        // Lane B binds each journal amount to its own bank leg. A journal booking
+        // this transfer net of the row's separate fee row carries the Wise leg at
+        // the net amount, so look that up too.
+        const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+        if (resolution.status === "none" && !otherLabelled && netAmount !== undefined) {
+          const netQuery = { ...query, amount: netAmount };
+          resolution = guard.resolveInterAccount(netQuery);
+          otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(netQuery);
+        }
+        if (resolution.status === "ambiguous_refless" || otherLabelled) {
+          const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
+          ownershipReviews.push({
+            ...reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON),
+            candidate_journal_ids: candidateIds,
+            candidates: candidateIds.map(describeCandidate),
+          });
+          continue;
+        }
+        existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
       }
-      if (resolution.status === "ambiguous_refless" || otherLabelled) {
-        ownershipReviews.push(reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON));
-        continue;
-      }
-      const existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
       const existingJournal = existingJournalId === undefined
         ? undefined
         : journalSnapshot.find(journal => journal.id === existingJournalId);
@@ -996,6 +1146,41 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         current_client_state: ownCompanyClientMatches,
       });
     }
+  }
+
+  // No approved own transfer at all: nothing a mapping could apply to.
+  for (const [row, journalId] of pendingMappings) {
+    rejectMapping(row, journalId, "the row is not an own transfer approved for inter-account booking");
+  }
+  ownershipReviews.push(...mappingReviews);
+
+  // Advisory only (never a claim or a skip): an untagged stored row of the
+  // same movement on this account, e.g. a card payment entered by hand. A
+  // stored direction marker, when present, must agree.
+  for (const entry of created) {
+    const row = entry.source_row;
+    if (!row) continue;
+    const currency = bookedCurrencyForWiseRow(row);
+    const matches = existingTx.filter(tx =>
+      isNonVoidTransaction(tx) &&
+      tx.id !== undefined &&
+      !tx.description?.startsWith("WISE:") &&
+      tx.accounts_dimensions_id === accounts_dimensions_id &&
+      tx.date === entry.date &&
+      typeof tx.amount === "number" && Math.abs(tx.amount - entry.amount) < 0.005 &&
+      (tx.cl_currencies_id ?? "EUR") === currency &&
+      [entry.source_direction, "?"].includes(markedWiseDirection(tx.description))
+    );
+    if (matches.length === 0) continue;
+    ownershipReviews.push({
+      wise_id: entry.wise_id,
+      code: "wise_untagged_ledger_match",
+      reason: WISE_UNTAGGED_LEDGER_MATCH_REASON,
+      source_verified: false,
+      target_verified: false,
+      approval_required: false,
+      ledger_transaction_ids: matches.map(tx => tx.id!),
+    });
   }
 
   // --- Post-import: scan eligible payment rows for unpaid purchase invoices

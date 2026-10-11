@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 158573,
+    "toolsListBytes": 159478,
     "descriptionsBytes": 22558,
-    "inputSchemasBytes": 100529,
+    "inputSchemasBytes": 101434,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5088
@@ -5524,6 +5524,28 @@
             "maximum": 9007199254740991,
             "type": "integer"
           },
+          "journalized_transfer_ids": {
+            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row is still created.",
+            "items": {
+              "properties": {
+                "journal_id": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "wise_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "wise_id",
+                "journal_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "plan_handle": {
             "description": "Execution-plan handle returned by the reviewed dry run. Required for execute=true in addition to approved_command_digest; the digest alone cannot execute.",
             "type": "string"
@@ -5746,6 +5768,28 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "journalized_transfer_ids": {
+            "description": "Wise only: checked { wise_id, journal_id } pairs whose labelled journal already books that transfer; each is validated.",
+            "items": {
+              "properties": {
+                "journal_id": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "wise_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "wise_id",
+                "journal_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           },
           "mode": {
             "description": "Workflow phase. Defaults to prepare (dry-run preview).",
