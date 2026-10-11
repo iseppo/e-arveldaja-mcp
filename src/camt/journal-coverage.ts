@@ -62,6 +62,8 @@ export interface CamtJournalCoverageContext {
   readonly repeatedBankReferences: Set<string>;
   /** Journal id → distinct statement references its document number matches. */
   readonly identityClaims: Map<number, Set<string>>;
+  /** Transaction id → reference keys of the statement entries it matched (F3 included). */
+  readonly matchedEntryKeys: Map<number, Set<string | undefined>>;
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly laneB: InterAccountResolver;
 }
@@ -130,6 +132,7 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
       .map((transaction) => [transaction.id!, transaction])),
     repeatedBankReferences: findRepeatedBankReferences([...entries]),
     identityClaims,
+    matchedEntryKeys,
     ownIbanToDimension: lookups.ownIbanToDimension,
     laneB: snapshot.interAccountResolver(laneBJournals, lookups.ownDimensionIds),
   };
@@ -154,7 +157,12 @@ function contradictsSourceTransaction(journal: Journal, entryKey: string | undef
   if (!entryKey || journal.operation_type !== "TRANSACTION" || journal.operations_id == null) return false;
   const source = context.sameDimensionTransactions.get(journal.operations_id);
   const sourceKey = source ? storedBankReferenceLookupKey(source) : undefined;
-  return sourceKey !== undefined && sourceKey !== entryKey;
+  if (sourceKey !== undefined && sourceKey !== entryKey) return true;
+  // The identity a statement entry's match established (e.g. F3 for a row read
+  // back without a direct reference) counts as the source's identity too.
+  const matchedKeys = [...context.matchedEntryKeys.get(journal.operations_id) ?? []]
+    .filter((key): key is string => key !== undefined);
+  return matchedKeys.length > 0 && !matchedKeys.includes(entryKey);
 }
 
 export function classifyCamtJournalCoverage(

@@ -7,6 +7,9 @@ import {
   type CamtJournalCoverage,
 } from "./journal-coverage.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
+import { computeCamtImportProjection } from "./projection.js";
+import { buildCamtDescriptionWithMetadata } from "./duplicate-identity.js";
+import { summarizeEntries } from "./parser.js";
 
 // LHV dim 7 and Wise dim 8 are own bank dimensions on 1020; dim 70 is a loan
 // sub-account on 1410. Entries are on dim 7.
@@ -238,5 +241,39 @@ describe("classifyCamtJournalCoverage", () => {
     const feeDeducted = journal(701, [p(1020, LHV, "D", 14.5), p(1020, WISE, "C", 15), p(8610, null, "D", 0.5)],
       { operation_type: "TRANSACTION", operations_id: 9800 });
     expect(classify([feeDeducted], wiseEntry({ amount: 14.5 }))).toEqual({ kind: "inter_account", journal_ids: [701] });
+  });
+});
+
+describe("journal coverage through the projection (Codex round 2)", () => {
+  // tx801 is R2's row as the API reads it back: no direct bank reference, a
+  // description cut to the cap, so only F3 recovers its identity. Its journal
+  // carries R's reference and books 100 of the statement's 200.
+  const base = {
+    date: "2026-02-04", amount: 100, currency: "EUR", direction: "DBIT" as const, counterparty_name: "Supplier",
+    counterparty_iban: "EE471000001020145685", description: "Long payment description ".repeat(12),
+    duplicate: false, duplicate_transaction_ids: [] as number[],
+  };
+  const r = { ...base, bank_reference: "R" };
+  const r2 = { ...base, bank_reference: "R2" };
+  const tx801 = {
+    id: 801, status: "CONFIRMED", accounts_dimensions_id: 7, type: "C", amount: 100, cl_currencies_id: "EUR", date: base.date,
+    description: buildCamtDescriptionWithMetadata(r2.description, r2), bank_ref_number: null, bank_account_no: null,
+    bank_account_name: "Supplier", ref_number: null,
+  } as Transaction;
+  const journal601 = journal(601, [p(1020, 7, "C", 100), p(5000, null, "D", 100)],
+    { operation_type: "TRANSACTION", operations_id: 801, document_number: "BANK:R", effective_date: base.date });
+
+  it.each([["R first", [r, r2]], ["R2 first", [r2, r]]])("an F3-recovered source identity contradicting the journal gives review (%s)", async (_name, entries) => {
+    const projection = await computeCamtImportProjection({
+      loaded: { entries, summary: summarizeEntries(entries), statement_metadata: { iban: "EE000", period: {} } },
+      accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined, ledgerTransactions: [tx801],
+      journalCoverage: { journals: [journal601], accountId: 1020, bankAccounts: [], accountDimensions: [],
+        interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
+      resolveClient: async () => ({}), reportProgress: async () => {},
+    });
+    expect(tx801.description!.length).toBe(150);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped.find(row => row.bank_reference === "R2")?.duplicate_transaction_ids).toEqual([801]);
+    expect(projection.skipped.find(row => row.bank_reference === "R")).toMatchObject({ review_code: "camt_journal_conflict", journal_ids: [601] });
   });
 });
