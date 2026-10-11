@@ -4002,16 +4002,16 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
   ];
 
   /** A PROJECT row as MCP-CAMT stores it: bank_account_no null, the IBAN only in the signed marker. */
-  function camtRow(id: number, o: { iban?: string; dir?: "DBIT" | "CRDT"; amount?: number; date?: string; dim?: number; name?: string; ref?: string } = {}) {
+  function camtRow(id: number, o: { iban?: string; dir?: "DBIT" | "CRDT"; amount?: number; date?: string; dim?: number; name?: string; ref?: string; text?: null } = {}) {
     const amount = o.amount ?? 600;
     const date = o.date ?? "2026-09-26";
     const name = o.name ?? "Näide OU";
     return {
       id, status: "PROJECT", is_deleted: false, type: "C", amount, cl_currencies_id: "EUR", date,
       accounts_dimensions_id: o.dim ?? 100, bank_account_name: name, bank_account_no: null, bank_ref_number: null,
-      description: buildCamtDescriptionWithMetadata("Näide OU", {
+      description: buildCamtDescriptionWithMetadata(o.text === null ? undefined : "Näide OU", {
         date, amount, currency: "EUR", direction: o.dir ?? "DBIT", counterparty_name: name,
-        counterparty_iban: o.iban ?? WISE_IBAN, bank_reference: o.ref ?? `REF${id}`, description: "Näide OU",
+        counterparty_iban: o.iban ?? WISE_IBAN, bank_reference: o.ref ?? `REF${id}`, description: o.text === null ? undefined : "Näide OU",
       }),
     };
   }
@@ -4172,6 +4172,37 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const { handler } = setup([counterpart(), withRef(5021, "2026-09-24"), withRef(5022, "2026-09-25"), withRef(5023, "2026-09-27")], [journal({ document_number: "R1" })]);
       const payload = parseMcpResponse((await handler({ max_date_gap: 2 })).content[0]!.text);
       expect(proposals(payload)).toEqual([]);
+    });
+
+    it("matches the journal on a verified marker that kept only the reference hash (brh)", async () => {
+      const longRef = "LONG-REFERENCE-" + "A".repeat(100);
+      // No description text: the marker alone fits, with the reference only as its hash.
+      const row = camtRow(5002, { name: "Wise Payments", ref: longRef, text: null });
+      expect(row.description).toMatch(/^\[e-arveldaja-mcp:camt brh=sha256:/);
+      expect(row.description).not.toContain(longRef);
+      const { handler, api } = setup([counterpart(), row], [journal({ document_number: longRef })]);
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(proposals(payload)).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+    });
+
+    it("Codex counterexample: every review-group member's journal claim counts (all orders)", async () => {
+      const withRef = (id: number, ref: string, date: string) => ({ ...camtRow(id, { ref, date }), bank_ref_number: ref });
+      const rows = [withRef(5011, "R1", "2026-09-24"), withRef(5012, "R2", "2026-09-25"), withRef(5013, "R2", "2026-09-27")];
+      const counterparts = [counterpart({ id: 5008, date: "2026-09-24" }), counterpart({ id: 5009, date: "2026-09-26" })];
+      const journals = [
+        journal({ id: 9001, effective_date: "2026-09-24", document_number: "R1", operations_id: 5008 }),
+        journal({ id: 9002, effective_date: "2026-09-26", document_number: "R2", operations_id: 5009 }),
+      ];
+      const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+      for (const order of orders) {
+        const { handler, api } = setup([...counterparts, ...order.map(i => rows[i]!)], journals);
+        const payload = parseMcpResponse((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
     });
   });
 

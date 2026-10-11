@@ -316,7 +316,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             amount: txDuplicateAmount,
             date: tx.date,
             maxGapDays: DUPLICATE_DATE_WINDOW_DAYS,
-            reference: transferReferenceOf(tx),
+            reference: transferReferenceOf(tx, guard.journals),
           }, { consume: false });
           if (resolution.status === "none") return undefined;
           const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
