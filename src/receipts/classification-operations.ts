@@ -9,11 +9,12 @@ import { roundMoney } from "../money.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { bankTransactionDirection, signedBankTransactionDirection } from "../bank-transaction-direction.js";
+import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import { isNotFoundHttpError } from "../http-client.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
-import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
+import { normalizeCompanyName } from "../company-name.js";
+import { findAutoBookingRule, hasConcreteAutoBookingRuleBookingTarget } from "../accounting-rules.js";
 import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
 import {
   bankReferenceLookupKey,
@@ -335,6 +336,11 @@ function partitionByLedgerContext(
       ownBankDimensionIds: lookups.ownDimensionIds,
     }),
   };
+  const storedKeyCounts = new Map<string, number>();
+  for (const transaction of rows) {
+    const key = storedBankReferenceLookupKey(transaction);
+    if (key !== undefined) storedKeyCounts.set(key, (storedKeyCounts.get(key) ?? 0) + 1);
+  }
   for (const transaction of rows) {
     if (transaction.id === undefined) {
       partition.remaining.push(transaction);
@@ -347,9 +353,16 @@ function partitionByLedgerContext(
       ...(transaction.bank_account_name ? { counterparty: transaction.bank_account_name } : {}),
     };
 
+    // A marker that kept only the reference hash still carries the identity key.
+    const storedKey = storedBankReferenceLookupKey(transaction);
+    const hashOnly = storedKey !== undefined && coverageEntry(transaction, "CRDT").bank_reference === undefined;
     const hits = entriesFor(transaction)
-      .map(entry => classifyCamtJournalCoverage(entry, coverageContext))
-      .filter((coverage): coverage is Exclude<CamtJournalCoverage, { kind: "none" }> => coverage.kind !== "none");
+      .map(entry => classifyCamtJournalCoverage(entry, coverageContext, hashOnly ? storedKey : undefined))
+      .filter((coverage): coverage is Exclude<CamtJournalCoverage, { kind: "none" }> => coverage.kind !== "none")
+      // A repeated hash-only key cannot prove which row a journal books.
+      .map(coverage => hashOnly && coverage.kind === "identity" && (storedKeyCounts.get(storedKey) ?? 0) > 1
+        ? { kind: "review" as const, code: "camt_journal_conflict" as const, journal_ids: coverage.journal_ids }
+        : coverage);
     if (hits.length === 1 && hits[0]!.kind === "identity" && trustedDirection(transaction)) {
       partition.alreadyBooked.push({
         ...base,
@@ -370,20 +383,15 @@ function partitionByLedgerContext(
       continue;
     }
 
-    // An unverifiable CAMT marker proves neither IBAN nor direction: never an
-    // own transfer (WP3); a row that only looks like one goes to review.
+    // An unverifiable CAMT marker proves neither IBAN nor direction (a flipped
+    // dir= turns refunds into payments): never classified or booked, always review.
     if (hasUnverifiableCamtMarker(transaction)) {
-      const markerIban = extractCamtDescriptionMetadata(transaction.description).bank_account_no?.replace(/\s+/g, "").toUpperCase();
-      if ((markerIban && lookups.ownIbanToDimension.has(markerIban)) || sameCompanyIdentity(transaction.bank_account_name, ledger.companyLegalName)) {
-        partition.possibleDuplicates.push({
-          ...base,
-          journal_ids: [],
-          code: "camt_marker_unverified",
-          next_action: "check the row against the bank statement: its CAMT marker checksum does not verify, so it is not treated as an own transfer; if it is one, reconcile it manually, otherwise classify normally",
-        });
-      } else {
-        partition.remaining.push(transaction);
-      }
+      partition.possibleDuplicates.push({
+        ...base,
+        journal_ids: [],
+        code: "camt_marker_unverified",
+        next_action: "check the row against the bank statement: its CAMT marker checksum does not verify, so neither its direction nor its counterparty account is proven; correct or re-import the row, then classify again",
+      });
       continue;
     }
 
@@ -692,7 +700,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       let suggestion = resolved.suggestion;
       // Precedence: statutory category > saved rule > transaction history >
       // supplier-invoice history > keyword. History is review-only, never a rule.
-      const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
+      // A saved rule outranks history even when supplier-invoice history
+      // resolved first (the resolver returns it before looking at rules).
+      const savedRule = findAutoBookingRule(group.normalized_counterparty, classification.category);
+      const ruleApplies = savedRule !== undefined &&
+        (classification.category === "bank_fees" || hasConcreteAutoBookingRuleBookingTarget(savedRule));
+      const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules" || ruleApplies;
       if (!fixedBySource && history) {
         suggestion = historyBookingSuggestion(history, accounts);
         applyMode = "review_only";
@@ -802,7 +815,52 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     // re-fetch). Both dry_run_apply (mint the plan from this) and execute_apply
     // (drift-check against the reviewed plan) share this exact computation.
     const gatherCache = new Map<number, GatherOutcome>();
-    const fingerprint = await this.computeApplyFingerprint(groups, fingerprintContext, gatherCache);
+    const liveFingerprint = await this.computeApplyFingerprint(groups, fingerprintContext, gatherCache);
+
+    // Re-run classification's ledger partition for every row this apply could
+    // book: a journal, own transfer or duplicate that appeared after the preview
+    // drifts the plan, and a blocked row is skipped. Unreadable ledger fails closed.
+    const ledgerBlocks = new Map<number, { code: string; next_action: string }>();
+    let ledgerCheck: Record<string, string> | "unavailable" | null = null;
+    const bookableRows = groups
+      .filter(group => group.apply_mode === "purchase_invoice" && shouldProcessExpenseAsPurchaseInvoice(group.category))
+      .flatMap(group => group.transactions.map(stub => stub.id === undefined ? undefined : gatherCache.get(stub.id)))
+      .flatMap(outcome => outcome?.kind === "ok" ? [outcome.transaction] : []);
+    if (bookableRows.length > 0) {
+      if (!dryRun) api.journals.invalidateListCache();
+      const ledger = await loadLedgerContext(api);
+      const ledgerTransactions = ledger ? await api.transactions.listAll().catch(() => undefined) : undefined;
+      if (!ledger || !ledgerTransactions) {
+        ledgerCheck = "unavailable";
+      } else {
+        ledgerCheck = {};
+        const fresh = new Map(bookableRows.map(transaction => [transaction.id!, transaction]));
+        for (const dimensionId of [...new Set(bookableRows.map(transaction => transaction.accounts_dimensions_id))]) {
+          const targets = bookableRows.filter(transaction => transaction.accounts_dimensions_id === dimensionId);
+          const rows = [
+            ...ledgerTransactions.filter(transaction => transaction.accounts_dimensions_id === dimensionId &&
+              isProjectTransaction(transaction) && !fresh.has(transaction.id!)),
+            ...targets,
+          ];
+          const partition = typeof dimensionId === "number"
+            ? partitionByLedgerContext(api, rows, ledgerTransactions, ledger, dimensionId)
+            : "The transaction has no bank dimension.";
+          const blocked = typeof partition === "string"
+            ? targets.map(transaction => ({ transaction_id: transaction.id!, code: "ledger_unavailable", next_action: partition }))
+            : [
+              ...partition.alreadyBooked.map(row => ({ ...row, code: `already_booked:${row.journal_ids.join(",")}` })),
+              ...partition.ownTransfers.map(row => ({ ...row, code: "own_transfer" })),
+              ...partition.possibleDuplicates.map(row => ({ ...row, code: `possible_duplicate:${row.code}:${row.journal_ids.join(",")}` })),
+            ];
+          for (const row of blocked) {
+            if (!fresh.has(row.transaction_id)) continue;
+            ledgerCheck[String(row.transaction_id)] = row.code;
+            ledgerBlocks.set(row.transaction_id, { code: row.code, next_action: row.next_action });
+          }
+        }
+      }
+    }
+    const fingerprint: PlanRecord = { ...liveFingerprint, ledger_check: ledgerCheck };
 
     // P0-2 execute gate: consume the reviewed plan (consume-once, scope-bound)
     // and compare the FRESH canonical effect. Any material difference vs the
@@ -911,9 +969,19 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         for (const transaction of freshTransactions) {
           // A classification group may still carry an incoming row (refund,
           // chargeback) — never book it as a purchase invoice and confirm it.
-          const direction = bankTransactionDirection(transaction);
+          // Only a checksum-verified marker proves the direction (a flipped dir=).
+          const direction = trustedDirection(transaction) ?? "unknown";
           if (direction !== "outgoing") {
             notes.push(`Transaction ${transaction.id} is not an outgoing payment (direction: ${direction}); skipped — only outgoing payments are booked as purchase invoices.`);
+            continue;
+          }
+          if (ledgerCheck === "unavailable") {
+            notes.push(`Transaction ${transaction.id} skipped — journals could not be read, so it cannot be checked for an existing booking. Retry later.`);
+            continue;
+          }
+          const ledgerBlock = ledgerBlocks.get(transaction.id!);
+          if (ledgerBlock) {
+            notes.push(`Transaction ${transaction.id} is already booked or needs ledger review (${ledgerBlock.code}); skipped — ${ledgerBlock.next_action}.`);
             continue;
           }
           // The payment settles an existing open purchase invoice — booking a

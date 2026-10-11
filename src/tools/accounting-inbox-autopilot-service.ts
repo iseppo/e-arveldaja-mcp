@@ -166,6 +166,10 @@ export function stableReviewId(sourceTool: string, item: Record<string, unknown>
     .map((candidate) => (isRecord(candidate) ? numberAt(candidate, "id") : undefined))
     .filter((id): id is number => id !== undefined)
     .sort((left, right) => left - right);
+  const memberIds = arrayAt(item, "transactions")
+    .map((member) => (isRecord(member) ? numberAt(member, "id") : undefined))
+    .filter((id): id is number => id !== undefined)
+    .sort((left, right) => left - right);
   const identity = JSON.stringify([
     sourceTool,
     item.transaction_id ?? null,
@@ -179,6 +183,9 @@ export function stableReviewId(sourceTool: string, item: Record<string, unknown>
     typeof item.type === "string" ? item.type : null,
     reference || null,
     candidateIds,
+    // A classification group is its member rows: two groups of one counterparty
+    // and category (split by direction or history) must not share an id.
+    ...(memberIds.length > 0 ? [memberIds] : []),
   ]);
   return `${sourceTool}:${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`;
 }
@@ -554,16 +561,16 @@ function summarizeAutopilotToolResult(
         what: string,
       ) => {
         const counterparty = row.counterparty !== undefined ? wrapUntrustedOcr(row.counterparty) : undefined;
-        return toAutopilotFollowUp(
-          tool,
-          `Transaction ${row.transaction_id} (${row.date} ${row.amount}${counterparty ? ` ${counterparty}` : ""}) ${what}`,
-          { recommendation: row.next_action },
-          {
-            review_type: reviewType,
-            source_tool: tool,
-            item: { ...row, ...(counterparty !== undefined ? { counterparty } : {}) },
-          },
-        );
+        // A direct action, not a continuation: no resolver handles these rows,
+        // so there is no resolver_input; the id still makes the item resumable.
+        return {
+          id: stableReviewId(tool, { ...row, category: reviewType }),
+          ...toAutopilotFollowUp(
+            tool,
+            `Transaction ${row.transaction_id} (${row.date} ${row.amount}${counterparty ? ` ${counterparty}` : ""}) ${what}`,
+            { recommendation: row.next_action },
+          ),
+        };
       };
       const partitionFollowUps: AutopilotFollowUp[] = [
         ...result.alreadyBooked.map((row) => partitionFollowUp(
