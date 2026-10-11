@@ -3487,6 +3487,30 @@ describe("camt import — journals that already book the movement (F1)", () => {
     });
   });
 
+  it("re-runs the split-group partial-legacy check under the row lock", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(splitReferenceXml());
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    api.transactions.create.mockResolvedValue({ created_object_id: 9001 });
+    // After the execute-time projection read, an old aggregate row with an
+    // unverifiable marker carrying the group's reference appears.
+    let reads = 0;
+    api.transactions.listAll.mockImplementation(async () => (reads++ === 0 ? [] : [{
+      id: 9030, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7, date: "2026-02-03", type: "C",
+      amount: 150, cl_currencies_id: "EUR", bank_ref_number: null, bank_account_no: null, ref_number: null,
+      bank_account_name: "Vendor A OÜ",
+      description: `Split payment\n[e-arveldaja-mcp:camt br=REF-SPLIT-1 dir=DBIT sig=${"0".repeat(16)}]`,
+    }]));
+
+    const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.execution.execution_report.stop_reason).toMatchObject({
+      command_id: "camt-create-0", category: "plan_drift", code: "partial_legacy_appeared",
+    });
+  });
+
   it("(h) does not create a row whose precheck journal fetch fails", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);

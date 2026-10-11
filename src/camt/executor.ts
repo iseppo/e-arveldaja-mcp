@@ -34,6 +34,7 @@ import {
   buildDuplicateLookup,
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
+  findPartialLegacyEntries,
 } from "./duplicate-identity.js";
 import {
   buildCamtJournalCoverageContext,
@@ -700,6 +701,20 @@ export async function executeCamtImport(
         exactKeyOccurrences.get(buildBatchDuplicateKey(descriptor.entry)),
       );
       if (duplicateIds.length > 0) return { outcome: "drift", error_code: "duplicate_appeared" };
+      // The group-level partial-legacy check, on the same fresh ledger: an old
+      // aggregate row of this entry's split group may have appeared too.
+      const entries = projection.parsed.entries;
+      const fresh = entries.map(entry => {
+        const ids = findDuplicateTransactionIds(
+          entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
+          exactKeyOccurrences.get(buildBatchDuplicateKey(entry)),
+        );
+        return { ...entry, duplicate: ids.length > 0, duplicate_transaction_ids: ids };
+      });
+      const partial = findPartialLegacyEntries(fresh, lookup, accountsDimensionsId);
+      if (partial.has(fresh[entries.indexOf(descriptor.entry)]!)) {
+        return { outcome: "drift", error_code: "partial_legacy_appeared" };
+      }
       // Same for a journal booked elsewhere since the review (manual entry,
       // the other side of an own transfer): an uncached journal read.
       api.journals.invalidateListCache();
