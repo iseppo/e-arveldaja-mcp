@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { logAudit } from "../audit-log.js";
 import {
   BANK_CLASSIFICATION_PLAN_DOMAIN,
@@ -21,7 +22,8 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
 function makeOperations(apiOptions: AccountingWorkflowApiOptions = {}) {
-  const api = createAccountingWorkflowApi(apiOptions);
+  // Apply re-checks the ledger per bank dimension, so dimension 100 must resolve.
+  const api = createAccountingWorkflowApi({ accountDimensions: [{ id: 100, accounts_id: 1020, is_deleted: false }], ...apiOptions });
   const ctx = createTestRuntimeSafetyContext();
   const operations = createClassificationOperations(api, ctx, wrapUntrustedOcr);
   return { api, operations, ctx };
@@ -128,7 +130,7 @@ describe("classification operations — applyClassifications", () => {
 // case asserts the create / confirm / link API writes were NEVER called.
 // ---------------------------------------------------------------------------
 
-const SAAS_TX = {
+const SAAS_TX_UNSIGNED = {
   id: 42,
   status: "PROJECT",
   is_deleted: false,
@@ -139,10 +141,12 @@ const SAAS_TX = {
   bank_account_name: "OpenAI",
   clients_id: 7,
   cl_currencies_id: "EUR",
-  // Signed outgoing: apply books only rows PROVEN outgoing (the API reads every
-  // stored type back as "C", so the type alone proves nothing).
-  description: "OpenAI subscription\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
+  description: "OpenAI subscription",
 };
+// Signed outgoing: apply books only rows PROVEN outgoing (the API reads every
+// stored type back as "C", so the type alone proves nothing), and only a
+// checksum-verified marker proves a direction.
+const SAAS_TX = withSignedCamtMarker(SAAS_TX_UNSIGNED, "DBIT");
 
 const SAAS_CLIENT = {
   id: 7,
@@ -659,7 +663,7 @@ describe("classification operations — incoming rows are never booked as purcha
 
   it("analyze splits one counterparty's charges and refunds into separate direction groups", async () => {
     const charge = { ...SAAS_TX, id: 42 };
-    const refund = { ...SAAS_TX, id: 43, amount: 25, type: "D", description: "refund\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" };
+    const refund = withSignedCamtMarker({ ...SAAS_TX, id: 43, amount: 25, type: "D", description: "refund" }, "CRDT");
     const { operations } = makeOperations({
       transactionRows: [charge, refund],
       clientRows: [SAAS_CLIENT],
@@ -680,7 +684,7 @@ describe("classification operations — incoming rows are never booked as purcha
 describe("classification operations — guided compact round trip", () => {
   it("the classify compact's inlined classifications_json completes dry_run_apply → execute_apply", async () => {
     // Signed outgoing so apply books it (unsigned rows are direction-unknown).
-    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
+    const feeTx = withSignedCamtMarker({ ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee" }, "DBIT");
     const { operations, api } = makeOperations({ allowWrites: true,
       transactionRows: [feeTx],
       transactionDetails: { 1: feeTx },
@@ -721,7 +725,7 @@ describe("classification operations — guided compact round trip", () => {
 });
 
 describe("classification operations — a payment matching an open purchase invoice is never auto-booked", () => {
-  const SAAS_TX = { id: 42, status: "PROJECT", is_deleted: false, type: "C", amount: 25, date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI", clients_id: 7, cl_currencies_id: "EUR", description: "OpenAI subscription\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
+  const SAAS_TX = withSignedCamtMarker({ id: 42, status: "PROJECT", is_deleted: false, type: "C", amount: 25, date: "2026-03-22", accounts_dimensions_id: 100, bank_account_name: "OpenAI", clients_id: 7, cl_currencies_id: "EUR", description: "OpenAI subscription" }, "DBIT");
   const SAAS_CLIENT = { id: 7, name: "OpenAI Ireland Limited", is_supplier: true, is_client: false, cl_code_country: "IE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false };
   const ARTS = [{ id: 501, name_est: "Software", name_eng: "Software", accounts_id: 5230, vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1 }];
   const ACCS = [{ id: 5230, name_est: "Software expense", name_eng: "Software expense", account_type_est: "Kulud", account_type_eng: "Expenses" }];
@@ -778,7 +782,7 @@ describe("classification operations — a payment matching an open purchase invo
   });
 
   it("does not hold back a payment to another supplier whose name merely contains the partially paid supplier's (Codex verify #8)", async () => {
-    const ABC_TX = { ...SAAS_TX, bank_account_name: "ABC OÜ", clients_id: 10, bank_account_no: "EE382200221020145685" };
+    const ABC_TX = withSignedCamtMarker({ ...SAAS_TX, bank_account_name: "ABC OÜ", clients_id: 10, bank_account_no: "EE382200221020145685" }, "DBIT");
     const PARTIAL = { ...OPEN, id: 91, clients_id: 20, client_name: "ABC Ehitus OÜ", bank_account_no: "EE471000001020145685", number: "INV-2026-01", create_date: "2026-01-15", payment_status: "PARTIALLY_PAID", gross_price: 100, base_gross_price: 100 };
     const { operations } = makeOperations({
       transactionRows: [ABC_TX], transactionDetails: { 42: ABC_TX }, clientRows: [SAAS_CLIENT],
@@ -991,7 +995,7 @@ describe("classification operations — ledger context (F6)", () => {
   });
 
   it("(f) a bank-fee group without history stays bookable, and its analysis round-trips through dry_run_apply", async () => {
-    const feeTx = { ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]" };
+    const feeTx = withSignedCamtMarker({ ...BANK_FEE_TX, clients_id: 9, cl_currencies_id: "EUR", description: "Bank monthly fee" }, "DBIT");
     const { operations } = makeOperations({
       transactionRows: [feeTx],
       transactionDetails: { 1: feeTx },
@@ -1069,5 +1073,198 @@ describe("classification operations — ledger context (F6)", () => {
     expect(result.ledgerContextUnavailable).toBeDefined();
     expect(result.ownTransfers).toEqual([]);
     expect(result.groups).toHaveLength(1);
+  });
+
+  // --- Codex review of fix/live-all, slice 5 ---------------------------------
+
+  const SUPPLIER = { id: 7, name: "Tarkvara OÜ", is_supplier: true, is_client: false, cl_code_country: "EE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false };
+  const SAAS_ARTICLES = [{ id: 501, name_est: "Software", name_eng: "Software", accounts_id: 5230, vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1 }];
+  const SAAS_ACCOUNTS = [...LOAN_ACCOUNTS, { id: 5230, name_est: "Software expense", account_type_est: "Kulud" }];
+  const PAID_HISTORY = { id: 88, status: "CONFIRMED", payment_status: "PAID", clients_id: 7, client_name: "Tarkvara OÜ", create_date: "2026-02-22", gross_price: 25 };
+  const HISTORY_ITEMS = [{ custom_title: "Subscription", cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "24", vat_accounts_id: 1510 }];
+
+  function saasRow(id: number, direction: "CRDT" | "DBIT", reference = `R${id}`) {
+    return withSignedCamtMarker({
+      id, status: "PROJECT", is_deleted: false, type: "C", amount: 25, date: "2026-03-22", accounts_id: 1020,
+      accounts_dimensions_id: 100, bank_account_name: "Tarkvara OÜ", bank_account_no: null, bank_ref_number: null,
+      ref_number: null, clients_id: 7, cl_currencies_id: "EUR", description: "Subscription",
+    }, direction, reference);
+  }
+
+  function saasOperations(rows: any[], journals: unknown[] = [], extra: Record<string, unknown> = {}) {
+    const journalList = vi.fn().mockResolvedValue(journals);
+    const built = makeOperations({
+      allowWrites: true,
+      transactionRows: rows,
+      transactionDetails: Object.fromEntries(rows.map(row => [row.id, row])),
+      clientRows: [SUPPLIER],
+      purchaseArticles: SAAS_ARTICLES,
+      accounts: SAAS_ACCOUNTS,
+      purchaseInvoiceRows: [PAID_HISTORY],
+      purchaseInvoiceDetails: { 88: { id: 88, number: "OLD-88", liability_accounts_id: 2310, items: HISTORY_ITEMS } },
+      bankAccounts: BANK_ACCOUNTS,
+      accountDimensions: DIMENSIONS,
+      journals: { listAllWithPostings: journalList },
+      readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Näide OÜ" }) },
+      ...extra,
+    } as any);
+    return { ...built, journalList };
+  }
+
+  it("(R5-1) refunds whose dir was flipped to DBIT (checksum fails) are reviewed, never booked", async () => {
+    const flip = (row: any) => ({ ...row, description: row.description.replace("dir=CRDT", "dir=DBIT") });
+    const refunds = [flip(saasRow(61, "CRDT")), flip(saasRow(62, "CRDT"))];
+    const { operations, api } = saasOperations(refunds);
+    const result = await analyze(operations);
+    expect(result.groups).toEqual([]);
+    expect(result.possibleDuplicates.map(row => [row.transaction_id, row.code])).toEqual([
+      [61, "camt_marker_unverified"], [62, "camt_marker_unverified"],
+    ]);
+
+    // An echoed purchase_invoice group with the same rows books nothing either.
+    const group = {
+      category: "saas_subscriptions", apply_mode: "purchase_invoice", normalized_counterparty: "tarkvara",
+      display_counterparty: "Tarkvara OÜ", recurring: true, similar_amounts: true, total_amount: 50,
+      suggested_booking: { purchase_article_id: 501, purchase_account_id: 5230, liability_account_id: 2310, reason: "SaaS" },
+      reasons: ["keyword"], transactions: refunds,
+    };
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+    expect(out.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("(R5-2) a hash-only marker reference (brh=) keeps journal identity: BANK:<reference> two days later is alreadyBooked", async () => {
+    const longReference = `LONGREF${"9".repeat(120)}`;
+    const fee = camtRow({ id: 63, amount: 15, date: "2026-09-10", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: longReference, description: "fee" });
+    expect(fee.description).toMatch(/ (brh=sha256:|h=)[0-9a-f]{64}/);
+    expect(fee.description).not.toContain(longReference);
+    const journal = {
+      id: 601, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-09-12", document_number: `BANK:${longReference}`,
+      postings: [
+        { accounts_id: 8610, accounts_dimensions_id: null, type: "D", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+      ],
+    };
+    const { operations } = ledgerOperations({ rows: [fee], journals: [journal] });
+    const result = await analyze(operations);
+    expect(result.alreadyBooked).toEqual([expect.objectContaining({ transaction_id: 63, journal_ids: [601], strength: "reference" })]);
+    expect(result.groups).toEqual([]);
+  });
+
+  it("(R5-3) a journal that books a previewed payment after dry_run_apply drifts the plan with zero writes", async () => {
+    const rows = [saasRow(42, "DBIT", "R42"), saasRow(43, "DBIT", "R43")];
+    const journals: unknown[] = [];
+    const { operations, api, journalList } = saasOperations(rows, journals);
+    const analysis = await analyze(operations);
+    const bookable = analysis.groups.filter(group => group.apply_mode === "purchase_invoice");
+    expect(bookable).toHaveLength(1);
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: bookable } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(dry.value.results[0]!.status).toBe("dry_run_preview");
+
+    journals.push({
+      id: 7042, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-03-22", document_number: "BANK:R42",
+      postings: [
+        { accounts_id: 5230, accounts_dimensions_id: null, type: "D", amount: 25, base_amount: 25, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 25, base_amount: 25, cl_currencies_id: "EUR" },
+      ],
+    });
+    expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
+    const out = await operations.applyClassifications({ classificationsJson: { groups: bookable }, execute: true, planHandle: dry.value.planHandle });
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.error.code).toBe("plan_drift");
+    // execute reads the journals past the 120 s list cache.
+    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(1);
+    expect(api.journals.invalidateListCache.mock.invocationCallOrder[0]!)
+      .toBeLessThan(journalList.mock.invocationCallOrder.at(-1)!);
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+    // A fresh preview skips the now-booked row with the ledger's next action.
+    const again = await operations.applyClassifications({ classificationsJson: { groups: bookable } });
+    expect(again.ok).toBe(true);
+    if (again.ok) expect(again.value.results[0]!.notes.join("\n")).toMatch(/Transaction 42 .*already booked.*7042/);
+  });
+
+  it("(R5-3b) apply fails closed when the journals cannot be read", async () => {
+    const rows = [saasRow(44, "DBIT"), saasRow(46, "DBIT")];
+    const { operations, api, journalList } = saasOperations(rows);
+    const analysis = await analyze(operations);
+    const bookable = analysis.groups.filter(group => group.apply_mode === "purchase_invoice");
+    expect(bookable).toHaveLength(1);
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: bookable } });
+    if (!dry.ok) throw new Error("dry run failed");
+    journalList.mockRejectedValue(new Error("503"));
+    const out = await operations.applyClassifications({ classificationsJson: { groups: bookable }, execute: true, planHandle: dry.value.planHandle });
+    expect(out.ok).toBe(false);
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("(R5-3c) apply books nothing when the journals cannot be read at preview or at execute", async () => {
+    const rows = [saasRow(47, "DBIT"), saasRow(48, "DBIT")];
+    const { operations, api, journalList } = saasOperations(rows);
+    journalList.mockRejectedValue(new Error("503"));
+    const group = {
+      category: "saas_subscriptions", apply_mode: "purchase_invoice", normalized_counterparty: "tarkvara",
+      display_counterparty: "Tarkvara OÜ", recurring: true, similar_amounts: true, total_amount: 50,
+      suggested_booking: { purchase_article_id: 501, purchase_account_id: 5230, liability_account_id: 2310, reason: "SaaS" },
+      reasons: ["keyword"], transactions: rows,
+    };
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.notes.join("\n")).toMatch(/Transaction 47 skipped — journals could not be read/);
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+    expect(out.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("(R5-2b) a hash-only reference shared by two rows cannot prove which row a journal books", async () => {
+    const longReference = `LONGREF${"8".repeat(120)}`;
+    const first = camtRow({ id: 64, amount: 15, date: "2026-09-10", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: longReference, description: "fee" });
+    const second = camtRow({ id: 65, amount: 15, date: "2026-09-11", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: longReference, description: "fee" });
+    const journal = {
+      id: 602, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-09-12", document_number: `BANK:${longReference}`,
+      postings: [
+        { accounts_id: 8610, accounts_dimensions_id: null, type: "D", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+      ],
+    };
+    const { operations } = ledgerOperations({ rows: [first, second], journals: [journal] });
+    const result = await analyze(operations);
+    expect(result.alreadyBooked).toEqual([]);
+    expect(result.possibleDuplicates.map(row => [row.transaction_id, row.code])).toEqual([
+      [64, "camt_journal_conflict"], [65, "camt_journal_conflict"],
+    ]);
+  });
+
+  it("(R5-4) a saved rule suppresses transaction history even when supplier-invoice history resolves first", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "earv-r5-rules-"));
+    const rulesFile = join(dir, "accounting-rules.md");
+    writeFileSync(rulesFile, "# Accounting Rules\n\n## Auto Booking\n| match | purchase_account_id |\n| --- | --- |\n| Tarkvara | 1410 |\n", "utf-8");
+    const previous = process.env.EARVELDAJA_RULES_FILE;
+    process.env.EARVELDAJA_RULES_FILE = rulesFile;
+    resetAccountingRulesCache();
+    try {
+      const history = historyRows("Tarkvara OÜ", "C", [2110, 900], ["2026-01-01", "2026-02-01", "2026-03-01"]);
+      const { operations } = saasOperations([saasRow(45, "DBIT"), ...history.transactions], history.journals);
+      const result = await analyze(operations);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]!.suggested_booking.source).not.toBe("transaction_history");
+      expect(JSON.stringify(result.groups[0]!.review_guidance ?? {})).not.toContain("2110");
+    } finally {
+      if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+      else process.env.EARVELDAJA_RULES_FILE = previous;
+      resetAccountingRulesCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

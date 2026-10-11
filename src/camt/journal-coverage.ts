@@ -129,10 +129,12 @@ function contradictsSourceTransaction(journal: Journal, entryKey: string | undef
 export function classifyCamtJournalCoverage(
   entry: ParsedCamtEntry,
   context: CamtJournalCoverageContext,
+  /** Stored lookup key for a row whose marker kept only the reference hash. */
+  referenceKey?: string,
 ): CamtJournalCoverage {
   if ((entry.currency || "EUR") !== "EUR") return { kind: "none" };
   const expectedNet = (entry.direction === "CRDT" ? 1 : -1) * cents(entry.amount);
-  const entryKey = bankReferenceLookupKey(entry.bank_reference);
+  const entryKey = bankReferenceLookupKey(entry.bank_reference) ?? referenceKey;
   const covering = new Map<number, "identity" | "inter_account">();
   const reviews = new Map<CamtJournalReviewCode, Set<number>>();
   const review = (code: CamtJournalReviewCode, journalId?: number) => {

@@ -22,6 +22,7 @@ import {
   type AccountingWorkflowApiOptions,
 } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 
 vi.mock("../audit-log.js", async (importOriginal) => ({
@@ -75,6 +76,19 @@ afterEach(() => {
   resetAccountingRulesCache();
 });
 
+/**
+ * The literal `[e-arveldaja-mcp:camt dir=… sig=abc123abc123abcd]` markers below
+ * stand for "a genuinely signed CAMT row". Only a checksum-verified marker proves
+ * a direction, so the mock API serves each such row re-signed from its own fields.
+ */
+const FIXTURE_MARKER = /\n\[e-arveldaja-mcp:camt dir=(DBIT|CRDT) sig=abc123abc123abcd\]$/;
+function signFixtureMarker<T>(row: T): T {
+  const description = (row as { description?: unknown } | undefined)?.description;
+  const match = typeof description === "string" ? FIXTURE_MARKER.exec(description) : null;
+  if (!match) return row;
+  return withSignedCamtMarker({ ...(row as any), description: description!.slice(0, match.index) }, match[1] as "DBIT" | "CRDT");
+}
+
 function setupReceiptTool(
   toolName: string,
   runtimeSafetyContext: ReturnType<typeof createTestRuntimeSafetyContext>,
@@ -99,12 +113,18 @@ function setupReceiptTool(
     saleInvoiceRows: options.saleInvoices,
     purchaseInvoiceRows: options.purchaseInvoices,
     purchaseInvoiceDetails: options.purchaseInvoiceDetails,
-    transactionRows: options.transactions,
-    transactionDetails: options.transactionDetails,
+    transactionRows: options.transactions?.map(signFixtureMarker),
+    transactionDetails: options.transactionDetails
+      ? Object.fromEntries(Object.entries(options.transactionDetails).map(([id, row]) => [id, signFixtureMarker(row)]))
+      : undefined,
     missingTransactionDetail: "undefined",
     purchaseArticles: options.purchaseArticles,
     accounts: options.accounts,
-    transactions: options.getImpl ? { get: options.getImpl } : undefined,
+    // Apply re-checks the ledger per bank dimension, so dimension 100 must resolve.
+    accountDimensions: [{ id: 100, accounts_id: 1020, is_deleted: false }],
+    transactions: options.getImpl
+      ? { get: vi.fn(async (...args: unknown[]) => signFixtureMarker(await options.getImpl!(...args))) }
+      : undefined,
   };
   const api = createAccountingWorkflowApi(apiOptions);
 
@@ -116,7 +136,7 @@ function setupReceiptTool(
   };
 }
 
-const H14_TX = {
+const H14_TX = withSignedCamtMarker({
   id: 99,
   status: "PROJECT",
   is_deleted: false,
@@ -125,12 +145,12 @@ const H14_TX = {
   date: "2026-03-22",
   accounts_dimensions_id: 100,
   bank_account_name: "OpenAI",
-  // Signed outgoing: apply books only rows PROVEN outgoing (the API reads every
-  // stored type back as "C", so the type alone proves nothing).
-  description: "Subscription\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
+  description: "Subscription",
   cl_currencies_id: "EUR",
   clients_id: 7,
-};
+// Signed outgoing: apply books only rows PROVEN outgoing (the API reads every
+// stored type back as "C", so the type alone proves nothing).
+}, "DBIT");
 
 const H14_CLASSIFICATION = {
   category: "saas_subscriptions",
@@ -172,7 +192,7 @@ function setupH14Tool(
   const setup = setupReceiptTool(toolName, createTestRuntimeSafetyContext(), {
     allowWrites,
     getImpl: vi.fn().mockImplementation(async (id: number) =>
-      id === 100 ? { ...H14_TX, id: 100, date: "2026-03-23" } : H14_TX),
+      id === 100 ? withSignedCamtMarker({ ...H14_TX, id: 100, date: "2026-03-23" }, "DBIT") : H14_TX),
     clients: [{
       id: 7,
       name: "OpenAI Ireland Limited",
@@ -438,7 +458,7 @@ describe("H14 post-create recovery state", () => {
 });
 
 describe("H14 accumulator and invalidation recovery", () => {
-  const tx100 = { ...H14_TX, id: 100, date: "2026-03-23" };
+  const tx100 = withSignedCamtMarker({ ...H14_TX, id: 100, date: "2026-03-23" }, "DBIT");
   const group100 = {
     ...H14_CLASSIFICATION,
     normalized_counterparty: "openai-two",
