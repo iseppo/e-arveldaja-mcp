@@ -13,6 +13,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  transferReferenceOf,
   unverifiedMarkerTransferClaim,
   type OneSidedInference,
 } from "../banking/reconciliation/inter-account-matcher.js";
@@ -315,7 +316,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             amount: txDuplicateAmount,
             date: tx.date,
             maxGapDays: DUPLICATE_DATE_WINDOW_DAYS,
-            reference: tx.bank_ref_number ?? tx.ref_number,
+            reference: transferReferenceOf(tx),
           }, { consume: false });
           if (resolution.status === "none") return undefined;
           const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;

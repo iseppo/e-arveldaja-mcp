@@ -47,6 +47,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  transferReferenceOf,
   unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
   getSameTypeReciprocalEvidence,
@@ -984,7 +985,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       txOut.accounts_dimensions_id, txIn.accounts_dimensions_id,
       bestCandidate.comparableAmount, txOut.date, maxGap,
-      txOut.bank_ref_number ?? txOut.ref_number, true,
+      transferReferenceOf(txOut), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(txOut.id);
@@ -1049,7 +1050,7 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
-      undefined, txOut.bank_ref_number ?? txOut.ref_number,
+      undefined, transferReferenceOf(txOut),
     );
     if (txOut.clients_id == null) await resolveCompanyClientsId();
   }
@@ -1175,7 +1176,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       source.accounts_dimensions_id, counterpart.accounts_dimensions_id,
       distributionAmount, source.date, maxGap,
-      source.bank_ref_number ?? source.ref_number, true,
+      transferReferenceOf(source), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(sourceId);
@@ -1263,7 +1264,7 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       source.accounts_dimensions_id, counterpart.accounts_dimensions_id, distributionAmount, source.date,
-      undefined, source.bank_ref_number ?? source.ref_number,
+      undefined, transferReferenceOf(source),
     );
     if (source.clients_id == null) await resolveCompanyClientsId();
   }
@@ -1306,7 +1307,7 @@ export async function runInterAccountMatching(
       // one-sided journal check below (skip / ambiguous_refless), not here.
       const covered = (tx: Transaction, target: number, amount: number) =>
         resolveExistingJournal(
-          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, tx.bank_ref_number ?? tx.ref_number, false,
+          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferenceOf(tx), false,
         ).status !== "none";
       if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
 
@@ -1376,6 +1377,10 @@ export async function runInterAccountMatching(
     };
   }
   const mirrorProposals: Array<{ row: SkippedAlreadyHandledRow; proposal: NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> }> = [];
+  // Rows sent to same-key review stay candidates for later rows, and the
+  // journal each review matched counts as claimed.
+  const mirrorReviewedTxIds = new Set<number>();
+  const mirrorReviewJournalClaims = new Map<number, number>();
 
   for (const tx of remaining) {
     if (!tx.id || blockedOneSidedTxIds.has(tx.id) || consumedTxIds.has(tx.id)) continue;
@@ -1425,7 +1430,7 @@ export async function runInterAccountMatching(
       amountEur,
       tx.date,
       maxGap,
-      tx.bank_ref_number ?? tx.ref_number,
+      transferReferenceOf(tx),
       true,
     );
     if (resolution.status === "matched") {
@@ -1435,7 +1440,7 @@ export async function runInterAccountMatching(
       // marker. The journal covers one movement; with several candidates it
       // cannot be told which is its mirror, so all of them go to review.
       const sameKeyCandidates = [...remaining, ...unconfirmed.filter(hasUnverifiableCamtMarker)].filter(other =>
-        other.id !== undefined && other.id !== tx.id && !consumedTxIds.has(other.id) &&
+        other.id !== undefined && other.id !== tx.id && (!consumedTxIds.has(other.id) || mirrorReviewedTxIds.has(other.id)) &&
         other.accounts_dimensions_id === tx.accounts_dimensions_id &&
         Math.abs(toUtcDay(other.date) - toUtcDay(tx.date)) / 86_400_000 <= 1 &&
         (hasUnverifiableCamtMarker(other)
@@ -1447,7 +1452,11 @@ export async function runInterAccountMatching(
             inferOneSidedTransfer(other, lookups, oneSidedInferenceCache).targetDimension === targetDimension));
       if (sameKeyCandidates.length > 0) {
         const ids = [tx.id, ...sameKeyCandidates.map(other => other.id!)];
-        for (const id of ids) consumedTxIds.add(id);
+        for (const id of ids) {
+          consumedTxIds.add(id);
+          mirrorReviewedTxIds.add(id);
+        }
+        mirrorReviewJournalClaims.set(resolution.journal_id, (mirrorReviewJournalClaims.get(resolution.journal_id) ?? 0) + 1);
         ambiguousRefless.push({
           transaction_ids: ids, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
           source_account: sourceTitle, target_account: targetTitle,
@@ -1498,14 +1507,15 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       tx.accounts_dimensions_id, targetDimension, amountEur, tx.date,
-      undefined, tx.bank_ref_number ?? tx.ref_number,
+      undefined, transferReferenceOf(tx),
     );
     if (tx.clients_id == null) await resolveCompanyClientsId();
   }
 
   // A proposal needs the journal to have no other claimant in this run.
   for (const { row, proposal } of mirrorProposals) {
-    const claimants = skippedAlreadyHandled.filter(other => other.existing_journal_id === proposal.journal_id).length;
+    const claimants = skippedAlreadyHandled.filter(other => other.existing_journal_id === proposal.journal_id).length +
+      (mirrorReviewJournalClaims.get(proposal.journal_id) ?? 0);
     if (claimants !== 1) continue;
     row.mirror_proposal = proposal;
     row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };

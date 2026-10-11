@@ -4143,6 +4143,36 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       expect(payload.already_handled).toEqual(expect.arrayContaining([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]));
       expect(proposals(payload)).toEqual([]);
     });
+
+    it("matches the journal on the verified marker's bank reference (no direct reference)", async () => {
+      const { handler, api } = setup([counterpart(), camtRow(5002, { name: "Wise Payments" })], [journal({ document_number: "REF5002" })]);
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(proposals(payload)).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+    });
+
+    it("Codex counterexample: three same-reference rows on consecutive days and one journal → no proposal for any", async () => {
+      const withRef = (id: number, date: string) => ({ ...camtRow(id, { ref: "R1", date }), bank_ref_number: "R1" });
+      const rows = [withRef(5011, "2026-09-25"), withRef(5012, "2026-09-26"), withRef(5013, "2026-09-27")];
+      for (const ordered of [rows, [...rows].reverse()]) {
+        const { handler, api } = setup([counterpart(), ...ordered], [journal({ document_number: "R1" })]);
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        const reviewed = new Set(payload.ambiguous_refless.flatMap((row: any) => row.transaction_ids));
+        expect([...reviewed].sort()).toEqual([5011, 5012, 5013]);
+      }
+    });
+
+    it("counts a journal claimant already routed to review (no proposal for a later same-reference row)", async () => {
+      // 5021/5022 (24/25 Sep) both reach journal 9001 (26 Sep) within max_date_gap 2 and go to review
+      // together; 5023 (27 Sep) has no same-key neighbour within a day, but the journal is already claimed.
+      const withRef = (id: number, date: string) => ({ ...camtRow(id, { ref: "R1", date }), bank_ref_number: "R1" });
+      const { handler } = setup([counterpart(), withRef(5021, "2026-09-24"), withRef(5022, "2026-09-25"), withRef(5023, "2026-09-27")], [journal({ document_number: "R1" })]);
+      const payload = parseMcpResponse((await handler({ max_date_gap: 2 })).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+    });
   });
 
   it("reports a company-name transfer with no single target for review instead of dropping it (F4c)", async () => {
@@ -4192,6 +4222,27 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
       expect(payload.ambiguous_refless).toEqual([]);
+    });
+
+    it("an encoded line break before the marker does not hide a tampered sig", async () => {
+      for (const encoded of ["&#10;", "&#xA;"]) {
+        const tampered = tamperSig(camtRow(5002, { name: "Näide OÜ" }));
+        const row = { ...tampered, description: tampered.description!.replace("\n[e-arveldaja-mcp:camt", `${encoded}[e-arveldaja-mcp:camt`) };
+        const { handler, api } = setupInterAccountTool({ transactions: [row], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" })]);
+      }
+    });
+
+    it("an empty direct IBAN does not hide a tampered marker's own-account claim", async () => {
+      for (const direct of ["", "   "]) {
+        const row = { ...tamperSig(camtRow(5002, { name: "Wise" })), bank_account_no: direct };
+        const { handler, api } = setupInterAccountTool({ transactions: [row], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" })]);
+      }
     });
 
     it("never pairs (and so never deletes) a tampered row even when the other leg's IBAN points at its account", async () => {
