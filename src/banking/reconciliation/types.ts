@@ -223,12 +223,19 @@ export interface SkippedAlreadyHandledRow {
   source_account: string; source_dimension_id?: number;
   target_account?: string; target_dimension_id?: number;
   existing_journal_id: number; reason: string;
+  /** Report-only: positive evidence that this PROJECT row mirrors the
+   * journal's confirmed counterpart. Never deleted automatically. */
+  mirror_proposal?: { counterpart_transaction_id: number; journal_id: number; evidence: string[] };
+  next_action?: { tool: "delete_transaction"; args: { id: number }; approval_required: true };
 }
 
 export interface AmbiguousReflessRow {
   transaction_ids: number[]; amount: number; date: string;
   currency?: string; amount_eur?: number;
   source_account: string; target_account: string; reason: string;
+  /** Why the row needs review when it is not a plain ref-less collision:
+   * its CAMT marker sig does not verify. */
+  code?: "camt_marker_unverified";
 }
 
 export interface CrossCurrencyRow {

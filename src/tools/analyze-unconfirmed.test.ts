@@ -1,6 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
+
+/**
+ * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
+ * a row whose marker sig fails verification (camt_marker_unverified), so a
+ * fixture standing for a signed CAMT row must carry a sig that verifies.
+ */
+function camtSigned<T extends Record<string, any>>(tx: T): T {
+  const description = String(tx.description ?? "");
+  const direction = description.match(/\b(?:dir|d)=(CRDT|DBIT)\b/)?.[1] as "CRDT" | "DBIT";
+  const clean = description.replace(/\n?\[e-arveldaja-mcp:camt [^\]]*\]$/, "") || undefined;
+  const signed = {
+    ...tx,
+    description: buildCamtDescriptionWithMetadata(clean, {
+      date: tx.date, amount: tx.amount, currency: tx.cl_currencies_id ?? "", direction,
+      counterparty_name: tx.bank_account_name ?? undefined, counterparty_iban: tx.bank_account_no ?? undefined,
+      bank_reference: tx.bank_ref_number ?? `FIXTURE-${tx.id}`, reference_number: tx.ref_number ?? undefined, description: clean,
+    }),
+  };
+  if (!isTrustedCamtDescriptionMetadata(signed as any)) throw new Error(`fixture ${tx.id}: CAMT marker does not verify`);
+  return signed;
+}
+
 
 function setupTool(options: {
   transactions?: unknown[];
@@ -522,7 +545,7 @@ describe("analyze_unconfirmed_transactions", () => {
       { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 300 },
     ];
     const base = { status: "PROJECT", is_deleted: false, type: "C", date: "2026-10-01", cl_currencies_id: "EUR" };
-    const lhvOut = { ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE22", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+    const lhvOut = camtSigned({ ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE22", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
 
     it("does not treat a payer whose name merely contains the company name as an own transfer", async () => {
       const handler = setupTool({
@@ -897,5 +920,43 @@ describe("analyze_unconfirmed_transactions F5 exact_invoice_base_amount", () => 
       { related_table: "purchase_invoices", related_id: 6001 },
       { related_table: "purchase_invoices", related_id: 6002 },
     ]));
+  });
+});
+
+// --- WP3 (F4): CAMT marker IBAN in inter-account suggestions ------------------
+describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
+  const WISE_IBAN = "BE08905767222113";
+  const threeAccounts = [
+    ...defaultBankAccounts,
+    { id: 3, account_name_est: "Wise", account_no: WISE_IBAN, iban_code: WISE_IBAN, accounts_dimensions_id: 300 },
+  ];
+  /** A PROJECT row as MCP-CAMT stores it: bank_account_no null, the IBAN only in the signed marker. */
+  function camtRow(id: number) {
+    const amount = 600;
+    const date = "2026-09-26";
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "C", amount, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: 100, bank_account_name: "Näide OU", bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Näide OU", {
+        date, amount, currency: "EUR", direction: "DBIT", counterparty_name: "Näide OU",
+        counterparty_iban: WISE_IBAN, bank_reference: `REF${id}`, description: "Näide OU",
+      }),
+    };
+  }
+
+  it("suggests confirm_inter_account to the verified marker IBAN's account", async () => {
+    const handler = setupTool({ transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ" });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "confirm_inter_account", match_confidence: 90 });
+    expect(payload.suggestions[0]!.distribution).toMatchObject({ related_sub_id: 300 });
+  });
+
+  it("gives no confirm_inter_account suggestion for a marker whose sig fails the checksum", async () => {
+    const row = camtRow(5002);
+    const tampered = { ...row, bank_account_name: "Näide OÜ", description: row.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+    const handler = setupTool({ transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ" });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
+    expect(payload.suggestions[0]!.distribution).toBeUndefined();
   });
 });

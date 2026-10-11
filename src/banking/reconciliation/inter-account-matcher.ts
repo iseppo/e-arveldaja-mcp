@@ -3,6 +3,7 @@ import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js
 import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
+import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, storedBankAccountNo } from "../../camt/duplicate-identity.js";
 
 // ---------------------------------------------------------------------------
 // Reciprocal-transfer TRANSACTION pairing. PURE: the reciprocal/one-sided
@@ -13,6 +14,26 @@ import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 // duplicated here) — this module pairs two unconfirmed transactions.
 // No MCP/HTTP/fs/audit/env.
 // ---------------------------------------------------------------------------
+
+/**
+ * The counterparty IBAN of a row: the direct `bank_account_no`, else the IBAN
+ * of a checksum-verified CAMT marker (MCP-CAMT rows store it only there). A
+ * marker whose `sig` fails verification yields "" — never trusted evidence.
+ */
+export function counterpartyIbanOf(tx: Transaction): string {
+  return (storedBankAccountNo(tx) ?? "").trim().toUpperCase();
+}
+
+/**
+ * True when the row carries a signed CAMT marker whose `sig` does not verify:
+ * its statement identity (IBAN, direction) cannot be trusted, so reconciliation
+ * must not act on it automatically. A marker without a `sig` is not CAMT-signed.
+ */
+export function hasUnverifiableCamtMarker(tx: Transaction): boolean {
+  const marker = (tx.description ?? "").match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]\s*$/i)?.[1];
+  if (marker === undefined || !/(?:^|\s)(?:entry_sig|sig|s)=/i.test(marker)) return false;
+  return !isTrustedCamtDescriptionMetadata(tx);
+}
 
 export interface OneSidedInference {
   targetDimension?: number;
@@ -43,7 +64,7 @@ export function inferOneSidedTransfer(
 
   const { ownIbanToDimension, dimensionToIban, companyName } = lookups;
   const counterpartyName = normalizeCompanyName(tx.bank_account_name ?? "");
-  const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
+  const counterpartyIban = counterpartyIbanOf(tx);
 
   let targetDimension: number | undefined;
   let confidence = 0;
@@ -109,6 +130,21 @@ export function inferOneSidedTransfer(
   return result;
 }
 
+/**
+ * For a row with an unverifiable CAMT marker: the own-transfer inference its
+ * UNTRUSTED marker IBAN or its name would give, or undefined when neither
+ * points at an own account. Used only to report such a row for review
+ * (`camt_marker_unverified`) — never to book, pair or delete it.
+ */
+export function unverifiedMarkerTransferClaim(
+  tx: Transaction,
+  lookups: InterAccountMatchLookups,
+): OneSidedInference | undefined {
+  const claimedIban = tx.bank_account_no ?? extractCamtDescriptionMetadata(tx.description).bank_account_no ?? null;
+  const inference = inferOneSidedTransfer({ ...tx, bank_account_no: claimedIban }, lookups, new Map());
+  return inference.confidence > 0 || inference.ambiguousTargetDimensions ? inference : undefined;
+}
+
 export function getTransferPairCompatibility(
   txA: Transaction,
   txB: Transaction,
@@ -172,8 +208,8 @@ export function hasReciprocalOwnIbanEvidence(
   txB: Transaction,
   dimensionToIban: Map<number, string>,
 ): boolean {
-  const txACounterpartyIban = (txA.bank_account_no ?? "").trim().toUpperCase();
-  const txBCounterpartyIban = (txB.bank_account_no ?? "").trim().toUpperCase();
+  const txACounterpartyIban = counterpartyIbanOf(txA);
+  const txBCounterpartyIban = counterpartyIbanOf(txB);
   const txAAccountIban = dimensionToIban.get(txA.accounts_dimensions_id) ?? "";
   const txBAccountIban = dimensionToIban.get(txB.accounts_dimensions_id) ?? "";
 

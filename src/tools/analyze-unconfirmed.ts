@@ -9,7 +9,13 @@ import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import { inferOneSidedTransfer, type OneSidedInference } from "../banking/reconciliation/inter-account-matcher.js";
+import {
+  counterpartyIbanOf,
+  hasUnverifiableCamtMarker,
+  inferOneSidedTransfer,
+  unverifiedMarkerTransferClaim,
+  type OneSidedInference,
+} from "../banking/reconciliation/inter-account-matcher.js";
 import { comparableTransactionAmount, isAmbiguousForeignInvoiceBase, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
@@ -60,6 +66,8 @@ interface Suggestion {
   duplicate_journal_ids?: number[];
   match_confidence?: number;
   candidate_invoices?: Array<{ related_table: string; related_id: number }>;
+  /** Set on a review whose CAMT marker sig fails the checksum. */
+  code?: "camt_marker_unverified";
 }
 
 function buildBankJournalDuplicateKey(
@@ -129,7 +137,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       };
       const inferenceCache = new Map<number, OneSidedInference>();
       const hasOwnOriginEvidence = (row: Transaction, sourceDim: number): boolean => {
-        const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+        const iban = counterpartyIbanOf(row);
         if (iban) return ownIbanToDimension.get(iban)?.has(sourceDim) ?? false;
         return sameCompanyIdentity(row.bank_account_name, companyLegalName);
       };
@@ -345,12 +353,23 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           suggested_action: "manual_review",
           reason,
         });
-        const counterpartyIban = (tx.bank_account_no ?? "").trim().toUpperCase();
+        const counterpartyIban = counterpartyIbanOf(tx);
         let isInterAccount = false;
+
+        // A CAMT marker whose sig fails the checksum has an unverifiable
+        // statement identity: never suggest an inter-account confirm for it.
+        const markerUnverified = hasUnverifiableCamtMarker(tx);
+        if (markerUnverified && unverifiedMarkerTransferClaim(tx, inferenceLookups)) {
+          suggestions.push({
+            ...heldForReview("Looks like an own-account transfer, but the CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified; check the bank statement and resolve it manually."),
+            code: "camt_marker_unverified",
+          });
+          isInterAccount = true;
+        }
 
         // Check counterparty IBAN matches own bank account
         // One IBAN can back several own accounts (LHV multi-currency).
-        const ibanTargets = counterpartyIban && ownIbanToDimension.has(counterpartyIban)
+        const ibanTargets = !markerUnverified && counterpartyIban && ownIbanToDimension.has(counterpartyIban)
           ? [...ownIbanToDimension.get(counterpartyIban)!].filter(d => d !== txDim)
           : [];
         if (ibanTargets.length > 1) {
@@ -404,7 +423,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
         // Check counterparty name matches company name
         // Same name AND legal form, as reconcile's one-sided inference requires.
-        if (!isInterAccount) {
+        if (!isInterAccount && !markerUnverified) {
           if (sameCompanyIdentity(tx.bank_account_name, companyLegalName)) {
             const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== txDim);
             const booked = otherDimensions.length === 1 ? alreadyBookedTransfer(otherDimensions[0]!) : undefined;

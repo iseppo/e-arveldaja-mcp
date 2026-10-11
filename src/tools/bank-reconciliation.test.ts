@@ -5,6 +5,29 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
+
+/**
+ * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
+ * a row whose marker sig fails verification (camt_marker_unverified), so a
+ * fixture standing for a signed CAMT row must carry a sig that verifies.
+ */
+function camtSigned<T extends Record<string, any>>(tx: T): T {
+  const description = String(tx.description ?? "");
+  const direction = description.match(/\b(?:dir|d)=(CRDT|DBIT)\b/)?.[1] as "CRDT" | "DBIT";
+  const clean = description.replace(/\n?\[e-arveldaja-mcp:camt [^\]]*\]$/, "") || undefined;
+  const signed = {
+    ...tx,
+    description: buildCamtDescriptionWithMetadata(clean, {
+      date: tx.date, amount: tx.amount, currency: tx.cl_currencies_id ?? "", direction,
+      counterparty_name: tx.bank_account_name ?? undefined, counterparty_iban: tx.bank_account_no ?? undefined,
+      bank_reference: tx.bank_ref_number ?? `FIXTURE-${tx.id}`, reference_number: tx.ref_number ?? undefined, description: clean,
+    }),
+  };
+  if (!isTrustedCamtDescriptionMetadata(signed as any)) throw new Error(`fixture ${tx.id}: CAMT marker does not verify`);
+  return signed;
+}
+
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
@@ -347,7 +370,7 @@ describe("reconcile_transactions", () => {
       const { handler } = setupInterAccountTool({
         transactions: [
           { id: 4, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-          { id: 5, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+          camtSigned({ id: 5, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
         ],
         bankAccounts: [
           { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
@@ -368,7 +391,7 @@ describe("reconcile_transactions", () => {
       const { handler } = setupInterAccountTool({
         transactions: [
           { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", description: "Ülekanne SEB kontole" },
-          { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "Ülekanne LHV kontolt\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" },
+          camtSigned({ id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678", description: "Ülekanne LHV kontolt\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" }),
         ],
         bankAccounts: [
           { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
@@ -1169,7 +1192,7 @@ describe("bank_reconciliation plan binding", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: null },
-        { id: 41, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: null },
+        camtSigned({ id: 41, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: null }),
       ],
       bankAccounts: iaBankAccounts,
     });
@@ -1217,7 +1240,7 @@ describe("bank_reconciliation plan binding", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: 7 },
-        { id: 41, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 7 },
+        camtSigned({ id: 41, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 7 }),
       ],
       bankAccounts: iaBankAccounts,
     });
@@ -1300,7 +1323,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler } = setupInterAccountTool({
       transactions: [
         { id: 3, status: "PROJECT", is_deleted: false, type: "C", amount: 1000, date: "2026-03-19", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 4, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 1000, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 4, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 1000, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -1393,7 +1416,7 @@ describe("reconcile_inter_account_transfers", () => {
   it("pairs reciprocal same-type company-name transfers when both sides strongly infer each other", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
-        { id: 115, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer out\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" },
+        camtSigned({ id: 115, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer out\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" }),
         { id: 116, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: null, bank_account_name: "Test OÜ", description: "Transfer in" },
       ],
       bankAccounts,
@@ -1540,7 +1563,7 @@ describe("reconcile_inter_account_transfers", () => {
       const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(api.transactions.delete).toHaveBeenCalledWith(2);
     });
 
@@ -1584,7 +1607,7 @@ describe("reconcile_inter_account_transfers", () => {
       const result = await executeInterAccount(handler);
       const payload = parseMcpResponse(result.content[0]!.text);
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
       expect(payload.pairs[0]!.incoming_transaction_id).toBe(3);
       expect(api.transactions.delete).toHaveBeenCalledTimes(1);
@@ -1598,14 +1621,14 @@ describe("reconcile_inter_account_transfers", () => {
       { id: 2, account_name_est: "LHV USD", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 12 },
       { id: 3, account_name_est: "Swed", account_no: "EE33", iban_code: "EE33", accounts_dimensions_id: 33 },
     ];
-    const swedOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 33, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
-    const lhvEurIn = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 11, bank_account_no: "EE33", bank_account_name: "Männipuu OÜ", clients_id: null, description: "y\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" };
+    const swedOut = camtSigned({ id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 33, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
+    const lhvEurIn = camtSigned({ id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 11, bank_account_no: "EE33", bank_account_name: "Männipuu OÜ", clients_id: null, description: "y\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" });
 
     it("pairs Swed -> LHV EUR into dim 11 and books it once", async () => {
       const { handler, api } = setupInterAccountTool({ transactions: [swedOut, lhvEurIn], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
       const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 2, to_dimension_id: 11 });
       expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
@@ -1651,7 +1674,7 @@ describe("reconcile_inter_account_transfers", () => {
         { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
         { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
       ];
-      const out = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: null, bank_account_name: "Test OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" };
+      const out = camtSigned({ id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: null, bank_account_name: "Test OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" });
       const inc = { id: 2, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: "EE99THIRD", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
       const { handler, api } = setupInterAccountTool({ transactions: [out, inc], bankAccounts: accounts });
       const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
@@ -1696,7 +1719,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 141, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 92, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 142, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 100, base_amount: 92, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 142, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 100, base_amount: 92, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -1738,7 +1761,7 @@ describe("reconcile_inter_account_transfers", () => {
           accounts_dimensions_id: 100,
           bank_account_no: "EE987654321098765432",
         },
-        {
+        camtSigned({
           id: 102,
           status: "PROJECT",
           is_deleted: false,
@@ -1750,7 +1773,7 @@ describe("reconcile_inter_account_transfers", () => {
           date: "2026-03-20",
           accounts_dimensions_id: 200,
           bank_account_no: "EE123456789012345678",
-        },
+        }),
       ],
       bankAccounts,
     });
@@ -1780,7 +1803,7 @@ describe("reconcile_inter_account_transfers", () => {
           accounts_dimensions_id: 100,
           bank_account_no: "EE987654321098765432",
         },
-        {
+        camtSigned({
           id: 104,
           status: "PROJECT",
           is_deleted: false,
@@ -1792,7 +1815,7 @@ describe("reconcile_inter_account_transfers", () => {
           date: "2026-03-20",
           accounts_dimensions_id: 200,
           bank_account_no: "EE123456789012345678",
-        },
+        }),
       ],
       bankAccounts,
     });
@@ -1812,7 +1835,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 201, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 90, cl_currencies_id: "USD", date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 202, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 90, base_amount: 90, cl_currencies_id: "EUR", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 202, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 90, base_amount: 90, cl_currencies_id: "EUR", date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -2001,8 +2024,8 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 25, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432", bank_account_name: "Transfer" },
-        { id: 26, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" },
-        { id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" },
+        camtSigned({ id: 26, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" }),
+        camtSigned({ id: 27, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_name: "Test OÜ" }),
       ],
       bankAccounts: [
         ...bankAccounts,
@@ -2057,7 +2080,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 11, status: "PROJECT", is_deleted: false, type: "C", amount: 750, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 12, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 750, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 12, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 750, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -2106,7 +2129,7 @@ describe("reconcile_inter_account_transfers", () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [
         { id: 21, status: "PROJECT", is_deleted: false, type: "C", amount: 300, date: "2026-03-21", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 22, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 300, date: "2026-03-21", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 22, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 300, date: "2026-03-21", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -2130,7 +2153,7 @@ describe("reconcile_inter_account_transfers", () => {
       transactions: [
         { id: 13, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
         { id: 14, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE987654321098765432" },
-        { id: 15, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" },
+        camtSigned({ id: 15, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
       ],
       bankAccounts,
     });
@@ -2181,7 +2204,7 @@ describe("reconcile_inter_account_transfers", () => {
         { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 11 },
         { id: 2, account_name_est: "Wise", account_no: "BE22", iban_code: "BE22", accounts_dimensions_id: 22 },
       ];
-      const lhvOut = { id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+      const lhvOut = camtSigned({ id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
       const wiseIn = { id: 2, status: "PROJECT", is_deleted: false, type: "D", amount: 99, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: null, bank_account_name: "Männipuu OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
 
       it("routes both legs to review instead of booking each one-sided", async () => {
@@ -2215,7 +2238,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       it("does not flag two INCOMING rows (opposite ways) as one fee-deducted transfer", async () => {
-        const lhvIn = { ...lhvOut, type: "D", description: "x\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" };
+        const lhvIn = camtSigned({ ...lhvOut, type: "D", description: "x\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" });
         const wiseIn2 = { ...wiseIn, amount: 99.5 };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvIn, wiseIn2], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
@@ -2226,7 +2249,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       it("does not flag a pair whose incoming leg is larger than the outgoing leg", async () => {
-        const smallOut = { ...lhvOut, amount: 99 };
+        const smallOut = camtSigned({ ...lhvOut, amount: 99 });
         const bigIn = { ...wiseIn, amount: 100 };
         const { handler } = setupInterAccountTool({ transactions: [smallOut, bigIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
@@ -2252,7 +2275,7 @@ describe("reconcile_inter_account_transfers", () => {
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 100 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
 
-        expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
         expect(payload.matched_one_sided).toBe(0);
         expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
         expect(api.transactions.delete).toHaveBeenCalledWith(2);
@@ -2294,7 +2317,7 @@ describe("reconcile_inter_account_transfers", () => {
       const base = { status: "PROJECT", is_deleted: false, cl_currencies_id: "EUR", date: "2026-10-01", clients_id: null };
 
       it("reports a same-type pair whose mirror leg lacks own-origin evidence (counterpart_lacks_own_origin)", async () => {
-        const lhvOut = { ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+        const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
         const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
@@ -2312,7 +2335,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       it("reports an opposite-direction pair whose base amounts conflict (conflicting_transfer_amounts)", async () => {
-        const lhvOut = { ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" };
+        const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
         const wiseIn = { ...base, id: 2, type: "D", amount: 100, cl_currencies_id: "USD", base_amount: 95, accounts_dimensions_id: 22, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
@@ -3346,13 +3369,13 @@ describe("reconcile_inter_account_transfers", () => {
       const run = setupInterAccountTool({
         transactions: [
           { id: 9101, status: "PROJECT", is_deleted: false, type: "C", amount: 75, cl_currencies_id: "EUR", date: "2026-07-21", accounts_dimensions_id: 100, bank_account_no: "BE08905767222113" },
-          { id: 9102, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 75, cl_currencies_id: "EUR", date: "2026-07-21", accounts_dimensions_id: 300, bank_account_no: "EE123456789012345678" },
+          camtSigned({ id: 9102, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 75, cl_currencies_id: "EUR", date: "2026-07-21", accounts_dimensions_id: 300, bank_account_no: "EE123456789012345678" }),
         ],
         bankAccounts: twoAccounts,
       });
       const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
 
-      expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.pairs[0]).toMatchObject({
         outgoing_transaction_id: 9101, incoming_transaction_id: 9102,
@@ -3371,7 +3394,7 @@ describe("reconcile_inter_account_transfers", () => {
       const run = setupInterAccountTool({
         transactions: [
           { id: 9201, status: "PROJECT", is_deleted: false, type: "C", amount: 100, base_amount: 90, cl_currencies_id: "USD", date: "2026-07-22", accounts_dimensions_id: 100, bank_account_no: "BE08905767222113" },
-          { id: 9202, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 90, cl_currencies_id: "EUR", date: "2026-07-22", accounts_dimensions_id: 300, bank_account_no: "EE123456789012345678" },
+          camtSigned({ id: 9202, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 90, cl_currencies_id: "EUR", date: "2026-07-22", accounts_dimensions_id: 300, bank_account_no: "EE123456789012345678" }),
         ],
         bankAccounts: twoAccounts,
       });
@@ -3963,6 +3986,227 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
       expect(payload.auto_confirmed).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
+    });
+  });
+});
+
+// --- WP3 (F4): CAMT marker IBAN, unverifiable markers, mirror proposals -------
+// Local fixtures only: the shared setupInterAccountTool is reused unchanged.
+describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
+  const LHV_IBAN = "EE123456789012345678";
+  const WISE_IBAN = "BE08905767222113";
+  const threeAccounts = [
+    { id: 1, account_name_est: "LHV", account_no: LHV_IBAN, iban_code: LHV_IBAN, accounts_dimensions_id: 100 },
+    { id: 2, account_name_est: "Wise", account_no: WISE_IBAN, iban_code: WISE_IBAN, accounts_dimensions_id: 300 },
+    { id: 3, account_name_est: "Lightyear", account_no: "EE999999999999999999", iban_code: "EE999999999999999999", accounts_dimensions_id: 400 },
+  ];
+
+  /** A PROJECT row as MCP-CAMT stores it: bank_account_no null, the IBAN only in the signed marker. */
+  function camtRow(id: number, o: { iban?: string; dir?: "DBIT" | "CRDT"; amount?: number; date?: string; dim?: number; name?: string; ref?: string } = {}) {
+    const amount = o.amount ?? 600;
+    const date = o.date ?? "2026-09-26";
+    const name = o.name ?? "Näide OU";
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "C", amount, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: o.dim ?? 100, bank_account_name: name, bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Näide OU", {
+        date, amount, currency: "EUR", direction: o.dir ?? "DBIT", counterparty_name: name,
+        counterparty_iban: o.iban ?? WISE_IBAN, bank_reference: o.ref ?? `REF${id}`, description: "Näide OU",
+      }),
+    };
+  }
+  /** Flip one hex character of the marker sig, keeping it syntactically valid. */
+  function tamperSig<T extends { description?: string }>(tx: T): T {
+    return { ...tx, description: tx.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+  }
+
+  it("books a one-sided transfer to the account behind a verified marker IBAN among three accounts", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.matched_one_sided).toBe(1);
+    expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
+    expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
+  });
+
+  it("pairs a verified-marker outgoing with the incoming row on the marker IBAN's account", async () => {
+    const { handler } = setupInterAccountTool({
+      transactions: [
+        camtRow(5002),
+        { id: 5003, status: "PROJECT", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null, description: "WISE:T5003 top-up [source_direction=IN]" },
+      ],
+      bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 5002, incoming_transaction_id: 5003 });
+    expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
+  });
+
+  describe("Phase 2 mirror proposals (F4b): report-only, never deleted", () => {
+    const counterpart = (o: Record<string, unknown> = {}) => ({
+      id: 5001, status: "CONFIRMED", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26",
+      accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null,
+      description: "WISE:TRANSFER-1 top-up [source_direction=IN]", ...o,
+    });
+    const journal = (o: Record<string, unknown> = {}) => ({
+      id: 9001, effective_date: "2026-09-26", is_deleted: false, registered: true, operation_type: "TRANSACTION", operations_id: 5001,
+      document_number: null,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 300, type: "D", amount: 600, base_amount: 600, is_deleted: false },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 600, base_amount: 600, is_deleted: false },
+      ],
+      ...o,
+    });
+    const setup = (transactions: unknown[], journals: unknown[] = [journal()]) =>
+      setupInterAccountTool({ transactions, journals, bankAccounts: threeAccounts, companyName: "Näide OÜ" });
+    const proposals = (payload: any) => payload.already_handled.filter((row: any) => row.mirror_proposal);
+
+    it("proposes the sole same-key mirror for explicit deletion, in dry run and execute, and never deletes it", async () => {
+      const { handler, api } = setup([counterpart(), camtRow(5002)]);
+      const dry = parseMcpResponse((await handler({})).content[0]!.text);
+      const executed = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      for (const payload of [dry, executed]) {
+        expect(payload.matched_one_sided).toBe(0);
+        expect(payload.already_handled).toEqual([expect.objectContaining({
+          transaction_id: 5002, existing_journal_id: 9001,
+          mirror_proposal: expect.objectContaining({ counterpart_transaction_id: 5001, journal_id: 9001, evidence: expect.any(Array) }),
+          next_action: { tool: "delete_transaction", args: { id: 5002 }, approval_required: true },
+        })]);
+      }
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("Codex counterexample: two same-day outgoings to the own Wise IBAN and one journal → no proposal, both reviewed", async () => {
+      for (const order of [[5002, 5003], [5003, 5002]]) {
+        const rows = order.map(id => camtRow(id));
+        const { handler, api } = setup([counterpart(), ...rows]);
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(payload.already_handled).toEqual([]);
+        expect(payload.matched_one_sided).toBe(0);
+        expect(payload.ambiguous_refless).toEqual([
+          expect.objectContaining({ transaction_ids: expect.arrayContaining([5002, 5003]) }),
+        ]);
+        expect(payload.ambiguous_refless[0].transaction_ids).toHaveLength(2);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      }
+    });
+
+    it("makes no proposal when the journal is not the counterpart's TRANSACTION journal (ENTRY)", async () => {
+      const { handler } = setup([counterpart(), camtRow(5002)], [journal({ operation_type: "ENTRY" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal when the counterpart is not CONFIRMED", async () => {
+      for (const status of ["PROJECT", "VOID"]) {
+        const { handler, api } = setup([counterpart({ status }), camtRow(5002)]);
+        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        expect(proposals(payload)).toEqual([]);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      }
+    });
+
+    it("Codex counterexample: a verified mirror plus a same-day row with a tampered marker → no proposal, both reviewed", async () => {
+      const { handler } = setup([counterpart(), camtRow(5002), tamperSig(camtRow(5003))]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+      expect(payload.ambiguous_refless).toContainEqual(expect.objectContaining({ transaction_ids: [5002, 5003] }));
+    });
+
+    it("makes no proposal when the mirror's signed direction contradicts its journal posting", async () => {
+      // The counterpart carries no signed direction, so only the posting side can veto.
+      const { handler } = setup([counterpart({ description: "top-up" }), camtRow(5002, { dir: "CRDT" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal for a non-EUR counterpart (EUR-only)", async () => {
+      const { handler } = setup([counterpart({ cl_currencies_id: "USD", base_amount: 600 }), camtRow(5002)]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(proposals(payload)).toEqual([]);
+    });
+
+    it("makes no proposal when the journal has another claimant", async () => {
+      // A Phase 1 pair (5006 -> 5007) already claims journal 9001 by its
+      // reference; the Phase 2 row 5002 carrying the same reference is the
+      // sole same-key Phase 2 row but not the journal's only claimant.
+      const withRef = (id: number) => ({ ...camtRow(id, { ref: "R1" }), bank_ref_number: "R1" });
+      const wiseIn = { id: 5007, status: "PROJECT", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null, description: "WISE:T5007 top-up [source_direction=IN]" };
+      const { handler } = setup([counterpart(), withRef(5006), withRef(5002), wiseIn], [journal({ document_number: "R1" })]);
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.already_handled).toEqual(expect.arrayContaining([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]));
+      expect(proposals(payload)).toEqual([]);
+    });
+  });
+
+  it("reports a company-name transfer with no single target for review instead of dropping it (F4c)", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [{ id: 5004, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 100, bank_account_name: "Näide OÜ", bank_account_no: null }],
+      bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.ambiguous_refless).toEqual([
+      expect.objectContaining({ transaction_ids: [5004], target_account: "Wise / Lightyear", reason: expect.stringContaining("target_accounts_dimensions_id") }),
+    ]);
+  });
+
+  describe("a CAMT marker whose sig fails the checksum fails closed (camt_marker_unverified)", () => {
+    const twoAccounts = threeAccounts.slice(0, 2);
+
+    it("(a) 2 own accounts and the exact company name: not confirmed, reported for review", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: twoAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.ambiguous_refless).toEqual([
+        expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }),
+      ]);
+    });
+
+    it("(b) 3 accounts with an explicit target: not confirmed, reported for review", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: threeAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 300 })).content[0]!.text);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.matched_one_sided).toBe(0);
+      expect(payload.ambiguous_refless).toEqual([
+        expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }),
+      ]);
+    });
+
+    it("(c) a marker without a sig keeps the name-only behaviour", async () => {
+      const unsigned = { ...camtRow(5002, { name: "Näide OÜ" }), description: `Näide OU\n[e-arveldaja-mcp:camt br=REF5002 iban=${WISE_IBAN} dir=DBIT]` };
+      const { handler } = setupInterAccountTool({ transactions: [unsigned], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.matched_one_sided).toBe(1);
+      expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
+      expect(payload.ambiguous_refless).toEqual([]);
+    });
+
+    it("never pairs (and so never deletes) a tampered row even when the other leg's IBAN points at its account", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 5003, status: "PROJECT", is_deleted: false, type: "C", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Someone", bank_account_no: LHV_IBAN, description: "WISE:T5003 out [source_direction=OUT]" },
+          tamperSig(camtRow(5002, { dir: "CRDT", iban: WISE_IBAN, name: "Näide OÜ" })),
+        ],
+        bankAccounts: twoAccounts, companyName: "Näide OÜ",
+      });
+      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      expect(payload.matched_pairs).toBe(0);
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalledWith(5002, expect.anything(), expect.anything());
+      expect(payload.ambiguous_refless).toContainEqual(expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" }));
     });
   });
 });

@@ -44,7 +44,10 @@ import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
+  counterpartyIbanOf,
+  hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
   getSameTypeReciprocalEvidence,
   type InterAccountMatchLookups,
@@ -739,11 +742,17 @@ export async function runInterAccountMatching(
     targetAccountsDimensionsId: target_accounts_dimensions_id,
   };
 
+  // A row whose CAMT marker sig fails the checksum has an unverifiable
+  // statement identity (IBAN, direction): it never takes part in automatic
+  // pairing, one-sided confirms or mirror handling. Rows it would otherwise
+  // have touched as an own transfer are reported for review below.
+  const pairable = unconfirmed.filter(tx => !hasUnverifiableCamtMarker(tx));
+
   // Rows without a signed marker ("unknown") stay on the outgoing side as
   // before; same-type pairs among them confirm only when exactly one leg is
   // signed outgoing, and a confirm books from the real stored type.
-  const outgoing = unconfirmed.filter(tx => bankTransactionDirection(tx) !== "incoming");
-  const incoming = unconfirmed.filter(tx => bankTransactionDirection(tx) === "incoming");
+  const outgoing = pairable.filter(tx => bankTransactionDirection(tx) !== "incoming");
+  const incoming = pairable.filter(tx => bankTransactionDirection(tx) === "incoming");
 
   const matchedPairs: PairResult[] = [];
   const ambiguousPairs: AmbiguousPairResult[] = [];
@@ -794,6 +803,20 @@ export async function runInterAccountMatching(
 
   const oneSidedInferenceCache = new Map<number, OneSidedInference>();
 
+  for (const tx of unconfirmed) {
+    if (!tx.id || !hasUnverifiableCamtMarker(tx)) continue;
+    const claim = unverifiedMarkerTransferClaim(tx, lookups);
+    if (!claim) continue;
+    const claimedTargets = claim.targetDimension !== undefined ? [claim.targetDimension] : claim.ambiguousTargetDimensions ?? [];
+    ambiguousRefless.push({
+      transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+      source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+      target_account: claimedTargets.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+      code: "camt_marker_unverified",
+      reason: `Transaction ${tx.id} looks like an own-account transfer, but its CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified. It is excluded from automatic matching; check the bank statement and resolve it manually.`,
+    });
+  }
+
   // Deleting a row as a transfer mirror needs positive evidence it came from
   // the source account: its counterparty IBAN is the source account's, or (with
   // no IBAN) the payer is the company itself — same name AND same legal form.
@@ -802,7 +825,7 @@ export async function runInterAccountMatching(
   // name), a merely similar name, or an own account's display title (a bank's
   // own refund "Swedbank AS" vs an account titled "Swedbank") is not evidence.
   function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
-    const iban = (row.bank_account_no ?? "").trim().toUpperCase();
+    const iban = counterpartyIbanOf(row);
     if (iban) return ownIbanToDimension.get(iban)?.has(sourceDimensionId) ?? false;
     return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
   }
@@ -855,8 +878,8 @@ export async function runInterAccountMatching(
       const txOutComparableAmount = compatibility.txAComparableAmount;
       const conflictingComparableAmounts = compatibility.conflictingComparableAmounts;
 
-      const outCounterpartyIban = (txOut.bank_account_no ?? "").trim().toUpperCase();
-      const inCounterpartyIban = (txIn.bank_account_no ?? "").trim().toUpperCase();
+      const outCounterpartyIban = counterpartyIbanOf(txOut);
+      const inCounterpartyIban = counterpartyIbanOf(txIn);
       const inAccountIban = dimensionToIban.get(txIn.accounts_dimensions_id) ?? "";
       const outAccountIban = dimensionToIban.get(txOut.accounts_dimensions_id) ?? "";
 
@@ -1032,7 +1055,7 @@ export async function runInterAccountMatching(
   }
 
   // --- Phase 1b: reciprocal same-type pairs with strong mutual target evidence ---
-  const phaseOneRemaining = unconfirmed.filter(
+  const phaseOneRemaining = pairable.filter(
     tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
   );
 
@@ -1246,7 +1269,7 @@ export async function runInterAccountMatching(
   }
 
   // --- Phase 2: one-sided transfers (counterparty = company name or own IBAN) ---
-  const remaining = unconfirmed.filter(
+  const remaining = pairable.filter(
     tx => tx.id && !consumedTxIds.has(tx.id) && !blockedOneSidedTxIds.has(tx.id),
   );
 
@@ -1317,8 +1340,45 @@ export async function runInterAccountMatching(
     }
   }
 
+  // Positive evidence that `tx` (a Phase 2 row already covered by `journalId`)
+  // mirrors that journal's confirmed counterpart transaction, or undefined.
+  // Report-only: the operator resolves a proposal with delete_transaction.
+  const isPlainEur = (row: Transaction) =>
+    row.cl_currencies_id === "EUR" && (row.base_amount == null || sameAmountToTheCent(row.base_amount, row.amount));
+  function mirrorProposalFor(tx: Transaction, targetDimension: number, journalId: number): NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> | undefined {
+    const journal = guard.journals.find(j => j.id === journalId);
+    if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION") return undefined;
+    const counterpart = journal.operations_id != null ? allTx.find(row => row.id === journal.operations_id) : undefined;
+    if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED") return undefined;
+    if (counterpart.accounts_dimensions_id !== targetDimension || !sameAmountToTheCent(counterpart.amount, tx.amount)) return undefined;
+    if (!isPlainEur(tx) || !isPlainEur(counterpart)) return undefined;
+    if (!hasOwnOriginEvidence(tx, targetDimension)) return undefined;
+    const direction = signedBankTransactionDirection(tx);
+    if (!direction) return undefined;
+    const ownSide = direction === "incoming" ? "D" : "C";
+    const legsOn = (dim: number) => journal.postings.filter(p => !p.is_deleted && p.accounts_dimensions_id === dim);
+    const ownLegs = legsOn(tx.accounts_dimensions_id);
+    const targetLegs = legsOn(targetDimension);
+    if (ownLegs.length === 0 || ownLegs.some(p => p.type !== ownSide)) return undefined;
+    if (targetLegs.length === 0 || targetLegs.some(p => p.type === ownSide)) return undefined;
+    if (signedBankTransactionDirection(counterpart) === direction) return undefined;
+    return {
+      counterpart_transaction_id: counterpart.id!,
+      journal_id: journalId,
+      evidence: [
+        "journal_is_counterpart_transaction",
+        "counterpart_confirmed_on_target_account",
+        "same_eur_amount",
+        "own_origin_evidence",
+        "posting_side_matches_signed_direction",
+        "sole_same_key_candidate",
+      ],
+    };
+  }
+  const mirrorProposals: Array<{ row: SkippedAlreadyHandledRow; proposal: NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> }> = [];
+
   for (const tx of remaining) {
-    if (!tx.id || blockedOneSidedTxIds.has(tx.id)) continue;
+    if (!tx.id || blockedOneSidedTxIds.has(tx.id) || consumedTxIds.has(tx.id)) continue;
     const { targetDimension, confidence, reasons, ambiguousTargetDimensions } =
       inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
 
@@ -1328,6 +1388,18 @@ export async function runInterAccountMatching(
         source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
         target_account: ambiguousTargetDimensions.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
         reason: `The counterparty IBAN backs several own accounts (dimensions ${ambiguousTargetDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
+      });
+      continue;
+    }
+    if (!targetDimension && reasons.includes("counterparty_name_matches_company")) {
+      // The payer is the company itself, but several own accounts could be
+      // the other side: report it rather than silently dropping the row.
+      const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
+      ambiguousRefless.push({
+        transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+        source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+        target_account: otherDimensions.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+        reason: `The counterparty is the company itself, but several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
       });
       continue;
     }
@@ -1358,13 +1430,41 @@ export async function runInterAccountMatching(
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(tx.id);
-      skippedAlreadyHandled.push({
+      // Other unhandled rows with this transfer's key (same account and
+      // target, same EUR cents, ±1 day) — including rows with an unverifiable
+      // marker. The journal covers one movement; with several candidates it
+      // cannot be told which is its mirror, so all of them go to review.
+      const sameKeyCandidates = [...remaining, ...unconfirmed.filter(hasUnverifiableCamtMarker)].filter(other =>
+        other.id !== undefined && other.id !== tx.id && !consumedTxIds.has(other.id) &&
+        other.accounts_dimensions_id === tx.accounts_dimensions_id &&
+        Math.abs(toUtcDay(other.date) - toUtcDay(tx.date)) / 86_400_000 <= 1 &&
+        (hasUnverifiableCamtMarker(other)
+          ? sameAmountToTheCent(comparableTransactionAmount(other), amountEur) &&
+            [unverifiedMarkerTransferClaim(other, lookups)].some(claim =>
+              claim?.targetDimension === targetDimension || claim?.ambiguousTargetDimensions?.includes(targetDimension))
+          // A row whose own EUR amount does not resolve is already an error row.
+          : [resolveOneSidedTransferAmount(other)].some(resolved => resolved.ok && sameAmountToTheCent(resolved.amountEur, amountEur)) &&
+            inferOneSidedTransfer(other, lookups, oneSidedInferenceCache).targetDimension === targetDimension));
+      if (sameKeyCandidates.length > 0) {
+        const ids = [tx.id, ...sameKeyCandidates.map(other => other.id!)];
+        for (const id of ids) consumedTxIds.add(id);
+        ambiguousRefless.push({
+          transaction_ids: ids, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
+          source_account: sourceTitle, target_account: targetTitle,
+          reason: `Transactions ${ids.join(", ")} are same-amount transfers from ${sourceTitle} to ${targetTitle} within a day of each other, but journal #${resolution.journal_id} books only one movement, so it cannot be told which of them (if any) is its mirror. Check the bank statements: delete the mirror row and confirm any genuine transfer inline.`,
+        });
+        continue;
+      }
+      const row: SkippedAlreadyHandledRow = {
         transaction_id: tx.id, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
         source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
         target_account: targetTitle, target_dimension_id: targetDimension,
         existing_journal_id: resolution.journal_id,
         reason: "Already journalized from the other account side",
-      });
+      };
+      skippedAlreadyHandled.push(row);
+      const proposal = mirrorProposalFor(tx, targetDimension, resolution.journal_id);
+      if (proposal) mirrorProposals.push({ row, proposal });
       continue;
     }
     if (resolution.status === "ambiguous_refless") {
@@ -1401,6 +1501,15 @@ export async function runInterAccountMatching(
       undefined, tx.bank_ref_number ?? tx.ref_number,
     );
     if (tx.clients_id == null) await resolveCompanyClientsId();
+  }
+
+  // A proposal needs the journal to have no other claimant in this run.
+  for (const { row, proposal } of mirrorProposals) {
+    const claimants = skippedAlreadyHandled.filter(other => other.existing_journal_id === proposal.journal_id).length;
+    if (claimants !== 1) continue;
+    row.mirror_proposal = proposal;
+    row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };
+    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction; reconcile never deletes it automatically.`;
   }
 
   const companyClientsId = await resolveCompanyClientsId();
