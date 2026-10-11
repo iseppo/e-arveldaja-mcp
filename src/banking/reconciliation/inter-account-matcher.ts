@@ -1,13 +1,15 @@
-import type { Transaction } from "../../types/api.js";
+import type { Journal, Transaction } from "../../types/api.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 import {
+  bankReferenceLookupKey,
   extractCamtDescriptionMetadata,
   isTrustedCamtDescriptionMetadata,
   normalizeOptionalReference,
   storedBankAccountNo,
+  storedBankReferenceLookupKey,
 } from "../../camt/duplicate-identity.js";
 
 // ---------------------------------------------------------------------------
@@ -46,14 +48,25 @@ export function hasUnverifiableCamtMarker(tx: Transaction): boolean {
 /**
  * The bank reference used to match an existing inter-account journal: the
  * direct `bank_ref_number`, else the reference of a checksum-verified CAMT
- * marker (MCP-CAMT rows store it only there), else `ref_number`.
+ * marker (MCP-CAMT rows store it only there), else `ref_number`. A verified
+ * marker that kept only the reference hash (a reference over the marker cap)
+ * is matched by the shared lookup key: the document number of a journal whose
+ * reference has the same key is returned.
  */
-export function transferReferenceOf(tx: Transaction): string | undefined {
+export function transferReferenceOf(tx: Transaction, journals: readonly Journal[] = []): string | undefined {
   const direct = normalizeOptionalReference(tx.bank_ref_number ?? undefined);
   if (direct) return direct;
   const metadata = extractCamtDescriptionMetadata(tx.description);
-  const markerReference = isTrustedCamtDescriptionMetadata(tx, metadata) ? normalizeOptionalReference(metadata.bank_ref_number) : undefined;
-  return markerReference ?? tx.ref_number ?? undefined;
+  if (isTrustedCamtDescriptionMetadata(tx, metadata)) {
+    const markerReference = normalizeOptionalReference(metadata.bank_ref_number);
+    if (markerReference) return markerReference;
+    const key = storedBankReferenceLookupKey(tx);
+    const journal = key
+      ? journals.find(j => !j.is_deleted && bankReferenceLookupKey(j.document_number ?? undefined) === key)
+      : undefined;
+    if (journal?.document_number) return journal.document_number;
+  }
+  return tx.ref_number ?? undefined;
 }
 
 export interface OneSidedInference {

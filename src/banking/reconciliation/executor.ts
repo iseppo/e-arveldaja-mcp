@@ -985,7 +985,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       txOut.accounts_dimensions_id, txIn.accounts_dimensions_id,
       bestCandidate.comparableAmount, txOut.date, maxGap,
-      transferReferenceOf(txOut), true,
+      transferReferenceOf(txOut, guard.journals), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(txOut.id);
@@ -1050,7 +1050,7 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
-      undefined, transferReferenceOf(txOut),
+      undefined, transferReferenceOf(txOut, guard.journals),
     );
     if (txOut.clients_id == null) await resolveCompanyClientsId();
   }
@@ -1176,7 +1176,7 @@ export async function runInterAccountMatching(
     const resolution = resolveExistingJournal(
       source.accounts_dimensions_id, counterpart.accounts_dimensions_id,
       distributionAmount, source.date, maxGap,
-      transferReferenceOf(source), true,
+      transferReferenceOf(source, guard.journals), true,
     );
     if (resolution.status === "matched") {
       consumedTxIds.add(sourceId);
@@ -1264,7 +1264,7 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       source.accounts_dimensions_id, counterpart.accounts_dimensions_id, distributionAmount, source.date,
-      undefined, transferReferenceOf(source),
+      undefined, transferReferenceOf(source, guard.journals),
     );
     if (source.clients_id == null) await resolveCompanyClientsId();
   }
@@ -1307,7 +1307,7 @@ export async function runInterAccountMatching(
       // one-sided journal check below (skip / ambiguous_refless), not here.
       const covered = (tx: Transaction, target: number, amount: number) =>
         resolveExistingJournal(
-          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferenceOf(tx), false,
+          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferenceOf(tx, guard.journals), false,
         ).status !== "none";
       if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
 
@@ -1430,7 +1430,7 @@ export async function runInterAccountMatching(
       amountEur,
       tx.date,
       maxGap,
-      transferReferenceOf(tx),
+      transferReferenceOf(tx, guard.journals),
       true,
     );
     if (resolution.status === "matched") {
@@ -1456,7 +1456,19 @@ export async function runInterAccountMatching(
           consumedTxIds.add(id);
           mirrorReviewedTxIds.add(id);
         }
-        mirrorReviewJournalClaims.set(resolution.journal_id, (mirrorReviewJournalClaims.get(resolution.journal_id) ?? 0) + 1);
+        // Every member's journal claim counts, not only this row's: a later
+        // row must not become the sole claimant of a journal a member matched.
+        const claimedJournalIds = [resolution.journal_id];
+        for (const other of sameKeyCandidates) {
+          const otherResolution = resolveExistingJournal(
+            other.accounts_dimensions_id, targetDimension, amountEur, other.date, maxGap,
+            transferReferenceOf(other, guard.journals), false,
+          );
+          if (otherResolution.status === "matched") claimedJournalIds.push(otherResolution.journal_id);
+        }
+        for (const journalId of claimedJournalIds) {
+          mirrorReviewJournalClaims.set(journalId, (mirrorReviewJournalClaims.get(journalId) ?? 0) + 1);
+        }
         ambiguousRefless.push({
           transaction_ids: ids, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
           source_account: sourceTitle, target_account: targetTitle,
@@ -1507,7 +1519,7 @@ export async function runInterAccountMatching(
     });
     recordInterAccountJournal(
       tx.accounts_dimensions_id, targetDimension, amountEur, tx.date,
-      undefined, transferReferenceOf(tx),
+      undefined, transferReferenceOf(tx, guard.journals),
     );
     if (tx.clients_id == null) await resolveCompanyClientsId();
   }
