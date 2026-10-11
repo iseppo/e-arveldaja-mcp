@@ -1255,6 +1255,19 @@ describe("execute_year_end_close partial-mutation visibility (F-YEAR-END-PARTIAL
     expect(payloads.filter((payload) => payload.error === "Year-end close already exists")).toHaveLength(1);
   });
 
+  it("refuses the execute (fail closed) when the company identity for the booking lock cannot be read", async () => {
+    const journalsCreate = vi.fn().mockResolvedValue({ created_object_id: 7701 });
+    const api = createApi(makeM20BaseJournals(), { journalsCreate });
+    api.readonly.getVatInfo = vi.fn().mockRejectedValue(Object.assign(new Error("HTTP 503"), { status: 503 }));
+    const server = { registerTool: vi.fn() } as any;
+    registerAnnualReportTools(server, api);
+    const handler = server.registerTool.mock.calls.find(([name]: [string]) => name === "execute_year_end_close")[2];
+    const result = await handler({ year: 2025, confirm: true });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("Could not determine company identity for the booking lock; retry");
+    expect(journalsCreate).not.toHaveBeenCalled();
+  });
+
   it("returns a structured partial result — never a bare thrown error — when a closing journal fails to create", async () => {
     const journalsCreate = vi.fn().mockRejectedValue(new Error("backend 500"));
     const handler = setupTool("execute_year_end_close", { journals: makeM20BaseJournals(), journalsCreate });

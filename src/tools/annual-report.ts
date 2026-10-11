@@ -1793,7 +1793,13 @@ export function registerAnnualReportTools(server: McpServer, api: ApiContext): v
 
       // One execute per company+year at a time: concurrent runs would both
       // analyse the open year before either creates, and book the close twice.
-      return withBookingKeyLock(await companyLedgerLockScope(api), { ns: "YEC", id: String(year) }, async () => {
+      let lockScope: string;
+      try {
+        lockScope = await companyLedgerLockScope(api);
+      } catch (error) {
+        return toolError(error);
+      }
+      return withBookingKeyLock(lockScope, { ns: "YEC", id: String(year) }, async () => {
         // Uncached: existing-close detection (and the closing amounts) come from
         // the journals — a close booked elsewhere within the 120 s cache window
         // must be seen, or it would be booked twice.

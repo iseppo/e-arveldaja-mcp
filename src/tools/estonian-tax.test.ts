@@ -1668,6 +1668,27 @@ describe("prepare_dividend_package", () => {
     expect(loser.content[0]!.text.toLowerCase()).toContain("insufficient retained earnings");
     expect(store.filter((journal) => String(journal.document_number ?? "").startsWith("DIV-"))).toHaveLength(1);
   });
+
+  it("refuses a booking execute (fail closed) when the company identity for the lock cannot be read; dry runs are unaffected", async () => {
+    const api = makeApi([
+      makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(2960, "C", 5000)]),
+      makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
+    ], makeStandardAccounts());
+    Object.assign(api.readonly, {
+      getVatInfo: vi.fn().mockRejectedValue(Object.assign(new Error("HTTP 503"), { status: 503 })),
+    });
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, api);
+    const cb = mock.tools.get("prepare_dividend_package")!;
+
+    const refused = await cb({ net_dividend: 400, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false });
+    expect(isError(refused)).toBe(true);
+    expect(refused.content[0]!.text).toContain("Could not determine company identity for the booking lock; retry");
+    expect(api.journals.create).not.toHaveBeenCalled();
+
+    const preview = await cb({ net_dividend: 400, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: true });
+    expect(isError(preview)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

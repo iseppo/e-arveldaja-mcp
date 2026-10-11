@@ -159,19 +159,23 @@ export async function withBookingKeyLock<T>(
  * year-end close). The connection fingerprint hashes the credentials, so two
  * processes using different API keys for the same company would not serialize;
  * the company's tax reference number (or VAT number) plus the API environment
- * is the same for both. When no company identity can be loaded this falls back
- * to the connection fingerprint (serializes per credential only). The lock
- * directory is per OS user / TMPDIR (tmpdir() or EARVELDAJA_LOCK_DIR), so
- * processes under different users or temp dirs still do not serialize.
+ * is the same for both. When the identity lookup FAILS the execute is refused
+ * (thrown, retryable): a per-credential fallback would let a second key race
+ * past the lock. Known limitation: a company that genuinely has neither a tax
+ * reference number nor a VAT number falls back to the connection fingerprint
+ * (serializes per credential only). The lock directory is per OS user / TMPDIR
+ * (tmpdir() or EARVELDAJA_LOCK_DIR), so processes under different users or temp
+ * dirs still do not serialize.
  */
 export async function companyLedgerLockScope(api: ApiContext): Promise<string> {
+  let vatInfo: Awaited<ReturnType<ApiContext["readonly"]["getVatInfo"]>>;
   try {
-    const vatInfo = await api.readonly.getVatInfo();
-    const companyId = vatInfo.tax_refnumber?.trim() || vatInfo.vat_number?.trim();
-    if (companyId) return `company\0${api.journals.apiBaseUrl}\0${companyId}`;
-  } catch {
-    // No company identity available: per-credential lock below.
+    vatInfo = await api.readonly.getVatInfo();
+  } catch (error) {
+    throw new Error("Could not determine company identity for the booking lock; retry.", { cause: error });
   }
+  const companyId = vatInfo?.tax_refnumber?.trim() || vatInfo?.vat_number?.trim();
+  if (companyId) return `company\0${api.journals.apiBaseUrl}\0${companyId}`;
   return api.journals.connectionFingerprint;
 }
 

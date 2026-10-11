@@ -1244,7 +1244,13 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
       };
       if (dry_run) return checkAndBook();
-      return withBookingKeyLock(await companyLedgerLockScope(api), { ns: "DIV", id: "__headroom__" }, async () => {
+      let lockScope: string;
+      try {
+        lockScope = await companyLedgerLockScope(api);
+      } catch (error) {
+        return toolError(error);
+      }
+      return withBookingKeyLock(lockScope, { ns: "DIV", id: "__headroom__" }, async () => {
         api.journals.invalidateListCache();
         return checkAndBook();
       });

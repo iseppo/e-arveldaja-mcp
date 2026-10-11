@@ -1021,8 +1021,12 @@ describe("companyLedgerLockScope", () => {
     expect(demo).not.toBe(a);
   });
 
-  it("falls back to the connection fingerprint when no company identity can be loaded", async () => {
+  it("falls back to the connection fingerprint when the company has no identity on record", async () => {
     expect(await companyLedgerLockScope(apiWith("fp-a", "u", async () => ({ vat_number: null })))).toBe("fp-a");
-    expect(await companyLedgerLockScope(apiWith("fp-a", "u", async () => { throw new Error("down"); }))).toBe("fp-a");
+  });
+
+  it("fails closed when the company identity lookup fails", async () => {
+    await expect(companyLedgerLockScope(apiWith("fp-a", "u", async () => { throw new Error("down"); })))
+      .rejects.toThrow("Could not determine company identity for the booking lock; retry");
   });
 });
