@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { withOwnedFileLock } from "../file-lock.js";
+import { companyLedgerLockScope } from "../booking-guard.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { normalizeCompanyName } from "../company-name.js";
@@ -534,6 +535,16 @@ export async function executeCamtImport(
       message: "A reviewed execution-plan handle from the CAMT dry run is required to import transactions.",
     };
   }
+  // Rows are serialized per company (not per credential) + bank dimension, so
+  // two API keys of one company cannot both pass a row's duplicate recheck.
+  // Resolved before the plan is consumed: a failed identity lookup refuses the
+  // execute and the reviewed plan stays usable for the retry.
+  let lockScope: string;
+  try {
+    lockScope = await companyLedgerLockScope(api);
+  } catch (error) {
+    return { ok: false, code: "company_identity_unavailable", message: (error as Error).message };
+  }
   let storedPlan;
   try {
     storedPlan = runtimeSafetyContext.planStore.consume(planHandle, CAMT_PLAN_DOMAIN);
@@ -584,14 +595,14 @@ export async function executeCamtImport(
   // usable id came back).
   const createdThisRun: Transaction[] = [];
   const exactKeyOccurrences = findExactKeyOccurrences(projection.parsed.entries, accountsDimensionsId);
-  // A row's duplicate recheck and its create run under one lock per connection
+  // A row's duplicate recheck and its create run under one lock per company
   // + bank dimension (in-process queue plus file lock), held from the row's
   // prepare until the next row's prepare or the end of the run. A concurrent
   // execute of the same statement then rechecks only after this row's create
   // has landed, instead of both passing on the same ledger.
   const rowLockPath = resolvePath(
     process.env.EARVELDAJA_LOCK_DIR ?? resolvePath(tmpdir(), "e-arveldaja-mcp-locks"),
-    `${createHash("sha256").update(`${api.transactions.connectionFingerprint}\0camt\0${accountsDimensionsId}`).digest("hex")}.lock`,
+    `${createHash("sha256").update(`${lockScope}\0camt\0${accountsDimensionsId}`).digest("hex")}.lock`,
   );
   let releaseRowLock: (() => Promise<void>) | undefined;
   const freeRowLock = async () => {

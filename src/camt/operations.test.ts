@@ -150,4 +150,53 @@ describe("CamtOperations", () => {
     const created = outcomes.map(outcome => outcome.ok ? outcome.value.createdCount : 0);
     expect(created.sort()).toEqual([0, 1]);
   });
+
+  it("two concurrent executes through different API keys of one company create its row once", async () => {
+    const ledger: Array<Record<string, unknown>> = [];
+    const source = { file_path: inline(fixtureCamtXml()) };
+    const args = { source, accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined };
+    const runs = await Promise.all(["camt-key-a", "camt-key-b"].map(async fingerprint => {
+      const { api, operations } = setup([], { allowWrites: true });
+      Object.assign(api.transactions, { connectionFingerprint: fingerprint });
+      Object.assign(api.journals, { connectionFingerprint: fingerprint, apiBaseUrl: "https://rmp-api.rik.ee/v1" });
+      api.readonly.getVatInfo.mockResolvedValue({ vat_number: null, tax_refnumber: "9000123456" });
+      api.transactions.listAll.mockImplementation(async () => [...ledger]);
+      api.transactions.create.mockImplementation(async (payload: Record<string, unknown>) => {
+        await new Promise(resolve => setTimeout(resolve, 30));
+        const id = 9001 + ledger.length;
+        ledger.push({ ...payload, id, status: "PROJECT", is_deleted: false });
+        return { code: 200, created_object_id: id, messages: [] };
+      });
+      const dry = await operations.prepareImport(args);
+      if (!dry.ok) throw new Error("dry run failed");
+      return { api, operations, planHandle: dry.value.planHandle };
+    }));
+
+    const outcomes = await Promise.all(runs.map(run => run.operations.executeImport({ ...args, planHandle: run.planHandle })));
+    expect(ledger).toHaveLength(1);
+    expect(runs.reduce((count, run) => count + run.api.transactions.create.mock.calls.length, 0)).toBe(1);
+    expect(outcomes.map(outcome => outcome.ok ? outcome.value.createdCount : 0).sort()).toEqual([0, 1]);
+  });
+
+  it("executeImport refuses (fail closed) before any create when the company identity lookup fails", async () => {
+    const { api, operations } = setup([], { allowWrites: true });
+    const source = { file_path: inline(fixtureCamtXml()) };
+    const args = { source, accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined };
+    const dry = await operations.prepareImport(args);
+    if (!dry.ok) throw new Error("dry run failed");
+    api.readonly.getVatInfo.mockRejectedValueOnce(Object.assign(new Error("HTTP 503"), { status: 503 }));
+
+    const refused = await operations.executeImport({ ...args, planHandle: dry.value.planHandle });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.error.code).toBe("company_identity_unavailable");
+      expect(refused.error.message).toContain("Could not determine company identity for the booking lock; retry");
+    }
+    expect(api.transactions.create).not.toHaveBeenCalled();
+
+    // The reviewed plan is still usable for the retry.
+    const retried = await operations.executeImport({ ...args, planHandle: dry.value.planHandle });
+    expect(retried.ok).toBe(true);
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+  });
 });
