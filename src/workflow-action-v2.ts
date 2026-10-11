@@ -12,7 +12,8 @@ const WORKFLOW_PAGE_TOOL = "get_workflow_page" as const;
 const SETUP_FALLBACK_TOOL = "get_setup_instructions" as const;
 
 export interface WorkflowActionV2NextAction {
-  tool: string;
+  // Absent only for a direct review action: its recommendation is the step.
+  tool?: string;
   args: Record<string, unknown>;
   approval_required: boolean;
   // Present when the next step is answering a question (a tool-less v1 action):
@@ -105,7 +106,19 @@ function nextActionFrom(
   questionRerun: BuildWorkflowActionV2Options["questionRerun"],
 ): WorkflowActionV2NextAction | undefined {
   if (action?.kind === "done") return undefined;
-  if (action && (typeof action.tool !== "string" || action.tool.length === 0)) {
+  const toolLess = action !== undefined && (typeof action.tool !== "string" || action.tool.length === 0);
+  if (toolLess && action.kind === "review_item" && action.args === undefined) {
+    // A direct review action (no resolver handles it; a blocked dry run carries
+    // args instead) asks nothing: rerunning the inbox would only repeat it, so
+    // the recommendation is the next step.
+    return {
+      args: {},
+      approval_required: false,
+      ...(action.recommendation ? { recommendation: action.recommendation } : {}),
+      instruction: "Carry out this review item's recommendation (a write still needs the user's approval); it asks no question, so do not rerun accounting_inbox for it.",
+    };
+  }
+  if (action && toolLess) {
     // A tool-less action (answer_question) is answered by asking the user and
     // rerunning the originating tool with the answer — never the setup
     // fallback, and never a continuation call that cannot consume the answer.
