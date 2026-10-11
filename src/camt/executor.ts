@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { resolve as resolvePath } from "node:path";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { withOwnedFileLock } from "../file-lock.js";
-import { companyLedgerLockScope } from "../booking-guard.js";
+import { BookingGuard, companyLedgerLockScope } from "../booking-guard.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { normalizeCompanyName } from "../company-name.js";
@@ -35,6 +35,11 @@ import {
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
 } from "./duplicate-identity.js";
+import {
+  buildCamtJournalCoverageContext,
+  classifyCamtJournalCoverage,
+  type CamtJournalSnapshot,
+} from "./journal-coverage.js";
 import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
 import {
@@ -263,6 +268,45 @@ async function resolveClientForEntry(
   return resolution;
 }
 
+/** The journal snapshot could not be read or bound to the bank account: refuse, never treat as empty. */
+export class CamtJournalSnapshotError extends Error {
+  constructor(readonly code: "journal_snapshot_unavailable" | "camt_bank_account_unresolved", message: string) {
+    super(message);
+    this.name = "CamtJournalSnapshotError";
+  }
+}
+
+/** Journals (with postings), bank accounts and the dimension's own bank GL account. */
+async function loadCamtJournalSnapshot(api: ApiContext, accountsDimensionsId: number): Promise<CamtJournalSnapshot> {
+  let dimensions, bankAccounts, journals;
+  try {
+    [dimensions, bankAccounts, journals] = await Promise.all([
+      api.readonly.getAccountDimensions(),
+      api.readonly.getBankAccounts(),
+      api.journals.listAllWithPostings(),
+    ]);
+  } catch (error) {
+    throw new CamtJournalSnapshotError(
+      "journal_snapshot_unavailable",
+      `The journal snapshot needed to rule out already-booked movements could not be read (${(error as Error).message}). Nothing was imported; retry the dry run.`,
+    );
+  }
+  const accountId: unknown = dimensions.find(dimension => dimension.id === accountsDimensionsId && !dimension.is_deleted)?.accounts_id;
+  if (typeof accountId !== "number" || !Number.isSafeInteger(accountId) || accountId <= 0) {
+    throw new CamtJournalSnapshotError(
+      "camt_bank_account_unresolved",
+      `The bank account of dimension ${accountsDimensionsId} could not be resolved, so existing journals cannot be checked. Nothing was imported.`,
+    );
+  }
+  return {
+    journals,
+    accountId,
+    bankAccounts,
+    accountDimensions: dimensions,
+    interAccountResolver: (snapshot, ownDimensionIds) => BookingGuard.fromSnapshot(api, snapshot, ownDimensionIds),
+  };
+}
+
 /**
  * Fetch the ledger and drive the pure projection, injecting the api-backed
  * client resolver and progress reporter. The api I/O lives here (adapter
@@ -276,12 +320,14 @@ export async function buildImportProjection(
   dateTo: string | undefined,
 ): Promise<CamtImportProjection> {
   const ledgerTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+  const journalCoverage = await loadCamtJournalSnapshot(api, accountsDimensionsId);
   return computeCamtImportProjection({
     loaded,
     accountsDimensionsId,
     dateFrom,
     dateTo,
     ledgerTransactions,
+    journalCoverage,
     resolveClient: (entry, cache) => resolveClientForEntry(api, entry, cache),
     reportProgress: (index, total) => reportProgress(index, total),
   });
@@ -315,6 +361,8 @@ export function camtPlanFingerprint(projection: CamtImportProjection, normalized
       amount: row.amount,
       reason: row.reason,
       duplicate_transaction_ids: row.duplicate_transaction_ids,
+      journal_ids: row.journal_ids,
+      review_code: row.review_code,
     })),
     possible_duplicates: projection.descriptors.map((descriptor, index) => ({
       id: camtPlanCommandId(index),
@@ -371,6 +419,8 @@ export function issueCamtPlan(
       bank_reference: row.bank_reference,
       reason: row.reason,
       duplicate_transaction_ids: row.duplicate_transaction_ids,
+      journal_ids: row.journal_ids,
+      review_code: row.review_code,
     })),
     reviews: projection.descriptors
       .filter(d => d.possibleDuplicateMatches.length > 0)
@@ -579,7 +629,13 @@ export async function executeCamtImport(
   await ensureAccountDimensionExists(api, accountsDimensionsId);
   await assertStatementAccountMatchesDimension(api, loaded.statement_metadata.iban, accountsDimensionsId);
 
-  const projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo);
+  let projection: CamtImportProjection;
+  try {
+    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo);
+  } catch (error) {
+    if (error instanceof CamtJournalSnapshotError) return { ok: false, code: error.code, message: error.message };
+    throw error;
+  }
   const storedFingerprint = isRecord(storedPlan.privatePayload)
     ? storedPlan.privatePayload.fingerprint
     : undefined;
@@ -643,8 +699,25 @@ export async function executeCamtImport(
         descriptor.entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
         exactKeyOccurrences.get(buildBatchDuplicateKey(descriptor.entry)),
       );
-      return duplicateIds.length > 0
-        ? { outcome: "drift", error_code: "duplicate_appeared" }
+      if (duplicateIds.length > 0) return { outcome: "drift", error_code: "duplicate_appeared" };
+      // Same for a journal booked elsewhere since the review (manual entry,
+      // the other side of an own transfer): an uncached journal read.
+      api.journals.invalidateListCache();
+      let snapshot: CamtJournalSnapshot;
+      try {
+        snapshot = await loadCamtJournalSnapshot(api, accountsDimensionsId);
+      } catch (error) {
+        if (error instanceof CamtJournalSnapshotError) return { outcome: "drift", error_code: error.code };
+        throw error;
+      }
+      const coverage = classifyCamtJournalCoverage(descriptor.entry, buildCamtJournalCoverageContext({
+        snapshot,
+        dimensionId: accountsDimensionsId,
+        entries: projection.parsed.entries,
+        ledgerTransactions: ledger,
+      }));
+      return coverage.kind !== "none"
+        ? { outcome: "drift", error_code: "journal_coverage_appeared" }
         : { outcome: "ready" };
     },
     mutateIndex: async index => {

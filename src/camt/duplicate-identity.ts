@@ -175,19 +175,24 @@ function buildCamtDescriptionMarkerFromParts(parts: string[]): string | undefine
     : undefined;
 }
 
-function buildCamtEntrySignatureForParsedEntry(entry: ParsedCamtEntry, cleanDescription: string | undefined): string | undefined {
+/** `legacy`: the dir-less signature an earlier release wrote (stored type, no direction). */
+function buildCamtEntrySignatureForParsedEntry(
+  entry: ParsedCamtEntry,
+  cleanDescription: string | undefined,
+  legacy = false,
+): string | undefined {
   const bankReferenceKey = bankReferenceLookupKey(entry.bank_reference);
   return buildCamtEntrySignature({
     bankReferenceKey,
     date: entry.date,
-    type: "C",
+    type: legacy ? legacyTransactionTypeForDirection(entry.direction) : "C",
     currency: entry.currency,
     amount: entry.amount,
     refNumber: canonicalRefNumber(entry.reference_number).value,
     bankAccountNo: entry.counterparty_iban,
     bankAccountName: entry.counterparty_name,
     description: cleanDescription,
-    sourceDirection: entry.direction,
+    sourceDirection: legacy ? undefined : entry.direction,
   });
 }
 
@@ -323,7 +328,7 @@ export function storedBankAccountNo(transaction: Pick<Transaction,
 }
 
 export function buildDuplicateLookup(transactions: Transaction[], selectedDimensionId: number): DuplicateLookup {
-  const lookup: DuplicateLookup = { byBankRef: new Map(), byEntryKey: new Map() };
+  const lookup: DuplicateLookup = { byBankRef: new Map(), byEntryKey: new Map(), bySignature: new Map(), byMarkerReference: new Map() };
   for (const transaction of transactions) {
     addToDuplicateLookup(lookup, transaction, selectedDimensionId);
   }
@@ -354,6 +359,11 @@ export function addToDuplicateLookup(
     byEntryKey.set(entryKey, exactExisting);
   }
 
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  if (metadata.entry_sig) pushToMap(lookup.bySignature, metadata.entry_sig, transaction);
+  const markerReferenceKey = dimensionScopedBankReferenceLookupKey(markerBankReferenceLookupKey(metadata), selectedDimensionId);
+  if (markerReferenceKey) pushToMap(lookup.byMarkerReference, markerReferenceKey, transaction);
+
   const directBankRefKey = dimensionScopedBankReferenceLookupKey(
     directBankReferenceLookupKey(transaction),
     selectedDimensionId,
@@ -363,6 +373,84 @@ export function addToDuplicateLookup(
   const existing = byBankRef.get(directBankRefKey) ?? [];
   existing.push(transaction.id);
   byBankRef.set(directBankRefKey, existing);
+}
+
+function pushToMap<T>(map: Map<string, T[]>, key: string, value: T): void {
+  const existing = map.get(key) ?? [];
+  existing.push(value);
+  map.set(key, existing);
+}
+
+function markerBankReferenceLookupKey(metadata: ReturnType<typeof extractCamtDescriptionMetadata>): string | undefined {
+  return bankReferenceLookupKey(metadata.bank_ref_number) ?? metadata.bank_ref_hash;
+}
+
+/**
+ * True when `stored` is exactly what the CAMT renderer writes for this
+ * description beside the stored marker: the full text, or the text cut to the
+ * budget that marker leaves and then trimEnd()-ed. Anything else (edited text,
+ * a shorter cut) is not proof of truncation.
+ */
+function storedTextIsRenderedDescription(stored: string | null | undefined, cleanDescription: string | undefined): boolean {
+  if (!stored) return false;
+  const marker = normalizeCamtDescriptionLineBreaks(stored).trimEnd()
+    .match(/(?:^|\n)(\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\])$/)?.[1];
+  if (!marker) return false;
+  const text = stripCamtDescriptionMetadata(stored);
+  if (!cleanDescription) return text === undefined;
+  if (text === cleanDescription) return true;
+  const budget = TRANSACTION_DESCRIPTION_MAX_LENGTH - marker.length - 1;
+  if (budget <= 0 || cleanDescription.length <= budget) return false;
+  const rendered = cleanDescription.slice(0, budget).trimEnd();
+  return rendered.length > 0 && text === rendered;
+}
+
+/**
+ * Stored rows on this dimension whose CAMT marker `sig` is the one this entry
+ * produces (current, or the dir-less legacy variant) although the marker fails
+ * its checksum: the sig is taken over the full description before the stored
+ * text is cut to the cap, and read-back drops bank_ref_number/bank_account_no.
+ * The sig is only a hint; every surviving field must corroborate it. Only
+ * `clients_id` is ignored (legitimately reassigned on confirm).
+ */
+export function findMarkerSignatureMatches(
+  entry: ParsedCamtEntry,
+  lookup: DuplicateLookup,
+  selectedDimensionId: number,
+): number[] {
+  const entryReferenceKey = bankReferenceLookupKey(entry.bank_reference);
+  if (!entryReferenceKey) return [];
+  const cleanDescription = markerSafeDescription(entry.description);
+  const signatures = new Set([
+    buildCamtEntrySignatureForParsedEntry(entry, cleanDescription),
+    buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, true),
+  ].filter((signature): signature is string => signature !== undefined));
+  const entryIban = normalizePossibleDuplicateIban(entry.counterparty_iban);
+  const entryName = normalizeBatchDuplicateKeyPart(entry.counterparty_name);
+  const entryRef = normalizeBatchDuplicateKeyPart(canonicalRefNumber(entry.reference_number).value);
+  const present = (value: string | null | undefined) => normalizeOptionalReference(value ?? undefined) !== undefined;
+
+  const matches = new Set<number>();
+  for (const signature of signatures) {
+    for (const row of lookup.bySignature.get(signature) ?? []) {
+      const metadata = extractCamtDescriptionMetadata(row.description);
+      const corroborated =
+        row.accounts_dimensions_id === selectedDimensionId &&
+        row.date === entry.date &&
+        Number.isFinite(row.amount) && centsKey(row.amount) === centsKey(entry.amount) &&
+        (row.cl_currencies_id || "EUR") === (entry.currency || "EUR") &&
+        markerBankReferenceLookupKey(metadata) === entryReferenceKey &&
+        (!metadata.source_direction || metadata.source_direction === entry.direction) &&
+        storedTextIsRenderedDescription(row.description, cleanDescription) &&
+        (!present(row.bank_account_name) || normalizeBatchDuplicateKeyPart(row.bank_account_name ?? undefined) === entryName) &&
+        (!present(row.ref_number) || normalizeBatchDuplicateKeyPart(row.ref_number ?? undefined) === entryRef) &&
+        (!present(row.bank_ref_number) || directBankReferenceLookupKey(row) === entryReferenceKey) &&
+        (!present(row.bank_account_no) || normalizePossibleDuplicateIban(normalizeOptionalReference(row.bank_account_no ?? undefined)) === entryIban) &&
+        (metadata.bank_account_no === undefined || normalizePossibleDuplicateIban(metadata.bank_account_no) === entryIban);
+      if (corroborated && row.id) matches.add(row.id);
+    }
+  }
+  return [...matches];
 }
 
 export function buildPossibleDuplicateLookup(
@@ -552,6 +640,25 @@ export function findPartialLegacyEntries(
       if (!entry.duplicate || uncovered.has(entry)) partial.add(entry);
     }
   }
+  // Entries sharing a repeated bank reference never take the signature path
+  // (findDuplicateTransactionIds refuses it), so a stored row whose CAMT marker
+  // carries that reference, trusted or not, and that no entry's exact match
+  // accounts for may be an old aggregate or truncated leg. Neither create nor
+  // skip: review all.
+  const byReference = new Map<string, ParsedCamtEntry[]>();
+  for (const entry of entries) {
+    const reference = normalizeOptionalReference(entry.bank_reference);
+    if (reference) pushToMap(byReference, reference, entry);
+  }
+  for (const [reference, sharing] of byReference) {
+    if (sharing.length < 2) continue;
+    const key = dimensionScopedBankReferenceLookupKey(bankReferenceLookupKey(reference), selectedDimensionId);
+    const explained = new Set(sharing.flatMap((entry) => entry.duplicate_transaction_ids));
+    const dates = new Set(sharing.map((entry) => entry.date));
+    const unexplained = (key ? lookup.byMarkerReference.get(key) ?? [] : [])
+      .some((row) => dates.has(row.date) && !explained.has(row.id!));
+    if (unexplained) for (const entry of sharing) partial.add(entry);
+  }
   return partial;
 }
 
@@ -579,6 +686,9 @@ export function findDuplicateTransactionIds(
   const matches = new Set<number>();
 
   for (const id of lookup.byBankRef.get(bankReferenceKey) ?? []) {
+    matches.add(id);
+  }
+  for (const id of findMarkerSignatureMatches(entry, lookup, selectedDimensionId)) {
     matches.add(id);
   }
 

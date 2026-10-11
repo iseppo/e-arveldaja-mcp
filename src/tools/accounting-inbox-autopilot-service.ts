@@ -380,7 +380,7 @@ function summarizeAutopilotToolResult(
           possible_duplicate_count: reviewCount,
           error_count: errorCount,
         },
-        followUps: reviewItems.map((item) => {
+        followUps: [...reviewItems.map((item) => {
           const hasConfirmedMatch = arrayAt(item, "existing_transactions").some((candidate) =>
             isRecord(candidate) && stringAt(candidate, "status") === "CONFIRMED"
           );
@@ -415,6 +415,30 @@ function summarizeAutopilotToolResult(
             },
           );
         }),
+        // Rows not created because an existing journal may already book them,
+        // or because a previous release imported their entry only in part.
+        ...preview.projection.skipped.filter((row) => row.review_note !== undefined).map((row) => {
+          const journalReview = row.review_code !== undefined;
+          return toAutopilotFollowUp(
+            tool,
+            `CAMT row ${row.date} ${row.amount} was not created: ${journalReview
+              ? "an existing journal may already book it"
+              : "a previous release imported its statement entry only in part"}.`,
+            { recommendation: row.review_note },
+            {
+              review_type: journalReview ? "camt_journal_review" : "camt_partial_legacy",
+              source_tool: tool,
+              item: {
+                date: row.date,
+                amount: row.amount,
+                bank_reference: wrapUntrustedOcr(row.bank_reference),
+                journal_ids: row.journal_ids ?? [],
+                ...(journalReview ? { review_code: row.review_code } : {}),
+                review_note: row.review_note,
+              },
+            },
+          );
+        })],
       };
     }
     case "import_wise_transactions": {

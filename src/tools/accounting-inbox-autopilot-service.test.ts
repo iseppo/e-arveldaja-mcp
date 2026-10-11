@@ -133,6 +133,39 @@ async function pipelineWithPendingCamtAndReconciliation() {
 }
 
 describe("runAccountingInboxDryRunPipeline", () => {
+  it("raises an accountant-review follow-up for every CAMT row skipped with a review note", async () => {
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: [
+        { date: "2026-09-24", amount: 10500, bank_reference: "REF-LOAN-1", duplicate_transaction_ids: [], reason: "Already booked by journal 601", journal_ids: [601] },
+        { date: "2026-06-20", amount: 12.83, bank_reference: "PILET-1", duplicate_transaction_ids: [], reason: "review", journal_ids: [28424939],
+          review_code: "camt_journal_posting_review", review_note: "The 12.83 EUR DBIT row on 2026-06-20 may already be booked by journal 28424939." },
+        { date: "2026-02-04", amount: 95, bank_reference: "R1", duplicate_transaction_ids: [], reason: "Partially imported by a previous release; needs review",
+          review_note: "The 95 EUR DBIT row on 2026-02-04 belongs to a statement entry a previous release imported only in part." },
+      ] },
+      createdCount: 0,
+      errorCount: 0,
+      possibleDuplicates: [],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        camtFiles: ["/tmp/accounting-inbox/statement.xml"],
+        steps: [{
+          step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+          suggested_args: { file_path: "/tmp/accounting-inbox/statement.xml", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [], reason: "CAMT found",
+        }],
+      }),
+      operations: mockOperations({ prepareCamtImport }),
+    });
+
+    const reviews = result.needs_accountant_review.map(item => item.resolver_input?.review_type);
+    expect(reviews).toEqual(["camt_journal_review", "camt_partial_legacy"]);
+    const journalReview = result.needs_accountant_review[0]!;
+    expect(journalReview.id).toBeDefined();
+    expect(journalReview.resolver_input?.item).toMatchObject({ journal_ids: [28424939], review_code: "camt_journal_posting_review" });
+    expect(String((journalReview.resolver_input?.item as Record<string, unknown>).bank_reference)).toContain("UNTRUSTED_OCR_START");
+  });
+
   it("marks reconciliation deferred when an import dry run has pending rows (M12)", async () => {
     const { result, prepareInterAccount } = await pipelineWithPendingCamtAndReconciliation();
     expect(result.skipped_steps).toEqual(expect.arrayContaining([

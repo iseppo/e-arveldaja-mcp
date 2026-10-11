@@ -173,12 +173,26 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     })),
   }));
 
+  // Rows not created because an existing journal may already book them.
+  const journalReviews = projection.skipped
+    .filter(row => row.review_code !== undefined)
+    .map(row => ({
+      code: "camt_journal_review",
+      review_code: row.review_code,
+      date: row.date,
+      amount: row.amount,
+      bank_reference: wrapUntrustedOcr(row.bank_reference),
+      journal_ids: row.journal_ids ?? [],
+      review_note: row.review_note,
+    }));
+  const needsReview = [...sanitizedPossibleDuplicates, ...journalReviews];
+
   const workflowSummary = dryRun
     ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
     : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
   const workflow = buildWorkflowEnvelope({
     summary: workflowSummary,
-    needs_review: sanitizedPossibleDuplicates,
+    needs_review: needsReview,
     dry_run_steps: dryRun
       ? [{
           tool: "import_camt053",
@@ -207,7 +221,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
       results: sanitizedResults,
       skipped: sanitizedSkipped,
       errors: [],
-      needs_review: sanitizedPossibleDuplicates,
+      needs_review: needsReview,
       ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     }),
     ...(projection.skipped.length > 0 && {
@@ -300,7 +314,10 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     warnings.push({ code: "camt_unsplit_entry", message: row.review_note! });
   }
   for (const row of data.projection.skipped.filter(skipped => skipped.review_note !== undefined).slice(0, 3)) {
-    warnings.push({ code: "camt_partial_legacy_import", message: row.review_note! });
+    warnings.push({
+      code: row.review_code !== undefined ? "camt_journal_review" : "camt_partial_legacy_import",
+      message: row.review_note!,
+    });
   }
 
   // Errors (indeterminate / failed commands) surface as blockers — never hidden.

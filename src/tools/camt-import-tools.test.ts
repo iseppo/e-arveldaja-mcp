@@ -9,7 +9,11 @@ import { resolveFileInput } from "../file-validation.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { registerCamtImportTools } from "./camt-import.js";
+import { createCamtOperations } from "../camt/operations.js";
+import { renderCamtImportCompact } from "../camt/presenter.js";
 import { parseMcpResponse } from "../mcp-json.js";
+import { preflightCamt053Xml } from "../camt/parser.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import {
   createAccountingWorkflowApi,
   createMockToolServer,
@@ -166,13 +170,18 @@ function setupCamtTool(options: {
   findByNameResult?: unknown[];
   findByNameImpl?: (name: string) => unknown[] | Promise<unknown[]>;
   bankAccounts?: unknown[];
+  accountDimensions?: unknown[];
+  journals?: unknown[];
   toolName?: string;
   allowWrites?: boolean;
 } = {}) {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi({
     allowWrites: options.allowWrites,
-    accountDimensions: [fixtureAccountDimension({ id: 7 })],
+    accountDimensions: options.accountDimensions ?? [fixtureAccountDimension({ id: 7 })],
+    ...(options.journals !== undefined
+      ? { journals: { listAllWithPostings: vi.fn().mockResolvedValue(options.journals) } }
+      : {}),
     bankAccounts: options.bankAccounts ?? [fixtureBankAccount({ accounts_dimensions_id: 7 })],
     transactionRows: options.existingTransactions ?? [],
     clients: {
@@ -1754,6 +1763,40 @@ describe("camt import tool", () => {
     ]);
   });
 
+  it("skips a confirmed row whose stored description was cut to the cap (F3, the 682 shape)", async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><BkToCstmrStmt><Stmt><Id>stmt-682</Id>
+<Acct><Id><IBAN>EE637700771011212909</IBAN></Id><Ccy>EUR</Ccy></Acct>
+<Ntry><Amt Ccy="EUR">682.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><BookgDt><Dt>2026-09-24</Dt></BookgDt><AcctSvcrRef>TRUNC-REF-0001</AcctSvcrRef>
+<NtryDtls><TxDtls><RltdPties><Dbtr><Nm>Payer Ministry</Nm></Dbtr><DbtrAcct><Id><IBAN>EE471000001020145685</IBAN></Id></DbtrAcct></RltdPties>
+<RmtInf><Ustrd>RKID:20260924000400000001 EXAMPLE FOUNDATION FOR INNOVATION SA 2026 14 09.09.2026</Ustrd><Strd><CdtrRefInf><Ref>57700816</Ref></CdtrRefInf></Strd></RmtInf>
+</TxDtls></NtryDtls></Ntry></Stmt></BkToCstmrStmt></Document>`;
+    const preflight = preflightCamt053Xml(xml);
+    if (!preflight.ok) throw new Error("preflight rejected");
+    const entry = preflight.value.entries[0]!;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(xml);
+    // As the API reads it back: identity fields null, type "C", confirmed to another client.
+    const { api, handler } = setupCamtTool({ allowWrites: true,
+      existingTransactions: [{
+        id: 9001, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: 7, date: "2026-09-24", type: "C",
+        amount: 682, cl_currencies_id: "EUR", bank_ref_number: null, bank_account_no: null, clients_id: 4242,
+        bank_account_name: "Payer Ministry", ref_number: "57700816",
+        description: buildCamtDescriptionWithMetadata(entry.description, entry),
+      }],
+    });
+
+    const payload = parseMcpResponse((await executeGranularWithPlan(handler, {
+      file_path: "/tmp/camt.xml",
+      accounts_dimensions_id: 7,
+    })).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(0);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.summary.possible_duplicate_count).toBe(0);
+  });
+
   it("does not auto-skip prior transactions that only have an unsigned CAMT marker", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
@@ -3217,6 +3260,22 @@ describe("camt import — statement closing-balance tripwire", () => {
     expect(check.warnings).toEqual([]);
   });
 
+  it("reconciles on the dry run when a journal already books the statement entry (F1)", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance()
+      .replace("<Amt Ccy=\"EUR\">12.00</Amt>\n        <CdtDbtInd>CRDT</CdtDbtInd>", "<Amt Ccy=\"EUR\">10.00</Amt>\n        <CdtDbtInd>DBIT</CdtDbtInd>"));
+    const { api, handler } = setupCamtTool({ journals: [journalCoverageFixture(501, "BANK:REF-CLBD-1")] });
+
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(payload.created_count).toBe(0);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    const check = payload.statement_balance_check;
+    expect(check.statement_closing_balance).toBe(-10.00);
+    expect(check.booked_balance).toBe(-10.00);
+    expect(check.expected_balance).toBe(-10.00);
+    expect(check.within_tolerance).toBe(true);
+  });
+
   it("surfaces and persists the closing-balance check on execute", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(camtXmlWithClosingBalance());
@@ -3289,5 +3348,174 @@ describe("camt import — statement closing-balance tripwire", () => {
     expect(check).toBeDefined();
     expect(check.persisted).toBe(false);
     expect(check.notes.join(" ")).toMatch(/could not (be persisted|run)/i);
+  });
+});
+
+/** A registered journal crediting LHV dim 7 (1020) with 10.00 on 2026-02-01. */
+function journalCoverageFixture(id: number, documentNumber: string | null, overrides: Record<string, unknown> = {}) {
+  return {
+    id, effective_date: "2026-02-01", registered: true, is_deleted: false, operation_type: "ENTRY",
+    document_number: documentNumber, title: "Manual bank booking",
+    postings: [
+      { accounts_id: 5000, accounts_dimensions_id: null, type: "D", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+      { accounts_id: 1020, accounts_dimensions_id: 7, type: "C", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+    ],
+    ...overrides,
+  };
+}
+
+describe("camt import — journals that already book the movement (F1)", () => {
+  const args = { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 };
+
+  it("(a) skips an entry a manual BANK:<ref> journal books, naming the journal, and never creates", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [journalCoverageFixture(501, "BANK:REF-VOID-1")] });
+
+    const payload = parseMcpResponse((await executeGranularWithPlan(handler, args)).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.created_count).toBe(0);
+    expect(payload.skipped_count).toBe(1);
+    expect(payload.execution.skipped[0]).toMatchObject({ journal_ids: [501] });
+    expect(payload.execution.skipped[0].reason).toContain("501");
+  });
+
+  it("(b) skips the LHV leg of a transfer already confirmed from the Wise side", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(withCounterpartyIban(singleEntryXml, "BE08905767222113"));
+    const { api, handler } = setupCamtTool({
+      allowWrites: true,
+      bankAccounts: [
+        fixtureBankAccount({ accounts_dimensions_id: 7 }),
+        fixtureBankAccount({ accounts_dimensions_id: 8, account_no: "BE08905767222113", iban_code: "BE08905767222113" }),
+      ],
+      accountDimensions: [fixtureAccountDimension({ id: 7 }), fixtureAccountDimension({ id: 8 })],
+      journals: [journalCoverageFixture(701, null, {
+        operation_type: "TRANSACTION", operations_id: 9800,
+        postings: [
+          { accounts_id: 1020, accounts_dimensions_id: 8, type: "D", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+          { accounts_id: 1020, accounts_dimensions_id: 7, type: "C", amount: 10, base_amount: 10, cl_currencies_id: "EUR", is_deleted: false },
+        ],
+      })],
+    });
+
+    const payload = parseMcpResponse((await executeGranularWithPlan(handler, args)).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.execution.skipped[0]).toMatchObject({ journal_ids: [701] });
+  });
+
+  it("(c) sends an amount/date-only journal match to review instead of creating", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [journalCoverageFixture(502, null)] });
+
+    const dry = parseMcpResponse((await handler(args)).content[0]!.text);
+    expect(dry.created_count).toBe(0);
+    expect(dry.workflow.needs_review).toEqual([expect.objectContaining({
+      code: "camt_journal_review", review_code: "camt_journal_posting_review", journal_ids: [502], amount: 10,
+    })]);
+    expect(dry.execution.needs_review).toEqual(dry.workflow.needs_review);
+
+    await executeGranularWithPlan(handler, args);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("(c) the compact surface warns with camt_journal_review", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api } = setupCamtTool({ journals: [journalCoverageFixture(502, null)] });
+    const outcome = await createCamtOperations(api, createTestRuntimeSafetyContext()).prepareImport({
+      source: { file_path: "/tmp/camt.xml" }, accountsDimensionsId: 7, dateFrom: undefined, dateTo: undefined,
+    });
+    if (!outcome.ok) throw new Error("prepare failed");
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value });
+    expect(summary.warnings).toEqual([expect.objectContaining({ code: "camt_journal_review" })]);
+  });
+
+  it("(d) refuses with plan_drift when a covering journal appears between dry run and execute", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    api.journals.listAllWithPostings.mockResolvedValue([journalCoverageFixture(501, "BANK:REF-VOID-1")]);
+
+    const result = await handler({ ...args, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("(e) refuses the dry run with journal_snapshot_unavailable when the journal fetch fails", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ journals: [] });
+    api.journals.listAllWithPostings.mockRejectedValue(new Error("journals down"));
+
+    const result = await handler(args);
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("journal_snapshot_unavailable");
+    expect(payload.retry).toBe("safe");
+  });
+
+  it("(g) stops at the row whose precheck sees a journal that appeared during the command loop", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(twoDistinctRefXml());
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    api.transactions.create.mockResolvedValue({ created_object_id: 9001 });
+    // Empty at execute-time projection and row 1's precheck; REF-B's journal lands after row 1's write.
+    api.journals.listAllWithPostings.mockImplementation(async () => (api.transactions.create.mock.calls.length === 0 ? [] : [
+      journalCoverageFixture(503, "BANK:REF-B", {
+        effective_date: "2026-02-02",
+        postings: [{ accounts_id: 1020, accounts_dimensions_id: 7, type: "C", amount: 20, base_amount: 20, cl_currencies_id: "EUR", is_deleted: false }],
+      }),
+    ]));
+    api.journals.invalidateListCache.mockClear();
+
+    const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(2);
+    expect(payload.execution.execution_report.stop_reason).toMatchObject({
+      command_id: "camt-create-1", category: "plan_drift", code: "journal_coverage_appeared",
+    });
+  });
+
+  it("(h) does not create a row whose precheck journal fetch fails", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ allowWrites: true, journals: [] });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    let reads = 0;
+    api.journals.listAllWithPostings.mockImplementation(async () => {
+      if (reads++ === 0) return [];
+      throw new Error("journals down");
+    });
+
+    const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.execution.execution_report.stop_reason).toMatchObject({
+      command_id: "camt-create-0", category: "plan_drift", code: "journal_snapshot_unavailable",
+    });
+  });
+
+  it("(i) refuses when the dimension's bank account cannot be resolved", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool({ accountDimensions: [fixtureAccountDimension({ id: 7, accounts_id: undefined as never })] });
+
+    const result = await handler(args);
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("camt_bank_account_unresolved");
+    expect(api.transactions.create).not.toHaveBeenCalled();
   });
 });
