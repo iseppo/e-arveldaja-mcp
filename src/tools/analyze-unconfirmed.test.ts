@@ -823,3 +823,79 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
     await expect(handler({})).rejects.toThrow(/payment_status/);
   });
 });
+
+describe("analyze_unconfirmed_transactions F5 exact_invoice_base_amount", () => {
+  const eurRow = {
+    id: 901,
+    status: "PROJECT",
+    is_deleted: false,
+    type: "C",
+    amount: 290.03,
+    date: "2026-09-15",
+    accounts_dimensions_id: 100,
+    cl_currencies_id: "EUR",
+    clients_id: 77,
+    description: "Card payment",
+    bank_account_name: "Acme Cloud LLC",
+    bank_account_no: null,
+  };
+  const usdInvoice = {
+    id: 5487,
+    status: "CONFIRMED",
+    payment_status: "NOT_PAID",
+    number: "INV-5487",
+    clients_id: 77,
+    client_name: "Acme Cloud LLC",
+    cl_currencies_id: "USD",
+    gross_price: 334.46,
+    currency_rate: 1.1532,
+    base_gross_price: 290.03,
+  };
+
+  it("suggests confirm_invoice with the EUR row amount for a unique match", async () => {
+    const handler = setupTool({ transactions: [eurRow], bankAccounts: defaultBankAccounts, purchases: [usdInvoice] });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const s = payload.suggestions[0]!;
+    expect(s.suggested_action).toBe("confirm_invoice");
+    expect(s.reason).toContain("exact_invoice_base_amount");
+    expect(s.distribution).toEqual({ related_table: "purchase_invoices", related_id: 5487, amount: 290.03 });
+  });
+
+  it("holds a tie between two Tier A invoices for manual review without a distribution", async () => {
+    const handler = setupTool({
+      transactions: [eurRow],
+      bankAccounts: defaultBankAccounts,
+      purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
+    });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const s = payload.suggestions[0]!;
+    expect(s.suggested_action).toBe("manual_review");
+    expect(s.distribution).toBeUndefined();
+    expect(s.reason).toContain("ambiguous_foreign_invoice_base");
+    expect(s.candidate_invoices).toEqual([
+      { related_table: "purchase_invoices", related_id: 5487 },
+      { related_table: "purchase_invoices", related_id: 5488 },
+    ]);
+  });
+
+  // Codex counterexample: same client, EUR 100 invoice and USD 200 invoice with
+  // base EUR 100. Both score 55; neither order may yield a distribution.
+  const eur100Row = { ...eurRow, id: 902, amount: 100 };
+  const eurInvoice = { ...usdInvoice, id: 6001, number: "INV-6001", cl_currencies_id: "EUR", gross_price: 100, currency_rate: 1, base_gross_price: 100 };
+  const usd200Invoice = { ...usdInvoice, id: 6002, number: "INV-6002", gross_price: 200, currency_rate: 2, base_gross_price: 100 };
+  it.each([
+    ["EUR invoice first", [eurInvoice, usd200Invoice]],
+    ["USD invoice first", [usd200Invoice, eurInvoice]],
+  ])("holds a mixed exact_amount / Tier A top-score tie for review (%s)", async (_label, purchases) => {
+    const handler = setupTool({ transactions: [eur100Row], bankAccounts: defaultBankAccounts, purchases });
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const s = payload.suggestions[0]!;
+    expect(s.suggested_action).toBe("manual_review");
+    expect(s.distribution).toBeUndefined();
+    expect(s.reason).toContain("ambiguous_foreign_invoice_base");
+    expect(s.candidate_invoices).toEqual(expect.arrayContaining([
+      { related_table: "purchase_invoices", related_id: 6001 },
+      { related_table: "purchase_invoices", related_id: 6002 },
+    ]));
+  });
+});

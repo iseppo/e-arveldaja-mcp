@@ -205,3 +205,53 @@ describe("computeExactMatchProjection signed-outgoing invoice eligibility", () =
     expect(projection.confirms.map(c => [c.transactionId, c.invoiceTable])).toEqual([[1210, "sale_invoices"]]);
   });
 });
+
+describe("computeExactMatchProjection exact_invoice_base_amount (F5)", () => {
+  const eurRow = tx({
+    id: 901, type: "C", amount: 290.03, base_amount: undefined, cl_currencies_id: "EUR",
+    clients_id: 77, ref_number: "RF-5487", description: "Acme Cloud",
+  } as Partial<Transaction>);
+  const usdInvoice = {
+    id: 5487, number: "INV-5487", clients_id: 77, client_name: "Acme Cloud LLC",
+    cl_currencies_id: "USD", gross_price: 334.46, currency_rate: 1.1532, base_gross_price: 290.03,
+    bank_ref_number: "RF-5487", payment_status: "NOT_PAID", status: "CONFIRMED",
+  } as unknown as PurchaseInvoice;
+
+  it("confirms the unique match at the EUR row amount when min_confidence <= 85", () => {
+    const projection = computeExactMatchProjection([eurRow], [], [usdInvoice], 85);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceTable, c.invoiceId, c.amount, c.confidence]))
+      .toEqual([[901, "purchase_invoices", 5487, 290.03, 85]]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it("does not confirm at the default threshold of 90", () => {
+    const projection = computeExactMatchProjection([eurRow], [], [usdInvoice], 90);
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it("skips two Tier A candidates as ambiguous_foreign_invoice_base", () => {
+    const second = { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 } as PurchaseInvoice;
+    const projection = computeExactMatchProjection([eurRow], [], [usdInvoice, second], 40);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 901, reason: expect.stringContaining("ambiguous_foreign_invoice_base") }]);
+  });
+
+  const eur100 = tx({ id: 902, type: "C", amount: 100, base_amount: undefined, cl_currencies_id: "EUR", clients_id: 77, ref_number: undefined } as Partial<Transaction>);
+  const eurInvoice = { ...usdInvoice, id: 6001, cl_currencies_id: "EUR", gross_price: 100, currency_rate: 1, base_gross_price: 100, bank_ref_number: undefined } as unknown as PurchaseInvoice;
+  const usd200 = { ...usdInvoice, id: 6002, gross_price: 200, currency_rate: 2, base_gross_price: 100, bank_ref_number: undefined } as unknown as PurchaseInvoice;
+  it.each([
+    ["EUR invoice first", [eurInvoice, usd200]],
+    ["USD invoice first", [usd200, eurInvoice]],
+  ])("skips a mixed exact_amount / Tier A tie as ambiguous (%s)", (_label, purchases) => {
+    const projection = computeExactMatchProjection([eur100], [], purchases, 40);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 902, reason: expect.stringContaining("ambiguous_foreign_invoice_base") }]);
+  });
+
+  it("still skips a foreign-row exact_base_amount match as cross-currency", () => {
+    const usdRow = tx({ id: 903, type: "C", amount: 330, base_amount: 290.03, cl_currencies_id: "USD", clients_id: 77, ref_number: "RF-5487" } as Partial<Transaction>);
+    const projection = computeExactMatchProjection([usdRow], [], [usdInvoice], 40);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 903, reason: expect.stringContaining("Cross-currency match") }]);
+  });
+});
