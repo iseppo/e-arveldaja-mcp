@@ -1346,6 +1346,18 @@ export async function runInterAccountMatching(
       });
       continue;
     }
+    if (!targetDimension && reasons.includes("counterparty_name_matches_company")) {
+      // The payer is the company itself, but several own accounts could be
+      // the other side: report it rather than silently dropping the row.
+      const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
+      ambiguousRefless.push({
+        transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+        source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+        target_account: otherDimensions.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+        reason: `The counterparty is the company itself, but several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
+      });
+      continue;
+    }
     if (confidence < 50 || !targetDimension) continue;
 
     const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;

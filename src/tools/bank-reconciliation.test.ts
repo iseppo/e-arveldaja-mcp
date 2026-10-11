@@ -3810,6 +3810,19 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
   });
 
+  it("reports a company-name transfer with no single target for review instead of dropping it (F4c)", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [{ id: 5004, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 100, bank_account_name: "Näide OÜ", bank_account_no: null }],
+      bankAccounts: threeAccounts, companyName: "Näide OÜ",
+    });
+    const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.ambiguous_refless).toEqual([
+      expect.objectContaining({ transaction_ids: [5004], target_account: "Wise / Lightyear", reason: expect.stringContaining("target_accounts_dimensions_id") }),
+    ]);
+  });
+
   describe("a CAMT marker whose sig fails the checksum fails closed (camt_marker_unverified)", () => {
     const twoAccounts = threeAccounts.slice(0, 2);
 
