@@ -203,14 +203,16 @@ describe("runAccountingInboxDryRunPipeline", () => {
       ledgerContextUnavailable: undefined,
     });
     const reviews = output.needs_accountant_review;
-    const types = reviews.map((item) => item.resolver_input?.review_type);
-    expect(types).toEqual([
-      "classification_already_booked",
-      "classification_own_transfer",
-      "classification_own_transfer",
-      "classification_possible_duplicate",
+    // Direct actions: no continuation resolver handles these rows, so they carry
+    // no resolver_input (resolve_accounting_review_item would reject it) — the
+    // recommendation is the action itself.
+    expect(reviews.map((item) => item.resolver_input)).toEqual([undefined, undefined, undefined, undefined]);
+    expect(reviews.map((item) => item.summary.match(/already booked|own accounts|own account|may already be booked/)?.[0])).toEqual([
+      "already booked", "own account", "own accounts", "may already be booked",
     ]);
+    expect(reviews.every((item) => typeof item.id === "string" && item.id.length > 0)).toBe(true);
     expect(new Set(reviews.map((item) => item.id)).size).toBe(4);
+    expect(reviews[2]!.recommendation).toContain("chosen by the operator from 200, 300");
     expect(reviews[0]!.summary).toContain("42");
     expect(reviews[0]!.recommendation).toContain("delete_transaction 42");
     expect(reviews[3]!.recommendation).toContain("compare with journal 7002");
@@ -249,6 +251,15 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(a).not.toBe(b);
     expect(a).toBe(aAgain);
     expect(a.startsWith("classify_unmatched_transactions:")).toBe(true);
+  });
+
+  it("stableReviewId separates classification groups with the same counterparty and category but different member transactions", () => {
+    const group = { category: "saas_subscriptions", normalized_counterparty: "acme", display_counterparty: "Acme" };
+    const a = stableReviewId("classify_unmatched_transactions", { ...group, transactions: [{ id: 2 }, { id: 1 }] });
+    const b = stableReviewId("classify_unmatched_transactions", { ...group, transactions: [{ id: 3 }] });
+    const aReordered = stableReviewId("classify_unmatched_transactions", { ...group, transactions: [{ id: 1 }, { id: 2 }] });
+    expect(a).not.toBe(b);
+    expect(a).toBe(aReordered);
   });
 
   it("stableReviewId separates receipts that share a name in different folders (M11)", () => {
