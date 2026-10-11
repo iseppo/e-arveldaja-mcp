@@ -1246,6 +1246,40 @@ describe("classification operations — ledger context (F6)", () => {
     ]);
   });
 
+  function feeJournal(id: number, documentNumber: string) {
+    return {
+      id, operation_type: "ENTRY", operations_id: null, registered: true, is_deleted: false,
+      effective_date: "2026-09-12", document_number: documentNumber,
+      postings: [
+        { accounts_id: 8610, accounts_dimensions_id: null, type: "D", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 15, base_amount: 15, cl_currencies_id: "EUR" },
+      ],
+    };
+  }
+
+  it("(S5-2) one BANK:R journal cannot book both a hash-only R row and a hash-only BANK:R row", async () => {
+    const reference = `LONGREF${"9".repeat(120)}`;
+    const plain = camtRow({ id: 66, amount: 15, date: "2026-09-10", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference, description: "fee" });
+    const prefixed = camtRow({ id: 67, amount: 15, date: "2026-09-10", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: `BANK:${reference}`, description: "fee" });
+    expect(`${plain.description}${prefixed.description}`).not.toContain(reference);
+    const { operations } = ledgerOperations({ rows: [plain, prefixed], journals: [feeJournal(601, `BANK:${reference}`)] });
+    const result = await analyze(operations);
+    expect(result.alreadyBooked).toEqual([]);
+    expect(result.possibleDuplicates.map(row => [row.transaction_id, row.code])).toEqual([
+      [66, "camt_journal_conflict"], [67, "camt_journal_conflict"],
+    ]);
+  });
+
+  it("(S5-2b) a date filter does not hide the competing row from the journal exclusivity check", async () => {
+    const first = camtRow({ id: 68, amount: 15, date: "2026-09-10", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: "R68", description: "fee" });
+    const second = camtRow({ id: 69, amount: 15, date: "2026-09-11", direction: "DBIT", name: "Pank AS", iban: "EE550000000000000063", reference: "BANK:R68", description: "fee" });
+    const { operations } = ledgerOperations({ rows: [first, second], journals: [feeJournal(602, "BANK:R68")] });
+    const outcome = await operations.analyzeUnmatched({ accountsDimensionsId: 100, dateTo: "2026-09-10" });
+    if (!outcome.ok) throw new Error("analyze failed");
+    expect(outcome.value.alreadyBooked).toEqual([]);
+    expect(outcome.value.possibleDuplicates.map(row => [row.transaction_id, row.code])).toEqual([[68, "camt_journal_conflict"]]);
+  });
+
   it("(R5-4) a saved rule suppresses transaction history even when supplier-invoice history resolves first", async () => {
     const dir = mkdtempSync(join(tmpdir(), "earv-r5-rules-"));
     const rulesFile = join(dir, "accounting-rules.md");
@@ -1255,11 +1289,22 @@ describe("classification operations — ledger context (F6)", () => {
     resetAccountingRulesCache();
     try {
       const history = historyRows("Tarkvara OÜ", "C", [2110, 900], ["2026-01-01", "2026-02-01", "2026-03-01"]);
-      const { operations } = saasOperations([saasRow(45, "DBIT"), ...history.transactions], history.journals);
+      const { operations, api } = saasOperations([saasRow(45, "DBIT"), saasRow(46, "DBIT"), ...history.transactions], history.journals);
       const result = await analyze(operations);
       expect(result.groups).toHaveLength(1);
-      expect(result.groups[0]!.suggested_booking.source).not.toBe("transaction_history");
+      // The saved rule decides — not transaction history (2110), and not the
+      // supplier's purchase-invoice history (5230) either.
+      expect(result.groups[0]!.suggested_booking).toMatchObject({ source: "local_rules", purchase_account_id: 1410 });
       expect(JSON.stringify(result.groups[0]!.review_guidance ?? {})).not.toContain("2110");
+
+      // Through preview and execute both payments book to the rule account only.
+      const dry = await operations.applyClassifications({ classificationsJson: { groups: result.groups } });
+      if (!dry.ok) throw new Error("dry run failed");
+      const out = await operations.applyClassifications({ classificationsJson: { groups: result.groups }, execute: true, planHandle: dry.value.planHandle });
+      expect(out.ok).toBe(true);
+      const bookedAccounts = api.purchaseInvoices.createAndSetTotals.mock.calls
+        .flatMap((call: any[]) => (call[0]?.items ?? []).map((item: any) => item.purchase_accounts_id));
+      expect(bookedAccounts).toEqual([1410, 1410]);
     } finally {
       if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
       else process.env.EARVELDAJA_RULES_FILE = previous;
