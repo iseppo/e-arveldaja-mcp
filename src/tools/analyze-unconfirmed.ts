@@ -10,7 +10,7 @@ import { isProjectTransaction } from "../transaction-status.js";
 import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCandidates } from "./bank-reconciliation.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import { inferOneSidedTransfer, type OneSidedInference } from "../banking/reconciliation/inter-account-matcher.js";
-import { comparableTransactionAmount, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
+import { comparableTransactionAmount, isAmbiguousForeignInvoiceBase, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
@@ -59,6 +59,7 @@ interface Suggestion {
   duplicate_journal_id?: number;
   duplicate_journal_ids?: number[];
   match_confidence?: number;
+  candidate_invoices?: Array<{ related_table: string; related_id: number }>;
 }
 
 function buildBankJournalDuplicateKey(
@@ -466,11 +467,14 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           reasons: string[];
           partiallyPaidWarning: boolean;
         } | undefined;
+        // Every candidate at or above the threshold, for the Tier A tie check.
+        const invoiceCandidates: Array<{ table: "sale_invoices" | "purchase_invoices"; id: number; confidence: number; reasons: string[] }> = [];
         const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
         if (allowSaleInvoices) {
           for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) invoiceCandidates.push({ table: "sale_invoices", id: inv.id!, confidence, reasons });
             if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
               bestInvoiceMatch = {
                 type: "sale_invoice",
@@ -487,6 +491,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         if (allowPurchaseInvoices) {
           for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
             const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+            if (confidence >= threshold) invoiceCandidates.push({ table: "purchase_invoices", id: inv.id!, confidence, reasons });
             if (confidence >= threshold && (!bestInvoiceMatch || confidence > bestInvoiceMatch.confidence)) {
               bestInvoiceMatch = {
                 type: "purchase_invoice",
@@ -498,6 +503,21 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               };
             }
           }
+        }
+
+        if (bestInvoiceMatch && isAmbiguousForeignInvoiceBase(invoiceCandidates)) {
+          suggestions.push({
+            transaction_id: tx.id!,
+            date: tx.date,
+            amount: tx.amount,
+            currency: tx.cl_currencies_id,
+            description: tx.description,
+            bank_account_name: tx.bank_account_name,
+            suggested_action: "manual_review",
+            reason: `ambiguous_foreign_invoice_base: ${invoiceCandidates.length} open invoices compete on a foreign-currency invoice base amount; pick the invoice manually.`,
+            candidate_invoices: invoiceCandidates.map(c => ({ related_table: c.table, related_id: c.id })),
+          });
+          continue;
         }
 
         if (bestInvoiceMatch) {

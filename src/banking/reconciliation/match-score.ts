@@ -68,9 +68,31 @@ export function sameAmountToTheCent(a: number, b: number): boolean {
   return sameCents(amountCents(a), amountCents(b));
 }
 
+/**
+ * Amount reason for an explicit-EUR payment equal to a foreign-currency
+ * invoice's structured `base_gross_price` (never the gross × rate fallback).
+ * Capped at TIER_A_CONFIDENCE_CAP, and a top-score tie involving it is ambiguous.
+ */
+export const EXACT_INVOICE_BASE_AMOUNT = "exact_invoice_base_amount";
+const TIER_A_CONFIDENCE_CAP = 85;
+
+/**
+ * True when a candidate set cannot pick one invoice because Tier A is involved:
+ * a top-score tie in which any candidate is Tier A (whatever the other's
+ * reason), or a Tier A top candidate while another Tier A candidate exists.
+ * A unique non-Tier-A winner is not affected. Callers route an ambiguous set
+ * to review with no distribution.
+ */
+export function isAmbiguousForeignInvoiceBase(candidates: ReadonlyArray<{ confidence: number; reasons: readonly string[] }>): boolean {
+  const isTierA = (c: { reasons: readonly string[] }) => c.reasons.includes(EXACT_INVOICE_BASE_AMOUNT);
+  const top = Math.max(...candidates.map(c => c.confidence));
+  const tied = candidates.filter(c => c.confidence === top);
+  return tied.some(isTierA) && (tied.length >= 2 || candidates.filter(isTierA).length >= 2);
+}
+
 export function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; cl_currencies_id?: string | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
   txAmount: number
 ): { confidence: number; reasons: string[]; partiallyPaidWarning: boolean } {
   let confidence = 0;
@@ -104,6 +126,21 @@ export function matchScore(
     confidence += 40;
     reasons.push("exact_base_amount");
   } else if (
+    // Tier A: structured fields only. Currency read inline (amount-resolution
+    // imports this module). Only an unpaid invoice: paying the full base on a
+    // partially paid one would overpay.
+    tx.cl_currencies_id === "EUR" &&
+    typeof invoice.cl_currencies_id === "string" &&
+    /^[A-Z]{3}$/.test(invoice.cl_currencies_id) &&
+    invoice.cl_currencies_id !== "EUR" &&
+    invoice.base_gross_price != null &&
+    !txHasMeaningfulBase &&
+    invoice.payment_status === "NOT_PAID" &&
+    sameCents(txCents, amountCents(invoice.base_gross_price))
+  ) {
+    confidence += 40;
+    reasons.push(EXACT_INVOICE_BASE_AMOUNT);
+  } else if (
     txCents !== undefined && invoiceCents !== undefined &&
     // "Close" is a genuine tolerance (under 1.00 EUR), not an equality test, and
     // stays exclusive: exactly 1.00 EUR apart is not close.
@@ -136,6 +173,10 @@ export function matchScore(
   if (partiallyPaidWarning) {
     confidence = Math.max(0, confidence - 15);
     reasons.push("partially_paid_warning");
+  }
+
+  if (reasons.includes(EXACT_INVOICE_BASE_AMOUNT)) {
+    confidence = Math.min(confidence, TIER_A_CONFIDENCE_CAP);
   }
 
   return { confidence: Math.min(confidence, 100), reasons, partiallyPaidWarning };

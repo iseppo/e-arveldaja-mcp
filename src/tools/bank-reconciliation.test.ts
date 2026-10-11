@@ -3732,3 +3732,237 @@ describe("exact-match confirm duplicate-posting guard", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F5: an EUR bank payment against a foreign-currency purchase invoice whose
+// structured base_gross_price equals the payment (Tier A). Anonymised live
+// case: USD 334.46 invoice @ 1.1532 = EUR 290.03 base, paid as EUR 290.03.
+// ---------------------------------------------------------------------------
+describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice base)", () => {
+  const eurRow = {
+    id: 901,
+    status: "PROJECT",
+    is_deleted: false,
+    type: "C",
+    amount: 290.03,
+    date: "2026-09-15",
+    cl_currencies_id: "EUR",
+    accounts_dimensions_id: 100,
+    bank_account_name: "Acme Cloud LLC",
+  };
+  const usdInvoice = {
+    id: 5487,
+    status: "CONFIRMED",
+    payment_status: "NOT_PAID",
+    number: "INV-5487",
+    clients_id: 77,
+    client_name: "Acme Cloud LLC",
+    cl_currencies_id: "USD",
+    gross_price: 334.46,
+    currency_rate: 1.1532,
+    base_gross_price: 290.03,
+  };
+
+  describe("matchScore", () => {
+    it("scores Tier A for an explicit-EUR row equal to the invoice's base_gross_price", () => {
+      const result = matchScore(eurRow as any, usdInvoice, 290.03);
+      expect(result.reasons).toContain("exact_invoice_base_amount");
+      expect(result.reasons).not.toContain("exact_base_amount");
+      expect(result.reasons).not.toContain("exact_amount");
+      // 40 for the amount + 10 for the partial payee-name match.
+      expect(result.confidence).toBe(50);
+    });
+
+    it("never uses the gross × rate fallback (rate only, no base)", () => {
+      const { base_gross_price: _omit, ...rateOnly } = usdInvoice;
+      const result = matchScore(eurRow as any, rateOnly, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+      expect(result.reasons).not.toContain("exact_base_amount");
+      expect(result.reasons).not.toContain("exact_amount");
+      expect(result.reasons).not.toContain("close_amount");
+      expect(result.confidence).toBe(10); // name match only
+    });
+
+    it("leaves an EUR invoice on the ordinary exact_amount path", () => {
+      const result = matchScore(eurRow as any, { ...usdInvoice, cl_currencies_id: "EUR", gross_price: 290.03, currency_rate: 1 }, 290.03);
+      expect(result.reasons).toContain("exact_amount");
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it("keeps a foreign row with a meaningful base on exact_base_amount", () => {
+      const usdRow = { ...eurRow, cl_currencies_id: "USD", amount: 330, base_amount: 290.03 };
+      const result = matchScore(usdRow as any, usdInvoice, 330);
+      expect(result.reasons).toContain("exact_base_amount");
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it("needs equality to the cent (290.04 does not match)", () => {
+      const result = matchScore({ ...eurRow, amount: 290.04 } as any, usdInvoice, 290.04);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+      expect(result.confidence).toBe(10); // name match only
+    });
+
+    it.each([
+      ["null", null],
+      ["empty", ""],
+      ["non-canonical \"usd \"", "usd "],
+      ["missing", undefined],
+    ])("awards nothing when the invoice currency is %s", (_label, currency) => {
+      const result = matchScore(eurRow as any, { ...usdInvoice, cl_currencies_id: currency as any }, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["USD", "USD"],
+    ])("awards nothing when the row currency is %s (explicit EUR required)", (_label, currency) => {
+      const result = matchScore({ ...eurRow, cl_currencies_id: currency } as any, usdInvoice, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it.each(["PARTIALLY_PAID", "PAID", undefined])("awards nothing when payment_status is %s (only NOT_PAID)", status => {
+      const result = matchScore(eurRow as any, { ...usdInvoice, payment_status: status as any }, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it("awards nothing for an EUR invoice even when its base differs from its gross", () => {
+      const result = matchScore(eurRow as any, { ...usdInvoice, cl_currencies_id: "EUR" }, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it("awards nothing when the row carries a meaningful base of its own", () => {
+      const result = matchScore({ ...eurRow, base_amount: 250 } as any, usdInvoice, 290.03);
+      expect(result.reasons).not.toContain("exact_invoice_base_amount");
+    });
+
+    it("caps ref + client + Tier A at 85 (below the 90 auto-confirm default)", () => {
+      const result = matchScore(
+        { ...eurRow, clients_id: 77, ref_number: "RF-5487" } as any,
+        { ...usdInvoice, bank_ref_number: "RF-5487" },
+        290.03,
+      );
+      expect(result.reasons).toEqual(expect.arrayContaining(["exact_invoice_base_amount", "ref_number", "client_id"]));
+      expect(result.confidence).toBe(85);
+    });
+  });
+
+  describe("auto_confirm_exact_matches", () => {
+    it("does not confirm at the default threshold even with ref + client", async () => {
+      const { handler, api } = setupAutoConfirmTool({
+        transactions: [{ ...eurRow, clients_id: 77, ref_number: "RF-5487" }],
+        purchases: [{ ...usdInvoice, bank_ref_number: "RF-5487" }],
+      });
+      const payload = parseMcpResponse((await executeAutoConfirm(handler, {})).content[0]!.text);
+      expect(payload.auto_confirmed).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("confirms the unique case at an explicit min_confidence of 40 with the EUR row amount", async () => {
+      const { handler, api } = setupAutoConfirmTool({
+        transactions: [{ ...eurRow, clients_id: 77 }],
+        purchases: [usdInvoice],
+      });
+      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      expect(payload.auto_confirmed).toBe(1);
+      expect(api.transactions.confirm).toHaveBeenCalledWith(901, [
+        { related_table: "purchase_invoices", related_id: 5487, amount: 290.03 },
+      ], { autoFixClientsId: false });
+    });
+
+    it("routes a third-party payer to review instead of confirming", async () => {
+      const { handler, api } = setupAutoConfirmTool({
+        transactions: [{ ...eurRow, clients_id: 12 }],
+        purchases: [usdInvoice],
+      });
+      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      expect(payload.auto_confirmed).toBe(0);
+      expect(payload.third_party_payer_reviews).toEqual([
+        expect.objectContaining({ transaction_id: 901, invoice_id: 5487, reason: "third_party_payer" }),
+      ]);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("skips two Tier A invoices from the same client as ambiguous_foreign_invoice_base", async () => {
+      const { handler, api } = setupAutoConfirmTool({
+        transactions: [{ ...eurRow, clients_id: 77 }],
+        purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
+      });
+      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      expect(payload.auto_confirmed).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
+    });
+  });
+
+  describe("reconcile_transactions suggest", () => {
+    it("suggests the unique Tier A match with the EUR row amount as distribution", async () => {
+      const handler = setupReconciliationTool({
+        transactions: [{ ...eurRow, clients_id: 77 }],
+        purchases: [usdInvoice],
+      });
+      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      expect(payload.matches[0]!.best_match.match_reasons).toContain("exact_invoice_base_amount");
+      expect(payload.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 5487, amount: 290.03 });
+    });
+
+    it("gives no distribution for a Tier A tie and asks for review", async () => {
+      const handler = setupReconciliationTool({
+        transactions: [{ ...eurRow, clients_id: 77 }],
+        purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
+      });
+      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      expect(payload.matches[0]!.distribution).toBeUndefined();
+      expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
+    });
+
+    // Codex counterexample: EUR 100 paid to a client with an open EUR 100
+    // invoice and an open USD 200 invoice whose base is EUR 100. Both score
+    // 55 (amount 40 + client 15); whichever sorts first must not be distributed.
+    const eur100Row = { ...eurRow, id: 902, amount: 100, clients_id: 77 };
+    const eurInvoice = { ...usdInvoice, id: 6001, number: "INV-6001", cl_currencies_id: "EUR", gross_price: 100, currency_rate: 1, base_gross_price: 100 };
+    const usd200Invoice = { ...usdInvoice, id: 6002, number: "INV-6002", gross_price: 200, currency_rate: 2, base_gross_price: 100 };
+    it.each([
+      ["EUR invoice first", [eurInvoice, usd200Invoice]],
+      ["USD invoice first", [usd200Invoice, eurInvoice]],
+    ])("rejects a mixed exact_amount / Tier A top-score tie (%s)", async (_label, purchases) => {
+      const handler = setupReconciliationTool({ transactions: [eur100Row], purchases });
+      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      expect(payload.matches[0]!.distribution).toBeUndefined();
+      expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
+    });
+
+    it("holds a Tier A top candidate for review while another Tier A candidate exists (no tie)", async () => {
+      const handler = setupReconciliationTool({
+        transactions: [{ ...eurRow, clients_id: 77, ref_number: "RF-5487" }],
+        purchases: [{ ...usdInvoice, bank_ref_number: "RF-5487" }, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
+      });
+      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      expect(payload.matches[0]!.best_match.id).toBe(5487);
+      expect(payload.matches[0]!.best_match.confidence).toBe(85);
+      expect(payload.matches[0]!.distribution).toBeUndefined();
+      expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
+    });
+
+    it("leaves a unique non-Tier-A winner alone when a lower Tier A candidate exists", async () => {
+      const handler = setupReconciliationTool({
+        transactions: [{ ...eur100Row, ref_number: "RF-6001" }],
+        purchases: [usd200Invoice, { ...eurInvoice, bank_ref_number: "RF-6001" }],
+      });
+      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      expect(payload.matches[0]!.best_match.id).toBe(6001);
+      expect(payload.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 6001, amount: 100 });
+      expect(payload.matches[0]!.manual_review_required).toBeUndefined();
+    });
+
+    it.each([
+      ["EUR invoice first", [eurInvoice, usd200Invoice]],
+      ["USD invoice first", [usd200Invoice, eurInvoice]],
+    ])("auto-confirm skips the mixed tie as ambiguous (%s)", async (_label, purchases) => {
+      const { handler, api } = setupAutoConfirmTool({ transactions: [eur100Row], purchases });
+      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      expect(payload.auto_confirmed).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
+    });
+  });
+});

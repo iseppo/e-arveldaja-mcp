@@ -41,7 +41,7 @@ import {
   type ReconciliationExecutionCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
-import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, type MatchCandidate } from "./match-score.js";
+import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
   inferOneSidedTransfer,
@@ -236,7 +236,10 @@ export async function runSuggestMatches(
         (bestMatch.match_reasons.includes("exact_base_amount") ||
           bestMatch.match_reasons.includes("cross_currency_conflict")) &&
         !bestMatch.match_reasons.includes("exact_amount");
-      const distribution = crossCurrency
+      const ambiguousForeignBase = isAmbiguousForeignInvoiceBase(
+        candidates.map(c => ({ confidence: c.confidence, reasons: c.match_reasons })),
+      );
+      const distribution = crossCurrency || ambiguousForeignBase
         ? undefined
         : buildSuggestedDistribution(
             bestMatch.type,
@@ -272,6 +275,11 @@ export async function runSuggestMatches(
       }
       if (bestMatch.partially_paid_warning) {
         manualReviewNotes.push("Invoice is PARTIALLY_PAID; verify the remaining open balance before confirming.");
+      }
+      if (ambiguousForeignBase) {
+        manualReviewNotes.push(
+          `ambiguous_foreign_invoice_base: ${candidates.map(c => `${c.type} #${c.id}`).join(", ")} `
+          + "compete on a foreign-currency invoice base amount; pick the invoice manually.");
       }
       if (crossCurrency) {
         manualReviewNotes.push("Cross-currency match: tx amount is in a different currency than the invoice gross. Compute the correct distribution amount manually before confirming.");

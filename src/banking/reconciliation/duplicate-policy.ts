@@ -1,7 +1,7 @@
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
 import { bankPostingSideForInvoiceMatch } from "../../bank-transaction-direction.js";
 import { buildInvoiceIndex, getIndexedCandidates, type InvoiceIndex } from "./invoice-index.js";
-import { matchScore, getInvoiceMatchEligibility, type MatchCandidate } from "./match-score.js";
+import { matchScore, getInvoiceMatchEligibility, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
 import type {
   ExactConfirmClientResolution,
@@ -110,6 +110,13 @@ export function computeExactMatchProjection(
 
   for (const tx of unconfirmed) {
     const candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys);
+    if (candidates.length > 1 && isAmbiguousForeignInvoiceBase(candidates.map(c => ({ confidence: c.confidence, reasons: c.match_reasons })))) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: `ambiguous_foreign_invoice_base: ${candidates.map(c => `${c.type} #${c.id}`).join(", ")} compete on a foreign-currency invoice base amount; match manually.`,
+      });
+      continue;
+    }
     if (candidates.length !== 1) continue;
     const match = candidates[0]!;
 
