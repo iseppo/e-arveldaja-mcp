@@ -116,7 +116,24 @@ export function matchScore(
   const txHasMeaningfulBase = !sameCents(baseCents, txCents);
   const invoiceHasMeaningfulBase = !sameCents(baseInvoiceCents, invoiceCents);
   const conflictingBase = nominalMatch && !baseMatch && (txHasMeaningfulBase || invoiceHasMeaningfulBase);
-  if (conflictingBase) {
+  // Tier A: structured fields only. Currency read inline (amount-resolution
+  // imports this module). Only an unpaid invoice: paying the full base on a
+  // partially paid one would overpay. Checked BEFORE the nominal branch: a
+  // foreign invoice whose gross equals its base (rate 1) nominally equals the
+  // EUR row too, and must still get the Tier A cap and tie rules.
+  const tierA =
+    tx.cl_currencies_id === "EUR" &&
+    typeof invoice.cl_currencies_id === "string" &&
+    /^[A-Z]{3}$/.test(invoice.cl_currencies_id) &&
+    invoice.cl_currencies_id !== "EUR" &&
+    invoice.base_gross_price != null &&
+    !txHasMeaningfulBase &&
+    invoice.payment_status === "NOT_PAID" &&
+    sameCents(txCents, amountCents(invoice.base_gross_price));
+  if (tierA) {
+    confidence += 40;
+    reasons.push(EXACT_INVOICE_BASE_AMOUNT);
+  } else if (conflictingBase) {
     confidence += 40;
     reasons.push("cross_currency_conflict");
   } else if (nominalMatch) {
@@ -125,21 +142,6 @@ export function matchScore(
   } else if (baseMatch && txHasMeaningfulBase) {
     confidence += 40;
     reasons.push("exact_base_amount");
-  } else if (
-    // Tier A: structured fields only. Currency read inline (amount-resolution
-    // imports this module). Only an unpaid invoice: paying the full base on a
-    // partially paid one would overpay.
-    tx.cl_currencies_id === "EUR" &&
-    typeof invoice.cl_currencies_id === "string" &&
-    /^[A-Z]{3}$/.test(invoice.cl_currencies_id) &&
-    invoice.cl_currencies_id !== "EUR" &&
-    invoice.base_gross_price != null &&
-    !txHasMeaningfulBase &&
-    invoice.payment_status === "NOT_PAID" &&
-    sameCents(txCents, amountCents(invoice.base_gross_price))
-  ) {
-    confidence += 40;
-    reasons.push(EXACT_INVOICE_BASE_AMOUNT);
   } else if (
     txCents !== undefined && invoiceCents !== undefined &&
     // "Close" is a genuine tolerance (under 1.00 EUR), not an equality test, and

@@ -4261,3 +4261,56 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     });
   });
 });
+
+// Codex review (fix/live-all): a foreign invoice whose gross equals its base
+// (USD 100 @ rate 1, base 100) nominally equals an EUR 100 row. The Tier A
+// reason must still apply, so the 85 cap and the A3 tie rules hold.
+describe("F5 Tier A wins over a nominal match when the foreign gross equals its base", () => {
+  const row = {
+    id: 950, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-09-15",
+    cl_currencies_id: "EUR", accounts_dimensions_id: 100, clients_id: 77, bank_account_name: "Acme Cloud LLC",
+  };
+  const usdEqual = {
+    id: 7001, status: "CONFIRMED", payment_status: "NOT_PAID", number: "INV-7001", clients_id: 77,
+    client_name: "Acme Cloud LLC", cl_currencies_id: "USD", gross_price: 100, currency_rate: 1, base_gross_price: 100,
+  };
+  const eurInvoice = { ...usdEqual, id: 7002, number: "INV-7002", cl_currencies_id: "EUR" };
+
+  it("matchScore gives exact_invoice_base_amount, not exact_amount, and caps ref + client at 85", () => {
+    const result = matchScore({ ...row, ref_number: "RF-7001" } as any, { ...usdEqual, bank_ref_number: "RF-7001" }, 100);
+    expect(result.reasons).toContain("exact_invoice_base_amount");
+    expect(result.reasons).not.toContain("exact_amount");
+    expect(result.confidence).toBe(85);
+  });
+
+  it("auto-confirm does not confirm it at the default threshold even with ref + client", async () => {
+    const { handler, api } = setupAutoConfirmTool({
+      transactions: [{ ...row, ref_number: "RF-7001" }],
+      purchases: [{ ...usdEqual, bank_ref_number: "RF-7001" }],
+    });
+    const payload = parseMcpResponse((await executeAutoConfirm(handler, {})).content[0]!.text);
+    expect(payload.auto_confirmed).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["EUR invoice first", [eurInvoice, usdEqual]],
+    ["USD invoice first", [usdEqual, eurInvoice]],
+  ])("suggest rejects the EUR 100 / USD 100 (base 100) tie (%s)", async (_label, purchases) => {
+    const handler = setupReconciliationTool({ transactions: [row], purchases });
+    const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+    expect(payload.matches[0]!.distribution).toBeUndefined();
+    expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
+  });
+
+  it.each([
+    ["EUR invoice first", [eurInvoice, usdEqual]],
+    ["USD invoice first", [usdEqual, eurInvoice]],
+  ])("auto-confirm skips the EUR 100 / USD 100 (base 100) tie as ambiguous (%s)", async (_label, purchases) => {
+    const { handler, api } = setupAutoConfirmTool({ transactions: [row], purchases });
+    const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+    expect(payload.auto_confirmed).toBe(0);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
+  });
+});
