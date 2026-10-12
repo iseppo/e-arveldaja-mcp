@@ -297,8 +297,8 @@ describe("a matched duplicate's registration journal (Codex live round 3, findin
   const registration = (cash: "D" | "C", amount: number, o: Partial<Journal> = {}) =>
     journal(9200, [p(1020, DIM, cash, amount), p(1210, null, cash === "D" ? "C" : "D", amount)],
       { operation_type: "TRANSACTION", operations_id: 9100, effective_date: incoming.date, ...o });
-  const project = (ledger: Transaction[], journals: Journal[]) => computeCamtImportProjection({
-    loaded: { entries: [incoming], summary: summarizeEntries([incoming]), statement_metadata: { iban: "EE000", period: {} } },
+  const project = (ledger: Transaction[], journals: Journal[], statementEntry = incoming) => computeCamtImportProjection({
+    loaded: { entries: [statementEntry], summary: summarizeEntries([statementEntry]), statement_metadata: { iban: "EE000", period: {} } },
     accountsDimensionsId: DIM, dateFrom: undefined, dateTo: undefined, ledgerTransactions: ledger,
     journalCoverage: { journals, accountId: 1020, bankAccounts: [], accountDimensions: [],
       interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
@@ -345,6 +345,33 @@ describe("a matched duplicate's registration journal (Codex live round 3, findin
     const projection = await project([row("PROJECT")], []);
     expect(projection.descriptors).toHaveLength(0);
     expect(projection.skipped).toEqual([{ date: incoming.date, amount: 15, bank_reference: "LIVE-REF-15", ...plainSkip }]);
+  });
+
+  describe("a foreign-currency statement entry is checked for direction only", () => {
+    const usd: ParsedCamtEntry = { ...incoming, amount: 100, currency: "USD", bank_reference: "LIVE-REF-USD" };
+    const usdRow = { ...row("CONFIRMED"), amount: 100, cl_currencies_id: "USD", bank_ref_number: "LIVE-REF-USD",
+      description: buildCamtDescriptionWithMetadata(usd.description, usd) } as Transaction;
+    const usdRegistration = (cash: "D" | "C") =>
+      journal(9200, [p(1020, DIM, cash, 100, { cl_currencies_id: "USD", base_amount: 90 }),
+        p(1210, null, cash === "D" ? "C" : "D", 100, { cl_currencies_id: "USD", base_amount: 90 })],
+      { operation_type: "TRANSACTION", operations_id: 9100, effective_date: incoming.date });
+
+    it("a same-direction booking (D bank 100 USD, base 90 EUR) → plain duplicate skip", async () => {
+      const projection = await project([usdRow], [usdRegistration("D")], usd);
+      expect(projection.descriptors).toHaveLength(0);
+      expect(projection.skipped).toEqual([{ date: incoming.date, amount: 100, bank_reference: "LIVE-REF-USD", ...plainSkip }]);
+    });
+
+    it("a wrong-direction booking → review camt_duplicate_journal_conflict", async () => {
+      const projection = await project([usdRow], [usdRegistration("C")], usd);
+      expect(projection.descriptors).toHaveLength(0);
+      expect(projection.skipped[0]).toMatchObject({ review_code: "camt_duplicate_journal_conflict", journal_ids: [9200] });
+    });
+
+    it("no registration journal → review camt_duplicate_journal_conflict", async () => {
+      const projection = await project([usdRow], [], usd);
+      expect(projection.skipped[0]).toMatchObject({ review_code: "camt_duplicate_journal_conflict", journal_ids: [] });
+    });
   });
 
   it("the review reaches the plan fingerprint, so a journal change between dry run and execute is caught", async () => {
