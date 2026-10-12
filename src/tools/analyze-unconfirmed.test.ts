@@ -880,6 +880,30 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       expect(payload.suggestions[0]).toMatchObject({ suggested_action: "reimport_duplicate", confidence: 95, duplicate_journal_id: 95 });
       expect(payload.suggestions[0]!.reason).toContain("safe to delete");
     });
+
+    it("does not advise deleting a signed foreign-currency row without a EUR base amount", async () => {
+      // USD 100 with base_amount null: its nominal 100 is not EUR 100, so the
+      // journal's EUR 100 debit cannot be proven to book it.
+      const handler = setupTool({
+        transactions: [camtSigned({ ...baseTx, type: "C", cl_currencies_id: "USD", base_amount: null, bank_ref_number: "BANKREF-1", description: "Incoming payment\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" })],
+        bankAccounts: defaultBankAccounts,
+        journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 100 }])],
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
+      expect(payload.suggestions[0]!.reason).toContain("no EUR base amount");
+      expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
+    });
+
+    it("still promotes a signed foreign-currency row whose EUR base the journal nets exactly", async () => {
+      const handler = setupTool({
+        transactions: [camtSigned({ ...baseTx, type: "C", cl_currencies_id: "USD", base_amount: 92.5, bank_ref_number: "BANKREF-1", description: "Incoming payment\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" })],
+        bankAccounts: defaultBankAccounts,
+        journals: [refJournal([{ dim: 100, type: "D", amount: 92.5 }, { dim: 200, type: "C", amount: 92.5 }])],
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]).toMatchObject({ suggested_action: "reimport_duplicate", confidence: 95, duplicate_journal_id: 95 });
+    });
   });
 
   it("does not call a signed outgoing transfer a duplicate of an opposite-direction journal with its reference (hash-only and direct ref, all alias orders)", async () => {

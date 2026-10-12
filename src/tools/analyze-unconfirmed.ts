@@ -82,17 +82,26 @@ function buildBankJournalDuplicateKey(
   return `${accountsDimensionsId}|${type}|${amount}|${date}`;
 }
 
+/** The row's EUR amount: `amount` for a EUR row, else a finite `base_amount` (never the nominal foreign amount). */
+function rowEurAmount(tx: Transaction): number | undefined {
+  if ((tx.cl_currencies_id ?? "EUR").toUpperCase() === "EUR") return tx.base_amount ?? tx.amount;
+  return typeof tx.base_amount === "number" && Number.isFinite(tx.base_amount) ? tx.base_amount : undefined;
+}
+
 /**
- * Whether a journal books this row's money: its AGGREGATED EUR net on the
+ * Whether a journal books this row's money:its AGGREGATED EUR net on the
  * row's own bank dimension equals the row's signed amount to the cent
  * (incoming debits the bank) — the own-account half of reconcile's
  * `journalMovesTransfer`. An unsigned row has no provable side, so nothing
- * covers it; a foreign posting without a base amount is not EUR-comparable.
+ * covers it; a foreign posting — or a foreign-currency row — without a EUR
+ * base amount is not EUR-comparable.
  */
-function journalCoversRow(journal: Journal | undefined, tx: Transaction, amountEur: number): boolean {
+function journalCoversRow(journal: Journal | undefined, tx: Transaction): boolean {
   if (!journal) return false;
   const direction = bankTransactionDirection(tx);
   if (direction === "unknown") return false;
+  const amountEur = rowEurAmount(tx);
+  if (amountEur === undefined) return false;
   const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
   if (live.some(posting => posting.base_amount == null &&
     (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return false;
@@ -284,7 +293,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           // prove the journal books THIS row: deletion advice needs a signed
           // direction and the journal's aggregated net on the row's bank
           // dimension equal to the row's signed EUR amount.
-          const coveringMatch = bankRefMatches.find(m => journalCoversRow(journalById.get(m.journal_id), tx, txDuplicateAmount));
+          const coveringMatch = bankRefMatches.find(m => journalCoversRow(journalById.get(m.journal_id), tx));
           if (coveringMatch) {
             const match = coveringMatch;
             // Use the journal's document_number (already trimmed+uppercased in the
@@ -320,6 +329,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               suggested_action: "manual_review",
               reason: direction === "unknown"
                 ? `Bank reference ${safeRef} is already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle}, but this row carries no signed statement direction, so it cannot be proven that the journal books this row's money; check the bank statement before deleting or confirming it.`
+                : rowEurAmount(tx) === undefined
+                ? `Bank reference ${safeRef} is already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle}, but this ${tx.cl_currencies_id} row has no EUR base amount, so it cannot be proven that the journal books this row's money; check the bank statement before deleting or confirming it.`
                 : `Bank reference ${safeRef} is already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle}, but that journal's net on this bank account is not ${txDuplicateAmount} EUR in this row's direction, so it does not cover this row; verify before deleting or confirming it.`,
             });
             continue;
