@@ -3727,3 +3727,66 @@ describe("M5 create_client / update_client identity guards", () => {
     expect(api.clients.update).toHaveBeenCalledWith(7, { email: "a@b.ee" });
   });
 });
+
+describe("invoice update requires positive PROJECT evidence for ledger-bearing fields", () => {
+  // Live-shaped: a booked, paid invoice whose read-back carries no usable status.
+  const unverifiedStatuses: Array<[string, Record<string, unknown>]> = [
+    ["omitted", { id: 7, payment_status: "PAID" }],
+    ["empty string", { id: 7, status: "", payment_status: "PAID" }],
+    ["null", { id: 7, status: null, payment_status: "PAID" }],
+    ["unknown", { id: 7, status: "ARCHIVED", payment_status: "" }],
+  ];
+
+  for (const [toolName, entity, apiKey, metadataPatch] of [
+    ["update_purchase_invoice", "purchase_invoice", "purchaseInvoices", { notes: "Internal note" }],
+    ["update_sale_invoice", "sale_invoice", "saleInvoices", { notes: "Internal note", invoice_info: "Shown on invoice" }],
+  ] as const) {
+    for (const [label, invoice] of unverifiedStatuses) {
+      it(`${toolName} refuses journal_date when status is ${label}`, async () => {
+        const { api, handler } = getCrudToolHarness(toolName, {
+          [apiKey]: { get: vi.fn().mockResolvedValue({ ...invoice, items: [] }), update: vi.fn() },
+        });
+        const result = await handler({ id: 7, data: { journal_date: "2026-05-01" } }) as { isError?: boolean; content: Array<{ text: string }> };
+        expect(result.isError).toBe(true);
+        expect(api[apiKey].update).not.toHaveBeenCalled();
+        const body = parseMcpResponse(result.content[0]!.text) as { category: string; details: string[] };
+        expect(body.category).toBe("invoice_status_unverified");
+        expect(body.details[0]).toMatch(new RegExp(`"journal_date".*non-PROJECT.*${entity}`));
+      });
+
+      it(`${toolName} still forwards the metadata allowlist when status is ${label}`, async () => {
+        const { api, handler } = getCrudToolHarness(toolName, {
+          [apiKey]: { get: vi.fn().mockResolvedValue(invoice), update: vi.fn().mockResolvedValue({ id: 7 }) },
+        });
+        await handler({ id: 7, data: metadataPatch });
+        expect(api[apiKey].update).toHaveBeenCalledWith(7, expect.objectContaining(metadataPatch));
+      });
+    }
+
+    it(`${toolName} refuses a VOID paid invoice`, async () => {
+      const { api, handler } = getCrudToolHarness(toolName, {
+        [apiKey]: { get: vi.fn().mockResolvedValue({ id: 7, status: "VOID", payment_status: "PAID" }), update: vi.fn() },
+      });
+      const result = await handler({ id: 7, data: { journal_date: "2026-05-01" } }) as { content: Array<{ text: string }> };
+      expect(api[apiKey].update).not.toHaveBeenCalled();
+      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "void_record_immutable" });
+    });
+
+    it(`${toolName} refuses journal_date on a CONFIRMED paid invoice with the confirmed category`, async () => {
+      const { api, handler } = getCrudToolHarness(toolName, {
+        [apiKey]: { get: vi.fn().mockResolvedValue({ id: 7, status: "CONFIRMED", payment_status: "PAID", items: [] }), update: vi.fn() },
+      });
+      const result = await handler({ id: 7, data: { journal_date: "2026-05-01" } }) as { content: Array<{ text: string }> };
+      expect(api[apiKey].update).not.toHaveBeenCalled();
+      expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({ category: "confirmed_record_immutable" });
+    });
+
+    it(`${toolName} allows journal_date on a PROJECT invoice`, async () => {
+      const { api, handler } = getCrudToolHarness(toolName, {
+        [apiKey]: { get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", payment_status: "" }), update: vi.fn().mockResolvedValue({ id: 7 }) },
+      });
+      await handler({ id: 7, data: { journal_date: "2026-05-01" } });
+      expect(api[apiKey].update).toHaveBeenCalledWith(7, expect.objectContaining({ journal_date: "2026-05-01" }));
+    });
+  }
+});

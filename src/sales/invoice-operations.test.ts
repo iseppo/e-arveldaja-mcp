@@ -550,6 +550,47 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
+  describe("update requires positive PROJECT evidence for ledger-bearing fields", () => {
+    async function runUpdate(invoice: Record<string, unknown>, payload: Record<string, unknown>) {
+      const update = vi.fn().mockResolvedValue({});
+      const api = makeApi({ update, get: vi.fn().mockResolvedValue(invoice) });
+      const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
+      const prepared = await ops.run({ mode: "prepare", action: "update", id: 6, payload });
+      if (!prepared.ok || prepared.value.mode !== "prepare") throw new Error("prepare failed");
+      const outcome = await ops.run({ mode: "execute", action: "update", id: 6, planHandle: prepared.value.planHandle, payload });
+      return { update, outcome };
+    }
+
+    // Live-shaped: a booked, paid invoice whose read-back carries no usable status.
+    for (const [label, invoice, code] of [
+      ["omitted", { id: 6, payment_status: "PAID" }, "invoice_status_unverified"],
+      ["empty string", { id: 6, status: "", payment_status: "PAID" }, "invoice_status_unverified"],
+      ["null", { id: 6, status: null, payment_status: "PAID" }, "invoice_status_unverified"],
+      ["VOID", { id: 6, status: "VOID", payment_status: "PAID" }, "void_record_immutable"],
+      ["CONFIRMED", { id: 6, status: "CONFIRMED", payment_status: "PAID" }, "confirmed_record_immutable"],
+    ] as const) {
+      it(`refuses journal_date when status is ${label}`, async () => {
+        const { update, outcome } = await runUpdate(invoice, { journal_date: "2026-05-01" });
+        expect(update).not.toHaveBeenCalled();
+        expect(outcome.ok).toBe(false);
+        if (outcome.ok) return;
+        expect(outcome.error.code).toBe(code);
+      });
+    }
+
+    it("still forwards metadata-only edits when status is missing", async () => {
+      const { update, outcome } = await runUpdate({ id: 6, status: "", payment_status: "PAID" }, { notes: "Internal note" });
+      expect(outcome.ok).toBe(true);
+      expect(update).toHaveBeenCalledWith(6, { notes: "Internal note" });
+    });
+
+    it("allows journal_date on a PROJECT invoice", async () => {
+      const { update, outcome } = await runUpdate({ id: 6, status: "PROJECT", payment_status: "" }, { journal_date: "2026-05-01" });
+      expect(outcome.ok).toBe(true);
+      expect(update).toHaveBeenCalledWith(6, { journal_date: "2026-05-01" });
+    });
+  });
+
   // Fix 1 — validation must run BEFORE the inline customer is resolve-or-created.
   it("Fix1: a bad-dimension item fails validation BEFORE the inline customer is created — no orphan client, no invoice", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });

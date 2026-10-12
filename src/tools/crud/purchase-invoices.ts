@@ -6,6 +6,7 @@ import { desandboxAllStrings, renderExternalEntity } from "../../external-text-r
 import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
+import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { toolResponse } from "../../tool-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
@@ -200,15 +201,21 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     // Fresh read: merging onto a cached snapshot could revert UI edits.
     api.purchaseInvoices.invalidateListCache();
     const current = await api.purchaseInvoices.get(id);
-    if (current.status === "VOID") {
+    const status = decodeInvoiceStatusCritical(current).status;
+    if (status === "VOID") {
       return toolError({
         category: "void_record_immutable",
         error: `Purchase invoice ${id} is VOID and cannot be edited.`,
         next_action: "Create a new purchase invoice instead of editing the voided one.",
       });
     }
-    const isConfirmed = current.status === "CONFIRMED";
-    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed });
+    const isConfirmed = status === "CONFIRMED";
+    // Only positive PROJECT evidence unlocks ledger-bearing fields. A missing,
+    // "", null or unknown status gets the confirmed-invoice metadata allowlist
+    // (fail closed): the record may well be booked.
+    const isDraft = status === "PROJECT";
+    const statusLabel = isConfirmed ? "CONFIRMED" : `non-PROJECT (status=${JSON.stringify(status ?? null)})`;
+    const updateErrors = validateUpdateFields(parsed, "purchase_invoice", { isConfirmed: !isDraft, statusLabel });
     if (updateErrors.length > 0) {
       if (isConfirmed && Object.keys(parsed).length > 0) {
         return toolError({
@@ -218,11 +225,19 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
           next_action: "invalidate_purchase_invoice, fetch the draft, update it, then explicitly re-confirm",
         });
       }
+      if (!isDraft && Object.keys(parsed).length > 0) {
+        return toolError({
+          category: "invoice_status_unverified",
+          error: `Purchase invoice ${id} is not a PROJECT draft (status=${JSON.stringify(status ?? null)}); ledger-bearing fields cannot be edited`,
+          details: updateErrors,
+          next_action: "Re-read the invoice with get_purchase_invoice; ledger-bearing fields are editable only on a PROJECT draft (invalidate a confirmed invoice first)",
+        });
+      }
       return toolError({ error: "Invalid update fields", details: updateErrors });
     }
     // Caller-supplied draft items get the same validation and VAT defaulting as
     // create_purchase_invoice (non-VAT field refusal, VAT defaults, dimensions).
-    if (parsed.items !== undefined && !isConfirmed) {
+    if (parsed.items !== undefined && isDraft) {
       const isVatReg = await isCompanyVatRegistered(api);
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
       if (!isVatReg) {
