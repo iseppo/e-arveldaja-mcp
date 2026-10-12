@@ -173,6 +173,8 @@ export interface CamtSkippedRow {
   journal_ids?: number[];
   /** Set when an existing journal may book this movement and needs review. */
   review_code?: string;
+  /** Machine-readable reason for an automatic skip (e.g. `camt_native_import_match`). */
+  skip_code?: string;
 }
 
 export interface CamtImportProjection {

@@ -1,5 +1,7 @@
 import { findDuplicatePostingsInJournals } from "../bank-posting-duplicate-guard.js";
 import type { InterAccountQuery, InterAccountResolution } from "../booking-guard.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { normalizeIban } from "../resolution/bank-account-resolution.js";
 import { buildBankAccountLookups, toUtcDay } from "../tools/inter-account-utils.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import {
@@ -70,6 +72,8 @@ export interface CamtJournalCoverageContext {
   readonly registrationJournals: Map<number, Journal[]>;
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly laneB: InterAccountResolver;
+  /** Statement entries per date + direction + currency + amount, over the whole file. */
+  readonly entryAmountOccurrences: Map<string, number>;
 }
 
 const REVIEW_PRIORITY: CamtJournalReviewCode[] = [
@@ -79,6 +83,9 @@ const REVIEW_PRIORITY: CamtJournalReviewCode[] = [
 ];
 
 const cents = (value: number) => Math.round(value * 100);
+
+const entryAmountKey = (entry: ParsedCamtEntry) =>
+  `${entry.date}|${entry.direction}|${entry.currency || "EUR"}|${cents(entry.amount)}`;
 
 export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput): CamtJournalCoverageContext {
   const { snapshot, dimensionId, entries, ledgerTransactions, entryReferenceKeys } = input;
@@ -137,6 +144,11 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
   const laneBJournals = journals.filter((journal) =>
     !journalDocumentReferenceKeys(journal.document_number).some((key) => statementReferenceKeys.has(key)));
   const lookups = buildBankAccountLookups([...snapshot.bankAccounts], [...snapshot.accountDimensions]);
+  const entryAmountOccurrences = new Map<string, number>();
+  for (const entry of entries) {
+    const key = entryAmountKey(entry);
+    entryAmountOccurrences.set(key, (entryAmountOccurrences.get(key) ?? 0) + 1);
+  }
   return {
     accountId: snapshot.accountId,
     dimensionId,
@@ -151,6 +163,7 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
     registrationJournals,
     ownIbanToDimension: lookups.ownIbanToDimension,
     laneB: snapshot.interAccountResolver(laneBJournals, lookups.ownDimensionIds),
+    entryAmountOccurrences,
   };
 }
 
@@ -266,6 +279,60 @@ export function classifyCamtJournalCoverage(
   return { kind: "none" };
 }
 
+/**
+ * A posting-scan review whose only candidate is the registration journal of a
+ * row e-arveldaja's own bank import created (plain description, no bank
+ * reference read back): the entry is already imported when every piece of
+ * evidence holds, else undefined and the review stands. Evidence: a CONFIRMED,
+ * non-deleted transaction on this dimension with the entry's date and EUR
+ * cents; its one live TRANSACTION journal posts exactly the entry's signed EUR
+ * net on the bank dimension; the counterparty agrees (IBAN when both sides
+ * carry one, else the normalised name; neither → no proof); no stored bank
+ * reference or contradicting signed marker on the row; and uniqueness
+ * both ways — no other statement entry shares date + direction + amount, no
+ * other ledger row on the dimension shares date + amount, and no entry matched
+ * the transaction or claims the journal by reference.
+ */
+export function findCamtNativeImportMatch(
+  entry: ParsedCamtEntry,
+  coverage: CamtJournalCoverage,
+  context: CamtJournalCoverageContext,
+): { readonly transaction_id: number; readonly journal_id: number } | undefined {
+  if (coverage.kind !== "review" || coverage.code !== "camt_journal_posting_review" || coverage.journal_ids.length !== 1) return undefined;
+  if ((entry.currency || "EUR") !== "EUR" || context.entryAmountOccurrences.get(entryAmountKey(entry)) !== 1) return undefined;
+  const journal = context.journalsById.get(coverage.journal_ids[0]!);
+  if (!journal || journal.registered !== true || journal.operation_type !== "TRANSACTION" || journal.operations_id == null) return undefined;
+  const transactionId = journal.operations_id;
+  const transaction = context.sameDimensionTransactions.get(transactionId);
+  if (!transaction || transaction.status !== "CONFIRMED" || transaction.is_deleted) return undefined;
+  // A stored bank reference is another identity; the native import keeps none.
+  if (storedBankReferenceLookupKey(transaction) !== undefined) return undefined;
+  if (transaction.cl_currencies_id !== "EUR" || transaction.date !== entry.date || cents(transaction.amount) !== cents(entry.amount)) return undefined;
+  // A signed marker that contradicts the statement direction is not this row.
+  const direction = bankTransactionDirection(transaction);
+  if (direction !== "unknown" && direction !== (entry.direction === "CRDT" ? "incoming" : "outgoing")) return undefined;
+  const expectedNet = (entry.direction === "CRDT" ? 1 : -1) * cents(entry.amount);
+  if (bankNetCents(journal, context) !== expectedNet) return undefined;
+  if (context.matchedEntryKeys.has(transactionId) || context.identityClaims.has(journal.id!)) return undefined;
+  const registrations = context.journals.filter((other) =>
+    other.operation_type === "TRANSACTION" && other.operations_id === transactionId);
+  if (registrations.length !== 1) return undefined;
+  const twins = [...context.sameDimensionTransactions.values()].filter((other) =>
+    !other.is_deleted && other.date === entry.date && cents(other.amount) === cents(entry.amount));
+  if (twins.length !== 1) return undefined;
+  const entryIban = normalizeIban(entry.counterparty_iban);
+  const transactionIban = normalizeIban(transaction.bank_account_no);
+  if (entryIban && transactionIban) return entryIban === transactionIban ? { transaction_id: transactionId, journal_id: journal.id! } : undefined;
+  const entryName = normalizeCounterpartyName(entry.counterparty_name);
+  const transactionName = normalizeCounterpartyName(transaction.bank_account_name);
+  if (!entryName || entryName !== transactionName) return undefined;
+  return { transaction_id: transactionId, journal_id: journal.id! };
+}
+
+/** Case- and whitespace-insensitive only: a legal-form difference is another party. */
+function normalizeCounterpartyName(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
 
 /** Signed net the journal posts on the bank dimension in any currency (base amount when finite), for direction only. */
 function bankDirectionNet(journal: Journal, context: CamtJournalCoverageContext): number | undefined {

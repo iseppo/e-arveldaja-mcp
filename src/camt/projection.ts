@@ -16,6 +16,7 @@ import {
   buildCamtJournalCoverageContext,
   checkCamtDuplicateRegistration,
   classifyCamtJournalCoverage,
+  findCamtNativeImportMatch,
   type CamtJournalCoverage,
   type CamtJournalSnapshot,
 } from "./journal-coverage.js";
@@ -68,6 +69,7 @@ export function enrichWithDuplicates(
 }
 
 const CAMT_DUPLICATE_JOURNAL_CONFLICT = "camt_duplicate_journal_conflict";
+const CAMT_NATIVE_IMPORT_MATCH = "camt_native_import_match";
 const CAMT_PARTIAL_LEGACY_REASON = "Partially imported by a previous release; needs review";
 
 function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJournalCoverage, { kind: "none" }>): CamtSkippedRow {
@@ -209,6 +211,21 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       continue;
     }
     const coverage = classifyCamtJournalCoverage(entry, journalCoverage);
+    // A row e-arveldaja's own bank import created reads back with no bank
+    // reference; its registration journal is then the only scan hit.
+    const nativeMatch = findCamtNativeImportMatch(entry, coverage, journalCoverage);
+    if (nativeMatch) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: [nativeMatch.transaction_id],
+        journal_ids: [nativeMatch.journal_id],
+        reason: `Already imported by e-arveldaja's bank import as transaction ${nativeMatch.transaction_id} (${CAMT_NATIVE_IMPORT_MATCH})`,
+        skip_code: CAMT_NATIVE_IMPORT_MATCH,
+      });
+      continue;
+    }
     if (coverage.kind !== "none") {
       skipped.push(journalCoverageSkip(entry, coverage));
       continue;

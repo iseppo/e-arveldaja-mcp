@@ -364,6 +364,7 @@ export function camtPlanFingerprint(projection: CamtImportProjection, normalized
       duplicate_transaction_ids: row.duplicate_transaction_ids,
       journal_ids: row.journal_ids,
       review_code: row.review_code,
+      skip_code: row.skip_code,
     })),
     possible_duplicates: projection.descriptors.map((descriptor, index) => ({
       id: camtPlanCommandId(index),
@@ -422,6 +423,7 @@ export function issueCamtPlan(
       duplicate_transaction_ids: row.duplicate_transaction_ids,
       journal_ids: row.journal_ids,
       review_code: row.review_code,
+      skip_code: row.skip_code,
     })),
     reviews: projection.descriptors
       .filter(d => d.possibleDuplicateMatches.length > 0)

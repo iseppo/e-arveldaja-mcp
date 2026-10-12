@@ -4,6 +4,7 @@ import type { AccountDimension, BankAccount, Journal, Posting } from "../types/a
 import {
   buildCamtJournalCoverageContext,
   classifyCamtJournalCoverage,
+  findCamtNativeImportMatch,
   type CamtJournalCoverage,
 } from "./journal-coverage.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
@@ -380,5 +381,132 @@ describe("a matched duplicate's registration journal (Codex live round 3, findin
     const inverted = camtPlanFingerprint(await project([row("CONFIRMED")], [registration("C", 15)]), args);
     expect(inverted).not.toBe(covered);
     expect(camtPlanFingerprint(await project([row("CONFIRMED")], [registration("C", 15)]), args)).toBe(inverted);
+  });
+});
+
+describe("a row e-arveldaja's own bank import created (camt_native_import_match)", () => {
+  // Live shape: the native LHV import stores a plain description, no marker,
+  // bank_ref_number null (the API drops it) and type "C" on every row; its
+  // registration journal is an operation_type TRANSACTION journal.
+  const DIM = 7;
+  const outgoing: ParsedCamtEntry = {
+    date: "2026-03-11", amount: 42.5, currency: "EUR", direction: "DBIT", counterparty_name: "Näidis Teenus OÜ",
+    counterparty_iban: "EE471000001020145685", description: "Arve 2026-17", bank_reference: "STMT-REF-4250",
+    duplicate: false, duplicate_transaction_ids: [],
+  };
+  const native = (o: Partial<Transaction> = {}): Transaction => ({
+    id: 9300, status: "CONFIRMED", accounts_dimensions_id: DIM, type: "C", amount: 42.5, cl_currencies_id: "EUR",
+    date: outgoing.date, description: "Arve 2026-17", bank_ref_number: null, bank_account_no: null,
+    bank_account_name: "  näidis   teenus oü ", ref_number: null, clients_id: 31, is_deleted: false, ...o,
+  }) as Transaction;
+  const registration = (cash: "D" | "C", amount: number, o: Partial<Journal> = {}) =>
+    journal(9400, [p(1020, DIM, cash, amount), p(2310, null, cash === "D" ? "C" : "D", amount)],
+      { operation_type: "TRANSACTION", operations_id: 9300, effective_date: outgoing.date, ...o });
+  const project = (ledger: Transaction[], journals: Journal[], entries: ParsedCamtEntry[] = [outgoing]) => computeCamtImportProjection({
+    loaded: { entries, summary: summarizeEntries(entries), statement_metadata: { iban: "EE000", period: {} } },
+    accountsDimensionsId: DIM, dateFrom: undefined, dateTo: undefined, ledgerTransactions: ledger,
+    journalCoverage: { journals, accountId: 1020, bankAccounts: [], accountDimensions: [],
+      interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
+    resolveClient: async () => ({}), reportProgress: async () => {},
+  });
+  const nativeSkip = {
+    date: outgoing.date, amount: 42.5, bank_reference: "STMT-REF-4250", duplicate_transaction_ids: [9300], journal_ids: [9400],
+    reason: "Already imported by e-arveldaja's bank import as transaction 9300 (camt_native_import_match)",
+    skip_code: "camt_native_import_match",
+  };
+  const expectReview = (projection: Awaited<ReturnType<typeof project>>, journalIds = [9400]) => {
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_posting_review", journal_ids: journalIds });
+    expect(projection.skipped[0]!.skip_code).toBeUndefined();
+  };
+
+  it("a unique same-day same-amount entry, exact bank net, same counterparty name → already imported, not review", async () => {
+    const projection = await project([native()], [registration("C", 42.5)]);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped).toEqual([nativeSkip]);
+  });
+
+  it("an equal IBAN proves the counterparty even when the names differ", async () => {
+    const projection = await project([native({ bank_account_no: "EE47 1000 0010 2014 5685", bank_account_name: "Other Name" })],
+      [registration("C", 42.5)]);
+    expect(projection.skipped).toEqual([nativeSkip]);
+  });
+
+  it("an incoming entry on a debit registration journal → already imported", async () => {
+    const incoming = { ...outgoing, direction: "CRDT" as const };
+    const projection = await project([native()], [registration("D", 42.5)], [incoming]);
+    expect(projection.skipped).toEqual([nativeSkip]);
+  });
+
+  it("two same-day same-amount same-direction entries → both stay review", async () => {
+    const second = { ...outgoing, bank_reference: "STMT-REF-4251" };
+    const projection = await project([native()], [registration("C", 42.5)], [outgoing, second]);
+    expect(projection.skipped).toHaveLength(2);
+    for (const row of projection.skipped) expect(row).toMatchObject({ review_code: "camt_journal_posting_review" });
+  });
+
+  it.each([
+    ["the counterparty name differs", [native({ bank_account_name: "Teine Firma OÜ" })], [registration("C", 42.5)], [9400]],
+    ["a different legal form is another party", [native({ bank_account_name: "Näidis Teenus AS" })], [registration("C", 42.5)], [9400]],
+    ["the transaction has neither name nor IBAN", [native({ bank_account_name: null })], [registration("C", 42.5)], [9400]],
+    ["both IBANs present but different", [native({ bank_account_no: "EE382200221020145685" })], [registration("C", 42.5)], [9400]],
+    ["the journal's bank net is 1 cent off", [native()], [registration("C", 42.49)], [9400]],
+    ["the transaction amount is 1 cent off", [native({ amount: 42.49 })], [registration("C", 42.5)], [9400]],
+    ["the transaction is on another date", [native({ date: "2026-03-10" })], [registration("C", 42.5, { effective_date: "2026-03-10" })], [9400]],
+    ["the transaction is a PROJECT row", [native({ status: "PROJECT" })], [registration("C", 42.5)], [9400]],
+    ["the transaction status is unknown", [native({ status: undefined })], [registration("C", 42.5)], [9400]],
+    ["the transaction carries another stored bank reference", [native({ bank_ref_number: "OTHER-REF" })], [registration("C", 42.5)], [9400]],
+    ["the journal is a manual ENTRY", [native()], [registration("C", 42.5, { operation_type: "ENTRY" })], [9400]],
+    ["the transaction is not on this dimension", [native({ accounts_dimensions_id: 8 })], [registration("C", 42.5)], [9400]],
+    ["a second ledger row shares date and amount", [native(), native({ id: 9301, bank_account_name: "Muu" })], [registration("C", 42.5)], [9400]],
+  ])("%s → stays review", async (_name, ledger, journals, journalIds) => {
+    expectReview(await project(ledger as Transaction[], journals as Journal[]), journalIds as number[]);
+  });
+
+  it("an inverted registration journal (debits the bank for an outgoing entry) is not a scan hit → created, never skipped", async () => {
+    const projection = await project([native()], [registration("D", 42.5)]);
+    expect(projection.skipped).toEqual([]);
+    expect(projection.descriptors).toHaveLength(1);
+  });
+
+  it("a journal whose bank legs net to zero (a credit leg the scan hits, plus an offsetting debit) → stays review", async () => {
+    const twoLegs = journal(9400, [p(1020, DIM, "C", 42.5), p(1020, DIM, "D", 42.5)],
+      { operation_type: "TRANSACTION", operations_id: 9300, effective_date: outgoing.date });
+    expectReview(await project([native()], [twoLegs]));
+  });
+
+  it("a transaction another entry already matched by bank reference → this entry stays review", async () => {
+    // The row also matches a different-day entry through its stored reference.
+    const claimed = native({ bank_ref_number: "STMT-REF-OTHER" });
+    const other: ParsedCamtEntry = { ...outgoing, date: "2026-03-12", bank_reference: "STMT-REF-OTHER" };
+    const projection = await project([claimed], [registration("C", 42.5)], [outgoing, other]);
+    expect(projection.skipped.find(row => row.bank_reference === "STMT-REF-OTHER")).toMatchObject({ duplicate_transaction_ids: [9300] });
+    expect(projection.skipped.find(row => row.bank_reference === "STMT-REF-4250")?.skip_code).toBeUndefined();
+  });
+
+  it("a reference-less transaction another entry matched (e.g. by its description marker) is not matched again", () => {
+    const other: ParsedCamtEntry = { ...outgoing, date: "2026-03-12", bank_reference: "STMT-REF-OTHER", duplicate: true, duplicate_transaction_ids: [9300] };
+    const context = (entries: ParsedCamtEntry[]) => buildCamtJournalCoverageContext({
+      snapshot: { journals: [registration("C", 42.5)], accountId: 1020, bankAccounts: [], accountDimensions: [],
+        interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
+      dimensionId: DIM, entries, ledgerTransactions: [native()],
+    });
+    const review = { kind: "review", code: "camt_journal_posting_review", journal_ids: [9400] } as const;
+    expect(findCamtNativeImportMatch(outgoing, review, context([outgoing]))).toEqual({ transaction_id: 9300, journal_id: 9400 });
+    expect(findCamtNativeImportMatch(outgoing, review, context([outgoing, other]))).toBeUndefined();
+  });
+
+  it("a non-EUR entry is never auto-skipped", async () => {
+    const usd = { ...outgoing, currency: "USD" };
+    const projection = await project([native({ cl_currencies_id: "USD" })], [registration("C", 42.5)], [usd]);
+    expect(projection.skipped.some(row => row.skip_code !== undefined)).toBe(false);
+  });
+
+  it("the native-match skip reaches the plan fingerprint", async () => {
+    const args = camtNormalizedArgs(DIM, undefined, undefined);
+    const skipped = camtPlanFingerprint(await project([native()], [registration("C", 42.5)]), args);
+    const review = camtPlanFingerprint(await project([native({ bank_account_name: "Teine" })], [registration("C", 42.5)]), args);
+    expect(skipped).not.toBe(review);
+    expect(camtPlanFingerprint(await project([native()], [registration("C", 42.5)]), args)).toBe(skipped);
   });
 });
