@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 84921,
+    "toolsListBytes": 85053,
     "descriptionsBytes": 11327,
-    "inputSchemasBytes": 52947,
+    "inputSchemasBytes": 53079,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4099
@@ -997,7 +997,7 @@
             "type": "string"
           },
           "type": {
-            "description": "Filter by transaction type: C or D. Narrowed server-side.",
+            "description": "Filter by statement direction: D = incoming, C = outgoing, read from the signed CAMT/Wise marker (client-side). Rows without a marker are left out and counted in direction_unknown_excluded.",
             "enum": [
               "C",
               "D"

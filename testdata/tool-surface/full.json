@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 159478,
+    "toolsListBytes": 159610,
     "descriptionsBytes": 22558,
-    "inputSchemasBytes": 101434,
+    "inputSchemasBytes": 101566,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5088
@@ -1403,7 +1403,7 @@
             "type": "string"
           },
           "type": {
-            "description": "Filter by transaction type: C or D. Narrowed server-side.",
+            "description": "Filter by statement direction: D = incoming, C = outgoing, read from the signed CAMT/Wise marker (client-side). Rows without a marker are left out and counted in direction_unknown_excluded.",
             "enum": [
               "C",
               "D"
