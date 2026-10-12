@@ -21,6 +21,7 @@ import {
   type OneSidedInference,
 } from "../banking/reconciliation/inter-account-matcher.js";
 import { comparableTransactionAmount, isAmbiguousForeignInvoiceBase, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
+import { legacyTruncatedCamtMarkerHint } from "../camt/duplicate-identity.js";
 import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
@@ -431,7 +432,8 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         const markerUnverified = hasUnverifiableCamtMarker(tx);
         if (markerUnverified && unverifiedMarkerTransferClaim(tx, inferenceLookups)) {
           suggestions.push({
-            ...heldForReview("Looks like an own-account transfer, but the CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified; check the bank statement and resolve it manually."),
+            ...heldForReview("Looks like an own-account transfer, but the CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified; check the bank statement and resolve it manually." +
+              (legacyTruncatedCamtMarkerHint(tx) ? ` ${legacyTruncatedCamtMarkerHint(tx)}` : "")),
             code: "camt_marker_unverified",
           });
           isInterAccount = true;

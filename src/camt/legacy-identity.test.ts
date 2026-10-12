@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
-import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "./duplicate-identity.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "./duplicate-identity.js";
+import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE } from "../banking/reconciliation/duplicate-policy.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
-import type { Journal } from "../types/api.js";
+import type { Journal, SaleInvoice } from "../types/api.js";
 
 // Rows stored by the release before CntrValAmt-weighted splitting and the
 // AddtlNtryInf description fallback (1007fde) must still be recognised as the
@@ -251,6 +252,54 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const rerun = await projectBooked(xml, [row]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun).map(r => r.duplicate_transaction_ids)).toEqual([[9016]]);
+  });
+
+  // Reconcile has no statement entry, so the legacy full-text sig cannot be
+  // recomputed (the cut tail is gone). The row stays unproven; the review only
+  // explains why.
+  describe("at reconcile time (no statement entry)", () => {
+    const legacyTruncatedRow = (id: number, ref: string, over: Partial<Transaction> = {}) => {
+      const [entry] = parse(wrap(crdt({ ...E682, ref })));
+      const marker = `[e-arveldaja-mcp:camt br=${entry!.bank_reference} iban=${entry!.counterparty_iban} dir=CRDT sig=${sig(entry!, "C", true)}]`;
+      return { entry: entry!, row: apiRow(id, entry!, render(entry!.description!, marker), over) };
+    };
+    const openSale = (entry: ParsedCamtEntry) => ({
+      id: 8801, number: "ARV-8801", clients_id: 5150, client_name: "Example Foundation",
+      gross_price: entry.amount, base_gross_price: entry.amount, bank_ref_number: entry.reference_number,
+      payment_status: "", status: "CONFIRMED", cl_currencies_id: "EUR",
+    }) as unknown as SaleInvoice;
+
+    it("names a legacy truncated marker in the review, never trusts it", () => {
+      const { row } = legacyTruncatedRow(9020, "RECON-REF-1");
+      expect(isTrustedCamtDescriptionMetadata(row)).toBe(false);
+      expect(legacyTruncatedCamtMarkerHint(row)).toMatch(/^legacy_truncated_camt_marker: /);
+    });
+
+    it("also hints for a dir-less legacy truncated row", () => {
+      const [entry] = parse(wrap(crdt({ ...E682, ref: "RECON-REF-2", amount: "16.00" })));
+      const row = apiRow(9021, entry!, render(entry!.description!, legacyMarker(entry!)), { type: "D" });
+      expect(isTrustedCamtDescriptionMetadata(row)).toBe(false);
+      expect(legacyTruncatedCamtMarkerHint(row)).toBeDefined();
+    });
+
+    it("gives no hint for a verifying row or a short row with a bad sig", () => {
+      const [entry] = parse(wrap(crdt({ ...E682, ref: "RECON-REF-3" })));
+      expect(legacyTruncatedCamtMarkerHint(currentRow(9022, entry!))).toBeUndefined();
+      const [short] = parse(wrap(crdt({ amount: "15.00", date: "2026-06-12", ref: "RECON-REF-4", name: "Small Payer", iban: "EE382200221020145685", ustrd: "Arve 15" })));
+      const tampered = apiRow(9023, short!, `${short!.description}\n[e-arveldaja-mcp:camt br=${short!.bank_reference} dir=DBIT sig=0123456789abcdef]`);
+      expect(isTrustedCamtDescriptionMetadata(tampered)).toBe(false);
+      expect(legacyTruncatedCamtMarkerHint(tampered)).toBeUndefined();
+    });
+
+    it("does not auto-confirm a legacy truncated row by reference, and says why", () => {
+      const { entry, row } = legacyTruncatedRow(9024, "RECON-REF-5", { status: "PROJECT", clients_id: undefined });
+      const projection = computeExactMatchProjection([row], [openSale(entry)], [], EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE);
+      expect(projection.confirms).toEqual([]);
+      expect(projection.skipped).toEqual([{
+        transaction_id: 9024,
+        reason: expect.stringMatching(/^direction_unproven: CAMT marker checksum does not verify; .*legacy_truncated_camt_marker: .*Re-importing the statement recognises the row but does not re-sign it/),
+      }]);
+    });
   });
 
   it("skips a legacy dir-less untruncated row signed with type D", async () => {

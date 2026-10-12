@@ -292,6 +292,35 @@ export function isTrustedCamtDescriptionMetadata(
   return expectedSignature !== undefined && expectedSignature === metadata.entry_sig;
 }
 
+/**
+ * Review text for a stored row whose signed CAMT marker fails its checksum and
+ * whose text before the marker fills the 150-character cap (up to 3 trailing
+ * whitespace characters may have been trimmed at the cut): the shape an
+ * earlier release left when it signed the full description and then cut it.
+ * `undefined` otherwise.
+ *
+ * Explanation only, never evidence. Such a sig can be recomputed only from the
+ * full statement text (`findMarkerSignatureMatches` on re-import), which is no
+ * longer stored, so a tampered marker on a cap-filling row looks the same.
+ */
+export function legacyTruncatedCamtMarkerHint(
+  transaction: Parameters<typeof isTrustedCamtDescriptionMetadata>[0],
+): string | undefined {
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  if (!metadata.entry_sig || isTrustedCamtDescriptionMetadata(transaction, metadata)) return undefined;
+  const marker = normalizeCamtDescriptionLineBreaks(transaction.description ?? "").trimEnd()
+    .match(/(?:^|\n)(\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\])$/)?.[1];
+  const text = stripCamtDescriptionMetadata(transaction.description ?? undefined);
+  if (!marker || !text) return undefined;
+  const budget = TRANSACTION_DESCRIPTION_MAX_LENGTH - marker.length - 1;
+  if (text.length > budget || text.length < budget - 3) return undefined;
+  return "legacy_truncated_camt_marker: the description fills the 150-character cap, as rows from releases " +
+    "before the stored-text signing fix do (the sig was taken over the full statement text, then the text was cut), " +
+    "so this checksum can never verify. Re-importing the statement recognises the row but does not re-sign it. " +
+    "Check the row against the bank statement and confirm it manually; for a PROJECT row you may instead delete it " +
+    "and re-import the statement (after owner approval) to get a verifiable marker.";
+}
+
 function directBankReferenceLookupKey(transaction: Pick<Transaction, "bank_ref_number">): string | undefined {
   return bankReferenceLookupKey(transaction.bank_ref_number ?? undefined);
 }

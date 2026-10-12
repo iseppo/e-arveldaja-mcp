@@ -18,6 +18,7 @@ import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
 import {
   bankReferenceLookupKey,
   extractCamtDescriptionMetadata,
+  legacyTruncatedCamtMarkerHint,
   storedBankReferenceLookupKey,
 } from "../camt/duplicate-identity.js";
 import { buildCamtJournalCoverageContext, classifyCamtJournalCoverage, type CamtJournalCoverage } from "../camt/journal-coverage.js";
@@ -400,7 +401,8 @@ function partitionByLedgerContext(
         ...base,
         journal_ids: [],
         code: "camt_marker_unverified",
-        next_action: "check the row against the bank statement: its CAMT marker checksum does not verify, so neither its direction nor its counterparty account is proven; correct or re-import the row, then classify again",
+        next_action: legacyTruncatedCamtMarkerHint(transaction) ??
+          "check the row against the bank statement: its CAMT marker checksum does not verify, so neither its direction nor its counterparty account is proven; correct or re-import the row, then classify again",
       });
       continue;
     }
