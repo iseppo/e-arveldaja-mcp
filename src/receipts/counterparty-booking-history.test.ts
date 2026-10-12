@@ -237,3 +237,69 @@ describe("counterparty booking history — identity", () => {
     expect(lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "unknown" }).suggestion).toBeUndefined();
   });
 });
+
+describe("counterparty booking history — name-only identity (A4)", () => {
+  // Live shape: a Wise fee row "TransferWise", outgoing, no IBAN, no legal form,
+  // previously booked to 8610 with a dimension on the same own bank dimension.
+  const fee = (m: number, spec: Partial<RowSpec> = {}): RowSpec =>
+    ({ date: month(m), name: "TransferWise", side: "C", contra: [[8610, 950]], ...spec });
+
+  it("suggests the run for an exact name on the same own bank dimension, marked name_only", () => {
+    const index = history([fee(1), fee(2, { name: "transferwise" }), fee(3, { name: " TransferWise " })]);
+    const result = lookupCounterpartyHistory(index, { name: "TransferWise", accounts_dimensions_id: 100, direction: "outgoing" });
+    expect(result.suggestion).toMatchObject({ account_id: 8610, dimension_id: 950, streak: 3, history_total: 3, identity: "name_only" });
+  });
+
+  it("needs the query's own bank dimension: missing or different → no match", () => {
+    const index = history([fee(1), fee(2), fee(3)]);
+    expect(lookupCounterpartyHistory(index, { name: "TransferWise", direction: "outgoing" }).history_total).toBe(0);
+    expect(lookupCounterpartyHistory(index, { name: "TransferWise", accounts_dimensions_id: 200, direction: "outgoing" }).history_total).toBe(0);
+  });
+
+  it("does not count rows on another own bank dimension toward the streak", () => {
+    const index = history([fee(1), fee(2, { dim: 200 }), fee(3)]);
+    const result = lookupCounterpartyHistory(index, { name: "TransferWise", accounts_dimensions_id: 100, direction: "outgoing" });
+    expect(result.history_total).toBe(2);
+    expect(result.suggestion).toBeUndefined();
+  });
+
+  it("names that differ beyond case and whitespace do not match, even with the same history key", () => {
+    const index = history([fee(1, { name: "Transfer-Wise" }), fee(2, { name: "Transfer Wise" }), fee(3, { name: "Transfer.Wise" })]);
+    const result = lookupCounterpartyHistory(index, { name: "Transfer Wise", accounts_dimensions_id: 100, direction: "outgoing" });
+    expect(result.history_total).toBe(1);
+    expect(result.suggestion).toBeUndefined();
+  });
+
+  it("an IBAN on either side keeps the IBAN rule", () => {
+    const withIban = history([fee(1, { iban: "EE111111111111111111" }), fee(2, { iban: "EE111111111111111111" }), fee(3, { iban: "EE111111111111111111" })]);
+    expect(lookupCounterpartyHistory(withIban, { name: "TransferWise", accounts_dimensions_id: 100, direction: "outgoing" }).history_total).toBe(0);
+    const withoutIban = history([fee(1), fee(2), fee(3)]);
+    expect(lookupCounterpartyHistory(withoutIban, {
+      name: "TransferWise", iban: "EE111111111111111111", accounts_dimensions_id: 100, direction: "outgoing",
+    }).history_total).toBe(0);
+    // A matching IBAN still matches, and is not marked name-only.
+    const matched = lookupCounterpartyHistory(withIban, {
+      name: "TransferWise", iban: "EE111111111111111111", accounts_dimensions_id: 100, direction: "outgoing",
+    }).suggestion;
+    expect(matched?.streak).toBe(3);
+    expect(matched?.identity).toBeUndefined();
+  });
+
+  it("a legal-form name on either side never matches by name only", () => {
+    const plain = history([fee(1, { name: "Laenaja" }), fee(2, { name: "Laenaja" }), fee(3, { name: "Laenaja" })]);
+    expect(lookupCounterpartyHistory(plain, { name: "Laenaja OÜ", accounts_dimensions_id: 100, direction: "outgoing" }).history_total).toBe(0);
+    const formed = history([fee(1, { name: "Laenaja OÜ" }), fee(2, { name: "Laenaja OÜ" }), fee(3, { name: "Laenaja OÜ" })]);
+    expect(lookupCounterpartyHistory(formed, { name: "Laenaja", accounts_dimensions_id: 100, direction: "outgoing" }).history_total).toBe(0);
+    // Two legal-form names keep the legal-person rule, not marked name-only.
+    const legal = lookupCounterpartyHistory(formed, { name: "Laenaja OÜ", accounts_dimensions_id: 100, direction: "outgoing" }).suggestion;
+    expect(legal?.streak).toBe(3);
+    expect(legal?.identity).toBeUndefined();
+  });
+
+  it("still requires MIN_STREAK", () => {
+    const index = history([fee(1), fee(2)]);
+    const result = lookupCounterpartyHistory(index, { name: "TransferWise", accounts_dimensions_id: 100, direction: "outgoing" });
+    expect(result.history_total).toBe(2);
+    expect(result.suggestion).toBeUndefined();
+  });
+});

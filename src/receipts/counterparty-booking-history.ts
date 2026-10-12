@@ -9,6 +9,9 @@ import type { Journal, Transaction } from "../types/api.js";
 // its side comes from that journal's bank leg (the API reads every stored type
 // back as "C"). Only the newest unbroken run of one treatment, at least
 // MIN_STREAK long, becomes a suggestion, and it is review-only by contract.
+// Counterparties without a stored IBAN or a legal form (e.g. a Wise fee row
+// "TransferWise") match by exact display name on the same own bank dimension
+// only, and such a suggestion is marked `identity: "name_only"`.
 
 const MIN_STREAK = 3;
 const DEFAULT_INVOICE_LEDGER_ACCOUNTS: ReadonlySet<number> = new Set([DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE]);
@@ -25,6 +28,8 @@ interface HistoryRow {
   readonly date: string;
   readonly name: string;
   readonly iban: string | undefined;
+  /** The own bank dimension the row was imported on. */
+  readonly dimension_id: number | null;
   /** undefined: the row breaks any streak it sits in. */
   readonly treatment: Treatment | undefined;
 }
@@ -37,6 +42,8 @@ export interface CounterpartyBookingHistory {
 export interface CounterpartyHistoryQuery {
   readonly name: string | null | undefined;
   readonly iban?: string | null;
+  /** The query row's own bank dimension; required for a name-only match. */
+  readonly accounts_dimensions_id?: number | null;
   readonly direction: HistoryDirection | "unknown";
 }
 
@@ -49,10 +56,15 @@ export interface CounterpartyHistorySuggestion extends Treatment {
   readonly history_total: number;
   readonly latest_date: string;
   readonly breakdown: HistoryBreakdownEntry[];
+  /** Set when neither side has an IBAN or legal form: the match rests on the exact name alone. */
+  readonly identity?: "name_only";
 }
 
 export interface CounterpartyHistoryResult {
-  /** Identity-compatible confirmed rows in this direction, across all own bank dimensions. */
+  /**
+   * Identity-compatible confirmed rows in this direction, across all own bank
+   * dimensions (only the query's own dimension for a name-only match).
+   */
   readonly history_total: number;
   readonly breakdown: HistoryBreakdownEntry[];
   readonly suggestion?: CounterpartyHistorySuggestion;
@@ -61,6 +73,13 @@ export interface CounterpartyHistoryResult {
 export function counterpartyHistoryKey(name: string | null | undefined): string {
   return normalizeCompanyName(name, { stripNonAlphanumeric: true });
 }
+
+/** Case- and whitespace-insensitive display name; punctuation still counts. */
+function displayNameKey(name: string | null | undefined): string {
+  return (name ?? "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+const hasLegalForm = (name: string | null | undefined) => sameCompanyIdentity(name, name);
 
 function normalizedIban(value: string | null | undefined): string | undefined {
   const iban = (value ?? "").replace(/\s+/g, "").toUpperCase();
@@ -116,6 +135,7 @@ export function buildCounterpartyBookingHistory(input: {
       date: transaction.date,
       name: transaction.bank_account_name ?? "",
       iban: normalizedIban(storedBankAccountNo(transaction)),
+      dimension_id: transaction.accounts_dimensions_id ?? null,
       treatment,
     };
     // A row whose side cannot be read from its journal breaks the run in the
@@ -137,15 +157,23 @@ export function buildCounterpartyBookingHistory(input: {
 /**
  * Same counterparty: differing stored IBANs never are; two names that both carry
  * a legal form must be the same legal person ("Foo OÜ" ≠ "Foo AS"); otherwise
- * both rows must carry the same stored IBAN.
+ * both rows must carry the same stored IBAN. When neither side has an IBAN nor
+ * a legal form, the same display name (up to case and whitespace) on the same
+ * own bank dimension is the weaker, name-only identity.
  */
 function sameCounterparty(query: CounterpartyHistoryQuery, row: HistoryRow): boolean {
   const queryIban = normalizedIban(query.iban);
   if (queryIban && row.iban && queryIban !== row.iban) return false;
-  if (sameCompanyIdentity(query.name, query.name) && sameCompanyIdentity(row.name, row.name)) {
+  const queryHasForm = hasLegalForm(query.name);
+  const rowHasForm = hasLegalForm(row.name);
+  if (queryHasForm && rowHasForm) {
     return sameCompanyIdentity(query.name, row.name);
   }
-  return queryIban !== undefined && queryIban === row.iban;
+  if (queryIban !== undefined || row.iban !== undefined) return queryIban !== undefined && queryIban === row.iban;
+  if (queryHasForm || rowHasForm) return false;
+  return query.accounts_dimensions_id != null &&
+    query.accounts_dimensions_id === row.dimension_id &&
+    displayNameKey(query.name) === displayNameKey(row.name);
 }
 
 const sameTreatment = (left: Treatment, right: Treatment) =>
@@ -188,6 +216,8 @@ export function lookupCounterpartyHistory(
       history_total: rows.length,
       latest_date: rows[rows.length - 1]!.date,
       breakdown,
+      // Without a query IBAN or legal form, every matched row came through the name-only tier.
+      ...(normalizedIban(query.iban) === undefined && !hasLegalForm(query.name) ? { identity: "name_only" as const } : {}),
     },
   };
 }

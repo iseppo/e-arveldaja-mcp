@@ -438,7 +438,7 @@ function splitGroupByHistory(
   const parts = new Map<string, { rows: Transaction[]; history?: CounterpartyHistorySuggestion }>();
   for (const transaction of group.transactions) {
     const history = historyOf(transaction);
-    const key = history ? JSON.stringify([history.account_id, history.dimension_id, history.streak, history.history_total]) : "";
+    const key = history ? JSON.stringify([history.account_id, history.dimension_id, history.streak, history.history_total, history.identity ?? ""]) : "";
     const part = parts.get(key) ?? { rows: [], history };
     part.rows.push(transaction);
     parts.set(key, part);
@@ -453,12 +453,15 @@ function historyBookingSuggestion(
 ): ClassifiedTransactionSuggestion {
   const account = accounts.find(candidate => candidate.id === history.account_id);
   const dimension = history.dimension_id !== null ? ` dimension ${history.dimension_id}` : "";
+  const nameOnly = history.identity === "name_only"
+    ? " The counterparty is matched by its name only (no IBAN or legal form on these rows), so check it is the same party."
+    : "";
   return {
     purchase_account_id: history.account_id,
     purchase_account_name: account ? `${history.account_id} ${account.name_est}` : undefined,
     ...(history.dimension_id !== null ? { purchase_account_dimensions_id: history.dimension_id } : {}),
     source: "transaction_history",
-    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}. Review-only: confirm the substance before booking.`,
+    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly} Review-only: confirm the substance before booking.`,
     transaction_history: history,
     suggested_distribution: {
       related_table: "accounts",
@@ -688,6 +691,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       : lookupCounterpartyHistory(partition.history, {
           name: transaction.bank_account_name,
           iban: counterpartyIbanOf(transaction) || undefined,
+          accounts_dimensions_id: transaction.accounts_dimensions_id,
           direction: trustedDirection(transaction) ?? "unknown",
         }).suggestion;
     const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
@@ -728,6 +732,20 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           reason: "No booking history or saved rule names a contra account for this counterparty; choose it from the transaction's substance.",
         };
       }
+      const historyHint = suggestion.source === "transaction_history" ? history : undefined;
+      const guidance = applyMode !== "purchase_invoice"
+        ? buildClassificationReviewGuidance({
+            category: classification.category,
+            displayCounterparty: group.display_counterparty,
+            ...(historyHint
+              ? { history: { accountId: historyHint.account_id, dimensionId: historyHint.dimension_id, streak: historyHint.streak, historyTotal: historyHint.history_total } }
+              : {}),
+          })
+        : undefined;
+      // A name-only history match says so in the guidance too (A4).
+      const reviewGuidance = guidance && historyHint?.identity === "name_only"
+        ? { ...guidance, recommendation: `${guidance.recommendation} NB: osapool on tuvastatud ainult nime järgi (IBAN ja õiguslik vorm puuduvad), kontrolli, et see on sama osapool.` }
+        : guidance;
       // Build the RAW classified group (no wrapping). The presenter reproduces
       // the double-wrap of transaction description/bank_account_name and the
       // single-wrap of counterparty fields. Key order matches the former
@@ -742,15 +760,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         total_amount: roundMoney(group.transactions.reduce((sum, transaction) => sum + transaction.amount, 0)),
         suggested_booking: suggestion,
         reasons: classification.reasons,
-        review_guidance: applyMode !== "purchase_invoice"
-          ? buildClassificationReviewGuidance({
-              category: classification.category,
-              displayCounterparty: group.display_counterparty,
-              ...(suggestion.source === "transaction_history" && history
-                ? { history: { accountId: history.account_id, dimensionId: history.dimension_id, streak: history.streak, historyTotal: history.history_total } }
-                : {}),
-            })
-          : undefined,
+        review_guidance: reviewGuidance,
         transactions: group.transactions.map(transaction => ({
           id: transaction.id,
           type: transaction.type,

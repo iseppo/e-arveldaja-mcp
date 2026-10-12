@@ -927,6 +927,29 @@ describe("classification operations — ledger context (F6)", () => {
     expect(guidance).not.toMatch(/müügi/i);
   });
 
+  it("(A4) a 'TransferWise' fee row with no IBAN or legal form gets a review-only, name-only history suggestion on its own dimension", async () => {
+    const feeHistory = historyRows("TransferWise", "C", [2110, 900], ["2026-06-01", "2026-07-01", "2026-08-01"], 600);
+    const fee = camtRow({ id: 11, amount: 0.02, date: "2026-09-10", direction: "DBIT", name: "TransferWise", description: "fee" });
+    const { operations } = ledgerOperations({ rows: [fee, ...feeHistory.transactions], journals: feeHistory.journals });
+    const group = (await analyze(operations)).groups[0]!;
+    expect(group.apply_mode).toBe("review_only");
+    expect(group.suggested_booking).toMatchObject({
+      source: "transaction_history",
+      purchase_account_id: 2110,
+      purchase_account_dimensions_id: 900,
+      transaction_history: { streak: 3, history_total: 3, identity: "name_only" },
+    });
+    expect(group.suggested_booking.reason).toContain("name only");
+    expect(JSON.stringify(group.review_guidance)).toContain("ainult nime järgi");
+
+    // The same history on another own bank dimension does not answer for it.
+    const elsewhere = camtRow({ id: 12, amount: 0.02, date: "2026-09-10", direction: "DBIT", name: "TransferWise", description: "fee", dim: 200 });
+    const other = ledgerOperations({ rows: [elsewhere, ...feeHistory.transactions], journals: feeHistory.journals });
+    const outcome = await other.operations.analyzeUnmatched({ accountsDimensionsId: 200 });
+    if (!outcome.ok) throw new Error("analyze failed");
+    expect(outcome.value.groups[0]!.suggested_booking.source).not.toBe("transaction_history");
+  });
+
   it("(b) a row whose marker IBAN is the own account of dim 200 is an own transfer with target 200, not a group", async () => {
     const transfer = camtRow({ id: 2, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE });
     const { operations } = ledgerOperations({ rows: [transfer] });
