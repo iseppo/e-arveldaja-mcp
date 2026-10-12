@@ -4234,6 +4234,37 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       }
     });
 
+    it("an opposite-direction journal with the row's reference is not its booking: review, not already handled (hash-only and direct ref, all alias orders)", async () => {
+      const longRef = "LONG-REFERENCE-" + "A".repeat(100);
+      // D LHV / C Wise: money INTO LHV, while the row moved 600 OUT of LHV.
+      const reversed = journal({ document_number: longRef, postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 300, type: "C", amount: 600, base_amount: 600, is_deleted: false },
+        { accounts_id: 1020, accounts_dimensions_id: 100, type: "D", amount: 600, base_amount: 600, is_deleted: false },
+      ] });
+      const aliasSets = [
+        [],
+        [journal({ id: 9000, registered: false, document_number: `BANK:${longRef}` })],
+        [journal({ id: 9000, effective_date: "2026-08-01", document_number: `BANK:${longRef}` })],
+      ];
+      const rows = [
+        camtRow(5002, { name: "Wise Payments", ref: longRef, text: null }),
+        { ...camtRow(5002, { name: "Wise Payments", ref: longRef, text: null }), bank_ref_number: longRef },
+      ];
+      for (const row of rows) {
+        for (const aliases of aliasSets) {
+          for (const journals of [[...aliases, reversed], [reversed, ...aliases]]) {
+            const { handler, api } = setup([counterpart(), row], journals);
+            const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+            expect(api.transactions.confirm).not.toHaveBeenCalled();
+            expect(api.transactions.delete).not.toHaveBeenCalled();
+            expect(payload.matched_one_sided).toBe(0);
+            expect(payload.already_handled).toEqual([]);
+            expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [5002] })]);
+          }
+        }
+      }
+    });
+
     it("Codex counterexample: a consumed ref-less journal does not hide a reviewed member's claim on another journal (all orders)", async () => {
       const withRef = (id: number, ref: string, date: string) => ({ ...camtRow(id, { ref, date }), bank_ref_number: ref });
       const rows = [withRef(5011, "R1", "2026-09-24"), withRef(5012, "R2", "2026-09-25"), withRef(5013, "R2", "2026-09-27")];

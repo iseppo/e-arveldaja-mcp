@@ -837,6 +837,35 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
     expect(payload.summary.confirm_inter_account ?? 0).toBe(0);
   });
 
+  it("does not call a signed outgoing transfer a duplicate of an opposite-direction journal with its reference (hash-only and direct ref, all alias orders)", async () => {
+    const longRef = "LONG-REFERENCE-" + "A".repeat(100);
+    const description = buildCamtDescriptionWithMetadata(undefined, {
+      date: "2026-03-22", amount: 500, currency: "EUR", direction: "DBIT",
+      counterparty_name: "SEB", counterparty_iban: "EE987654321098765432", bank_reference: longRef,
+    });
+    // D LHV / C SEB: money INTO LHV, while the row moved 500 OUT of LHV.
+    const reversed = { ...journal(93, "2026-03-22", [{ dim: 200, type: "C", amount: 500 }, { dim: 100, type: "D", amount: 500 }]), document_number: longRef };
+    const aliasSets = [
+      [],
+      [{ ...reversed, id: 90, registered: false, document_number: `BANK:${longRef}` }],
+      [{ ...reversed, id: 90, effective_date: "2025-01-01", document_number: `BANK:${longRef}` }],
+    ];
+    const rows = [
+      { ...baseTx, type: "C", amount: 500, bank_account_name: "SEB", bank_account_no: "EE987654321098765432", bank_ref_number: null, description },
+      { ...baseTx, type: "C", amount: 500, bank_account_name: "SEB", bank_account_no: "EE987654321098765432", bank_ref_number: longRef, description },
+    ];
+    for (const row of rows) {
+      for (const aliases of aliasSets) {
+        for (const journals of [[...aliases, reversed], [reversed, ...aliases]]) {
+          const handler = setupTool({ transactions: [row], bankAccounts: defaultBankAccounts, journals });
+          const payload = parseMcpResponse((await handler({})).content[0]!.text);
+          expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
+          expect(payload.suggestions[0]!.duplicate_journal_id).toBeUndefined();
+        }
+      }
+    }
+  });
+
   it("fails closed on a malformed invoice payment_status like the reconcile paths", async () => {
     const handler = setupTool({
       transactions: [{ ...baseTx, type: "D", description: "Payment", ref_number: "RF1" }],

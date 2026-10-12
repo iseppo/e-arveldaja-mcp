@@ -1,4 +1,6 @@
 import type { Journal, Transaction } from "../../types/api.js";
+import type { BookingGuard, InterAccountQuery, InterAccountResolution } from "../../booking-guard.js";
+import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
@@ -79,8 +81,9 @@ export function transferReferenceOf(tx: Transaction, journals: readonly Journal[
 
 /**
  * Resolve a transfer against its candidate references: the first reference
- * that matches a journal wins (probed without consuming); with none, the
- * first reference's outcome stands.
+ * that matches a journal wins (probed without consuming); else a reference
+ * that hits a journal it cannot be booked against (any outcome but `none`)
+ * blocks booking; with neither, the first reference's outcome stands.
  */
 export function resolveWithReferences<R extends { status: string }>(
   references: readonly string[],
@@ -88,10 +91,56 @@ export function resolveWithReferences<R extends { status: string }>(
   consume: boolean,
 ): R {
   if (references.length > 1) {
-    const matching = references.find(reference => resolve(reference, false).status === "matched");
-    if (matching !== undefined) return resolve(matching, consume);
+    const probes = references.map(reference => ({ reference, outcome: resolve(reference, false) }));
+    const matching = probes.find(probe => probe.outcome.status === "matched");
+    if (matching !== undefined) return resolve(matching.reference, consume);
+    const blocking = probes.find(probe => probe.outcome.status !== "none");
+    if (blocking !== undefined) return blocking.outcome;
   }
   return resolve(references[0], consume);
+}
+
+/**
+ * Whether a journal books this row's transfer: its legs on the row's account
+ * move `amountEur` in the row's signed direction (either way when the row is
+ * unsigned) and its legs on the target account move the opposite way (a fee
+ * may make that amount differ), in EUR (no foreign posting without a base
+ * amount).
+ */
+export function journalMovesTransfer(journal: Journal | undefined, tx: Transaction, targetDim: number, amountEur: number): boolean {
+  if (!journal) return false;
+  const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
+  if (live.some(posting => posting.base_amount == null &&
+    (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return false;
+  const signedCents = (dim: number) => live
+    .filter(posting => posting.accounts_dimensions_id === dim)
+    .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100), 0);
+  const cents = Math.round(Math.abs(amountEur) * 100);
+  const direction = bankTransactionDirection(tx);
+  const sides = direction === "incoming" ? [1] : direction === "outgoing" ? [-1] : [1, -1];
+  const own = signedCents(tx.accounts_dimensions_id);
+  const target = signedCents(targetDim);
+  return sides.some(side => own === side * cents && target * side < 0);
+}
+
+/** A Lane B outcome, or a matched snapshot journal that does not move the row's transfer. */
+export type TransferResolution = InterAccountResolution | { status: "uncovered"; journal_id: number };
+
+/**
+ * Lane B keys are direction-blind: a snapshot journal matched by reference or
+ * key stands in for the row only when {@link journalMovesTransfer}; otherwise
+ * the outcome is `uncovered` (review) and nothing is consumed.
+ */
+export function resolveTransfer(
+  guard: Pick<BookingGuard, "resolveInterAccount" | "journals">,
+  query: InterAccountQuery, tx: Transaction, consume: boolean,
+): TransferResolution {
+  const probe = guard.resolveInterAccount(query, { consume: false });
+  if (probe.status === "matched" && probe.pool === "snapshot" &&
+    !journalMovesTransfer(guard.journals.find(journal => journal.id === probe.journal_id), tx, query.targetDim, query.amount)) {
+    return { status: "uncovered", journal_id: probe.journal_id };
+  }
+  return consume ? guard.resolveInterAccount(query, { consume: true }) : probe;
 }
 
 export interface OneSidedInference {

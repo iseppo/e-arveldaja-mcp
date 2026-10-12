@@ -14,7 +14,7 @@ import {
 } from "../../api/transactions.api.js";
 import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
-import { BookingGuard, type InterAccountResolution } from "../../booking-guard.js";
+import { BookingGuard } from "../../booking-guard.js";
 import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import { buildBankAccountLookups, normalizeReference, toUtcDay } from "../../tools/inter-account-utils.js";
 import {
@@ -47,6 +47,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  resolveTransfer,
   resolveWithReferences,
   transferReferenceOf,
   transferReferencesOf,
@@ -55,6 +56,7 @@ import {
   getSameTypeReciprocalEvidence,
   type InterAccountMatchLookups,
   type OneSidedInference,
+  type TransferResolution,
 } from "./inter-account-matcher.js";
 import { computeExactMatchProjection } from "./duplicate-policy.js";
 import {
@@ -771,13 +773,18 @@ export async function runInterAccountMatching(
   const guard = await BookingGuard.load(api, { ownDimensionIds });
 
   function resolveExistingJournal(
-    sourceDim: number, targetDim: number, amount: number, date: string, maxGapDays: number,
-    references: readonly string[], consume: boolean,
-  ): InterAccountResolution {
-    return resolveWithReferences(references, (reference, consumeNow) => guard.resolveInterAccount(
-      { sourceDim, targetDim, amount, date, maxGapDays, reference },
-      { consume: consumeNow },
+    tx: Transaction, targetDim: number, amount: number, maxGapDays: number, consume: boolean,
+  ): TransferResolution {
+    return resolveWithReferences(transferReferencesOf(tx, guard.journals), (reference, consumeNow) => resolveTransfer(
+      guard,
+      { sourceDim: tx.accounts_dimensions_id, targetDim, amount, date: tx.date, maxGapDays, reference },
+      tx, consumeNow,
     ), consume);
+  }
+
+  /** Review reason for a row whose matched journal does not move its transfer. */
+  function uncoveredReason(journalId: number, amount: number, sourceTitle: string, targetTitle: string): string {
+    return `Journal #${journalId} matches this transfer's reference or key, but it does not move ${amount} EUR between ${sourceTitle} and ${targetTitle} in this row's direction, so it is not this row's booking. Check the bank statement and the journal, then confirm the row inline or correct the journal.`;
   }
 
   function recordInterAccountJournal(
@@ -984,11 +991,7 @@ export async function runInterAccountMatching(
     const fromTitle = dimensionToTitle.get(txOut.accounts_dimensions_id) ?? `dim:${txOut.accounts_dimensions_id}`;
     const toTitle = dimensionToTitle.get(txIn.accounts_dimensions_id) ?? `dim:${txIn.accounts_dimensions_id}`;
 
-    const resolution = resolveExistingJournal(
-      txOut.accounts_dimensions_id, txIn.accounts_dimensions_id,
-      bestCandidate.comparableAmount, txOut.date, maxGap,
-      transferReferencesOf(txOut, guard.journals), true,
-    );
+    const resolution = resolveExistingJournal(txOut, txIn.accounts_dimensions_id, bestCandidate.comparableAmount, maxGap, true);
     if (resolution.status === "matched") {
       consumedTxIds.add(txOut.id);
       consumedTxIds.add(txIn.id!);
@@ -998,13 +1001,13 @@ export async function runInterAccountMatching(
       );
       continue;
     }
-    if (resolution.status === "ambiguous_refless") {
+    if (resolution.status === "ambiguous_refless" || resolution.status === "uncovered") {
       consumedTxIds.add(txOut.id);
       consumedTxIds.add(txIn.id!);
       ambiguousRefless.push({
         transaction_ids: [txOut.id, txIn.id!], amount: txOut.amount, date: txOut.date,
         source_account: fromTitle, target_account: toTitle,
-        reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
+        reason: resolution.status === "uncovered" ? uncoveredReason(resolution.journal_id, bestCandidate.comparableAmount, fromTitle, toTitle) : "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
       });
       continue;
     }
@@ -1175,11 +1178,7 @@ export async function runInterAccountMatching(
     const fromTitleEarly = dimensionToTitle.get(source.accounts_dimensions_id) ?? `dim:${source.accounts_dimensions_id}`;
     const toTitleEarly = dimensionToTitle.get(counterpart.accounts_dimensions_id) ?? `dim:${counterpart.accounts_dimensions_id}`;
 
-    const resolution = resolveExistingJournal(
-      source.accounts_dimensions_id, counterpart.accounts_dimensions_id,
-      distributionAmount, source.date, maxGap,
-      transferReferencesOf(source, guard.journals), true,
-    );
+    const resolution = resolveExistingJournal(source, counterpart.accounts_dimensions_id, distributionAmount, maxGap, true);
     if (resolution.status === "matched") {
       consumedTxIds.add(sourceId);
       consumedTxIds.add(counterpartId);
@@ -1203,13 +1202,13 @@ export async function runInterAccountMatching(
       );
       continue;
     }
-    if (resolution.status === "ambiguous_refless") {
+    if (resolution.status === "ambiguous_refless" || resolution.status === "uncovered") {
       consumedTxIds.add(sourceId);
       consumedTxIds.add(counterpartId);
       ambiguousRefless.push({
         transaction_ids: [sourceId, counterpartId], amount: source.amount, date: source.date,
         source_account: fromTitleEarly, target_account: toTitleEarly,
-        reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
+        reason: resolution.status === "uncovered" ? uncoveredReason(resolution.journal_id, distributionAmount, fromTitleEarly, toTitleEarly) : "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
       });
       continue;
     }
@@ -1308,9 +1307,7 @@ export async function runInterAccountMatching(
       // An existing journal already covering either leg is handled by the
       // one-sided journal check below (skip / ambiguous_refless), not here.
       const covered = (tx: Transaction, target: number, amount: number) =>
-        resolveExistingJournal(
-          tx.accounts_dimensions_id, target, amount, tx.date, maxGap, transferReferencesOf(tx, guard.journals), false,
-        ).status !== "none";
+        resolveExistingJournal(tx, target, amount, maxGap, false).status !== "none";
       if (covered(a, b.accounts_dimensions_id, aAmount) || covered(b, a.accounts_dimensions_id, bAmount)) continue;
 
       // A fee-deducted transfer is one outgoing and one incoming leg with the
@@ -1426,15 +1423,7 @@ export async function runInterAccountMatching(
     }
     const { nominalAmount, currency, amountEur } = amountResolution;
 
-    const resolution = resolveExistingJournal(
-      tx.accounts_dimensions_id,
-      targetDimension,
-      amountEur,
-      tx.date,
-      maxGap,
-      transferReferencesOf(tx, guard.journals),
-      true,
-    );
+    const resolution = resolveExistingJournal(tx, targetDimension, amountEur, maxGap, true);
     if (resolution.status === "matched") {
       consumedTxIds.add(tx.id);
       // Other unhandled rows with this transfer's key (same account and
@@ -1499,12 +1488,12 @@ export async function runInterAccountMatching(
       if (proposal) mirrorProposals.push({ row, proposal });
       continue;
     }
-    if (resolution.status === "ambiguous_refless") {
+    if (resolution.status === "ambiguous_refless" || resolution.status === "uncovered") {
       consumedTxIds.add(tx.id);
       ambiguousRefless.push({
         transaction_ids: [tx.id], amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
         source_account: sourceTitle, target_account: targetTitle,
-        reason: "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
+        reason: resolution.status === "uncovered" ? uncoveredReason(resolution.journal_id, amountEur, sourceTitle, targetTitle) : "A same-key inter-account journal (matching amount/date/accounts) was already booked this run and its reference does not disambiguate; cannot tell a genuine second transfer from a duplicate mirror leg. Confirm inline if this is a real second transfer.",
       });
       continue;
     }

@@ -13,6 +13,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  resolveTransfer,
   resolveWithReferences,
   transferReferencesOf,
   unverifiedMarkerTransferClaim,
@@ -311,14 +312,14 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         // inter-account journal already covers it (e.g. the mirror leg was
         // confirmed first). Returns a replacement suggestion, or undefined.
         const alreadyBookedTransfer = (targetDim: number): Suggestion | undefined => {
-          const resolution = resolveWithReferences(transferReferencesOf(tx, guard.journals), reference => guard.resolveInterAccount({
+          const resolution = resolveWithReferences(transferReferencesOf(tx, guard.journals), reference => resolveTransfer(guard, {
             sourceDim: txDim,
             targetDim,
             amount: txDuplicateAmount,
             date: tx.date,
             maxGapDays: DUPLICATE_DATE_WINDOW_DAYS,
             reference,
-          }, { consume: false }), false);
+          }, tx, false), false);
           if (resolution.status === "none") return undefined;
           const targetTitle = dimensionToTitle.get(targetDim) ?? `dim:${targetDim}`;
           const base = {
@@ -337,6 +338,13 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               reason: `Own-account transfer ${bankTitle} <-> "${targetTitle}" is already booked as journal #${resolution.journal_id} (within ${DUPLICATE_DATE_WINDOW_DAYS} day). Do not confirm; this PROJECT row is likely the mirror leg — delete it after verifying.`,
               duplicate_journal_id: resolution.journal_id,
               duplicate_journal_ids: [resolution.journal_id],
+            };
+          }
+          if (resolution.status === "uncovered") {
+            return {
+              ...base,
+              suggested_action: "manual_review",
+              reason: `Journal #${resolution.journal_id} matches this own-account transfer ${bankTitle} <-> "${targetTitle}" by reference or key, but it does not move ${txDuplicateAmount} EUR in this row's direction, so it is not this row's booking; verify before confirming.`,
             };
           }
           return {
