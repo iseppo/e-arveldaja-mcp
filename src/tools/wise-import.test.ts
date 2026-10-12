@@ -6064,10 +6064,17 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
         sourceName: "Wise Own Account", targetName: "LHV Own Account",
         sourceAmount: "100", targetAmount: "100", sourceFeeAmount: "1",
       })]));
+      // A third own bank account (dimension 30 on GL 1030) that is not an
+      // endpoint of this statement's transfer.
       const setup = setupWiseTool([], undefined, {
         ...transferOptions([journal]),
+        bankAccounts: [
+          ...configuredTransferBankAccounts(),
+          { accounts_dimensions_id: 30, beneficiary_name: "Savings Own Account", account_name_est: "Savings Own Account", account_name_eng: "Savings Own Account" },
+        ],
         accountDimensions: [
           ...configuredTransferDimensions(),
+          { id: 30, accounts_id: 1030, title_est: "Savings", is_deleted: false },
           { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
         ],
       });
@@ -6091,6 +6098,10 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       ["an extra unrelated posting pair", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit,
         { accounts_id: 5000, type: "D", amount: 3 }, { accounts_id: 2000, type: "C", amount: 3 }]],
       ["the counterpart leg at the net amount", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 101 }]],
+      ["the \"fee\" debited to another own bank dimension", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 },
+        { accounts_id: 1030, accounts_dimensions_id: 30, type: "D", amount: 1 }]],
+      ["the \"fee\" debited to another bank account's GL account without a dimension", [wiseOut,
+        { accounts_dimensions_id: 20, type: "D", amount: 100 }, { accounts_id: 1030, type: "D", amount: 1 }]],
     ])("a journal with %s is reviewed and suppresses nothing", async (_label, postings) => {
       const dry = await run(outJournal(731, postings));
       expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
@@ -6098,6 +6109,27 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
         wise_id: "TRANSFER-OUT-FEE",
         code: "wise_transfer_journal_ambiguous",
         candidate_journal_ids: [731],
+      })]);
+      expect(dry.execution.needs_review[0].fee_held_journal_ids).toBeUndefined();
+    });
+
+    it.each([
+      ["a USD journal without EUR base amounts", {
+        cl_currencies_id: "USD",
+        postings: [{ ...wiseOut, base_amount: null }, { accounts_dimensions_id: 20, type: "D", amount: 100, base_amount: null },
+          { ...feeDebit, base_amount: null }],
+      }],
+      ["an unregistered exact-reference journal", { registered: false, document_number: "TRANSFER-OUT-FEE" }],
+    ])("%s with the fee shape is reviewed and does not hold the fee", async (_label, override) => {
+      const base = outJournal(732, [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit]);
+      const journal = "postings" in override
+        ? { ...base, ...override, postings: (override.postings as Array<Record<string, unknown>>).map(posting => ({ is_deleted: false, ...posting })) }
+        : { ...base, ...override };
+      const dry = await run(journal);
+      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+      expect(dry.execution.needs_review).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-OUT-FEE",
+        candidate_journal_ids: [732],
       })]);
       expect(dry.execution.needs_review[0].fee_held_journal_ids).toBeUndefined();
     });

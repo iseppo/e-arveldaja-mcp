@@ -19,7 +19,7 @@ function rowsOf(lines: string[]): WiseRow[] {
 function project(eligible: WiseRow[], existingTx: Transaction[], extra: Partial<Parameters<typeof projectWiseCommands>[0]> = {}) {
   return projectWiseCommands({
     eligible, accountsDimensionsId: WISE, accountDimensions, feeAccountDimensionsId: FEE_DIM, wiseClientId: 7,
-    existingTx, transferDecisions: new Map(), postingDimensionsSnapshot: new Map(), journalSnapshot: [],
+    existingTx, transferDecisions: new Map(), postingDimensionsSnapshot: new Map(), bankDimensionIds: new Set(), journalSnapshot: [],
     createInterAccountGuard: () => { throw new Error("no guard expected"); },
     approvedTransferIds: new Set(), ownCompanyClientId: undefined, ownCompanyClientMatches: [], allPurchaseInvoices: [],
     ...extra,
