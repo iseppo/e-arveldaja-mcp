@@ -1,18 +1,16 @@
 name: Publish
 
-# Publishes a release tag to npm and the MCP registry without stored tokens:
-# npm via Trusted Publishing (OIDC; configured once on npmjs.com for this
-# workflow file) and the MCP registry via `mcp-publisher login github-oidc`
-# (namespace io.github.iseppo/*). Runs on a pushed v* tag, or by hand for an
-# existing tag: `gh workflow run publish.yml -f tag=v0.29.0`.
+# Publishes a stable release tag (vX.Y.Z) to npm and the MCP registry without
+# stored tokens: npm via Trusted Publishing (OIDC; configured once on npmjs.com
+# for this workflow file) and the MCP registry via `mcp-publisher login
+# github-oidc` (namespace io.github.iseppo/*). Runs on a pushed tag; to rerun
+# for an existing tag that contains this workflow, dispatch it ON the tag so
+# the provenance names the published commit:
+#   gh workflow run publish.yml --ref vX.Y.Z
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag to publish (e.g. v0.29.0)"
-        required: true
 
 permissions:
   contents: read
@@ -23,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TAG: ${{ inputs.tag || github.ref_name }}
+  MCP_SERVER_NAME: io.github.iseppo/e-arveldaja-mcp
   MCP_PUBLISHER_VERSION: "1.8.1"
   MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
 
@@ -31,10 +29,21 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the release tag
+      - name: Only a stable release tag is published
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if ! [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "::error::Run this workflow on a stable release tag vX.Y.Z (got $REF); prereleases are not published here."
+            exit 1
+          fi
+          echo "VERSION=${BASH_REMATCH[1]}" >> "$GITHUB_ENV"
+
+      - name: Check out the tag
         uses: actions/checkout@v7
-        with:
-          ref: refs/tags/${{ env.TAG }}
+
+      - name: Checkout must be the commit the run was triggered for
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -48,10 +57,9 @@ jobs:
 
       - name: Tag must match package and server versions
         run: |
-          version="${TAG#v}"
-          test "$(node -p "require('./package.json').version")" = "$version"
-          test "$(jq -r .version server.json)" = "$version"
-          echo "VERSION=$version" >> "$GITHUB_ENV"
+          test "$(node -p "require('./package.json').version")" = "$VERSION"
+          test "$(jq -r .version server.json)" = "$VERSION"
+          test "$(jq -r .name server.json)" = "$MCP_SERVER_NAME"
 
       - name: Install dependencies
         run: npm ci
@@ -61,10 +69,13 @@ jobs:
 
       - name: Publish to npm (skipped when this version is already published)
         run: |
-          if [ -n "$(npm view "e-arveldaja-mcp@$VERSION" version 2>/dev/null)" ]; then
-            echo "e-arveldaja-mcp@$VERSION is already on npm; skipping."
-          else
+          if out=$(npm view "e-arveldaja-mcp@$VERSION" version --json 2>&1); then
+            echo "e-arveldaja-mcp@$VERSION is already on npm ($out); skipping."
+          elif grep -q "E404" <<<"$out"; then
             npm publish --ignore-scripts
+          else
+            echo "::error::npm lookup failed: $out"
+            exit 1
           fi
 
       - name: Install mcp-publisher
@@ -75,10 +86,10 @@ jobs:
 
       - name: Publish to the MCP registry (skipped when this version is already listed)
         run: |
-          listed=$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.iseppo/e-arveldaja-mcp&version=$VERSION" | jq '[.servers[]? | select(.server.version == env.VERSION)] | length')
-          if [ "$listed" != "0" ]; then
-            echo "io.github.iseppo/e-arveldaja-mcp $VERSION is already in the MCP registry; skipping."
-          else
-            ./mcp-publisher login github-oidc
-            ./mcp-publisher publish
-          fi
+          status=$(curl -sS -o /dev/null -w "%{http_code}" \
+            "https://registry.modelcontextprotocol.io/v0/servers/${MCP_SERVER_NAME//\//%2F}/versions/$VERSION")
+          case "$status" in
+            200) echo "$MCP_SERVER_NAME $VERSION is already in the MCP registry; skipping." ;;
+            404) ./mcp-publisher login github-oidc && ./mcp-publisher publish ;;
+            *) echo "::error::MCP registry lookup returned HTTP $status"; exit 1 ;;
+          esac

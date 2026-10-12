@@ -4,7 +4,7 @@
 
 ### Internal
 
-- A `publish.yml` workflow publishes a pushed `v*` tag to npm (Trusted Publishing, OIDC) and the MCP registry (`mcp-publisher login github-oidc`, pinned 1.8.1 with checksum) after the release gate; already-published versions are skipped. Run it by hand for an existing tag with `gh workflow run publish.yml -f tag=vX.Y.Z`.
+- A `publish.yml` workflow publishes a pushed `v*` tag to npm (Trusted Publishing, OIDC) and the MCP registry (`mcp-publisher login github-oidc`, pinned 1.8.1 with checksum) after the release gate; only stable `vX.Y.Z` tags are published, and already-published versions are skipped (exact npm and registry version lookups; any other lookup error fails the run). To rerun it for a tag, dispatch it on the tag: `gh workflow run publish.yml --ref vX.Y.Z`.
 
 ## [0.29.0] - 2026-10-12
 
