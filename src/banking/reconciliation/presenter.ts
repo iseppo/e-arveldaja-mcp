@@ -160,9 +160,12 @@ export function renderSuggestPayload(data: ReconciliationSuggestions): Record<st
 // The POSSIBLE-duplicate warning lines are built HERE (the sole sandbox site)
 // from the executor's RAW scan inputs, wrapping the untrusted journal title.
 const wrapReconTitle = (title: string): string => wrapUntrustedOcr(title) ?? "";
-function reconDuplicateWarnings(projection: ExactMatchProjection): string[] {
-  return (projection.duplicateWarningInputs ?? []).flatMap(({ scan, candidate }) =>
-    formatDuplicatePostingWarnings(scan, candidate, wrapReconTitle));
+function reconDuplicateWarnings(projection: ExactMatchProjection, omitBlocked = false): string[] {
+  return (projection.duplicateWarningInputs ?? [])
+    // With block_on_duplicate an available scan with suspects blocked the row
+    // (it has a blocked_duplicate_suspect warning instead).
+    .filter(({ scan }) => !(omitBlocked && scan.scan_available && scan.suspects.length > 0))
+    .flatMap(({ scan, candidate }) => formatDuplicatePostingWarnings(scan, candidate, wrapReconTitle));
 }
 
 // --- Exact-match FULL envelope (byte-identical to the pre-refactor tool) ------
@@ -593,10 +596,12 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
   // not plan exclusions): only the full dry-run output lists every one.
   const blockedHint = "they are not in the plan; the standard or full profile (EARVELDAJA_PROFILE) lists every one as a "
     + "blocked_duplicate_suspect result row of reconcile_bank_transactions mode=\"dry_run_auto_confirm\" with block_on_duplicate: true.";
-  // With block_on_duplicate the duplicate-warned rows are blocked too, so the
-  // plan does not hold them either.
-  const duplicateHint = input.blockOnDuplicate === true ? blockedHint : moreHint;
-  warnings.push(...cappedWarnings("possible_duplicate", reconDuplicateWarnings(projection).map(line => ({
+  // A row blocked by block_on_duplicate already has its blocked_duplicate_suspect
+  // warning (same journals); only rows that stay in the confirm set (an
+  // unavailable scan, or advisory suspects without block_on_duplicate) carry a
+  // possible_duplicate warning, and those rows are plan commands.
+  const duplicateHint = moreHint;
+  warnings.push(...cappedWarnings("possible_duplicate", reconDuplicateWarnings(projection, input.blockOnDuplicate === true).map(line => ({
     code: "possible_duplicate",
     message: line,
   })), duplicateHint));

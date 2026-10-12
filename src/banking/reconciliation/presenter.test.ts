@@ -332,17 +332,34 @@ describe("renderExactMatchCompact", () => {
     expect(summary.warnings?.some(w => w.code === "blocked_duplicate_suspect")).toBe(true);
   });
 
-  it("points past-the-cap duplicate warnings at the full dry run when block_on_duplicate blocked those rows", () => {
-    const duplicateWarningInputs = Array.from({ length: 4 }, () => ({
+  it("leaves blocked rows to their blocked_duplicate_suspect warning and points the rest at the plan", () => {
+    const withSuspects = Array.from({ length: 4 }, () => ({
       scan: { scan_available: true, suspects: [suspect] },
       candidate: { amount: 100, direction: "D" },
-    })) as unknown as ExactMatchProjection["duplicateWarningInputs"];
-    const projection = makeExactProjection(0, { duplicateWarningInputs });
-    const blocked = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "PLAN-D", blockOnDuplicate: true });
-    const blockedMore = blocked.summary.warnings?.find(w => w.code === "possible_duplicate_more")?.message ?? "";
-    expect(blockedMore).toMatch(/not shown; they are not in the plan;/);
-    expect(blockedMore).not.toContain("get_execution_plan_page");
-    const advisory = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "PLAN-D" });
+    }));
+    const unavailable = Array.from({ length: 4 }, () => ({
+      scan: { scan_available: false, suspects: [], scan_note: "Duplicate scan unavailable" },
+      candidate: { amount: 100, direction: "D" },
+    }));
+    // block_on_duplicate: rows with suspects were blocked (their own warning);
+    // rows whose scan was unavailable stay in the confirm set = plan commands.
+    const blocked = renderExactMatchCompact({
+      mode: "DRY_RUN",
+      projection: makeExactProjection(0, { duplicateWarningInputs: [...withSuspects, ...unavailable] as unknown as ExactMatchProjection["duplicateWarningInputs"] }),
+      planHandle: "PLAN-D",
+      blockOnDuplicate: true,
+    });
+    const duplicates = blocked.summary.warnings?.filter(w => w.code === "possible_duplicate") ?? [];
+    expect(duplicates.every(w => !w.message.startsWith("POSSIBLE duplicate"))).toBe(true);
+    const more = blocked.summary.warnings?.find(w => w.code === "possible_duplicate_more")?.message ?? "";
+    expect(more).toMatch(/^1 more possible_duplicate item\(s\) not shown; page them with get_execution_plan_page/);
+    // Without block_on_duplicate every suspect row stays in the plan too.
+    const advisory = renderExactMatchCompact({
+      mode: "DRY_RUN",
+      projection: makeExactProjection(0, { duplicateWarningInputs: withSuspects as unknown as ExactMatchProjection["duplicateWarningInputs"] }),
+      planHandle: "PLAN-D",
+    });
+    expect(advisory.summary.warnings?.filter(w => w.code === "possible_duplicate")).toHaveLength(3);
     expect(advisory.summary.warnings?.find(w => w.code === "possible_duplicate_more")?.message).toContain("get_execution_plan_page");
   });
 
