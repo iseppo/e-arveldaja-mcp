@@ -3,7 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { SaleInvoice, PurchaseInvoice, Transaction } from "../types/api.js";
+import type { SaleInvoice, PurchaseInvoice, Transaction, Journal } from "../types/api.js";
 import { readOnly } from "../annotations.js";
 import { reportProgress } from "../progress.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -80,6 +80,26 @@ function buildBankJournalDuplicateKey(
   date: string,
 ): string {
   return `${accountsDimensionsId}|${type}|${amount}|${date}`;
+}
+
+/**
+ * Whether a journal books this row's money: its AGGREGATED EUR net on the
+ * row's own bank dimension equals the row's signed amount to the cent
+ * (incoming debits the bank) — the own-account half of reconcile's
+ * `journalMovesTransfer`. An unsigned row has no provable side, so nothing
+ * covers it; a foreign posting without a base amount is not EUR-comparable.
+ */
+function journalCoversRow(journal: Journal | undefined, tx: Transaction, amountEur: number): boolean {
+  if (!journal) return false;
+  const direction = bankTransactionDirection(tx);
+  if (direction === "unknown") return false;
+  const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
+  if (live.some(posting => posting.base_amount == null &&
+    (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return false;
+  const net = live
+    .filter(posting => posting.accounts_dimensions_id === tx.accounts_dimensions_id)
+    .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100), 0);
+  return net === (direction === "incoming" ? 1 : -1) * Math.round(Math.abs(amountEur) * 100);
 }
 
 export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiContext): void {
@@ -180,6 +200,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         operation_type?: string;
       }
       const bankJournalIndex = new Map<string, JournalMatch[]>();
+      const journalById = new Map(allJournals.filter(j => j.id != null).map(j => [j.id!, j]));
       for (const j of allJournals) {
         if (j.is_deleted || !j.registered || !j.postings) continue;
         for (const p of j.postings) {
@@ -259,8 +280,13 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             : [];
           const dupJournalIds = dupMatches.map(m => m.journal_id);
 
-          if (bankRefMatches.length > 0) {
-            const match = bankRefMatches[0]!;
+          // The index keys single postings, so a shared reference alone does not
+          // prove the journal books THIS row: deletion advice needs a signed
+          // direction and the journal's aggregated net on the row's bank
+          // dimension equal to the row's signed EUR amount.
+          const coveringMatch = bankRefMatches.find(m => journalCoversRow(journalById.get(m.journal_id), tx, txDuplicateAmount));
+          if (coveringMatch) {
+            const match = coveringMatch;
             // Use the journal's document_number (already trimmed+uppercased in the
             // match comparison) rather than tx.bank_ref_number to avoid rendering
             // whitespace-only raw values. Still JSON.stringify to escape any hostile
@@ -278,6 +304,23 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               reason: `Bank reference ${safeRef} already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle} — safe to delete this PROJECT row.`,
               duplicate_journal_id: match.journal_id,
               duplicate_journal_ids: dupJournalIds,
+            });
+            continue;
+          }
+          if (bankRefMatches.length > 0) {
+            const match = bankRefMatches[0]!;
+            const safeRef = JSON.stringify((match.document_number ?? "").slice(0, 100));
+            suggestions.push({
+              transaction_id: tx.id!,
+              date: tx.date,
+              amount: tx.amount,
+              currency: tx.cl_currencies_id,
+              description: tx.description,
+              bank_account_name: tx.bank_account_name,
+              suggested_action: "manual_review",
+              reason: direction === "unknown"
+                ? `Bank reference ${safeRef} is already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle}, but this row carries no signed statement direction, so it cannot be proven that the journal books this row's money; check the bank statement before deleting or confirming it.`
+                : `Bank reference ${safeRef} is already booked as journal #${match.journal_id} near ${tx.date} in ${bankTitle}, but that journal's net on this bank account is not ${txDuplicateAmount} EUR in this row's direction, so it does not cover this row; verify before deleting or confirming it.`,
             });
             continue;
           }
@@ -330,6 +373,15 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             description: tx.description,
             bank_account_name: tx.bank_account_name,
           };
+          // Mirror-leg deletion advice needs a proven direction: an unsigned
+          // row matches a journal moving the money either way.
+          if (resolution.status === "matched" && direction === "unknown") {
+            return {
+              ...base,
+              suggested_action: "manual_review",
+              reason: `Journal #${resolution.journal_id} books an own-account transfer ${bankTitle} <-> "${targetTitle}" of ${txDuplicateAmount} EUR (within ${DUPLICATE_DATE_WINDOW_DAYS} day), but this row carries no signed statement direction, so it cannot be proven to be that journal's mirror leg; check the bank statement before deleting or confirming it.`,
+            };
+          }
           if (resolution.status === "matched") {
             return {
               ...base,
