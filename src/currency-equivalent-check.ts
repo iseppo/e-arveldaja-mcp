@@ -108,15 +108,19 @@ function compactKey(value: string | null | undefined): string {
 const IBAN_TOKEN_RE = /(?<![\p{L}\p{N}])[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,3})?(?![\p{L}\p{N}])/giu;
 
 /**
- * The complete invoice identifier as a token: not preceded or followed by a
- * letter/digit, so INV-1001 never matches inside INV-10010. Separators between
+ * The complete invoice identifier as a token, delimited by the field edge,
+ * whitespace or terminal/enclosing punctuation, so INV-1001 never matches
+ * inside INV-10010, INV-1001-2, INV-1001/A or A/INV-1001. Separators between
  * its parts and at letter/digit transitions are optional ("INV-1001",
  * "INV 1001", "INV1001" all match). Undefined for an identifier under 4 chars.
  */
 function invoiceIdentifierRe(invoiceNumber: string | undefined): RegExp | undefined {
   if (compactKey(invoiceNumber).length < 4) return undefined;
   const parts = (invoiceNumber ?? "").toLowerCase().match(/\p{L}+|\p{N}+/gu) ?? [];
-  return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("[\\s\\-_/.#]?")}(?![\\p{L}\\p{N}])`, "iu");
+  // Delimited on both sides by the field edge, whitespace, or terminal /
+  // enclosing punctuation only: "INV-1001-2", "INV-1001/A" and "A/INV-1001"
+  // are other identifiers.
+  return new RegExp(`(?<=^|[\\s.,;:()"'])${parts.join("[\\s\\-_/.#]?")}(?=$|[\\s.,;:()"'])`, "iu");
 }
 
 export interface PaymentCounterparty {

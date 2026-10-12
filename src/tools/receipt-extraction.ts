@@ -3117,17 +3117,31 @@ export interface CurrencyEquivalentAmbiguity {
   foreign_amount?: number;
 }
 
-// Lines that state an equivalent / converted / charged figure of the document
-// ("Summa eurodes", "EUR equivalent", "Card conversion", "Cardholder amount").
-// Together with the total/payable labels these are the only lines whose
-// amounts can make a document currency-ambiguous; a footer or marketing figure
-// ("Free shipping for orders over 50 EUR") never does.
+// A figure line for the ambiguity check is a COMPLETE "label amount" line: a
+// total / payable / equivalent / conversion / cardholder label at the start
+// (after optional bullets), then only the amount with its currency, an optional
+// short VAT suffix and nothing else. Prose that merely contains such a word
+// ("Free shipping when total orders exceed 50 EUR", "Total savings 5 EUR")
+// never qualifies — missing a warning is preferred over gating a correct receipt.
 // A complete standalone currency label ("Currency: USD", "Valuuta EUR."):
 // nothing else on the line, so "Currency USD accepted for online orders" is not one.
 const STANDALONE_CURRENCY_LABEL_RE =
   /^\s*(?:currency(?:\s+code)?|valuuta(?:kood)?|w[äa]hrung|devise|valuta|moneda)\s*[:=-]?\s*([A-Za-z]{3})\s*[.,;]?\s*$/i;
-const CURRENCY_EQUIVALENT_LINE_RE =
-  /\b(?:equivalent|ekvivalent|eurodes|conversion|converted|charged|billed)\b/i;
+const AMBIGUITY_CURRENCY_CODES = ["EUR", ...NON_EUR_CURRENCY_CODES].join("|");
+const AMBIGUITY_CURRENCY_TOKEN = `(?:${AMBIGUITY_CURRENCY_CODES}|US\\$|CA\\$|AU\\$|NZ\\$|HK\\$|[€$£¥])`;
+const AMBIGUITY_FIGURE_LABEL =
+  "(?:grand\\s+total|total(?:\\s+(?:amount|due|paid|to\\s+pay))?|amount\\s+(?:due|paid|charged|payable)|to\\s+pay|payable|" +
+  "kokku(?:\\s+tasuda)?|summa\\s+kokku|kogusumma|tasuda|maksta|maksmisele\\s+kuulub|" +
+  "summa\\s+eurodes(?:\\s*\\(km-ga\\))?|summa\\s*\\(km-ga\\)|" +
+  "(?:card\\s+)?conversion|converted\\s+amount|(?:[A-Z]{3}\\s+)?equivalent|ekvivalent|" +
+  "card\\s?holder\\s+(?:amount|total)|kaardiomaniku\\s+summa|charged|billed)";
+const AMBIGUITY_AMOUNT = "-?(?:\\d{1,3}(?:[ .,]\\d{3})+|\\d+)(?:[.,]\\d{1,3})?";
+const AMBIGUITY_FIGURE_LINE_RE = new RegExp(
+  `^\\s*(?:[-*•·]\\s*)?${AMBIGUITY_FIGURE_LABEL}(?:\\s+in\\s+(?:${AMBIGUITY_CURRENCY_CODES}))?\\s*[:=-]?\\s*` +
+    `(?:${AMBIGUITY_CURRENCY_TOKEN}\\s*)?${AMBIGUITY_AMOUNT}(?:\\s*${AMBIGUITY_CURRENCY_TOKEN})?` +
+    "(?:\\s*\\(?\\s*(?:incl\\.?|including|koos)\\s+(?:vat|km|käibemaksuga|tax)\\s*\\)?|\\s*\\(\\s*\\))?\\s*\\.?\\s*$",
+  "i",
+);
 
 export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined): CurrencyEquivalentAmbiguity | undefined {
   if (!sourceText) return undefined;
@@ -3140,9 +3154,7 @@ export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined
     const clean = blankExchangeRateNumbers(line);
     const labelCode = clean.match(STANDALONE_CURRENCY_LABEL_RE)?.[1]?.toUpperCase();
     const labelled = labelCode !== undefined && (labelCode === "EUR" || NON_EUR_CURRENCY_CODES.has(labelCode));
-    const amountLine = RECEIPT_TOTAL_LABEL_RE.test(clean) ||
-      CURRENCY_EQUIVALENT_LINE_RE.test(clean) ||
-      RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(clean);
+    const amountLine = AMBIGUITY_FIGURE_LINE_RE.test(clean);
     if (!amountLine && !labelled) continue;
     const amounts = amountLine ? extractAmountsFromLine(clean, text) : [];
     if (amounts.length === 0) {

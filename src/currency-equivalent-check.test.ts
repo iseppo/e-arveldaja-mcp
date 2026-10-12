@@ -93,6 +93,35 @@ describe("detectCurrencyEquivalentAmbiguity false positives (Codex review)", () 
     expect(loadPurchaseInvoices).not.toHaveBeenCalled();
   });
 
+  // Codex round 3: only a complete "label amount" line is a figure line.
+  it("ignores prose amount lines and keeps genuine figure lines (conservative grammar)", async () => {
+    for (const footer of [
+      "Free shipping for orders over 50 EUR",
+      "Free shipping when total orders exceed 50 EUR",
+      "Orders over 100 EUR ship free",
+      "Total savings 5 EUR",
+      "Currency USD accepted for online orders",
+    ]) {
+      const text = `Example Shop\nReceipt R-60\nDate 2026-03-10\nTOTAL 100.00 USD\n${footer}`;
+      expect(extract(text).currency).toBe("USD");
+      expect(detectCurrencyEquivalentAmbiguity(text), footer).toBeUndefined();
+      expect(await checkCurrencyEquivalent({
+        rawText: text, extractedCurrency: "USD", supplierClientId: SUPPLIER_ID,
+        loadPurchaseInvoices: async () => history(["EUR", "EUR", "EUR"]),
+      }), footer).toBeUndefined();
+    }
+    for (const line of [
+      "Summa eurodes (km-ga) 100.00 EUR",
+      "TOTAL 100 EUR",
+      "Total in EUR: 100.00",
+      "Cardholder amount EUR 90.00",
+      "Summa eurodes 100.00 EUR",
+    ]) {
+      expect(detectCurrencyEquivalentAmbiguity(`Total USD 110.00\n${line}`)?.foreign_currency, line).toBe("USD");
+    }
+    expect(detectCurrencyEquivalentAmbiguity("TOTAL 100.00 EUR\nCard conversion: USD 110")?.foreign_currency).toBe("USD");
+  });
+
   // Codex round 2, finding 1: only a complete standalone currency label counts.
   it("does not flag a EUR receipt whose footer mentions a currency in prose", async () => {
     const text = "Example Shop\nReceipt R-59\nDate 2026-03-10\nTOTAL 100.00 EUR\nCurrency USD accepted for online orders";
@@ -208,6 +237,12 @@ describe("checkCurrencyEquivalent", () => {
     expect((await run("INV-1001", "Payment INV-1001."))?.payment?.transaction_ids).toEqual([520]);
     expect((await run("INV-1001", "Payment inv 1001"))?.payment?.transaction_ids).toEqual([520]);
     expect((await run("INV-1001", "Payment INV1001"))?.payment?.transaction_ids).toEqual([520]);
+    // Codex round 3: a following/preceding '-', '/' etc. makes it another identifier.
+    expect(await run("INV-1001", "Payment INV-1001-2")).toBeUndefined();
+    expect(await run("INV-1001", "Payment INV-1001/A")).toBeUndefined();
+    expect(await run("INV-1001", "Payment A/INV-1001")).toBeUndefined();
+    expect((await run("INV-1001", "Payment (INV-1001)"))?.payment?.transaction_ids).toEqual([520]);
+    expect((await run("INV-1001", "INV-1001"))?.payment?.transaction_ids).toEqual([520]);
     expect(await run("2014", "Transfer to EE38 2200 2210 2014 5685")).toBeUndefined();
     expect(await run("20145685", "Transfer to EE382200221020145685")).toBeUndefined();
   });
