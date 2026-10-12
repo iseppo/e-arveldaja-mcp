@@ -1,0 +1,84 @@
+name: Publish
+
+# Publishes a release tag to npm and the MCP registry without stored tokens:
+# npm via Trusted Publishing (OIDC; configured once on npmjs.com for this
+# workflow file) and the MCP registry via `mcp-publisher login github-oidc`
+# (namespace io.github.iseppo/*). Runs on a pushed v* tag, or by hand for an
+# existing tag: `gh workflow run publish.yml -f tag=v0.29.0`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.29.0)"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  MCP_PUBLISHER_VERSION: "1.8.1"
+  MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Ensure npm supports trusted publishing (>= 11.5.1)
+        run: npm install -g npm@^11.5.1
+
+      - name: Tag must match package and server versions
+        run: |
+          version="${TAG#v}"
+          test "$(node -p "require('./package.json').version")" = "$version"
+          test "$(jq -r .version server.json)" = "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Release gate
+        run: npm run release:check
+
+      - name: Publish to npm (skipped when this version is already published)
+        run: |
+          if [ -n "$(npm view "e-arveldaja-mcp@$VERSION" version 2>/dev/null)" ]; then
+            echo "e-arveldaja-mcp@$VERSION is already on npm; skipping."
+          else
+            npm publish --ignore-scripts
+          fi
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Publish to the MCP registry (skipped when this version is already listed)
+        run: |
+          listed=$(curl -fsS "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.iseppo/e-arveldaja-mcp&version=$VERSION" | jq '[.servers[]? | select(.server.version == env.VERSION)] | length')
+          if [ "$listed" != "0" ]; then
+            echo "io.github.iseppo/e-arveldaja-mcp $VERSION is already in the MCP registry; skipping."
+          else
+            ./mcp-publisher login github-oidc
+            ./mcp-publisher publish
+          fi
