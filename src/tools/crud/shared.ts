@@ -251,7 +251,7 @@ export function invoiceListFilterParams(opts: { dateLabel: string; clientLabel: 
     date_from: isoDateString(`Only invoices with ${opts.dateLabel} on or after this date (YYYY-MM-DD). Server-side filter.`).optional(),
     date_to: isoDateString(`Only invoices with ${opts.dateLabel} on or before this date (YYYY-MM-DD). Server-side filter.`).optional(),
     status: z.enum(["PROJECT", "CONFIRMED"]).optional().describe("Filter by status (server-side): PROJECT (draft) or CONFIRMED."),
-    payment_status: z.enum(["PAID", "PARTIALLY_PAID", "NOT_PAID"]).optional().describe("Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID."),
+    payment_status: z.enum(["PAID", "PARTIALLY_PAID", "NOT_PAID"]).optional().describe("Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID. Unpaid invoices read back with payment_status \"\" or null, not NOT_PAID."),
     clients_id: coerceId.optional().describe(`Filter by ${opts.clientLabel} (clients_id, server-side).`),
   };
 }

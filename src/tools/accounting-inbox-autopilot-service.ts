@@ -353,6 +353,34 @@ function invokeAutopilotOperation(
   }
 }
 
+/** Per-code follow-up for a Wise transfer review row. */
+function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][number]): string {
+  switch (review.code) {
+    case "wise_transfer_ownership_unverified":
+      return "Verify that both accounts belong to the company, then rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true.";
+    case "wise_transfer_dimensions_unverified":
+      return "Configure the source and target bank account dimensions for this transfer, then rerun the Wise dry run before execute=true.";
+    case "wise_untagged_ledger_match":
+      return `Advisory only: the row is still imported, no rerun is needed. Compare it with stored transaction(s) ${(review.ledger_transaction_ids ?? []).join(", ") || "named in the reason"}; if they are the same movement, delete one of them after the owner approves.`;
+    case "wise_transfer_journal_ambiguous":
+      return `Show the owner candidate journal(s) ${(review.candidate_journal_ids ?? []).join(", ")}. Only if the owner picks the one that books exactly this transfer, rerun the Wise dry run with journalized_transfer_ids [{ wise_id, journal_id }] (a new preview and digest); otherwise the row is created unconfirmed and reconciled later.`;
+    case "wise_transfer_journal_inconsistent":
+      return `Journal(s) ${(review.candidate_journal_ids ?? []).join(", ")} carry this Wise ID but do not book this amount and direction. Correct or remove the labelled journal with the owner's approval, then rerun the Wise dry run; the row is created unconfirmed meanwhile.`;
+    case "wise_transfer_mapping_rejected":
+      return `The journalized_transfer_ids mapping${review.journal_id !== undefined ? ` to journal ${review.journal_id}` : ""} was rejected; tell the owner why, fix or drop the mapping and rerun the Wise dry run. The row resolves as if unmapped meanwhile.`;
+    case "unused_mapping":
+      return "Tell the owner this journalized_transfer_ids mapping did nothing (row absent or already imported); drop it and rerun the Wise dry run.";
+    case "wise_legacy_leg_ambiguous":
+      return "This leg and its fee are not imported. Compare the stored row with the Wise statement and book the missing leg manually with the owner.";
+    case "wise_transfer_cross_currency":
+      return "The row is created unconfirmed; after the import, reconcile it as an inter-account transfer with the correct per-account amounts.";
+    case "wise_transfer_already_imported":
+      return "The transfer is already stored; confirm_own_transfer_ids does not act on it. Reconcile the existing bank transaction as an inter-account transfer.";
+    default:
+      return "Resolve this transfer as described, then rerun the Wise dry run before execute=true.";
+  }
+}
+
 function summarizeAutopilotToolResult(
   tool: string,
   value: unknown,
@@ -438,9 +466,11 @@ function summarizeAutopilotToolResult(
             }),
             ...toAutopilotFollowUp(
               tool,
-              `CAMT row ${row.date} ${row.amount} was not created: ${journalReview
-                ? "an existing journal may already book it"
-                : "a previous release imported its statement entry only in part"}.`,
+              `CAMT row ${row.date} ${row.amount} was not created: ${!journalReview
+                ? "a previous release imported its statement entry only in part"
+                : row.review_code === "camt_duplicate_journal_conflict" || row.review_code === "camt_journal_direction_conflict"
+                  ? `an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (${row.review_code})`
+                  : `an existing journal may already book it (${row.review_code})`}.`,
               { recommendation: row.review_note },
             ),
           };
@@ -465,11 +495,7 @@ function summarizeAutopilotToolResult(
         id: wiseReviewId("wise_transfer_review", review.wise_id, review.code),
         source: tool,
         summary: `Wise transfer ${review.wise_id} needs review (${review.code}): ${review.reason}`,
-        recommendation: review.code === "wise_transfer_ownership_unverified"
-          ? "Verify that both accounts belong to the company, then rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true."
-          : review.code === "wise_transfer_dimensions_unverified"
-            ? "Configure the source and target bank account dimensions for this transfer, then rerun the Wise dry run before execute=true."
-            : "Resolve this transfer as described, then rerun the Wise dry run before execute=true.",
+        recommendation: wiseReviewRecommendation(review),
       }));
       // Invoice FX corrections are advisory only (the import never applies
       // them); surface each so the manual correction is not silently dropped.
@@ -579,7 +605,9 @@ function summarizeAutopilotToolResult(
             ? `is a transfer to/from own account dimension ${row.target_dimension_id}.`
             : "is a transfer between own accounts with no single target account.")),
         ...result.possibleDuplicates.map((row) => partitionFollowUp(
-          "classification_possible_duplicate", row, `may already be booked (${row.code}).`)),
+          "classification_possible_duplicate", row, row.code === "camt_marker_unverified"
+            ? "has a CAMT marker whose checksum does not verify, so its direction and counterparty account are unproven (camt_marker_unverified)."
+            : `may already be booked (${row.code}).`)),
         ...(result.ledgerContextUnavailable !== undefined
           ? [{
               source: tool,
@@ -630,20 +658,62 @@ function summarizeAutopilotToolResult(
       const ambiguous = match.ambiguousPairs.length;
       const skippedAlreadyHandled = match.skippedAlreadyHandled.length;
       const errorCount = match.errors.length;
-      const followUps = ambiguous > 0
-        ? [{
-            source: tool,
-            summary: `${ambiguous} inter-account transfer candidate(s) were ambiguous.`,
-            recommendation: "Review only the ambiguous transfer pairs before confirming anything.",
-          }]
-        : [];
+      const ambiguousRefless = match.ambiguousRefless ?? [];
+      const crossCurrency = match.crossCurrencyPairs ?? [];
+      const proposedMirrors = match.skippedAlreadyHandled.filter(row => row.mirror_proposal !== undefined);
+      // Every held row is its own follow-up with its ids: a count alone reads
+      // as "clean" when transfers are held for review and never booked. The
+      // reasons are server-built (ids, amounts, own account titles).
+      const transferFollowUp = (category: string, ids: number[], summary: string, recommendation: string): AutopilotFollowUp => ({
+        id: `${tool}:${createHash("sha256").update(JSON.stringify([tool, category, ...ids])).digest("hex").slice(0, 16)}`,
+        source: tool,
+        summary,
+        recommendation,
+      });
+      const followUps: AutopilotFollowUp[] = [
+        ...match.ambiguousPairs.map(pair => transferFollowUp(
+          "inter_account_ambiguous_pair",
+          [pair.outgoing_transaction_id, ...pair.candidate_incoming_transaction_ids],
+          `Inter-account transaction ${pair.outgoing_transaction_id} is ambiguous (${pair.code ?? "ambiguous_pair"}): ${pair.reason}`,
+          "Check the bank statements and resolve this pair with the owner before confirming anything; it is not in the plan.",
+        )),
+        ...ambiguousRefless.map(row => transferFollowUp(
+          row.code ?? "ambiguous_refless",
+          row.transaction_ids,
+          `Inter-account transaction(s) ${row.transaction_ids.join(", ")} need review (${row.code ?? "ambiguous_refless"}): ${row.reason}`,
+          "Held out of the plan. Check the bank statements and resolve these rows with the owner; delete or confirm a row only after explicit approval.",
+        )),
+        ...crossCurrency.map(row => transferFollowUp(
+          "cross_currency",
+          row.transaction_ids,
+          `Inter-account transaction(s) ${row.transaction_ids.join(", ")} are a cross-currency pair (${row.amount_out} out / ${row.amount_in} in): ${row.reason}`,
+          "Held out of the plan. Confirm each leg with the correct per-account amounts after the owner approves.",
+        )),
+        ...proposedMirrors.map(row => transferFollowUp(
+          "mirror_proposal",
+          [row.transaction_id],
+          `PROJECT transaction ${row.transaction_id} looks like the mirror of confirmed transaction ${row.mirror_proposal!.counterpart_transaction_id}, `
+            + `already booked by journal ${row.mirror_proposal!.journal_id} (evidence: ${row.mirror_proposal!.evidence.join(", ")}).`,
+          `Report only: verify against both bank statements, then delete transaction ${row.transaction_id} with delete_transaction only after the owner explicitly approves. Reconcile never deletes it.`,
+        )),
+        ...match.errors.map(row => transferFollowUp(
+          row.code ?? "inter_account_error",
+          row.transaction_ids,
+          `Inter-account transaction(s) ${row.transaction_ids.join(", ")} failed (${row.code ?? "inter_account_error"}): ${row.reason}`,
+          "Resolve this error before confirming the related transfer.",
+        )),
+      ];
       return {
-        summary: `Inter-account transfer dry run found ${matchedPairs} matched pair(s), ${matchedOneSided} one-sided match(es), ${ambiguous} ambiguous case(s), and ${errorCount} error(s).`,
+        summary: `Inter-account transfer dry run found ${matchedPairs} matched pair(s), ${matchedOneSided} one-sided match(es), ${ambiguous} ambiguous case(s), `
+          + `${ambiguousRefless.length} held for review, ${crossCurrency.length} cross-currency pair(s), ${proposedMirrors.length} proposed mirror deletion(s), and ${errorCount} error(s).`,
         preview: {
           matched_pairs: matchedPairs,
           matched_one_sided: matchedOneSided,
           skipped_ambiguous: ambiguous,
           skipped_already_handled: skippedAlreadyHandled,
+          needs_review_ambiguous_refless: ambiguousRefless.length,
+          cross_currency: crossCurrency.length,
+          proposed_mirrors: proposedMirrors.length,
           error_count: errorCount,
         },
         followUps,

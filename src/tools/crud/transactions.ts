@@ -167,7 +167,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
   // =====================
 
   registerTool(server, "list_transactions",
-    "List bank transactions. Paginated. Returns brief view by default; pass view='full' or call get_transaction for full detail.",
+    "List bank transactions. Paginated. Returns brief view by default; pass view='full' or call get_transaction for full detail. The brief view's direction comes from a signed CAMT/Wise marker (unknown without one); the read-back type is always \"C\" and is not a direction.",
     {
       ...pageParam.shape,
       ...viewParam,
@@ -278,13 +278,16 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
             filtered_client_side: true,
             out_of_range: outOfRange,
             ...(wantedDirection ? { direction_unknown_excluded: directionUnknownExcluded } : {}),
+            ...(directionUnknownExcluded > 0
+              ? { direction_unknown_note: `${directionUnknownExcluded} row(s) have no signed direction marker (e.g. e-arveldaja's own bank import) and were left out; omit type to see them.` }
+              : {}),
             items,
           }),
         }],
       };
     });
 
-  registerTool(server, "get_transaction", "Get a transaction by ID", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
+  registerTool(server, "get_transaction", "Get a transaction by ID. The read-back type is always \"C\" and is not a direction; only a signed CAMT/Wise marker in the description (or, for a CONFIRMED row, its registration journal) proves it.", idParam.shape, { ...readOnly, title: "Get Transaction" }, async ({ id }) => {
     const result = await api.transactions.get(id);
     return { content: [{ type: "text", text: toMcpJson(renderExternalEntity("transaction", result)) }] };
   });

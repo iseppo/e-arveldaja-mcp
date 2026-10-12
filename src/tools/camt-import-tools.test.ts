@@ -3422,7 +3422,7 @@ describe("camt import — journals that already book the movement (F1)", () => {
     expect(api.transactions.create).not.toHaveBeenCalled();
   });
 
-  it("(c) the compact surface warns with camt_journal_review", async () => {
+  it("(c) the compact surface warns with the row's own review_code", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(singleEntryXml);
     const { api } = setupCamtTool({ journals: [journalCoverageFixture(502, null)] });
@@ -3431,7 +3431,9 @@ describe("camt import — journals that already book the movement (F1)", () => {
     });
     if (!outcome.ok) throw new Error("prepare failed");
     const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value });
-    expect(summary.warnings).toEqual([expect.objectContaining({ code: "camt_journal_review" })]);
+    expect(summary.warnings).toEqual([expect.objectContaining({ code: outcome.value.projection.skipped[0]!.review_code })]);
+    expect(summary.warnings?.[0]!.code).toMatch(/^camt_journal_/);
+    expect(summary.counts?.journal_reviews).toBe(1);
   });
 
   it("(d) refuses with plan_drift when a covering journal appears between dry run and execute", async () => {

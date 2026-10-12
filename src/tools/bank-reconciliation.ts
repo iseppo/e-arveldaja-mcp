@@ -215,12 +215,12 @@ export function registerBankReconciliationTools(
   );
 
   registerTool(server, "reconcile_bank_transactions",
-    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
+    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches (confidence >= 90, or the ref_number_exact rule: the reference of exactly one open unpaid EUR invoice + the exact EUR amount + a proven direction matching the invoice kind; such rows keep their lower confidence and carry auto_confirm_rule), mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
     {
       mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run", "execute_inter_account"])
         .optional()
         .describe("Workflow phase to run. Defaults to suggest."),
-      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes."),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes (auto-confirm default 90). Above 90 also disables the ref_number_exact rule."),
       max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
         .describe(`Maximum days between inter-account transfer legs (default 1, max ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS}).`),
       target_accounts_dimensions_id: z.number().optional().describe(

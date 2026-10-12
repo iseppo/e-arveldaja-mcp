@@ -154,6 +154,40 @@ describe("renderWiseImportCompact", () => {
   });
 });
 
+describe("renderWiseImportCompact — automatic matches", () => {
+  it("itemises each automatic match with the stored row / journal and an undo hint, never as a plain duplicate", () => {
+    const data = makeData(1);
+    data.skipped = [
+      ...Array.from({ length: 4 }, (_, index) => ({
+        wise_id: `CARD_TRANSACTION-${index}`,
+        reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${500 + index} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+        auto_match: { code: "wise_untagged_ledger_unique" as const, transaction_id: 500 + index },
+      })),
+      {
+        wise_id: "TRANSFER-9",
+        reason: "Already journalized (wise_transfer_journal_unique_legacy): inter-account journal 7100 is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created",
+        auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 7100 },
+      },
+      {
+        wise_id: "FEE-TRANSFER-9",
+        reason: "Fee already journalized: inter-account journal 7100 books this transfer net of the fee",
+        auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 7100 },
+      },
+      { wise_id: "TRANSFER-1", reason: "Already imported" },
+    ];
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.counts).toMatchObject({ skipped: 7, duplicates: 1, auto_matched: 6, errors: 0 });
+    const untagged = summary.warnings?.filter(w => w.code === "wise_untagged_ledger_unique") ?? [];
+    expect(untagged.map(w => w.item_id)).toEqual(["CARD_TRANSACTION-0", "CARD_TRANSACTION-1", "CARD_TRANSACTION-2"]);
+    expect(untagged[0]!.message).toContain("If wrong: if it is a different movement, correct or delete transaction 500, then re-run the preview.");
+    expect(summary.warnings?.find(w => w.code === "wise_untagged_ledger_unique_more")?.message)
+      .toMatch(/^1 more wise_untagged_ledger_unique item\(s\) not shown; .*get_execution_plan_page.*PLAN-HANDLE-XYZ.*exclusions/);
+    const legacy = summary.warnings?.filter(w => w.code === "wise_transfer_journal_unique_legacy") ?? [];
+    expect(legacy.map(w => w.message.split(":")[0])).toEqual(["Row not created", "Fee row not created"]);
+    expect(legacy[0]!.message).toContain("correct or delete journal 7100");
+  });
+});
+
 describe("renderWiseImportCompact — totals currency", () => {
   function foreignCreated(index: number): WiseCreatedEntry {
     const entry = cleanCreated(index);

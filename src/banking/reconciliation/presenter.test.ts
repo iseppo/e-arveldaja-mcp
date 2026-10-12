@@ -389,6 +389,24 @@ describe("renderExactMatchCompact", () => {
     // The generic "did not complete" blocker must NOT fire: the confirm ran.
     expect(summary.blockers?.some(b => b.code === "confirm_incomplete")).toBe(false);
   });
+
+  it("counts and itemises ref_number_exact confirms and direction_unproven skips, capped at 3 with an N-more count", () => {
+    const projection = makeExactProjection(5, {
+      confirms: Array.from({ length: 5 }, (_, index) => confirmDescriptor(index, index < 4 ? { confidence: 80, autoConfirmRule: "ref_number_exact" } : {})),
+      skipped: [
+        { transaction_id: 71, reason: "direction_unproven: sale_invoice #901 matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually." },
+        { transaction_id: 72, reason: "Cross-currency match (base-amount only) against sale_invoice #902; compute the correct distribution amount manually before confirming." },
+      ],
+    });
+    const { summary } = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "PLAN-R" });
+    expect(summary.counts).toMatchObject({ would_confirm: 5, ref_number_exact: 4, skipped: 2, direction_unproven: 1 });
+    const refWarnings = summary.warnings?.filter(w => w.code === "ref_number_exact") ?? [];
+    expect(refWarnings.map(w => w.item_id)).toEqual(["0", "1", "2"]);
+    expect(refWarnings[0]!.message).toContain("min_confidence above 90");
+    const more = summary.warnings?.find(w => w.code === "ref_number_exact_more");
+    expect(more?.message).toMatch(/^1 more ref_number_exact item\(s\) not shown; .*PLAN-R/);
+    expect(summary.warnings?.filter(w => w.code === "direction_unproven").map(w => w.item_id)).toEqual(["71"]);
+  });
 });
 
 describe("renderExactMatchPayload", () => {

@@ -536,6 +536,7 @@ export function isNonErrorWiseSkipReason(reason: string): boolean {
   return reason.startsWith("Already imported") ||
     reason.startsWith("Already journalized") ||
     reason.startsWith("Fee already imported") ||
+    reason.startsWith("Fee already journalized") ||
     reason.startsWith("Unsupported Wise direction") ||
     reason === "Skipped because main transaction was not created";
 }

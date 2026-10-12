@@ -193,6 +193,14 @@ export interface WiseCreatedEntry {
 export interface WiseSkippedEntry {
   wise_id: string;
   reason: string;
+  /** Set when an automatic match (not the row's own WISE: tag) kept the row
+   * out of the plan: names the stored transaction or journal it was matched
+   * to, so a wrong match can be undone by correcting that record. */
+  auto_match?: {
+    code: "wise_untagged_ledger_unique" | "wise_transfer_journal_unique_legacy";
+    transaction_id?: number;
+    journal_id?: number;
+  };
 }
 
 export interface WiseSkippedJarRow {

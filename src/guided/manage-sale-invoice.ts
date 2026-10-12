@@ -82,7 +82,7 @@ export function registerManageSaleInvoiceTool(
       date_from: z.string().optional().describe("read=list: revenue date on/after (YYYY-MM-DD)."),
       date_to: z.string().optional().describe("read=list: revenue date on/before (YYYY-MM-DD)."),
       status: z.string().optional().describe("read=list: PROJECT|CONFIRMED."),
-      payment_status: z.string().optional().describe("read=list: PAID|PARTIALLY_PAID|NOT_PAID."),
+      payment_status: z.string().optional().describe("read=list: PAID|PARTIALLY_PAID|NOT_PAID (unpaid rows read back with payment_status \"\" or null)."),
       clients_id: z.number().int().positive().optional().describe("read=list: filter by customer."),
     },
     { ...batch, title: "Manage Sale Invoice" },

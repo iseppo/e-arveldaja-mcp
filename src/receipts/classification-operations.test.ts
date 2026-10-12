@@ -18,6 +18,7 @@ import {
   type AccountingWorkflowApiOptions,
 } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
+import { runWithToolProfile } from "../tool-profile.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -925,6 +926,14 @@ describe("classification operations — ledger context (F6)", () => {
     expect(guidance).toContain("900");
     expect(guidance).toContain("confirm_transaction");
     expect(guidance).not.toMatch(/müügi/i);
+    // The distribution carries no amount: the text says to add each row's own.
+    expect(group.suggested_booking.reason).toContain("adding amount = that transaction's own amount");
+    expect(guidance).toContain("amount: <tehingu summa>");
+    // On guided, confirm_transaction is not registered and is not named.
+    const guided = await runWithToolProfile("guided", () => analyze(operations));
+    const guidedGuidance = JSON.stringify(guided.groups[0]!.review_guidance);
+    expect(guidedGuidance).not.toContain("confirm_transaction");
+    expect(guidedGuidance).toContain("standard- või full-profiili");
   });
 
   it("(A4) a 'TransferWise' fee row with no IBAN or legal form gets a review-only, name-only history suggestion on its own dimension", async () => {
@@ -995,6 +1004,7 @@ describe("classification operations — ledger context (F6)", () => {
     const nextAction = result.possibleDuplicates[0]!.next_action;
     expect(nextAction).toContain("compare with journal 7002");
     expect(nextAction).toContain("otherwise classify normally");
+    expect(nextAction).toContain("after explicit owner approval");
   });
 
   it("(e) a saved auto-booking rule beats the transaction history", async () => {

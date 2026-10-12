@@ -373,6 +373,11 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       const output = run([withFee], [netJournal]);
       expect(actions(output)).toEqual(["inter_account:TRANSFER-1004:create_only_already_journalized:701"]);
       expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1004", "FEE:TRANSFER-1004"]);
+      // Both the row and its fee name the journal they were automatically matched to.
+      expect(output.skipped.map(entry => entry.auto_match)).toEqual([
+        { code: "wise_transfer_journal_unique_legacy", journal_id: 701 },
+        { code: "wise_transfer_journal_unique_legacy", journal_id: 701 },
+      ]);
     });
 
     it.each([
@@ -627,6 +632,9 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
         code: "wise_transfer_journal_ambiguous",
         fee_held_journal_ids: [703],
       })]);
+      // The review text itself says the fee is held, so a compact surface
+      // that carries only the message does not drop it.
+      expect(output.ownershipReviews[0]!.reason).toContain("Its fee row is not imported while journal 703 may already book it");
       expect(output.created.map(entry => entry.wise_id)).toEqual(["TRANSFER-A"]);
     },
   );
@@ -767,14 +775,14 @@ describe("Wise row next to an untagged stored row of the same movement (F2b)", (
       expect(created(output)).toEqual([]);
       expect(output.created).toEqual([]);
       expect(output.ownershipReviews).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE) }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
     });
 
     it("is not created when, without a reference, its account name carries the Wise counterparty (live shape ii)", () => {
       const stored = manual({ ref_number: null, bank_account_name: "Booking.com / Hotel Y (Z OÜ)", description: "Majutus Tartus" });
       const output = unique(rowsOf([card(ID)]), [stored], [registration()]);
       expect(created(output)).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE) }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
     });
 
     it("keeps the row's fee, no longer depending on the skipped main row", () => {

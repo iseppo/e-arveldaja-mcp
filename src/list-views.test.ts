@@ -3,6 +3,19 @@ import { applyListView, BRIEF_FIELDS } from "./list-views.js";
 import { toMcpJson } from "./mcp-json.js";
 
 describe("applyListView", () => {
+  it("brief transactions show the marker-proven direction instead of the read-back type (always C)", () => {
+    const items = [
+      { id: 1, type: "C", status: "CONFIRMED", amount: 10, description: "WISE:TRANSFER-1 Näidis [source_direction=IN]" },
+      { id: 2, type: "C", status: "CONFIRMED", amount: 20, description: "WISE:CARD-2 Pood [source_direction=OUT]" },
+      { id: 3, type: "C", status: "CONFIRMED", amount: 30, description: "Arve 12" },
+    ];
+    const out = applyListView("transaction", items, "brief") as Array<Record<string, unknown>>;
+    expect(out.map(row => row.direction)).toEqual(["incoming", "outgoing", "unknown"]);
+    expect(out.every(row => !("type" in row))).toBe(true);
+    // The full view is the raw API row, unchanged.
+    expect(applyListView("transaction", items, "full")).toBe(items);
+  });
+
   it("returns items unchanged when view='full'", () => {
     const items = [{ id: 1, name: "x", code: "C", notes: "secret" }];
     expect(applyListView("client", items, "full")).toBe(items);
