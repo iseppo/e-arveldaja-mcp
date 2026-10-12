@@ -720,11 +720,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         (classification.category === "revenue_without_invoice" || classification.category === "unknown")
       ) {
         // A keyword purchase-article guess (e.g. a sales-transport or fixed-asset
-        // account) for an incoming or unknown row is noise, not a suggestion.
+        // account) for an incoming or unknown row is noise, not a suggestion. So is
+        // the purchase-invoice payable (2310): a bank fee or a receipt read it as
+        // the account to book to.
         suggestion = {
-          liability_account_id: suggestion.liability_account_id,
           source: "fallback",
-          reason: `${suggestion.reason} No booking history or saved rule names a contra account for this counterparty; choose it from the transaction's substance.`,
+          reason: "No booking history or saved rule names a contra account for this counterparty; choose it from the transaction's substance.",
         };
       }
       // Build the RAW classified group (no wrapping). The presenter reproduces

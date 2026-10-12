@@ -1061,6 +1061,9 @@ describe("classification operations — ledger context (F6)", () => {
     expect(byTransaction(9).suggested_booking.source).not.toBe("transaction_history");
     // No keyword purchase-article guess for an incoming row with no history or rule.
     expect(byTransaction(9).suggested_booking.purchase_account_id).toBeUndefined();
+    // Nor the purchase-invoice payable, which read as "book this to 2310".
+    expect(byTransaction(9).suggested_booking.liability_account_id).toBeUndefined();
+    expect(byTransaction(9).suggested_booking.reason).not.toMatch(/keyword/i);
   });
 
   it("reports an unavailable journal snapshot instead of failing, and partitions nothing", async () => {

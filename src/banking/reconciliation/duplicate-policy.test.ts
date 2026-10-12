@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeExactMatchProjection, THIRD_PARTY_PAYER_NEXT_ACTION } from "./duplicate-policy.js";
 import { exactMatchFingerprint } from "./projection.js";
+import { matchScore } from "./match-score.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../../types/api.js";
 
 // The EIS case, verified live: Rahandusministeerium (2309260) paid an invoice
@@ -227,6 +228,18 @@ describe("computeExactMatchProjection exact_invoice_base_amount (F5)", () => {
   it("does not confirm at the default threshold of 90", () => {
     const projection = computeExactMatchProjection([eurRow], [], [usdInvoice], 90);
     expect(projection.confirms).toEqual([]);
+  });
+
+  // The live API reports an unpaid invoice as "" or null, never "NOT_PAID".
+  it.each([[""], [null]])("treats payment_status %j as unpaid (live API shape)", (status) => {
+    const live = { ...usdInvoice, payment_status: status } as unknown as PurchaseInvoice;
+    const projection = computeExactMatchProjection([eurRow], [], [live], 85);
+    expect(projection.confirms.map(c => [c.invoiceId, c.amount, c.confidence])).toEqual([[5487, 290.03, 85]]);
+  });
+
+  it.each([["PAID"], ["PARTIALLY_PAID"], ["SOMETHING_NEW"], [undefined]])("never matches a %s invoice at its base amount", (status) => {
+    const invoice = { ...usdInvoice, payment_status: status } as unknown as PurchaseInvoice;
+    expect(matchScore(eurRow, invoice, 290.03).reasons).not.toContain("exact_invoice_base_amount");
   });
 
   it("skips two Tier A candidates as ambiguous_foreign_invoice_base", () => {

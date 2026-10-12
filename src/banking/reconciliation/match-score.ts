@@ -74,6 +74,16 @@ export function sameAmountToTheCent(a: number, b: number): boolean {
  * Capped at TIER_A_CONFIDENCE_CAP, and a top-score tie involving it is ambiguous.
  */
 export const EXACT_INVOICE_BASE_AMOUNT = "exact_invoice_base_amount";
+
+/**
+ * The live API reports an unpaid confirmed invoice as `payment_status: ""` (or
+ * null), never "NOT_PAID" (verified live 2026-10), so a strict "NOT_PAID" check
+ * never matched real data. PAID, PARTIALLY_PAID, any unknown value and a missing
+ * field stay excluded.
+ */
+function isUnpaidPaymentStatus(status: string | null | undefined): boolean {
+  return status === null || status === "" || status === "NOT_PAID";
+}
 const TIER_A_CONFIDENCE_CAP = 85;
 
 /**
@@ -128,7 +138,7 @@ export function matchScore(
     invoice.cl_currencies_id !== "EUR" &&
     invoice.base_gross_price != null &&
     !txHasMeaningfulBase &&
-    invoice.payment_status === "NOT_PAID" &&
+    isUnpaidPaymentStatus(invoice.payment_status) &&
     sameCents(txCents, amountCents(invoice.base_gross_price));
   if (tierA) {
     confidence += 40;

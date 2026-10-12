@@ -3843,7 +3843,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
       expect(result.reasons).not.toContain("exact_invoice_base_amount");
     });
 
-    it.each(["PARTIALLY_PAID", "PAID", undefined])("awards nothing when payment_status is %s (only NOT_PAID)", status => {
+    it.each(["PARTIALLY_PAID", "PAID", undefined])("awards nothing when payment_status is %s (only NOT_PAID, \"\" or null)", status => {
       const result = matchScore(eurRow as any, { ...usdInvoice, payment_status: status as any }, 290.03);
       expect(result.reasons).not.toContain("exact_invoice_base_amount");
     });
