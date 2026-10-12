@@ -200,7 +200,7 @@ describe("analyze_unconfirmed_transactions", () => {
 
     it("promotes to reimport_duplicate with confidence 95 when bank_ref_number matches journal document_number", async () => {
       const handler = setupTool({
-        transactions: [{
+        transactions: [camtSigned({
           id: 3,
           status: "PROJECT",
           is_deleted: false,
@@ -209,11 +209,11 @@ describe("analyze_unconfirmed_transactions", () => {
           date: "2026-03-22",
           accounts_dimensions_id: 100,
           cl_currencies_id: "EUR",
-          description: "Re-imported payment",
+          description: "Re-imported payment\n[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]",
           bank_account_name: "Supplier OÜ",
           bank_account_no: null,
           bank_ref_number: "REF-XYZ-123",
-        }],
+        })],
         bankAccounts: defaultBankAccounts,
         journals: [{
           id: 99,
@@ -835,6 +835,51 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
     const payload = parseMcpResponse((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 93 });
     expect(payload.summary.confirm_inter_account ?? 0).toBe(0);
+  });
+
+  describe("reimport_duplicate requires the journal's aggregated net to cover the row", () => {
+    const target = { dim: 200, type: "D" as const };
+    const refJournal = (postings: Array<{ dim: number; type: "D" | "C"; amount: number }>) =>
+      ({ ...journal(95, "2026-03-22", postings), document_number: "BANKREF-1", operation_type: "TRANSACTION" });
+
+    it("does not advise deleting an unsigned legacy row whose same-reference journal is inverted", async () => {
+      // Legacy incoming 100 read back as "C" with no marker; the journal books
+      // C own 100 / D target 100 — the opposite of an incoming row.
+      const handler = setupTool({
+        transactions: [{ ...baseTx, type: "C", bank_ref_number: "BANKREF-1", description: "Incoming payment" }],
+        bankAccounts: defaultBankAccounts,
+        journals: [refJournal([{ dim: 100, type: "C", amount: 100 }, { ...target, amount: 100 }])],
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
+      expect(payload.suggestions[0]!.reason).not.toContain("safe to delete");
+      expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
+    });
+
+    it("does not advise deleting a signed incoming row whose same-reference journal debits the bank twice", async () => {
+      // D own 100 + D own 100 / C target 200: one posting matches the key, but
+      // the journal's net on the row's account is +200, not +100.
+      const handler = setupTool({
+        transactions: [camtSigned({ ...baseTx, type: "C", bank_ref_number: "BANKREF-1", description: "Incoming payment\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" })],
+        bankAccounts: defaultBankAccounts,
+        journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 200 }])],
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
+      expect(payload.suggestions[0]!.reason).toContain("does not cover this row");
+      expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
+    });
+
+    it("still promotes a signed incoming row whose same-reference journal nets exactly its amount", async () => {
+      const handler = setupTool({
+        transactions: [camtSigned({ ...baseTx, type: "C", bank_ref_number: "BANKREF-1", description: "Incoming payment\n[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]" })],
+        bankAccounts: defaultBankAccounts,
+        journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 100 }])],
+      });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions[0]).toMatchObject({ suggested_action: "reimport_duplicate", confidence: 95, duplicate_journal_id: 95 });
+      expect(payload.suggestions[0]!.reason).toContain("safe to delete");
+    });
   });
 
   it("does not call a signed outgoing transfer a duplicate of an opposite-direction journal with its reference (hash-only and direct ref, all alias orders)", async () => {
