@@ -15,6 +15,7 @@ import { TRANSACTION_DESCRIPTION_MAX_LENGTH, weaveFullRefIntoDescription } from 
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
 import { bankReferenceLookupKey, journalDocumentReferenceKeys } from "../camt/duplicate-identity.js";
 import { buildInterAccountJournalIndex, normalizeReference, toUtcDay, UNKNOWN_JOURNAL_ID } from "../tools/inter-account-utils.js";
+import { findRegistrationJournal } from "../banking/receipt-ledger-check.js";
 import {
   bookedAmountForWiseRow,
   bookedCurrencyForWiseRow,
@@ -347,6 +348,25 @@ export function journalLabelledWithWiseId(journal: Journal, wiseId: string): boo
     const key = bankReferenceLookupKey(reference);
     return key !== undefined && keys.includes(key);
   });
+}
+
+/** A label shaped like a Wise ID (TRANSFER-123, CARD_TRANSACTION-9001). */
+const WISE_ID_SHAPED_LABEL = /^[A-Z]+(?:_[A-Z]+)*-\d+$/;
+
+/**
+ * Signed net (D +, C −) in base EUR cents that `journal` posts on
+ * `dimensionId`, or `undefined` when a posting there cannot show its EUR
+ * amount (foreign currency without a base amount) or has no side.
+ */
+function dimensionNetEurCents(journal: Journal, dimensionId: number): number | undefined {
+  let net = 0;
+  for (const posting of journal.postings ?? []) {
+    if (posting.is_deleted || posting.accounts_dimensions_id !== dimensionId) continue;
+    const currency = (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase();
+    if ((posting.base_amount == null && currency !== "EUR") || (posting.type !== "D" && posting.type !== "C")) return undefined;
+    net += (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100);
+  }
+  return net;
 }
 
 interface StoredWiseLeg {
@@ -915,6 +935,33 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     }
     pendingMappings.clear();
 
+    // Unique legacy match: every approved transfer row's same-key candidates,
+    // so a journal another row of this import could claim is never accepted
+    // automatically (uniqueness in both directions).
+    const transferCandidateIds = new Map<WiseRow, number[]>();
+    for (const entry of created) {
+      const row = entry.source_row;
+      const decision = row === undefined ? undefined : transferDecisions.get(row);
+      if (!row || !decision?.ownershipBasis || decision.targetDimensionId === undefined) continue;
+      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+      transferCandidateIds.set(row, laneBCandidateIds(decision.targetDimensionId,
+        netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date));
+    }
+    // Wise IDs and references a journal label could name: this statement's
+    // rows and the WISE: tags already stored.
+    const knownWiseLabels = [...new Set([
+      ...eligible.flatMap(row => [row.id, row.reference]),
+      ...existingTx.flatMap(tx => tx.description?.startsWith("WISE:")
+        ? [tx.description.split(" ")[0]!.replace(/^WISE:(?:FEE:)?/, "")]
+        : []),
+    ].filter(label => normalizeReference(label) !== ""))];
+    const labelledWithOtherWiseId = (journal: Journal, row: WiseRow): boolean => {
+      const label = normalizeReference(journal.document_number);
+      if (label === "" || journalLabelledWithWiseId(journal, row.id) || label === normalizeReference(row.reference)) return false;
+      return /^WISE:/i.test(label) || WISE_ID_SHAPED_LABEL.test(label) ||
+        knownWiseLabels.some(other => other !== row.id && other !== row.reference && journalLabelledWithWiseId(journal, other));
+    };
+
     for (const entry of [...created]) {
       const row = entry.source_row;
       if (!row || entry.status !== "would_create") continue;
@@ -997,6 +1044,34 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
         cents(feeCommand.booked_amount) === cents(bookedFeeAmountForWiseRow(row)) &&
         journalBooksNetOfFee(journal);
+      // The legacy journal stands in for the row only when it books this
+      // transfer exactly: gross on both bank legs and nothing else, or net of
+      // the fee it also books.
+      const journalBooksGross = (journal: Journal): boolean => {
+        const direction = sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1;
+        return (journal.postings ?? []).filter(posting => !posting.is_deleted).every(posting =>
+            posting.accounts_dimensions_id === accounts_dimensions_id || posting.accounts_dimensions_id === targetDimensionId) &&
+          dimensionNetEurCents(journal, accounts_dimensions_id) === direction * cents(entry.amount) &&
+          dimensionNetEurCents(journal, targetDimensionId) === -direction * cents(entry.amount);
+      };
+      // wise_transfer_journal_unique_legacy: the row's ONLY same-key candidate
+      // is accepted as already journalized, as an accepted mapping would be,
+      // when it is registered and EUR-covered, books this transfer exactly in
+      // this row's direction, names no other Wise transfer, and no other row,
+      // mapping or stored Wise bank row can claim it.
+      const uniqueLegacyJournalId = (candidateIds: number[]): number | undefined => {
+        if (candidateIds.length !== 1) return undefined;
+        const journalId = candidateIds[0]!;
+        const journal = journalSnapshot.find(candidate => candidate.id === journalId);
+        if (!journal || journal.registered !== true || journal.is_deleted || hasForeignPostingWithoutBase(journal)) return undefined;
+        if (!(journalBooksGross(journal) || journalBooksNetOfFee(journal))) return undefined;
+        if (labelledWithOtherWiseId(journal, row)) return undefined;
+        if ([...transferCandidateIds].some(([other, ids]) => other !== row && ids.includes(journalId))) return undefined;
+        if (journalizedTransferIds.some(mapping => mapping.journal_id === journalId && mapping.wise_id !== row.id)) return undefined;
+        if (journal.operation_type === "TRANSACTION" && existingTx.some(tx =>
+          tx.id === journal.operations_id && tx.accounts_dimensions_id === accounts_dimensions_id)) return undefined;
+        return journalId;
+      };
       const dropFeeCommand = (feeCommand: WiseImportCommand) => {
         commands.splice(commands.indexOf(feeCommand), 1);
         const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
@@ -1019,6 +1094,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       };
 
       let existingJournalId = mappedJournalId;
+      let uniqueLegacy = false;
       if (existingJournalId === undefined) {
         let resolution = guard.resolveInterAccount(query);
         let otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(query);
@@ -1052,11 +1128,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           !(wiseLegMoves(matchedJournal, row, entry.amount) || journalBooksNetOfFee(matchedJournal))
         );
         if (resolution.status === "ambiguous_refless" || otherLabelled || matchUncovered) {
-          pushJournalReview("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON,
-            laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date));
-          continue;
+          const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
+          existingJournalId = uniqueLegacyJournalId(candidateIds);
+          if (existingJournalId === undefined) {
+            pushJournalReview("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON, candidateIds);
+            continue;
+          }
+          uniqueLegacy = true;
+        } else {
+          existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
         }
-        existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
       }
       // Exact-reference identity is independent of the amount keys above: a
       // live journal labelled with this Wise ID that is not the journal
@@ -1089,7 +1170,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         created.splice(created.indexOf(entry), 1);
         skipped.push({
           wise_id: row.id,
-          reason: `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
+          reason: uniqueLegacy
+            ? `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${existingJournalId} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`
+            : `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
         });
         dependsOn = null;
         // A journal that books the transfer net of the fee already books the
@@ -1160,23 +1243,64 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   }
   ownershipReviews.push(...mappingReviews);
 
-  // Advisory only (never a claim or a skip): an untagged stored row of the
-  // same movement on this account, e.g. a card payment entered by hand. A
-  // stored direction marker, when present, must agree.
+  // An untagged stored row of the same movement on this account, e.g. a card
+  // payment entered by hand. A stored direction marker, when present, must
+  // agree. Advisory (the row is still created) unless the stored row is
+  // provably this movement (wise_untagged_ledger_unique below).
+  const untaggedLookalikes = new Map<WiseCreatedEntry, Transaction[]>();
   for (const entry of created) {
     const currency = entry.source_row ? bookedCurrencyForWiseRow(entry.source_row) : entry.booked_currency;
     if (currency === undefined) continue;
-    const matches = existingTx.filter(tx =>
+    untaggedLookalikes.set(entry, existingTx.filter(tx =>
       isNonVoidTransaction(tx) &&
       tx.id !== undefined &&
       !tx.description?.startsWith("WISE:") &&
       tx.accounts_dimensions_id === accounts_dimensions_id &&
       tx.date === entry.date &&
       typeof tx.amount === "number" && Math.abs(tx.amount - entry.amount) < 0.005 &&
-      (tx.cl_currencies_id ?? "EUR") === currency &&
-      [entry.source_direction, "?"].includes(markedWiseDirection(tx.description))
-    );
+      (tx.cl_currencies_id ?? "EUR") === currency
+    ));
+  }
+  const lookalikeClaims = new Map<number, number>();
+  for (const lookalikes of untaggedLookalikes.values()) {
+    for (const tx of lookalikes) lookalikeClaims.set(tx.id!, (lookalikeClaims.get(tx.id!) ?? 0) + 1);
+  }
+  // wise_untagged_ledger_unique: the row is not created when its ONLY stored
+  // lookalike is CONFIRMED, no other row of this import looks like it, and its
+  // direction is proven to agree, by its marker or, when it has none, by its
+  // single registration journal moving this amount on the Wise account in the
+  // row's direction (base EUR, to the cent). A plain card/payment row only:
+  // a transfer or a reviewed row keeps its create.
+  const untaggedRowCovers = (entry: WiseCreatedEntry, tx: Transaction): boolean => {
+    const row = entry.source_row;
+    if (!row || tx.status !== "CONFIRMED" || lookalikeClaims.get(tx.id!) !== 1) return false;
+    if (!commands.some(command => command.row_key === `row:${row.rowIndex}:main` && command.action === "main_create")) return false;
+    if (commands.some(command => command.row_index === row.rowIndex && command.action === "inter_account")) return false;
+    if (ownershipReviews.some(review => review.wise_id === row.id || review.wise_id === entry.wise_id)) return false;
+    const marker = markedWiseDirection(tx.description);
+    if (marker !== "?") return marker === entry.source_direction;
+    const journals = findRegistrationJournal(journalSnapshot, tx.id!);
+    return journals.length === 1 && (tx.cl_currencies_id ?? "EUR") === "EUR" &&
+      dimensionNetEurCents(journals[0]!, accounts_dimensions_id) ===
+        (entry.source_direction === "IN" ? 1 : -1) * Math.round(entry.amount * 100);
+  };
+  for (const [entry, lookalikes] of untaggedLookalikes) {
+    const matches = lookalikes.filter(tx => [entry.source_direction, "?"].includes(markedWiseDirection(tx.description)));
     if (matches.length === 0) continue;
+    if (lookalikes.length === 1 && untaggedRowCovers(entry, lookalikes[0]!)) {
+      const mainKey = `row:${entry.source_row!.rowIndex}:main`;
+      commands.splice(commands.findIndex(command => command.row_key === mainKey), 1);
+      for (const command of commands) {
+        if (command.depends_on === mainKey) command.depends_on = null;
+      }
+      mainCommandKeysByRow.delete(entry.source_row!.rowIndex);
+      created.splice(created.indexOf(entry), 1);
+      skipped.push({
+        wise_id: entry.wise_id,
+        reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${lookalikes[0]!.id} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+      });
+      continue;
+    }
     ownershipReviews.push({
       wise_id: entry.wise_id,
       code: "wise_untagged_ledger_match",
