@@ -12,7 +12,7 @@ import {
 } from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata } from "../../camt/duplicate-identity.js";
+import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
 import type {
   ExactConfirmClientResolution,
   ExactConfirmDescriptor,
@@ -88,6 +88,12 @@ function hasProvenDirectionFor(tx: Transaction, type: MatchCandidate["type"]): b
 function camtMarkerFailsChecksum(tx: Transaction): boolean {
   const metadata = extractCamtDescriptionMetadata(tx.description);
   return metadata.entry_sig !== undefined && !isTrustedCamtDescriptionMetadata(tx, metadata);
+}
+
+/** `reason`, followed by why the marker cannot verify when the row has the legacy truncated shape. */
+function withLegacyTruncationHint(tx: Transaction, reason: string): string {
+  const hint = legacyTruncatedCamtMarkerHint(tx);
+  return hint ? `${reason} ${hint}` : reason;
 }
 
 /** An explicitly stated ISO currency code, else `undefined` (missing, null, blank or malformed). */
@@ -238,7 +244,7 @@ export function computeExactMatchProjection(
     if (candidates.length === 0 && unverifiedMarkerMatches.length > 0) {
       skipped.push({
         transaction_id: tx.id,
-        reason: `direction_unproven: CAMT marker checksum does not verify; ${unverifiedMarkerMatches.join(", ")} would match by reference number and exact amount; confirm manually.`,
+        reason: withLegacyTruncationHint(tx, `direction_unproven: CAMT marker checksum does not verify; ${unverifiedMarkerMatches.join(", ")} would match by reference number and exact amount; confirm manually.`),
       });
       continue;
     }
@@ -315,7 +321,7 @@ export function computeExactMatchProjection(
       skipped.push({
         transaction_id: tx.id,
         reason: camtMarkerFailsChecksum(tx)
-          ? `direction_unproven: CAMT marker checksum does not verify; ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`
+          ? withLegacyTruncationHint(tx, `direction_unproven: CAMT marker checksum does not verify; ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`)
           : `direction_unproven: ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`,
       });
       continue;

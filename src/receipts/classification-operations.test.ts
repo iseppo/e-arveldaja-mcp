@@ -1071,7 +1071,23 @@ describe("classification operations — ledger context (F6)", () => {
     const { operations } = ledgerOperations({ rows: [flipped] });
     const result = await analyze(operations);
     expect(result.ownTransfers).toEqual([]);
-    expect(result.possibleDuplicates).toEqual([expect.objectContaining({ transaction_id: 7, code: "camt_marker_unverified" })]);
+    expect(result.possibleDuplicates).toEqual([expect.objectContaining({
+      transaction_id: 7, code: "camt_marker_unverified", next_action: expect.stringMatching(/^check the row against the bank statement/),
+    })]);
+  });
+
+  it("(h2) a cap-filling row whose sig fails says it may be a legacy truncated marker", async () => {
+    const long = camtRow({ id: 17, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE, description: `Laenu tagastus ${"x".repeat(160)}` });
+    // Same shape as a row an earlier release stored: cut at the cap, sig over text no longer stored.
+    const legacy = { ...long, description: long.description!.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
+    expect(legacy.description!.length).toBe(150);
+    const { operations } = ledgerOperations({ rows: [legacy] });
+    const result = await analyze(operations);
+    expect(result.ownTransfers).toEqual([]);
+    expect(result.possibleDuplicates).toEqual([expect.objectContaining({
+      transaction_id: 17, code: "camt_marker_unverified",
+      next_action: expect.stringMatching(/^legacy_truncated_camt_marker: .*confirm it manually/),
+    })]);
   });
 
   it("(A6) a 'Näide OÜ' / 'Näide AS' group is split so only the identity-compatible rows carry the history", async () => {

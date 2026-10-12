@@ -41,6 +41,7 @@ import {
   type ReconciliationExecutionCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
+import { legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
@@ -823,7 +824,8 @@ export async function runInterAccountMatching(
       source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
       target_account: claimedTargets.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
       code: "camt_marker_unverified",
-      reason: `Transaction ${tx.id} looks like an own-account transfer, but its CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified. It is excluded from automatic matching; check the bank statement and resolve it manually.`,
+      reason: `Transaction ${tx.id} looks like an own-account transfer, but its CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified. It is excluded from automatic matching; check the bank statement and resolve it manually.` +
+        (legacyTruncatedCamtMarkerHint(tx) ? ` ${legacyTruncatedCamtMarkerHint(tx)}` : ""),
     });
   }
 
