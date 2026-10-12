@@ -33,6 +33,7 @@ import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
+import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
 import { HttpError } from "../http-client.js";
 import { classifyMutationFailure } from "../mutation-outcome.js";
@@ -306,9 +307,12 @@ function parseAccountStatement(csv: string): AccountStatementRow[] {
     rows.push({
       row_index: i - 1,
       date: fields[0]!,
-      reference: fields[1]!,
-      ticker: fields[2]!,
-      isin: fields[3]!,
+      // Free-text columns drop literal sandbox delimiter tokens before they
+      // reach LY:{reference} document numbers, journal titles or plan digests;
+      // marker-free text is unchanged.
+      reference: stripSandboxMarkers(fields[1]!),
+      ticker: stripSandboxMarkers(fields[2]!),
+      isin: stripSandboxMarkers(fields[3]!),
       type: validateLightyearType(fields[4]!),
       quantity: parseNumber(fields[5]!),
       ccy: fields[6]!,
@@ -862,14 +866,14 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
     // or unusually long names can't smuggle bulk text. Real security names
     // fit easily under 128 chars; truncation makes the Lightyear-CSV trust
     // decision robust to format drift.
-    const rawName = fields[headerIndex.Name]!;
+    const rawName = stripSandboxMarkers(fields[headerIndex.Name]!);
     const name = rawName.length > 128 ? rawName.slice(0, 128) + "…" : rawName;
     rows.push({
       date: fields[headerIndex.Date]!,
-      ticker: fields[headerIndex.Ticker]!,
+      ticker: stripSandboxMarkers(fields[headerIndex.Ticker]!),
       name,
-      isin: fields[headerIndex.ISIN]!,
-      country: fields[headerIndex.Country]!,
+      isin: stripSandboxMarkers(fields[headerIndex.ISIN]!),
+      country: stripSandboxMarkers(fields[headerIndex.Country]!),
       fees_eur: parseNumber(fields[headerIndex["Fees (EUR)"]]!),
       quantity: parseNumber(fields[headerIndex.Quantity]!),
       cost_basis_eur: parseNumber(fields[headerIndex["Cost Basis (EUR)"]]!),

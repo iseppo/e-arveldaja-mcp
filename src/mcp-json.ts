@@ -1,5 +1,6 @@
 import { encode, decode } from "@toon-format/toon";
 import { randomBytes } from "crypto";
+import { stripSandboxMarkers } from "./sandbox-markers.js";
 
 // Wrap untrusted OCR / external text with per-call nonce delimiters so a
 // downstream LLM treats the content as data, not instructions. A fixed
@@ -66,13 +67,7 @@ export function canonicalBusinessText(value: unknown): string {
   // reach a persisted or matched value.
   // Loop to a fixpoint: one pass over a NESTED token (a marker embedded inside
   // another marker's prefix) would splice the outer halves into a new marker.
-  for (
-    let stripped = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "");
-    stripped !== text;
-    stripped = text.replace(/<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g, "")
-  ) {
-    text = stripped;
-  }
+  text = stripSandboxMarkers(text);
   return text.trim().replace(/\s+/g, " ");
 }
 

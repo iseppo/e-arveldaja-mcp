@@ -15,6 +15,7 @@ import {
 } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { stripSandboxMarkers } from "../sandbox-markers.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
@@ -2994,10 +2995,25 @@ function currencyOfAmountOnLine(line: string, value: number, documentContext: st
 }
 
 export function extractReceiptFieldsFromText(
-  text: string,
-  fileName: string,
-  options?: ExtractReceiptFieldsOptions,
+  sourceText: string,
+  sourceFileName: string,
+  sourceOptions?: ExtractReceiptFieldsOptions,
 ): ExtractedReceiptFields {
+  // Literal sandbox delimiter tokens planted in the OCR text, layout items or
+  // file name are removed BEFORE any field, fingerprint or booking value is
+  // derived, so none can reach a persisted invoice/client or a plan digest.
+  // Marker-free input is unchanged (same strings, same item objects).
+  const text = stripSandboxMarkers(sourceText);
+  const fileName = stripSandboxMarkers(sourceFileName);
+  const options = sourceOptions?.textItems
+    ? {
+      ...sourceOptions,
+      textItems: sourceOptions.textItems.map((item) => {
+        const itemText = stripSandboxMarkers(item.text);
+        return itemText === item.text ? item : { ...item, text: itemText };
+      }),
+    }
+    : sourceOptions;
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
   const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
