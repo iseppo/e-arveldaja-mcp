@@ -1,6 +1,7 @@
 import { findDuplicatePostingsInJournals } from "../bank-posting-duplicate-guard.js";
 import type { InterAccountQuery, InterAccountResolution } from "../booking-guard.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { canonicalRefNumber } from "../ref-number.js";
 import { normalizeIban } from "../resolution/bank-account-resolution.js";
 import { buildBankAccountLookups, toUtcDay } from "../tools/inter-account-utils.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
@@ -26,7 +27,8 @@ export type CamtJournalReviewCode =
   | "camt_journal_conflict"
   | "camt_journal_posting_review"
   | "camt_journal_inconsistent_amounts"
-  | "camt_journal_identity_stale";
+  | "camt_journal_identity_stale"
+  | "camt_journal_direction_conflict";
 
 export type CamtJournalCoverage =
   | { readonly kind: "none" }
@@ -276,6 +278,18 @@ export function classifyCamtJournalCoverage(
   const [only] = [...covering];
   if (only) return { kind: only[1], journal_ids: [only[0]] };
   if (scanIds.length > 0) return { kind: "review", code: "camt_journal_posting_review", journal_ids: journalIds };
+  // d) The direction-filtered scan misses a CONFIRMED row's registration
+  // journal booked backwards (the old type-"C" bug): same dimension, date and
+  // EUR cents, but the opposite bank net. It may be this movement, so it is a
+  // review, never a create and never a skip.
+  const invertedIds = context.journals.filter((journal) => {
+    if (journal.registered !== true || journal.operation_type !== "TRANSACTION" || journal.operations_id == null) return false;
+    const transaction = context.sameDimensionTransactions.get(journal.operations_id);
+    return transaction !== undefined && transaction.status === "CONFIRMED" && !transaction.is_deleted &&
+      transaction.date === entry.date && cents(transaction.amount) === cents(entry.amount) &&
+      bankNetCents(journal, context) === -expectedNet;
+  }).map((journal) => journal.id!).sort((left, right) => left - right);
+  if (invertedIds.length > 0) return { kind: "review", code: "camt_journal_direction_conflict", journal_ids: invertedIds };
   return { kind: "none" };
 }
 
@@ -288,7 +302,8 @@ export function classifyCamtJournalCoverage(
  * cents; its one live TRANSACTION journal posts exactly the entry's signed EUR
  * net on the bank dimension; the counterparty agrees (IBAN when both sides
  * carry one, else the normalised name; neither → no proof); no stored bank
- * reference or contradicting signed marker on the row; and uniqueness
+ * reference or contradicting signed marker on the row; no contradicting
+ * payment reference (both sides carry one and they differ); and uniqueness
  * both ways — no other statement entry shares date + direction + amount, no
  * other ledger row on the dimension shares date + amount, and no entry matched
  * the transaction or claims the journal by reference.
@@ -320,6 +335,11 @@ export function findCamtNativeImportMatch(
   const twins = [...context.sameDimensionTransactions.values()].filter((other) =>
     !other.is_deleted && other.date === entry.date && cents(other.amount) === cents(entry.amount));
   if (twins.length !== 1) return undefined;
+  // Two different payment references are two payments; a row without one
+  // (the common native-import case) does not contradict.
+  const entryPaymentRef = paymentReferenceKey(entry.reference_number);
+  const transactionPaymentRef = paymentReferenceKey(transaction.ref_number);
+  if (entryPaymentRef && transactionPaymentRef && entryPaymentRef !== transactionPaymentRef) return undefined;
   const entryIban = normalizeIban(entry.counterparty_iban);
   const transactionIban = normalizeIban(transaction.bank_account_no);
   if (entryIban && transactionIban) return entryIban === transactionIban ? { transaction_id: transactionId, journal_id: journal.id! } : undefined;
@@ -327,6 +347,11 @@ export function findCamtNativeImportMatch(
   const transactionName = normalizeCounterpartyName(transaction.bank_account_name);
   if (!entryName || entryName !== transactionName) return undefined;
   return { transaction_id: transactionId, journal_id: journal.id! };
+}
+
+/** The stored (cap-enforced) payment reference, whitespace- and case-insensitive. */
+function paymentReferenceKey(value: string | null | undefined): string | undefined {
+  return canonicalRefNumber(normalizeOptionalReference(value ?? undefined)).value?.replace(/\s+/g, "").toUpperCase() || undefined;
 }
 
 /** Case- and whitespace-insensitive only: a legal-form difference is another party. */

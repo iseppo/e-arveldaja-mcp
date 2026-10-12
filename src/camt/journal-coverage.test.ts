@@ -463,10 +463,48 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     expectReview(await project(ledger as Transaction[], journals as Journal[]), journalIds as number[]);
   });
 
-  it("an inverted registration journal (debits the bank for an outgoing entry) is not a scan hit → created, never skipped", async () => {
+  it("an inverted registration journal (debits the bank for an outgoing entry) → direction review, never created or skipped", async () => {
     const projection = await project([native()], [registration("D", 42.5)]);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped).toHaveLength(1);
+    expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_direction_conflict", journal_ids: [9400] });
+    expect(projection.skipped[0]!.skip_code).toBeUndefined();
+  });
+
+  it.each([
+    ["a PROJECT row", [native({ status: "PROJECT" })], [registration("D", 42.5)]],
+    ["another date", [native({ date: "2026-03-10" })], [registration("D", 42.5, { effective_date: "2026-03-10" })]],
+    ["another amount", [native({ amount: 42.49 })], [registration("D", 42.49)]],
+    ["a journal debiting another bank amount", [native()], [registration("D", 10)]],
+    ["a manual ENTRY journal", [native()], [registration("D", 42.5, { operation_type: "ENTRY" })]],
+  ])("an inverted journal of %s is no direction conflict → created", async (_name, ledger, journals) => {
+    const projection = await project(ledger as Transaction[], journals as Journal[]);
     expect(projection.skipped).toEqual([]);
     expect(projection.descriptors).toHaveLength(1);
+  });
+
+  it("the inverted-journal review reaches the plan fingerprint", async () => {
+    const args = camtNormalizedArgs(DIM, undefined, undefined);
+    const review = camtPlanFingerprint(await project([native()], [registration("D", 42.5)]), args);
+    const create = camtPlanFingerprint(await project([native({ status: "PROJECT" })], [registration("D", 42.5)]), args);
+    expect(review).not.toBe(create);
+  });
+
+  it("contradictory payment references (entry 202618, row 202617) → stays review", async () => {
+    expectReview(await project([native({ ref_number: "202617" })], [registration("C", 42.5)],
+      [{ ...outgoing, reference_number: "202618" }]));
+  });
+
+  it("equal payment references (after whitespace/case normalisation) → already imported", async () => {
+    const projection = await project([native({ ref_number: " rf18 5390 " })], [registration("C", 42.5)],
+      [{ ...outgoing, reference_number: "RF185390" }]);
+    expect(projection.skipped).toEqual([nativeSkip]);
+  });
+
+  it("a row without a payment reference against an entry with one → already imported", async () => {
+    const projection = await project([native({ ref_number: null })], [registration("C", 42.5)],
+      [{ ...outgoing, reference_number: "202618" }]);
+    expect(projection.skipped).toEqual([nativeSkip]);
   });
 
   it("a journal whose bank legs net to zero (a credit leg the scan hits, plus an offsetting debit) → stays review", async () => {
