@@ -14,7 +14,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { createConnectionDefaultsStore } from "../connection-defaults-store.js";
-import type { ElicitOutcome, Elicitor } from "../elicitation.js";
+import { assertNoSecretFields, type ElicitField, type ElicitOutcome, type Elicitor } from "../elicitation.js";
 
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -211,6 +211,8 @@ describe("process_bank_input — capability-aware elicitation + persisted defaul
     // No secret field is ever elicited; only the bounded dimension + consent flag.
     expect(Object.keys(calls.lastFields!)).toEqual(["accounts_dimensions_id", "remember_for_connection"]);
     for (const key of Object.keys(calls.lastFields!)) expect(key).not.toMatch(/api.?key|password|secret|token|public.?value/i);
+    // The real elicitation guard also scans titles/descriptions: the form must pass it.
+    expect(() => assertNoSecretFields(calls.lastFields as Record<string, ElicitField>)).not.toThrow();
   });
 
   it("does NOT persist a resolved choice without remember_for_connection consent", async () => {

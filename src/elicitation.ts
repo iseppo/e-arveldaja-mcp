@@ -62,7 +62,7 @@ function candidateStrings(key: string, field: ElicitField): string[] {
   return candidates;
 }
 
-function assertNoSecretFields(fields: Record<string, ElicitField>): void {
+export function assertNoSecretFields(fields: Record<string, ElicitField>): void {
   for (const [key, field] of Object.entries(fields)) {
     if (candidateStrings(key, field).some(candidate => SECRET_FIELD_PATTERN.test(candidate))) {
       throw new Error(

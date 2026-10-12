@@ -284,7 +284,7 @@ export function registerProcessBankInputTool(
         remember_for_connection: {
           type: "boolean",
           title: "Remember this choice for this connection",
-          description: "Store only a non-secret hint (the bank dimension id) so future statements on this connection resolve automatically. Re-validated on every read.",
+          description: "Store only the bank dimension id so future statements on this connection resolve automatically. Re-validated on every read.",
           default: false,
         },
       },
