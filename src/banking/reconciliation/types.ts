@@ -192,12 +192,14 @@ export interface AmbiguousPairResult {
   confidence: number;
   /** Why the pair needs review: unknown source leg, a possible fee-deducted
    * transfer, a mirror leg without own-origin evidence (so it cannot be
-   * deleted), or legs whose base amounts conflict. */
+   * deleted), legs whose base amounts conflict, or a payment instruction id
+   * naming a different candidate than the best-scoring one. */
   code?:
     | "direction_unresolved"
     | "possible_fee_deducted_transfer"
     | "counterpart_lacks_own_origin"
-    | "conflicting_transfer_amounts";
+    | "conflicting_transfer_amounts"
+    | "instruction_id_conflict";
   reason: string;
 }
 

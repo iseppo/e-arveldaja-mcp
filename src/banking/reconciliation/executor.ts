@@ -54,6 +54,8 @@ import {
   transferReferencesOf,
   unverifiedMarkerTransferClaim,
   getTransferPairCompatibility,
+  camtInstructionIdOf,
+  wiseReferenceInstructionIdOf,
   getSameTypeReciprocalEvidence,
   type InterAccountMatchLookups,
   type OneSidedInference,
@@ -970,7 +972,41 @@ export async function runInterAccountMatching(
     });
 
     const topConfidence = candidates[0]!.confidence;
-    const topCandidates = candidates.filter(candidate => candidate.confidence === topConfidence);
+    let topCandidates = candidates.filter(candidate => candidate.confidence === topConfidence);
+    // Payment instruction id (LHV Refs/InstrId = the Wise reference's "/<id>"
+    // suffix): identity evidence only among candidates that already pass every
+    // amount/date/account guard. It breaks a same-confidence tie when exactly
+    // one tied candidate carries it, and sends the row to review when the sole
+    // top candidate is not the one it names; it never adds a candidate.
+    const instructionId = camtInstructionIdOf(txOut);
+    const instructionMatches = instructionId === undefined
+      ? []
+      : candidates.filter(candidate => wiseReferenceInstructionIdOf(candidate.txIn) === instructionId);
+    if (instructionMatches.length > 0) {
+      const tiedMatches = topCandidates.filter(candidate => instructionMatches.includes(candidate));
+      if (topCandidates.length > 1 && tiedMatches.length === 1) {
+        topCandidates = tiedMatches;
+      } else if (topCandidates.length === 1 && tiedMatches.length === 0) {
+        const named = instructionMatches.map(candidate => candidate.txIn);
+        ambiguousPairs.push({
+          outgoing_transaction_id: txOut.id,
+          amount: txOut.amount,
+          date_out: txOut.date,
+          from_dimension_id: txOut.accounts_dimensions_id,
+          candidate_incoming_transaction_ids: [topCandidates[0]!.txIn.id!, ...named.map(tx => tx.id!)],
+          candidate_incoming_dimension_ids: [topCandidates[0]!.txIn.accounts_dimensions_id, ...named.map(tx => tx.accounts_dimensions_id)],
+          confidence: topConfidence,
+          code: "instruction_id_conflict",
+          reason: `Outgoing transaction ${txOut.id} best matches incoming ${topCandidates[0]!.txIn.id}, but its payment instruction id names incoming ${named.map(tx => tx.id).join(", ")} instead (Wise reference suffix). Check both statements and confirm the right pair inline.`,
+        });
+        blockedOneSidedTxIds.add(txOut.id);
+        for (const candidate of [topCandidates[0]!, ...instructionMatches]) blockedOneSidedTxIds.add(candidate.txIn.id!);
+        continue;
+      }
+      if (topCandidates.length === 1 && instructionMatches.includes(topCandidates[0]!)) {
+        topCandidates[0]!.reasons.push("instruction_id_matches_reference");
+      }
+    }
     if (topCandidates.length > 1) {
       ambiguousPairs.push({
         outgoing_transaction_id: txOut.id,

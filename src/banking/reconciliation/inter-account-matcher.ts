@@ -3,6 +3,7 @@ import type { BookingGuard, InterAccountQuery, InterAccountResolution } from "..
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
+import { REF_NUMBER_MAX_LENGTH } from "../../ref-number.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 import {
@@ -77,6 +78,38 @@ export function transferReferencesOf(tx: Transaction, journals: readonly Journal
 /** The first of {@link transferReferencesOf}, for recording an in-run journal. */
 export function transferReferenceOf(tx: Transaction, journals: readonly Journal[] = []): string | undefined {
   return transferReferencesOf(tx, journals)[0];
+}
+
+/**
+ * The payment instruction id (Refs/InstrId) of an outgoing CAMT row, read only
+ * from a checksum-verified marker whose direction is DBIT; else undefined.
+ */
+export function camtInstructionIdOf(tx: Transaction): string | undefined {
+  const metadata = extractCamtDescriptionMetadata(tx.description);
+  if (metadata.instruction_id === undefined || metadata.source_direction !== "DBIT") return undefined;
+  return isTrustedCamtDescriptionMetadata(tx, metadata) ? metadata.instruction_id : undefined;
+}
+
+/**
+ * The trailing "/<digits>" id of an incoming Wise main row's full reference
+ * (an own-account top-up from LHV reads "<COMPANY>/<InstrId>"). The full
+ * reference is `ref_number` when under the cap; a capped one counts only when
+ * the write boundary wove the full reference in front of the direction marker
+ * (it then ends the description text). Anything else yields undefined.
+ */
+export function wiseReferenceInstructionIdOf(tx: Transaction): string | undefined {
+  const description = tx.description ?? "";
+  if (!/^WISE:(?!FEE:)\S/i.test(description) || bankTransactionDirection(tx) !== "incoming") return undefined;
+  const ref = tx.ref_number?.trim() ?? "";
+  if (ref === "") return undefined;
+  let full = ref;
+  if (ref.length >= REF_NUMBER_MAX_LENGTH) {
+    const head = description.replace(/\s*\[source_direction=IN\]\s*$/i, "");
+    const start = head.lastIndexOf(` ${ref}`);
+    if (start < 0) return undefined;
+    full = head.slice(start + 1);
+  }
+  return full.match(/\/(\d{1,10})$/)?.[1];
 }
 
 /**

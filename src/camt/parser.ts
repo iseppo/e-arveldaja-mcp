@@ -459,6 +459,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         reference_number: normalizeOptionalReference(structuredRef) ??
           normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "EndToEndId"])),
         end_to_end_id: normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "EndToEndId"])),
+        instruction_id: normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "InstrId"])),
         bank_reference: normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? sourceTextAt(entryNode, ["AcctSvcrRef"])),
       };
     });
@@ -488,6 +489,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         description: [...new Set(legs.map((leg) => leg.description).filter((value): value is string => !!value))].join(" | ") || undefined,
         reference_number: common(legs.map((leg) => leg.reference_number)),
         end_to_end_id: common(legs.map((leg) => leg.end_to_end_id)),
+        instruction_id: common(legs.map((leg) => leg.instruction_id)),
         bank_reference: normalizeOptionalReference(sourceTextAt(entryNode, ["AcctSvcrRef"])) ?? legs[0]!.bank_reference,
         // The previous release stored one row per leg; any of them means this
         // entry was already imported.
@@ -514,6 +516,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         description: leg.description,
         reference_number: leg.reference_number,
         end_to_end_id: leg.end_to_end_id,
+        instruction_id: leg.instruction_id,
         bank_reference: leg.bank_reference,
         ...(leg.legacyAmount !== leg.amount || leg.description !== leg.ustrd
           ? { legacy_identities: [legacyIdentity(leg)] }

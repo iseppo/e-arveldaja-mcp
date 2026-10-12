@@ -311,6 +311,7 @@ describe("parseCamt053Xml", () => {
       description: "arve nr 99",
       reference_number: "44407737",
       end_to_end_id: "1753691085",
+      instruction_id: "190",
     });
 
     expect(result.entries[2]).toMatchObject({

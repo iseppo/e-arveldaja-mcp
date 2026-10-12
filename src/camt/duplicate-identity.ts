@@ -125,6 +125,7 @@ function buildCamtEntrySignature(parts: {
   bankAccountName?: string;
   description?: string;
   sourceDirection?: ParsedCamtEntry["direction"];
+  instructionId?: string;
 }): string | undefined {
   if (!parts.bankReferenceKey || !parts.date || !parts.type || !Number.isFinite(parts.amount)) {
     return undefined;
@@ -141,6 +142,9 @@ function buildCamtEntrySignature(parts: {
     normalizeBatchDuplicateKeyPart(parts.description),
   ];
   if (parts.sourceDirection) signatureParts.push(parts.sourceDirection);
+  // Appended only when present, so every marker written without `instr=`
+  // keeps its signature byte-for-byte.
+  if (parts.instructionId) signatureParts.push(`instr:${parts.instructionId}`);
   return shortStableHash(JSON.stringify(signatureParts));
 }
 
@@ -150,14 +154,15 @@ export function extractCamtDescriptionMetadata(description: string | null | unde
   bank_account_no?: string;
   entry_sig?: string;
   source_direction?: ParsedCamtEntry["direction"];
+  instruction_id?: string;
 } {
   if (!description) return {};
   const normalizedDescription = normalizeCamtDescriptionLineBreaks(description).trimEnd();
   const match = normalizedDescription.match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]$/);
   if (!match) return {};
 
-  const metadata: { bank_ref_number?: string; bank_ref_hash?: string; bank_account_no?: string; entry_sig?: string; source_direction?: ParsedCamtEntry["direction"] } = {};
-  for (const [, key, value] of match[1]!.matchAll(/(bank_ref_number|bank_ref_hash|bank_account_no|entry_sig|source_direction|br|brh|iban|sig|dir|h|i|s|d)=([^\s\]]+)/g)) {
+  const metadata: { bank_ref_number?: string; bank_ref_hash?: string; bank_account_no?: string; entry_sig?: string; source_direction?: ParsedCamtEntry["direction"]; instruction_id?: string } = {};
+  for (const [, key, value] of match[1]!.matchAll(/(bank_ref_number|bank_ref_hash|bank_account_no|entry_sig|source_direction|instr|br|brh|iban|sig|dir|h|i|s|d)=([^\s\]]+)/g)) {
     const decoded = decodeCamtMetadataValue(value);
     if (!decoded) continue;
     if (key === "bank_ref_number" || key === "br") metadata.bank_ref_number = decoded;
@@ -165,6 +170,7 @@ export function extractCamtDescriptionMetadata(description: string | null | unde
     if (key === "bank_account_no" || key === "iban" || key === "i") metadata.bank_account_no = decoded;
     if (key === "entry_sig" || key === "sig" || key === "s") metadata.entry_sig = normalizeStoredEntrySignature(decoded);
     if ((key === "source_direction" || key === "dir" || key === "d") && (decoded === "CRDT" || decoded === "DBIT")) metadata.source_direction = decoded;
+    if (key === "instr" && MARKER_INSTRUCTION_ID.test(decoded)) metadata.instruction_id = decoded;
   }
   return metadata;
 }
@@ -175,11 +181,20 @@ function buildCamtDescriptionMarkerFromParts(parts: string[]): string | undefine
     : undefined;
 }
 
+/** A Refs/InstrId the marker persists: numeric, on an outgoing (DBIT) row. */
+const MARKER_INSTRUCTION_ID = /^\d{1,10}$/;
+
+function markerInstructionId(entry: ParsedCamtEntry): string | undefined {
+  const id = normalizeOptionalReference(entry.instruction_id);
+  return entry.direction === "DBIT" && id !== undefined && MARKER_INSTRUCTION_ID.test(id) ? id : undefined;
+}
+
 /** `legacy`: the dir-less signature an earlier release wrote (stored type, no direction). */
 function buildCamtEntrySignatureForParsedEntry(
   entry: ParsedCamtEntry,
   cleanDescription: string | undefined,
   legacy = false,
+  instructionId?: string,
 ): string | undefined {
   const bankReferenceKey = bankReferenceLookupKey(entry.bank_reference);
   return buildCamtEntrySignature({
@@ -193,14 +208,19 @@ function buildCamtEntrySignatureForParsedEntry(
     bankAccountName: entry.counterparty_name,
     description: cleanDescription,
     sourceDirection: legacy ? undefined : entry.direction,
+    instructionId: legacy ? undefined : instructionId,
   });
 }
 
-function buildCamtDescriptionMarker(entry: ParsedCamtEntry, cleanDescription: string | undefined): string | undefined {
+function buildCamtDescriptionMarker(
+  entry: ParsedCamtEntry,
+  cleanDescription: string | undefined,
+  instructionId?: string,
+): string | undefined {
   const bankReference = normalizeOptionalReference(entry.bank_reference);
   if (!bankReference && !entry.counterparty_iban) return undefined;
 
-  const entrySignature = buildCamtEntrySignatureForParsedEntry(entry, cleanDescription);
+  const entrySignature = buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, false, instructionId);
   const bankReferencePart = bankReference
     ? `br=${encodeCamtMetadataValue(bankReference)}`
     : undefined;
@@ -214,11 +234,11 @@ function buildCamtDescriptionMarker(entry: ParsedCamtEntry, cleanDescription: st
     ? `iban=${encodeCamtMetadataValue(entry.counterparty_iban)}`
     : undefined;
   const signaturePart = entrySignature ? `sig=${entrySignature}` : undefined;
-  const directionPart = `dir=${entry.direction}`;
+  const directionPart = instructionId ? `dir=${entry.direction} instr=${instructionId}` : `dir=${entry.direction}`;
   const compactBankAccountPart = entry.counterparty_iban
     ? `i=${encodeCamtMetadataValue(entry.counterparty_iban)}`
     : undefined;
-  const compactDirectionPart = `d=${entry.direction}`;
+  const compactDirectionPart = instructionId ? `d=${entry.direction} instr=${instructionId}` : `d=${entry.direction}`;
   const compactSignaturePart = entrySignature ? `s=${entrySignature}` : undefined;
 
   const markerCandidates = [
@@ -237,8 +257,29 @@ function buildCamtDescriptionMarker(entry: ParsedCamtEntry, cleanDescription: st
 }
 
 export function buildCamtDescriptionWithMetadata(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
+  const withoutInstruction = renderCamtDescriptionWithMetadata(description, entry);
+  const instructionId = markerInstructionId(entry);
+  if (!instructionId) return withoutInstruction;
+  // The instruction id is persisted only when it costs no description text:
+  // the stored text must stay exactly what a release without `instr=` stored,
+  // so exact duplicate keys and rendered-text checks are unchanged.
+  const withInstruction = renderCamtDescriptionWithMetadata(description, entry, instructionId);
+  const text = (stored: string | undefined) => stripCamtDescriptionMetadata(stored);
+  return withInstruction !== undefined &&
+    extractCamtDescriptionMetadata(withInstruction).instruction_id === instructionId &&
+    text(withInstruction) === text(withoutInstruction) &&
+    text(withInstruction) === markerSafeDescription(description)
+    ? withInstruction
+    : withoutInstruction;
+}
+
+function renderCamtDescriptionWithMetadata(
+  description: string | undefined,
+  entry: ParsedCamtEntry,
+  instructionId?: string,
+): string | undefined {
   const cleanDescription = markerSafeDescription(description);
-  const marker = buildCamtDescriptionMarker(entry, cleanDescription);
+  const marker = buildCamtDescriptionMarker(entry, cleanDescription, instructionId);
   if (!marker) return cleanDescription;
 
   const separatorLength = cleanDescription ? 1 : 0;
@@ -255,7 +296,7 @@ export function buildCamtDescriptionWithMetadata(description: string | undefined
   // findMarkerSignatureMatches instead.)
   const storedMarker = trimmedDescription === cleanDescription
     ? marker
-    : buildCamtDescriptionMarker(entry, trimmedDescription || undefined) ?? marker;
+    : buildCamtDescriptionMarker(entry, trimmedDescription || undefined, instructionId) ?? marker;
   return trimmedDescription ? `${trimmedDescription}\n${storedMarker}` : storedMarker;
 }
 
@@ -288,6 +329,7 @@ export function isTrustedCamtDescriptionMetadata(
     bankAccountName: transaction.bank_account_name ?? undefined,
     description: stripCamtDescriptionMetadata(transaction.description ?? undefined),
     sourceDirection: metadata.source_direction,
+    instructionId: metadata.instruction_id,
   });
   return expectedSignature !== undefined && expectedSignature === metadata.entry_sig;
 }
@@ -462,6 +504,8 @@ export function findMarkerSignatureMatches(
   const cleanDescription = markerSafeDescription(entry.description);
   const signatures = new Set([
     extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
+    // What a release without the `instr=` marker field stored for this entry.
+    extractCamtDescriptionMetadata(renderCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription),
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, true),
   ].filter((signature): signature is string => signature !== undefined));

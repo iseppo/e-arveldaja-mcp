@@ -4464,3 +4464,97 @@ describe("F5 Tier A wins over a nominal match when the foreign gross equals its 
     expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
   });
 });
+
+describe("reconcile_inter_account_transfers: LHV InstrId ↔ Wise reference suffix", () => {
+  const LHV_IBAN = "EE000000000000000001";
+  const WISE_IBAN = "BE00000000000002";
+  const accounts = [
+    { id: 1, account_name_est: "LHV", account_no: LHV_IBAN, iban_code: LHV_IBAN, accounts_dimensions_id: 100 },
+    { id: 2, account_name_est: "Wise", account_no: WISE_IBAN, iban_code: WISE_IBAN, accounts_dimensions_id: 300 },
+  ];
+  const company = "Näide OÜ";
+
+  /** An LHV CAMT DBIT row to the own Wise IBAN, with the InstrId in its signed marker. */
+  function lhvOut(id: number, instructionId: string | undefined, date = "2026-05-04") {
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "C", amount: 500, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: 100, bank_account_name: company, bank_account_no: null, bank_ref_number: null, ref_number: null,
+      description: buildCamtDescriptionWithMetadata(company, {
+        date, amount: 500, currency: "EUR", direction: "DBIT", counterparty_name: company,
+        counterparty_iban: WISE_IBAN, bank_reference: `LHVREF${id}`, description: company, instruction_id: instructionId,
+        duplicate: false, duplicate_transaction_ids: [],
+      }),
+    };
+  }
+  /** A Wise "Money added" row as the Wise import stores it (reference in ref_number). */
+  function wiseIn(id: number, reference: string, date = "2026-05-04") {
+    return {
+      id, status: "PROJECT", is_deleted: false, type: "D", amount: 500, cl_currencies_id: "EUR", date,
+      accounts_dimensions_id: 300, bank_account_name: company, bank_account_no: null, ref_number: reference,
+      description: `WISE:TRANSFER-${id} ${company} (Money added) [source_direction=IN]`,
+    };
+  }
+  const run = async (transactions: unknown[]) => {
+    const { handler } = setupInterAccountTool({ transactions, bankAccounts: accounts, companyName: company });
+    return parseMcpResponse((await handler({})).content[0]!.text) as any;
+  };
+
+  it("breaks a same-amount same-day tie by the instruction id", async () => {
+    const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/69"), wiseIn(12, "NÄIDE OÜ/68")]);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 12 });
+    expect(payload.pairs[0].match_reasons).toContain("instruction_id_matches_reference");
+    expect(payload.ambiguous_pairs).toEqual([]);
+  });
+
+  it("pairs the right legs of two same-key transfers; the in-run same-key guard still reviews the second", async () => {
+    const payload = await run([lhvOut(1, "68"), lhvOut(2, "69"), wiseIn(11, "NÄIDE OÜ/69"), wiseIn(12, "NÄIDE OÜ/68")]);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 12 });
+    expect(payload.ambiguous_pairs).toEqual([]);
+    expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [2, 11] })]);
+  });
+
+  it("reads the id from a capped reference only via the full reference woven into the description", async () => {
+    const longRef = "NÄIDE PIKA NIMEGA OSAÜHING OÜ/68";
+    const woven = { ...wiseIn(12, longRef.slice(0, 20)), description: `WISE:TRANSFER-12 ${company} (Money added) ${longRef}[source_direction=IN]` };
+    const notWoven = { ...wiseIn(11, "NÄIDE PIKA NIMEGA OS") };
+    const payload = await run([lhvOut(1, "68"), woven, notWoven]);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 1, incoming_transaction_id: 12 });
+  });
+
+  it("stays ambiguous when no candidate's reference carries the id", async () => {
+    const payload = await run([lhvOut(1, "68"), lhvOut(2, "69"), wiseIn(11, "NÄIDE OÜ/70"), wiseIn(12, "NÄIDE OÜ/71")]);
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.ambiguous_pairs.length).toBeGreaterThan(0);
+  });
+
+  it("without a stored instruction id keeps the old ambiguous outcome", async () => {
+    const payload = await run([lhvOut(1, undefined), lhvOut(2, undefined), wiseIn(11, "NÄIDE OÜ/69"), wiseIn(12, "NÄIDE OÜ/68")]);
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.ambiguous_pairs.length).toBeGreaterThan(0);
+  });
+
+  it("a mismatching id on the sole candidate does not block the existing match", async () => {
+    const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/70")]);
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.pairs[0].match_reasons).not.toContain("instruction_id_matches_reference");
+  });
+
+  it("sends the pair to review when the id names a lower-scoring candidate (instruction_id_conflict)", async () => {
+    const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/69"), wiseIn(12, "NÄIDE OÜ/68", "2026-05-05")]);
+    expect(payload.matched_pairs).toBe(0);
+    expect(payload.ambiguous_pairs).toEqual([expect.objectContaining({
+      outgoing_transaction_id: 1,
+      candidate_incoming_transaction_ids: [11, 12],
+      code: "instruction_id_conflict",
+    })]);
+  });
+
+  it("ignores the id on a non-Wise incoming row", async () => {
+    const plain = { ...wiseIn(12, "NÄIDE OÜ/68"), description: "Top-up" };
+    const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/69"), plain]);
+    expect(payload.pairs?.some((pair: any) => pair.match_reasons?.includes("instruction_id_matches_reference")) ?? false).toBe(false);
+  });
+});
