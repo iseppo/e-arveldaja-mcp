@@ -543,6 +543,10 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         let proposedBaseNetPrice: number | undefined;
         let proposedBaseVatPrice: number | undefined;
 
+        // A settlement that rounds to 0.00 EUR yields no rate (gross / 0) and
+        // no FX basis: review it instead of proposing a correction.
+        if (isForeignCurrency && !(paidEur > 0)) category = "review";
+
         if (category === "small_rounding") {
           if (isForeignCurrency && full.gross_price && full.gross_price > 0) {
             proposedBaseGrossPrice = paidEur;

@@ -263,6 +263,39 @@ describe("reconcile_currency_rounding", () => {
     expect(c.proposed_base_vat_price).toBe(0);
   });
 
+  it("sends a foreign settlement that rounds to 0.00 EUR to review instead of dividing by zero", async () => {
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 151,
+          number: "AED-001",
+          client_name: "Vendor",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "AED",
+          net_price: 0.01,
+          vat_price: 0,
+          gross_price: 0.01,
+          base_net_price: 0.01,
+          base_vat_price: 0,
+          base_gross_price: 0.01,
+          liability_accounts_id: 2310,
+          liability_accounts_dimensions_id: null,
+          create_date: "2026-05-01",
+          transactions: [251],
+        },
+      ],
+      transactionsById: {
+        251: { id: 251, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 0.01, cl_currencies_id: "AED", currency_rate: 4, items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 151, amount: 0.01, cl_currencies_id: "AED", currency_rate: 4 }] },
+      },
+    });
+
+    const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    const c = payload.candidates.find((candidate: any) => candidate.invoice_id === 151 || candidate.id === 151) ?? payload.candidates[0];
+    expect(c.category).toBe("review");
+    expect(c.proposed_currency_rate).toBeUndefined();
+  });
+
   it("derives base_net as the residual when only vat_price is present (no net_price)", async () => {
     // Degenerate but possible: a foreign invoice carrying vat but no net_price.
     // The tool must still reconcile base_net + base_vat == base_gross, deriving

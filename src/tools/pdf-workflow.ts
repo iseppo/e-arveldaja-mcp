@@ -475,7 +475,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         if (detectedCurrency && detectedCurrency !== "EUR") {
           warnings.push(
             `Invoice in ${detectedCurrency}. Extraction and validation use cl_currencies_id="${detectedCurrency}"; booking with create_purchase_invoice_from_pdf uses currency="${detectedCurrency}" plus currency_rate (${detectedCurrency} per 1 EUR). ` +
-            `For Wise card payments take the rate from the Wise CSV "Source amount (after fees)" / "Target amount (after fees)" and pass base_gross_price when known — that locks the EUR base_* values to the actual conversion and avoids a PARTIALLY_PAID residual balance (jääk).`
+            `For Wise card payments take the rate from the Wise CSV "Target amount (after fees)" / "Source amount (after fees)" and pass base_gross_price when known — that locks the EUR base_* values to the actual conversion and avoids a PARTIALLY_PAID residual balance (jääk).`
           );
         }
 

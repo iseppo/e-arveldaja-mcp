@@ -88,6 +88,17 @@ describe("CAMT marker instruction id (instr=)", () => {
     expect(buildCamtDescriptionWithMetadata(roomy, { ...base, description: roomy, instruction_id: "68" })).toContain("instr=68");
   });
 
+  it("drops instr rather than a marker identity field the sig covers", () => {
+    // A bank reference long enough that " instr=…" would push the marker to a
+    // form without the IBAN; the read-back row has no bank fields of its own.
+    const entry = { ...base, bank_reference: "R".repeat(20) + "/".repeat(12), counterparty_iban: "BE08905767222113", instruction_id: "1234567890" };
+    const description = buildCamtDescriptionWithMetadata(base.description, entry)!;
+    const { instruction_id: _unused, ...withoutId } = entry;
+    expect(description).toBe(buildCamtDescriptionWithMetadata(base.description, withoutId));
+    expect(description).not.toContain("instr=");
+    expect(extractCamtDescriptionMetadata(description).bank_account_no).toBe("BE08905767222113");
+  });
+
   it("a row stored without instr is still the same entry on re-import", () => {
     const entry = { ...base, instruction_id: "68" };
     const old = asStored(buildCamtDescriptionWithMetadata(base.description, base), 7);

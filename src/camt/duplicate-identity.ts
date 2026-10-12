@@ -265,8 +265,16 @@ export function buildCamtDescriptionWithMetadata(description: string | undefined
   // so exact duplicate keys and rendered-text checks are unchanged.
   const withInstruction = renderCamtDescriptionWithMetadata(description, entry, instructionId);
   const text = (stored: string | undefined) => stripCamtDescriptionMetadata(stored);
+  // ...and it must not cost an identity field either: a longer marker can fall
+  // back to a shorter form that drops the IBAN or bank reference the sig
+  // still covers, which would leave the row unverifiable.
+  const identity = (stored: string | undefined) => {
+    const { bank_ref_number, bank_ref_hash, bank_account_no, source_direction, entry_sig } = extractCamtDescriptionMetadata(stored);
+    return JSON.stringify([bank_ref_number, bank_ref_hash, bank_account_no, source_direction, entry_sig !== undefined]);
+  };
   return withInstruction !== undefined &&
     extractCamtDescriptionMetadata(withInstruction).instruction_id === instructionId &&
+    identity(withInstruction) === identity(withoutInstruction) &&
     text(withInstruction) === text(withoutInstruction) &&
     text(withInstruction) === markerSafeDescription(description)
     ? withInstruction
