@@ -72,8 +72,12 @@ export async function computeMissingDocuments(
     if (j.is_deleted) return false;
     if (date_from && j.effective_date < date_from) return false;
     if (date_to && j.effective_date > date_to) return false;
-    // Manual journals (no operation_type) are most likely to need documents
-    return !j.base_document_files_id && !j.operation_type;
+    // Manual journals are most likely to need documents. The live API tags them
+    // operation_type "ENTRY"; a missing operation_type is treated as manual too
+    // (safe side: flag rather than hide). System journals (TRANSACTION,
+    // PURCHASE_INVOICE, SALE_INVOICE, EMTA_*, SALARY_PAYMENT, YEAR_CLOSING) take
+    // their source document from the generating record, so they are excluded.
+    return !j.base_document_files_id && (!j.operation_type || j.operation_type === "ENTRY");
   });
 
   // Transactions without documents

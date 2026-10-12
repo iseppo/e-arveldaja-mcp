@@ -238,7 +238,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         if (params.date_from && (!tx.date || tx.date < params.date_from)) return false;
         if (params.date_to && (!tx.date || tx.date > params.date_to)) return false;
         if (params.status && tx.status !== params.status) return false;
-        if (params.type && tx.type !== params.type) return false;
+        // No client-side `type` check: `type` is write-only (every row reads back
+        // "C"), so comparing it would drop every matching incoming row. A `type`
+        // filter always routes through the server-narrowed listAll above.
         if (params.accounts_dimensions_id !== undefined && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
         // Mirror the rest of the codebase (analyze-unconfirmed, reconciliation):
         // EUR-equivalent comparison, not nominal — otherwise a USD 1000 / 920-EUR
