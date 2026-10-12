@@ -4,6 +4,7 @@ import { buildInvoiceIndex, getIndexedCandidates, type InvoiceIndex } from "./in
 import {
   matchScore,
   getInvoiceMatchEligibility,
+  EXACT_INVOICE_BASE_AMOUNT,
   isAmbiguousForeignInvoiceBase,
   isUnpaidPaymentStatus,
   sameAmountToTheCent,
@@ -83,6 +84,46 @@ function hasProvenDirectionFor(tx: Transaction, type: MatchCandidate["type"]): b
   return verifiedCamtDirection(tx) === (type === "sale_invoice" ? "incoming" : "outgoing");
 }
 
+/** A signed CAMT marker (it carries a `sig`) whose checksum does not verify. */
+function camtMarkerFailsChecksum(tx: Transaction): boolean {
+  const metadata = extractCamtDescriptionMetadata(tx.description);
+  return metadata.entry_sig !== undefined && !isTrustedCamtDescriptionMetadata(tx, metadata);
+}
+
+/** An explicitly stated ISO currency code, else `undefined` (missing, null, blank or malformed). */
+function explicitCurrency(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : undefined;
+}
+
+/**
+ * Why a single exact match lacks the currency evidence an automatic confirm
+ * needs, or `undefined` when it has it. The scorer compares bare numbers, so
+ * a row with no currency, or a USD row without a base amount, nominally equals
+ * a EUR invoice and scores `exact_amount`. Admitted only:
+ * - both currencies explicit and equal, cents-exact (`exact_amount`);
+ * - an explicit EUR row vs a foreign invoice's structured EUR base (Tier A,
+ *   `exact_invoice_base_amount`);
+ * - a foreign row whose finite `base_amount` equals a EUR invoice to the cent.
+ */
+function currencyEvidenceGap(tx: Transaction, inv: SaleInvoice | PurchaseInvoice | undefined, reasons: readonly string[]): string | undefined {
+  const txCurrency = explicitCurrency(tx.cl_currencies_id);
+  if (txCurrency === undefined) return "the transaction carries no explicit currency";
+  const invoiceCurrency = explicitCurrency(inv?.cl_currencies_id);
+  if (invoiceCurrency === undefined) return "the invoice carries no explicit currency";
+  if (txCurrency === invoiceCurrency) {
+    return reasons.includes("exact_amount") ? undefined : `${txCurrency} amounts are not cents-exact`;
+  }
+  if (reasons.includes(EXACT_INVOICE_BASE_AMOUNT)) return undefined;
+  const baseMatchesEurInvoice = invoiceCurrency === "EUR" &&
+    typeof tx.base_amount === "number" && Number.isFinite(tx.base_amount) &&
+    sameAmountToTheCent(tx.base_amount, inv?.gross_price ?? Number.NaN);
+  return baseMatchesEurInvoice
+    ? undefined
+    : `a ${txCurrency} transaction without an equal EUR base amount against a ${invoiceCurrency} invoice`;
+}
+
 /**
  * The ref-number rule: a payment carrying an invoice's structured reference
  * number at the exact EUR amount scores only 80 (exact_amount + ref_number) and
@@ -98,7 +139,9 @@ function hasProvenDirectionFor(tx: Transaction, type: MatchCandidate["type"]): b
  * - the reference names exactly one open invoice of either kind;
  * - the invoice is CONFIRMED and unpaid ("", null, NOT_PAID).
  * The caller still requires a single candidate, consumes the invoice key and
- * applies the third-party-payer partition.
+ * applies the third-party-payer partition. A match that fails ONLY because the
+ * row's CAMT marker checksum does not verify is reported to
+ * `unverifiedMarkerMatches`, so the owner is told why it was not admitted.
  */
 function isRefNumberExactMatch(
   tx: Transaction,
@@ -107,15 +150,19 @@ function isRefNumberExactMatch(
   reasons: readonly string[],
   saleIndex: InvoiceIndex<SaleInvoice>,
   purchaseIndex: InvoiceIndex<PurchaseInvoice>,
+  unverifiedMarkerMatches?: string[],
 ): boolean {
   if (!reasons.includes("exact_amount") || !reasons.includes("ref_number")) return false;
-  if (typeof tx.cl_currencies_id !== "string" || tx.cl_currencies_id.trim().toUpperCase() !== "EUR") return false;
-  if (typeof inv.cl_currencies_id !== "string" || inv.cl_currencies_id.trim().toUpperCase() !== "EUR") return false;
+  if (explicitCurrency(tx.cl_currencies_id) !== "EUR" || explicitCurrency(inv.cl_currencies_id) !== "EUR") return false;
   if (tx.base_amount != null && !sameAmountToTheCent(tx.base_amount, tx.amount)) return false;
-  if (!hasProvenDirectionFor(tx, type)) return false;
   if (inv.status !== "CONFIRMED" || !isUnpaidPaymentStatus(inv.payment_status)) return false;
   const ref = tx.ref_number ?? "";
-  return (saleIndex.byRef.get(ref)?.length ?? 0) + (purchaseIndex.byRef.get(ref)?.length ?? 0) === 1;
+  if ((saleIndex.byRef.get(ref)?.length ?? 0) + (purchaseIndex.byRef.get(ref)?.length ?? 0) !== 1) return false;
+  if (!hasProvenDirectionFor(tx, type)) {
+    if (camtMarkerFailsChecksum(tx)) unverifiedMarkerMatches?.push(`${type} #${inv.id}`);
+    return false;
+  }
+  return true;
 }
 
 export function collectExactMatchCandidates(
@@ -124,6 +171,7 @@ export function collectExactMatchCandidates(
   purchaseIndex: InvoiceIndex<PurchaseInvoice>,
   threshold: number,
   consumedInvoiceKeys: Set<string>,
+  unverifiedMarkerMatches?: string[],
 ): MatchCandidate[] {
   const candidates: MatchCandidate[] = [];
   const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
@@ -136,7 +184,7 @@ export function collectExactMatchCandidates(
       if (consumedInvoiceKeys.has(`sale:${inv.id!}`)) continue;
       const { confidence, reasons } = matchScore(tx, inv, tx.amount);
       const byRule = confidence < threshold && refRuleApplies &&
-        isRefNumberExactMatch(tx, inv, "sale_invoice", reasons, saleIndex, purchaseIndex);
+        isRefNumberExactMatch(tx, inv, "sale_invoice", reasons, saleIndex, purchaseIndex, unverifiedMarkerMatches);
       if (confidence >= threshold || byRule) {
         candidates.push({
           type: "sale_invoice", id: inv.id!, number: inv.number ?? "",
@@ -154,7 +202,7 @@ export function collectExactMatchCandidates(
       if (consumedInvoiceKeys.has(`purchase:${inv.id!}`)) continue;
       const { confidence, reasons } = matchScore(tx, inv, tx.amount);
       const byRule = confidence < threshold && refRuleApplies &&
-        isRefNumberExactMatch(tx, inv, "purchase_invoice", reasons, saleIndex, purchaseIndex);
+        isRefNumberExactMatch(tx, inv, "purchase_invoice", reasons, saleIndex, purchaseIndex, unverifiedMarkerMatches);
       if (confidence >= threshold || byRule) {
         candidates.push({
           type: "purchase_invoice", id: inv.id!, number: inv.number ?? "",
@@ -181,9 +229,19 @@ export function computeExactMatchProjection(
   const skipped: Array<{ transaction_id?: number; reason: string }> = [];
   const thirdPartyPayerReviews: ThirdPartyPayerReview[] = [];
   const consumedInvoiceKeys = new Set<string>();
+  const salesById = new Map(openSales.map(inv => [inv.id, inv]));
+  const purchasesById = new Map(openPurchases.map(inv => [inv.id, inv]));
 
   for (const tx of unconfirmed) {
-    const candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys);
+    const unverifiedMarkerMatches: string[] = [];
+    const candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys, unverifiedMarkerMatches);
+    if (candidates.length === 0 && unverifiedMarkerMatches.length > 0) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: `direction_unproven: CAMT marker checksum does not verify; ${unverifiedMarkerMatches.join(", ")} would match by reference number and exact amount; confirm manually.`,
+      });
+      continue;
+    }
     if (candidates.length > 1 && isAmbiguousForeignInvoiceBase(candidates.map(c => ({ confidence: c.confidence, reasons: c.match_reasons })))) {
       skipped.push({
         transaction_id: tx.id,
@@ -231,6 +289,17 @@ export function computeExactMatchProjection(
       continue;
     }
 
+    // Every automatic confirm needs explicit, compatible currency evidence.
+    const invoice = match.type === "sale_invoice" ? salesById.get(match.id) : purchasesById.get(match.id);
+    const currencyGap = currencyEvidenceGap(tx, invoice, match.match_reasons);
+    if (currencyGap !== undefined) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: `currency_unproven: ${match.type} #${match.id} matches but ${currencyGap}; confirm manually.`,
+      });
+      continue;
+    }
+
     // Without a verified direction the row may be money going the other way.
     // Only the invoice's own counterparty is evidence that does not depend on
     // the direction: an equal clients_id, or a payer name equal to the invoice
@@ -245,7 +314,9 @@ export function computeExactMatchProjection(
     if (!sameCounterparty && !hasProvenDirectionFor(tx, match.type)) {
       skipped.push({
         transaction_id: tx.id,
-        reason: `direction_unproven: ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`,
+        reason: camtMarkerFailsChecksum(tx)
+          ? `direction_unproven: CAMT marker checksum does not verify; ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`
+          : `direction_unproven: ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`,
       });
       continue;
     }

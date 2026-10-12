@@ -248,7 +248,15 @@ export function buildCamtDescriptionWithMetadata(description: string | undefined
   const trimmedDescription = cleanDescription.length > descriptionBudget
     ? cleanDescription.slice(0, descriptionBudget).trimEnd()
     : cleanDescription;
-  return trimmedDescription ? `${trimmedDescription}\n${marker}` : marker;
+  // The sig covers the text actually stored, so a truncated row still passes
+  // its checksum. The sig has a fixed width, so re-signing keeps the marker's
+  // length and the budget computed above. (Releases before this signed the
+  // full text; such truncated rows stay unverifiable and are matched by
+  // findMarkerSignatureMatches instead.)
+  const storedMarker = trimmedDescription === cleanDescription
+    ? marker
+    : buildCamtDescriptionMarker(entry, trimmedDescription || undefined) ?? marker;
+  return trimmedDescription ? `${trimmedDescription}\n${storedMarker}` : storedMarker;
 }
 
 export function isTrustedCamtDescriptionMetadata(
@@ -407,9 +415,11 @@ function storedTextIsRenderedDescription(stored: string | null | undefined, clea
 
 /**
  * Stored rows on this dimension whose CAMT marker `sig` is the one this entry
- * produces (current, or the dir-less legacy variant) although the marker fails
- * its checksum: the sig is taken over the full description before the stored
- * text is cut to the cap, and read-back drops bank_ref_number/bank_account_no.
+ * produces (over the stored text, over the full text as releases before
+ * stored-text signing wrote it, or the dir-less legacy variant) although the
+ * marker fails its checksum: an older sig was taken over the full description
+ * before the stored text was cut to the cap, and read-back drops
+ * bank_ref_number/bank_account_no.
  * The sig is only a hint; every surviving field must corroborate it. Only
  * `clients_id` is ignored (legitimately reassigned on confirm).
  */
@@ -422,6 +432,7 @@ export function findMarkerSignatureMatches(
   if (!entryReferenceKey) return [];
   const cleanDescription = markerSafeDescription(entry.description);
   const signatures = new Set([
+    extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription),
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, true),
   ].filter((signature): signature is string => signature !== undefined));

@@ -20,11 +20,12 @@ vi.mock("../../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(
 const matchingTx = () => ({
   id: 1, status: "PROJECT", is_deleted: false, type: "D",
   amount: 100, base_amount: 100, ref_number: "REF1", clients_id: 42,
-  date: "2026-01-10", accounts_dimensions_id: 9, accounts_id: 1020,
+  date: "2026-01-10", accounts_dimensions_id: 9, accounts_id: 1020, cl_currencies_id: "EUR",
 });
 const matchingSale = () => ({
   id: 501, number: "INV-1", clients_id: 42, gross_price: 100, base_gross_price: 100,
   bank_ref_number: "REF1", payment_status: "NOT_PAID", status: "CONFIRMED", client_name: "Acme",
+  cl_currencies_id: "EUR",
 });
 
 function setup(overrides: Record<string, unknown> = {}) {
@@ -65,12 +66,12 @@ const INVOICE_CLIENTS_ID = 2327264;
 const thirdPartyTx = () => ({
   id: 1210, status: "PROJECT", is_deleted: false, type: "D",
   amount: 1488.0, base_amount: 1488.0, ref_number: "REF-1488",
-  clients_id: PAYER_CLIENTS_ID, date: "2026-09-10", accounts_dimensions_id: 9,
+  clients_id: PAYER_CLIENTS_ID, date: "2026-09-10", accounts_dimensions_id: 9, cl_currencies_id: "EUR",
 });
 const thirdPartySale = () => ({
   id: 501, number: "ARV-501", clients_id: INVOICE_CLIENTS_ID, gross_price: 1488.0,
   base_gross_price: 1488.0, bank_ref_number: "REF-1488",
-  payment_status: "NOT_PAID", status: "CONFIRMED", client_name: "EIS",
+  payment_status: "NOT_PAID", status: "CONFIRMED", client_name: "EIS", cl_currencies_id: "EUR",
 });
 
 function setupThirdPartyPayer() {

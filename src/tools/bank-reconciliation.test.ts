@@ -46,16 +46,16 @@ function setupReconciliationTool(options: {
   const api = {
     transactions: {
       invalidateListCache: vi.fn(),
-      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      listAll: vi.fn().mockResolvedValue(withLiveCurrency(options.transactions) ?? []),
       confirm: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
       invalidateListCache: vi.fn(),
-      listAll: vi.fn().mockResolvedValue(options.sales ?? []),
+      listAll: vi.fn().mockResolvedValue(withLiveCurrency(options.sales) ?? []),
     },
     purchaseInvoices: {
       invalidateListCache: vi.fn(),
-      listAll: vi.fn().mockResolvedValue(options.purchases ?? []),
+      listAll: vi.fn().mockResolvedValue(withLiveCurrency(options.purchases) ?? []),
     },
     readonly: {
       getBankAccounts: vi.fn().mockResolvedValue([]),
@@ -694,11 +694,25 @@ describe("reconcile_transactions", () => {
   });
 });
 
-function createAutoConfirmApi(options: {
+/**
+ * Live rows and invoices always carry an explicit currency ("EUR" on every
+ * bank row read back); a fixture that leaves it out gets the live default.
+ * An explicit `cl_currencies_id: undefined` still overrides it.
+ */
+function withLiveCurrency(rows: unknown[] | undefined): unknown[] | undefined {
+  return rows?.map(row => ({ cl_currencies_id: "EUR", ...(row as Record<string, unknown>) }));
+}
+
+function createAutoConfirmApi(rawOptions: {
   transactions?: unknown[];
   sales?: unknown[];
   purchases?: unknown[];
 } = {}) {
+  const options = {
+    transactions: withLiveCurrency(rawOptions.transactions),
+    sales: withLiveCurrency(rawOptions.sales),
+    purchases: withLiveCurrency(rawOptions.purchases),
+  };
   return {
     transactions: {
       invalidateListCache: vi.fn(),
@@ -3708,7 +3722,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
   const nonEurTx = { ...matchingTx, cl_currencies_id: "USD", base_amount: 92 };
   // Matching non-EUR invoice: nominal 100 USD, EUR base 92 — the tx confirms
   // cleanly (exact_amount + exact base), so the flow reaches the dup guard.
-  const nonEurSale = { ...matchingSale, base_gross_price: 92 };
+  const nonEurSale = { ...matchingSale, cl_currencies_id: "USD", base_gross_price: 92 };
   const duplicateJournal92 = {
     ...duplicateJournal,
     id: 556,

@@ -32,6 +32,7 @@ function tx(overrides: Partial<Transaction> = {}): Transaction {
     clients_id: PAYER,
     date: "2026-09-10",
     accounts_dimensions_id: 9,
+    cl_currencies_id: "EUR",
     ...overrides,
   } as Transaction;
 }
@@ -47,6 +48,7 @@ function sale(overrides: Partial<SaleInvoice> = {}): SaleInvoice {
     payment_status: "NOT_PAID",
     status: "CONFIRMED",
     client_name: "EIS",
+    cl_currencies_id: "EUR",
     ...overrides,
   } as SaleInvoice;
 }
@@ -511,5 +513,117 @@ describe("computeExactMatchProjection direction proof for score-qualified matche
   it("auto-confirms a partial-name match whose verified CAMT direction matches the invoice kind", () => {
     const projection = computeExactMatchProjection([withSignedCamtMarker(row(), "CRDT")], [vendorSale()], NO_PURCHASES, DEFAULT);
     expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence, c.autoConfirmRule])).toEqual([[1210, 501, 90, undefined]]);
+  });
+});
+
+describe("computeExactMatchProjection currency evidence", () => {
+  // exact_amount (40) + ref_number (40) + client_name_partial (10) = 90, the
+  // default, on an unsigned live-shaped row whose payer name equals the
+  // invoice client. The scorer compares bare numbers, so currency must be
+  // proven separately before anything is confirmed automatically.
+  const DEFAULT = EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
+  const vendorRow = (overrides: Partial<Transaction> = {}) => tx({
+    id: 2001, type: "C", amount: 100, base_amount: undefined, ref_number: "202618", clients_id: undefined,
+    bank_account_name: "Vendor", cl_currencies_id: "EUR", description: "Arve 202618", ...overrides,
+  } as Partial<Transaction>);
+  const vendorSale = (overrides: Partial<SaleInvoice> = {}) => sale({
+    id: 701, number: "ARV-701", client_name: "Vendor", gross_price: 100, base_gross_price: 100,
+    bank_ref_number: "202618", payment_status: "", cl_currencies_id: "EUR", ...overrides,
+  } as Partial<SaleInvoice>);
+
+  it("still auto-confirms an explicit EUR row against a EUR invoice", () => {
+    const projection = computeExactMatchProjection([vendorRow()], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.currency, c.confidence])).toEqual([[2001, 701, "EUR", 90]]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["blank", "  "],
+  ])("skips a row with %s currency as currency_unproven at score 90", (_label, currency) => {
+    const projection = computeExactMatchProjection(
+      [vendorRow({ cl_currencies_id: currency as never })], [vendorSale()], NO_PURCHASES, DEFAULT,
+    );
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 2001,
+      reason: expect.stringMatching(/^currency_unproven: sale_invoice #701 .*no explicit currency/),
+    }]);
+  });
+
+  it("skips an invoice without an explicit currency", () => {
+    const projection = computeExactMatchProjection(
+      [vendorRow()], [vendorSale({ cl_currencies_id: undefined } as never)], NO_PURCHASES, DEFAULT,
+    );
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped[0]!.reason).toMatch(/^currency_unproven: .*invoice carries no explicit currency/);
+  });
+
+  it("never auto-confirms a USD row without a base amount against a EUR invoice", () => {
+    const projection = computeExactMatchProjection(
+      [vendorRow({ cl_currencies_id: "USD" })], [vendorSale()], NO_PURCHASES, DEFAULT,
+    );
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 2001, reason: expect.stringContaining("currency_unproven") }]);
+  });
+
+  it("auto-confirms a USD row whose finite EUR base amount equals the EUR invoice", () => {
+    const projection = computeExactMatchProjection(
+      [vendorRow({ cl_currencies_id: "USD", base_amount: 100 })], [vendorSale()], NO_PURCHASES, DEFAULT,
+    );
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId])).toEqual([[2001, 701]]);
+  });
+
+  it("still confirms the Tier A foreign-invoice base path (EUR row vs USD invoice base)", () => {
+    const usdInvoice = {
+      id: 5487, number: "INV-5487", clients_id: 77, client_name: "Acme Cloud LLC",
+      cl_currencies_id: "USD", gross_price: 334.46, currency_rate: 1.1532, base_gross_price: 290.03,
+      bank_ref_number: "RF-5487", payment_status: "", status: "CONFIRMED",
+    } as unknown as PurchaseInvoice;
+    const eurRow = tx({ id: 901, type: "C", amount: 290.03, base_amount: undefined, clients_id: 77, ref_number: "RF-5487" } as Partial<Transaction>);
+    const projection = computeExactMatchProjection([eurRow], [], [usdInvoice], 85);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.amount])).toEqual([[901, 5487, 290.03]]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it("binds a currency_unproven skip into the plan fingerprint", () => {
+    const confirmed = computeExactMatchProjection([vendorRow()], [vendorSale()], NO_PURCHASES, DEFAULT);
+    const skipped = computeExactMatchProjection([vendorRow({ cl_currencies_id: undefined })], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(exactMatchFingerprint(skipped, DEFAULT)).not.toBe(exactMatchFingerprint(confirmed, DEFAULT));
+  });
+});
+
+describe("computeExactMatchProjection explains an unverifiable CAMT marker", () => {
+  const DEFAULT = EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
+  const row = (overrides: Partial<Transaction> = {}) => tx({
+    type: "C", cl_currencies_id: "EUR", clients_id: undefined, description: "Payment ARV-501", ...overrides,
+  } as Partial<Transaction>);
+  const liveSale = () => sale({ payment_status: "", client_name: "Vendor" } as Partial<SaleInvoice>);
+  const tamper = (signed: Transaction) => ({ ...signed, description: signed.description!.replace("Payment", "Paymant") });
+
+  it("skips a ref_number_exact match whose marker fails its checksum with that reason", () => {
+    const tampered = tamper(withSignedCamtMarker(row(), "CRDT"));
+    expect(isTrustedCamtDescriptionMetadata(tampered)).toBe(false);
+    const projection = computeExactMatchProjection([tampered], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 1210,
+      reason: expect.stringMatching(/^direction_unproven: CAMT marker checksum does not verify; sale_invoice #501/),
+    }]);
+  });
+
+  it("names the failed checksum on a score-qualified direction_unproven skip", () => {
+    const tampered = tamper(withSignedCamtMarker(row({ bank_account_name: "Vendor Logistics" }), "CRDT"));
+    const projection = computeExactMatchProjection([tampered], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 1210,
+      reason: expect.stringMatching(/^direction_unproven: CAMT marker checksum does not verify; sale_invoice #501 matches/),
+    }]);
+  });
+
+  it("keeps the plain direction_unproven reason for an unsigned row", () => {
+    const projection = computeExactMatchProjection([row({ bank_account_name: "Vendor Logistics" })], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.skipped[0]!.reason).toMatch(/^direction_unproven: sale_invoice #501/);
   });
 });
