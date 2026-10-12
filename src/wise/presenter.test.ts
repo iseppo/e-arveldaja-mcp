@@ -117,11 +117,11 @@ describe("renderWiseImportCompact", () => {
     const data = makeData(1);
     const advisory = {
       row_index: 0, wise_id: "WISE-0", date: "2026-02-01", supplier_name: "Vendor 0 OÜ",
-      target_amount: 20, target_currency: "USD", source_amount_eur: 17.07, wise_currency_rate: 0.8535,
+      target_amount: 20, target_currency: "USD", source_amount_eur: 17.07, wise_currency_rate: 1.171646,
       invoice_id: 700, invoice_number: "USD-700", invoice_currency: "USD", invoice_gross: 20,
       category: "foreign_currency_lock" as const,
-      proposed_action: "Advisory, not applied: lock invoice USD-700 to Wise rate: base_gross_price 17.10 → 17.07 EUR, currency_rate → 0.8535.",
-      proposed_correction: { currency_rate: 0.8535, base_gross_price: 17.07 },
+      proposed_action: "Advisory, not applied: lock invoice USD-700 to Wise rate: base_gross_price 17.10 → 17.07 EUR, currency_rate → 1.171646.",
+      proposed_correction: { currency_rate: 1.171646, base_gross_price: 17.07 },
       current_object_state: {} as never,
     };
     data.invoiceFixCandidates = [

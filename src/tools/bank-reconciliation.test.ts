@@ -6,6 +6,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
+import { getComparableBaseInvoiceAmount } from "../banking/reconciliation/invoice-index.js";
 
 /**
  * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
@@ -2927,7 +2928,7 @@ describe("reconcile_inter_account_transfers", () => {
       for (const direction of directions) {
         const transaction = {
           id: direction.id, status: "PROJECT", is_deleted: false, type: direction.type,
-          amount: 100, currency_rate: 0.9, cl_currencies_id: "USD", date: "2026-07-12",
+          amount: 100, currency_rate: 1.111111, cl_currencies_id: "USD", date: "2026-07-12",
           accounts_dimensions_id: direction.source, bank_account_name: "Test OÜ", bank_account_no: null,
         };
         const dry = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
@@ -2989,7 +2990,7 @@ describe("reconcile_inter_account_transfers", () => {
     it("H10 prefers agreeing foreign base evidence over rate evidence", async () => {
       const transactions = [8401, 8402].map(id => ({
         id, status: "PROJECT", is_deleted: false, type: "C", amount: 100,
-        base_amount: 90, currency_rate: 0.8999, cl_currencies_id: "USD", date: "2026-07-13",
+        base_amount: 90, currency_rate: 1.11123, cl_currencies_id: "USD", date: "2026-07-13",
         accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
       }));
       const run = setupInterAccountTool({ transactions, bankAccounts: twoAccounts });
@@ -3013,7 +3014,7 @@ describe("reconcile_inter_account_transfers", () => {
       const control = setupInterAccountTool({
         transactions: [{
           id: 8403, status: "PROJECT", is_deleted: false, type: "C", amount: 100,
-          base_amount: 90, currency_rate: 0.90004, cl_currencies_id: "USD", date: "2026-07-14",
+          base_amount: 90, currency_rate: 1.11106, cl_currencies_id: "USD", date: "2026-07-14",
           accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
         }],
         bankAccounts: twoAccounts,
@@ -3027,12 +3028,12 @@ describe("reconcile_inter_account_transfers", () => {
         transactions: [
           {
             id: 8404, status: "PROJECT", is_deleted: false, type: "C", amount: 1,
-            base_amount: 0.07, currency_rate: 0.06, cl_currencies_id: "USD", date: "2026-07-15",
+            base_amount: 0.07, currency_rate: 16.67, cl_currencies_id: "USD", date: "2026-07-15",
             accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
           },
           {
             id: 8405, status: "PROJECT", is_deleted: false, type: "C", amount: 1,
-            currency_rate: 0.07, cl_currencies_id: "USD", date: "2026-07-15",
+            currency_rate: 14.29, cl_currencies_id: "USD", date: "2026-07-15",
             accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
           },
         ],
@@ -3047,7 +3048,7 @@ describe("reconcile_inter_account_transfers", () => {
       const smallTwoCent = setupInterAccountTool({
         transactions: [{
           id: 8406, status: "PROJECT", is_deleted: false, type: "C", amount: 1,
-          base_amount: 0.07, currency_rate: 0.05, cl_currencies_id: "USD", date: "2026-07-16",
+          base_amount: 0.07, currency_rate: 20, cl_currencies_id: "USD", date: "2026-07-16",
           accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
         }],
         bankAccounts: twoAccounts,
@@ -3112,7 +3113,7 @@ describe("reconcile_inter_account_transfers", () => {
         transactions: [
           {
             id: 8501, status: "PROJECT", is_deleted: false, type: "C", amount: 100,
-            base_amount: 90, currency_rate: 0.8998, cl_currencies_id: "USD", date: "2026-07-15",
+            base_amount: 90, currency_rate: 1.11136, cl_currencies_id: "USD", date: "2026-07-15",
             accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
           },
           {
@@ -3135,7 +3136,7 @@ describe("reconcile_inter_account_transfers", () => {
       const hugeForeignRun = setupInterAccountTool({
         transactions: [{
           id: 8503, status: "PROJECT", is_deleted: false, type: "C", amount: 1e308,
-          base_amount: 1e308, currency_rate: 0.5, cl_currencies_id: "USD", date: "2026-07-16",
+          base_amount: 1e308, currency_rate: 2, cl_currencies_id: "USD", date: "2026-07-16",
           accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
         }],
         bankAccounts: twoAccounts,
@@ -3235,8 +3236,8 @@ describe("reconcile_inter_account_transfers", () => {
         { id: 8707, fields: { amount: Number.POSITIVE_INFINITY, cl_currencies_id: "EUR" }, code: "one_sided_amount_invalid", reason: "The one-sided transfer amount must be a finite positive number.", raw: Number.POSITIVE_INFINITY },
         { id: 8708, fields: { amount: 100, cl_currencies_id: "USD", base_amount: 0, currency_rate: 0.9 }, code: "one_sided_base_amount_invalid", reason: "The one-sided transfer base amount must be a finite positive number when provided.", raw: 0 },
         { id: 8709, fields: { amount: 100, cl_currencies_id: "USD", currency_rate: 0 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 0 },
-        { id: 8710, fields: { amount: Number.MAX_VALUE, cl_currencies_id: "USD", currency_rate: 2 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 2 },
-        { id: 8711, fields: { amount: Number.MIN_VALUE, cl_currencies_id: "USD", currency_rate: 0.5 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 0.5 },
+        { id: 8710, fields: { amount: Number.MAX_VALUE, cl_currencies_id: "USD", currency_rate: 0.5 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 0.5 },
+        { id: 8711, fields: { amount: Number.MIN_VALUE, cl_currencies_id: "USD", currency_rate: 2 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 2 },
         { id: 8712, fields: { amount: 0, cl_currencies_id: 42, base_amount: -1, currency_rate: -1 }, code: "one_sided_amount_invalid", reason: "The one-sided transfer amount must be a finite positive number.", raw: 0 },
         { id: 8713, fields: { amount: 100, cl_currencies_id: 42, base_amount: -1, currency_rate: -1 }, code: "one_sided_currency_invalid", reason: "The one-sided transfer currency must be an explicit three-letter ASCII code.", raw: 42 },
         { id: 8714, fields: { amount: 100, cl_currencies_id: "USD", base_amount: 0, currency_rate: 0 }, code: "one_sided_base_amount_invalid", reason: "The one-sided transfer base amount must be a finite positive number when provided.", raw: 0 },
@@ -3462,15 +3463,23 @@ describe("matchScore", () => {
 
   it("returns exact_base_amount when base amounts match via currency_rate fallback", () => {
     // Invoice has no base_gross_price but has currency_rate.
-    // getComparableBaseInvoiceAmount computes: gross_price * currency_rate = 100 * 0.92 = 92
-    // tx.base_amount = 92, txAmount = 1000 (SEK), invoice.gross_price = 100 (USD)
-    // txAmount (1000) !== invoiceAmount (100) so exact_amount is skipped;
-    // baseAmount (92) === baseInvoiceAmount (92) triggers exact_base_amount.
-    const tx = { ...baseTx, amount: 1000, base_amount: 92, cl_currencies_id: "SEK" };
-    const invoice = { gross_price: 100, currency_rate: 0.92 };
+    // currency_rate is FOREIGN units per 1 EUR (ECB convention), so
+    // getComparableBaseInvoiceAmount computes gross_price / currency_rate = 108 / 1.08 = 100.
+    // tx.base_amount = 100, txAmount = 1000 (SEK), invoice.gross_price = 108 (USD)
+    // txAmount (1000) !== invoiceAmount (108) so exact_amount is skipped;
+    // baseAmount (100) === baseInvoiceAmount (100) triggers exact_base_amount.
+    const tx = { ...baseTx, amount: 1000, base_amount: 100, cl_currencies_id: "SEK" };
+    const invoice = { gross_price: 108, currency_rate: 1.08 };
     const result = matchScore(tx, invoice, 1000);
     expect(result.reasons).toContain("exact_base_amount");
     expect(result.confidence).toBeGreaterThanOrEqual(40);
+  });
+
+  it("pins the currency_rate fallback as base = gross / rate (foreign units per 1 EUR)", () => {
+    expect(getComparableBaseInvoiceAmount({ gross_price: 108, currency_rate: 1.08 })).toBe(100);
+    // The inverted (EUR-per-foreign) reading would give 116.64 and must not match.
+    const tx = { ...baseTx, amount: 1000, base_amount: 116.64, cl_currencies_id: "SEK" };
+    expect(matchScore(tx, { gross_price: 108, currency_rate: 1.08 }, 1000).reasons).not.toContain("exact_base_amount");
   });
 
   it("returns exact_base_amount when base_gross_price is explicit on invoice", () => {

@@ -2873,7 +2873,7 @@ describe("wise import tool", () => {
         cl_currencies_id: "USD",
         gross_price: 100,
         base_gross_price: 95,
-        currency_rate: 0.95,
+        currency_rate: 1.052632,
       }],
     });
 
@@ -2973,7 +2973,7 @@ describe("wise import tool", () => {
       expect.objectContaining({
         invoice_id: 700,
         result: "advisory",
-        proposed_correction: { currency_rate: 0.9, base_gross_price: 90 },
+        proposed_correction: { currency_rate: 1.111111, base_gross_price: 90 },
       }),
     ]);
     expect(payload.command_count).toBe(4);
@@ -3005,7 +3005,7 @@ describe("wise import tool", () => {
       purchaseInvoices: [{
         id: 741, status: "CONFIRMED", payment_status: "UNPAID", number: injectedNumber,
         client_name: "Plain Vendor", create_date: "2026-06-10", cl_currencies_id: "USD",
-        gross_price: 100, base_gross_price: 95, currency_rate: 0.95,
+        gross_price: 100, base_gross_price: 95, currency_rate: 1.052632,
       }],
     });
     const payload = parseWiseResponse(await preview.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
@@ -3071,7 +3071,7 @@ describe("wise import tool", () => {
         cl_currencies_id: "USD",
         gross_price: 100,
         base_gross_price: 95,
-        currency_rate: 0.95,
+        currency_rate: 1.052632,
       }],
     });
     const installExactBytes = (csv: string) => {
@@ -3194,7 +3194,7 @@ describe("wise import tool", () => {
       cl_currencies_id: "USD",
       gross_price: 100,
       base_gross_price: 94,
-      currency_rate: 0.94,
+      currency_rate: 1.06383,
     }] } });
 
     expect(baseline.payload.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
@@ -3641,7 +3641,7 @@ describe("wise import tool", () => {
         cl_currencies_id: "USD",
         gross_price: 100,
         base_gross_price: 95,
-        currency_rate: 0.95,
+        currency_rate: 1.052632,
       }],
       purchaseInvoiceUpdate,
     });
@@ -3970,7 +3970,7 @@ describe("wise import tool", () => {
       payment_status: "UNPAID",
       gross_price: 100,
       base_gross_price: 95,
-      currency_rate: 0.95,
+      currency_rate: 1.052632,
     };
     mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
       id: "M04-STALE-INVOICE",
@@ -4335,7 +4335,7 @@ describe("wise import tool", () => {
         cl_currencies_id: "USD",
         gross_price: 100,
         base_gross_price: 95,
-        currency_rate: 0.95,
+        currency_rate: 1.052632,
       })),
     });
     const ambiguousPayload = parseWiseResponse(await ambiguous.handler({
@@ -4440,7 +4440,7 @@ describe("wise import tool", () => {
         cl_currencies_id: "USD",
         gross_price: 100,
         base_gross_price: 95,
-        currency_rate: 0.95,
+        currency_rate: 1.052632,
       }],
     });
     const invoicePayload = parseWiseResponse(await invoicePreview.handler({
@@ -4469,9 +4469,9 @@ describe("wise import tool", () => {
         source_amount_eur: 90,
         target_amount: 100,
         target_currency: "USD",
-        wise_currency_rate: 0.9,
+        wise_currency_rate: 1.111111,
         result: "advisory",
-        proposed_correction: { currency_rate: 0.9, base_gross_price: 90 },
+        proposed_correction: { currency_rate: 1.111111, base_gross_price: 90 },
       }),
     ]);
     // Advisory corrections are not an approval impact.
@@ -4501,10 +4501,10 @@ describe("wise import tool", () => {
     const setup = setupWiseTool([], undefined, {
       purchaseInvoices: [{
         id: 741, status: "CONFIRMED", payment_status: paymentStatus, number: "USD-741", client_name: "Ordinary Vendor",
-        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 0.95,
+        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 1.052632,
       }, {
         id: 742, status: "CONFIRMED", payment_status: "PAID", number: "USD-742", client_name: "Ordinary Vendor",
-        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 0.95,
+        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 1.052632,
       }],
     });
     const payload = parseWiseResponse(await setup.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
@@ -4512,7 +4512,7 @@ describe("wise import tool", () => {
     expect(payload.invoice_currency_fixes.candidates).toEqual([expect.objectContaining({
       invoice_id: 741,
       result: "advisory",
-      proposed_correction: { currency_rate: 0.9, base_gross_price: 90 },
+      proposed_correction: { currency_rate: 1.111111, base_gross_price: 90 },
     })]);
     expectNoWiseMutations(setup.api);
   });
@@ -4534,7 +4534,7 @@ describe("wise import tool", () => {
           id: 700, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
           number: "USD-700", client_name: "OpenAI",
           cl_currencies_id: "USD", gross_price: 20,
-          base_gross_price: 17.10, currency_rate: 0.855,
+          base_gross_price: 17.10, currency_rate: 1.169591,
           create_date: "2026-05-01",
         }],
         purchaseInvoiceUpdate,
@@ -4551,7 +4551,7 @@ describe("wise import tool", () => {
       expect(payload.invoice_currency_fixes).toBeDefined();
       expect(payload.invoice_currency_fixes.foreign_currency_lock).toBe(1);
       expect(payload.invoice_currency_fixes.candidates[0].result).toBe("advisory");
-      expect(payload.invoice_currency_fixes.candidates[0].wise_currency_rate).toBeCloseTo(0.8535, 4);
+      expect(payload.invoice_currency_fixes.candidates[0].wise_currency_rate).toBeCloseTo(1.171646, 5);
       expect(purchaseInvoiceUpdate).not.toHaveBeenCalled();
     });
 
@@ -4563,7 +4563,7 @@ describe("wise import tool", () => {
           id: 700, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
           number: "USD-700", client_name: evil,
           cl_currencies_id: "USD", gross_price: 20,
-          base_gross_price: 17.10, currency_rate: 0.855,
+          base_gross_price: 17.10, currency_rate: 1.169591,
           create_date: "2026-05-01",
         }],
         purchaseInvoiceUpdate: vi.fn().mockResolvedValue({}),
@@ -4590,7 +4590,7 @@ describe("wise import tool", () => {
           id: 701, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
           number: "USD-701", client_name: "OpenAI",
           cl_currencies_id: "USD", gross_price: 20,
-          base_gross_price: 17.10, currency_rate: 0.855,
+          base_gross_price: 17.10, currency_rate: 1.169591,
           create_date: "2026-05-01",
         }],
         purchaseInvoiceUpdate,
@@ -4609,7 +4609,7 @@ describe("wise import tool", () => {
       expect(candidate).toMatchObject({ invoice_id: 701, result: "advisory" });
       expect(candidate.proposed_action).toMatch(/^Advisory, not applied: /);
       expect(candidate.proposed_correction.base_gross_price).toBeCloseTo(17.07, 2);
-      expect(candidate.proposed_correction.currency_rate).toBeCloseTo(0.8535, 4);
+      expect(candidate.proposed_correction.currency_rate).toBeCloseTo(1.171646, 5);
     });
 
     it("skips when invoice already carries the Wise rate (idempotent re-import)", async () => {
@@ -4620,7 +4620,7 @@ describe("wise import tool", () => {
           id: 702, status: "CONFIRMED", payment_status: "PARTIALLY_PAID",
           number: "USD-702", client_name: "OpenAI",
           cl_currencies_id: "USD", gross_price: 20,
-          base_gross_price: 17.07, currency_rate: 0.8535,
+          base_gross_price: 17.07, currency_rate: 1.171646,
           create_date: "2026-05-01",
         }],
         purchaseInvoiceUpdate,
@@ -4698,7 +4698,7 @@ describe("wise import tool", () => {
           number: "USD-720", client_name: "OpenAI",
           cl_currencies_id: "USD", gross_price: 20,
           base_gross_price: 17.10,           // stale
-          currency_rate: 0.8535,              // already matches Wise
+          currency_rate: 1.171646,              // already matches Wise
           create_date: "2026-05-01",
         }],
         purchaseInvoiceUpdate,

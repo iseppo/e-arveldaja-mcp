@@ -355,7 +355,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       const detectedCurrency = rawCurrency && /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : undefined;
       if (detectedCurrency && detectedCurrency !== "EUR") {
         extractionWarnings.push(
-          `Invoice in ${detectedCurrency}. Booking uses currency="${detectedCurrency}" plus currency_rate (EUR per 1 ${detectedCurrency}); pass base_gross_price when known to lock the EUR settlement.`,
+          `Invoice in ${detectedCurrency}. Booking uses currency="${detectedCurrency}" plus currency_rate (${detectedCurrency} per 1 EUR); pass base_gross_price when known to lock the EUR settlement.`,
         );
       }
 

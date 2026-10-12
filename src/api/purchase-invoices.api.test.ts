@@ -368,7 +368,7 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
     await api.createAndSetTotals({
       ...baseData,
       cl_currencies_id: "USD",
-      currency_rate: 0.9234,
+      currency_rate: 1.082602,
       base_gross_price: 92.37,
       items: [{ custom_title: "SaaS", amount: 1, total_net_price: 100, vat_rate_dropdown: "-" }],
     } as any, 0, 100, true);
@@ -383,13 +383,43 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
     await api.createAndSetTotals({
       ...baseData,
       cl_currencies_id: "USD",
-      currency_rate: 0.9,
+      currency_rate: 1.111111,
       base_gross_price: 111.6,
       items: [{ custom_title: "SaaS", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
     } as any, 24, 124, true);
     const body = totalsPatch(patch);
     expect(body.base_net_price).toBe(90);
     expect(body.base_vat_price).toBe(21.6);
+  });
+
+  it("auto-derives base_* as amount / currency_rate (foreign units per 1 EUR)", async () => {
+    const { api, patch } = makeCreateApi([{ id: 1, total_net_price: 108, vat_amount: 0 }]);
+    await api.createAndSetTotals({
+      ...baseData,
+      cl_currencies_id: "USD",
+      currency_rate: 1.08,
+      items: [{ custom_title: "SaaS", amount: 1, total_net_price: 108, vat_rate_dropdown: "-" }],
+    } as any, 0, 108, true);
+    const body = totalsPatch(patch);
+    expect(body.currency_rate).toBe(1.08);
+    // 108 USD / 1.08 = 100 EUR (not 108 * 1.08 = 116.64).
+    expect(body.base_gross_price).toBe(100);
+    expect(body.base_net_price).toBe(100);
+    expect(body.base_vat_price).toBe(0);
+  });
+
+  it("auto-derives a VAT invoice's base trio from the rate and keeps it reconciled", async () => {
+    const { api, patch } = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
+    await api.createAndSetTotals({
+      ...baseData,
+      cl_currencies_id: "USD",
+      currency_rate: 1.24,
+      items: [{ custom_title: "SaaS", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
+    } as any, 24, 124, true);
+    const body = totalsPatch(patch);
+    expect(body.base_gross_price).toBe(100);
+    expect(body.base_net_price).toBe(80.65);
+    expect(body.base_vat_price).toBe(19.35);
   });
 
   it("applies #62 structural defaults on the count-mismatch fallback items", async () => {

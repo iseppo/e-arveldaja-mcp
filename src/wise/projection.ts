@@ -1434,7 +1434,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const sourceCurrency = normalizeWiseCurrency(row.sourceCurrency);
     const targetAmount = row.targetAmount;
     const sourceAmount = row.sourceAmount; // EUR (after fees) for OUT rows
-    const isForeignCardPayment = sourceCurrency === "EUR" && targetCurrency !== "EUR" && targetAmount > 0;
+    const isForeignCardPayment = sourceCurrency === "EUR" && targetCurrency !== "EUR" && targetAmount > 0 && sourceAmount > 0;
 
     for (const inv of unpaidInvoices) {
       const invSupplierKey = normalizeWiseCompanyName(inv.client_name);
@@ -1451,7 +1451,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       if (invGross === undefined || invGross === null) continue;
 
       if (isForeignCardPayment && invCurrency === targetCurrency && Math.abs(invGross - targetAmount) < 0.01) {
-        const wiseRate = roundTo(sourceAmount / targetAmount, 6);
+        // e-arveldaja currency_rate is FOREIGN units per 1 EUR (ECB
+        // convention): the EUR-funded card payment's rate is target / source.
+        const wiseRate = roundTo(targetAmount / sourceAmount, 6);
         const proposedBaseGross = roundMoney(sourceAmount);
         // Idempotency: skip when the invoice already carries the Wise
         // settlement values (within 1 cent for base_gross and 6dp for

@@ -2,12 +2,12 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 34051,
+    "toolsListBytes": 34068,
     "descriptionsBytes": 5064,
-    "inputSchemasBytes": 24117,
+    "inputSchemasBytes": 24134,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 5088
+      "bytes": 5105
     },
     "serverInstructionsBytes": 932,
     "promptMetadataBytes": 7700,
@@ -569,7 +569,7 @@
             "type": "string"
           },
           "currency_rate": {
-            "description": "mode='create': EUR per 1 foreign unit; required when currency != EUR.",
+            "description": "mode='create': foreign units per 1 EUR (e.g. USD 1.08); required when currency != EUR.",
             "exclusiveMinimum": 0,
             "type": "number"
           },

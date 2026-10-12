@@ -208,7 +208,7 @@ describe("pdf workflow tools", () => {
 
     expect(metadata).toContain("EXACT total VAT");
     expect(metadata).toContain("EXACT total gross");
-    expect(metadata).toContain("EUR per 1 foreign currency unit");
+    expect(metadata).toContain("foreign currency units per 1 EUR");
     expect(metadata).toContain("purchase_accounts_dimensions_id is REQUIRED");
     expect(metadata).not.toContain("self-heal");
     expect(metadata).not.toContain("Legacy callers may still pass");

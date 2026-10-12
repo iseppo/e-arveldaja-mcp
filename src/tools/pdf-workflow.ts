@@ -282,7 +282,7 @@ export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<s
     warnings.push(
       `Foreign-currency invoice (${currencyCode}): no currency_rate or base_net_price provided. ` +
       `Without these, the EUR booking may not match the actual Wise card-payment conversion and the invoice can stay PARTIALLY_PAID. ` +
-      `Pass currency_rate (Wise CSV "Source amount (after fees)" / "Target amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
+      `Pass currency_rate (foreign units per 1 EUR: Wise CSV "Target amount (after fees)" / "Source amount (after fees)") and/or base_gross_price to lock the EUR settlement.`
     );
   }
 
@@ -474,7 +474,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const detectedCurrency = rawCurrency && /^[A-Z]{3}$/.test(rawCurrency) ? rawCurrency : undefined;
         if (detectedCurrency && detectedCurrency !== "EUR") {
           warnings.push(
-            `Invoice in ${detectedCurrency}. Extraction and validation use cl_currencies_id="${detectedCurrency}"; booking with create_purchase_invoice_from_pdf uses currency="${detectedCurrency}" plus currency_rate (EUR per 1 ${detectedCurrency}). ` +
+            `Invoice in ${detectedCurrency}. Extraction and validation use cl_currencies_id="${detectedCurrency}"; booking with create_purchase_invoice_from_pdf uses currency="${detectedCurrency}" plus currency_rate (${detectedCurrency} per 1 EUR). ` +
             `For Wise card payments take the rate from the Wise CSV "Source amount (after fees)" / "Target amount (after fees)" and pass base_gross_price when known — that locks the EUR base_* values to the actual conversion and avoids a PARTIALLY_PAID residual balance (jääk).`
           );
         }
@@ -534,7 +534,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       invoice_date: z.string().optional().describe("Invoice date (YYYY-MM-DD)"),
       due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
       cl_currencies_id: z.string().optional().describe("Invoice currency (default EUR)"),
-      currency_rate: z.number().positive().optional().describe("Planned exchange rate (EUR per 1 foreign unit)"),
+      currency_rate: z.number().positive().optional().describe("Planned exchange rate (foreign units per 1 EUR)"),
       base_net_price: z.number().optional().describe("Planned EUR-equivalent net amount"),
       reg_code: z.string().optional().describe("Supplier registry code (registrikood, 8-digit Estonian business code)"),
       vat_no: z.string().optional().describe("Supplier VAT number (KMKR, e.g. EE102809963)"),
@@ -903,7 +903,7 @@ export async function computeBookingSuggestion(
 
 export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api: ApiContext): void {
   registerTool(server, "create_purchase_invoice_from_pdf",
-    "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
+    "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
     {
       supplier_client_id: coerceId.describe("Supplier client ID (from resolve_supplier)"),
       invoice_number: z.string().describe("Invoice number"),
@@ -920,7 +920,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       ref_number: z.string().optional().describe("Reference number"),
       bank_account_no: z.string().optional().describe("Supplier bank account"),
       currency: z.string().optional().describe("Currency code (default EUR). Use the original invoice currency (e.g. USD) and supply currency_rate."),
-      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when currency != EUR."),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as foreign currency units per 1 EUR (ECB convention, e.g. USD 1.08; EUR = amount / rate). Required when currency != EUR."),
       base_net_price: z.number().optional().describe("EUR equivalent of net_price; auto-derived from currency_rate when omitted."),
       base_vat_price: z.number().optional().describe("EUR equivalent of vat_price; auto-derived from currency_rate when omitted."),
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
@@ -993,7 +993,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const currencyCode = (params.currency ?? "EUR").toUpperCase();
       if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
         return toolError({
-          error: `currency_rate is required when currency="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+          error: `currency_rate is required when currency="${currencyCode}". Pass ${currencyCode} per 1 EUR (Wise: Target amount / Source amount).`,
         });
       }
 

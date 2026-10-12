@@ -2,12 +2,12 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 85841,
-    "descriptionsBytes": 11882,
-    "inputSchemasBytes": 53308,
+    "toolsListBytes": 85982,
+    "descriptionsBytes": 11914,
+    "inputSchemasBytes": 53417,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
-      "bytes": 4099
+      "bytes": 4169
     },
     "serverInstructionsBytes": 964,
     "promptMetadataBytes": 8030,
@@ -1429,7 +1429,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
+      "description": "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1476,7 +1476,7 @@
             "type": "string"
           },
           "currency_rate": {
-            "description": "Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR.",
+            "description": "Exchange rate as foreign currency units per 1 EUR (ECB convention, e.g. USD 1.08; EUR = amount / rate). Required when cl_currencies_id != EUR.",
             "exclusiveMinimum": 0,
             "type": "number"
           },
@@ -2142,7 +2142,7 @@
             "type": "string"
           },
           "currency_rate": {
-            "description": "Planned exchange rate (EUR per 1 foreign unit)",
+            "description": "Planned exchange rate (foreign units per 1 EUR)",
             "exclusiveMinimum": 0,
             "type": "number"
           },
@@ -2300,7 +2300,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
+      "description": "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2336,7 +2336,7 @@
             "type": "string"
           },
           "currency_rate": {
-            "description": "Exchange rate as EUR per 1 foreign currency unit. Required when currency != EUR.",
+            "description": "Exchange rate as foreign currency units per 1 EUR (ECB convention, e.g. USD 1.08; EUR = amount / rate). Required when currency != EUR.",
             "exclusiveMinimum": 0,
             "type": "number"
           },
