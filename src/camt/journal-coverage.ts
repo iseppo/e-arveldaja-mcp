@@ -267,6 +267,20 @@ export function classifyCamtJournalCoverage(
 }
 
 
+/** Signed net the journal posts on the bank dimension in any currency (base amount when finite), for direction only. */
+function bankDirectionNet(journal: Journal, context: CamtJournalCoverageContext): number | undefined {
+  let net = 0;
+  for (const posting of journal.postings ?? []) {
+    if (posting.is_deleted || posting.accounts_id !== context.accountId || posting.accounts_dimensions_id !== context.dimensionId) continue;
+    const value = Number.isFinite(posting.base_amount) ? posting.base_amount! : posting.amount;
+    if (!Number.isFinite(value)) return undefined;
+    if (posting.type === "D") net += value;
+    else if (posting.type === "C") net -= value;
+    else return undefined;
+  }
+  return net;
+}
+
 export type CamtDuplicateJournalCheck =
   | { readonly kind: "covered" }
   | { readonly kind: "conflict"; readonly journal_ids: number[]; readonly missing_transaction_ids: number[] };
@@ -299,7 +313,7 @@ export function checkCamtDuplicateRegistration(
     let net: number | undefined = 0;
     for (const journal of journals) {
       journalIds.add(journal.id!);
-      const journalNet = bankNetCents(journal, context);
+      const journalNet = eur ? bankNetCents(journal, context) : bankDirectionNet(journal, context);
       net = journalNet === undefined || net === undefined ? undefined : net + journalNet;
     }
     if (net === undefined || (eur ? net !== sign * cents(entry.amount) : Math.sign(net) !== sign)) conflict = true;
