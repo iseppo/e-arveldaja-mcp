@@ -10,6 +10,8 @@ import {
   type MatchCandidate,
 } from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
+import { normalizeCompanyName } from "../../company-name.js";
+import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata } from "../../camt/duplicate-identity.js";
 import type {
   ExactConfirmClientResolution,
   ExactConfirmDescriptor,
@@ -63,15 +65,36 @@ export function thirdPartyPayerReviewReason(
 export const EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE = 90;
 
 /**
+ * The statement direction of a row whose CAMT marker passes its checksum
+ * (`isTrustedCamtDescriptionMetadata`), else `undefined`. The marker's shape
+ * alone (what `bankTransactionDirection` reads) is not proof: flipping
+ * `dir=DBIT` to `dir=CRDT` breaks the `sig` but keeps the shape. A Wise
+ * `[source_direction=…]` marker carries no checksum at all, so it never counts
+ * as proven here.
+ */
+function verifiedCamtDirection(tx: Transaction): "incoming" | "outgoing" | undefined {
+  const metadata = extractCamtDescriptionMetadata(tx.description);
+  if (metadata.source_direction === undefined || !isTrustedCamtDescriptionMetadata(tx, metadata)) return undefined;
+  const direction = metadata.source_direction === "CRDT" ? "incoming" : "outgoing";
+  return bankTransactionDirection(tx) === direction ? direction : undefined;
+}
+
+function hasProvenDirectionFor(tx: Transaction, type: MatchCandidate["type"]): boolean {
+  return verifiedCamtDirection(tx) === (type === "sale_invoice" ? "incoming" : "outgoing");
+}
+
+/**
  * The ref-number rule: a payment carrying an invoice's structured reference
  * number at the exact EUR amount scores only 80 (exact_amount + ref_number) and
  * reaches the default 90 only with a matching clients_id, which live CAMT/Wise
  * rows rarely carry. It is admitted at thresholds up to the default only when
  * every piece of evidence is present:
- * - EUR row (no differing base) vs EUR invoice, cents-exact (`exact_amount`,
- *   never Tier A or a cross-currency reason);
- * - a signed direction marker matching the invoice kind (incoming ↔ sale,
- *   outgoing ↔ purchase); an unsigned row is "unknown" and never qualifies;
+ * - an explicit EUR row (a missing currency is not proof; no differing base)
+ *   vs EUR invoice, cents-exact (`exact_amount`, never Tier A or a
+ *   cross-currency reason);
+ * - a checksum-verified CAMT direction matching the invoice kind (incoming ↔
+ *   sale, outgoing ↔ purchase); an unsigned, Wise-only or tampered row never
+ *   qualifies;
  * - the reference names exactly one open invoice of either kind;
  * - the invoice is CONFIRMED and unpaid ("", null, NOT_PAID).
  * The caller still requires a single candidate, consumes the invoice key and
@@ -86,10 +109,10 @@ function isRefNumberExactMatch(
   purchaseIndex: InvoiceIndex<PurchaseInvoice>,
 ): boolean {
   if (!reasons.includes("exact_amount") || !reasons.includes("ref_number")) return false;
-  if (transactionCurrency(tx) !== "EUR") return false;
+  if (typeof tx.cl_currencies_id !== "string" || tx.cl_currencies_id.trim().toUpperCase() !== "EUR") return false;
   if (typeof inv.cl_currencies_id !== "string" || inv.cl_currencies_id.trim().toUpperCase() !== "EUR") return false;
   if (tx.base_amount != null && !sameAmountToTheCent(tx.base_amount, tx.amount)) return false;
-  if (bankTransactionDirection(tx) !== (type === "sale_invoice" ? "incoming" : "outgoing")) return false;
+  if (!hasProvenDirectionFor(tx, type)) return false;
   if (inv.status !== "CONFIRMED" || !isUnpaidPaymentStatus(inv.payment_status)) return false;
   const ref = tx.ref_number ?? "";
   return (saleIndex.byRef.get(ref)?.length ?? 0) + (purchaseIndex.byRef.get(ref)?.length ?? 0) === 1;
@@ -204,6 +227,25 @@ export function computeExactMatchProjection(
         confidence: match.confidence,
         reason: reviewReason,
         next_action: reviewReason === "invoice_client_missing" ? INVOICE_CLIENT_MISSING_NEXT_ACTION : THIRD_PARTY_PAYER_NEXT_ACTION,
+      });
+      continue;
+    }
+
+    // Without a verified direction the row may be money going the other way.
+    // Only the invoice's own counterparty is evidence that does not depend on
+    // the direction: an equal clients_id, or a payer name equal to the invoice
+    // client's once normalised (e-arveldaja's native bank import carries the
+    // name but no client or marker). A substring name match never is:
+    // "Vendor Logistics" paying out must not settle a sale invoice for
+    // "Vendor" at exact_amount + ref_number + client_name_partial.
+    const sameCounterparty = match.match_reasons.includes("client_id") || (
+      match.match_reasons.includes("client_name_partial") &&
+      normalizeCompanyName(tx.bank_account_name ?? "") === normalizeCompanyName(match.client_name)
+    );
+    if (!sameCounterparty && !hasProvenDirectionFor(tx, match.type)) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: `direction_unproven: ${match.type} #${match.id} matches without a checksum-verified CAMT direction or the invoice's own client; confirm manually.`,
       });
       continue;
     }

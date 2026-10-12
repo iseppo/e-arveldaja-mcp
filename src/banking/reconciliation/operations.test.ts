@@ -4,6 +4,7 @@ import { ReconciliationOperationFailedError } from "./executor.js";
 import { renderExactMatchPayload } from "./presenter.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
 import { createTestRuntimeSafetyContext } from "../../__fixtures__/runtime-safety.js";
+import { withSignedCamtMarker } from "../../__fixtures__/camt-marker.js";
 
 // The typed reconciliation operations are exercised through narrow api/plan
 // ports — NOT a mock McpServer. This pins prepare (zero mutations, issue plan)
@@ -332,10 +333,9 @@ describe("BankReconciliationOperations", () => {
   });
 
   // --- ref_number_exact rule (live-shaped: type "C" + signed marker, payment_status "") ---
-  const refRuleTx = () => ({
-    ...matchingTx(), type: "C", clients_id: null, cl_currencies_id: "EUR",
-    description: "Payment INV-1\n[e-arveldaja-mcp:camt br=BR1 dir=CRDT sig=0123456789abcdef]",
-  });
+  const refRuleTx = () => withSignedCamtMarker({
+    ...matchingTx(), type: "C", clients_id: null, cl_currencies_id: "EUR", description: "Payment INV-1",
+  }, "CRDT");
   const refRuleSale = () => ({ ...matchingSale(), cl_currencies_id: "EUR", payment_status: "" });
   function setupRefRule(salesAtExecute: unknown[]) {
     const salesListAll = vi.fn()
