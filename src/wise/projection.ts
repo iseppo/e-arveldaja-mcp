@@ -304,6 +304,8 @@ const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_inter_account_transfers.";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
   "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed. Either reconcile it with reconcile_inter_account_transfers, or, if you have checked that one of the candidate journals books exactly this Wise transfer, re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so the row is recorded as already journalized instead of created.";
+const WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON =
+  "A journal labelled with this Wise transfer's ID already exists, but its Wise-account posting does not move this row's amount (gross, or net of a fee the journal also books) in this row's direction. Confirming the row would book the transfer twice, so it is imported unconfirmed. Correct or remove the labelled journal, then reconcile the row with reconcile_inter_account_transfers.";
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
   "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
 const WISE_TRANSFER_MAPPING_REJECTED_REASON =
@@ -328,6 +330,20 @@ export function wiseLegAmountNetOfFee(row: WiseRow, amount: number): number | un
   const bookedCurrency = bookedCurrencyForWiseRow(row);
   if (!direction || !(fee > 0) || bookedFeeCurrencyForWiseRow(row, bookedCurrency) !== bookedCurrency) return undefined;
   return roundMoney(direction === "IN" ? amount - fee : amount + fee);
+}
+
+/**
+ * Whether `journal` is labelled with this Wise transfer's ID (bare or as
+ * WISE:{id}), by the shared journal document-reference key contract. Amount
+ * plays no part: an exact-reference journal is this transfer's identity
+ * whatever it books.
+ */
+export function journalLabelledWithWiseId(journal: Journal, wiseId: string): boolean {
+  const keys = journalDocumentReferenceKeys(journal.document_number);
+  return [wiseId, `WISE:${wiseId}`].some(reference => {
+    const key = bankReferenceLookupKey(reference);
+    return key !== undefined && keys.includes(key);
+  });
 }
 
 interface StoredWiseLeg {
@@ -951,15 +967,37 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
         if (feeEntryIndex >= 0) created.splice(feeEntryIndex, 1);
       };
+      // The row stays for review, but a candidate journal that already books
+      // its fee keeps the fee out of the plan: confirming it would expense
+      // the fee twice if that journal is this transfer.
+      const pushJournalReview = (code: "wise_transfer_journal_ambiguous" | "wise_transfer_journal_inconsistent",
+        reason: string, candidateIds: number[]) => {
+        const feeCommand = commands.find(command => command.row_key === feeKey);
+        const feeHeldIds = candidateIds.filter(id => journalBooksFee(journalSnapshot.find(journal => journal.id === id), feeCommand));
+        if (feeCommand && feeHeldIds.length > 0) dropFeeCommand(feeCommand);
+        ownershipReviews.push({
+          ...reviewFor(code, reason),
+          candidate_journal_ids: candidateIds,
+          candidates: candidateIds.map(describeCandidate),
+          ...(feeHeldIds.length > 0 ? { fee_held_journal_ids: feeHeldIds } : {}),
+        });
+      };
+      // Lane B binds each journal amount to its own bank leg. A journal booking
+      // this transfer net of the row's separate fee row carries the Wise leg at
+      // the net amount. It stands in for the row only when it also books the
+      // fee (a non-bank posting of the fee amount): otherwise the Wise and
+      // counterpart nets would each miss the fee against the statement.
+      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+      const journalBooksNetOfFee = (journal: Journal | undefined): boolean =>
+        netAmount !== undefined && wiseLegMoves(journal, row, netAmount) &&
+        (journal?.postings ?? []).some(posting => !posting.is_deleted && !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
+          baseCents(posting) === cents(bookedFeeAmountForWiseRow(row)));
 
       let existingJournalId = mappedJournalId;
       if (existingJournalId === undefined) {
         let resolution = guard.resolveInterAccount(query);
         let otherLabelled = resolution.status === "none" && guard.hasOtherLabelledInterAccount(query);
-        // Lane B binds each journal amount to its own bank leg. A journal booking
-        // this transfer net of the row's separate fee row carries the Wise leg at
-        // the net amount, so look that up too.
-        const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+        // Look the net-of-fee Wise leg up too.
         if (resolution.status === "none" && !otherLabelled && netAmount !== undefined) {
           const netQuery = { ...query, amount: netAmount };
           resolution = guard.resolveInterAccount(netQuery);
@@ -978,32 +1016,35 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         }
         // Lane B keys are direction-blind: a matched journal (exact reference,
         // gross or net of the fee, or ref-less) stands in for the row only when
-        // its Wise leg moves this row's gross or net amount in the row's
-        // direction, in EUR. Otherwise the row is created and reviewed.
+        // its Wise leg moves this row's gross amount, or the net amount while
+        // also booking the fee, in the row's direction, in EUR. Otherwise the
+        // row is created and reviewed.
         const matchedJournal = resolution.status === "matched"
           ? journalSnapshot.find(journal => journal.id === resolution.journal_id)
           : undefined;
         const matchUncovered = resolution.status === "matched" && (
           matchedJournal === undefined || hasForeignPostingWithoutBase(matchedJournal) ||
-          ![entry.amount, netAmount].some(amount => amount !== undefined && wiseLegMoves(matchedJournal, row, amount))
+          !(wiseLegMoves(matchedJournal, row, entry.amount) || journalBooksNetOfFee(matchedJournal))
         );
         if (resolution.status === "ambiguous_refless" || otherLabelled || matchUncovered) {
-          const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
-          // The row stays for review, but a candidate journal that already books
-          // its fee keeps the fee out of the plan: confirming it would expense
-          // the fee twice if that journal is this transfer.
-          const feeCommand = commands.find(command => command.row_key === feeKey);
-          const feeHeldIds = candidateIds.filter(id => journalBooksFee(journalSnapshot.find(journal => journal.id === id), feeCommand));
-          if (feeCommand && feeHeldIds.length > 0) dropFeeCommand(feeCommand);
-          ownershipReviews.push({
-            ...reviewFor("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON),
-            candidate_journal_ids: candidateIds,
-            candidates: candidateIds.map(describeCandidate),
-            ...(feeHeldIds.length > 0 ? { fee_held_journal_ids: feeHeldIds } : {}),
-          });
+          pushJournalReview("wise_transfer_journal_ambiguous", WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON,
+            laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date));
           continue;
         }
         existingJournalId = resolution.status === "matched" ? resolution.journal_id : undefined;
+      }
+      // Exact-reference identity is independent of the amount keys above: a
+      // live journal labelled with this Wise ID that is not the journal
+      // standing in for the row (e.g. it books another amount or direction)
+      // means the transfer may already be booked, so the row is reviewed,
+      // never confirmed or suppressed.
+      const identityIds = journalSnapshot
+        .filter(journal => journal.id !== undefined && !journal.is_deleted && journalLabelledWithWiseId(journal, row.id))
+        .map(journal => journal.id!)
+        .sort((left, right) => left - right);
+      if (identityIds.some(id => id !== existingJournalId)) {
+        pushJournalReview("wise_transfer_journal_inconsistent", WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON, identityIds);
+        continue;
       }
       const existingJournal = existingJournalId === undefined
         ? undefined
@@ -1132,7 +1173,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const unpaidInvoices: PurchaseInvoice[] = allPurchaseInvoices.filter(inv =>
     inv.id !== undefined &&
     inv.status === "CONFIRMED" &&
-    (inv.payment_status === "PARTIALLY_PAID" || inv.payment_status === "UNPAID" || inv.payment_status === "OVERDUE")
+    // The live API reads an unpaid CONFIRMED invoice back as "" or null.
+    (inv.payment_status == null || inv.payment_status === "" ||
+      inv.payment_status === "PARTIALLY_PAID" || inv.payment_status === "UNPAID" || inv.payment_status === "OVERDUE")
   );
 
   for (const row of paymentRows) {

@@ -4408,6 +4408,37 @@ describe("wise import tool", () => {
     expectNoWiseMutations(invoicePreview.api);
   });
 
+  it.each(["", null])("proposes the Wise-rate advisory for a live unpaid invoice (payment_status %j)", async (paymentStatus) => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
+      id: "M04-INVOICE-LIVE-UNPAID",
+      direction: "OUT",
+      sourceName: "Wise Own Account",
+      sourceAmount: "90",
+      sourceCurrency: "EUR",
+      targetName: "Ordinary Vendor",
+      targetAmount: "100",
+      targetCurrency: "USD",
+      exchangeRate: "1.111111",
+    })]));
+    const setup = setupWiseTool([], undefined, {
+      purchaseInvoices: [{
+        id: 741, status: "CONFIRMED", payment_status: paymentStatus, number: "USD-741", client_name: "Ordinary Vendor",
+        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 0.95,
+      }, {
+        id: 742, status: "CONFIRMED", payment_status: "PAID", number: "USD-742", client_name: "Ordinary Vendor",
+        create_date: "2026-06-10", cl_currencies_id: "USD", gross_price: 100, base_gross_price: 95, currency_rate: 0.95,
+      }],
+    });
+    const payload = parseWiseResponse(await setup.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
+
+    expect(payload.invoice_currency_fixes.candidates).toEqual([expect.objectContaining({
+      invoice_id: 741,
+      result: "advisory",
+      proposed_correction: { currency_rate: 0.9, base_gross_price: 90 },
+    })]);
+    expectNoWiseMutations(setup.api);
+  });
+
   describe("invoice currency fixes", () => {
     const usdRow = (sourceAmount: string, targetAmount: string, supplier: string, date: string) => buildCsvRow([
       `usd-${date}`, "COMPLETED", "OUT", `${date} 09:00:00`, `${date} 09:00:00`,
@@ -5987,6 +6018,70 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(staleRun.executed.execution.errors).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-NET-FEE",
       reason: expect.stringMatching(wrapped("Inter-account confirmation failed: Stale inter-account precondition: a matching journal appeared before confirmation")),
+    })]);
+  });
+
+  it.each([
+    ["ref-less", {}],
+    ["exact-reference", { document_number: "TRANSFER-NET-NOFEE" }],
+  ])("a %s net-of-fee journal that does not book the fee is reviewed, never suppressing the gross row", async (_label, extra) => {
+    // Gross 100, credited 99.50, fee 0.50. Journal D Wise 99.50 / C LHV 99.50
+    // has no fee posting: suppressing the row while still booking the fee row
+    // would leave Wise +99.00 and LHV -99.50 against the statement's +99.50 / -100.
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      transferIn("TRANSFER-NET-NOFEE", "2026-02-02", "100", { targetAmount: "99.50", targetFeeAmount: "0.50" }),
+    ]));
+    const setup = setupWiseTool([], undefined, {
+      ...transferOptions([lhvWiseJournal(711, "2026-02-02", 99.5, extra)]),
+      accountDimensions: [
+        ...configuredTransferDimensions(),
+        { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+      ],
+    });
+    const dry = parseWiseResponse(await setup.handler({ ...transferArgs, fee_account_dimensions_id: 9, execute: false }));
+
+    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+    expect(JSON.stringify(dry.skipped_details ?? [])).not.toContain("Already journalized");
+    expect(dry.execution.needs_review).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-NET-NOFEE",
+      code: "wise_transfer_journal_ambiguous",
+      candidate_journal_ids: [711],
+    })]);
+    expectNoWiseMutations(setup.api);
+  });
+
+  it.each([
+    ["a different amount", lhvWiseJournal(720, "2026-02-02", 110, { document_number: "TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
+    ["a WISE:-prefixed label outside the ±1 day window", lhvWiseJournal(720, "2026-02-09", 100, { document_number: "WISE:TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
+  ])("a journal labelled with the Wise ID at %s is reviewed, never booked again", async (_label, journal) => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-ID-OTHER", "2026-02-02", "100")]));
+    const setup = setupWiseTool([], undefined, transferOptions([journal]));
+    const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+
+    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.execution.needs_review).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-ID-OTHER",
+      code: "wise_transfer_journal_inconsistent",
+      candidate_journal_ids: [720],
+    })]);
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("the execute recheck refuses to confirm when a journal labelled with the Wise ID appears at another amount", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-ID-STALE", "2026-02-02", "100")]));
+    const stale = setupWiseTool([], undefined, transferOptions());
+    let journalReads = 0;
+    stale.api.journals.listAllWithPostings.mockImplementation(async () =>
+      ++journalReads > 2 ? [lhvWiseJournal(721, "2026-02-02", 110, { document_number: "TRANSFER-ID-STALE", operation_type: "ENTRY" })] : []);
+    const staleRun = await runApprovedWiseImport(stale, transferArgs);
+
+    expect(staleRun.dry.execution.commands).toEqual(expect.arrayContaining([expect.objectContaining({
+      action: "inter_account", mutation_mode: "create_then_confirm",
+    })]));
+    expect(stale.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(staleRun.executed.execution.errors).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-ID-STALE",
+      reason: expect.stringMatching(wrapped("Inter-account confirmation failed: Stale inter-account precondition: a journal labelled with this Wise transfer appeared before confirmation")),
     })]);
   });
 

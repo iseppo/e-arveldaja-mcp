@@ -35,6 +35,7 @@ export interface WiseTransferReview {
     | "wise_transfer_ownership_unverified"
     | "wise_transfer_cross_currency"
     | "wise_transfer_journal_ambiguous"
+    | "wise_transfer_journal_inconsistent"
     | "wise_transfer_already_imported"
     | "wise_legacy_leg_ambiguous"
     | "wise_transfer_mapping_rejected"
@@ -45,12 +46,13 @@ export interface WiseTransferReview {
   target_verified: boolean;
   approval_required: boolean;
   /** wise_transfer_journal_ambiguous: the same-key (±1 day) journals the row
-   * could not be told apart from. */
+   * could not be told apart from; wise_transfer_journal_inconsistent: the
+   * journals labelled with the row's Wise ID. */
   candidate_journal_ids?: number[];
   candidates?: WiseTransferJournalCandidate[];
   /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
   journal_id?: number;
-  /** wise_transfer_journal_ambiguous: candidate journals that already book the
+  /** wise_transfer_journal_ambiguous / _inconsistent: candidate journals that already book the
    * row's fee, so the fee row is held out of the plan with the review. */
   fee_held_journal_ids?: number[];
   /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
