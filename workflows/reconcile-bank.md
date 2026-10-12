@@ -30,10 +30,10 @@ If the unconfirmed total is 0, everything is reconciled — stop here.
 
 Show a summary grouped by confidence level:
 
-**HIGH (>=80):** Strong matches. In auto mode only confidence >= 90 is eligible for confirmation (Step 3, "Auto mode"), and even then only with user approval — never auto-confirm an 80-89 match without asking.
-- Transaction: date, amount, description, and raw `type` if helpful
+**HIGH (>=80):** Strong matches. In auto mode (Step 3, "Auto mode") only two kinds of match are eligible, and even then only with user approval: confidence >= 90, or a row flagged `auto_confirm_rule: "ref_number_exact"`. That rule admits a match that still shows confidence 80 only when the payment's reference names exactly one open, confirmed, unpaid EUR invoice, the EUR amount is exact to the cent, and a checksum-verified CAMT direction matches the invoice kind (incoming for a sale invoice, outgoing for a purchase invoice). Never confirm any other 80-89 match without asking.
+- Transaction: date, amount, description
 - Matched invoice: number, client, gross amount, confidence, match reasons
-- Newly created bank transactions set API `type` from the true statement direction: `type: "D"` for incoming (money in — the backend debits cash, "Laekumine"), `type: "C"` for outgoing (money out — credits cash, "Tasumine"). The backend derives the cash-account leg from this field at confirmation, so it must match the real flow. For read-side flow decisions still prefer signed `source_direction` metadata (`CRDT`/`DBIT` or `IN`/`OUT`), using legacy `D`/`C` only as a fallback for older rows without source metadata.
+- Newly created bank transactions set API `type` from the true statement direction: `type: "D"` for incoming (money in — the backend debits cash, "Laekumine"), `type: "C"` for outgoing (money out — credits cash, "Tasumine"). The backend derives the cash-account leg from this field at confirmation, so it must match the real flow. On read, `type` always comes back as "C" and says nothing about direction. Only a signed marker (CAMT `dir=`, Wise `[source_direction=]`) or, for a CONFIRMED row, its registration journal proves the direction; otherwise treat the direction as unknown.
 - For cross-currency matches, prefer `match_reasons` such as `exact_base_amount`, and do NOT derive `distribution.amount` from `tx.amount` when base and source currencies differ; use the invoice open balance and the tool-provided distribution.
 
 **MEDIUM (50-79):** Review recommended.
@@ -60,6 +60,8 @@ Show what would be confirmed. Ask user for approval. The approval card must incl
 - how many bank transactions would be confirmed
 - invoice numbers and counterparties
 - source confidence and match reasons
+- the rows admitted by `auto_confirm_rule: "ref_number_exact"` (count and transaction IDs; page the full plan with `get_execution_plan_page` when the preview shows only samples). To exclude them, re-run the dry run with `min_confidence` above 90; there is no other switch
+- skipped rows and their reasons, including `direction_unproven` (an exact match whose direction is not proven by a checksum-verified CAMT marker or the invoice's own client): they are not confirmed and are presented as in Review mode
 - side effect: confirmed bank transaction distributions
 - audit reference when available
 
@@ -71,6 +73,8 @@ If approved, call `reconcile_bank_transactions` with `mode: "execute_auto_confir
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 If execute returns `plan_drift`, `plan_handle_required`, or another `plan_*` error, nothing was confirmed: re-run the dry run to review a fresh plan and get a new handle, then ask for approval again.
+
+After execute, tell the owner which transactions were confirmed by `ref_number_exact` (transaction and invoice IDs). If the owner says one is wrong, the undo is to invalidate that bank transaction (on the `standard` or `full` profile) and confirm it again against the right invoice or account.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
 Report: how many confirmed, how many skipped, any errors — prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`. Inspect `result.execution.execution_report` when present — its `status` (`completed` or `partial_execution`), `command_partitions`, and `stop_reason` show whether every reviewed confirm ran; if it stopped part-way, do not retry automatically, re-run the dry run for a fresh preview.
@@ -97,7 +101,7 @@ Only do this when a `distribution` key is present.
 - After any invoice-linked confirm, read the tool's `ledger_check`/`warnings`: a `ledger_client_mismatch` or `registration_journal_not_found` result means the transaction IS confirmed but booked wrongly; follow its `next_action` (invalidate, then confirm again with `reassign_client_to_invoice: true`).
 <!-- E_ARVELDAJA_FEATURE_END:standard -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
-This profile confirms invoice matches only through the reviewed exact-match plan (Auto mode). Matches below the auto threshold, tied candidates, partially paid invoices, and approved third-party-payer matches (which need a confirm with `reassign_client_to_invoice: true`) need a single-transaction confirm that this profile does not expose: list them with the exact proposed distribution and tell the user to run this workflow on the `standard` or `full` profile (`EARVELDAJA_PROFILE`) to confirm them inline.
+This profile confirms invoice matches only through the reviewed exact-match plan (Auto mode), which includes the `ref_number_exact` rows described above. Other matches below the auto threshold, `direction_unproven` skips, tied candidates, partially paid invoices, and approved third-party-payer matches (which need a confirm with `reassign_client_to_invoice: true`) need a single-transaction confirm that this profile does not expose: list them with the exact proposed distribution and tell the user to run this workflow on the `standard` or `full` profile (`EARVELDAJA_PROFILE`) to confirm them inline.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 <!-- E_ARVELDAJA_FEATURE_START:alignment-report -->
 - `run_accounting_report` with `report: "receipt_client_alignment"` lists every existing receipt booked under the wrong client.
@@ -112,7 +116,7 @@ Call `reconcile_bank_transactions` with `mode: "suggest"` and `min_confidence: 0
 - If no `distribution` key is present, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 <!-- E_ARVELDAJA_FEATURE_END:standard -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
-- If the match is an exact >= 90 match, confirm it through the Auto mode plan; otherwise present it as in Review mode.
+- If the match is an exact >= 90 match or is flagged `auto_confirm_rule: "ref_number_exact"`, confirm it through the Auto mode plan; otherwise present it as in Review mode.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 ## Step 4: Inter-account transfers
@@ -126,13 +130,14 @@ The dry run returns a `plan_handle` bound to exactly the reviewed transfer pairs
 Review the results:
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
 - Treat `result.execution.summary` as the canonical source for counts, and use `result.pairs`, `result.one_sided`, `result.already_handled`, and `result.ambiguous_pairs` for the detailed breakdown.
-- `already_handled`: transfers already journalized from the other side — safe to delete
+- `already_handled`: a journal already books the transfer. Rows WITHOUT `mirror_proposal` are only listed for the owner: they are not proven mirrors, so never offer to delete them. Propose deleting a row only when it carries `mirror_proposal` (it is then the sole candidate): show its `evidence`, `journal_id` and `counterpart_transaction_id`, and delete it through its `next_action` (`delete_transaction`) only after the owner explicitly approves that row
 - `one_sided`: would confirm against the other bank account
 - `pairs`: would confirm the outgoing side and delete the duplicate incoming `PROJECT` (draft/unconfirmed) row (`incoming_action: "would_delete_duplicate"`)
 - `result.execution.errors`: any confirmation failures or other blocking issues
 <!-- E_ARVELDAJA_FEATURE_END:standard -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
-- `summary.counts` gives the pairs, one-sided confirms, already-handled rows, and ambiguous transfers; `summary.samples`, `summary.warnings`, and `summary.blockers` carry the detail.
+- `summary.counts` gives the pairs, one-sided confirms, already-handled rows (`duplicates`), proposed mirror deletions (`proposed_mirrors`), and transfers needing review; `summary.samples`, `summary.warnings`, and `summary.blockers` carry the detail. Warnings show at most 3 rows per category; when a category has more, the warning reports how many are not shown: tell the owner that count and never present the shown rows as the complete list.
+- Already-handled rows are only listed. A `mirror_proposal` warning names a row that is the sole proven mirror of a journal-booked transfer; deleting it needs the `standard` or `full` profile (`EARVELDAJA_PROFILE`) and the owner's explicit approval. Never offer to delete an already-handled row that has no mirror proposal.
 - `summary.next_action` is the ready-to-send execute call (`mode: "execute_inter_account"` with the `plan_handle` and the dry run's `max_date_gap` / `target_accounts_dimensions_id`); run it only after approval.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 - Ambiguous transfers (including `direction_unresolved`) are never auto-confirmed — present them for a decision.

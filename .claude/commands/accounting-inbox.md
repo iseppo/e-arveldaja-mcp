@@ -69,7 +69,7 @@ If `autopilot.needs_one_decision` is non-empty:
 - if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, or `wise_account_dimension_id`), before continuing
 
 If an item under `autopilot.needs_accountant_review` includes:
-- `recommendation`: present that first as the default compliant handling
+- `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row
 - `compliance_basis`: summarize it briefly in plain language
 - `follow_up_questions`: ask only those questions that the payload itself did not already answer
 - `resolver_input`: pass that object to `continue_accounting_workflow` with `action: "resolve_review"` before inventing your own follow-up plan

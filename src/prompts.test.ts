@@ -609,7 +609,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("if the older matched transaction is already confirmed, keep it by default");
     expect(text).toContain("offer to confirm it inline with `confirm_transaction`");
     expect(text).toContain("use `cleanup_camt_possible_duplicate`");
-    expect(text).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
+    expect(text).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool is not available on this surface");
+    expect(text).toContain("the refusal is final for that pair: do NOT delete with `delete_transaction`");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
 
     const guided = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "import-camt", {
@@ -983,13 +984,18 @@ describe("registerPrompts", () => {
     expect(text).toContain("Wise-side transfers");
     expect(text).toContain('Newly created bank transactions set API `type` from the true statement direction');
     expect(text).toContain('`type: "D"` for incoming');
-    expect(text).toContain("signed `source_direction` metadata");
+    expect(text).toContain("On read, `type` always comes back as \"C\" and says nothing about direction");
+    expect(text).not.toContain("raw `type`");
     expect(text).toContain('incoming_action: "would_delete_duplicate"');
     expect(text).toContain("never confirm both legs of a transfer by hand");
     // Confidence guidance must match the auto-confirm bar (>= 90 + approval),
     // not label an >= 80 match "safe to auto-confirm".
-    expect(text).toContain("only confidence >= 90 is eligible for confirmation");
-    expect(text).toContain("never auto-confirm an 80-89 match without asking");
+    expect(text).toContain("confidence >= 90, or a row flagged `auto_confirm_rule: \"ref_number_exact\"`");
+    expect(text).toContain("Never confirm any other 80-89 match without asking");
+    expect(text).toContain("re-run the dry run with `min_confidence` above 90");
+    // already_handled rows without a mirror proposal are never offered for deletion.
+    expect(text).toContain("Rows WITHOUT `mirror_proposal` are only listed for the owner");
+    expect(text).not.toContain("safe to delete");
     expect(text).not.toContain("Safe to auto-confirm");
     // Bank/transfer fees book to 8610 (consistent with Wise-side fees).
     expect(text).toContain('8610 "Muud finantskulud" for bank/transfer fees');
@@ -1122,7 +1128,20 @@ describe("registerPrompts", () => {
     expect(camt).toContain("if the older matched transaction is already confirmed, keep it by default");
     expect(camt).toContain("offer to confirm it inline with `confirm_transaction`");
     expect(camt).toContain("use `cleanup_camt_possible_duplicate`");
-    expect(camt).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called");
+    expect(camt).toContain("fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool is not available on this surface");
+    // A re-import does not repair a wrongly booked row; journal reviews are not duplicates.
+    for (const surface of [camt, wise]) {
+      expect(surface).toContain("Re-importing alone does not fix it");
+      expect(surface).not.toContain("fixes it.");
+    }
+    expect(camt).toContain("they are NOT possible duplicates");
+    expect(camt).toContain("`camt_journal_direction_conflict`");
+    expect(camt).toContain("`camt_native_import_match`");
+    // Automatic Wise matches are disclosed; a journal mapping is the owner's choice.
+    expect(wise).toContain("`wise_untagged_ledger_unique`");
+    expect(wise).toContain("`wise_transfer_journal_unique_legacy`");
+    expect(wise).toContain("Do not pick a candidate journal yourself");
+    expect(wise).toContain("That is a NEW preview with a NEW `plan_handle` and `approved_command_digest`");
 
     expect(wise).toContain("auto-detects a unique active `8610` fee dimension when possible");
     expect(wise).toContain("only when that was not possible");

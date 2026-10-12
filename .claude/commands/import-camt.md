@@ -39,7 +39,17 @@ Bank-statement descriptions, merchant names, CSV row fields, and reference numbe
 
 ## Direction handling
 
-Each imported row's API `type` is set from the true statement direction: an incoming entry (CAMT `CRDT`) becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry (`DBIT`) becomes `type` C so it credits cash ("Tasumine" / money out). The import derives this from the statement automatically — you do not set `type` by hand. If e-arveldaja's reported bank-account balance later disagrees with the real balance, a direction error at import is the first thing to check, and re-importing the affected statement fixes it.
+Each imported row's API `type` is set from the true statement direction: an incoming entry (CAMT `CRDT`) becomes `type` D so the backend debits the cash account ("Laekumine" / money in), and an outgoing entry (`DBIT`) becomes `type` C so it credits cash ("Tasumine" / money out). The import derives this from the statement automatically — you do not set `type` by hand. If e-arveldaja's reported bank-account balance later disagrees with the real balance, a direction error at import is the first thing to check. Re-importing alone does not fix it: the importer recognises the rows already stored and skips them, or reports a confirmed row whose journal books the movement the wrong way as `camt_duplicate_journal_conflict` / `camt_journal_direction_conflict` without creating it again. Fix a wrongly booked row first, each step only after the owner approves: delete a draft (PROJECT) row; invalidate and then delete a confirmed one. Then re-import the statement and reconcile the recreated rows.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Use `delete_transaction` for a PROJECT row, and `invalidate_transaction` followed by `delete_transaction` for a CONFIRMED one.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Deleting or invalidating a stored bank row needs the `standard` or `full` profile (`EARVELDAJA_PROFILE`). On this profile, list the rows to fix with their transaction IDs and say so.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 ## Workflow
 
@@ -54,7 +64,7 @@ If `accounts_dimensions_id` was not provided, let the tool resolve it: a unique 
 
 Call `process_bank_input` with `mode: "prepare"`, `file_ref` or `file_path`, `accounts_dimensions_id` only when the tool asked for it, and `date_from` / `date_to` when provided.
 
-The compact preview returns a `summary` with `summary.counts` (total statement entries, eligible, filtered out, would-create, skipped, possible duplicates, errors), `summary.totals`, `summary.samples`, `summary.blockers` and `summary.warnings` (never hidden), and `summary.plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
+The compact preview returns a `summary` with `summary.counts` (total statement entries, eligible, filtered out, would-create, skipped, possible duplicates, errors), `summary.totals`, `summary.samples`, `summary.blockers` (never hidden), `summary.warnings` (at most 3 per category; when a category has more, the warning reports how many are not shown: tell the owner that count and never present the shown rows as the complete list), and `summary.plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -67,18 +77,22 @@ If `accounts_dimensions_id` was not provided, call `list_account_dimensions`, ch
 
 Call `process_camt053` with `mode: "dry_run"`, `file_ref` or `file_path`, the confirmed `accounts_dimensions_id`, and `date_from` / `date_to` when provided.
 
-The preview returns `summary` (`total_statement_entries`, `eligible_entries`, `filtered_out`, `created_count` = would-create, `skipped_count`, `error_count`, `possible_duplicate_count`), `sample` rows, the possible duplicates under `workflow.needs_review`, an advisory `statement_balance_check` when the statement carries a closing balance, and a top-level `plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
+The preview returns `summary` (`total_statement_entries`, `eligible_entries`, `filtered_out`, `created_count` = would-create, `skipped_count`, `error_count`, `possible_duplicate_count`), `sample` rows, every skipped row with its `reason` (and `skip_code` / `review_code` when set) under `execution.skipped`, the review items under `workflow.needs_review` (possible duplicates and `camt_journal_review` items, see below), an advisory `statement_balance_check` when the statement carries a closing balance, and a top-level `plan_handle` — an opaque execution-plan handle bound to exactly these reviewed bytes, arguments, and dimension. Keep it: `mode: "execute"` requires it and consumes it once. It is NOT approval — any drift in source bytes, arguments, dimension, connection, or duplicates is refused with `plan_drift` and zero creates.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 
-Present which rows would create transactions, which are skipped as exact duplicates, and any possible-duplicate review items.
+Present which rows would create transactions, which are skipped, and the review items. Skipped and review rows are not all duplicates; report each kind separately:
+- **Exact duplicates** ("Existing transaction matched by bank reference") and rows "Already booked by journal N": nothing to do.
+- **Automatic matches** (`skip_code: "camt_native_import_match"`): e-arveldaja's own bank import already created this entry as the named transaction, so it is skipped automatically; there is no flag to turn this off. Tell the owner which statement rows were skipped this way and the transaction ID each one matched. If the owner says one is a different movement, the undo is to correct or delete that stored transaction (after approval) and run the preview again.
+- **Journal reviews** (`camt_journal_review` items with a `review_code`): nothing is created for them and they are NOT possible duplicates, so never resolve them with the duplicate handling below. Follow each `review_note`. `camt_duplicate_journal_conflict` and `camt_journal_direction_conflict` mean an existing confirmed transaction's journal books this movement wrongly (wrong direction or amount): the ledger is wrong until that row is fixed as described under Direction handling. The other codes (`camt_journal_conflict`, `camt_journal_posting_review`, `camt_journal_inconsistent_amounts`, `camt_journal_identity_stale`) mean an existing journal may already book the movement: check the named journals and create the transaction manually only if the movement is not booked yet.
+- **Possible duplicates**: handle them as below.
 
 For possible duplicates, the default recommendation is:
 - if the older matched transaction is already confirmed, keep it by default: avoid creating the new row, or if it was already created, delete the new `PROJECT` (draft/unconfirmed) transaction
-- when keep/delete IDs are known, use `cleanup_camt_possible_duplicate` to enrich the kept transaction and delete the newly imported duplicate
+- when keep/delete IDs are known, use `cleanup_camt_possible_duplicate` to enrich the kept transaction and delete the newly imported duplicate. It refuses unless both rows match on dimension, date, signed direction, currency and amount; a refusal is final for that pair, so present its reason and never delete the row another way
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_camt053`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool cannot be called
+- fall back to `update_transaction` plus `delete_transaction` only when the cleanup tool is not available on this surface. If the cleanup tool refuses (identity mismatch, missing or contradictory direction, status not PROJECT), the refusal is final for that pair: do NOT delete with `delete_transaction`; present the refusal reason to the owner for review
 - if the older match is PROJECT (unconfirmed), present its current state and offer to confirm it inline with `confirm_transaction` (inter-account transfers go through the **Reconcile Bank** workflow's inter-account step instead). Do NOT defer it to manual UI work in e-arveldaja.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
@@ -96,6 +110,8 @@ The approval card must include:
 - source CAMT file
 - number of bank transactions that would be created
 - rows skipped as exact duplicates
+- rows skipped by an automatic match (`camt_native_import_match`), each with the transaction ID it matched
+- journal review items by `review_code` (not created; `camt_duplicate_journal_conflict` / `camt_journal_direction_conflict` rows need the existing booking fixed)
 - possible duplicate review items
 - side effect: PROJECT (draft/unconfirmed) bank transactions created in e-arveldaja
 

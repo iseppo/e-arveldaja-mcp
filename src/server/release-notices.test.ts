@@ -19,6 +19,9 @@ describe("release notices", () => {
     expect(notice!.affectedFlows).toEqual(expect.arrayContaining(["camt", "wise"]));
     expect(notice!.severity).toBe("warning");
     expect(notice!.message).toContain("0.22.0");
+    // A re-import skips the stored rows; it never repairs them on its own.
+    expect(notice!.message).toContain("re-importing alone does not fix it");
+    expect(notice!.message).not.toContain("fixes it.");
   });
 
   it("surfaces the bank notice for camt and wise flows within its window", () => {

@@ -38,7 +38,7 @@ export const RELEASE_NOTICES: readonly ReleaseNotice[] = Object.freeze([
     affectedFlows: Object.freeze(["camt", "wise"] as const),
     severity: "warning" as const,
     message:
-      "⚠️ v0.22.0 regression window: if you ran an e-arveldaja-mcp session between Sunday 2026-07-19 22:30 and Monday 2026-07-20 04:15 (while 0.22.0 was the latest version), any bank-statement entries created during that window are very likely wrong — incoming transactions were booked backwards. Check what e-arveldaja reports as the bank-account balance against the real bank-account balance; if they differ, re-importing the affected bank statements fixes it.",
+      "⚠️ v0.22.0 regression window: if you ran an e-arveldaja-mcp session between Sunday 2026-07-19 22:30 and Monday 2026-07-20 04:15 (while 0.22.0 was the latest version), any bank-statement entries created during that window are very likely wrong — incoming transactions were booked backwards. Check what e-arveldaja reports as the bank-account balance against the real bank-account balance; if they differ, re-importing alone does not fix it, because the importer recognises the rows already stored and skips them. Delete each wrongly booked draft (PROJECT) row, and invalidate and delete each wrongly booked confirmed row (a CAMT re-import preview reports it as camt_duplicate_journal_conflict or camt_journal_direction_conflict), each only after the owner approves; then re-import the statement and reconcile the recreated rows.",
     // Opens at the regression window and sunsets after a reconciliation grace
     // period so operators still see the advisory long enough to check their books.
     window: Object.freeze({ start: "2026-07-19T00:00:00Z", end: "2026-10-19T00:00:00Z" }),

@@ -79,21 +79,27 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 
 - `result.already_booked`: a journal already carries the row's bank reference. Verify that journal, then the PROJECT row can be deleted (`delete_transaction`, after approval).
 - `result.own_transfers`: transfers between own accounts. Reconcile them with `reconcile_bank_transactions` mode `inter_account_dry_run`; a `target_dimension_id` of null means the operator picks the target from `candidate_dimension_ids`.
-- `result.possible_duplicates`: a journal may already book the row. Compare first; never delete by default.
+- `result.possible_duplicates`: a journal may already book the row. Compare first; never delete by default. Rows with `code: "camt_marker_unverified"` are different: no journal was found, but the row's CAMT marker checksum does not verify, so neither its direction nor its counterparty account is proven. Check the row against the bank statement and correct or re-import it before classifying; never book or delete it on the marker's word.
+- Any deletion named in a `next_action` happens only after the owner explicitly approves that row.
 - `result.ledger_context_unavailable`: the check could not run; say so and do not treat the groups as complete.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `classify_bank_transactions`, and none of these is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- the `already_booked`, `own_transfers`, `possible_duplicates` and `ledger_context_unavailable` warnings in `result.summary` name those rows; already-booked rows are deleted only after verification and approval, own transfers go to `reconcile_bank_transactions` mode `inter_account_dry_run`, and possible duplicates are compared first.
+- the `already_booked`, `own_transfers`, `possible_duplicates` and `ledger_context_unavailable` warnings in `result.summary` name those rows; own transfers go to `reconcile_bank_transactions` mode `inter_account_dry_run`, and possible duplicates are compared first (a possible duplicate can also be a row whose CAMT marker checksum does not verify: its direction is unproven, so check it against the statement). Deleting an already-booked row needs the `standard` or `full` profile (`EARVELDAJA_PROFILE`) and the owner's explicit approval after the journal is verified; on this profile, list those rows and say so.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 - `apply_mode="purchase_invoice"` groups are auto-bookable
 - review-only categories are reported back as skipped
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `classify_bank_transactions`, and none of these is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+- a review-only group can carry a booking-history hint: the counterparty's last confirmed rows were all booked to one account (`continue_accounting_workflow` shows it; a name-only match says the counterparty was matched by name only, so ask the user to check it is the same party). Its recommendation names a single-transaction confirm (one call per transaction, with that transaction's amount added to the suggested distribution) that this profile does not expose: list the rows with the proposed account and suggest the `standard` or `full` profile (`EARVELDAJA_PROFILE`)
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- a group whose `suggested_booking.source` is `transaction_history` repeats how this counterparty's last rows were booked (`transaction_history.streak`). It is review-only: after the user confirms the substance, book it with `confirm_transaction` using `suggested_booking.suggested_distribution`; never save it as a rule without asking
+- a group whose `suggested_booking.source` is `transaction_history` repeats how this counterparty's last rows were booked (`transaction_history.streak`). When `transaction_history.identity` is `name_only`, the counterparty was matched by name only (no IBAN or legal form), so ask the user to check it is the same party. It is review-only: after the user confirms the substance, book each transaction with its own `confirm_transaction` call, using `suggested_booking.suggested_distribution` plus `amount` set to that transaction's amount (the suggested distribution carries no amount); never save it as a rule without asking
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 - for review-only categories, start with `review_guidance.recommendation`, explain the compliance basis briefly, and ask only the listed follow-up questions that are still unresolved
 - when a review-only group already exposes `review_guidance.resolver_input` with concrete IDs, do NOT close the workflow with "handle this manually in e-arveldaja". Offer to chain into `continue_accounting_workflow` with `action="prepare_action"` (or the `prepare-accounting-review-action` workflow) so the user can approve the next concrete tool call inline.
