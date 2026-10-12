@@ -130,6 +130,25 @@ describe("reconciliation compact profile routing", () => {
     });
   });
 
+  it("guided execute_auto_confirm with block_on_duplicate keeps a blocked row to its blocked-duplicate warning", async () => {
+    const { handler, api } = setup();
+    // A registered journal already debits the bank dimension 100 EUR the same day.
+    api.journals.listAllWithPostings.mockResolvedValue([{
+      id: 555, registered: true, is_deleted: false, effective_date: "2026-03-20", title: "Manual receipt",
+      postings: [{ accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "D", amount: 100, base_amount: 100, is_deleted: false }],
+    }]);
+    await runWithToolProfile("guided", async () => {
+      const dry = await call(handler("reconcile_bank_transactions"), { mode: "dry_run_auto_confirm", min_confidence: 50, block_on_duplicate: true });
+      const exec = await call(handler("reconcile_bank_transactions"), {
+        mode: "execute_auto_confirm", plan_handle: dry.summary.plan_handle, min_confidence: 50, block_on_duplicate: true,
+      });
+      const codes = (exec.summary.warnings ?? []).map((w: any) => w.code);
+      expect(codes).toContain("blocked_duplicate_suspect");
+      expect((exec.summary.warnings ?? []).some((w: any) => w.code === "possible_duplicate" && w.message.startsWith("POSSIBLE duplicate"))).toBe(false);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+  });
+
   it("guided inter_account_dry_run names only the guided execute route and it runs", async () => {
     const { handler } = setup();
     await runWithToolProfile("guided", async () => {

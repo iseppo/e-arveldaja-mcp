@@ -257,7 +257,7 @@ export function registerBankReconciliationTools(
                 plan_handle,
                 outcome.value.executionReport,
               );
-              return compactResponse(renderExactMatchCompact({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks, operationHandle, connectionName }));
+              return compactResponse(renderExactMatchCompact({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks, operationHandle, connectionName, blockOnDuplicate: block_on_duplicate }));
             }
             case "inter_account_dry_run": {
               const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id });

@@ -82,9 +82,11 @@ jobs:
       # The MCP registry validates the package against npm, and a fresh
       # publish takes a few minutes to become visible there.
       - name: Wait until npm serves this version
+        timeout-minutes: 12
         run: |
           for attempt in $(seq 1 40); do
-            if [ -n "$(npm view --prefer-online "e-arveldaja-mcp@$VERSION" version 2>/dev/null)" ]; then exit 0; fi
+            if served=$(npm view --prefer-online --json=false --fetch-timeout=20000 --fetch-retries=0 "e-arveldaja-mcp@$VERSION" version 2>/dev/null) \
+              && [ "$served" = "$VERSION" ]; then exit 0; fi
             sleep 15
           done
           echo "::error::e-arveldaja-mcp@$VERSION did not appear on npm within 10 minutes"

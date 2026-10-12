@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Guided `execute_auto_confirm` with `block_on_duplicate` no longer repeats a blocked row as a possible duplicate.** The execution summary did not get the flag, so a blocked row showed both its blocked-duplicate warning and a `possible_duplicate` warning, and the overflow hint pointed at plan sections that do not hold it. The preview already did this right.
+
 ### Internal
 
 - The publish workflow waits (up to 10 minutes) until npm serves the new version before registering it in the MCP registry, which validates the package against npm.
