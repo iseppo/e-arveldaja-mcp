@@ -174,7 +174,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       date_from: isoDateString("Only transactions with date >= this (YYYY-MM-DD). Narrowed server-side.").optional(),
       date_to: isoDateString("Only transactions with date <= this (YYYY-MM-DD). Narrowed server-side.").optional(),
       status: z.enum(["PROJECT", "CONFIRMED", "VOID"]).optional().describe("Filter by status: PROJECT, CONFIRMED, or VOID. Narrowed server-side."),
-      type: z.enum(["C", "D"]).optional().describe("Filter by transaction type: C or D. Narrowed server-side."),
+      type: z.enum(["C", "D"]).optional().describe("Filter by statement direction: D = incoming, C = outgoing, read from the signed CAMT/Wise marker (client-side). Rows without a marker are left out and counted in direction_unknown_excluded."),
       accounts_dimensions_id: z.number().int().positive().optional().describe("Filter by bank account dimension ID (client-side)"),
       amount_min: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) >= this"),
       amount_max: z.number().optional().describe("Only transactions whose EUR-equivalent amount (base_amount ?? amount) <= this"),
@@ -185,10 +185,14 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
     },
     { ...readOnly, title: "List Transactions" },
     async (params) => {
-      // Split filters: the API natively supports date range / status / type /
-      // client (narrowed server-side); amount, bank-ref and account-dimension
-      // have no API equivalent and are applied client-side over the narrowed set.
-      const hasClientOnlyFilter = params.accounts_dimensions_id !== undefined
+      // Split filters: the API natively supports date range / status / client
+      // (narrowed server-side); amount, bank-ref, account-dimension and type
+      // are applied client-side over the narrowed set. `type` is never sent: the
+      // live API's `type` query returns the same rows for C, D or any value
+      // (verified 2026-10), and the read-back `type` is always "C", so the
+      // direction comes from the signed CAMT/Wise marker instead.
+      const hasClientOnlyFilter = params.type !== undefined
+        || params.accounts_dimensions_id !== undefined
         || params.amount_min !== undefined
         || params.amount_max !== undefined
         || params.has_bank_ref !== undefined
@@ -198,14 +202,12 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         start_date: params.date_from,
         end_date: params.date_to,
         status: params.status,
-        type: params.type,
         clients_id: params.clients_id,
       };
       const hasServerFilter = params.modified_since !== undefined
         || params.date_from !== undefined
         || params.date_to !== undefined
         || params.status !== undefined
-        || params.type !== undefined
         || params.clients_id !== undefined;
       if (!hasClientOnlyFilter) {
         // The API filters AND paginates — no client-side page-walking needed.
@@ -234,13 +236,12 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         ? await api.transactions.listAll(serverFilter)
         : await api.transactions.listAllCached();
       const bankRefContains = params.bank_ref_contains?.toLowerCase();
+      const wantedDirection = params.type === "D" ? "incoming" : params.type === "C" ? "outgoing" : undefined;
+      let directionUnknownExcluded = 0;
       const filtered = all.filter((tx) => {
         if (params.date_from && (!tx.date || tx.date < params.date_from)) return false;
         if (params.date_to && (!tx.date || tx.date > params.date_to)) return false;
         if (params.status && tx.status !== params.status) return false;
-        // No client-side `type` check: `type` is write-only (every row reads back
-        // "C"), so comparing it would drop every matching incoming row. A `type`
-        // filter always routes through the server-narrowed listAll above.
         if (params.accounts_dimensions_id !== undefined && tx.accounts_dimensions_id !== params.accounts_dimensions_id) return false;
         // Mirror the rest of the codebase (analyze-unconfirmed, reconciliation):
         // EUR-equivalent comparison, not nominal — otherwise a USD 1000 / 920-EUR
@@ -253,6 +254,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         if (params.has_bank_ref === true && !normalizedRef) return false;
         if (params.has_bank_ref === false && normalizedRef) return false;
         if (bankRefContains && !normalizedRef.toLowerCase().includes(bankRefContains)) return false;
+        if (wantedDirection) {
+          const direction = bankTransactionDirection(tx);
+          if (direction === "unknown") { directionUnknownExcluded++; return false; }
+          if (direction !== wantedDirection) return false;
+        }
         return true;
       });
       const perPage = params.per_page ?? 100;
@@ -271,6 +277,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
             per_page: perPage,
             filtered_client_side: true,
             out_of_range: outOfRange,
+            ...(wantedDirection ? { direction_unknown_excluded: directionUnknownExcluded } : {}),
             items,
           }),
         }],

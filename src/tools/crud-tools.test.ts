@@ -766,11 +766,11 @@ describe("server-side list filters", () => {
       },
     });
 
-    const res = await handler({ date_from: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9 }) as { content: Array<{ text: string }> };
+    const res = await handler({ date_from: "2026-01-01", status: "CONFIRMED", clients_id: 9 }) as { content: Array<{ text: string }> };
 
     expect(api.transactions.list).toHaveBeenCalledTimes(1);
     expect((api.transactions.list as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
-      start_date: "2026-01-01", status: "CONFIRMED", type: "C", clients_id: 9,
+      start_date: "2026-01-01", status: "CONFIRMED", clients_id: 9,
     });
     expect(api.transactions.listAll).not.toHaveBeenCalled();
     expect(api.transactions.listAllCached).not.toHaveBeenCalled();
@@ -810,25 +810,46 @@ describe("server-side list filters", () => {
     expect(payload.total_items).toBe(1); // only the 100-amount row clears amount_min=50
   });
 
-  it("list_transactions type='D' + client-side filters keeps server-narrowed incoming rows (live rows read back type C)", async () => {
-    // Live-shaped: the server already narrowed to stored type D, but every row reads back "C".
+  // Live API (2026-10): the `type` query returns the same rows for C, D or any
+  // value, and every row reads back "C" — direction comes from the signed marker.
+  it.each([
+    ["D", [11]],
+    ["C", [13]],
+  ])("list_transactions type='%s' filters by signed direction client-side and never sends type", async (type, expected) => {
     const rows = [
-      { id: 11, date: "2026-02-01", amount: 100, base_amount: 100, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-IN-1", description: "Payment [source_direction=IN]" },
-      { id: 12, date: "2026-02-02", amount: 30, base_amount: 30, status: "CONFIRMED", type: "C", accounts_dimensions_id: 6, bank_ref_number: "REF-IN-2" },
+      { id: 11, date: "2026-02-01", amount: 100, base_amount: 100, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-1", description: "WISE:TRANSFER-1 Payment [source_direction=IN]" },
+      { id: 12, date: "2026-02-02", amount: 30, base_amount: 30, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-2", description: "manual row, no marker" },
+      { id: 13, date: "2026-02-03", amount: 40, base_amount: 40, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-3", description: "WISE:CARD_TRANSACTION-3 Card [source_direction=OUT]" },
     ];
     const { api, handler } = getCrudToolHarness("list_transactions", {
       transactions: {
         list: vi.fn(),
         listAll: vi.fn().mockResolvedValue(rows),
-        listAllCached: vi.fn(),
+        listAllCached: vi.fn().mockResolvedValue(rows),
       },
     });
 
-    const res = await handler({ type: "D", accounts_dimensions_id: 5, amount_min: 50, bank_ref_contains: "ref-in" }) as { content: Array<{ text: string }> };
+    const res = await handler({ type, date_from: "2026-02-01" }) as { content: Array<{ text: string }> };
 
-    expect(api.transactions.listAll).toHaveBeenCalledTimes(1);
-    expect((api.transactions.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ type: "D" });
-    expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+    expect(api.transactions.list).not.toHaveBeenCalled();
+    const query = (api.transactions.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(query).toMatchObject({ start_date: "2026-02-01" });
+    expect(query.type).toBeUndefined();
+    const payload = parseMcpResponse(res.content[0]!.text) as { items: Array<{ id: number }>; direction_unknown_excluded: number; filtered_client_side: boolean };
+    expect(payload.filtered_client_side).toBe(true);
+    expect(payload.items.map(i => i.id)).toEqual(expected);
+    expect(payload.direction_unknown_excluded).toBe(1);
+  });
+
+  it("list_transactions type='D' combined with client-side filters keeps the matching incoming row", async () => {
+    const rows = [
+      { id: 11, date: "2026-02-01", amount: 100, base_amount: 100, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-IN-1", description: "WISE:TRANSFER-1 Payment [source_direction=IN]" },
+      { id: 12, date: "2026-02-02", amount: 30, base_amount: 30, status: "CONFIRMED", type: "C", accounts_dimensions_id: 6, bank_ref_number: "REF-IN-2" },
+    ];
+    const { handler } = getCrudToolHarness("list_transactions", {
+      transactions: { list: vi.fn(), listAll: vi.fn(), listAllCached: vi.fn().mockResolvedValue(rows) },
+    });
+    const res = await handler({ type: "D", accounts_dimensions_id: 5, amount_min: 50, bank_ref_contains: "ref-in" }) as { content: Array<{ text: string }> };
     const payload = parseMcpResponse(res.content[0]!.text) as { total_items: number; items: Array<{ id: number }> };
     expect(payload.total_items).toBe(1);
     expect(payload.items.map(i => i.id)).toEqual([11]);
