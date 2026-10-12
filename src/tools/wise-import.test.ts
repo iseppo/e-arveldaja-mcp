@@ -6377,7 +6377,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(payload.results.map((row: any) => row.wise_id)).toEqual(["TRANSFER-M2-SELF", "BANK_DETAILS_PAYMENT-M2-SELF"]);
   });
 
-  it("m3: approving an already-imported transfer warns and points to reconcile_inter_account_transfers", async () => {
+  it("m3: approving an already-imported transfer warns and points to the inter-account reconcile route", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       transferIn("TRANSFER-M3-OLD", "2026-02-05", "40", { sourceName: "Claimed source", targetName: "Claimed target" }),
     ]));
@@ -6396,7 +6396,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(payload.execution.needs_review).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-M3-OLD",
       code: "wise_transfer_already_imported",
-      reason: expect.stringContaining("reconcile_inter_account_transfers"),
+      reason: expect.stringMatching(/reconcile_bank_transactions mode 'inter_account_dry_run'.*reconcile_inter_account_transfers.*'execute_inter_account' with that preview's plan_handle/),
     })]);
   });
 

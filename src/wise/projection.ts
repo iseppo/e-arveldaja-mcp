@@ -310,12 +310,16 @@ export interface WiseProjectionOutput {
 // Transactions.bank_account_name maxLength in the e-arveldaja API.
 const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
 
+// Inter-account route for Wise review rows: merged tool (registered on every
+// profile) first, granular tool as the standard/full alternative.
+const WISE_INTER_ACCOUNT_ROUTE =
+  "preview it with reconcile_bank_transactions mode 'inter_account_dry_run' (reconcile_inter_account_transfers on the standard/full profile) and run mode 'execute_inter_account' with that preview's plan_handle only for the actions the user approved; a row the preview leaves out (e.g. a foreign-currency leg without EUR base evidence) still needs its counterpart or rate resolved, or manual booking";
 const WISE_TRANSFER_CROSS_CURRENCY_REASON =
-  "Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; reconcile it with reconcile_bank_transactions mode 'inter_account_dry_run' then 'execute_inter_account' (reconcile_inter_account_transfers on the standard/full profile).";
+  `Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; ${WISE_INTER_ACCOUNT_ROUTE}.`;
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
-  "A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed. Either reconcile it with reconcile_bank_transactions mode 'inter_account_dry_run' then 'execute_inter_account' (reconcile_inter_account_transfers on the standard/full profile), or, if you have checked that one of the candidate journals books exactly this Wise transfer, re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so the row is recorded as already journalized instead of created.";
+  `A same-amount inter-account journal within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row is imported unconfirmed. First check whether one of the candidate journals books exactly this Wise transfer: if one does, do not reconcile the row (that would book the transfer twice) but re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so the row is recorded as already journalized instead of created; if none does, ${WISE_INTER_ACCOUNT_ROUTE}.`;
 const WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON =
-  "A journal labelled with this Wise transfer's ID already exists, but its Wise-account posting does not move this row's amount (gross, or net of a fee the journal also books) in this row's direction. Confirming the row would book the transfer twice, so it is imported unconfirmed. Correct or remove the labelled journal, then reconcile the row with reconcile_bank_transactions mode 'inter_account_dry_run' then 'execute_inter_account' (reconcile_inter_account_transfers on the standard/full profile).";
+  `A journal labelled with this Wise transfer's ID already exists, but its Wise-account posting does not move this row's amount (gross, or net of a fee the journal also books) in this row's direction. Confirming the row would book the transfer twice, so it is imported unconfirmed. Correct or remove the labelled journal. If a journal then books this transfer, delete this unconfirmed row instead of reconciling it: reconciliation may not recognise the labelled journal and would book the transfer twice. Only if no journal books it, ${WISE_INTER_ACCOUNT_ROUTE}.`;
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
   "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
 const WISE_TRANSFER_MAPPING_REJECTED_REASON =
@@ -325,7 +329,7 @@ const WISE_TRANSFER_MAPPING_UNUSED_REASON =
 const WISE_UNTAGGED_LEDGER_MATCH_REASON =
   "A bank row without a WISE: identity tag, already stored on this Wise account, has the same date, amount and currency. It may be this movement entered by hand. Advisory only: the row is still imported; if it duplicates the stored row, remove one of them.";
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
-  "This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. Confirm the existing bank transaction with reconcile_bank_transactions mode 'inter_account_dry_run' then 'execute_inter_account' (reconcile_inter_account_transfers on the standard/full profile).";
+  `This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. If the existing bank transaction is already CONFIRMED, nothing is left to do; if it is still unconfirmed (PROJECT), ${WISE_INTER_ACCOUNT_ROUTE}.`;
 
 /**
  * The Wise bank leg's amount when a journal books this row's transfer net of
