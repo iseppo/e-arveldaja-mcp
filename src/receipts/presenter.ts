@@ -2,7 +2,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { toolError } from "../tool-error.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { roundMoney } from "../money.js";
-import { createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
 import {
@@ -296,17 +296,18 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
   }
   const totals: Record<string, number | string> = { gross, net, vat, currency };
 
-  // Unresolved decisions surface as warnings (≤3); the receipt file name is the
-  // only free text and is OCR-sandbox-wrapped. No raw OCR / supplier text is
-  // embedded in the message.
-  const warnings: CompactWarning[] = [];
-  for (const row of results.filter(candidate => candidate.status === "needs_review").slice(0, 3)) {
-    warnings.push({
+  // Unresolved decisions surface as warnings (3 + an "N more" notice); the
+  // receipt file name is the only free text and is OCR-sandbox-wrapped. No raw
+  // OCR / supplier text is embedded in the message.
+  const warnings: CompactWarning[] = cappedWarnings(
+    "needs_review",
+    results.filter(candidate => candidate.status === "needs_review").map(row => ({
       item_id: wrapUntrustedOcr(row.file.name) ?? "",
       code: "needs_review",
       message: "Receipt needs manual review before booking.",
-    });
-  }
+    })),
+    "the standard/full profile lists every receipt; or process a smaller folder to see them here.",
+  );
   if (ocrIssueCount > 0) {
     warnings.push({
       code: "low_ocr_confidence",

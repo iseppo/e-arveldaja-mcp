@@ -265,4 +265,29 @@ describe("classification apply compact", () => {
     expect(compact.summary.next_action!.args.classifications_json).toEqual(classificationsJson);
     expect(compact.summary.next_action!.approval_required).toBe(true);
   });
+
+  it("apply shows 3 skipped groups and counts the rest", () => {
+    const results = Array.from({ length: 5 }, (_, i) => ({
+      category: "bank_fees", counterparty: `LHV Bank ${i}`, status: "skipped", notes: [], transactions: [i],
+    }));
+    const { summary } = renderApplyClassificationsCompact({
+      result: baseApply({ mode: "DRY_RUN", dryRun: true, summary: { applied: 0, skipped: 5, dry_run_preview: 0, failed: 0 }, results } as never),
+      classificationsJson: { groups: [] },
+    });
+    const warnings = summary.warnings ?? [];
+    expect(warnings.filter(w => w.code === "skipped")).toHaveLength(3);
+    expect(warnings.find(w => w.code === "skipped_more")?.message).toMatch(/^2 more skipped item\(s\) not shown/);
+  });
+});
+
+describe("classification compact — capped warnings", () => {
+  it("analysis shows 3 review-only groups and counts the rest", () => {
+    const result = analysis(6);
+    for (const group of result.groups) group.apply_mode = "review_only";
+    const { summary } = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
+    const warnings = summary.warnings ?? [];
+    expect(warnings.filter(w => w.code === "needs_review")).toHaveLength(3);
+    expect(warnings.find(w => w.code === "needs_review_more")?.message).toMatch(/^3 more needs_review item\(s\) not shown/);
+  });
+
 });

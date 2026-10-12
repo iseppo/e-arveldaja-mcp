@@ -298,3 +298,20 @@ describe("renderReceiptBatchCompact — executed", () => {
     expect(summary.next_action?.tool).toBe("continue_accounting_workflow");
   });
 });
+
+describe("renderReceiptBatchCompact — capped needs_review warnings", () => {
+  it("shows 3 needs_review receipts and counts the rest", () => {
+    const extraRows = Array.from({ length: 5 }, (_, i) => fileResult(100 + i, "needs_review"));
+    const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(1, { extraRows })));
+    const warnings = summary.warnings ?? [];
+    expect(warnings.filter(w => w.code === "needs_review")).toHaveLength(3);
+    const more = warnings.find(w => w.code === "needs_review_more");
+    expect(more?.message).toMatch(/^2 more needs_review item\(s\) not shown/);
+  });
+
+  it("adds no notice at or below the cap", () => {
+    const extraRows = Array.from({ length: 3 }, (_, i) => fileResult(100 + i, "needs_review"));
+    const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(1, { extraRows })));
+    expect((summary.warnings ?? []).some(w => w.code === "needs_review_more")).toBe(false);
+  });
+});

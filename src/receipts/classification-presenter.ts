@@ -1,7 +1,7 @@
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
-import { createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import { ResponseBudgetError } from "../response-budget.js";
 import { PlanStoreError } from "../plan-store.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
@@ -218,13 +218,17 @@ export function renderClassificationAnalysisCompact(
     ...result.categoryCounts,
   };
 
-  // Unresolved (review-only) groups surface as warnings (≤3); the counterparty
-  // is the only free text and is OCR-sandbox-wrapped.
-  const warnings: CompactWarning[] = unresolvedGroups.slice(0, 3).map(group => ({
-    item_id: wrapUntrustedOcr(group.display_counterparty) ?? "",
-    code: "needs_review",
-    message: `Group classified as ${group.category} needs manual review before booking (apply_mode ${group.apply_mode}).`,
-  }));
+  // Unresolved (review-only) groups surface as warnings (3 + an "N more"
+  // notice); the counterparty is the only free text and is OCR-sandbox-wrapped.
+  const warnings: CompactWarning[] = cappedWarnings(
+    "needs_review",
+    unresolvedGroups.map(group => ({
+      item_id: wrapUntrustedOcr(group.display_counterparty) ?? "",
+      code: "needs_review",
+      message: `Group classified as ${group.category} needs manual review before booking (apply_mode ${group.apply_mode}).`,
+    })),
+    "the standard/full profile lists every group; or narrow date_from/date_to to see them here.",
+  );
 
   const samples = groups.slice(0, 3).map((group, index) => ({
     i: index,
@@ -388,14 +392,17 @@ export function renderApplyClassificationsCompact(
     }
   }
 
-  const warnings: CompactWarning[] = results
-    .filter(group => group.status === "skipped")
-    .slice(0, 3)
-    .map(group => ({
-      item_id: wrapUntrustedOcr(group.counterparty) ?? "",
-      code: "skipped",
-      message: `Classification group ${group.category} was skipped and not booked.`,
-    }));
+  const warnings: CompactWarning[] = cappedWarnings(
+    "skipped",
+    results
+      .filter(group => group.status === "skipped")
+      .map(group => ({
+        item_id: wrapUntrustedOcr(group.counterparty) ?? "",
+        code: "skipped",
+        message: `Classification group ${group.category} was skipped and not booked.`,
+      })),
+    "the standard/full profile lists every group; re-preview to review them.",
+  );
 
   const samples = results.slice(0, 3).map((group, index) => ({
     i: index,
