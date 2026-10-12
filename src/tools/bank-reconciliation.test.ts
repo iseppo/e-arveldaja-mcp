@@ -3492,6 +3492,24 @@ describe("matchScore", () => {
     expect(result.reasons).not.toContain("exact_amount");
   });
 
+  it("does not label equal numbers in different currencies exact_amount", () => {
+    // 100 USD (no base) vs a 100 EUR invoice: same figure, different money.
+    const usd = { ...baseTx, cl_currencies_id: "USD" };
+    const result = matchScore(usd, { gross_price: 100, cl_currencies_id: "EUR" }, 100);
+    expect(result.reasons).toContain("cross_currency_conflict");
+    expect(result.reasons).not.toContain("exact_amount");
+    // EUR row vs a USD invoice with the same figure is not exact either.
+    const eur = matchScore(baseTx, { gross_price: 100, cl_currencies_id: "USD" }, 100);
+    expect(eur.reasons).not.toContain("exact_amount");
+  });
+
+  it("keeps exact_amount for a foreign row whose EUR base equals a EUR invoice, and for same currency", () => {
+    const proven = matchScore({ ...baseTx, cl_currencies_id: "USD", base_amount: 100 }, { gross_price: 100, cl_currencies_id: "EUR" }, 100);
+    expect(proven.reasons).toContain("exact_amount");
+    expect(matchScore({ ...baseTx, cl_currencies_id: "USD" }, { gross_price: 100, cl_currencies_id: "USD" }, 100).reasons).toContain("exact_amount");
+    expect(matchScore(baseTx, { gross_price: 100 }, 100).reasons).toContain("exact_amount");
+  });
+
   it("adds ref_number score when references match", () => {
     const tx = { ...baseTx, ref_number: "RF123" };
     const invoice = { gross_price: 100, bank_ref_number: "RF123" };

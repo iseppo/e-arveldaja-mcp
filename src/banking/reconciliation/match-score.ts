@@ -103,6 +103,12 @@ export function isAmbiguousForeignInvoiceBase(candidates: ReadonlyArray<{ confid
   return tied.some(isTierA) && (tied.length >= 2 || candidates.filter(isTierA).length >= 2);
 }
 
+function explicitCurrencyCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(code) ? code : undefined;
+}
+
 export function matchScore(
   tx: Transaction,
   invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; cl_currencies_id?: string | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string | null },
@@ -128,7 +134,19 @@ export function matchScore(
   const baseMatch = sameCents(baseCents, baseInvoiceCents);
   const txHasMeaningfulBase = !sameCents(baseCents, txCents);
   const invoiceHasMeaningfulBase = !sameCents(baseInvoiceCents, invoiceCents);
-  const conflictingBase = nominalMatch && !baseMatch && (txHasMeaningfulBase || invoiceHasMeaningfulBase);
+  // Equal numbers in two explicitly different currencies are not an exact
+  // amount. Mirrors auto-confirm's currency evidence (duplicate-policy
+  // `currencyEvidenceGap`): only a foreign row whose finite EUR `base_amount`
+  // equals a EUR invoice counts; anything else is flagged like a base conflict.
+  const txCurrency = explicitCurrencyCode(tx.cl_currencies_id);
+  const invoiceCurrency = explicitCurrencyCode(invoice.cl_currencies_id);
+  const currenciesDiffer = txCurrency !== undefined && invoiceCurrency !== undefined && txCurrency !== invoiceCurrency;
+  const crossCurrencyProven = invoiceCurrency === "EUR" && typeof tx.base_amount === "number" &&
+    Number.isFinite(tx.base_amount) && baseMatch;
+  const conflictingBase = nominalMatch && (
+    (!baseMatch && (txHasMeaningfulBase || invoiceHasMeaningfulBase)) ||
+    (currenciesDiffer && !crossCurrencyProven)
+  );
   // Tier A: structured fields only. Currency read inline (amount-resolution
   // imports this module). Only an unpaid invoice: paying the full base on a
   // partially paid one would overpay. Checked BEFORE the nominal branch: a

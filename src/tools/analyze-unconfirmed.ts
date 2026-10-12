@@ -13,6 +13,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  journalEurNetCents,
   resolveTransfer,
   resolveWithReferences,
   transferReferencesOf,
@@ -102,12 +103,8 @@ function journalCoversRow(journal: Journal | undefined, tx: Transaction): boolea
   if (direction === "unknown") return false;
   const amountEur = rowEurAmount(tx);
   if (amountEur === undefined) return false;
-  const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
-  if (live.some(posting => posting.base_amount == null &&
-    (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return false;
-  const net = live
-    .filter(posting => posting.accounts_dimensions_id === tx.accounts_dimensions_id)
-    .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100), 0);
+  const net = journalEurNetCents(journal, tx.accounts_dimensions_id);
+  if (net === undefined) return false;
   return net === (direction === "incoming" ? 1 : -1) * Math.round(Math.abs(amountEur) * 100);
 }
 
