@@ -1171,13 +1171,25 @@ describe("process_receipt_batch currency-equivalent cross-check (F-CURRENCY-EQUI
     const { payload } = await runDryRun({
       history: [],
       transactions: [{
-        id: 61, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-03-20", amount: 100, cl_currencies_id: "EUR",
-        description: "WISE:CARD-9 Example Shop [110 USD @ 1.1] [source_direction=OUT]",
+        id: 61, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-03-20", amount: 101.5, cl_currencies_id: "EUR",
+        clients_id: 7, description: "WISE:CARD-9 Example Shop [110 USD @ 1.0837] [source_direction=OUT]",
       }],
     });
     const result = payload.results[0]!;
     expect(result.status).toBe("needs_review");
     expect(JSON.stringify(result.notes)).toContain("candidate payment transaction(s) 61 match the USD figure");
+  });
+
+  it("ignores a same-day USD payment to another client (no supplier link)", async () => {
+    const { payload } = await runDryRun({
+      history: [],
+      transactions: [{
+        id: 62, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-03-20", amount: 110, cl_currencies_id: "USD", clients_id: 99,
+      }],
+    });
+    const result = payload.results[0]!;
+    expect(result.llm_fallback.confidence_signals).not.toContain("currency_equivalent_ambiguity");
+    expect(result.status).not.toBe("needs_review");
   });
 
   it("adds nothing when the supplier's history agrees with the extracted EUR", async () => {

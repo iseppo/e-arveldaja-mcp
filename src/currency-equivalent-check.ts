@@ -5,7 +5,7 @@ import {
   scoreTransactionToInvoice,
   type CurrencyEquivalentAmbiguity,
 } from "./tools/receipt-extraction.js";
-import { POSSIBLE_MATCH_THRESHOLD } from "./tools/receipt-inbox-matching.js";
+import { signedBankTransactionDirection } from "./bank-transaction-direction.js";
 
 // F-CURRENCY-EQUIVALENT: advisory out-of-band cross-check for a document whose
 // text names EUR and one supported foreign currency. "Currency USD … Summa
@@ -33,6 +33,10 @@ export interface CurrencyEquivalentCheckInput {
   supplierClientId?: number;
   /** Used only for payment counterparty scoring; never emitted. */
   supplierName?: string;
+  /** Used only to link a payment to this document; never emitted. */
+  invoiceNumber?: string;
+  /** Used only to link a payment to this document; never emitted. */
+  refNumber?: string;
   /** Called only for an ambiguous document. A failure drops the signal. */
   loadPurchaseInvoices?: () => Promise<readonly PurchaseInvoice[]>;
   /** Called only for an ambiguous document. A failure drops the signal. */
@@ -83,7 +87,9 @@ export function supplierCurrencySignal(
 }
 
 // Wise rows carry the other side of a conversion in the description:
-// "WISE:{id} Merchant [110 USD @ 1.1] [source_direction=OUT]".
+// "WISE:{id} Merchant [100 EUR @ 0.909] [source_direction=OUT]". On an outgoing
+// row the booked amount is the funding (source) side and the bracket is the
+// target — what the merchant was paid.
 const WISE_OPPOSITE_SIDE_RE = /^WISE:\S+[^\n]*?\[(\d+(?:\.\d+)?) ([A-Z]{3}) @ [^\]\n]{1,40}\]/;
 
 function wiseOppositeSide(transaction: Transaction): { amount: number; currency: string } | undefined {
@@ -93,39 +99,71 @@ function wiseOppositeSide(transaction: Transaction): { amount: number; currency:
   return Number.isFinite(amount) ? { amount, currency: match[2]! } : undefined;
 }
 
+function compactKey(value: string | null | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+export interface PaymentCounterparty {
+  clientId?: number;
+  name?: string;
+  invoiceDate?: string;
+  /** Supplier invoice number; a payment quoting it is linked to this document. */
+  invoiceNumber?: string;
+  /** Payment reference printed on the document. */
+  refNumber?: string;
+}
+
 export function paymentCurrencySignal(
   transactions: readonly Transaction[],
   ambiguity: CurrencyEquivalentAmbiguity,
   figures: { eur?: number; foreign?: number },
-  counterparty: { clientId?: number; name?: string; invoiceDate?: string },
+  counterparty: PaymentCounterparty,
 ): CurrencyEquivalentPaymentSignal | undefined {
-  const matches = (candidate: Transaction, currency: string, amount: number | undefined): boolean => {
-    if (amount === undefined) return false;
-    const { confidence, reasons } = scoreTransactionToInvoice(candidate, {
+  const foreign = ambiguity.foreign_currency;
+  const invoiceKey = compactKey(counterparty.invoiceNumber);
+  // A candidate must be linked to THIS supplier/document, not just share an
+  // amount and a date: same client id, the supplier's name, the document's
+  // payment reference, or its invoice number quoted on the row. A row naming
+  // another client is never a candidate.
+  const linked = (candidate: Transaction): boolean => {
+    if (counterparty.clientId !== undefined && candidate.clients_id != null && candidate.clients_id !== counterparty.clientId) {
+      return false;
+    }
+    const { reasons } = scoreTransactionToInvoice(candidate, {
       clients_id: counterparty.clientId,
       client_name: counterparty.name,
-      cl_currencies_id: currency,
       create_date: counterparty.invoiceDate,
-      gross_price: amount,
+      bank_ref_number: counterparty.refNumber,
     });
-    return reasons.includes("exact_amount") && confidence >= POSSIBLE_MATCH_THRESHOLD;
+    if (!reasons.includes("date_within_3_days") && !reasons.includes("date_within_10_days")) return false;
+    if (reasons.includes("client_id") || reasons.includes("counterparty_name") || reasons.includes("reference_number")) return true;
+    return invoiceKey.length >= 4 &&
+      [candidate.ref_number, candidate.bank_ref_number, candidate.description].some(field => compactKey(field).includes(invoiceKey));
+  };
+  // Which document figure (if any) an amount in `currency` equals.
+  const figureCurrency = (currency: string, amount: number): string | undefined => {
+    const figure = currency === "EUR" ? figures.eur : currency === foreign ? figures.foreign : undefined;
+    return figure !== undefined && Math.abs(Math.abs(amount) - figure) < 0.01 ? currency : undefined;
   };
   const supported = new Map<string, number[]>();
-  const support = (currency: string, id: number) => supported.set(currency, [...(supported.get(currency) ?? []), id]);
   for (const transaction of transactions) {
     if (transaction.id === undefined || transaction.is_deleted) continue;
-    const txCurrency = normalizeCurrency(transaction.cl_currencies_id) ?? "EUR";
+    const bookedCurrency = normalizeCurrency(transaction.cl_currencies_id) ?? "EUR";
     const wise = wiseOppositeSide(transaction);
-    if (txCurrency === ambiguity.foreign_currency && matches(transaction, txCurrency, figures.foreign)) {
-      support(ambiguity.foreign_currency, transaction.id);
-    } else if (
-      wise?.currency === ambiguity.foreign_currency &&
-      matches({ ...transaction, amount: wise.amount, cl_currencies_id: wise.currency }, wise.currency, figures.foreign)
-    ) {
-      support(ambiguity.foreign_currency, transaction.id);
-    } else if (txCurrency === "EUR" && wise?.currency !== ambiguity.foreign_currency && matches(transaction, "EUR", figures.eur)) {
-      support("EUR", transaction.id);
+    let currency: string | undefined;
+    if (wise) {
+      // Only an outgoing Wise row has a known target side.
+      if (signedBankTransactionDirection(transaction) !== "outgoing") continue;
+      const target = figureCurrency(wise.currency, wise.amount);
+      const source = figureCurrency(bookedCurrency, transaction.amount);
+      // The merchant-paid (target) currency is the signal; when the funding
+      // side matches the other figure the row supports both, so neither.
+      currency = target !== undefined && (source === undefined || source === target) ? target : undefined;
+    } else {
+      currency = figureCurrency(bookedCurrency, transaction.amount);
     }
+    if (currency === undefined || !linked(transaction)) continue;
+    supported.set(currency, [...(supported.get(currency) ?? []), transaction.id]);
   }
   if (supported.size !== 1) return undefined;
   const [currency, ids] = [...supported.entries()][0]!;
@@ -168,6 +206,8 @@ export async function checkCurrencyEquivalent(input: CurrencyEquivalentCheckInpu
         clientId: input.supplierClientId,
         name: input.supplierName,
         invoiceDate: input.invoiceDate,
+        invoiceNumber: input.invoiceNumber,
+        refNumber: input.refNumber,
       });
     } catch {
       payment = undefined;

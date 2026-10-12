@@ -73,9 +73,36 @@ describe("detectCurrencyEquivalentAmbiguity", () => {
 
   it("does not flag a single-currency document or one with two foreign currencies", () => {
     expect(detectCurrencyEquivalentAmbiguity(EUR_ONLY)).toBeUndefined();
-    expect(detectCurrencyEquivalentAmbiguity("Total USD 110.00\nShipping GBP 5.00\nTotal 100.00 EUR")).toBeUndefined();
+    expect(detectCurrencyEquivalentAmbiguity("Total USD 110.00\nTotal GBP 90.00\nTotal 100.00 EUR")).toBeUndefined();
     expect(detectCurrencyEquivalentAmbiguity("Total USD 110.00")).toBeUndefined();
     expect(detectCurrencyEquivalentAmbiguity(undefined)).toBeUndefined();
+  });
+});
+
+describe("detectCurrencyEquivalentAmbiguity false positives (Codex review)", () => {
+  // Finding 1: an inline rate quote names no document currency.
+  it("does not flag a EUR total carrying an inline exchange rate", async () => {
+    const text = "Example Shop\nReceipt R-57\nDate 2026-03-10\nTOTAL 100.00 EUR (1 EUR = 1.08 USD)";
+    const extracted = extract(text);
+    expect(extracted.currency).toBe("EUR");
+    expect(detectCurrencyEquivalentAmbiguity(text)).toBeUndefined();
+    const loadPurchaseInvoices = vi.fn(async () => history(["USD", "USD", "USD"]));
+    expect(await checkCurrencyEquivalent({
+      rawText: text, extractedCurrency: extracted.currency, supplierClientId: SUPPLIER_ID, loadPurchaseInvoices,
+    })).toBeUndefined();
+    expect(loadPurchaseInvoices).not.toHaveBeenCalled();
+  });
+
+  // Finding 2: a footer / marketing figure is not a second-currency total.
+  it("does not flag a USD receipt whose footer mentions a EUR amount", async () => {
+    const text = "Example Shop\nReceipt R-58\nDate 2026-03-10\nTOTAL 100.00 USD\nFree shipping for orders over 50 EUR";
+    const extracted = extract(text);
+    expect(extracted.currency).toBe("USD");
+    expect(detectCurrencyEquivalentAmbiguity(text)).toBeUndefined();
+    expect(await checkCurrencyEquivalent({
+      rawText: text, extractedCurrency: extracted.currency, supplierClientId: SUPPLIER_ID,
+      loadPurchaseInvoices: async () => history(["EUR", "EUR", "EUR"]),
+    })).toBeUndefined();
   });
 });
 
@@ -120,7 +147,7 @@ describe("checkCurrencyEquivalent", () => {
     expect(warning!.message).toContain("the extracted currency was not changed");
   });
 
-  it("warns when a candidate EUR payment matches the EUR figure of a USD-extracted document", async () => {
+  it("warns when a supplier-linked EUR payment matches the EUR figure of a USD-extracted document", async () => {
     const extracted = extract(USD_WITH_EUR_EQUIVALENT);
     expect(extracted.currency).toBe("USD");
     const warning = await checkCurrencyEquivalent({
@@ -130,7 +157,7 @@ describe("checkCurrencyEquivalent", () => {
       invoiceDate: "2026-03-10",
       supplierClientId: SUPPLIER_ID,
       loadPurchaseInvoices: async () => [],
-      loadTransactions: async () => [tx({ id: 501, amount: 100, cl_currencies_id: "EUR" })],
+      loadTransactions: async () => [tx({ id: 501, amount: 100, cl_currencies_id: "EUR", clients_id: SUPPLIER_ID })],
     });
     expect(warning).toMatchObject({
       extracted_currency: "USD",
@@ -139,24 +166,76 @@ describe("checkCurrencyEquivalent", () => {
     expect(warning!.supplier_history).toBeUndefined();
   });
 
-  it("treats a Wise row whose other side is the foreign currency as supporting the foreign currency", async () => {
-    const extracted = extract(EUR_WITH_USD_CONVERSION);
+  it("links a payment by the invoice number it quotes", async () => {
+    const extracted = extract(USD_WITH_EUR_EQUIVALENT);
     const warning = await checkCurrencyEquivalent({
       rawText: extracted.raw_text,
       extractedCurrency: extracted.currency,
       extractedGross: extracted.total_gross,
       invoiceDate: "2026-03-10",
-      loadTransactions: async () => [tx({
-        id: 502,
-        amount: 100,
-        cl_currencies_id: "EUR",
-        description: "WISE:CARD-1 Example Shop [110 USD @ 1.1] [source_direction=OUT]",
-      })],
+      invoiceNumber: "INV-1001",
+      loadTransactions: async () => [tx({ id: 505, amount: 100, cl_currencies_id: "EUR", description: "Payment inv1001" })],
     });
-    expect(warning).toMatchObject({
-      extracted_currency: "EUR",
-      payment: { suggested_currency: "USD", transaction_ids: [502] },
+    expect(warning?.payment).toEqual({ suggested_currency: "EUR", transaction_ids: [505] });
+  });
+
+  // Codex finding 3: amount + date alone is not a link to this supplier.
+  it("ignores an amount+date payment that is unlinked or names another supplier", async () => {
+    const extracted = extract(USD_WITH_EUR_EQUIVALENT);
+    const run = (rows: Transaction[]) => checkCurrencyEquivalent({
+      rawText: extracted.raw_text,
+      extractedCurrency: extracted.currency,
+      extractedGross: extracted.total_gross,
+      invoiceDate: "2026-03-10",
+      supplierClientId: SUPPLIER_ID,
+      supplierName: "Example Supplier OU",
+      loadTransactions: async () => rows,
     });
+    expect(await run([tx({ id: 506, amount: 100, date: "2026-03-10" })])).toBeUndefined();
+    expect(await run([tx({ id: 507, amount: 100, date: "2026-03-10", clients_id: 99, bank_account_name: "Other Vendor AS" })])).toBeUndefined();
+    // A row whose client id contradicts the supplier is rejected even when the name matches.
+    expect(await run([tx({ id: 508, amount: 100, date: "2026-03-10", clients_id: 99, bank_account_name: "Example Supplier OU" })])).toBeUndefined();
+  });
+
+  // Codex finding 4: on an outgoing Wise row the bracket is the merchant-paid
+  // (target) side; the funding currency is not a signal.
+  it("votes the Wise target currency, and nothing when source and target support different currencies", async () => {
+    const eurDoc = extract(EUR_WITH_USD_CONVERSION);
+    const usdDoc = extract(USD_WITH_EUR_EQUIVALENT);
+    const run = (doc: ReturnType<typeof extract>, row: Partial<Transaction> & Pick<Transaction, "id" | "amount">) => checkCurrencyEquivalent({
+      rawText: doc.raw_text,
+      extractedCurrency: doc.currency,
+      extractedGross: doc.total_gross,
+      invoiceDate: "2026-03-10",
+      supplierName: "Example Shop",
+      loadTransactions: async () => [tx({ bank_account_name: "Example Shop", ...row })],
+    });
+    // Correct EUR receipt paid from a USD balance: source USD 110 matches the
+    // USD figure, target EUR 100 the EUR one -> no signal.
+    expect(await run(eurDoc, {
+      id: 510, amount: 110, cl_currencies_id: "USD",
+      description: "WISE:CARD-2 Example Shop [100 EUR @ 0.90909] [source_direction=OUT]",
+    })).toBeUndefined();
+    // Same shape, EUR funding paid a USD merchant at both printed figures -> no signal.
+    expect(await run(eurDoc, {
+      id: 511, amount: 100, cl_currencies_id: "EUR",
+      description: "WISE:CARD-3 Example Shop [110 USD @ 1.1] [source_direction=OUT]",
+    })).toBeUndefined();
+    // EUR funding at another rate, merchant paid USD 110 -> USD.
+    expect((await run(eurDoc, {
+      id: 512, amount: 101.5, cl_currencies_id: "EUR",
+      description: "WISE:CARD-4 Example Shop [110 USD @ 1.0837] [source_direction=OUT]",
+    }))?.payment).toEqual({ suggested_currency: "USD", transaction_ids: [512] });
+    // USD funding at another rate, merchant paid EUR 100 -> EUR (symmetric).
+    expect((await run(usdDoc, {
+      id: 513, amount: 112, cl_currencies_id: "USD",
+      description: "WISE:CARD-5 Example Shop [100 EUR @ 0.8929] [source_direction=OUT]",
+    }))?.payment).toEqual({ suggested_currency: "EUR", transaction_ids: [513] });
+    // An incoming Wise row is never a payment signal.
+    expect(await run(eurDoc, {
+      id: 514, amount: 101.5, cl_currencies_id: "EUR",
+      description: "WISE:CARD-6 Example Shop [110 USD @ 1.0837] [source_direction=IN]",
+    })).toBeUndefined();
   });
 
   it("emits nothing when the signals agree with the extraction", async () => {

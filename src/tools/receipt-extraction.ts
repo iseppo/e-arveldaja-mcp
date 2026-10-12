@@ -3117,19 +3117,38 @@ export interface CurrencyEquivalentAmbiguity {
   foreign_amount?: number;
 }
 
+// Lines that state an equivalent / converted / charged figure of the document
+// ("Summa eurodes", "EUR equivalent", "Card conversion", "Cardholder amount").
+// Together with the total/payable labels these are the only lines whose
+// amounts can make a document currency-ambiguous; a footer or marketing figure
+// ("Free shipping for orders over 50 EUR") never does.
+const CURRENCY_EQUIVALENT_LINE_RE =
+  /\b(?:equivalent|ekvivalent|eurodes|conversion|converted|charged|billed)\b/i;
+
 export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined): CurrencyEquivalentAmbiguity | undefined {
   if (!sourceText) return undefined;
   const text = stripSandboxMarkers(sourceText);
   const codes = new Set<string>();
   const largest = new Map<string, number>();
   for (const line of text.split(/\r?\n/).map(clampTextLine).filter(Boolean)) {
-    const amounts = extractAmountsFromLine(blankExchangeRateNumbers(line), text);
-    const labelled = [...line.matchAll(CURRENCY_LABEL_CODE_RE)].length > 0;
-    if (amounts.length === 0 && !labelled) continue;
-    for (const code of detectCurrenciesOnLine(line)) codes.add(code);
+    // Same rate stripping the extractor uses: "(1 EUR = 1.08 USD)" names no
+    // document currency and contributes no amount.
+    const clean = blankExchangeRateNumbers(line);
+    const labelled = [...clean.matchAll(CURRENCY_LABEL_CODE_RE)].length > 0;
+    const amountLine = RECEIPT_TOTAL_LABEL_RE.test(clean) ||
+      CURRENCY_EQUIVALENT_LINE_RE.test(clean) ||
+      RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(clean);
+    if (!amountLine && !labelled) continue;
+    const amounts = amountLine ? extractAmountsFromLine(clean, text) : [];
+    if (amounts.length === 0) {
+      // A bare "Currency: USD" label names the document currency.
+      if (labelled) for (const code of detectCurrenciesOnLine(clean)) codes.add(code);
+      continue;
+    }
     for (const value of amounts) {
-      const code = currencyOfAmountOnLine(line, value, text);
+      const code = currencyOfAmountOnLine(clean, value, text);
       if (code === undefined) continue;
+      codes.add(code);
       const magnitude = Math.abs(value);
       if (magnitude > (largest.get(code) ?? 0)) largest.set(code, magnitude);
     }

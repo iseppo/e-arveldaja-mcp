@@ -5,7 +5,7 @@ import type { InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { scoreTransactionToInvoice } from "./receipt-extraction.js";
 import type { InvoiceDuplicateMatch, TransactionMatchCandidate } from "./receipt-inbox-types.js";
 
-export const POSSIBLE_MATCH_THRESHOLD = 70;
+const POSSIBLE_MATCH_THRESHOLD = 70;
 
 export interface TransactionMatchResult {
   candidate?: TransactionMatchCandidate;

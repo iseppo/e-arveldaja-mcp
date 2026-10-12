@@ -580,6 +580,8 @@ async function processSingleReceipt(
       invoiceDate: extracted.invoice_date,
       supplierClientId: resolvedClientId,
       supplierName: supplierResolution.client?.name ?? supplierResolution.preview_client?.name,
+      invoiceNumber: extracted.invoice_number,
+      refNumber: extracted.ref_number,
       loadPurchaseInvoices: async () => context.purchaseInvoices,
       loadTransactions: async () => options.bankTransactions,
     });
