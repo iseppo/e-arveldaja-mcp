@@ -14,6 +14,7 @@ import {
 } from "./duplicate-identity.js";
 import {
   buildCamtJournalCoverageContext,
+  checkCamtDuplicateRegistration,
   classifyCamtJournalCoverage,
   type CamtJournalCoverage,
   type CamtJournalSnapshot,
@@ -66,6 +67,7 @@ export function enrichWithDuplicates(
   };
 }
 
+const CAMT_DUPLICATE_JOURNAL_CONFLICT = "camt_duplicate_journal_conflict";
 const CAMT_PARTIAL_LEGACY_REASON = "Partially imported by a previous release; needs review";
 
 function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJournalCoverage, { kind: "none" }>): CamtSkippedRow {
@@ -153,6 +155,29 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       continue;
     }
     if (entry.duplicate) {
+      // A matched confirmed row is a plain duplicate only when its registration
+      // journal books this movement; otherwise surface it, never create it.
+      const registration = checkCamtDuplicateRegistration(entry, journalCoverage);
+      if (registration.kind === "conflict") {
+        const ids = registration.journal_ids.join(", ");
+        const rows = entry.duplicate_transaction_ids.join(", ");
+        skipped.push({
+          date: entry.date,
+          amount: entry.amount,
+          bank_reference: entry.bank_reference,
+          duplicate_transaction_ids: entry.duplicate_transaction_ids,
+          journal_ids: registration.journal_ids,
+          reason: "Existing transaction matched, but its registration journal does not book this movement; needs review",
+          review_code: CAMT_DUPLICATE_JOURNAL_CONFLICT,
+          review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} is already in the ledger as ` +
+            `transaction ${rows}, but ` +
+            (registration.missing_transaction_ids.length > 0
+              ? `transaction ${registration.missing_transaction_ids.join(", ")} has no registered journal${ids ? ` and journal ${ids} does not match` : ""}. `
+              : `its registration journal ${ids} does not book ${entry.amount} ${entry.currency} ${entry.direction === "CRDT" ? "into" : "out of"} this bank account (wrong direction or amount). `) +
+            "It was not created again; correct the existing transaction's booking (invalidate and re-confirm it) so the ledger matches the statement.",
+        });
+        continue;
+      }
       skipped.push({
         date: entry.date,
         amount: entry.amount,

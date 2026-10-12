@@ -4,6 +4,7 @@ import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
 import { buildCamtDescriptionWithMetadata } from "./duplicate-identity.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
+import type { Journal } from "../types/api.js";
 
 // Rows stored by the release before CntrValAmt-weighted splitting and the
 // AddtlNtryInf description fallback (1007fde) must still be recognised as the
@@ -20,7 +21,7 @@ const ntry = (amount: string, ref: string, inner: string, addtl = "") =>
   `<Ntry><Amt Ccy="EUR">${amount}</Amt><CdtDbtInd>DBIT</CdtDbtInd><BookgDt><Dt>2026-02-04</Dt></BookgDt>` +
   `${ref ? `<AcctSvcrRef>${ref}</AcctSvcrRef>` : ""}${inner ? `<NtryDtls>${inner}</NtryDtls>` : ""}${addtl ? `<AddtlNtryInf>${addtl}</AddtlNtryInf>` : ""}</Ntry>`;
 
-async function project(xml: string, ledger: Transaction[]) {
+async function project(xml: string, ledger: Transaction[], journals: Journal[] = []) {
   const preflight = preflightCamt053Xml(xml);
   if (!preflight.ok) throw new Error(`preflight rejected: ${JSON.stringify(preflight.rejected_fields)}`);
   return computeCamtImportProjection({
@@ -29,7 +30,7 @@ async function project(xml: string, ledger: Transaction[]) {
     dateFrom: undefined,
     dateTo: undefined,
     ledgerTransactions: ledger,
-    journalCoverage: { journals: [], accountId: 1020, bankAccounts: [], accountDimensions: [], interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
+    journalCoverage: { journals, accountId: 1020, bankAccounts: [], accountDimensions: [], interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
     resolveClient: async () => ({}) as never,
     reportProgress: async () => {},
   });
@@ -194,6 +195,19 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
   const legacyMarker = (e: ParsedCamtEntry, signature = sig(e, e.direction === "CRDT" ? "D" : "C", false)) =>
     `[e-arveldaja-mcp:camt br=${e.bank_reference} iban=${e.counterparty_iban} sig=${signature}]`;
   const projectEntries = (xml: string, ledger: Transaction[]) => project(xml, ledger);
+  /** Each CONFIRMED row with its registration journal booking it on DIM in the statement's direction, as the live API keeps it. */
+  const projectBooked = (xml: string, ledger: Transaction[]) => {
+    const cash = parse(xml)[0]!.direction === "CRDT" ? "D" : "C";
+    const journals = ledger.filter(row => row.status === "CONFIRMED").map((row, index) => ({
+      id: 7000 + index, effective_date: row.date, registered: true, is_deleted: false, operation_type: "TRANSACTION",
+      operations_id: row.id, document_number: null,
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: DIM, type: cash, amount: row.amount, base_amount: row.amount, cl_currencies_id: "EUR", is_deleted: false },
+        { accounts_id: 2310, accounts_dimensions_id: null, type: cash === "D" ? "C" : "D", amount: row.amount, base_amount: row.amount, cl_currencies_id: "EUR", is_deleted: false },
+      ],
+    }) as Journal);
+    return project(xml, ledger, journals);
+  };
   const skippedAsDuplicate = (p: Awaited<ReturnType<typeof project>>) =>
     p.skipped.filter(row => row.reason === "Existing transaction matched by bank reference" && row.review_note === undefined);
 
@@ -202,7 +216,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const [entry] = parse(xml);
     const row = currentRow(9001, entry!);
     expect(row.description!.length).toBe(MAX);
-    const rerun = await projectEntries(xml, [row]);
+    const rerun = await projectBooked(xml, [row]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun).map(r => r.duplicate_transaction_ids)).toEqual([[9001]]);
   });
@@ -210,7 +224,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
   it("skips a legacy dir-less untruncated row signed with type D", async () => {
     const xml = wrap(crdt({ amount: "15.00", date: "2026-06-12", ref: "LEG-REF-1", name: "Small Payer", iban: "EE382200221020145685", ustrd: "Arve 15" }));
     const [entry] = parse(xml);
-    const rerun = await projectEntries(xml, [apiRow(9002, entry!, `${entry!.description}\n${legacyMarker(entry!)}`)]);
+    const rerun = await projectBooked(xml, [apiRow(9002, entry!, `${entry!.description}\n${legacyMarker(entry!)}`)]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun)).toHaveLength(1);
   });
@@ -220,7 +234,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const [entry] = parse(xml);
     const description = render(entry!.description!, legacyMarker(entry!));
     expect(description.length).toBeLessThanOrEqual(MAX);
-    const rerun = await projectEntries(xml, [apiRow(9003, entry!, description)]);
+    const rerun = await projectBooked(xml, [apiRow(9003, entry!, description)]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun)).toHaveLength(1);
   });
@@ -231,7 +245,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const [entry] = parse(xml);
     const row = currentRow(9013, entry!);
     expect(row.description!.length).toBeLessThan(MAX);
-    const rerun = await projectEntries(xml, [row]);
+    const rerun = await projectBooked(xml, [row]);
     expect(rerun.descriptors).toHaveLength(0);
   });
 
@@ -241,7 +255,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const description = `${entry!.description}\n${legacyMarker(entry!)}`;
     // Today's marker is longer (dir=), so today's renderer would cut the text.
     expect(buildCamtDescriptionWithMetadata(entry!.description, entry!)!.split("\n")[0]!.length).toBeLessThan(entry!.description!.length);
-    const rerun = await projectEntries(xml, [apiRow(9004, entry!, description)]);
+    const rerun = await projectBooked(xml, [apiRow(9004, entry!, description)]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun)).toHaveLength(1);
   });

@@ -10,6 +10,7 @@ import type { ParsedCamtEntry, Transaction } from "./types.js";
 import { computeCamtImportProjection } from "./projection.js";
 import { buildCamtDescriptionWithMetadata } from "./duplicate-identity.js";
 import { summarizeEntries } from "./parser.js";
+import { camtNormalizedArgs, camtPlanFingerprint } from "./executor.js";
 
 // LHV dim 7 and Wise dim 8 are own bank dimensions on 1020; dim 70 is a loan
 // sub-account on 1410. Entries are on dim 7.
@@ -275,5 +276,82 @@ describe("journal coverage through the projection (Codex round 2)", () => {
     expect(projection.descriptors).toHaveLength(0);
     expect(projection.skipped.find(row => row.bank_reference === "R2")?.duplicate_transaction_ids).toEqual([801]);
     expect(projection.skipped.find(row => row.bank_reference === "R")).toMatchObject({ review_code: "camt_journal_conflict", journal_ids: [601] });
+  });
+});
+
+describe("a matched duplicate's registration journal (Codex live round 3, finding 8)", () => {
+  // Live shape: an incoming 15.00 statement entry already imported as a row
+  // read back with type "C" and its bank reference; an old release confirmed it
+  // with a journal that CREDITS the statement account (booked as outgoing).
+  const DIM = 7;
+  const incoming: ParsedCamtEntry = {
+    date: "2026-07-19", amount: 15, currency: "EUR", direction: "CRDT", counterparty_name: "Payer OU",
+    counterparty_iban: "EE471000001020145685", description: "Arve 15", bank_reference: "LIVE-REF-15",
+    duplicate: false, duplicate_transaction_ids: [],
+  };
+  const row = (status: string): Transaction => ({
+    id: 9100, status, accounts_dimensions_id: DIM, type: "C", amount: 15, cl_currencies_id: "EUR", date: incoming.date,
+    description: buildCamtDescriptionWithMetadata(incoming.description, incoming), bank_ref_number: "LIVE-REF-15",
+    bank_account_no: null, bank_account_name: "Payer OU", ref_number: null, clients_id: 31,
+  }) as Transaction;
+  const registration = (cash: "D" | "C", amount: number, o: Partial<Journal> = {}) =>
+    journal(9200, [p(1020, DIM, cash, amount), p(1210, null, cash === "D" ? "C" : "D", amount)],
+      { operation_type: "TRANSACTION", operations_id: 9100, effective_date: incoming.date, ...o });
+  const project = (ledger: Transaction[], journals: Journal[]) => computeCamtImportProjection({
+    loaded: { entries: [incoming], summary: summarizeEntries([incoming]), statement_metadata: { iban: "EE000", period: {} } },
+    accountsDimensionsId: DIM, dateFrom: undefined, dateTo: undefined, ledgerTransactions: ledger,
+    journalCoverage: { journals, accountId: 1020, bankAccounts: [], accountDimensions: [],
+      interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
+    resolveClient: async () => ({}), reportProgress: async () => {},
+  });
+  const plainSkip = { duplicate_transaction_ids: [9100], reason: "Existing transaction matched by bank reference" };
+
+  it("a correct journal (debits the statement account 15.00) → plain duplicate skip", async () => {
+    const projection = await project([row("CONFIRMED")], [registration("D", 15)]);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped).toEqual([{ date: incoming.date, amount: 15, bank_reference: "LIVE-REF-15", ...plainSkip }]);
+  });
+
+  it.each([
+    ["an inverted journal (credits the statement account)", registration("C", 15)],
+    ["an amount-off journal (debits 14.00)", registration("D", 14)],
+    ["a non-EUR bank posting", journal(9200, [p(1020, DIM, "D", 15, { cl_currencies_id: "USD" }), p(1210, null, "C", 15)],
+      { operation_type: "TRANSACTION", operations_id: 9100, effective_date: incoming.date })],
+  ])("%s → review camt_duplicate_journal_conflict, never a create", async (_name, wrong) => {
+    const projection = await project([row("CONFIRMED")], [wrong]);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped).toHaveLength(1);
+    expect(projection.skipped[0]).toMatchObject({
+      duplicate_transaction_ids: [9100], journal_ids: [9200], review_code: "camt_duplicate_journal_conflict",
+    });
+    expect(projection.skipped[0]!.review_note).toMatch(/transaction 9100.*journal 9200 does not book 15 EUR into this bank account/);
+  });
+
+  it("a confirmed row with no live registered journal → review (deleted or unregistered journals do not count)", async () => {
+    for (const journals of [[], [registration("D", 15, { is_deleted: true })], [registration("D", 15, { registered: false })]]) {
+      const projection = await project([row("CONFIRMED")], journals);
+      expect(projection.descriptors).toHaveLength(0);
+      expect(projection.skipped[0]).toMatchObject({ review_code: "camt_duplicate_journal_conflict", journal_ids: [] });
+      expect(projection.skipped[0]!.review_note).toMatch(/transaction 9100 has no registered journal/);
+    }
+  });
+
+  it("an unknown-status row is checked like a confirmed one (fail closed)", async () => {
+    const projection = await project([{ ...row("CONFIRMED"), status: undefined } as unknown as Transaction], []);
+    expect(projection.skipped[0]).toMatchObject({ review_code: "camt_duplicate_journal_conflict" });
+  });
+
+  it("a PROJECT duplicate has no journal to check → plain duplicate skip", async () => {
+    const projection = await project([row("PROJECT")], []);
+    expect(projection.descriptors).toHaveLength(0);
+    expect(projection.skipped).toEqual([{ date: incoming.date, amount: 15, bank_reference: "LIVE-REF-15", ...plainSkip }]);
+  });
+
+  it("the review reaches the plan fingerprint, so a journal change between dry run and execute is caught", async () => {
+    const args = camtNormalizedArgs(DIM, undefined, undefined);
+    const covered = camtPlanFingerprint(await project([row("CONFIRMED")], [registration("D", 15)]), args);
+    const inverted = camtPlanFingerprint(await project([row("CONFIRMED")], [registration("C", 15)]), args);
+    expect(inverted).not.toBe(covered);
+    expect(camtPlanFingerprint(await project([row("CONFIRMED")], [registration("C", 15)]), args)).toBe(inverted);
   });
 });

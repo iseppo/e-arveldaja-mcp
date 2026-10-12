@@ -66,6 +66,8 @@ export interface CamtJournalCoverageContext {
   readonly identityClaims: Map<number, Set<string>>;
   /** Transaction id → reference keys of the statement entries it matched (F3 included). */
   readonly matchedEntryKeys: Map<number, Set<string | undefined>>;
+  /** Transaction id → its live registered TRANSACTION journals, for every transaction a statement entry matched. */
+  readonly registrationJournals: Map<number, Journal[]>;
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly laneB: InterAccountResolver;
 }
@@ -102,6 +104,17 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
     const documentKeys = journalDocumentReferenceKeys(journal.document_number);
     return documentKeys.length > 0 && !documentKeys.some((key) => matchedKeys.has(key));
   });
+  // The matched transactions' own registration journals, kept apart from the
+  // scan above so a matched duplicate can still be checked against them.
+  const registrationJournals = new Map<number, Journal[]>();
+  for (const journal of snapshot.journals) {
+    if (journal.id == null || journal.is_deleted || journal.registered !== true) continue;
+    if (journal.operation_type !== "TRANSACTION" || journal.operations_id == null) continue;
+    if (!matchedEntryKeys.has(journal.operations_id)) continue;
+    const list = registrationJournals.get(journal.operations_id) ?? [];
+    list.push(journal);
+    registrationJournals.set(journal.operations_id, list);
+  }
   const statementReferenceKeys = new Set(entries
     .map((entry) => bankReferenceLookupKey(entry.bank_reference))
     .filter((key): key is string => key !== undefined));
@@ -135,6 +148,7 @@ export function buildCamtJournalCoverageContext(input: CamtJournalCoverageInput)
     repeatedBankReferences: findRepeatedBankReferences([...entries]),
     identityClaims,
     matchedEntryKeys,
+    registrationJournals,
     ownIbanToDimension: lookups.ownIbanToDimension,
     laneB: snapshot.interAccountResolver(laneBJournals, lookups.ownDimensionIds),
   };
@@ -250,4 +264,50 @@ export function classifyCamtJournalCoverage(
   if (only) return { kind: only[1], journal_ids: [only[0]] };
   if (scanIds.length > 0) return { kind: "review", code: "camt_journal_posting_review", journal_ids: journalIds };
   return { kind: "none" };
+}
+
+
+export type CamtDuplicateJournalCheck =
+  | { readonly kind: "covered" }
+  | { readonly kind: "conflict"; readonly journal_ids: number[]; readonly missing_transaction_ids: number[] };
+
+/**
+ * A statement entry the transaction dedup matched is only a plain duplicate
+ * when every matched non-PROJECT transaction's registration journal(s) move
+ * the entry's money on this dimension: same direction and, for a EUR entry,
+ * the same cents. A confirmed row booked backwards (the old type-"C" bug), for
+ * another amount, or with no registration journal is a conflict. A row of
+ * unknown status is checked like a confirmed one (fail closed).
+ */
+export function checkCamtDuplicateRegistration(
+  entry: ParsedCamtEntry,
+  context: CamtJournalCoverageContext,
+): CamtDuplicateJournalCheck {
+  const sign = entry.direction === "CRDT" ? 1 : -1;
+  const eur = (entry.currency || "EUR") === "EUR";
+  const journalIds = new Set<number>();
+  const missing: number[] = [];
+  let conflict = false;
+  for (const id of entry.duplicate_transaction_ids) {
+    const transaction = context.sameDimensionTransactions.get(id);
+    if (transaction?.status === "PROJECT") continue;
+    const journals = context.registrationJournals.get(id) ?? [];
+    if (journals.length === 0) {
+      missing.push(id);
+      continue;
+    }
+    let net: number | undefined = 0;
+    for (const journal of journals) {
+      journalIds.add(journal.id!);
+      const journalNet = bankNetCents(journal, context);
+      net = journalNet === undefined || net === undefined ? undefined : net + journalNet;
+    }
+    if (net === undefined || (eur ? net !== sign * cents(entry.amount) : Math.sign(net) !== sign)) conflict = true;
+  }
+  if (!conflict && missing.length === 0) return { kind: "covered" };
+  return {
+    kind: "conflict",
+    journal_ids: [...journalIds].sort((left, right) => left - right),
+    missing_transaction_ids: missing,
+  };
 }
