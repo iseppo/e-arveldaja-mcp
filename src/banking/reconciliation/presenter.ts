@@ -407,7 +407,8 @@ export function renderSuggestCompact(
     item_id: String(row.transaction_id ?? ""),
     code: "manual_review_required",
     message: String(row.manual_review_required),
-  })), "run reconcile_bank_transactions mode=\"dry_run_auto_confirm\" and page its plan exclusions with get_execution_plan_page.");
+  })), "run reconcile_bank_transactions mode=\"dry_run_auto_confirm\" and page its plan with get_execution_plan_page: "
+    + "payer/client mismatches are in section \"reviews\", the other exact-match review reasons in \"exclusions\".");
   if (data.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: data.duplicateScanNote });
   }
@@ -592,22 +593,29 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     code: "possible_duplicate",
     message: line,
   })), moreHint));
+  // Blocked suspects are in neither plan section (removed from the confirms,
+  // not plan exclusions): only the full dry-run output lists every one.
+  const blockedHint = "they are not in the plan; the standard or full profile (EARVELDAJA_PROFILE) lists every one as a "
+    + "blocked_duplicate_suspect result row of reconcile_bank_transactions mode=\"dry_run_auto_confirm\" with block_on_duplicate: true.";
   warnings.push(...cappedWarnings("blocked_duplicate_suspect", projection.blockedDuplicateSuspects.map(blocked => ({
     item_id: String(blocked.transaction_id),
     code: "blocked_duplicate_suspect",
     message: blocked.reason,
-  })), moreHint));
+  })), blockedHint));
   if (projection.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: projection.duplicateScanNote });
   }
   // One cap across the third-party payer reasons; each warning keeps its own code.
+  const thirdPartyPayerHint = dryRun && input.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${input.planHandle}", section: "reviews", detail: "full" }.`
+    : "re-run the dry run and page its plan reviews with get_execution_plan_page.";
   warnings.push(...cappedWarnings("third_party_payer_review", projection.thirdPartyPayerReviews.map(review => ({
     item_id: String(review.transaction_id),
     code: review.reason,
     message: `Payer client ${review.transaction_clients_id ?? "none"} does not match ${review.invoice_type} `
       + `#${review.invoice_id} client ${review.invoice_clients_id ?? "none"}; withheld from the confirm batch. `
       + thirdPartyPayerNextAction(review),
-  })), moreHint.replace("\"commands\" or \"exclusions\"", "\"reviews\"")));
+  })), thirdPartyPayerHint));
   for (const warning of input.ledgerChecks?.warnings ?? []) {
     warnings.push({ code: "ledger_check_unavailable", message: warning });
   }
@@ -708,7 +716,17 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
         }
       : {}),
     ...(details ? { details } : {}),
-  }, { budget: "batch", measureEnvelope: "summary" });
+  }, {
+    budget: "batch",
+    measureEnvelope: "summary",
+    warningHints: {
+      ref_number_exact: moreHint,
+      direction_unproven: moreHint,
+      possible_duplicate: moreHint,
+      blocked_duplicate_suspect: blockedHint,
+      ...Object.fromEntries(projection.thirdPartyPayerReviews.map(review => [review.reason, thirdPartyPayerHint])),
+    },
+  });
 
   return { summary };
 }
@@ -802,10 +820,11 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
     code: "cross_currency_review",
     message: row.reason,
   })), pageHint("exclusions")));
+  const errorHint = "resolve the listed errors and re-run the dry run to see the rest.";
   warnings.push(...cappedWarnings("inter_account_error", m.errors.map(row => ({
     code: row.code ?? "inter_account_error",
     message: row.reason,
-  })), "resolve the listed errors and re-run the dry run to see the rest."));
+  })), errorHint));
   for (const message of m.warnings ?? []) {
     warnings.push({ code: "company_name_without_legal_form", message });
   }
@@ -909,7 +928,14 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
         }
       : {}),
     ...(details ? { details } : {}),
-  }, { budget: "batch", measureEnvelope: "summary" });
+  }, {
+    budget: "batch",
+    measureEnvelope: "summary",
+    warningHints: {
+      ambiguous_pair: pageHint("reviews"),
+      ...Object.fromEntries(m.errors.map(row => [row.code ?? "inter_account_error", errorHint])),
+    },
+  });
 
   return { summary };
 }

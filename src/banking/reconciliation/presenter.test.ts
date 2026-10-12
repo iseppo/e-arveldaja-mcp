@@ -262,6 +262,14 @@ describe("renderSuggestCompact", () => {
     expect(summary.counts?.needs_review).toBe(1);
     expect(summary.warnings?.some(w => w.code === "manual_review_required")).toBe(true);
   });
+
+  it("points past-the-cap payer/client mismatches at the plan reviews, other reasons at exclusions", () => {
+    const data = makeSuggestions(0, Array.from({ length: 4 }, (_, index) => suggestRow(900 + index, {
+      manual_review_required: `Payer client 1 differs from the matched sale_invoice's client ${index}.`,
+    })));
+    const more = renderSuggestCompact(data).summary.warnings?.find(w => w.code === "manual_review_required_more");
+    expect(more?.message).toMatch(/payer\/client mismatches are in section "reviews", the other exact-match review reasons in "exclusions"/);
+  });
 });
 
 describe("renderExactMatchCompact", () => {
@@ -322,6 +330,20 @@ describe("renderExactMatchCompact", () => {
     expect(summary.counts?.blocked_duplicates).toBe(1);
     expect(summary.counts?.duplicates).toBe(1);
     expect(summary.warnings?.some(w => w.code === "blocked_duplicate_suspect")).toBe(true);
+  });
+
+  it("points past-the-cap blocked-duplicate suspects at the full dry run, not the plan sections", () => {
+    const projection = makeExactProjection(0, {
+      blockedDuplicateSuspects: Array.from({ length: 4 }, (_, index) => ({
+        transaction_id: 40 + index, reason: "Possible cross-mechanism duplicate", conflicting_journal_ids: [555], suspects: [suspect],
+      })),
+    });
+    const { summary } = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "PLAN-B" });
+    const message = summary.warnings?.find(w => w.code === "blocked_duplicate_suspect_more")?.message ?? "";
+    expect(message).toMatch(/^1 more blocked_duplicate_suspect item\(s\) not shown; they are not in the plan;/);
+    expect(message).toContain("standard or full profile");
+    expect(message).toContain("block_on_duplicate: true");
+    expect(message).not.toMatch(/get_execution_plan_page|exclusions|commands/);
   });
 
   it("surfaces third-party-payer reviews as counted warnings, not as confirms", () => {

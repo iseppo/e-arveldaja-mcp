@@ -85,6 +85,47 @@ describe("operation_summary_v1", () => {
     expect(notice.message).toContain("PLAN-1");
   });
 
+  it("keeps a summary that fits the hard limit when the truncation notice would be larger than the warning it replaces", () => {
+    const warning = { item_id: "r1", code: "ocr_low_confidence", message: "Low OCR confidence." };
+    const shell = { status: "needs_review" as const, message: "m", counts: { receipts: 351 }, warnings: [warning], plan_handle: "PLAN-R" };
+    const padding = RESPONSE_BUDGETS.batch.hard - 43 + 1
+      - mcpPayloadBytes({ summary: { ...shell, contract: "operation_summary_v1" } });
+    const input = { ...shell, message: "m".repeat(padding) };
+    expect(mcpPayloadBytes({ summary: { ...input, contract: "operation_summary_v1" } })).toBe(RESPONSE_BUDGETS.batch.hard - 43);
+    const summary = createOperationSummary(input, { budget: "batch", measureEnvelope: "summary" });
+    expect(summary.warnings).toEqual([warning]);
+    expect(mcpPayloadBytes({ summary })).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.hard);
+  });
+
+  it("does not let a larger truncation notice stop later sections from trimming the summary under the hard limit", () => {
+    const warning = { item_id: "r1", code: "ocr_low_confidence", message: "Low OCR confidence." };
+    const first = { item_id: "b1", code: "review", message: "Required review.", severity: "blocker" as const };
+    const second = { item_id: "b2", code: "review", message: "r".repeat(200), severity: "blocker" as const };
+    const shell = { status: "needs_review" as const, message: "m", warnings: [warning], blockers: [first], plan_handle: "PLAN-R" };
+    const padding = RESPONSE_BUDGETS.batch.hard - 20 + 1
+      - mcpPayloadBytes({ summary: { ...shell, contract: "operation_summary_v1" } });
+    const input = { ...shell, message: "m".repeat(padding), blockers: [first, second] };
+    const summary = createOperationSummary(input, { budget: "batch", measureEnvelope: "summary" });
+    expect(summary.warnings).toEqual([warning]);
+    expect(summary.blockers).toEqual([first]);
+  });
+
+  it("names each dropped code's own retrieval route in warnings_truncated", () => {
+    const long = "x".repeat(300);
+    const summary = createOperationSummary({
+      status: "needs_review",
+      message: "Review",
+      warnings: [
+        ...Array.from({ length: 30 }, (_, index) => ({ code: "created_review", message: `${index}${long}` })),
+        ...Array.from({ length: 30 }, (_, index) => ({ code: "excluded_review", message: `${index}${long}` })),
+      ],
+      plan_handle: "PLAN-1",
+    }, { warningHints: { created_review: "page the plan commands." } });
+    const notice = summary.warnings!.find(w => w.code === "warnings_truncated")!.message;
+    expect(notice).toMatch(/\(created_review: \d+\) page the plan commands\./);
+    expect(notice).toMatch(/\(excluded_review: \d+\) page them with get_execution_plan_page .*"exclusions" or "reviews"/);
+  });
+
   it("throws when irreducible Unicode content exceeds the 16 KiB hard limit", () => {
     const input = { status: "failed" as const, message: "🚀".repeat(5_000) };
     expect(() => createOperationSummary(input)).toThrowError("response_budget_exceeded");

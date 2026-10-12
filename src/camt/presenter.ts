@@ -414,7 +414,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     samples,
     ...(dryRun && data.planHandle !== undefined ? { plan_handle: data.planHandle } : {}),
     ...(details ? { details } : {}),
-  }, { budget: "batch", measureEnvelope: "summary" });
+  }, { budget: "batch", measureEnvelope: "summary", warningHints: { camt_unsplit_entry: pageHint("commands") } });
 
   return { summary };
 }

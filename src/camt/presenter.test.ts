@@ -157,6 +157,20 @@ describe("CAMT unsplit-entry review note", () => {
     expect(summary.warnings?.[3]!.message).toMatch(/^1 more camt_unsplit_entry item\(s\) not shown; .*PLAN-HANDLE-XYZ.*commands/);
   });
 
+  it("routes budget-pruned unsplit entries to the plan commands in warnings_truncated", () => {
+    const data = makeData(3);
+    const long = "x".repeat(9_000);
+    const descriptors = data.projection.descriptors.map((descriptor, index) => ({
+      ...descriptor,
+      entry: { ...descriptor.entry, review_note: `${long} (${index})` },
+    }));
+    const results = descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: { ...data, projection: { ...data.projection, descriptors }, results } });
+    const truncated = summary.warnings?.find(w => w.code === "warnings_truncated")?.message ?? "";
+    expect(truncated).toMatch(/\(camt_unsplit_entry: \d+\) page them with get_execution_plan_page .*section: "commands"/);
+    expect(truncated).not.toContain("exclusions");
+  });
+
   it("renders the note but never the internal legacy identities on parse output", () => {
     const entry = flagged().projection.descriptors[0]!.entry;
     const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);

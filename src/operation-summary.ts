@@ -42,6 +42,10 @@ export function createOperationSummary(
   options: Readonly<{
     budget?: Extract<ResponseBudgetKind, "normal" | "batch">;
     measureEnvelope?: "summary";
+    /** Per-code retrieval route for the `warnings_truncated` notice, for codes
+     * whose full list is not where the generic hint points (e.g. created rows
+     * in the plan `commands`). Same text as the code's `cappedWarnings` hint. */
+    warningHints?: Readonly<Record<string, string>>;
   }> = {},
 ): OperationSummaryV1 {
   const budget = RESPONSE_BUDGETS[options.budget ?? "normal"];
@@ -75,25 +79,37 @@ export function createOperationSummary(
     options.measureEnvelope === "summary" ? { summary } : summary,
   );
   let summary = build();
+  const rebuild = (): number => {
+    summary = build();
+    return bytes(summary);
+  };
   const maximizeFittingPrefix = (
     length: number,
     minimum: number,
     setLength: (length: number) => void,
   ): boolean => {
+    const before = bytes(summary);
     setLength(minimum);
-    summary = build();
-    if (bytes(summary) > budget.target) return false;
+    if (rebuild() > budget.target) {
+      // Pruning that does not shrink the summary (a truncation notice larger
+      // than what it dropped) is undone, so a summary never grows past the
+      // hard limit by pruning and later sections trim the smaller rendering.
+      if (bytes(summary) >= before) {
+        setLength(length);
+        rebuild();
+      }
+      return false;
+    }
     let low = minimum;
     let high = length;
     while (low < high) {
       const middle = Math.ceil((low + high) / 2);
       setLength(middle);
-      summary = build();
-      if (bytes(summary) <= budget.target) low = middle;
+      if (rebuild() <= budget.target) low = middle;
       else high = middle - 1;
     }
     setLength(low);
-    summary = build();
+    rebuild();
     return true;
   };
   if (bytes(summary) > budget.target) {
@@ -105,15 +121,16 @@ export function createOperationSummary(
     // Warnings are pruned per code, never as a list prefix: every code keeps its
     // first `perCode` items (the largest that fits), `<code>_more` cap notices
     // always survive, and one `warnings_truncated` notice counts what the
-    // budget dropped per code. A long run of one category (90 identical
-    // ownership reviews) therefore shrinks before a short one disappears.
+    // budget dropped per code, with each code's retrieval route. A long run of
+    // one category (90 identical ownership reviews) therefore shrinks before a
+    // short one disappears.
     const notice = (code: string): boolean => code.endsWith("_more");
     const groupSizes = new Map<string, number>();
     for (const warning of allWarnings) {
       if (!notice(warning.code)) groupSizes.set(warning.code, (groupSizes.get(warning.code) ?? 0) + 1);
     }
     const largestGroup = Math.max(0, ...groupSizes.values());
-    const truncationHint = safe.plan_handle !== undefined
+    const genericHint = safe.plan_handle !== undefined
       ? `page them with get_execution_plan_page { plan_handle: "${safe.plan_handle}", section: "exclusions" or "reviews", detail: "full" }.`
       : safe.details !== undefined
         ? `page the result with ${safe.details.tool} ${JSON.stringify(safe.details.args)}.`
@@ -126,11 +143,16 @@ export function createOperationSummary(
         seen.set(warning.code, index + 1);
         if (notice(warning.code) || index < perCode) kept.push(warning);
       }
-      const dropped = [...groupSizes].filter(([, size]) => size > perCode).map(([code, size]) => `${code}: ${size - perCode}`);
-      if (dropped.length > 0) {
+      const droppedByHint = new Map<string, string[]>();
+      for (const [code, size] of groupSizes) {
+        if (size <= perCode) continue;
+        const hint = options.warningHints?.[code] ?? genericHint;
+        droppedByHint.set(hint, [...(droppedByHint.get(hint) ?? []), `${code}: ${size - perCode}`]);
+      }
+      if (droppedByHint.size > 0) {
         kept.push({
           code: "warnings_truncated",
-          message: `Response size budget: more warning(s) not shown (${dropped.join(", ")}); ${truncationHint}`,
+          message: `Response size budget: more warning(s) not shown. ${[...droppedByHint].map(([hint, dropped]) => `(${dropped.join(", ")}) ${hint}`).join(" ")}`,
         });
       }
       warnings = kept;
