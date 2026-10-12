@@ -49,6 +49,7 @@ import {
   canonicalPlanJson,
   createdTransactionMatchesApprovedPayload,
   exactStateMatches,
+  journalLabelledWithWiseId,
   orderedIdsEqual,
   projectWiseCommands,
   transactionCommandExists,
@@ -681,11 +682,12 @@ async function runWiseImport(
             // identity-only), minus the registration journals this run's own
             // confirmations created (operations_id = a transaction created here).
             const createdHere = new Set(runtimeIds.values());
+            const priorJournals = freshJournals.filter(journal =>
+              !(journal.operation_type === "TRANSACTION" && journal.operations_id !== undefined && createdHere.has(journal.operations_id))
+            );
             const freshGuard = BookingGuard.fromSnapshot(
               api,
-              freshJournals.filter(journal =>
-                !(journal.operation_type === "TRANSACTION" && journal.operations_id !== undefined && createdHere.has(journal.operations_id))
-              ),
+              priorJournals,
               new Set([command.wise_dimension_id, command.counterpart_dimension_id]),
             );
             const journalQuery = {
@@ -706,6 +708,11 @@ async function runWiseImport(
               freshGuard.hasOtherLabelledInterAccount(query)
             )) {
               throw new Error("Stale inter-account precondition: a matching journal appeared before confirmation");
+            }
+            // As in the plan: a journal labelled with this Wise ID is this
+            // transfer's identity whatever amount it books.
+            if (priorJournals.some(journal => !journal.is_deleted && journalLabelledWithWiseId(journal, command.wise_id))) {
+              throw new Error("Stale inter-account precondition: a journal labelled with this Wise transfer appeared before confirmation");
             }
             if (command.client_update) await api.transactions.update(apiId, command.client_update);
             if (!command.confirmation_distribution) throw new Error("Inter-account confirmation distribution is missing");
