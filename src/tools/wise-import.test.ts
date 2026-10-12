@@ -541,7 +541,11 @@ describe("wise import tool", () => {
         { is_deleted: false, accounts_id: 5000, type: "D", amount: 12.5, base_amount: 12.5 },
       ],
     };
-    const setup = setupWiseTool([manualRow], undefined, { journals: [registration] });
+    const accountDimensions = [
+      { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+      { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false },
+    ];
+    const setup = setupWiseTool([manualRow], undefined, { journals: [registration], accountDimensions });
     const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
 
     const { dry, executed } = await runApprovedWiseImport(setup, args);
@@ -554,7 +558,7 @@ describe("wise import tool", () => {
     expect(executed.execution.errors).toEqual([]);
 
     // The stored row being reopened (PROJECT) between dry run and execute is drift.
-    const drift = setupWiseTool([manualRow], undefined, { journals: [registration] });
+    const drift = setupWiseTool([manualRow], undefined, { journals: [registration], accountDimensions });
     const reviewed = parseWiseResponse(await drift.handler({ ...args, execute: false }));
     drift.api.transactions.listAll.mockResolvedValue([{ ...manualRow, status: "PROJECT" }]);
     clearWiseCallHistory(drift.api);
@@ -563,6 +567,38 @@ describe("wise import tool", () => {
     }));
     expect(drifted.code).toBe("plan_drift");
     expectNoWiseMutations(drift.api);
+  });
+
+  it("a same-key row filtered out by date_from still competes for the untagged lookalike: create + advisory", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "CARD_TRANSACTION-4400", date: "2026-01-09", sourceAmount: "12.5", targetName: "Acme Ltd" }),
+      buildM04Values({ id: "CARD_TRANSACTION-4401", date: "2026-01-10", sourceAmount: "12.5", targetName: "Acme Ltd" }),
+    ]));
+    const manualRow = {
+      id: 41, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 12.5,
+      cl_currencies_id: "EUR", date: "2026-01-10", bank_account_name: "Acme Ltd", description: "Acme kaardimakse",
+    };
+    const registration = {
+      id: 8101, registered: true, is_deleted: false, effective_date: "2026-01-10",
+      operation_type: "TRANSACTION", operations_id: 41,
+      postings: [
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 12.5, base_amount: 12.5 },
+        { is_deleted: false, accounts_id: 5000, type: "D", amount: 12.5, base_amount: 12.5 },
+      ],
+    };
+    const accountDimensions = [
+      { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+      { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false },
+    ];
+    const setup = setupWiseTool([manualRow], undefined, { journals: [registration], accountDimensions });
+
+    const dry = parseWiseResponse(await setup.handler({
+      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9, date_from: "2026-01-10", execute: false,
+    }));
+
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", booked_amount: 12.5 })]);
+    expect(dry.execution.needs_review).toEqual([expect.objectContaining({ code: "wise_untagged_ledger_match", ledger_transaction_ids: [41] })]);
+    expect(JSON.stringify(dry.skipped_details ?? [])).not.toContain("wise_untagged_ledger_unique");
   });
 
   it("an over-cap reference row next to an untagged stored lookalike is created with the advisory (Task 9, untagged = advisory)", async () => {

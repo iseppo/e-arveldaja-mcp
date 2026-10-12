@@ -18,7 +18,7 @@ function rowsOf(lines: string[]): WiseRow[] {
 
 function project(eligible: WiseRow[], existingTx: Transaction[], extra: Partial<Parameters<typeof projectWiseCommands>[0]> = {}) {
   return projectWiseCommands({
-    eligible, accountsDimensionsId: WISE, accountDimensions, feeAccountDimensionsId: FEE_DIM, wiseClientId: 7,
+    eligible, allRows: eligible, accountsDimensionsId: WISE, accountDimensions, feeAccountDimensionsId: FEE_DIM, wiseClientId: 7,
     existingTx, transferDecisions: new Map(), postingDimensionsSnapshot: new Map(), bankDimensionIds: new Set(), journalSnapshot: [],
     createInterAccountGuard: () => { throw new Error("no guard expected"); },
     approvedTransferIds: new Set(), ownCompanyClientId: undefined, ownCompanyClientMatches: [], allPurchaseInvoices: [],
@@ -418,6 +418,35 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       expect(reviewCodesOf(output)).toContain("TRANSFER-1001:wise_transfer_journal_ambiguous");
     });
 
+    it("stays a review when an already-imported statement row has the same key (mixed already-imported + new)", () => {
+      const storedWise = { id: 5003, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 100, cl_currencies_id: "EUR",
+        date: "2026-03-23", description: "WISE:TRANSFER-1000 Firma OÜ [source_direction=IN]" } as Transaction;
+      const output = run([transferIn("TRANSFER-1000"), transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedWise] });
+      expect(output.skipped.map(entry => `${entry.wise_id}:${entry.reason}`)).toEqual(["TRANSFER-1000:Already imported (Wise ID match)"]);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
+    });
+
+    it("stays a review when a statement row outside the date filter has the same key", () => {
+      const all = rowsOf([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1000", "2026-03-22")]);
+      const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], { allRows: all.map((row, index) => index === 0 ? { ...row } : row) });
+      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
+    });
+
+    it("stays a review when a stored Wise row of another file has the same key (net of its stored fee, one day away)", () => {
+      const storedMain = { id: 5004, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 100.5, cl_currencies_id: "EUR",
+        date: "2026-03-24", description: "WISE:TRANSFER-0999 Firma OÜ" } as Transaction;
+      const storedFee = { id: 5005, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 0.5, cl_currencies_id: "EUR",
+        date: "2026-03-24", description: "WISE:FEE:TRANSFER-0999 Wise teenustasu" } as Transaction;
+      const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedMain, storedFee] });
+      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
+      // Without its fee row the stored 100.50 has another key: the journal is unique again.
+      const alone = run([transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedMain] });
+      expect(actions(alone)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+    });
+
     it("is never taken from an unregistered journal", () => {
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal({ registered: false })]);
       expect(output.commands.some(command => command.action === "inter_account" && command.mutation_mode === "create_only_already_journalized")).toBe(false);
@@ -723,24 +752,34 @@ describe("Wise row next to an untagged stored row of the same movement (F2b)", (
       ...overrides,
     }) as unknown as Journal;
     const UNIQUE = "Already imported (wise_untagged_ledger_unique): confirmed transaction 13875420";
+    // The Wise account's GL account is known, so its registration journal can prove the direction.
+    const wiseDims = [...accountDimensions, { id: WISE, accounts_id: 1020, is_deleted: false }] as AccountDimension[];
+    const ID = "CARD_TRANSACTION-3970533149";
+    const unique = (eligible: WiseRow[], existingTx: Transaction[], journals: Journal[], extra: Partial<Parameters<typeof projectWiseCommands>[0]> = {}) =>
+      project(eligible, existingTx, { accountDimensions: wiseDims, journalSnapshot: journals, ...extra });
+    const stillAdvisory = (output: ReturnType<typeof project>, ids = "13875420") => {
+      expect(created(output)).toEqual(["main_create:226.8 EUR"]);
+      expect(advisories(output)).toEqual([`${ID}:${ids}`]);
+    };
 
-    it("is not created when the registration journal proves the direction and amount", () => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual()], { journalSnapshot: [registration()] });
+    it("is not created when it names the Wise ID number and the registration journal proves the direction and amount (live shape i)", () => {
+      const output = unique(rowsOf([card(ID)]), [manual()], [registration()]);
       expect(created(output)).toEqual([]);
       expect(output.created).toEqual([]);
       expect(output.ownershipReviews).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: "CARD_TRANSACTION-3970533149", reason: expect.stringContaining(UNIQUE) }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE) }]);
     });
 
-    it("is not created when an agreeing direction marker proves the direction", () => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual({ description: "Booking.com käsitsi [source_direction=OUT]" })]);
+    it("is not created when, without a reference, its account name carries the Wise counterparty (live shape ii)", () => {
+      const stored = manual({ ref_number: null, bank_account_name: "Booking.com / Hotel Y (Z OÜ)", description: "Majutus Tartus" });
+      const output = unique(rowsOf([card(ID)]), [stored], [registration()]);
       expect(created(output)).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: "CARD_TRANSACTION-3970533149", reason: expect.stringContaining(UNIQUE) }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE) }]);
     });
 
     it("keeps the row's fee, no longer depending on the skipped main row", () => {
-      const feeCard = `CARD_TRANSACTION-3970533149,COMPLETED,OUT,"2026-06-25 17:48:24","2026-06-25 17:48:24",1.20,EUR,,,"Seppo AI OÜ",226.80,EUR,Booking.com,226.80,EUR,1,,,"Test Person",Travel,`;
-      const output = project(rowsOf([feeCard]), [manual()], { journalSnapshot: [registration()] });
+      const feeCard = `${ID},COMPLETED,OUT,"2026-06-25 17:48:24","2026-06-25 17:48:24",1.20,EUR,,,"Seppo AI OÜ",226.80,EUR,Booking.com,226.80,EUR,1,,,"Test Person",Travel,`;
+      const output = unique(rowsOf([feeCard]), [manual()], [registration()]);
       expect(created(output)).toEqual(["fee_create_and_confirm:1.2 EUR"]);
       expect(output.commands[0]!.depends_on).toBeNull();
     });
@@ -752,29 +791,76 @@ describe("Wise row next to an untagged stored row of the same movement (F2b)", (
       ["there are two registration journals", [registration(), registration({ id: 8802 })]],
       ["the registration journal is not registered", [registration({ registered: false })]],
     ] as Array<[string, Journal[]]>)("stays create + advisory when %s", (_case, journals) => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual()], { journalSnapshot: journals });
-      expect(created(output)).toEqual(["main_create:226.8 EUR"]);
-      expect(advisories(output)).toEqual(["CARD_TRANSACTION-3970533149:13875420"]);
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual()], journals));
+    });
+
+    it("stays create + advisory when the Wise account's GL account is unknown", () => {
+      stillAdvisory(project(rowsOf([card(ID)]), [manual()], { journalSnapshot: [registration()] }));
     });
 
     it("stays create + advisory when the stored row is PROJECT", () => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-3970533149")]), [manual({ status: "PROJECT" })], { journalSnapshot: [registration()] });
-      expect(created(output)).toEqual(["main_create:226.8 EUR"]);
-      expect(advisories(output)).toEqual(["CARD_TRANSACTION-3970533149:13875420"]);
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ status: "PROJECT" })], [registration()]));
+    });
+
+    it("an unsigned [source_direction=OUT] marker alone proves nothing: without a journal the row stays create + advisory", () => {
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ description: "Booking.com käsitsi [source_direction=OUT]" })], []));
+    });
+
+    it("an agreeing marker does not override a registration journal that DEBITS Wise (money in)", () => {
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ description: "Booking.com käsitsi [source_direction=OUT]" })], [registration({}, "D")]));
+    });
+
+    it("a signed CAMT marker contradicting the agreeing journal proves nothing", () => {
+      const camt = "Booking.com\n[e-arveldaja-mcp:camt br=ABC123 dir=CRDT sig=0123456789abcdef]";
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ description: camt })], [registration()]));
+    });
+
+    it.each([
+      ["a signed CAMT DBIT marker", "Booking.com\n[e-arveldaja-mcp:camt br=ABC123 dir=DBIT sig=0123456789abcdef]"],
+      ["a CAMT DBIT marker with an invalid signature", "Booking.com\n[e-arveldaja-mcp:camt br=ABC123 dir=DBIT sig=not-a-hex-sig]"],
+    ])("%s without a registration journal is no proof", (_case, description) => {
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ description })], []));
+    });
+
+    it("stays create + advisory when the stored row is a payment to a different merchant with an unrelated reference", () => {
+      const other = manual({ ref_number: null, bank_account_name: "Kohvik Mari OÜ", description: "Kaardimakse Kohvik Mari" });
+      stillAdvisory(unique(rowsOf([card(ID)]), [other], [registration()]));
+    });
+
+    it("stays create + advisory when the stored row's reference is neither the Wise ID number nor the Wise reference", () => {
+      stillAdvisory(unique(rowsOf([card(ID)]), [manual({ ref_number: "INV-2026-0042" })], [registration()]));
     });
 
     it("stays create + advisory when two rows of the import look like the stored row", () => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-1"), card("CARD_TRANSACTION-2")]), [manual()], { journalSnapshot: [registration()] });
+      const output = unique(rowsOf([card("CARD_TRANSACTION-1"), card("CARD_TRANSACTION-2")]), [manual()], [registration()]);
       expect(created(output)).toEqual(["main_create:226.8 EUR", "main_create:226.8 EUR"]);
       expect(advisories(output)).toEqual(["CARD_TRANSACTION-1:13875420", "CARD_TRANSACTION-2:13875420"]);
     });
 
     it("stays create + advisory when two stored rows look like this row", () => {
-      const output = project(rowsOf([card("CARD_TRANSACTION-1")]), [manual(), manual({ id: 13875421 })], {
-        journalSnapshot: [registration(), registration({ id: 8802, operations_id: 13875421 })],
-      });
-      expect(created(output)).toEqual(["main_create:226.8 EUR"]);
-      expect(advisories(output)).toEqual(["CARD_TRANSACTION-1:13875420,13875421"]);
+      const output = unique(rowsOf([card(ID)]), [manual(), manual({ id: 13875421 })],
+        [registration(), registration({ id: 8802, operations_id: 13875421 })]);
+      stillAdvisory(output, "13875420,13875421");
+    });
+
+    it("an already-imported statement row with the same key competes for the stored row", () => {
+      const rows = rowsOf([card("CARD_TRANSACTION-5550001"), card(ID)]);
+      const imported = { id: 13875500, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 226.8, cl_currencies_id: "EUR",
+        date: "2026-06-25", description: "WISE:CARD_TRANSACTION-5550001 Booking.com (Travel) [source_direction=OUT]" } as Transaction;
+      const output = unique(rows, [imported, manual()], [registration()]);
+      expect(output.skipped.map(entry => entry.reason)).toEqual(["Already imported (Wise ID match)"]);
+      stillAdvisory(output);
+    });
+
+    it("a statement row outside the date filter with the same key (one day away) competes for the stored row", () => {
+      const all = rowsOf([card(ID), card("CARD_TRANSACTION-5550002").replaceAll("2026-06-25", "2026-06-24")]);
+      stillAdvisory(unique([all[0]!], [manual()], [registration()], { allRows: all }));
+    });
+
+    it("a stored WISE: row of another file with the same key (one day away) competes for the stored row", () => {
+      const otherFile = { id: 13875600, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 226.8, cl_currencies_id: "EUR",
+        date: "2026-06-26", description: "WISE:CARD_TRANSACTION-5550003 Booking.com [source_direction=OUT]" } as Transaction;
+      stillAdvisory(unique(rowsOf([card(ID)]), [otherFile, manual()], [registration()]));
     });
   });
 
