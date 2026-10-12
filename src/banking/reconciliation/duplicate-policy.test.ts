@@ -3,6 +3,8 @@ import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE, THIR
 import { exactMatchFingerprint } from "./projection.js";
 import { matchScore } from "./match-score.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../../types/api.js";
+import { withSignedCamtMarker } from "../../__fixtures__/camt-marker.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../../camt/duplicate-identity.js";
 
 // The EIS case, verified live: Rahandusministeerium (2309260) paid an invoice
 // that belongs to EIS (2327264). journal.clients_id is copied from the
@@ -110,7 +112,9 @@ describe("computeExactMatchProjection third-party-payer partition", () => {
   });
 
   it("keeps the set_missing path for a transaction with no client of its own", () => {
-    const projection = computeExactMatchProjection([tx({ clients_id: undefined })], [sale()], NO_PURCHASES, THRESHOLD);
+    // No client to vouch for the counterparty, so the direction must be proven.
+    const signed = withSignedCamtMarker(tx({ type: "C", clients_id: undefined, cl_currencies_id: "EUR" } as Partial<Transaction>), "CRDT");
+    const projection = computeExactMatchProjection([signed], [sale()], NO_PURCHASES, THRESHOLD);
 
     expect(projection.thirdPartyPayerReviews).toEqual([]);
     expect(projection.confirms).toHaveLength(1);
@@ -302,11 +306,13 @@ describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () =
   // signed marker; an unpaid confirmed invoice reads back payment_status "".
   // exact_amount (40) + ref_number (40) = 80 < the default 90.
   const DEFAULT = EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
-  const camtCredit = "Payment ARV-501\n[e-arveldaja-mcp:camt br=BR1 dir=CRDT sig=0123456789abcdef]";
   const wiseOut = "WISE:TRANSFER-77 Vendor [source_direction=OUT]";
-  const liveTx = (overrides: Partial<Transaction> = {}) => tx({
-    type: "C", cl_currencies_id: "EUR", clients_id: undefined, description: camtCredit, ...overrides,
+  const unsignedTx = (overrides: Partial<Transaction> = {}) => tx({
+    type: "C", cl_currencies_id: "EUR", clients_id: undefined, description: "Payment ARV-501", ...overrides,
   } as Partial<Transaction>);
+  // A genuine, checksum-valid CAMT marker built from the row's own fields.
+  const liveTx = (overrides: Partial<Transaction> = {}, direction: "CRDT" | "DBIT" = "CRDT") =>
+    withSignedCamtMarker(unsignedTx(overrides), direction);
   const liveSale = (overrides: Partial<SaleInvoice> = {}) => sale({ cl_currencies_id: "EUR", payment_status: "", ...overrides } as Partial<SaleInvoice>);
   const livePurchase = (overrides: Partial<PurchaseInvoice> = {}) => ({
     id: 601, number: "P-601", clients_id: INVOICE_CLIENT, client_name: "Vendor", cl_currencies_id: "EUR",
@@ -325,9 +331,9 @@ describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () =
     });
   });
 
-  it("auto-confirms an outgoing Wise OUT payment of a purchase invoice (null payment_status)", () => {
+  it("auto-confirms an outgoing signed DBIT payment of a purchase invoice (null payment_status)", () => {
     const projection = computeExactMatchProjection(
-      [liveTx({ description: wiseOut })], [], [livePurchase({ payment_status: null } as never)], DEFAULT,
+      [liveTx({}, "DBIT")], [], [livePurchase({ payment_status: null } as never)], DEFAULT,
     );
     expect(projection.confirms).toHaveLength(1);
     expect(projection.confirms[0]).toMatchObject({
@@ -350,16 +356,53 @@ describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () =
   });
 
   it("never applies to an unsigned row (type C without a marker)", () => {
-    const projection = computeExactMatchProjection([liveTx({ description: "Payment ARV-501" })], [liveSale()], NO_PURCHASES, DEFAULT);
+    const projection = computeExactMatchProjection([unsignedTx()], [liveSale()], NO_PURCHASES, DEFAULT);
     expect(projection.confirms).toEqual([]);
     expect(projection.thirdPartyPayerReviews).toEqual([]);
   });
 
+  it("never applies to a tampered CAMT marker whose dir no longer matches its sig", () => {
+    // A genuine outgoing marker flipped to dir=CRDT keeps its shape (so
+    // bankTransactionDirection reads "incoming") but fails its checksum.
+    const signed = liveTx({}, "DBIT");
+    const tampered = { ...signed, description: signed.description!.replace("dir=DBIT", "dir=CRDT") };
+    expect(tampered.description).toContain("dir=CRDT");
+    expect(isTrustedCamtDescriptionMetadata(tampered)).toBe(false);
+    const projection = computeExactMatchProjection([tampered], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.thirdPartyPayerReviews).toEqual([]);
+  });
+
+  it("never applies to a Wise [source_direction] marker, which carries no checksum", () => {
+    const projection = computeExactMatchProjection(
+      [unsignedTx({ description: wiseOut })], [], [livePurchase({ payment_status: null } as never)], DEFAULT,
+    );
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["blank", "  "],
+  ])("never applies to a row whose currency is %s (not proven EUR)", (_label, currency) => {
+    // Sign the marker over the same blank currency the row reads back with, so
+    // the checksum verifies and only the explicit-EUR requirement can refuse it.
+    const row = unsignedTx({ cl_currencies_id: currency } as Partial<Transaction>);
+    const text = "Payment ARV-501";
+    const description = buildCamtDescriptionWithMetadata(text, {
+      date: row.date!, amount: row.amount, currency: currency ?? "", direction: "CRDT",
+      reference_number: row.ref_number ?? undefined, bank_reference: "BR-CCY", description: text,
+      duplicate: false, duplicate_transaction_ids: [],
+    });
+    const signed = { ...row, description } as Transaction;
+    expect(isTrustedCamtDescriptionMetadata(signed)).toBe(true);
+    const projection = computeExactMatchProjection([signed], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+  });
+
   it("never applies when the signed direction does not match the invoice kind", () => {
-    expect(computeExactMatchProjection(
-      [liveTx({ description: "WISE:TRANSFER-78 Vendor [source_direction=IN]" })], [], [livePurchase()], DEFAULT,
-    ).confirms).toEqual([]);
-    expect(computeExactMatchProjection([liveTx({ description: wiseOut })], [liveSale()], NO_PURCHASES, DEFAULT).confirms).toEqual([]);
+    expect(computeExactMatchProjection([liveTx({}, "CRDT")], [], [livePurchase()], DEFAULT).confirms).toEqual([]);
+    expect(computeExactMatchProjection([liveTx({}, "DBIT")], [liveSale()], NO_PURCHASES, DEFAULT).confirms).toEqual([]);
   });
 
   it("never applies when the reference is shared by another open invoice of either kind", () => {
@@ -425,5 +468,48 @@ describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () =
       [liveTx(), liveTx({ id: 1211, date: "2026-09-11" })], [liveSale()], NO_PURCHASES, DEFAULT,
     );
     expect(projection.confirms.map(c => c.transactionId)).toEqual([1210]);
+  });
+});
+
+describe("computeExactMatchProjection direction proof for score-qualified matches", () => {
+  // exact_amount (40) + ref_number (40) + client_name_partial (10) = 90, the
+  // default. Live rows read back type "C"; without a verified marker the money
+  // may have gone either way, so a substring name match must not settle the
+  // invoice — only the invoice's own counterparty (equal client or equal name).
+  const DEFAULT = EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
+  const vendorSale = () => sale({ cl_currencies_id: "EUR", payment_status: "", client_name: "Vendor" } as Partial<SaleInvoice>);
+  const row = (overrides: Partial<Transaction> = {}) => tx({
+    type: "C", cl_currencies_id: "EUR", clients_id: undefined, bank_account_name: "Vendor Logistics",
+    description: "Payment ARV-501", ...overrides,
+  } as Partial<Transaction>);
+
+  it("does not auto-confirm an unsigned row on a partial payer name; skips it as direction_unproven", () => {
+    const projection = computeExactMatchProjection([row()], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 1210, reason: expect.stringContaining("direction_unproven") }]);
+  });
+
+  it("does not auto-confirm on a partial name when the marker is a Wise or tampered CAMT one", () => {
+    const wise = row({ description: "WISE:TRANSFER-9 Vendor Logistics [source_direction=IN]" });
+    const signedOut = withSignedCamtMarker(row(), "DBIT");
+    const tampered = { ...signedOut, description: signedOut.description!.replace("dir=DBIT", "dir=CRDT") };
+    for (const candidate of [wise, tampered]) {
+      expect(computeExactMatchProjection([candidate], [vendorSale()], NO_PURCHASES, DEFAULT).confirms).toEqual([]);
+    }
+  });
+
+  it("still auto-confirms an unsigned row whose clients_id equals the invoice's", () => {
+    const projection = computeExactMatchProjection([row({ clients_id: INVOICE_CLIENT })], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence])).toEqual([[1210, 501, 95]]);
+  });
+
+  it("still auto-confirms an unsigned native-import row whose payer name equals the invoice client", () => {
+    const projection = computeExactMatchProjection([row({ bank_account_name: "VENDOR" })], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence])).toEqual([[1210, 501, 90]]);
+  });
+
+  it("auto-confirms a partial-name match whose verified CAMT direction matches the invoice kind", () => {
+    const projection = computeExactMatchProjection([withSignedCamtMarker(row(), "CRDT")], [vendorSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence, c.autoConfirmRule])).toEqual([[1210, 501, 90, undefined]]);
   });
 });
