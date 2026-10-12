@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
-import { buildCamtDescriptionWithMetadata } from "./duplicate-identity.js";
+import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "./duplicate-identity.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
 import type { Journal } from "../types/api.js";
 
@@ -211,14 +211,46 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
   const skippedAsDuplicate = (p: Awaited<ReturnType<typeof project>>) =>
     p.skipped.filter(row => row.reason === "Existing transaction matched by bank reference" && row.review_note === undefined);
 
-  it("skips the truncated 682 row (current marker, sig over the untruncated text)", async () => {
+  it("signs a truncated row over the stored text, so its marker verifies", () => {
+    const [entry] = parse(wrap(crdt(E682)));
+    const row = currentRow(9001, entry!);
+    expect(row.description!.length).toBe(MAX);
+    const [text, marker] = row.description!.split("\n") as [string, string];
+    expect(text.length).toBeLessThan(entry!.description!.length);
+    expect(marker).toContain(`sig=${sig({ ...entry!, description: text }, "C", true)}]`);
+    expect(isTrustedCamtDescriptionMetadata(row)).toBe(true);
+  });
+
+  it("skips the truncated 682 row this release writes (sig over the stored text)", async () => {
     const xml = wrap(crdt(E682));
     const [entry] = parse(xml);
     const row = currentRow(9001, entry!);
-    expect(row.description!.length).toBe(MAX);
     const rerun = await projectBooked(xml, [row]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun).map(r => r.duplicate_transaction_ids)).toEqual([[9001]]);
+  });
+
+  it("skips a truncated row this release wrote when read-back drops the payer name (marker no longer verifies)", async () => {
+    const xml = wrap(crdt({ ...E682, ref: "NEWSIG-REF-2" }));
+    const [entry] = parse(xml);
+    const row = currentRow(9017, entry!, { bank_account_name: null });
+    expect(isTrustedCamtDescriptionMetadata(row)).toBe(false);
+    const rerun = await projectBooked(xml, [row]);
+    expect(rerun.descriptors).toHaveLength(0);
+    expect(skippedAsDuplicate(rerun).map(r => r.duplicate_transaction_ids)).toEqual([[9017]]);
+  });
+
+  it("skips a truncated row an earlier release wrote (dir= marker, sig over the untruncated text)", async () => {
+    const xml = wrap(crdt({ ...E682, ref: "OLDSIG-REF-1" }));
+    const [entry] = parse(xml);
+    const marker = `[e-arveldaja-mcp:camt br=${entry!.bank_reference} iban=${entry!.counterparty_iban} dir=CRDT sig=${sig(entry!, "C", true)}]`;
+    const row = apiRow(9016, entry!, render(entry!.description!, marker));
+    expect(row.description!.length).toBeLessThanOrEqual(MAX);
+    expect(row.description).not.toBe(currentRow(0, entry!).description);
+    expect(isTrustedCamtDescriptionMetadata(row)).toBe(false);
+    const rerun = await projectBooked(xml, [row]);
+    expect(rerun.descriptors).toHaveLength(0);
+    expect(skippedAsDuplicate(rerun).map(r => r.duplicate_transaction_ids)).toEqual([[9016]]);
   });
 
   it("skips a legacy dir-less untruncated row signed with type D", async () => {

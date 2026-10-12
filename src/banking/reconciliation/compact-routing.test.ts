@@ -22,7 +22,7 @@ const matchingTx = {
 };
 const matchingSale = {
   id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10",
-  clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123",
+  clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123", cl_currencies_id: "EUR",
 };
 
 function setup() {
