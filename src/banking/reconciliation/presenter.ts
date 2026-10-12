@@ -848,7 +848,7 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
   });
 
   const message = dryRun
-    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s)${proposedMirrors.length > 0 ? `; ${proposedMirrors.length} proposed mirror deletion(s) to resolve with delete_transaction` : ""}.`
+    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s)${proposedMirrors.length > 0 ? `; ${proposedMirrors.length} proposed mirror deletion(s) for owner review (delete each only after explicit approval, with delete_transaction on the standard/full profile)` : ""}.`
     : `Inter-account reconcile handled ${m.matchedPairs.length} transfer pair(s) and ${m.matchedOneSided.length} one-sided transfer(s); ${errorCount} error(s).`;
 
   const status = dryRun
