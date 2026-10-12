@@ -1781,6 +1781,62 @@ ${entryXml}
     expect(api.transactions.delete).not.toHaveBeenCalled();
   });
 
+  // Legacy LHV-import row kept as CONFIRMED: plain description, no signed
+  // marker, one registration journal. Its direction is proven by that journal's
+  // posting on the row's own bank account + dimension (D = money in); the
+  // PROJECT duplicate has no journal and must still carry a signed marker.
+  describe("cleanup_camt_possible_duplicate with a journal-proven kept row", () => {
+    const key = {
+      accounts_dimensions_id: 5,
+      date: "2026-07-01",
+      type: "C",
+      amount: 42.5,
+      cl_currencies_id: "EUR",
+      bank_account_no: "EE000000000000000001",
+    };
+    const registration = (bankSide: "D" | "C", patch: Record<string, unknown> = {}) => ({
+      id: 4077, operation_type: "TRANSACTION", operations_id: 77, registered: true, is_deleted: false,
+      effective_date: "2026-07-01", cl_currencies_id: "EUR",
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 5, type: bankSide, amount: 42.5, base_amount: 42.5 },
+        { accounts_id: 1210, accounts_dimensions_id: null, type: bankSide === "D" ? "C" : "D", amount: 42.5, base_amount: 42.5 },
+      ],
+      ...patch,
+    });
+    const setup = (keptDescription: string, candidateDescription: string, journals: unknown[]) => setupAccountingInboxTool({
+      accountDimensions: [{ id: 5, accounts_id: 1020, title_est: "LHV" } as any],
+      journals: { listAll: vi.fn().mockResolvedValue(journals) } as any,
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => id === 77
+          ? { id: 77, status: "CONFIRMED", is_deleted: false, description: keptDescription, ...key }
+          : { id, status: "PROJECT", is_deleted: false, description: candidateDescription, ...key }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    it("deletes the signed incoming duplicate of a plain CONFIRMED row whose journal debits the bank", async () => {
+      const { handler, api } = setup("Laekumine arve 17", `Incoming\n${CAMT_CRDT_MARKER}`, [registration("D")]);
+      await handler({ keep_transaction_id: 77, delete_transaction_id: 9001 });
+      expect(api.journals.invalidateListCache).toHaveBeenCalled();
+      expect(api.transactions.delete).toHaveBeenCalledWith(9001);
+    });
+
+    it.each([
+      ["the journal books the opposite direction", "Laekumine arve 17", `Payment\n${CAMT_DBIT_MARKER}`, [registration("D")]],
+      ["the kept row's marker contradicts its journal", `Payment\n${CAMT_DBIT_MARKER}`, `Payment\n${CAMT_DBIT_MARKER}`, [registration("D")]],
+      ["the kept row has no registration journal", "Laekumine arve 17", `Incoming\n${CAMT_CRDT_MARKER}`, [registration("D", { operations_id: 78 })]],
+      ["the PROJECT duplicate has no signed marker", "Laekumine arve 17", "Incoming", [registration("D")]],
+    ])("refuses when %s", async (_label, keptDescription, candidateDescription, journals) => {
+      const { handler, api } = setup(keptDescription, candidateDescription, journals);
+      await expect(handler({ keep_transaction_id: 77, delete_transaction_id: 9001 }))
+        .rejects.toThrow(/identity mismatch.*signed direction missing or differs/i);
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.delete).not.toHaveBeenCalled();
+    });
+  });
+
   it.each([
     ["null", { status: null }],
     ["omitted", {}],

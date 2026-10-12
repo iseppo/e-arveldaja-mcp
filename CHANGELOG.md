@@ -16,6 +16,7 @@
 ### Changed
 
 - **CAMT: a statement entry e-arveldaja's own bank import already created is skipped, not sent to review.** Such rows read back with a plain description and no bank reference, so the importer only saw their registration journal in the posting scan and raised `camt_journal_posting_review`. The entry is now skipped as `camt_native_import_match` (naming the transaction and journal) when the only candidate is the TRANSACTION journal of a CONFIRMED row on the same dimension with the same date and EUR cents, that journal's bank net equals the entry's signed amount, the counterparty IBAN (when both sides have one) or name (case/whitespace-insensitive) agrees, the row has no stored bank reference, and no other statement entry or ledger row shares the date and amount and no other entry matched the row; anything else stays a review.
+- **A CONFIRMED bank row without a signed marker can now prove its direction from its registration journal.** The CAMT duplicate cleanup (kept row) and the currency-rounding settlement check (linked payment) previously failed closed on every legacy row (e-arveldaja's own bank import, old Wise/CAMT markers) because only a signed marker counted. They now also accept the direction booked by the row's registration journal (`TRANSACTION`, registered, on the row's own bank account and dimension: debit = incoming, credit = outgoing); a PROJECT row stays marker-only, and a marker that contradicts the journal, a missing journal or a bank posting without a EUR amount still fails closed.
 
 ### Fixed
 

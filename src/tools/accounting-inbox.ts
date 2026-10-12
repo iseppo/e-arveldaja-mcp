@@ -15,6 +15,7 @@ import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-vali
 import { logAudit } from "../audit-log.js";
 import { roundMoney } from "../money.js";
 import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
+import { loadProvenBankDirection } from "../bank-transaction-journal-direction.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
@@ -1178,7 +1179,10 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
  *     rounded amount. Direction is the SIGNED importer marker
  *     (`signedBankTransactionDirection`), never the stored `type` — the live API
  *     reads `type` back as "C" on every row, so it would pass an incoming refund
- *     as the duplicate of a same-amount outgoing payment. Each of
+ *     as the duplicate of a same-amount outgoing payment. The CONFIRMED kept row
+ *     may instead prove it through its registration journal
+ *     (`options.keptDirection`, from `loadProvenBankDirection`); the PROJECT
+ *     candidate has no journal and stays marker-only. Each of
  *     these must be PRESENT on both rows and equal — a missing field can never
  *     prove identity, so it fails CLOSED (no `?? EUR`/`?? null` collapsing two
  *     different rows to one identity).
@@ -1208,6 +1212,7 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
 export function compareCamtDuplicateIdentity(
   kept: Transaction,
   candidate: Transaction,
+  options?: { keptDirection: "incoming" | "outgoing" | undefined },
 ):
   | { matches: true; identity: string; corroboration: string[] }
   | { matches: false; reasons: string[] } {
@@ -1227,8 +1232,9 @@ export function compareCamtDuplicateIdentity(
 
   // The read-back `type` is "C" on every live row whatever was stored, so it
   // cannot tell an incoming refund from an outgoing payment. Only the signed
-  // importer marker proves direction; an unmarked row can never prove identity.
-  const keptDirection = signedBankTransactionDirection(kept);
+  // importer marker (or, for the kept CONFIRMED row, its registration journal)
+  // proves direction; an unproven row can never prove identity.
+  const keptDirection = options ? options.keptDirection : signedBankTransactionDirection(kept);
   const candidateDirection = signedBankTransactionDirection(candidate);
   if (!keptDirection || !candidateDirection || keptDirection !== candidateDirection) {
     reasons.push("signed direction missing or differs");
@@ -2684,6 +2690,7 @@ export function registerAccountingInboxTools(
       // The keep/delete gate below is destructive: decide it on a fresh read,
       // not a cached row that predates a confirm/delete made elsewhere.
       api.transactions.invalidateListCache();
+      api.journals.invalidateListCache();
       const keptTransaction = await api.transactions.get(keep_transaction_id);
       if (keptTransaction.is_deleted) {
         throw new Error(`Cannot keep transaction ${keep_transaction_id} because it is already deleted`);
@@ -2705,7 +2712,9 @@ export function registerAccountingInboxTools(
         );
       }
 
-      const identityCheck = compareCamtDuplicateIdentity(keptTransaction, duplicateTransaction);
+      const identityCheck = compareCamtDuplicateIdentity(keptTransaction, duplicateTransaction, {
+        keptDirection: await loadProvenBankDirection(api, keptTransaction),
+      });
       if (!identityCheck.matches) {
         throw new Error(
           `Refusing to clean up transactions ${keep_transaction_id} and ${delete_transaction_id}: ` +

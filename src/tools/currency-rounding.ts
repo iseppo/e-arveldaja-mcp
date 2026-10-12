@@ -14,7 +14,8 @@ import { resolveFxAccount } from "../account-resolution.js";
 import type { PurchaseInvoice, Transaction, TransactionItem } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
 import { todayInTallinn } from "../local-date.js";
-import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
+import { loadProvenBankDirection } from "../bank-transaction-journal-direction.js";
 
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
@@ -195,6 +196,8 @@ export async function resolveInvoiceSettlementProvenance(
   invoice: PurchaseInvoice,
   loadTransaction: (id: number) => Promise<Transaction>,
   liabilityAccountAssertion?: number,
+  proveDirection: (tx: Transaction) => Promise<"incoming" | "outgoing" | undefined> =
+    async tx => signedBankTransactionDirection(tx),
 ): Promise<InvoiceSettlementProvenance> {
   const errors: SettlementProvenanceError[] = [];
   const liabilityAccountId = invoice.liability_accounts_id;
@@ -246,10 +249,16 @@ export async function resolveInvoiceSettlementProvenance(
     }
     if (tx.is_deleted === true || tx.status === "VOID") continue;
     if (tx.status !== "CONFIRMED") errors.push(provenanceError("linked_transaction_not_confirmed", requestedId));
-    // Outgoing proof comes only from the signed importer marker: the stored
-    // `type` reads back "C" on every row, and an unmarked row's direction is
-    // unknown, so both incoming and unknown fail closed.
-    const provenOutgoing = bankTransactionDirection(tx) === "outgoing";
+    // Outgoing proof comes from the signed importer marker or, for a CONFIRMED
+    // row, its registration journal crediting the bank (`proveDirection`): the
+    // stored `type` reads back "C" on every row, so incoming, unproven and a
+    // marker/journal conflict all fail closed.
+    let provenOutgoing = false;
+    try {
+      provenOutgoing = await proveDirection(tx) === "outgoing";
+    } catch {
+      provenOutgoing = false;
+    }
     if (!provenOutgoing) errors.push(provenanceError("linked_transaction_direction_conflict", requestedId));
 
     const rawItems: unknown[] = Array.isArray(tx.items) ? tx.items : [];
@@ -509,6 +518,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
           full,
           id => api.transactions.get(id),
           liability_accounts_id,
+          tx => loadProvenBankDirection(api, tx),
         );
         if (!provenance.ok) {
           pushProvenanceReview(provenance.error, provenance.contributingTransactionIds);

@@ -107,6 +107,7 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
       ...options.clients,
     },
     journals: {
+      listAll: vi.fn().mockResolvedValue([]),
       listAllWithPostings: vi.fn().mockResolvedValue([]),
       invalidateListCache: vi.fn(),
       ...options.journals,

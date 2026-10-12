@@ -17,6 +17,7 @@ interface SetupOptions {
   journalConfirm?: ReturnType<typeof vi.fn>;
   invoiceUpdate?: ReturnType<typeof vi.fn>;
   existingJournals?: Array<Record<string, unknown>>;
+  accountDimensions?: Array<Record<string, unknown>>;
 }
 
 function setupTool(options: SetupOptions) {
@@ -39,6 +40,7 @@ function setupTool(options: SetupOptions) {
       getAccounts: vi.fn().mockResolvedValue([
         { id: 8500, name_est: "Kasum/kahjum valuutakursi muutustest", is_valid: true },
       ]),
+      getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? []),
     },
     purchaseInvoices: {
       listAll: vi.fn().mockResolvedValue(options.invoices),
@@ -974,6 +976,77 @@ describe("reconcile_currency_rounding", () => {
       expect(api.journals.create).not.toHaveBeenCalled();
       expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
     }
+  });
+
+  // Legacy LHV-import payment: plain description, no signed marker, CONFIRMED
+  // with one registration journal. Its cash side is proven by that journal's
+  // posting on the row's own bank account + dimension (C = money out).
+  describe("registration-journal direction proof", () => {
+    const legacyInvoice = {
+      id: 720, number: "LEGACY-LHV", client_name: "Vendor",
+      payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD",
+      gross_price: 10, base_gross_price: 9.50, create_date: "2026-07-01",
+      liability_accounts_id: 2120, liability_accounts_dimensions_id: null,
+      transactions: [830],
+    };
+    const legacyTx = (patch: Record<string, unknown> = {}) => ({
+      id: 830, status: "CONFIRMED", type: "C", description: "Arve LEGACY-LHV", amount: 9,
+      cl_currencies_id: "EUR", date: "2026-07-02", accounts_dimensions_id: 7,
+      items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 720, amount: 9, cl_currencies_id: "EUR" }],
+      ...patch,
+    });
+    const registration = (bankSide: "D" | "C", patch: Record<string, unknown> = {}) => ({
+      id: 9830, operation_type: "TRANSACTION", operations_id: 830, registered: true, is_deleted: false,
+      effective_date: "2026-07-02", document_number: null, cl_currencies_id: "EUR",
+      postings: [
+        { accounts_id: 1020, accounts_dimensions_id: 7, type: bankSide, amount: 9, base_amount: 9 },
+        { accounts_id: 2120, accounts_dimensions_id: null, type: bankSide === "C" ? "D" : "C", amount: 9, base_amount: 9 },
+      ],
+      ...patch,
+    });
+    const accountDimensions = [{ id: 7, accounts_id: 1020, title_est: "LHV" }];
+
+    it("accepts a plain CONFIRMED payment whose registration journal credits the bank", async () => {
+      const { handler } = setupTool({
+        invoices: [legacyInvoice],
+        transactionsById: { 830: legacyTx() },
+        existingJournals: [registration("C")],
+        accountDimensions,
+      });
+      const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+      expect(payload.candidates[0]).toMatchObject({ category: "fx_difference", paid_eur: 9, diff_eur: 0.5 });
+    });
+
+    it.each([
+      ["the journal debits the bank (incoming)", legacyTx(), [registration("D")]],
+      ["the signed marker contradicts the journal", legacyTx({ description: OUT_MARKER }), [registration("D")]],
+      ["there is no registration journal", legacyTx(), [registration("C", { operations_id: 831 })]],
+      ["the only journal is unregistered", legacyTx(), [registration("C", { registered: false })]],
+    ])("routes to review when %s", async (_label, tx, journals) => {
+      const { handler } = setupTool({
+        invoices: [legacyInvoice],
+        transactionsById: { 830: tx },
+        existingJournals: journals,
+        accountDimensions,
+      });
+      const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+      expect(payload.candidates[0]).toMatchObject({
+        category: "review",
+        provenance_error: { code: "linked_transaction_direction_conflict" },
+      });
+    });
+
+    it("keeps a PROJECT payment marker-only even when a crediting journal names it", async () => {
+      const { handler } = setupTool({
+        invoices: [legacyInvoice],
+        transactionsById: { 830: legacyTx({ status: "PROJECT" }) },
+        existingJournals: [registration("C")],
+        accountDimensions,
+      });
+      const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+      expect(payload.candidates[0]).toMatchObject({ category: "review" });
+      expect(payload.candidates[0].provenance_error.code).toMatch(/linked_transaction_(not_confirmed|direction_conflict)/);
+    });
   });
 
   it("H07 fail closed rejects a non-array linked-transactions container", async () => {
