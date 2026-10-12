@@ -1106,3 +1106,85 @@ describe("process_receipt_batch own-company identity protection (M09)", () => {
     expect(payload.results).toHaveLength(1);
   });
 });
+
+describe("process_receipt_batch currency-equivalent cross-check (F-CURRENCY-EQUIVALENT)", () => {
+  // Anonymised synthetic EUR card charge printing a USD conversion: the
+  // extractor (mocked here to its real output) picks EUR 100.
+  const AMBIGUOUS_TEXT = "Example Shop\nReceipt R-55\nDate 2026-03-20\nCard conversion: USD 110.00\nTOTAL 100.00 EUR";
+  const EXTRACTED = {
+    supplier_name: "Runikon Retail OU",
+    invoice_number: "R-55",
+    invoice_date: "2026-03-20",
+    total_net: 100,
+    total_vat: 0,
+    total_gross: 100,
+    currency: "EUR",
+    description: "Card purchase",
+    raw_text: AMBIGUOUS_TEXT,
+  };
+
+  function priorInvoices(currency: string) {
+    return [1, 2, 3, 4].map(n => createdDraftInvoice({
+      id: 800 + n, number: `H-${n}`, create_date: `2026-02-0${n}`, cl_currencies_id: currency, gross_price: 40 + n, status: "CONFIRMED",
+    }));
+  }
+
+  async function runDryRun(options: { history: unknown[]; transactions?: unknown[]; extracted?: Record<string, unknown> }) {
+    mockReceiptFolder();
+    vi.mocked(parseDocument).mockResolvedValue({ text: AMBIGUOUS_TEXT, pageCount: 1 } as any);
+    vi.mocked(classifyReceiptDocument).mockReturnValue("purchase_invoice");
+    const extracted = { ...EXTRACTED, ...options.extracted };
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue(extracted as any);
+    vi.mocked(hasAutoBookableReceiptFields).mockReturnValue(true);
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: { custom_title: "Card purchase", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "-" },
+      source: "supplier_history",
+      suggested_purchase_article: { id: 501, name: "Software" },
+    } as any);
+    mockResolvedSupplier();
+    const api = createReceiptBatchApi({
+      clients: [supplierClient()],
+      accounts: [SOFTWARE_ACCOUNT],
+      purchaseArticles: [SOFTWARE_ARTICLE],
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(options.history) },
+      transactions: options.transactions ?? [],
+    });
+    const handler = registerProcessReceiptBatch(api);
+    const payload = parseMcpResponse((await handler({ folder_path: "/tmp/receipts", accounts_dimensions_id: 100, execute: false })).content[0]!.text);
+    return { payload, extracted };
+  }
+
+  it("routes an ambiguous EUR receipt to review when the supplier's history is all USD", async () => {
+    const { payload } = await runDryRun({ history: priorInvoices("USD") });
+    const result = payload.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.llm_fallback.confidence_signals).toContain("currency_equivalent_ambiguity");
+    const notes = JSON.stringify(result.notes);
+    expect(notes).toContain("currency_equivalent_ambiguity");
+    expect(notes).toContain("extraction picked EUR");
+    // The extracted currency is reported unchanged.
+    expect(result.extracted.currency).toBe("EUR");
+    expect(result.extracted.total_gross).toBe(100);
+  });
+
+  it("routes it to review when a candidate Wise payment converted to USD", async () => {
+    const { payload } = await runDryRun({
+      history: [],
+      transactions: [{
+        id: 61, accounts_dimensions_id: 100, status: "PROJECT", type: "C", date: "2026-03-20", amount: 100, cl_currencies_id: "EUR",
+        description: "WISE:CARD-9 Example Shop [110 USD @ 1.1] [source_direction=OUT]",
+      }],
+    });
+    const result = payload.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(JSON.stringify(result.notes)).toContain("candidate payment transaction(s) 61 match the USD figure");
+  });
+
+  it("adds nothing when the supplier's history agrees with the extracted EUR", async () => {
+    const { payload } = await runDryRun({ history: priorInvoices("EUR") });
+    const result = payload.results[0]!;
+    expect(result.llm_fallback.confidence_signals).not.toContain("currency_equivalent_ambiguity");
+    expect(JSON.stringify(result.notes ?? [])).not.toContain("currency_equivalent_ambiguity");
+    expect(result.status).not.toBe("needs_review");
+  });
+});

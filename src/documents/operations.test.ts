@@ -148,6 +148,47 @@ describe("AccountingDocumentOperations.prepare", () => {
   });
 });
 
+describe("AccountingDocumentOperations.prepare currency-equivalent cross-check (F-CURRENCY-EQUIVALENT)", () => {
+  // Anonymised synthetic USD invoice that also prints its EUR equivalent.
+  function docUsdWithEurEquivalent(): Awaited<ReturnType<typeof parseDocument>> {
+    return {
+      text: ["ACME OÜ", "Reg. nr 17487472", "Arve INV-1", "Currency USD", "Total USD 110.00", "Summa eurodes 100.00 EUR"].join("\n"),
+      pageCount: 1,
+      ocrPartialFailure: false,
+      result: { pages: [{ pageNum: 1, textItems: [] }] },
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>;
+  }
+  const history = (currency: string) => [1, 2, 3].map(n => ({
+    id: 700 + n, clients_id: 4242, number: `H-${n}`, create_date: `2026-01-0${n}`, cl_currencies_id: currency, gross_price: 10 * n, status: "CONFIRMED",
+  }));
+
+  async function prepareWith(currency: string) {
+    mockedParseDocument.mockResolvedValue(docUsdWithEurEquivalent());
+    const { path } = writeTempPdf();
+    const supplier = fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, is_supplier: true });
+    const { ops } = setup({ clientRows: [supplier], purchaseInvoiceRows: history(currency), clients: { get: vi.fn().mockResolvedValue(supplier) } });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    if (!outcome.ok) throw new Error("prepare failed");
+    return outcome.value;
+  }
+
+  it("warns (and flags review) when the supplier's history is all EUR but USD was extracted", async () => {
+    const preview = await prepareWith("EUR");
+    expect(preview.extraction.fields.currency).toBe("USD");
+    const warning = preview.warnings.find(w => w.code === "currency_equivalent_ambiguity");
+    expect(warning?.message).toContain("extraction picked USD");
+    expect(preview.extraction.llm_fallback.confidence_signals).toContain("currency_equivalent_ambiguity");
+    expect(preview.extraction.llm_fallback.recommended).toBe(true);
+  });
+
+  it("adds no warning when the supplier's history agrees with the extracted USD", async () => {
+    const preview = await prepareWith("USD");
+    expect(preview.extraction.fields.currency).toBe("USD");
+    expect(preview.warnings.some(w => w.code === "currency_equivalent_ambiguity")).toBe(false);
+    expect(preview.extraction.llm_fallback.confidence_signals).not.toContain("currency_equivalent_ambiguity");
+  });
+});
+
 describe("AccountingDocumentOperations snapshot materialization", () => {
   it("removes its temp dir when writing the snapshot fails", async () => {
     const { path } = writeTempPdf();

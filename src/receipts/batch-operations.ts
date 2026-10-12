@@ -54,6 +54,7 @@ import { findDuplicateInvoice } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
+import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
 // are exported for pdf-workflow / own-company-identity / unit tests, and the
 // rule-target resolvers are shared with the classification path). Importing them
@@ -566,6 +567,25 @@ async function processSingleReceipt(
           notes: [`Skipped duplicate by ${duplicate.reason}.`],
         };
       }
+    }
+
+    // F-CURRENCY-EQUIVALENT: advisory cross-check of a two-currency document
+    // against the supplier's invoice history and the candidate bank rows, both
+    // already loaded for this run. A contradiction gates creation; the
+    // extracted currency itself is never changed.
+    const currencyWarning = await checkCurrencyEquivalent({
+      rawText: extracted.raw_text,
+      extractedCurrency: extracted.currency,
+      extractedGross: extracted.total_gross,
+      invoiceDate: extracted.invoice_date,
+      supplierClientId: resolvedClientId,
+      supplierName: supplierResolution.client?.name ?? supplierResolution.preview_client?.name,
+      loadPurchaseInvoices: async () => context.purchaseInvoices,
+      loadTransactions: async () => options.bankTransactions,
+    });
+    if (currencyWarning) {
+      signals.currency_equivalent_ambiguity = true;
+      notes.push(`${currencyWarning.code}: ${currencyWarning.message}`);
     }
 
     const preCreateSummary = summarize();

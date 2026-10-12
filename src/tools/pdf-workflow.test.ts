@@ -1642,3 +1642,43 @@ describe("resolve_supplier external-text display matrix (P07)", () => {
     }
   });
 });
+
+describe("extract_pdf_invoice currency-equivalent cross-check (F-CURRENCY-EQUIVALENT)", () => {
+  // Anonymised synthetic USD invoice that also prints its EUR equivalent.
+  const AMBIGUOUS = "ACME OÜ\nRegistrikood 17487472\nInvoice INV-1\nCurrency USD\nTotal USD 110.00\nSumma eurodes 100.00 EUR";
+  const SINGLE = "ACME OÜ\nRegistrikood 17487472\nInvoice INV-2\nTotal 100.00 EUR";
+  const supplier = { id: 42, name: "ACME OÜ", code: "17487472", is_supplier: true, is_deleted: false };
+  const history = [1, 2, 3].map(n => ({
+    id: 600 + n, clients_id: 42, number: `H-${n}`, create_date: `2026-01-0${n}`, cl_currencies_id: "EUR", gross_price: 10, status: "CONFIRMED",
+  }));
+
+  async function extractText(text: string) {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("ccy.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue({
+      text, pageCount: 1, ocrPartialFailure: false,
+      result: { text: "", pages: [{ pageNum: 1, text, width: 600, height: 800, textItems: [] }] } as any,
+    });
+    const listAll = vi.fn().mockResolvedValue(history);
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", {
+      clients: { listAll: vi.fn().mockResolvedValue([supplier]) },
+      purchaseInvoices: { listAll },
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/ccy.pdf" })).content[0]!.text);
+    return { payload, listAll };
+  }
+
+  it("warns when the resolved supplier's history (all EUR) contradicts the extracted USD", async () => {
+    const { payload } = await extractText(AMBIGUOUS);
+    expect(payload.extracted.currency).toBe("USD");
+    expect(payload.extracted.total_gross).toBe(110);
+    expect(JSON.stringify(payload.extracted.warnings)).toContain("currency_equivalent_ambiguity");
+    expect(payload.llm_fallback.confidence_signals).toContain("currency_equivalent_ambiguity");
+  });
+
+  it("does no history lookup and adds no warning for a single-currency document", async () => {
+    const { payload, listAll } = await extractText(SINGLE);
+    expect(listAll).not.toHaveBeenCalled();
+    expect(JSON.stringify(payload.extracted.warnings ?? [])).not.toContain("currency_equivalent_ambiguity");
+    expect(payload.llm_fallback.confidence_signals).not.toContain("currency_equivalent_ambiguity");
+  });
+});

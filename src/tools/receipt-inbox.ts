@@ -257,12 +257,17 @@ export function shouldGateCreation(
   // Layout and text gross disagreed: the payable amount itself is unverified, so
   // a note alone is not enough — gate creation in every mode.
   const totalGrossConflict = summary.confidence_signals.includes("total_gross_conflict");
+  // Supplier history / a candidate payment contradicts the currency picked from
+  // a two-currency document (F-CURRENCY-EQUIVALENT): never book either currency
+  // automatically.
+  const currencyEquivalentAmbiguity = summary.confidence_signals.includes("currency_equivalent_ambiguity");
   const confirmModeNeedsHighConfidence =
     executionMode === "create_and_confirm" && summary.confidence !== "high";
   const gate = summary.confidence === "low" ||
     foreignDefaultUnverified ||
     supplierIdentifierEchoUnconfirmed ||
     totalGrossConflict ||
+    currencyEquivalentAmbiguity ||
     confirmModeNeedsHighConfidence;
   return {
     gate,

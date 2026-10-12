@@ -9,7 +9,7 @@ import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
-import type { PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
+import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { contentMatchesExtension, resolveFileInput, sanitizeUploadFileName } from "../file-validation.js";
 import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "./purchase-vat-defaults.js";
@@ -24,7 +24,9 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
-import { computeMinOcrConfidence, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, LOW_OCR_CONFIDENCE_THRESHOLD, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
+import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
+import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
+import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, LOW_OCR_CONFIDENCE_THRESHOLD, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
@@ -422,8 +424,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         let ownCompanyVat: string | undefined;
         let ownCompanyRegistryCode: string | undefined;
         let ownIbans: string[] | undefined;
+        let clients: Client[] = [];
         try {
-          const clients = await api.clients.listAll();
+          clients = await api.clients.listAll();
           ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(api, clients));
         } catch {
           // Offline / unconfigured connection — extract without self-exclusions.
@@ -464,9 +467,32 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
+        // F-CURRENCY-EQUIVALENT: only for a document showing EUR and one foreign
+        // currency, cross-check the extracted currency against the (uniquely
+        // resolved) supplier's purchase-invoice history. Advisory and
+        // fail-safe; the extracted currency is never changed.
+        let currencyWarning: CurrencyEquivalentWarning | undefined;
+        if (clients.length > 0 && detectCurrencyEquivalentAmbiguity(extracted.raw_text)) {
+          const supplier = resolveSupplierDefault(clients, {
+            supplier_name: extracted.supplier_name,
+            supplier_reg_code: extracted.supplier_reg_code,
+            supplier_vat_no: extracted.supplier_vat_no,
+            supplier_iban: extracted.supplier_iban,
+          }, { ownCompanyVat, ownCompanyRegistryCode });
+          currencyWarning = await checkCurrencyEquivalent({
+            rawText: extracted.raw_text,
+            extractedCurrency: extracted.currency,
+            extractedGross: extracted.total_gross,
+            invoiceDate: extracted.invoice_date,
+            supplierClientId: supplier.status === "resolved" ? supplier.value.client.id : undefined,
+            loadPurchaseInvoices: () => api.purchaseInvoices.listAll(),
+          });
+          if (currencyWarning) signals.currency_equivalent_ambiguity = true;
+        }
         const llmFallback = summarizeInvoiceExtraction(extracted, signals, "hints.raw_text", inferSupplierCountry(extracted));
 
         const warnings: string[] = [];
+        if (currencyWarning) warnings.push(`${currencyWarning.code}: ${currencyWarning.message}`);
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
         // else — the OCR-derived `extracted.currency` could otherwise smuggle
         // attacker text into the warning string (which is not OCR-wrapped).

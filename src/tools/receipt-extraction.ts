@@ -3101,6 +3101,49 @@ export function extractReceiptFieldsFromText(
   };
 }
 
+/**
+ * F-CURRENCY-EQUIVALENT: a document whose amount / currency-label lines name
+ * EUR and exactly one supported non-EUR currency. Text alone cannot tell a
+ * foreign invoice that prints its EUR equivalent from a EUR charge that prints
+ * the foreign conversion, so callers cross-check it against out-of-band
+ * evidence (src/currency-equivalent-check.ts). Detection only: it is never
+ * called by extractReceiptFieldsFromText and changes no extracted field.
+ */
+export interface CurrencyEquivalentAmbiguity {
+  foreign_currency: string;
+  /** Largest EUR-marked amount on the document, when any. */
+  eur_amount?: number;
+  /** Largest amount marked with the foreign currency, when any. */
+  foreign_amount?: number;
+}
+
+export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined): CurrencyEquivalentAmbiguity | undefined {
+  if (!sourceText) return undefined;
+  const text = stripSandboxMarkers(sourceText);
+  const codes = new Set<string>();
+  const largest = new Map<string, number>();
+  for (const line of text.split(/\r?\n/).map(clampTextLine).filter(Boolean)) {
+    const amounts = extractAmountsFromLine(blankExchangeRateNumbers(line), text);
+    const labelled = [...line.matchAll(CURRENCY_LABEL_CODE_RE)].length > 0;
+    if (amounts.length === 0 && !labelled) continue;
+    for (const code of detectCurrenciesOnLine(line)) codes.add(code);
+    for (const value of amounts) {
+      const code = currencyOfAmountOnLine(line, value, text);
+      if (code === undefined) continue;
+      const magnitude = Math.abs(value);
+      if (magnitude > (largest.get(code) ?? 0)) largest.set(code, magnitude);
+    }
+  }
+  const foreign = [...codes].filter(code => NON_EUR_CURRENCY_CODES.has(code));
+  if (!codes.has("EUR") || foreign.length !== 1) return undefined;
+  const foreignCurrency = foreign[0]!;
+  return {
+    foreign_currency: foreignCurrency,
+    ...(largest.has("EUR") ? { eur_amount: largest.get("EUR") } : {}),
+    ...(largest.has(foreignCurrency) ? { foreign_amount: largest.get(foreignCurrency) } : {}),
+  };
+}
+
 export function scoreTransactionToInvoice(tx: Transaction, invoice: InvoiceSummaryForMatching): { confidence: number; reasons: string[] } {
   let confidence = 0;
   const reasons: string[] = [];

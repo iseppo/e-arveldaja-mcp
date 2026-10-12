@@ -22,6 +22,7 @@ import {
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
 import { summarizeInvoiceExtraction, type ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
+import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { detectSelfRegCodeOnly, detectSelfVatOnly } from "../tools/receipt-inbox.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
@@ -348,7 +349,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       ) {
         signals.supplier_identifier_echo_unconfirmed = true;
       }
-      const llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
+      let llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
 
       const extractionWarnings: string[] = [];
       const rawCurrency = extracted.currency?.toUpperCase();
@@ -406,6 +407,23 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
       // Duplicate detection over the whole purchase-invoice history.
       const allPurchases = await this.api.purchaseInvoices.listAll();
+
+      // F-CURRENCY-EQUIVALENT: cross-check a two-currency document's extracted
+      // currency against the resolved supplier's invoice history (the list just
+      // loaded). Advisory: a contradiction is a review warning; the extracted
+      // currency is never changed.
+      const currencyWarning = await checkCurrencyEquivalent({
+        rawText: extracted.raw_text,
+        extractedCurrency: extracted.currency,
+        extractedGross: extracted.total_gross,
+        invoiceDate: extracted.invoice_date,
+        supplierClientId: resolvedClientId,
+        loadPurchaseInvoices: async () => allPurchases,
+      });
+      if (currencyWarning) {
+        signals.currency_equivalent_ambiguity = true;
+        llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
+      }
       const duplicate = detectDuplicatePurchaseInvoice(allPurchases, {
         ...(resolvedClientId !== undefined ? { clients_id: resolvedClientId } : {}),
         invoice_number: extracted.invoice_number,
@@ -440,6 +458,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (signals.total_gross_conflict) {
         warnings.push({ code: "total_gross_conflict", message: "Layout and text extraction disagree on the gross total; verify the payable amount before booking." });
+      }
+      if (currencyWarning) {
+        warnings.push({ code: currencyWarning.code, message: currencyWarning.message });
       }
       if (signals.self_vat_detected || signals.self_reg_code_detected) {
         warnings.push({ code: "self_supplier_signal", message: "An identifier matched the active company itself; verify the supplier." });

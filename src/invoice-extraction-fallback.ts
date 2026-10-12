@@ -73,6 +73,13 @@ export interface ExtractionConfidenceSignals {
    * and gated from automatic creation in every mode.
    */
   total_gross_conflict?: boolean;
+  /**
+   * F-CURRENCY-EQUIVALENT: the document shows EUR and one foreign currency, and
+   * supplier history or a candidate payment suggests the other currency than the
+   * one extracted. The extracted currency is kept; routed to review and gated
+   * from automatic creation in every mode.
+   */
+  currency_equivalent_ambiguity?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -169,6 +176,7 @@ export function summarizeInvoiceExtraction(
   if (signals?.low_ocr_confidence) mediumSignals.push("low_ocr_confidence");
   if (signals?.supplier_identifier_echo_unconfirmed) mediumSignals.push("supplier_identifier_echo_unconfirmed");
   if (signals?.total_gross_conflict) mediumSignals.push("total_gross_conflict");
+  if (signals?.currency_equivalent_ambiguity) mediumSignals.push("currency_equivalent_ambiguity");
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.
