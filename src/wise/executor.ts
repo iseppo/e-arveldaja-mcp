@@ -332,6 +332,7 @@ async function runWiseImport(
 
   const projectionInput = {
     eligible,
+    allRows: rows,
     accountsDimensionsId: accounts_dimensions_id,
     accountDimensions: accountDimensionsSnapshot,
     feeAccountDimensionsId: undefined as number | undefined,
