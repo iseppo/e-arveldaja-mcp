@@ -271,6 +271,9 @@ export interface WiseProjectionInput {
   readonly existingTx: Transaction[];
   readonly transferDecisions: Map<WiseRow, WiseTransferDecision>;
   readonly postingDimensionsSnapshot: Map<number, AccountDimension>;
+  /** Every own bank account dimension the company has configured
+   * (getBankAccounts), not only this statement's transfer endpoints. */
+  readonly bankDimensionIds: ReadonlySet<number>;
   readonly journalSnapshot: Journal[];
   /** Lane B guard over `journalSnapshot`, built fresh per projection pass
    * (resolution consumes matched ref-less journals). */
@@ -403,6 +406,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     existingTx,
     transferDecisions,
     postingDimensionsSnapshot,
+    bankDimensionIds,
     journalSnapshot,
     createInterAccountGuard,
     approvedTransferIds,
@@ -805,6 +809,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     for (const decision of approvedTransferDecisions) {
       if (decision.targetDimensionId !== undefined) ownDimensionIds.add(decision.targetDimensionId);
     }
+    // Fee coverage tells bank postings from the fee expense by every own bank
+    // account, not only this statement's endpoints.
+    const ownBankDimensionIds = new Set<number>([...ownDimensionIds, ...bankDimensionIds]);
+    const ownBankAccountIds = new Set(accountDimensions
+      .filter(dimension => dimension.id !== undefined && ownBankDimensionIds.has(dimension.id))
+      .map(dimension => dimension.accounts_id));
     // Lane B, like reconcile_inter_account_transfers: ±1 day, labelled journals
     // identity-only, a matched ref-less journal consumed. Planned rows are NOT
     // recorded back: every row here is a Wise-side leg with a unique Wise ID,
@@ -959,12 +969,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       // amount the opposite way, no other own bank account is touched, and the
       // one remaining posting is a fee expense DEBIT of exactly the fee. Base
       // EUR, the basis the guard matched on. Anything else is reviewed.
+      // Eligibility is the transfer coverage's own: a registered, live journal
+      // whose postings all carry a EUR amount. A bank posting is any posting on
+      // a configured own bank dimension or on a bank account's GL account
+      // (e.g. 1020 with any or no dimension), never mistaken for the fee.
       const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
       const journalBooksNetOfFee = (journal: Journal | undefined): boolean => {
         if (journal === undefined || netAmount === undefined) return false;
+        if (journal.registered !== true || journal.is_deleted || hasForeignPostingWithoutBase(journal)) return false;
         const postings = (journal.postings ?? []).filter(posting => !posting.is_deleted);
-        const ownDimension = (posting: { accounts_dimensions_id?: number | null }) =>
-          ownDimensionIds.has(posting.accounts_dimensions_id ?? -1);
+        const ownDimension = (posting: { accounts_id?: number | null; accounts_dimensions_id?: number | null }) =>
+          ownBankDimensionIds.has(posting.accounts_dimensions_id ?? -1) || ownBankAccountIds.has(posting.accounts_id ?? -1);
         const nonBank = postings.filter(posting => !ownDimension(posting));
         const counterpartCents = postings
           .filter(posting => posting.accounts_dimensions_id === targetDimensionId)

@@ -254,6 +254,7 @@ async function runWiseImport(
   }
 
   let bankAccountsSnapshot: BankAccount[] = [];
+  let bankDimensionIds = new Set<number>();
   let invoiceInfoSnapshot: Awaited<ReturnType<typeof api.readonly.getInvoiceInfo>> | undefined;
   const accountDimensionsSnapshot: AccountDimension[] = await api.readonly.getAccountDimensions();
   let postingDimensionsSnapshot = new Map<number, AccountDimension>();
@@ -265,6 +266,7 @@ async function runWiseImport(
       api.readonly.getInvoiceInfo(),
     ]);
     const { dimensions: bankDimensions, identityDimensions } = bankIdentitiesByDimension(bankAccountsSnapshot);
+    bankDimensionIds = bankDimensions;
     postingDimensionsSnapshot = uniqueActivePostingDimensions(accountDimensionsSnapshot);
     const configuredDimensions = new Set(
       [...bankDimensions].filter(id => postingDimensionsSnapshot.has(id)),
@@ -330,6 +332,7 @@ async function runWiseImport(
     existingTx,
     transferDecisions,
     postingDimensionsSnapshot,
+    bankDimensionIds,
     journalSnapshot,
     createInterAccountGuard: (ownDimensionIds: Set<number>) =>
       BookingGuard.fromSnapshot(api, journalSnapshot, ownDimensionIds),
