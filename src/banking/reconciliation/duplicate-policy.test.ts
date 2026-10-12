@@ -565,7 +565,9 @@ describe("computeExactMatchProjection currency evidence", () => {
       [vendorRow({ cl_currencies_id: "USD" })], [vendorSale()], NO_PURCHASES, DEFAULT,
     );
     expect(projection.confirms).toEqual([]);
-    expect(projection.skipped).toEqual([{ transaction_id: 2001, reason: expect.stringContaining("currency_unproven") }]);
+    // Equal numbers across currencies now score cross_currency_conflict, so the
+    // cross-currency skip fires before the currency-evidence gap.
+    expect(projection.skipped).toEqual([{ transaction_id: 2001, reason: expect.stringContaining("Cross-currency match") }]);
   });
 
   it("auto-confirms a USD row whose finite EUR base amount equals the EUR invoice", () => {

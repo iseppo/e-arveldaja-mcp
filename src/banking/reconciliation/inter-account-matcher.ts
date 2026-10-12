@@ -101,6 +101,21 @@ export function resolveWithReferences<R extends { status: string }>(
 }
 
 /**
+ * A journal's signed EUR net (debit positive, in cents) on one account
+ * dimension, or `undefined` when a live foreign posting has no EUR base amount
+ * (not EUR-comparable). Shared by reconcile's `journalMovesTransfer` and the
+ * analyze path's own-account cover check.
+ */
+export function journalEurNetCents(journal: Journal, dimensionId: number | null | undefined): number | undefined {
+  const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
+  if (live.some(posting => posting.base_amount == null &&
+    (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return undefined;
+  return live
+    .filter(posting => posting.accounts_dimensions_id === dimensionId)
+    .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100), 0);
+}
+
+/**
  * Whether a journal books this row's transfer: its legs on the row's account
  * move `amountEur` in the row's signed direction (either way when the row is
  * unsigned) and its legs on the target account move the opposite way (a fee
@@ -109,17 +124,12 @@ export function resolveWithReferences<R extends { status: string }>(
  */
 export function journalMovesTransfer(journal: Journal | undefined, tx: Transaction, targetDim: number, amountEur: number): boolean {
   if (!journal) return false;
-  const live = (journal.postings ?? []).filter(posting => !posting.is_deleted);
-  if (live.some(posting => posting.base_amount == null &&
-    (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR")) return false;
-  const signedCents = (dim: number) => live
-    .filter(posting => posting.accounts_dimensions_id === dim)
-    .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100), 0);
   const cents = Math.round(Math.abs(amountEur) * 100);
   const direction = bankTransactionDirection(tx);
   const sides = direction === "incoming" ? [1] : direction === "outgoing" ? [-1] : [1, -1];
-  const own = signedCents(tx.accounts_dimensions_id);
-  const target = signedCents(targetDim);
+  const own = journalEurNetCents(journal, tx.accounts_dimensions_id);
+  const target = journalEurNetCents(journal, targetDim);
+  if (own === undefined || target === undefined) return false;
   return sides.some(side => own === side * cents && target * side < 0);
 }
 
