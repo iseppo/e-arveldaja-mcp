@@ -946,22 +946,42 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         maxGapDays: 1,
         reference: row.id,
       };
-      // Whether `journal` books this transfer NET of the row's fee — the Wise leg
-      // differs from the booked amount by exactly the fee and a non-bank leg
-      // carries the fee — so it already books the fee too. Base EUR, the basis
-      // the guard matched on: a non-EUR journal's nominal amounts are its own currency.
       const feeKey = `row:${row.rowIndex}:fee`;
       const cents = (value: number) => Math.round(value * 100);
       const baseCents = (posting: { amount: number; base_amount?: number }) => cents(posting.base_amount ?? posting.amount);
-      const journalBooksFee = (journal: Journal | undefined, feeCommand: WiseImportCommand | undefined): boolean => {
-        const postings = (journal?.postings ?? []).filter(posting => !posting.is_deleted);
-        return feeCommand !== undefined &&
-          feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
-          wiseLegMoves(journal, row,
-            entry.amount + (sourceDirectionForWiseDirection(row.direction) === "IN" ? -1 : 1) * feeCommand.booked_amount) &&
-          postings.some(posting => !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
-            baseCents(posting) === cents(feeCommand.booked_amount));
+      const signedCents = (posting: { type?: string; amount: number; base_amount?: number }) =>
+        (posting.type === "D" ? 1 : -1) * baseCents(posting);
+      // Lane B binds each journal amount to its own bank leg. A journal booking
+      // this transfer net of the row's separate fee row carries the Wise leg at
+      // the net amount. It stands in for the row (and its fee) only when it
+      // reproduces the statement on both bank accounts: the Wise leg moves the
+      // net amount in the row's direction, the counterpart leg moves the booked
+      // amount the opposite way, no other own bank account is touched, and the
+      // one remaining posting is a fee expense DEBIT of exactly the fee. Base
+      // EUR, the basis the guard matched on. Anything else is reviewed.
+      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+      const journalBooksNetOfFee = (journal: Journal | undefined): boolean => {
+        if (journal === undefined || netAmount === undefined) return false;
+        const postings = (journal.postings ?? []).filter(posting => !posting.is_deleted);
+        const ownDimension = (posting: { accounts_dimensions_id?: number | null }) =>
+          ownDimensionIds.has(posting.accounts_dimensions_id ?? -1);
+        const nonBank = postings.filter(posting => !ownDimension(posting));
+        const counterpartCents = postings
+          .filter(posting => posting.accounts_dimensions_id === targetDimensionId)
+          .reduce((sum, posting) => sum + signedCents(posting), 0);
+        const direction = sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1;
+        return wiseLegMoves(journal, row, netAmount) &&
+          postings.every(posting => !ownDimension(posting) ||
+            posting.accounts_dimensions_id === accounts_dimensions_id || posting.accounts_dimensions_id === targetDimensionId) &&
+          counterpartCents === -direction * cents(entry.amount) &&
+          nonBank.length === 1 && nonBank[0]!.type === "D" && baseCents(nonBank[0]!) === cents(bookedFeeAmountForWiseRow(row));
       };
+      // Whether `journal` already books the fee this fee command would book.
+      const journalBooksFee = (journal: Journal | undefined, feeCommand: WiseImportCommand | undefined): boolean =>
+        feeCommand !== undefined &&
+        feeCommand.booked_currency === bookedCurrencyForWiseRow(row) &&
+        cents(feeCommand.booked_amount) === cents(bookedFeeAmountForWiseRow(row)) &&
+        journalBooksNetOfFee(journal);
       const dropFeeCommand = (feeCommand: WiseImportCommand) => {
         commands.splice(commands.indexOf(feeCommand), 1);
         const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
@@ -982,16 +1002,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ...(feeHeldIds.length > 0 ? { fee_held_journal_ids: feeHeldIds } : {}),
         });
       };
-      // Lane B binds each journal amount to its own bank leg. A journal booking
-      // this transfer net of the row's separate fee row carries the Wise leg at
-      // the net amount. It stands in for the row only when it also books the
-      // fee (a non-bank posting of the fee amount): otherwise the Wise and
-      // counterpart nets would each miss the fee against the statement.
-      const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
-      const journalBooksNetOfFee = (journal: Journal | undefined): boolean =>
-        netAmount !== undefined && wiseLegMoves(journal, row, netAmount) &&
-        (journal?.postings ?? []).some(posting => !posting.is_deleted && !ownDimensionIds.has(posting.accounts_dimensions_id ?? -1) &&
-          baseCents(posting) === cents(bookedFeeAmountForWiseRow(row)));
 
       let existingJournalId = mappedJournalId;
       if (existingJournalId === undefined) {

@@ -6050,6 +6050,59 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expectNoWiseMutations(setup.api);
   });
 
+  describe("an outgoing €100 transfer with a €1 fee against a net-of-fee journal", () => {
+    // Statement: Wise −101 (100 + fee 1), LHV +100, fee expense 1.
+    const outJournal = (id: number, postings: Array<Record<string, unknown>>) => ({
+      id, is_deleted: false, registered: true, effective_date: "2026-02-02", operation_type: "ENTRY",
+      postings: postings.map(posting => ({ is_deleted: false, base_amount: posting.amount, ...posting })),
+    });
+    const wiseOut = { accounts_dimensions_id: 5, type: "C", amount: 101 };
+    const feeDebit = { accounts_id: 8610, type: "D", amount: 1 };
+    const run = async (journal: unknown) => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
+        id: "TRANSFER-OUT-FEE", direction: "OUT", date: "2026-02-02",
+        sourceName: "Wise Own Account", targetName: "LHV Own Account",
+        sourceAmount: "100", targetAmount: "100", sourceFeeAmount: "1",
+      })]));
+      const setup = setupWiseTool([], undefined, {
+        ...transferOptions([journal]),
+        accountDimensions: [
+          ...configuredTransferDimensions(),
+          { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+        ],
+      });
+      const dry = parseWiseResponse(await setup.handler({ ...transferArgs, fee_account_dimensions_id: 9, execute: false }));
+      expectNoWiseMutations(setup.api);
+      return dry;
+    };
+
+    it("a journal reproducing both bank nets and debiting the fee books the row and its fee", async () => {
+      const dry = await run(outJournal(730, [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit]));
+      expect(dry.execution.commands).toEqual([expect.objectContaining({
+        action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 730,
+      })]);
+      expect(dry.execution.needs_review).toEqual([]);
+    });
+
+    it.each([
+      ["a credited fee and an over-debited counterpart (C Wise 101 / D LHV 102 / C fee 1)",
+        [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 102 }, { accounts_id: 8610, type: "C", amount: 1 }]],
+      ["a reversed (credited) fee", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, { accounts_id: 8610, type: "C", amount: 1 }]],
+      ["an extra unrelated posting pair", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit,
+        { accounts_id: 5000, type: "D", amount: 3 }, { accounts_id: 2000, type: "C", amount: 3 }]],
+      ["the counterpart leg at the net amount", [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 101 }]],
+    ])("a journal with %s is reviewed and suppresses nothing", async (_label, postings) => {
+      const dry = await run(outJournal(731, postings));
+      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+      expect(dry.execution.needs_review).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-OUT-FEE",
+        code: "wise_transfer_journal_ambiguous",
+        candidate_journal_ids: [731],
+      })]);
+      expect(dry.execution.needs_review[0].fee_held_journal_ids).toBeUndefined();
+    });
+  });
+
   it.each([
     ["a different amount", lhvWiseJournal(720, "2026-02-02", 110, { document_number: "TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
     ["a WISE:-prefixed label outside the ±1 day window", lhvWiseJournal(720, "2026-02-09", 100, { document_number: "WISE:TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
