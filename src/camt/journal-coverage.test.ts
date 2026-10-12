@@ -469,6 +469,11 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     expect(projection.skipped).toHaveLength(1);
     expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_direction_conflict", journal_ids: [9400] });
     expect(projection.skipped[0]!.skip_code).toBeUndefined();
+    // The stored row is booked wrongly: the note asks for a correction, not
+    // "create it if not booked yet".
+    expect(projection.skipped[0]!.review_note).toContain("booked wrongly");
+    expect(projection.skipped[0]!.review_note).toContain("invalidate it, delete it and re-import");
+    expect(projection.skipped[0]!.review_note).not.toContain("create the transaction manually");
   });
 
   it.each([

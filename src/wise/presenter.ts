@@ -3,7 +3,7 @@ import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
-import { createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../operation-result-store.js";
 import type { PlanStoreError } from "../plan-store.js";
@@ -375,8 +375,27 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
 // (dry run). Blockers (execution errors) are never hidden. Untrusted free-form
 // text (counterparty + any raw reference) is OCR-sandbox-wrapped here.
 
-function isDuplicateSkip(reason: string): boolean {
-  return reason.startsWith("Already imported") || reason.startsWith("Fee already imported");
+// An automatic match (auto_match) is counted on its own, never as a plain
+// duplicate: it is a judgement the operator can object to.
+function isDuplicateSkip(entry: WiseSkippedEntry): boolean {
+  return entry.auto_match === undefined &&
+    (entry.reason.startsWith("Already imported") || entry.reason.startsWith("Fee already imported"));
+}
+
+function autoMatchWarning(entry: WiseSkippedEntry & { auto_match: NonNullable<WiseSkippedEntry["auto_match"]> }): CompactWarning {
+  const { code, transaction_id: transactionId, journal_id: journalId } = entry.auto_match;
+  const what = entry.reason.startsWith("Fee") ? "Fee row" : "Row";
+  const target = transactionId !== undefined
+    ? `stored confirmed transaction ${transactionId} on this Wise account`
+    : `inter-account journal ${journalId}`;
+  const undo = transactionId !== undefined
+    ? `if it is a different movement, correct or delete transaction ${transactionId}`
+    : `if the journal is not this transfer, correct or delete journal ${journalId}`;
+  return {
+    item_id: entry.wise_id,
+    code,
+    message: `${what} not created: automatic match (${code}) to ${target}. If wrong: ${undo}, then re-run the preview.`,
+  };
 }
 
 /**
@@ -408,7 +427,9 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
 
   const executionSkipped = data.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
   const executionErrors = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
-  const duplicateCount = data.skipped.filter(entry => isDuplicateSkip(entry.reason)).length;
+  const duplicateCount = data.skipped.filter(isDuplicateSkip).length;
+  const autoMatched = data.skipped.filter((entry): entry is WiseSkippedEntry & { auto_match: NonNullable<WiseSkippedEntry["auto_match"]> } =>
+    entry.auto_match !== undefined);
 
   const inEntries = data.created.filter(entry => entry.source_direction === "IN");
   const outEntries = data.created.filter(entry => entry.source_direction === "OUT");
@@ -422,6 +443,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     out_count: outEntries.length,
     skipped: executionSkipped.length,
     duplicates: duplicateCount,
+    auto_matched: autoMatched.length,
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
     inter_account: data.interAccountResults.length,
@@ -462,6 +484,14 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   for (const fix of data.invoiceFixCandidates) {
     if (fix.result !== "advisory") continue;
     warnings.push({ item_id: fix.wise_id, code: "wise_invoice_currency_advisory", message: fix.proposed_action });
+  }
+  // Automatic matches name the stored row / journal and how to undo them;
+  // there is no flag to switch them off.
+  const autoMatchMoreHint = dryRun && data.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "exclusions", detail: "full" }.`
+    : "re-run the preview and page its plan exclusions with get_execution_plan_page.";
+  for (const code of ["wise_untagged_ledger_unique", "wise_transfer_journal_unique_legacy"] as const) {
+    warnings.push(...cappedWarnings(code, autoMatched.filter(entry => entry.auto_match.code === code).map(autoMatchWarning), autoMatchMoreHint));
   }
   if (totalCurrencies.size > 1) {
     warnings.push({

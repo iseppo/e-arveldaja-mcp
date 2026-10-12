@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 33678,
-    "descriptionsBytes": 4824,
-    "inputSchemasBytes": 23984,
+    "toolsListBytes": 34051,
+    "descriptionsBytes": 5064,
+    "inputSchemasBytes": 24117,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5088
@@ -163,7 +163,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
+      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches (confidence >= 90, or the ref_number_exact rule: the reference of exactly one open unpaid EUR invoice + the exact EUR amount + a proven direction matching the invoice kind; such rows keep their lower confidence and carry auto_confirm_rule), mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -181,7 +181,7 @@
             "type": "integer"
           },
           "min_confidence": {
-            "description": "Minimum confidence threshold for invoice matching modes.",
+            "description": "Minimum confidence threshold for invoice matching modes (auto-confirm default 90). Above 90 also disables the ref_number_exact rule.",
             "maximum": 100,
             "minimum": 0,
             "type": "number"
@@ -916,7 +916,7 @@
             "description": "create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?}). For create, pass EITHER clients_id OR an inline client to resolve-or-create a customer ({name, reg_code?, vat_no?, iban?, country?}); on any identity conflict the create is refused and neither the client nor the invoice is created."
           },
           "payment_status": {
-            "description": "read=list: PAID|PARTIALLY_PAID|NOT_PAID.",
+            "description": "read=list: PAID|PARTIALLY_PAID|NOT_PAID (unpaid rows read back with payment_status \"\" or null).",
             "type": "string"
           },
           "plan_handle": {

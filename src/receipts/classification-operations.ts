@@ -276,7 +276,7 @@ function coverageEntry(transaction: Transaction, direction: ParsedCamtEntry["dir
 
 function compareAction(journalIds: number[]): string {
   const target = journalIds.length > 0 ? `journal ${journalIds.join(", ")}` : "the own-account transfer journals of this date and amount";
-  return `compare with ${target}; if it books this movement, delete the PROJECT row; otherwise classify normally`;
+  return `compare with ${target}; if it books this movement, delete the PROJECT row after explicit owner approval; otherwise classify normally`;
 }
 
 /**
@@ -378,7 +378,7 @@ function partitionByLedgerContext(
         ...base,
         journal_ids: hits[0]!.journal_ids,
         strength: "reference",
-        next_action: `verify that journal ${hits[0]!.journal_ids.join(", ")} books this movement, then delete_transaction ${transaction.id} (the PROJECT row)`,
+        next_action: `verify that journal ${hits[0]!.journal_ids.join(", ")} books this movement, then delete_transaction ${transaction.id} (the PROJECT row) after explicit owner approval`,
       });
       continue;
     }
@@ -461,7 +461,7 @@ function historyBookingSuggestion(
     purchase_account_name: account ? `${history.account_id} ${account.name_est}` : undefined,
     ...(history.dimension_id !== null ? { purchase_account_dimensions_id: history.dimension_id } : {}),
     source: "transaction_history",
-    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly} Review-only: confirm the substance before booking.`,
+    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly} Review-only: confirm the substance before booking. suggested_distribution carries no amount: book each transaction separately, adding amount = that transaction's own amount.`,
     transaction_history: history,
     suggested_distribution: {
       related_table: "accounts",

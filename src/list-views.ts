@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { bankTransactionDirection } from "./bank-transaction-direction.js";
 
 /**
  * Field whitelists for list_* responses. Brief view returns the fields an
@@ -25,7 +26,7 @@ export const BRIEF_FIELDS = {
   ],
   transaction: [
     "id", "date", "amount", "base_amount", "cl_currencies_id",
-    "status", "type", "clients_id", "accounts_dimensions_id",
+    "status", "clients_id", "accounts_dimensions_id",
     "bank_ref_number", "description",
   ],
   sale_invoice: [
@@ -82,6 +83,13 @@ export function applyListView<T>(
     if (item === null || typeof item !== "object" || Array.isArray(item)) {
       return item as unknown as Record<string, unknown>;
     }
-    return pickFields(item as Record<string, unknown>, fields);
+    const brief = pickFields(item as Record<string, unknown>, fields);
+    // The read-back `type` is always "C" (write-only on the live API), so the
+    // brief view shows the direction a signed CAMT/Wise marker proves instead:
+    // incoming, outgoing, or unknown.
+    if (entity === "transaction") {
+      brief.direction = bankTransactionDirection(item as { description?: string | null });
+    }
+    return brief;
   });
 }

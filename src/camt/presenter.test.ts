@@ -164,6 +164,34 @@ describe("CAMT partial legacy import review", () => {
   });
 });
 
+describe("CAMT journal reviews and automatic matches in the compact summary", () => {
+  it("keeps each review_code, caps journal reviews at 3 with an N-more count, and itemises native-import matches", () => {
+    const data = makeData(1);
+    const codes = ["camt_duplicate_journal_conflict", "camt_journal_direction_conflict", "camt_journal_posting_review", "camt_journal_conflict", "camt_duplicate_journal_conflict"];
+    const skipped = [
+      ...codes.map((code, index) => ({
+        date: "2026-02-05", amount: 10 + index, duplicate_transaction_ids: [], journal_ids: [800 + index],
+        reason: "r", review_code: code, review_note: `note ${index}`,
+      })),
+      {
+        date: "2026-02-06", amount: 42, duplicate_transaction_ids: [9001], journal_ids: [9101],
+        reason: "Already imported by e-arveldaja's bank import as transaction 9001 (camt_native_import_match)",
+        skip_code: "camt_native_import_match",
+      },
+    ];
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: { ...data, projection: { ...data.projection, skipped } } });
+    expect(summary.counts).toMatchObject({ skipped: 6, journal_reviews: 5, auto_matched: 1, possible_duplicates: 0 });
+    expect(summary.warnings?.slice(0, 4).map(w => w.code)).toEqual([
+      "camt_duplicate_journal_conflict", "camt_journal_direction_conflict", "camt_journal_posting_review", "camt_journal_review_more",
+    ]);
+    expect(summary.warnings?.[3]!.message).toMatch(/^2 more camt_journal_review item\(s\) not shown; .*PLAN-HANDLE-XYZ.*exclusions/);
+    const native = summary.warnings?.find(w => w.code === "camt_native_import_match");
+    expect(native?.item_id).toBe("9001");
+    expect(native?.message).toContain("journal 9101");
+    expect(native?.message).toContain("If wrong (a different movement): correct or delete transaction 9001, then re-run the preview.");
+  });
+});
+
 describe("CAMT full-envelope untrusted-text wrapping", () => {
   const OCR = /^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\n/;
 

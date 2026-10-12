@@ -111,3 +111,21 @@ export function createOperationSummary(
   if (bytes(summary) > budget.hard) throw new ResponseBudgetError();
   return cloneAndFreezePlanData(summary as unknown as PlanData) as unknown as OperationSummaryV1;
 }
+
+/**
+ * At most `cap` warnings of one category, followed by one `<code>_more` warning
+ * that counts the rest and says where they are listed, so a compact summary
+ * never silently drops items past the cap.
+ */
+export function cappedWarnings(
+  code: string,
+  items: readonly CompactWarning[],
+  moreHint: string,
+  cap = 3,
+): CompactWarning[] {
+  if (items.length <= cap) return [...items];
+  return [
+    ...items.slice(0, cap),
+    { code: `${code}_more`, message: `${items.length - cap} more ${code} item(s) not shown; ${moreHint}` },
+  ];
+}

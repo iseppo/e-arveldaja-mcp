@@ -9,7 +9,7 @@ import {
   type DuplicatePostingSuspect,
 } from "../../bank-posting-duplicate-guard.js";
 import { roundMoney } from "../../money.js";
-import { createOperationSummary, type OperationSummaryV1 } from "../../operation-summary.js";
+import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../../operation-summary.js";
 import { currentToolProfile, isToolVisibleForProfile } from "../../tool-profile.js";
 import type { CompactReviewItem, CompactWarning } from "../../operation-outcome.js";
 import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../../operation-result-store.js";
@@ -549,10 +549,18 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     projection.confirms.filter(descriptor => (descriptor.possibleDuplicatePostings?.length ?? 0) > 0).length
     + projection.blockedDuplicateSuspects.length;
 
+  // Confirms that rest on the ref_number_exact rule (confidence stays below
+  // 90) and rows skipped for an unproven direction are counted and itemised,
+  // so the approval names them.
+  const refRuleConfirms = projection.confirms.filter(descriptor => descriptor.autoConfirmRule === "ref_number_exact");
+  const directionUnproven = projection.skipped.filter(row => row.reason.startsWith("direction_unproven:"));
+
   const counts = {
     total_unconfirmed: projection.totalUnconfirmed,
     [dryRun ? "would_confirm" : "confirmed"]: confirmedCount,
+    ref_number_exact: refRuleConfirms.length,
     skipped: projection.skipped.length,
+    direction_unproven: directionUnproven.length,
     third_party_payer_reviews: projection.thirdPartyPayerReviews.length,
     blocked_duplicates: projection.blockedDuplicateSuspects.length,
     duplicates: duplicateCount,
@@ -565,6 +573,21 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
   }
 
   const warnings: CompactWarning[] = [];
+  const moreHint = dryRun && input.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${input.planHandle}", section: "commands" or "exclusions", detail: "full" }.`
+    : "re-run the dry run and page its plan with get_execution_plan_page.";
+  warnings.push(...cappedWarnings("ref_number_exact", refRuleConfirms.map(descriptor => ({
+    item_id: String(descriptor.transactionId),
+    code: "ref_number_exact",
+    message: `Transaction ${descriptor.transactionId} is in the ${dryRun ? "proposed" : "executed"} confirm set against ${descriptor.invoiceType} #${descriptor.invoiceId} `
+      + `by the ref_number_exact rule (confidence ${descriptor.confidence}, below 90): the reference of exactly one open unpaid EUR invoice, the exact EUR amount `
+      + "and a direction matching the invoice kind. To leave these rows out, re-run the dry run with min_confidence above 90.",
+  })), moreHint));
+  warnings.push(...cappedWarnings("direction_unproven", directionUnproven.map(row => ({
+    ...(row.transaction_id !== undefined ? { item_id: String(row.transaction_id) } : {}),
+    code: "direction_unproven",
+    message: row.reason,
+  })), moreHint));
   for (const line of reconDuplicateWarnings(projection).slice(0, 3)) {
     warnings.push({ code: "possible_duplicate", message: line });
   }

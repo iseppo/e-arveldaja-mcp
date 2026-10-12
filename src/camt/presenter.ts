@@ -2,7 +2,7 @@ import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { canonicalRefNumber } from "../ref-number.js";
-import { createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../operation-result-store.js";
 import type { PlanExecutionReport } from "../plan-execution.js";
@@ -293,6 +293,11 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   const meta = data.projection.statementMetadata;
 
   const possibleDuplicateCount = data.possibleDuplicates.length;
+  // Journal reviews are not duplicates: nothing is created and each needs its
+  // own follow-up; automatic native-import matches name the stored row.
+  const journalReviews = data.projection.skipped.filter(row => row.review_code !== undefined && row.review_note !== undefined);
+  const partialLegacy = data.projection.skipped.filter(row => row.review_code === undefined && row.review_note !== undefined);
+  const nativeMatches = data.projection.skipped.filter(row => row.skip_code === "camt_native_import_match");
   const counts = {
     total_statement_entries: data.projection.totalStatementEntries,
     eligible_entries: data.projection.eligibleEntries,
@@ -300,6 +305,8 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     [dryRun ? "would_create" : "created"]: data.createdCount,
     skipped: data.projection.skipped.length,
     possible_duplicates: possibleDuplicateCount,
+    journal_reviews: journalReviews.length,
+    auto_matched: nativeMatches.length,
     errors: data.errorCount,
   };
   const totals = {
@@ -313,12 +320,28 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   for (const row of data.results.filter(result => result.review_note !== undefined).slice(0, 3)) {
     warnings.push({ code: "camt_unsplit_entry", message: row.review_note! });
   }
-  for (const row of data.projection.skipped.filter(skipped => skipped.review_note !== undefined).slice(0, 3)) {
-    warnings.push({
-      code: row.review_code !== undefined ? "camt_journal_review" : "camt_partial_legacy_import",
-      message: row.review_note!,
-    });
-  }
+  const moreHint = dryRun && data.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "exclusions", detail: "full" }.`
+    : "re-run the preview and page its plan exclusions with get_execution_plan_page.";
+  // One cap across all journal-review codes; each warning keeps its own code.
+  warnings.push(...cappedWarnings("camt_journal_review", journalReviews.map(row => ({
+    code: row.review_code!,
+    message: row.review_note!,
+  })), moreHint));
+  warnings.push(...cappedWarnings("camt_partial_legacy_import", partialLegacy.map(row => ({
+    code: "camt_partial_legacy_import",
+    message: row.review_note!,
+  })), moreHint));
+  warnings.push(...cappedWarnings("camt_native_import_match", nativeMatches.map(row => {
+    const transactionId = row.duplicate_transaction_ids[0];
+    const journalId = row.journal_ids?.[0];
+    return {
+      ...(transactionId !== undefined ? { item_id: String(transactionId) } : {}),
+      code: "camt_native_import_match",
+      message: `The ${row.amount} row on ${row.date} was not created: automatic match (camt_native_import_match) to transaction ${transactionId} `
+        + `that e-arveldaja's own bank import created (journal ${journalId}). If wrong (a different movement): correct or delete transaction ${transactionId}, then re-run the preview.`,
+    };
+  }), moreHint));
 
   // Errors (indeterminate / failed commands) surface as blockers — never hidden.
   const blockers: CompactReviewItem[] = [];

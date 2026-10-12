@@ -170,7 +170,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
     const reviews = result.needs_accountant_review;
     expect(reviews.map(item => item.resolver_input)).toEqual([undefined, undefined]);
     expect(reviews.map(item => item.summary)).toEqual([
-      "CAMT row 2026-06-20 12.83 was not created: an existing journal may already book it.",
+      "CAMT row 2026-06-20 12.83 was not created: an existing journal may already book it (camt_journal_posting_review).",
       "CAMT row 2026-02-04 95 was not created: a previous release imported its statement entry only in part.",
     ]);
     expect(reviews[0]!.recommendation).toContain("journal 28424939");
@@ -192,6 +192,103 @@ describe("runAccountingInboxDryRunPipeline", () => {
       }),
     ]));
     expect(prepareInterAccount).not.toHaveBeenCalled();
+  });
+
+  it("tells a wrongly booked CAMT row apart from one an existing journal may already book", async () => {
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: ["camt_duplicate_journal_conflict", "camt_journal_direction_conflict", "camt_journal_posting_review"].map((code, index) => ({
+        date: "2026-06-20", amount: 10 + index, duplicate_transaction_ids: [], reason: "review", journal_ids: [500 + index],
+        review_code: code, review_note: `note ${index}`,
+      })) },
+      createdCount: 0, errorCount: 0, possibleDuplicates: [],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+          suggested_args: { file_path: "/tmp/a.xml", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [], reason: "CAMT found",
+        }],
+      }),
+      operations: mockOperations({ prepareCamtImport }),
+    });
+    expect(result.needs_accountant_review.map(item => item.summary)).toEqual([
+      "CAMT row 2026-06-20 10 was not created: an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (camt_duplicate_journal_conflict).",
+      "CAMT row 2026-06-20 11 was not created: an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (camt_journal_direction_conflict).",
+      "CAMT row 2026-06-20 12 was not created: an existing journal may already book it (camt_journal_posting_review).",
+    ]);
+  });
+
+  it("gives each Wise review code its own follow-up recommendation", async () => {
+    const review = (code: string, extra: Record<string, unknown> = {}) => ({
+      wise_id: `ID-${code}`, code, reason: "r", source_verified: false, target_verified: false, approval_required: false, ...extra,
+    });
+    const prepareWiseImport = vi.fn().mockResolvedValue(ok({
+      created: [], skipped: [], commands: [], invoiceFixCandidates: [],
+      ownershipReviews: [
+        review("wise_untagged_ledger_match", { ledger_transaction_ids: [61] }),
+        review("wise_transfer_journal_ambiguous", { candidate_journal_ids: [71, 72] }),
+        review("wise_transfer_mapping_rejected", { journal_id: 73 }),
+      ],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_wise_transactions", purpose: "Wise", recommended: true,
+          suggested_args: { file_path: "/tmp/w.csv", accounts_dimensions_id: 5, execute: false },
+          missing_inputs: [], reason: "Wise found",
+        }],
+      }),
+      operations: mockOperations({ prepareWiseImport }),
+    });
+    const recommendations = result.needs_accountant_review.map(item => item.recommendation ?? "");
+    expect(recommendations[0]).toContain("Advisory only: the row is still imported, no rerun is needed");
+    expect(recommendations[0]).toContain("61");
+    expect(recommendations[1]).toContain("candidate journal(s) 71, 72");
+    expect(recommendations[1]).toContain("journalized_transfer_ids");
+    expect(recommendations[2]).toContain("journal 73 was rejected");
+    expect(new Set(recommendations).size).toBe(3);
+  });
+
+  it("surfaces every held inter-account row with its ids, mirror proposals as report-only, and errors (PA09)", async () => {
+    const prepareInterAccount = vi.fn().mockResolvedValue(ok({
+      match: {
+        matchedPairs: [], matchedOneSided: [], ambiguousPairs: [],
+        skippedAlreadyHandled: [
+          { transaction_id: 31, amount: 100, date: "2026-03-02", source_account: "LHV", existing_journal_id: 901, reason: "Already journalized from the other account side",
+            mirror_proposal: { counterpart_transaction_id: 30, journal_id: 901, evidence: ["counterparty_iban_is_source_account"] },
+            next_action: { tool: "delete_transaction", args: { id: 31 }, approval_required: true } },
+          { transaction_id: 33, amount: 50, date: "2026-03-03", source_account: "LHV", existing_journal_id: 902, reason: "Already journalized" },
+        ],
+        ambiguousRefless: [
+          { transaction_ids: [41, 42], amount: 20, date: "2026-03-04", source_account: "LHV", target_account: "Wise", reason: "same-amount transfers" },
+          { transaction_ids: [43], amount: 30, date: "2026-03-05", source_account: "LHV", target_account: "Wise", code: "camt_marker_unverified", reason: "marker fails" },
+        ],
+        crossCurrencyPairs: [{ transaction_ids: [51, 52], amount_out: 100, amount_in: 92, date: "2026-03-06", source_account: "LHV", target_account: "Wise", reason: "base amount only" }],
+        errors: [{ transaction_ids: [61], reason: "no EUR amount" }],
+      },
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "reconcile_inter_account_transfers", purpose: "Transfers", recommended: true,
+          suggested_args: { execute: false }, missing_inputs: [], reason: "Transfers",
+        }],
+      }),
+      operations: mockOperations({ prepareInterAccount }),
+    });
+    expect(result.executed_steps[0]!.preview).toMatchObject({
+      skipped_already_handled: 2, needs_review_ambiguous_refless: 2, cross_currency: 1, proposed_mirrors: 1, error_count: 1,
+    });
+    const reviews = result.needs_accountant_review;
+    expect(reviews.map(item => item.summary.match(/^\S+ \S+\(?s?\)? ?(\d+(?:, \d+)*)/)?.[1])).toEqual(["41, 42", "43", "51, 52", "31", "61"]);
+    expect(reviews[1]!.summary).toContain("camt_marker_unverified");
+    const mirror = reviews[3]!;
+    expect(mirror.summary).toContain("mirror of confirmed transaction 30");
+    expect(mirror.recommendation).toContain("only after the owner explicitly approves");
+    // An already-handled row without a mirror proposal is never offered for deletion.
+    expect(reviews.some(item => item.summary.includes("33"))).toBe(false);
+    expect(new Set(reviews.map(item => item.id)).size).toBe(5);
   });
 
   it("returns every review item with stable resumable IDs (M11)", async () => {

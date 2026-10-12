@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 85053,
-    "descriptionsBytes": 11327,
-    "inputSchemasBytes": 53079,
+    "toolsListBytes": 85841,
+    "descriptionsBytes": 11882,
+    "inputSchemasBytes": 53308,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4099
@@ -928,7 +928,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List bank transactions. Paginated. Returns brief view by default; pass view='full' or call get_transaction for full detail.",
+      "description": "List bank transactions. Paginated. Returns brief view by default; pass view='full' or call get_transaction for full detail. The brief view's direction comes from a signed CAMT/Wise marker (unknown without one); the read-back type is always \"C\" and is not a direction.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1025,7 +1025,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get a transaction by ID",
+      "description": "Get a transaction by ID. The read-back type is always \"C\" and is not a direction; only a signed CAMT/Wise marker in the description (or, for a CONFIRMED row, its registration journal) proves it.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -1363,7 +1363,7 @@
             "type": "number"
           },
           "payment_status": {
-            "description": "Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID.",
+            "description": "Filter by payment status (server-side): PAID, PARTIALLY_PAID, or NOT_PAID. Unpaid invoices read back with payment_status \"\" or null, not NOT_PAID.",
             "enum": [
               "PAID",
               "PARTIALLY_PAID",
@@ -2659,7 +2659,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches, mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
+      "description": "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches (confidence >= 90, or the ref_number_exact rule: the reference of exactly one open unpaid EUR invoice + the exact EUR amount + a proven direction matching the invoice kind; such rows keep their lower confidence and carry auto_confirm_rule), mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2677,7 +2677,7 @@
             "type": "integer"
           },
           "min_confidence": {
-            "description": "Minimum confidence threshold for invoice matching modes.",
+            "description": "Minimum confidence threshold for invoice matching modes (auto-confirm default 90). Above 90 also disables the ref_number_exact rule.",
             "maximum": 100,
             "minimum": 0,
             "type": "number"
@@ -3225,7 +3225,7 @@
             "type": "integer"
           },
           "journalized_transfer_ids": {
-            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row is still created.",
+            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or created for review).",
             "items": {
               "properties": {
                 "journal_id": {

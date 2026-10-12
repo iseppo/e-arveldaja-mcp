@@ -1156,7 +1156,7 @@ export async function runInterAccountMatching(
         candidate_incoming_dimension_ids: [reciprocal.accounts_dimensions_id],
         confidence: bestCandidate.confidence,
         code: "direction_unresolved",
-        reason: `Transactions ${tx.id} and ${reciprocal.id} look like the two legs of one own-account transfer, but both carry stored type ${tx.type} and no single leg has a signed outgoing statement marker, so the transfer direction cannot be determined. Confirm the leg the money LEFT inline against the other bank account and delete the mirror row.`,
+        reason: `Transactions ${tx.id} and ${reciprocal.id} look like the two legs of one own-account transfer, but no single leg has a signed outgoing statement marker (the read-back type is always "C" and says nothing about direction), so which account the money left cannot be determined. After the owner confirms it from the bank statements, confirm that leg against the other bank account and delete the mirror row, each only with explicit approval.`,
       });
       blockedOneSidedTxIds.add(tx.id);
       blockedOneSidedTxIds.add(reciprocal.id);
@@ -1472,7 +1472,7 @@ export async function runInterAccountMatching(
         ambiguousRefless.push({
           transaction_ids: ids, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
           source_account: sourceTitle, target_account: targetTitle,
-          reason: `Transactions ${ids.join(", ")} are same-amount transfers from ${sourceTitle} to ${targetTitle} within a day of each other, but journal #${resolution.journal_id} books only one movement, so it cannot be told which of them (if any) is its mirror. Check the bank statements: delete the mirror row and confirm any genuine transfer inline.`,
+          reason: `Transactions ${ids.join(", ")} are same-amount transfers from ${sourceTitle} to ${targetTitle} within a day of each other, but journal #${resolution.journal_id} books only one movement, so it cannot be told which of them (if any) is its mirror. Check the bank statements, then, only after the owner approves, delete the mirror row and confirm any genuine transfer inline.`,
         });
         continue;
       }
@@ -1531,7 +1531,7 @@ export async function runInterAccountMatching(
     if (claimants !== 1) continue;
     row.mirror_proposal = proposal;
     row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };
-    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction; reconcile never deletes it automatically.`;
+    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction only after the owner explicitly approves; reconcile never deletes it automatically.`;
   }
 
   const companyClientsId = await resolveCompanyClientsId();

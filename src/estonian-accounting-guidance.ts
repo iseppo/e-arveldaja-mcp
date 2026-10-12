@@ -1,6 +1,7 @@
 import type { InvoiceExtractionFallback } from "./invoice-extraction-fallback.js";
 import { classifyExpenseForVat } from "./estonian-tax-rules.js";
 import { capUntrustedText, wrapUntrustedOcr } from "./mcp-json.js";
+import { currentToolProfile, isToolVisibleForProfile } from "./tool-profile.js";
 import type {
   ExtractedReceiptFields,
   ReceiptClassification,
@@ -323,10 +324,20 @@ export function buildClassificationReviewGuidance(params: {
     const { accountId, dimensionId, streak, historyTotal } = params.history;
     const target = dimensionId !== null ? `kontole ${accountId} dimensiooniga ${dimensionId}` : `kontole ${accountId}`;
     const distribution = dimensionId !== null
-      ? `{ related_table: "accounts", related_id: ${accountId}, related_sub_id: ${dimensionId} }`
-      : `{ related_table: "accounts", related_id: ${accountId} }`;
+      ? `{ related_table: "accounts", related_id: ${accountId}, related_sub_id: ${dimensionId}, amount: <tehingu summa> }`
+      : `{ related_table: "accounts", related_id: ${accountId}, amount: <tehingu summa> }`;
+    // Name confirm_transaction only where it is registered (not on guided).
+    let confirmVisible = false;
+    try {
+      confirmVisible = isToolVisibleForProfile("confirm_transaction", currentToolProfile());
+    } catch {
+      confirmVisible = false;
+    }
+    const howToBook = confirmVisible
+      ? `kinnita iga tehing eraldi confirm_transaction kaudu jaotusega ${distribution}`
+      : `kinnita iga tehing eraldi jaotusega ${distribution}; selles profiilis üksiktehingu kinnitamist pole, see vajab standard- või full-profiili (EARVELDAJA_PROFILE)`;
     return {
-      recommendation: `Soovitus: osapoole ${displayCounterparty} viimased ${streak} kinnitatud pangakannet (kokku ${historyTotal}) on järjest kirjendatud ${target}. Kui see tehing on sama sisuga, kinnita see confirm_transaction kaudu jaotusega ${distribution}. See on ainult vihje varasemate kannete põhjal: kontrolli enne kinnitamist tehingu sisu ja alusdokumenti.`,
+      recommendation: `Soovitus: osapoole ${displayCounterparty} viimased ${streak} kinnitatud pangakannet (kokku ${historyTotal}) on järjest kirjendatud ${target}. Kui see tehing on sama sisuga, ${howToBook}. See on ainult vihje varasemate kannete põhjal: kontrolli enne kinnitamist tehingu sisu ja alusdokumenti.`,
       compliance_basis: [
         BASIS_RPS_DOCUMENT,
         BASIS_RPS_SUBSTANCE,

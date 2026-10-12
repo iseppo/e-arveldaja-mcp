@@ -84,6 +84,19 @@ function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJourn
   if (coverage.kind !== "review") {
     return { ...base, reason: `Already booked by journal ${ids}` };
   }
+  if (coverage.code === "camt_journal_direction_conflict") {
+    // Not "may already book it": the stored row's journal books the opposite
+    // direction, so the ledger is wrong now and needs correcting.
+    return {
+      ...base,
+      reason: "An existing confirmed transaction's journal books this movement in the opposite direction; needs correction",
+      review_code: coverage.code,
+      review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} matches a confirmed transaction whose registration ` +
+        `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids} book${coverage.journal_ids.length === 1 ? "s" : ""} it in the opposite direction ` +
+        `(${coverage.code}): that row is booked wrongly. It was not created; correct the existing transaction: invalidate it, ` +
+        "delete it and re-import this statement entry (re-confirming the old row can book the wrong direction again), after the owner approves.",
+    };
+  }
   return {
     ...base,
     reason: "An existing journal may already book this movement; needs review",
@@ -176,7 +189,8 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
             (registration.missing_transaction_ids.length > 0
               ? `transaction ${registration.missing_transaction_ids.join(", ")} has no registered journal${ids ? ` and journal ${ids} does not match` : ""}. `
               : `its registration journal ${ids} does not book ${entry.amount} ${entry.currency} ${entry.direction === "CRDT" ? "into" : "out of"} this bank account (wrong direction or amount). `) +
-            "It was not created again; correct the existing transaction's booking (invalidate and re-confirm it) so the ledger matches the statement.",
+            "It was not created again; correct the existing transaction: invalidate it, delete it and re-import this statement entry " +
+            "(re-confirming the old row can book the wrong direction again), after the owner approves.",
         });
         continue;
       }

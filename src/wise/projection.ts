@@ -319,7 +319,7 @@ const WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON =
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
   "A bank row stored by an older release under this plain Wise ID (before split-leg tags and the currency fix) could be any of several legs of this ID, so which leg is still missing cannot be told. This leg and its fee are not imported; compare the stored row with the Wise statement and book the missing leg manually.";
 const WISE_TRANSFER_MAPPING_REJECTED_REASON =
-  "The journalized_transfer_ids mapping for this Wise transfer was not accepted, so the row is imported unconfirmed as usual. Check the mapping and reconcile the row with reconcile_inter_account_transfers. Rejected because";
+  "The journalized_transfer_ids mapping for this Wise transfer was not accepted, so the row resolves as if unmapped: it may still be skipped as already journalized, or created unconfirmed for review; see this row's own result. Check the mapping. Rejected because";
 const WISE_TRANSFER_MAPPING_UNUSED_REASON =
   "This journalized_transfer_ids mapping was not used:";
 const WISE_UNTAGGED_LEDGER_MATCH_REASON =
@@ -1154,8 +1154,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const feeCommand = commands.find(command => command.row_key === feeKey);
         const feeHeldIds = candidateIds.filter(id => journalBooksFee(journalSnapshot.find(journal => journal.id === id), feeCommand));
         if (feeCommand && feeHeldIds.length > 0) dropFeeCommand(feeCommand);
+        const feeHeldNote = feeCommand && feeHeldIds.length > 0
+          ? ` Its fee row is not imported while journal${feeHeldIds.length === 1 ? "" : "s"} ${feeHeldIds.join(", ")} may already book it; if ${feeHeldIds.length === 1 ? "that journal is" : "none of those journals is"} this transfer, book the fee by hand.`
+          : "";
         ownershipReviews.push({
-          ...reviewFor(code, reason),
+          ...reviewFor(code, reason + feeHeldNote),
           candidate_journal_ids: candidateIds,
           candidates: candidateIds.map(describeCandidate),
           ...(feeHeldIds.length > 0 ? { fee_held_journal_ids: feeHeldIds } : {}),
@@ -1242,6 +1245,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           reason: uniqueLegacy
             ? `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${existingJournalId} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`
             : `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
+          ...(uniqueLegacy ? { auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: existingJournalId } } : {}),
         });
         dependsOn = null;
         // A journal that books the transfer net of the fee already books the
@@ -1252,6 +1256,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           skipped.push({
             wise_id: feeCommand.wise_id,
             reason: `Fee already journalized: inter-account journal ${existingJournalId} books this transfer net of the fee`,
+            ...(uniqueLegacy ? { auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: existingJournalId } } : {}),
           });
         }
       }
@@ -1385,6 +1390,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       skipped.push({
         wise_id: entry.wise_id,
         reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${lookalikes[0]!.id} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+        auto_match: { code: "wise_untagged_ledger_unique", transaction_id: lookalikes[0]!.id! },
       });
       continue;
     }
