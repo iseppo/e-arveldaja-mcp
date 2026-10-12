@@ -102,7 +102,7 @@ export function isAmbiguousForeignInvoiceBase(candidates: ReadonlyArray<{ confid
 
 export function matchScore(
   tx: Transaction,
-  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; cl_currencies_id?: string | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string },
+  invoice: { gross_price?: number; base_gross_price?: number; currency_rate?: number | null; cl_currencies_id?: string | null; bank_ref_number?: string | null; clients_id?: number; client_name?: string; payment_status?: string | null },
   txAmount: number
 ): { confidence: number; reasons: string[]; partiallyPaidWarning: boolean } {
   let confidence = 0;
