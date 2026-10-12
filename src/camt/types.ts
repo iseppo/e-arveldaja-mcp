@@ -59,6 +59,13 @@ export interface ParsedCamtEntry {
   description?: string;
   reference_number?: string;
   end_to_end_id?: string;
+  /**
+   * The payment's Refs/InstrId. An LHV own-account DBIT carries a short
+   * sequential number here that reappears as the "/<id>" suffix of the Wise
+   * incoming leg's reference; a numeric one on a DBIT row is persisted in the
+   * CAMT marker (`instr=`) for inter-account pair disambiguation only.
+   */
+  instruction_id?: string;
   bank_reference?: string;
   /**
    * The identity fields an earlier release stored for this leg where they
