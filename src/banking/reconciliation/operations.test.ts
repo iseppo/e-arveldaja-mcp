@@ -331,6 +331,60 @@ describe("BankReconciliationOperations", () => {
     expect(api.transactions.update).not.toHaveBeenCalled();
   });
 
+  // --- ref_number_exact rule (live-shaped: type "C" + signed marker, payment_status "") ---
+  const refRuleTx = () => ({
+    ...matchingTx(), type: "C", clients_id: null, cl_currencies_id: "EUR",
+    description: "Payment INV-1\n[e-arveldaja-mcp:camt br=BR1 dir=CRDT sig=0123456789abcdef]",
+  });
+  const refRuleSale = () => ({ ...matchingSale(), cl_currencies_id: "EUR", payment_status: "" });
+  function setupRefRule(salesAtExecute: unknown[]) {
+    const salesListAll = vi.fn()
+      .mockResolvedValueOnce([refRuleSale()])
+      .mockResolvedValue(salesAtExecute);
+    return setup({
+      transactions: {
+        invalidateListCache: vi.fn(),
+        listAll: vi.fn().mockResolvedValue([refRuleTx()]),
+        get: vi.fn().mockResolvedValue(refRuleTx()),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: salesListAll },
+    });
+  }
+
+  it("auto-confirms a ref_number_exact match at the default threshold, setting the client from the invoice", async () => {
+    const { api, operations } = setupRefRule([refRuleSale()]);
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    expect(dry.value.projection.confirms.map(c => [c.transactionId, c.confidence, c.autoConfirmRule]))
+      .toEqual([[1, 80, "ref_number_exact"]]);
+
+    const executed = await operations.executeExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined, planHandle: dry.value.planHandle });
+    expect(executed.ok).toBe(true);
+    expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 42 });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(
+      1, [{ related_table: "sale_invoices", related_id: 501, amount: 100 }], { autoFixClientsId: false },
+    );
+  });
+
+  it("re-evaluates the ref_number_exact rule at execute: a second open invoice with the same reference is plan drift", async () => {
+    const { api, operations } = setupRefRule([refRuleSale(), { ...refRuleSale(), id: 502, number: "INV-2", gross_price: 7, base_gross_price: 7 }]);
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    expect(dry.ok && dry.value.projection.confirms).toHaveLength(1);
+    const planHandle = dry.ok ? dry.value.planHandle : undefined;
+
+    const executed = operations.executeExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined, planHandle });
+    await expect(executed).rejects.toBeInstanceOf(ReconciliationOperationFailedError);
+    await executed.catch((error: unknown) => {
+      expect((error as ReconciliationOperationFailedError).failure.kind).toBe("plan_drift");
+    });
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("flags a differing payer for manual review on the read-only suggest surface", async () => {
     const { operations } = setupThirdPartyPayer();
     const outcome = await operations.suggestMatches({ minConfidence: 50, blockOnDuplicate: undefined });

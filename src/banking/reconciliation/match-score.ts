@@ -23,6 +23,9 @@ export interface MatchCandidate {
   ref_number?: string | null;
   confidence: number;
   match_reasons: string[];
+  /** Set when the candidate is admitted to the exact-confirm set by the
+   * ref-number + exact-amount rule rather than by its score. */
+  auto_confirm_rule?: "ref_number_exact";
 }
 
 export function buildSuggestedDistribution(
@@ -81,7 +84,7 @@ export const EXACT_INVOICE_BASE_AMOUNT = "exact_invoice_base_amount";
  * never matched real data. PAID, PARTIALLY_PAID, any unknown value and a missing
  * field stay excluded.
  */
-function isUnpaidPaymentStatus(status: string | null | undefined): boolean {
+export function isUnpaidPaymentStatus(status: string | null | undefined): boolean {
   return status === null || status === "" || status === "NOT_PAID";
 }
 const TIER_A_CONFIDENCE_CAP = 85;

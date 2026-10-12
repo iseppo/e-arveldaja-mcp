@@ -100,6 +100,7 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
         amount: descriptor.amount,
         currency: descriptor.currency,
         confidence: descriptor.confidence,
+        ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
         ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
           ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
           : {}),
@@ -183,7 +184,7 @@ export function renderExactMatchPayload(input: {
       transaction_id: descriptor.transactionId,
       amount: descriptor.amount,
       date: descriptor.date,
-      match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence },
+      match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence, ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}) },
       status: dryRun ? "would_confirm" : confirmed ? "confirmed" : "not_confirmed",
       ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
         ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
@@ -622,6 +623,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
       id: descriptor.invoiceId,
       number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "",
       confidence: descriptor.confidence,
+      ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
     },
     status: dryRun ? "would_confirm" : (completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId)) ? "confirmed" : "not_confirmed"),
   }));
