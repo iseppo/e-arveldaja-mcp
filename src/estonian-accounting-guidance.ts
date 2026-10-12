@@ -343,7 +343,7 @@ export function buildClassificationReviewGuidance(params: {
         BASIS_RPS_SUBSTANCE,
       ],
       follow_up_questions: [
-        "Kas sellel tehingul on sama sisu ja alusdokument (nt sama laenuleping) mis varasematel kannetel?",
+        "Kas sellel tehingul on sama sisu ja alusdokument (nt sama leping, arve või teenusetasu) mis varasematel kannetel?",
       ],
     };
   }
