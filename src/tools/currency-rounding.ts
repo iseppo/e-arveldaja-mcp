@@ -322,8 +322,9 @@ export async function resolveInvoiceSettlementProvenance(
       const rawEvidences: number[] = [];
       if (isFinitePositive(item.base_amount)) rawEvidences.push(item.base_amount);
       if (isFinitePositive(item.amount) && txCurrency === "EUR") rawEvidences.push(item.amount);
-      if (isFinitePositive(item.amount) && isFinitePositive(item.currency_rate)) rawEvidences.push(item.amount * item.currency_rate);
-      if (isFinitePositive(item.amount) && isFinitePositive(tx.currency_rate)) rawEvidences.push(item.amount * tx.currency_rate);
+      // currency_rate is FOREIGN units per 1 EUR (ECB convention): EUR = amount / rate.
+      if (isFinitePositive(item.amount) && isFinitePositive(item.currency_rate)) rawEvidences.push(item.amount / item.currency_rate);
+      if (isFinitePositive(item.amount) && isFinitePositive(tx.currency_rate)) rawEvidences.push(item.amount / tx.currency_rate);
       if (isFinitePositive(item.amount) && isFinitePositive(tx.base_amount) && isFinitePositive(tx.amount)) {
         rawEvidences.push(item.amount * tx.base_amount / tx.amount);
       }
@@ -545,12 +546,14 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
         if (category === "small_rounding") {
           if (isForeignCurrency && full.gross_price && full.gross_price > 0) {
             proposedBaseGrossPrice = paidEur;
-            proposedCurrencyRate = roundTo(paidEur / full.gross_price, 6);
+            // currency_rate is FOREIGN units per 1 EUR (ECB convention), so
+            // the settlement rate is foreign gross / paid EUR and EUR = foreign / rate.
+            proposedCurrencyRate = roundTo(full.gross_price / paidEur, 6);
             // Recompute base_net/base_vat from foreign-currency components so
             // base_net + base_vat ≈ base_gross stays consistent for VAT
             // invoices with multi-line / mixed-rate items.
             if (full.net_price !== undefined && full.net_price !== null) {
-              proposedBaseNetPrice = roundMoney(full.net_price * proposedCurrencyRate);
+              proposedBaseNetPrice = roundMoney(full.net_price / proposedCurrencyRate);
               // Derive base_vat as the residual against the pinned base_gross
               // (paidEur) so base_net + base_vat == base_gross to the cent.
               // Rounding net, vat, and gross independently could leave the trio
@@ -559,7 +562,7 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
                 proposedBaseVatPrice = roundMoney(proposedBaseGrossPrice - proposedBaseNetPrice);
               }
             } else if (full.vat_price !== undefined && full.vat_price !== null) {
-              proposedBaseVatPrice = roundMoney(full.vat_price * proposedCurrencyRate);
+              proposedBaseVatPrice = roundMoney(full.vat_price / proposedCurrencyRate);
               // Mirror the net-present branch: pin base_net as the residual so the
               // patched trio still reconciles (base_net + base_vat == base_gross).
               // Without this, execute mode would patch base_gross/base_vat but

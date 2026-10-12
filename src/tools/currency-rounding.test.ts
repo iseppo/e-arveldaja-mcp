@@ -85,8 +85,9 @@ describe("reconcile_currency_rounding", () => {
     // VAT-bearing invoice picked deliberately: net 16.39 + vat 3.61 = gross 20.
     // The pre-fix bug computed base_net = gross*rate, base_vat = 0, which would
     // produce base_net=17.07, base_vat=0 here — completely wrong. The fix
-    // derives base_net = round(net*rate, 2) = round(16.39*0.8535, 2) = 13.99
-    // and base_vat = round(vat*rate, 2) = round(3.61*0.8535, 2) = 3.08.
+    // derives (currency_rate is foreign units per 1 EUR: 20 / 17.07 = 1.171646)
+    // base_net = round(net/rate, 2) = round(16.39/1.171646, 2) = 13.99
+    // and base_vat = round(vat/rate, 2) = round(3.61/1.171646, 2) = 3.08.
     const { handler } = setupTool({
       invoices: [
         {
@@ -127,7 +128,7 @@ describe("reconcile_currency_rounding", () => {
     expect(c.category).toBe("small_rounding");
     expect(c.diff_eur).toBeCloseTo(0.03, 2);
     expect(c.proposed_base_gross_price).toBeCloseTo(17.07, 2);
-    expect(c.proposed_currency_rate).toBeCloseTo(0.8535, 4);
+    expect(c.proposed_currency_rate).toBeCloseTo(1.171646, 5);
     expect(c.proposed_base_net_price).toBeCloseTo(13.99, 2);
     expect(c.proposed_base_vat_price).toBeCloseTo(3.08, 2);
     // Cross-check that net+vat ≈ gross (the property the prior bug violated).
@@ -168,16 +169,18 @@ describe("reconcile_currency_rounding", () => {
     expect(invoiceUpdate).toHaveBeenCalledTimes(1);
     const [, patch] = invoiceUpdate.mock.calls[0]!;
     expect(patch.base_gross_price).toBeCloseTo(17.07, 2);
-    expect(patch.currency_rate).toBeCloseTo(0.8535, 4);
+    // Foreign units per 1 EUR (ECB convention): 20 USD / 17.07 EUR.
+    expect(patch.currency_rate).toBeCloseTo(1.171646, 5);
     // Critical: patch must NOT use gross*rate (17.07) as base_net or zero base_vat.
     expect(patch.base_net_price).toBeCloseTo(13.99, 2);
     expect(patch.base_vat_price).toBeCloseTo(3.08, 2);
   });
 
   it("derives base_vat as the gross−net residual so the trio reconciles when independent rounding would drift a cent", async () => {
-    // Chosen so double-rounding actually diverges: rate = round(25.49/25.85, 6)
-    // = 0.986074. round(net*rate) = round(11.13*0.986074) = 10.98 and
-    // round(vat*rate) = round(14.72*0.986074) = 14.52 — but 10.98 + 14.52 =
+    // Chosen so double-rounding actually diverges: rate (foreign units per
+    // 1 EUR) = round(25.85/25.49, 6) = 1.014123. round(net/rate) =
+    // round(11.13/1.014123) = 10.98 and round(vat/rate) =
+    // round(14.72/1.014123) = 14.52 — but 10.98 + 14.52 =
     // 25.50 ≠ the 25.49 actually paid, so a naive per-field rounding overstates
     // base_gross by a cent and trips the API's net+vat=gross check. The residual
     // rule takes base_vat = round(base_gross − base_net) = round(25.49 − 10.98)
@@ -213,14 +216,51 @@ describe("reconcile_currency_rounding", () => {
     const c = payload.candidates[0];
 
     expect(c.category).toBe("small_rounding");
-    expect(c.proposed_currency_rate).toBeCloseTo(0.986074, 5);
+    expect(c.proposed_currency_rate).toBeCloseTo(1.014123, 5);
     expect(c.proposed_base_gross_price).toBe(25.49);
     expect(c.proposed_base_net_price).toBe(10.98);
-    // The residual, NOT round(vat*rate)=14.52 which would break the sum.
+    // The residual, NOT round(vat/rate)=14.52 which would break the sum.
     expect(c.proposed_base_vat_price).toBe(14.51);
     expect(c.proposed_base_vat_price).not.toBe(14.52);
     // net + vat reconciles to gross to the cent.
     expect(c.proposed_base_net_price + c.proposed_base_vat_price).toBeCloseTo(25.49, 2);
+  });
+
+  it("proposes currency_rate as foreign units per 1 EUR (108 USD paid with 100 EUR -> 1.08)", async () => {
+    const { handler } = setupTool({
+      invoices: [
+        {
+          id: 150,
+          number: "USD-050",
+          client_name: "Vendor",
+          status: "CONFIRMED",
+          payment_status: "PARTIALLY_PAID",
+          cl_currencies_id: "USD",
+          net_price: 108,
+          vat_price: 0,
+          gross_price: 108,
+          base_net_price: 100.05,
+          base_vat_price: 0,
+          base_gross_price: 100.05,
+          liability_accounts_id: 2310,
+          liability_accounts_dimensions_id: null,
+          create_date: "2026-05-01",
+          transactions: [250],
+        },
+      ],
+      transactionsById: {
+        250: { id: 250, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 100, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 150, amount: 100, cl_currencies_id: "EUR" }] },
+      },
+    });
+
+    const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    const c = payload.candidates[0];
+    expect(c.category).toBe("small_rounding");
+    expect(c.proposed_currency_rate).toBe(1.08);
+    expect(c.proposed_base_gross_price).toBe(100);
+    // base = amount / currency_rate: 108 / 1.08 = 100 (not 108 * 1.08 = 116.64).
+    expect(c.proposed_base_net_price).toBe(100);
+    expect(c.proposed_base_vat_price).toBe(0);
   });
 
   it("derives base_net as the residual when only vat_price is present (no net_price)", async () => {
@@ -763,8 +803,9 @@ describe("reconcile_currency_rounding", () => {
   it.each([
     ["item base", { amount: 10, base_amount: 9, cl_currencies_id: "USD" }, { amount: 10, cl_currencies_id: "USD" }],
     ["EUR nominal", { amount: 9, cl_currencies_id: "EUR" }, { amount: 9, cl_currencies_id: "EUR" }],
-    ["item rate", { amount: 10, currency_rate: 0.9, cl_currencies_id: "USD" }, { amount: 10, cl_currencies_id: "USD" }],
-    ["transaction rate", { amount: 10, cl_currencies_id: "USD" }, { amount: 10, currency_rate: 0.9, cl_currencies_id: "USD" }],
+    // currency_rate is foreign units per 1 EUR: 10 USD / 1.111111 = 9.00 EUR.
+    ["item rate", { amount: 10, currency_rate: 1.111111, cl_currencies_id: "USD" }, { amount: 10, cl_currencies_id: "USD" }],
+    ["transaction rate", { amount: 10, cl_currencies_id: "USD" }, { amount: 10, currency_rate: 1.111111, cl_currencies_id: "USD" }],
     ["proportional transaction base", { amount: 10, cl_currencies_id: "USD" }, { amount: 20, base_amount: 18, cl_currencies_id: "USD" }],
   ])("H07 valid provenance derives allocated EUR from %s", async (_label, item, transaction) => {
     const { handler } = setupTool({

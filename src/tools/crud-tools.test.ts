@@ -358,7 +358,7 @@ describe("registerCrudTools", () => {
   it("keeps compact direct-call invariants in heavy CRUD tool metadata", () => {
     const purchaseInvoice = toolMetadataText(getCrudToolHarness("create_purchase_invoice").options);
     expect(purchaseInvoice).toContain("EXACT");
-    expect(purchaseInvoice).toContain("EUR per 1 foreign currency unit");
+    expect(purchaseInvoice).toContain("foreign currency units per 1 EUR");
     expect(purchaseInvoice).toContain("purchase_accounts_dimensions_id is REQUIRED");
     expect(purchaseInvoice).not.toContain("Legacy callers may still pass");
 

@@ -218,10 +218,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
    * Items get project_no_vat_gross_price set for VAT tracking.
    *
    * For foreign-currency invoices (cl_currencies_id != "EUR"):
-   * data.currency_rate is required (EUR per 1 foreign unit). base_net_price /
+   * data.currency_rate is required (foreign units per 1 EUR, ECB convention —
+   * e.g. USD 1.08 means 1 EUR = 1.08 USD). base_net_price /
    * base_vat_price / base_gross_price can be supplied explicitly to match the
    * actual EUR settlement (e.g. Wise card-payment rate); otherwise they are
-   * auto-derived as round(amount * currency_rate, 2). For EUR invoices the
+   * auto-derived as round(amount / currency_rate, 2). For EUR invoices the
    * base_* fields are forced to mirror the foreign-currency totals so the
    * server-side payment matcher does not see a phantom rounding gap.
    */
@@ -236,7 +237,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     if (isForeignCurrency && (data.currency_rate === undefined || data.currency_rate === null || !Number.isFinite(data.currency_rate) || data.currency_rate <= 0)) {
       throw new Error(
         `currency_rate is required when cl_currencies_id="${currency}". ` +
-        `Pass the EUR-per-${currency} rate (for Wise card payments use Source amount / Target amount from the Wise CSV).`
+        `Pass the ${currency}-per-1-EUR rate (for Wise card payments use Target amount / Source amount from the Wise CSV).`
       );
     }
     const normalizedItems = normalizeItemsForNonVat(
@@ -316,14 +317,15 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       if (isForeignCurrency) {
         const rate = data.currency_rate!;
         const net = roundMoney(itemNet);
-        const baseGross = data.base_gross_price ?? roundMoney(gross * rate);
+        // currency_rate is FOREIGN units per 1 EUR, so EUR = foreign / rate.
+        const baseGross = data.base_gross_price ?? roundMoney(gross / rate);
         // With an explicit EUR gross (actual settlement), split it in the
         // invoice's own net/gross proportion rather than re-deriving net from
         // the nominal rate — otherwise a 0-VAT invoice gets a phantom base VAT.
         const baseNet = data.base_net_price ?? (
           data.base_gross_price !== undefined && gross !== 0
             ? roundMoney(net * baseGross / gross)
-            : roundMoney(net * rate)
+            : roundMoney(net / rate)
         );
         // Derive base_vat as the residual of base_gross − base_net so the trio
         // reconciles exactly (base_net + base_vat === base_gross). Rounding net,

@@ -133,6 +133,7 @@ export interface Journal {
   operation_type?: string;
   document_number?: string | null;
   cl_currencies_id?: string;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
   currency_rate?: number | null;
   base_document_files_id?: number | null;
   is_xls_imported?: boolean;
@@ -152,6 +153,7 @@ export interface TransactionItem {
   relation_id?: number;
   amount?: number;
   base_amount?: number;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
   currency_rate?: number | null;
   cl_currencies_id?: string;
   // Undocumented in the OpenAPI spec but returned live by GET /transactions/{id}
@@ -185,6 +187,7 @@ export interface Transaction {
   ref_number?: string | null;
   amount: number;
   base_amount?: number;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
   currency_rate?: number | null;
   cl_currencies_id: string;
   description?: string | null;
@@ -276,6 +279,7 @@ export interface SaleInvoice {
   invoice_info?: string | null;
   payment_description?: string | null;
   cl_currencies_id: string;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
   currency_rate?: number | null;
   base_gross_price?: number;
   base_net_price?: number;
@@ -381,6 +385,7 @@ export interface PurchaseInvoice {
   liability_accounts_id?: number;
   liability_accounts_dimensions_id?: number | null;
   cl_currencies_id: string;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
   currency_rate?: number | null;
   base_net_price?: number;
   base_vat_price?: number;

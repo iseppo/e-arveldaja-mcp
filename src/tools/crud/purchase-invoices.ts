@@ -83,7 +83,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
   });
 
   registerTool(server, "create_purchase_invoice",
-    "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (EUR per 1 foreign unit); base_* may lock actual EUR settlement.",
+    "Create a draft purchase invoice. Direct-call contract: pass exact invoice vat_price/gross_price; non-EUR requires cl_currencies_id + currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
     {
       clients_id: coerceId.describe("Supplier client ID"),
       client_name: z.string().describe("Supplier name"),
@@ -94,7 +94,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       vat_price: z.number().describe("Total VAT amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       gross_price: z.number().describe("Total gross amount from original invoice (EXACT, for payment matching). Required — confirm_purchase_invoice fails without it."),
       cl_currencies_id: z.string().optional().describe("Currency (default EUR)"),
-      currency_rate: z.number().positive().optional().describe("Exchange rate as EUR per 1 foreign currency unit. Required when cl_currencies_id != EUR."),
+      currency_rate: z.number().positive().optional().describe("Exchange rate as foreign currency units per 1 EUR (ECB convention, e.g. USD 1.08; EUR = amount / rate). Required when cl_currencies_id != EUR."),
       base_net_price: z.number().optional().describe("EUR equivalent of net_price; auto-derived from currency_rate when omitted."),
       base_vat_price: z.number().optional().describe("EUR equivalent of vat_price; auto-derived from currency_rate when omitted."),
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
@@ -146,7 +146,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       const currencyCode = (params.cl_currencies_id ?? "EUR").toUpperCase();
       if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
         return toolError({
-          error: `currency_rate is required when cl_currencies_id="${currencyCode}". Pass EUR per 1 ${currencyCode} (Wise: Source amount / Target amount).`,
+          error: `currency_rate is required when cl_currencies_id="${currencyCode}". Pass ${currencyCode} per 1 EUR (Wise: Target amount / Source amount).`,
         });
       }
 

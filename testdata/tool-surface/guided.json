@@ -2,12 +2,12 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 31340,
+    "toolsListBytes": 31357,
     "descriptionsBytes": 4592,
-    "inputSchemasBytes": 22116,
+    "inputSchemasBytes": 22133,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 5088
+      "bytes": 5105
     },
     "serverInstructionsBytes": 932,
     "promptMetadataBytes": 7700,
@@ -569,7 +569,7 @@
             "type": "string"
           },
           "currency_rate": {
-            "description": "mode='create': EUR per 1 foreign unit; required when currency != EUR.",
+            "description": "mode='create': foreign units per 1 EUR (e.g. USD 1.08); required when currency != EUR.",
             "exclusiveMinimum": 0,
             "type": "number"
           },

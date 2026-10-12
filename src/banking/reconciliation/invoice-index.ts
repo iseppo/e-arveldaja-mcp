@@ -19,8 +19,10 @@ export type MatchableInvoiceAmounts = {
 export function getComparableBaseInvoiceAmount(invoice: MatchableInvoiceAmounts): number | undefined {
   if (invoice.base_gross_price != null) return invoice.base_gross_price;
   if (invoice.gross_price == null) return undefined;
-  if (invoice.currency_rate != null) {
-    return roundMoney(invoice.gross_price * invoice.currency_rate);
+  // e-arveldaja currency_rate is FOREIGN units per 1 EUR (ECB convention,
+  // e.g. USD 1.08), so the EUR base is gross / rate.
+  if (invoice.currency_rate != null && invoice.currency_rate > 0) {
+    return roundMoney(invoice.gross_price / invoice.currency_rate);
   }
   return invoice.gross_price;
 }

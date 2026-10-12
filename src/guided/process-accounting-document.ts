@@ -251,7 +251,7 @@ export function registerProcessAccountingDocumentTool(
       ref_number: z.string().optional().describe("mode='create': reference number."),
       bank_account_no: z.string().optional().describe("mode='create': supplier bank account."),
       currency: z.string().optional().describe("mode='create': currency code (default EUR)."),
-      currency_rate: z.number().positive().optional().describe("mode='create': EUR per 1 foreign unit; required when currency != EUR."),
+      currency_rate: z.number().positive().optional().describe("mode='create': foreign units per 1 EUR (e.g. USD 1.08); required when currency != EUR."),
       base_net_price: z.number().optional().describe("mode='create': EUR equivalent of net_price."),
       base_vat_price: z.number().optional().describe("mode='create': EUR equivalent of vat_price."),
       base_gross_price: z.number().optional().describe("mode='create': actual settled EUR gross total."),

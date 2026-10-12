@@ -79,7 +79,8 @@ export function resolveOneSidedTransferAmount(tx: Transaction): OneSidedEurAmoun
     if (typeof rateValue !== "number" || !Number.isFinite(rateValue) || rateValue <= 0) {
       return oneSidedEurAmountFailure("one_sided_currency_rate_invalid");
     }
-    const rateAmount = nominalValue * rateValue;
+    // currency_rate is FOREIGN units per 1 EUR (ECB convention), so EUR = amount / rate.
+    const rateAmount = nominalValue / rateValue;
     if (!Number.isFinite(rateAmount) || rateAmount <= 0) {
       return oneSidedEurAmountFailure("one_sided_currency_rate_invalid");
     }
