@@ -5,6 +5,11 @@ import { logAudit } from "../audit-log.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
+// Live-shaped bank rows: `type` always reads back "C"; direction comes only from
+// the signed importer marker.
+const OUT_MARKER = "WISE:TEST-OUT supplier payment [source_direction=OUT]";
+const IN_MARKER = "WISE:TEST-IN supplier refund [source_direction=IN]";
+
 interface SetupOptions {
   invoices: Array<Record<string, unknown>>;
   transactionsById?: Record<number, unknown>;
@@ -102,7 +107,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        201: { id: 201, status: "CONFIRMED", type: "C", amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 101, amount: 17.07, cl_currencies_id: "EUR" }] },
+        201: { id: 201, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 101, amount: 17.07, cl_currencies_id: "EUR" }] },
       },
     });
 
@@ -151,7 +156,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        210: { id: 210, status: "CONFIRMED", type: "C", amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 110, amount: 17.07, cl_currencies_id: "EUR" }] },
+        210: { id: 210, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 110, amount: 17.07, cl_currencies_id: "EUR" }] },
       },
       invoiceUpdate,
     });
@@ -197,7 +202,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        230: { id: 230, status: "CONFIRMED", type: "C", amount: 25.49, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 130, amount: 25.49, cl_currencies_id: "EUR" }] },
+        230: { id: 230, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 25.49, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 130, amount: 25.49, cl_currencies_id: "EUR" }] },
       },
     });
 
@@ -240,7 +245,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        240: { id: 240, status: "CONFIRMED", type: "C", amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 140, amount: 17.07, cl_currencies_id: "EUR" }] },
+        240: { id: 240, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 140, amount: 17.07, cl_currencies_id: "EUR" }] },
       },
     });
 
@@ -279,7 +284,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        202: { id: 202, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
+        202: { id: 202, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
       },
       journalCreate,
       journalConfirm,
@@ -329,7 +334,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        202: { id: 202, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
+        202: { id: 202, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
       },
       // The paid-vs-booked residual persists after the FX journal is posted, so
       // the invoice is still PARTIALLY_PAID with the same diff on the next run.
@@ -370,7 +375,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        202: { id: 202, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
+        202: { id: 202, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
       },
       existingJournals: [{ id: 777, document_number: "FX:102" }],
     });
@@ -413,7 +418,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        202: { id: 202, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
+        202: { id: 202, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 102, amount: 90.00, cl_currencies_id: "EUR" }] },
       },
       // The prior FX journal was invalidated (is_deleted) — the residual is open
       // again, so it must not suppress a fresh FX adjustment.
@@ -451,7 +456,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        203: { id: 203, status: "CONFIRMED", type: "C", amount: 89.50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 103, amount: 89.50, cl_currencies_id: "EUR" }] },
+        203: { id: 203, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 89.50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 103, amount: 89.50, cl_currencies_id: "EUR" }] },
       },
       journalCreate,
     });
@@ -488,7 +493,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        204: { id: 204, status: "CONFIRMED", type: "C", amount: 50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 104, amount: 50, cl_currencies_id: "EUR" }] },
+        204: { id: 204, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 104, amount: 50, cl_currencies_id: "EUR" }] },
       },
       invoiceUpdate,
       journalCreate,
@@ -530,7 +535,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        220: { id: 220, status: "CONFIRMED", type: "C", amount: 50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 120, amount: 50, cl_currencies_id: "EUR" }] },
+        220: { id: 220, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 50, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 120, amount: 50, cl_currencies_id: "EUR" }] },
         221: new Error("upstream API timeout"),
       },
       invoiceUpdate,
@@ -565,8 +570,8 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        205: { id: 205, status: "VOID", type: "C", amount: 100, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 105, amount: 100, cl_currencies_id: "EUR" }] },
-        206: { id: 206, status: "CONFIRMED", type: "C", amount: 49.97, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 105, amount: 49.97, cl_currencies_id: "EUR" }] },
+        205: { id: 205, status: "VOID", type: "C", description: OUT_MARKER, amount: 100, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 105, amount: 100, cl_currencies_id: "EUR" }] },
+        206: { id: 206, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 49.97, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 105, amount: 49.97, cl_currencies_id: "EUR" }] },
       },
     });
 
@@ -592,7 +597,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        250: { id: 250, status: "CONFIRMED", type: "C", amount: 100.00, cl_currencies_id: "EUR", date: "2026-05-02", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 150, amount: 100, cl_currencies_id: "EUR" }] },
+        250: { id: 250, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 100.00, cl_currencies_id: "EUR", date: "2026-05-02", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 150, amount: 100, cl_currencies_id: "EUR" }] },
       },
       journalCreate,
     });
@@ -618,7 +623,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        260: { id: 260, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "EUR", date: "2027-01-15", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 160, amount: 90, cl_currencies_id: "EUR" }] },
+        260: { id: 260, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "EUR", date: "2027-01-15", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 160, amount: 90, cl_currencies_id: "EUR" }] },
       },
       journalCreate,
     });
@@ -647,7 +652,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        270: { id: 270, status: "CONFIRMED", type: "C", amount: 90.00, cl_currencies_id: "USD", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 170, amount: 90, cl_currencies_id: "USD" }] },
+        270: { id: 270, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 90.00, cl_currencies_id: "USD", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 170, amount: 90, cl_currencies_id: "USD" }] },
       },
       journalCreate,
       invoiceUpdate,
@@ -683,7 +688,7 @@ describe("reconcile_currency_rounding", () => {
         },
       ],
       transactionsById: {
-        207: { id: 207, status: "CONFIRMED", type: "C", amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 106, amount: 17.07, cl_currencies_id: "EUR" }] },
+        207: { id: 207, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 17.07, cl_currencies_id: "EUR", items: [{ accounts_id: 2310, relation_table: "purchase_invoices", relation_id: 106, amount: 17.07, cl_currencies_id: "EUR" }] },
       },
       invoiceUpdate,
       journalCreate,
@@ -710,7 +715,7 @@ describe("reconcile_currency_rounding", () => {
       }],
       transactionsById: {
         801: {
-          id: 801, status: "CONFIRMED", type: "C", amount: 100,
+          id: 801, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 100,
           base_amount: 90, cl_currencies_id: "USD", date: "2026-07-02",
           items: [
             { accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 701, amount: 20, base_amount: 18.01, cl_currencies_id: "USD" },
@@ -770,7 +775,7 @@ describe("reconcile_currency_rounding", () => {
       }],
       transactionsById: {
         802: {
-          id: 802, status: "CONFIRMED", type: "C", date: "2026-07-03",
+          id: 802, status: "CONFIRMED", type: "C", description: OUT_MARKER, date: "2026-07-03",
           ...transaction,
           items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 702, ...item }],
         },
@@ -796,9 +801,9 @@ describe("reconcile_currency_rounding", () => {
         transactions: [805, 803, 805, 804],
       }],
       transactionsById: {
-        803: { id: 803, status: "CONFIRMED", type: "C", amount: 10, base_amount: 9, cl_currencies_id: "USD", date: "2026-07-04", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 10, base_amount: 9, cl_currencies_id: "USD" }] },
-        804: { id: 804, status: "VOID", type: "C", amount: 999, cl_currencies_id: "EUR", date: "2026-12-31", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 999, cl_currencies_id: "EUR" }] },
-        805: { id: 805, status: "CONFIRMED", type: "C", amount: 20, cl_currencies_id: "EUR", date: "2026-07-05", items: [
+        803: { id: 803, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 10, base_amount: 9, cl_currencies_id: "USD", date: "2026-07-04", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 10, base_amount: 9, cl_currencies_id: "USD" }] },
+        804: { id: 804, status: "VOID", type: "C", description: OUT_MARKER, amount: 999, cl_currencies_id: "EUR", date: "2026-12-31", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 999, cl_currencies_id: "EUR" }] },
+        805: { id: 805, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 20, cl_currencies_id: "EUR", date: "2026-07-05", items: [
           { accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 8, cl_currencies_id: "EUR" },
           { accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 703, amount: 10, cl_currencies_id: "EUR" },
           { accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 999, amount: 2, cl_currencies_id: "EUR" },
@@ -824,7 +829,7 @@ describe("reconcile_currency_rounding", () => {
       liability_accounts_id: 2120, liability_accounts_dimensions_id: dimension,
       transactions: [806],
     };
-    const tx = { id: 806, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 704, amount: 9, cl_currencies_id: "EUR" }] };
+    const tx = { id: 806, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 704, amount: 9, cl_currencies_id: "EUR" }] };
     for (const args of [{ execute: true }, { execute: true, liability_accounts_id: 2120 }]) {
       const journalCreate = vi.fn().mockResolvedValue({ created_object_id: 902 });
       const { handler } = setupTool({ invoices: [invoice], transactionsById: { 806: tx }, journalCreate });
@@ -848,7 +853,7 @@ describe("reconcile_currency_rounding", () => {
         transactions: [823],
       }],
       transactionsById: {
-        823: { id: 823, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 711, amount: 9, cl_currencies_id: "EUR" }] },
+        823: { id: 823, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 711, amount: 9, cl_currencies_id: "EUR" }] },
       },
       invoiceUpdate,
     });
@@ -910,7 +915,8 @@ describe("reconcile_currency_rounding", () => {
     { label: "PROJECT status", code: "linked_transaction_not_confirmed", tx: { status: "PROJECT" } },
     { label: "missing status", code: "linked_transaction_not_confirmed", tx: { status: undefined } },
     { label: "unknown status", code: "linked_transaction_not_confirmed", tx: { status: "SETTLED" } },
-    { label: "incoming direction", code: "linked_transaction_direction_conflict", tx: { type: "D" } },
+    { label: "incoming direction (live type C + IN marker)", code: "linked_transaction_direction_conflict", tx: { description: IN_MARKER } },
+    { label: "unknown direction (no marker)", code: "linked_transaction_direction_conflict", tx: { description: undefined } },
     { label: "absent items", code: "invoice_distribution_missing", tx: { items: undefined } },
     { label: "wrong relation table", code: "invoice_distribution_missing", tx: { items: [{ accounts_id: 2120, relation_table: "sale_invoices", relation_id: 705, amount: 9, cl_currencies_id: "EUR" }] } },
     { label: "wrong relation id", code: "invoice_distribution_missing", tx: { items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 999, amount: 9, cl_currencies_id: "EUR" }] } },
@@ -942,7 +948,7 @@ describe("reconcile_currency_rounding", () => {
         transactions: [807],
       };
       const baseTx = {
-        id: 807, status: "CONFIRMED", type: "C", amount: 9,
+        id: 807, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9,
         cl_currencies_id: "EUR", date: "2026-07-02",
         items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 705, amount: 9, cl_currencies_id: "EUR" }],
       };
@@ -1016,7 +1022,7 @@ describe("reconcile_currency_rounding", () => {
     {
       label: "non-array transaction items",
       transaction: {
-        id: 825, status: "CONFIRMED", type: "C", amount: 9,
+        id: 825, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9,
         cl_currencies_id: "EUR", date: "2026-07-02", items: { relation_id: 714 },
       },
       code: "invoice_distribution_missing",
@@ -1024,7 +1030,7 @@ describe("reconcile_currency_rounding", () => {
     {
       label: "malformed item beside valid matching allocation",
       transaction: {
-        id: 825, status: "CONFIRMED", type: "C", amount: 9,
+        id: 825, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9,
         cl_currencies_id: "EUR", date: "2026-07-02",
         items: [
           null,
@@ -1082,8 +1088,8 @@ describe("reconcile_currency_rounding", () => {
       liability_accounts_id: 2120, liability_accounts_dimensions_id: null,
       transactions: [812, 811],
     };
-    const missingRelation = (id: number) => ({ id, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", items: [] });
-    const wrongDirection = (id: number) => ({ id, status: "CONFIRMED", type: "D", amount: 9, cl_currencies_id: "EUR", items: [] });
+    const missingRelation = (id: number) => ({ id, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", items: [] });
+    const wrongDirection = (id: number) => ({ id, status: "CONFIRMED", type: "C", description: IN_MARKER, amount: 9, cl_currencies_id: "EUR", items: [] });
     const scenarios = [
       {
         transactionsById: {
@@ -1156,7 +1162,7 @@ describe("reconcile_currency_rounding", () => {
         }],
         transactionsById: {
           824: {
-            id: 824, status: "CONFIRMED", type: "C", amount: 9,
+            id: 824, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9,
             cl_currencies_id: "EUR", date: "2026-07-02",
             items: [{
               accounts_id: 2120,
@@ -1202,8 +1208,8 @@ describe("reconcile_currency_rounding", () => {
       const { handler } = setupTool({
         invoices: [{ id: 709, number: "H07-PARTIAL", client_name: "Vendor", payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD", gross_price: 10, base_gross_price: 9.03, create_date: "2026-07-01", liability_accounts_id: 2120, liability_accounts_dimensions_id: null, transactions: [821, 820] }],
         transactionsById: {
-          820: { id: 820, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 709, amount: 9, cl_currencies_id: "EUR" }] },
-          821: { id: 821, status: "PROJECT", type: "C", amount: 1, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 709, amount: 1, cl_currencies_id: "EUR" }] },
+          820: { id: 820, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 709, amount: 9, cl_currencies_id: "EUR" }] },
+          821: { id: 821, status: "PROJECT", type: "C", description: OUT_MARKER, amount: 1, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 709, amount: 1, cl_currencies_id: "EUR" }] },
         },
         invoiceUpdate,
         journalCreate,
@@ -1236,7 +1242,7 @@ describe("reconcile_currency_rounding", () => {
       vi.mocked(logAudit).mockClear();
       const { handler } = setupTool({
         invoices: [{ id: 710, number: "H07-NUMERIC", client_name: "Vendor", payment_status: "PARTIALLY_PAID", cl_currencies_id: "USD", gross_price: 10, base_gross_price: booked, create_date: "2026-07-01", liability_accounts_id: 2120, liability_accounts_dimensions_id: null, transactions: [822] }],
-        transactionsById: { 822: { id: 822, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 999, amount: 9, cl_currencies_id: "EUR" }] } },
+        transactionsById: { 822: { id: 822, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 999, amount: 9, cl_currencies_id: "EUR" }] } },
         invoiceUpdate,
         journalCreate,
         journalConfirm,
@@ -1262,7 +1268,7 @@ describe("reconcile_currency_rounding", () => {
   it("H07 negative control keeps valid zero difference omitted", async () => {
     const { handler } = setupTool({
       invoices: [{ id: 707, number: "H07-ZERO", client_name: "Vendor", payment_status: "PARTIALLY_PAID", cl_currencies_id: "EUR", gross_price: 9, base_gross_price: 9, create_date: "2026-07-01", liability_accounts_id: 2120, liability_accounts_dimensions_id: null, transactions: [813] }],
-      transactionsById: { 813: { id: 813, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", date: "2026-07-02", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 707, amount: 9, cl_currencies_id: "EUR" }] } },
+      transactionsById: { 813: { id: 813, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", date: "2026-07-02", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 707, amount: 9, cl_currencies_id: "EUR" }] } },
     });
     const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
     expect(payload.candidates).toEqual([]);
@@ -1272,9 +1278,9 @@ describe("reconcile_currency_rounding", () => {
     const { handler } = setupTool({
       invoices: [{ id: 708, number: "H07-LIVE", client_name: "Vendor", payment_status: "PARTIALLY_PAID", cl_currencies_id: "EUR", gross_price: 9.03, base_gross_price: 9.03, create_date: "2026-07-01", liability_accounts_id: 2120, liability_accounts_dimensions_id: null, transactions: [816, 814, 815] }],
       transactionsById: {
-        814: { id: 814, status: "CONFIRMED", type: "C", amount: 9, cl_currencies_id: "EUR", date: "2026-07-02", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 708, amount: 9, cl_currencies_id: "EUR" }] },
-        815: { id: 815, status: "VOID", type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-12-31" },
-        816: { id: 816, status: "CONFIRMED", type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-11-30", is_deleted: true },
+        814: { id: 814, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 9, cl_currencies_id: "EUR", date: "2026-07-02", items: [{ accounts_id: 2120, relation_table: "purchase_invoices", relation_id: 708, amount: 9, cl_currencies_id: "EUR" }] },
+        815: { id: 815, status: "VOID", type: "C", description: OUT_MARKER, amount: 100, cl_currencies_id: "EUR", date: "2026-12-31" },
+        816: { id: 816, status: "CONFIRMED", type: "C", description: OUT_MARKER, amount: 100, cl_currencies_id: "EUR", date: "2026-11-30", is_deleted: true },
       },
     });
     const payload = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;

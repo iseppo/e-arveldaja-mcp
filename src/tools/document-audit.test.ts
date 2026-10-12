@@ -71,6 +71,19 @@ describe("find_missing_documents (extraction behavior-preserving)", () => {
     expect(asText).not.toContain("UNTRUSTED_OCR_START");
   });
 
+  it("flags live-shaped manual journals (operation_type ENTRY) and skips system journals", async () => {
+    const api = makeMissingApi();
+    (api.journals.listAll as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, is_deleted: false, registered: true, effective_date: "2026-06-10", title: "Manual", number: 1, operation_type: "ENTRY", base_document_files_id: null },
+      { id: 2, is_deleted: false, registered: true, effective_date: "2026-06-10", title: "Manual w/ doc", number: 2, operation_type: "ENTRY", base_document_files_id: 77 },
+      { id: 3, is_deleted: false, registered: true, effective_date: "2026-06-10", title: "Untagged", number: 3, operation_type: null, base_document_files_id: null },
+      ...["TRANSACTION", "PURCHASE_INVOICE", "SALE_INVOICE", "EMTA_PREPAYMENT", "EMTA_VAT_DECLARATION", "SALARY_PAYMENT", "YEAR_CLOSING"]
+        .map((operation_type, i) => ({ id: 10 + i, is_deleted: false, registered: true, effective_date: "2026-06-10", title: operation_type, number: 10 + i, operation_type, base_document_files_id: null })),
+    ]);
+    const core = await computeMissingDocuments(api, {});
+    expect(core.manual_journals_without_documents.items.map(j => j.id)).toEqual([1, 3]);
+  });
+
   it("the tool wraps journal title / tx description / invoice client at MCP output", async () => {
     const handler = setupMissingTool(makeMissingApi());
     const payload = parseMcpResponse((await handler({})).content[0]!.text) as any;

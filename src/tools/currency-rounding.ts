@@ -14,6 +14,7 @@ import { resolveFxAccount } from "../account-resolution.js";
 import type { PurchaseInvoice, Transaction, TransactionItem } from "../types/api.js";
 import { BookingGuard } from "../booking-guard.js";
 import { todayInTallinn } from "../local-date.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 
 const SMALL_ROUNDING_THRESHOLD = 0.10; // up to 10 cents → in-place fix
 const FX_DIFFERENCE_LIMIT = 1.00;      // up to 1 EUR → FX journal posting
@@ -245,7 +246,11 @@ export async function resolveInvoiceSettlementProvenance(
     }
     if (tx.is_deleted === true || tx.status === "VOID") continue;
     if (tx.status !== "CONFIRMED") errors.push(provenanceError("linked_transaction_not_confirmed", requestedId));
-    if (tx.type !== "C") errors.push(provenanceError("linked_transaction_direction_conflict", requestedId));
+    // Outgoing proof comes only from the signed importer marker: the stored
+    // `type` reads back "C" on every row, and an unmarked row's direction is
+    // unknown, so both incoming and unknown fail closed.
+    const provenOutgoing = bankTransactionDirection(tx) === "outgoing";
+    if (!provenOutgoing) errors.push(provenanceError("linked_transaction_direction_conflict", requestedId));
 
     const rawItems: unknown[] = Array.isArray(tx.items) ? tx.items : [];
     const hasMalformedItems = !Array.isArray(tx.items) || rawItems.some(item =>
@@ -261,7 +266,7 @@ export async function resolveInvoiceSettlementProvenance(
       errors.push(provenanceError("invoice_distribution_missing", requestedId));
     }
 
-    let transactionValid = tx.status === "CONFIRMED" && tx.type === "C" &&
+    let transactionValid = tx.status === "CONFIRMED" && provenOutgoing &&
       !hasMalformedItems && matchingItems.length > 0;
     if (!isFinitePositive(tx.amount)) {
       errors.push(provenanceError("allocation_amount_invalid", requestedId));

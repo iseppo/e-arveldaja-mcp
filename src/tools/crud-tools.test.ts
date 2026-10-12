@@ -810,6 +810,30 @@ describe("server-side list filters", () => {
     expect(payload.total_items).toBe(1); // only the 100-amount row clears amount_min=50
   });
 
+  it("list_transactions type='D' + client-side filters keeps server-narrowed incoming rows (live rows read back type C)", async () => {
+    // Live-shaped: the server already narrowed to stored type D, but every row reads back "C".
+    const rows = [
+      { id: 11, date: "2026-02-01", amount: 100, base_amount: 100, status: "CONFIRMED", type: "C", accounts_dimensions_id: 5, bank_ref_number: "REF-IN-1", description: "Payment [source_direction=IN]" },
+      { id: 12, date: "2026-02-02", amount: 30, base_amount: 30, status: "CONFIRMED", type: "C", accounts_dimensions_id: 6, bank_ref_number: "REF-IN-2" },
+    ];
+    const { api, handler } = getCrudToolHarness("list_transactions", {
+      transactions: {
+        list: vi.fn(),
+        listAll: vi.fn().mockResolvedValue(rows),
+        listAllCached: vi.fn(),
+      },
+    });
+
+    const res = await handler({ type: "D", accounts_dimensions_id: 5, amount_min: 50, bank_ref_contains: "ref-in" }) as { content: Array<{ text: string }> };
+
+    expect(api.transactions.listAll).toHaveBeenCalledTimes(1);
+    expect((api.transactions.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ type: "D" });
+    expect(api.transactions.listAllCached).not.toHaveBeenCalled();
+    const payload = parseMcpResponse(res.content[0]!.text) as { total_items: number; items: Array<{ id: number }> };
+    expect(payload.total_items).toBe(1);
+    expect(payload.items.map(i => i.id)).toEqual([11]);
+  });
+
   it("list_transactions falls back to the cached full walk when only a client-side filter is set", async () => {
     const { api, handler } = getCrudToolHarness("list_transactions", {
       transactions: {
