@@ -186,6 +186,30 @@ describe("renderWiseImportCompact — automatic matches", () => {
     expect(legacy.map(w => w.message.split(":")[0])).toEqual(["Row not created", "Fee row not created"]);
     expect(legacy[0]!.message).toContain("correct or delete journal 7100");
   });
+
+  it("keeps automatic matches and counts every omission when 90 ownership reviews push the summary over the budget", () => {
+    const data = makeData(1);
+    data.ownershipReviews = Array.from({ length: 90 }, (_, index) => ({
+      wise_id: `TRANSFER-${1000 + index}`,
+      code: "wise_transfer_dimensions_unverified" as const,
+      reason: "The Wise transfer between own accounts could not be verified against a bank dimension: the counterpart account is not configured. Book it manually after checking both statements.",
+    }));
+    data.skipped = Array.from({ length: 4 }, (_, index) => ({
+      wise_id: `CARD_TRANSACTION-${index}`,
+      reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${500 + index} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+      auto_match: { code: "wise_untagged_ledger_unique" as const, transaction_id: 500 + index },
+    }));
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(mcpPayloadBytes(summary)).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.target);
+    const codes = summary.warnings?.map(w => w.code) ?? [];
+    expect(codes.filter(code => code === "wise_untagged_ledger_unique").length).toBeGreaterThan(0);
+    expect(summary.warnings?.find(w => w.code === "wise_untagged_ledger_unique_more")?.message).toMatch(/^1 more /);
+    const kept = codes.filter(code => code === "wise_transfer_dimensions_unverified").length;
+    expect(kept).toBeLessThan(90);
+    const truncated = summary.warnings?.find(w => w.code === "warnings_truncated");
+    expect(truncated?.message).toContain(`wise_transfer_dimensions_unverified: ${90 - kept}`);
+    expect(truncated?.message).toContain("PLAN-HANDLE-XYZ");
+  });
 });
 
 describe("renderWiseImportCompact — totals currency", () => {

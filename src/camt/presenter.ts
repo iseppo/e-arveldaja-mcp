@@ -316,13 +316,15 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
 
   const warnings: CompactWarning[] = (data.statementBalanceCheck?.check?.warnings ?? [])
     .map(message => ({ code: "closing_balance", message }));
-  // Bounded like the samples: the compact surface stays approximately constant.
-  for (const row of data.results.filter(result => result.review_note !== undefined).slice(0, 3)) {
-    warnings.push({ code: "camt_unsplit_entry", message: row.review_note! });
-  }
-  const moreHint = dryRun && data.planHandle !== undefined
-    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "exclusions", detail: "full" }.`
-    : "re-run the preview and page its plan exclusions with get_execution_plan_page.";
+  const pageHint = (section: "commands" | "exclusions"): string => dryRun && data.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "${section}", detail: "full" }.`
+    : `re-run the preview and page its plan ${section} with get_execution_plan_page.`;
+  const moreHint = pageHint("exclusions");
+  // Unsplit entries are created rows, so the full list is in the plan commands.
+  warnings.push(...cappedWarnings("camt_unsplit_entry", data.results.filter(result => result.review_note !== undefined).map(row => ({
+    code: "camt_unsplit_entry",
+    message: row.review_note!,
+  })), pageHint("commands")));
   // One cap across all journal-review codes; each warning keeps its own code.
   warnings.push(...cappedWarnings("camt_journal_review", journalReviews.map(row => ({
     code: row.review_code!,

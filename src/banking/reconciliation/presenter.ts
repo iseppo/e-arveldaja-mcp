@@ -403,11 +403,11 @@ export function renderSuggestCompact(
 
   // Unresolved review items + a degraded duplicate scan surface as warnings —
   // never dropped from the lean surface.
-  const warnings: CompactWarning[] = reviewRows.slice(0, 3).map(row => ({
+  const warnings: CompactWarning[] = cappedWarnings("manual_review_required", reviewRows.map(row => ({
     item_id: String(row.transaction_id ?? ""),
     code: "manual_review_required",
     message: String(row.manual_review_required),
-  }));
+  })), "run reconcile_bank_transactions mode=\"dry_run_auto_confirm\" and page its plan exclusions with get_execution_plan_page.");
   if (data.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: data.duplicateScanNote });
   }
@@ -588,24 +588,26 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     code: "direction_unproven",
     message: row.reason,
   })), moreHint));
-  for (const line of reconDuplicateWarnings(projection).slice(0, 3)) {
-    warnings.push({ code: "possible_duplicate", message: line });
-  }
-  for (const blocked of projection.blockedDuplicateSuspects.slice(0, 3)) {
-    warnings.push({ item_id: String(blocked.transaction_id), code: "blocked_duplicate_suspect", message: blocked.reason });
-  }
+  warnings.push(...cappedWarnings("possible_duplicate", reconDuplicateWarnings(projection).map(line => ({
+    code: "possible_duplicate",
+    message: line,
+  })), moreHint));
+  warnings.push(...cappedWarnings("blocked_duplicate_suspect", projection.blockedDuplicateSuspects.map(blocked => ({
+    item_id: String(blocked.transaction_id),
+    code: "blocked_duplicate_suspect",
+    message: blocked.reason,
+  })), moreHint));
   if (projection.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: projection.duplicateScanNote });
   }
-  for (const review of projection.thirdPartyPayerReviews.slice(0, 3)) {
-    warnings.push({
-      item_id: String(review.transaction_id),
-      code: review.reason,
-      message: `Payer client ${review.transaction_clients_id ?? "none"} does not match ${review.invoice_type} `
-        + `#${review.invoice_id} client ${review.invoice_clients_id ?? "none"}; withheld from the confirm batch. `
-        + thirdPartyPayerNextAction(review),
-    });
-  }
+  // One cap across the third-party payer reasons; each warning keeps its own code.
+  warnings.push(...cappedWarnings("third_party_payer_review", projection.thirdPartyPayerReviews.map(review => ({
+    item_id: String(review.transaction_id),
+    code: review.reason,
+    message: `Payer client ${review.transaction_clients_id ?? "none"} does not match ${review.invoice_type} `
+      + `#${review.invoice_id} client ${review.invoice_clients_id ?? "none"}; withheld from the confirm batch. `
+      + thirdPartyPayerNextAction(review),
+  })), moreHint.replace("\"commands\" or \"exclusions\"", "\"reviews\"")));
   for (const warning of input.ledgerChecks?.warnings ?? []) {
     warnings.push({ code: "ledger_check_unavailable", message: warning });
   }
@@ -775,22 +777,35 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): { su
 
   // Ambiguous / cross-currency / unresolved rows surface as warnings — never
   // dropped from the lean surface.
+  // Each category is capped at 3 with an "N more" notice; ambiguous pairs are
+  // the plan's reviews, the other review categories its exclusions.
   const warnings: CompactWarning[] = [];
-  for (const pair of m.ambiguousPairs.slice(0, 3)) {
-    warnings.push({ item_id: String(pair.outgoing_transaction_id), code: "ambiguous_pair", message: pair.reason });
-  }
-  for (const row of proposedMirrors.slice(0, 3)) {
-    warnings.push({ item_id: String(row.transaction_id), code: "mirror_proposal", message: row.reason });
-  }
-  for (const row of m.ambiguousRefless.slice(0, 3)) {
-    warnings.push({ code: row.code ?? "ambiguous_refless", message: row.reason });
-  }
-  for (const row of m.crossCurrencyPairs.slice(0, 3)) {
-    warnings.push({ code: "cross_currency_review", message: row.reason });
-  }
-  for (const row of m.errors.slice(0, 3)) {
-    warnings.push({ code: row.code ?? "inter_account_error", message: row.reason });
-  }
+  const pageHint = (section: "exclusions" | "reviews"): string => dryRun && input.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${input.planHandle}", section: "${section}", detail: "full" }.`
+    : `re-run the dry run and page its plan ${section} with get_execution_plan_page.`;
+  warnings.push(...cappedWarnings("ambiguous_pair", m.ambiguousPairs.map(pair => ({
+    item_id: String(pair.outgoing_transaction_id),
+    code: "ambiguous_pair",
+    message: pair.reason,
+  })), pageHint("reviews")));
+  warnings.push(...cappedWarnings("mirror_proposal", proposedMirrors.map(row => ({
+    item_id: String(row.transaction_id),
+    code: "mirror_proposal",
+    message: row.reason,
+  })), pageHint("exclusions")));
+  // One cap across the ref-less review codes; each warning keeps its own code.
+  warnings.push(...cappedWarnings("ambiguous_refless", m.ambiguousRefless.map(row => ({
+    code: row.code ?? "ambiguous_refless",
+    message: row.reason,
+  })), pageHint("exclusions")));
+  warnings.push(...cappedWarnings("cross_currency_review", m.crossCurrencyPairs.map(row => ({
+    code: "cross_currency_review",
+    message: row.reason,
+  })), pageHint("exclusions")));
+  warnings.push(...cappedWarnings("inter_account_error", m.errors.map(row => ({
+    code: row.code ?? "inter_account_error",
+    message: row.reason,
+  })), "resolve the listed errors and re-run the dry run to see the rest."));
   for (const message of m.warnings ?? []) {
     warnings.push({ code: "company_name_without_legal_form", message });
   }

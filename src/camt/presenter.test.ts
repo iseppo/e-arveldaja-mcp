@@ -145,6 +145,18 @@ describe("CAMT unsplit-entry review note", () => {
     expect(summary.warnings).toEqual([{ code: "camt_unsplit_entry", message: note }]);
   });
 
+  it("caps unsplit-entry warnings at 3 and counts the rest", () => {
+    const data = makeData(4);
+    const descriptors = data.projection.descriptors.map((descriptor, index) => ({
+      ...descriptor,
+      entry: { ...descriptor.entry, review_note: `${note} (${index})` },
+    }));
+    const results = descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: { ...data, projection: { ...data.projection, descriptors }, results } });
+    expect(summary.warnings?.map(w => w.code)).toEqual(["camt_unsplit_entry", "camt_unsplit_entry", "camt_unsplit_entry", "camt_unsplit_entry_more"]);
+    expect(summary.warnings?.[3]!.message).toMatch(/^1 more camt_unsplit_entry item\(s\) not shown; .*PLAN-HANDLE-XYZ.*commands/);
+  });
+
   it("renders the note but never the internal legacy identities on parse output", () => {
     const entry = flagged().projection.descriptors[0]!.entry;
     const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);

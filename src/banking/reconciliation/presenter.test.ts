@@ -548,6 +548,22 @@ describe("renderInterAccountCompact", () => {
     const clean = renderInterAccountCompact({ mode: "DRY_RUN", match: makeInterAccount(1), planHandle: "P" });
     expect(clean.summary.counts?.proposed_mirrors).toBe(0);
   });
+
+  it("caps mirror proposals at 3 and counts the rest", () => {
+    const match = makeInterAccount(0, {
+      skippedAlreadyHandled: Array.from({ length: 4 }, (_, index) => ({
+        transaction_id: 80 + index, amount: 600, date: "2026-03-03", source_account: "LHV", existing_journal_id: 900 + index,
+        reason: `Likely mirror ${index}`,
+        mirror_proposal: { counterpart_transaction_id: 70 + index, journal_id: 900 + index, evidence: ["sole_same_key_candidate"] },
+        next_action: { tool: "delete_transaction", args: { id: 80 + index }, approval_required: true },
+      })),
+    });
+    const { summary } = renderInterAccountCompact({ mode: "DRY_RUN", match, planHandle: "PLAN-IA" });
+    expect(summary.counts?.proposed_mirrors).toBe(4);
+    expect(summary.warnings?.filter(w => w.code === "mirror_proposal").map(w => w.item_id)).toEqual(["80", "81", "82"]);
+    expect(summary.warnings?.find(w => w.code === "mirror_proposal_more")?.message)
+      .toMatch(/^1 more mirror_proposal item\(s\) not shown; .*PLAN-IA.*exclusions/);
+  });
 });
 
 describe("renderSuspects untrusted text", () => {

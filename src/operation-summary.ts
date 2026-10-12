@@ -102,7 +102,40 @@ export function createOperationSummary(
     const allSourceDocuments = sourceDocuments;
     const allBlockers = blockers;
     const fitsAfterSamples = allSamples.length > 0 && maximizeFittingPrefix(allSamples.length, 0, length => { samples = allSamples.slice(0, length); });
-    const fitsAfterWarnings = fitsAfterSamples || (allWarnings.length > 0 && maximizeFittingPrefix(allWarnings.length, 0, length => { warnings = allWarnings.slice(0, length); }));
+    // Warnings are pruned per code, never as a list prefix: every code keeps its
+    // first `perCode` items (the largest that fits), `<code>_more` cap notices
+    // always survive, and one `warnings_truncated` notice counts what the
+    // budget dropped per code. A long run of one category (90 identical
+    // ownership reviews) therefore shrinks before a short one disappears.
+    const notice = (code: string): boolean => code.endsWith("_more");
+    const groupSizes = new Map<string, number>();
+    for (const warning of allWarnings) {
+      if (!notice(warning.code)) groupSizes.set(warning.code, (groupSizes.get(warning.code) ?? 0) + 1);
+    }
+    const largestGroup = Math.max(0, ...groupSizes.values());
+    const truncationHint = safe.plan_handle !== undefined
+      ? `page them with get_execution_plan_page { plan_handle: "${safe.plan_handle}", section: "exclusions" or "reviews", detail: "full" }.`
+      : safe.details !== undefined
+        ? `page the result with ${safe.details.tool} ${JSON.stringify(safe.details.args)}.`
+        : "narrow the request (fewer rows or a shorter period) to list them.";
+    const capWarningsPerCode = (perCode: number): void => {
+      const kept: CompactWarning[] = [];
+      const seen = new Map<string, number>();
+      for (const warning of allWarnings) {
+        const index = seen.get(warning.code) ?? 0;
+        seen.set(warning.code, index + 1);
+        if (notice(warning.code) || index < perCode) kept.push(warning);
+      }
+      const dropped = [...groupSizes].filter(([, size]) => size > perCode).map(([code, size]) => `${code}: ${size - perCode}`);
+      if (dropped.length > 0) {
+        kept.push({
+          code: "warnings_truncated",
+          message: `Response size budget: more warning(s) not shown (${dropped.join(", ")}); ${truncationHint}`,
+        });
+      }
+      warnings = kept;
+    };
+    const fitsAfterWarnings = fitsAfterSamples || (largestGroup > 0 && maximizeFittingPrefix(largestGroup, 0, capWarningsPerCode));
     const fitsAfterDocuments = fitsAfterWarnings || (allSourceDocuments.length > 0 && maximizeFittingPrefix(allSourceDocuments.length, 0, length => { sourceDocuments = allSourceDocuments.slice(0, length); }));
     if (!fitsAfterDocuments && allBlockers.length > 1) {
       maximizeFittingPrefix(allBlockers.length, 1, length => { blockers = allBlockers.slice(0, length); });

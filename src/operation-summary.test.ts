@@ -62,6 +62,29 @@ describe("operation_summary_v1", () => {
     expect(first.details).toMatchObject({ available: true, returned_items: 1 });
   });
 
+  it("prunes warnings per code, keeping _more notices and counting what the budget dropped", () => {
+    const long = "x".repeat(300);
+    const summary = createOperationSummary({
+      status: "needs_review",
+      message: "Review",
+      warnings: [
+        ...Array.from({ length: 60 }, (_, index) => ({ item_id: String(index), code: "noisy", message: long })),
+        ...Array.from({ length: 3 }, (_, index) => ({ item_id: `a${index}`, code: "auto", message: long })),
+        { code: "auto_more", message: "1 more auto item(s) not shown; page them." },
+      ],
+      plan_handle: "PLAN-1",
+    });
+    expect(mcpPayloadBytes(summary)).toBeLessThanOrEqual(RESPONSE_BUDGETS.normal.target);
+    const codes = summary.warnings!.map(w => w.code);
+    const keptNoisy = codes.filter(code => code === "noisy").length;
+    expect(keptNoisy).toBeLessThan(60);
+    expect(codes.filter(code => code === "auto").length).toBe(Math.min(3, keptNoisy));
+    expect(codes).toContain("auto_more");
+    const notice = summary.warnings!.find(w => w.code === "warnings_truncated")!;
+    expect(notice.message).toContain(`noisy: ${60 - keptNoisy}`);
+    expect(notice.message).toContain("PLAN-1");
+  });
+
   it("throws when irreducible Unicode content exceeds the 16 KiB hard limit", () => {
     const input = { status: "failed" as const, message: "🚀".repeat(5_000) };
     expect(() => createOperationSummary(input)).toThrowError("response_budget_exceeded");
