@@ -306,7 +306,14 @@ async function runWiseImport(
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,
   );
-  const journalSnapshot: Journal[] = approvedTransferDecisions.length > 0
+  // Journals are also read when a confirmed untagged row on the Wise account
+  // shares a date with a statement row: its registration journal may prove
+  // its direction (wise_untagged_ledger_unique).
+  const eligibleDates = new Set(eligible.map(row => wiseDate(row.finishedOn || row.createdOn)));
+  const untaggedLookalikePossible = existingTx.some(tx =>
+    tx.status === "CONFIRMED" && tx.accounts_dimensions_id === accounts_dimensions_id &&
+    !tx.description?.startsWith("WISE:") && eligibleDates.has(tx.date));
+  const journalSnapshot: Journal[] = approvedTransferDecisions.length > 0 || untaggedLookalikePossible
     ? await api.journals.listAllWithPostings()
     : [];
   let ownCompanyClientMatches: Awaited<ReturnType<typeof api.clients.findByName>> = [];

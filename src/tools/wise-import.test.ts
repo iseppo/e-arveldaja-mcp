@@ -523,6 +523,48 @@ describe("wise import tool", () => {
     })]);
   });
 
+  it("the only untagged CONFIRMED lookalike whose registration journal proves the movement is not duplicated (wise_untagged_ledger_unique)", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "CARD_TRANSACTION-4401", date: "2026-01-10", sourceAmount: "12.5", targetName: "Acme Ltd" }),
+      buildM04Values({ id: "CARD_TRANSACTION-4402", date: "2026-01-11", sourceAmount: "30", targetName: "Other Ltd" }),
+    ]));
+    // Entered by hand: type reads back "C", no marker, no WISE: tag.
+    const manualRow = {
+      id: 41, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 12.5,
+      cl_currencies_id: "EUR", date: "2026-01-10", bank_account_name: "Acme Ltd", description: "Acme kaardimakse",
+    };
+    const registration = {
+      id: 8101, registered: true, is_deleted: false, effective_date: "2026-01-10",
+      operation_type: "TRANSACTION", operations_id: 41,
+      postings: [
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 12.5, base_amount: 12.5 },
+        { is_deleted: false, accounts_id: 5000, type: "D", amount: 12.5, base_amount: 12.5 },
+      ],
+    };
+    const setup = setupWiseTool([manualRow], undefined, { journals: [registration] });
+    const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", row_key: "row:1:main", booked_amount: 30 })]);
+    expect(dry.execution.needs_review).toEqual([]);
+    expect(JSON.stringify(dry.skipped_details)).toContain("wise_untagged_ledger_unique");
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toContain("WISE:CARD_TRANSACTION-4402");
+    expect(executed.execution.errors).toEqual([]);
+
+    // The stored row being reopened (PROJECT) between dry run and execute is drift.
+    const drift = setupWiseTool([manualRow], undefined, { journals: [registration] });
+    const reviewed = parseWiseResponse(await drift.handler({ ...args, execute: false }));
+    drift.api.transactions.listAll.mockResolvedValue([{ ...manualRow, status: "PROJECT" }]);
+    clearWiseCallHistory(drift.api);
+    const drifted = parseWiseResponse(await drift.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expectNoWiseMutations(drift.api);
+  });
+
   it("an over-cap reference row next to an untagged stored lookalike is created with the advisory (Task 9, untagged = advisory)", async () => {
     // A Wise row whose reference exceeds the 20-char ref_number cap. The prior
     // import stored the transaction with the *truncated* ref_number (what the
@@ -5848,10 +5890,39 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(executed.execution.errors).toEqual([]);
   });
 
-  it("M1: a differently labelled same-key journal routes the transfer to review instead of create_then_confirm", async () => {
+  it("M1: the only same-key journal, differently labelled but booking exactly this transfer, is accepted as already journalized (unique legacy)", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02")]));
+    const journal = lhvWiseJournal(502, "2026-02-02", 500, { document_number: "BANK:abc", operation_type: "TRANSACTION", operations_id: 4001 });
+    const setup = setupWiseTool([], undefined, transferOptions([journal]));
+
+    const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
+
+    expect(dry.execution.commands).toEqual([expect.objectContaining({
+      action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 502,
+    })]);
+    expect(dry.execution.needs_review).toEqual([]);
+    expect(JSON.stringify(dry.skipped_details)).toContain("wise_transfer_journal_unique_legacy");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(executed.inter_account_reconciliation).toMatchObject({ already_journalized: 1, confirmed: 0 });
+    expect(executed.execution.errors).toEqual([]);
+
+    // The journal changing between the reviewed dry run and execute is drift, never a create.
+    const drift = setupWiseTool([], undefined, transferOptions([journal]));
+    const reviewed = parseWiseResponse(await drift.handler({ ...transferArgs, execute: false }));
+    drift.api.journals.listAllWithPostings.mockResolvedValue([{ ...journal, document_number: "TRANSFER-OTHER-1" }]);
+    clearWiseCallHistory(drift.api);
+    const drifted = parseWiseResponse(await drift.rawHandler({
+      ...transferArgs, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expectNoWiseMutations(drift.api);
+  });
+
+  it("M1: a same-key journal labelled with another Wise ID routes the transfer to review instead of create_then_confirm", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02")]));
     const setup = setupWiseTool([], undefined, transferOptions([
-      lhvWiseJournal(502, "2026-02-02", 500, { document_number: "BANK:abc" }),
+      lhvWiseJournal(502, "2026-02-02", 500, { document_number: "TRANSFER-77001" }),
     ]));
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
@@ -5922,7 +5993,11 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
   it("F2a: a reviewed journalized_transfer_ids mapping records the transfer as already journalized and is bound to the plan", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-MAP", "2026-02-02")]));
-    const journals = [lhvWiseJournal(510, "2026-02-02", 500, { document_number: "LHVREF510" })];
+    // Two same-key candidates: without the mapping the row cannot be told apart.
+    const journals = [
+      lhvWiseJournal(510, "2026-02-02", 500, { document_number: "LHVREF510" }),
+      lhvWiseJournal(511, "2026-02-02", 500, { document_number: "LHVREF511" }),
+    ];
     const mapping = { journalized_transfer_ids: [{ wise_id: "TRANSFER-M1-MAP", journal_id: 510 }] };
 
     const plainSetup = setupWiseTool([], undefined, transferOptions(journals));
@@ -5931,7 +6006,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(plain.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
     expect(plain.execution.needs_review).toEqual([expect.objectContaining({
       code: "wise_transfer_journal_ambiguous",
-      candidate_journal_ids: [510],
+      candidate_journal_ids: [510, 511],
     })]);
 
     const setup = setupWiseTool([], undefined, transferOptions(journals));
