@@ -4,6 +4,7 @@ import { canonicalRefNumber } from "../ref-number.js";
 import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { roundMoney } from "../money.js";
+import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import type {
   ImportRejectedField,
@@ -382,16 +383,19 @@ function buildWiseRow(
     sourceFeeCurrency: parseWiseOptionalCurrency(fields[idx("Source fee currency")], valid.sourceCurrency, row, "Source fee currency"),
     targetFeeAmount: valid.targetFeeAmount,
     targetFeeCurrency: parseWiseOptionalCurrency(fields[idx("Target fee currency")], valid.targetCurrency, row, "Target fee currency"),
-    sourceName: fields[idx("Source name")] ?? "",
+    // Free-text columns drop literal sandbox delimiter tokens here, before they
+    // reach a description, client name, signature or plan digest; marker-free
+    // text is unchanged, so existing signatures stay byte-identical.
+    sourceName: stripSandboxMarkers(fields[idx("Source name")] ?? ""),
     sourceAmount: valid.sourceAmount,
     sourceCurrency: valid.sourceCurrency,
-    targetName: fields[idx("Target name")] ?? "",
+    targetName: stripSandboxMarkers(fields[idx("Target name")] ?? ""),
     targetAmount: valid.targetAmount,
     targetCurrency: valid.targetCurrency,
     exchangeRate: valid.exchangeRate,
-    reference: fields[idx("Reference")] ?? "",
-    category: fields[idx("Category")] ?? "",
-    note: fields[idx("Note")] ?? "",
+    reference: stripSandboxMarkers(fields[idx("Reference")] ?? ""),
+    category: stripSandboxMarkers(fields[idx("Category")] ?? ""),
+    note: stripSandboxMarkers(fields[idx("Note")] ?? ""),
   };
 }
 

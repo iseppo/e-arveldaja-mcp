@@ -1,8 +1,5 @@
 import { MAX_UNTRUSTED_TEXT_CHARS, unwrapUntrustedOcr, wrapUntrustedOcr } from "./mcp-json.js";
-
-// A single sandbox delimiter token (start or end) with its nonce. Never occurs
-// in genuine business text, so it is safe to strip wholesale on the write side.
-const SANDBOX_MARKER_RE = /<<UNTRUSTED_OCR_(?:START|END):[0-9a-f]*>>/g;
+import { stripSandboxMarkers } from "./sandbox-markers.js";
 
 /**
  * Hard character cap for a single sandbox-wrapped DISPLAY value. Genuine display
@@ -66,13 +63,8 @@ export function desandboxText(text: string | null | undefined): string | null | 
   for (let stripped = unwrapUntrustedOcr(out); stripped !== out; stripped = unwrapUntrustedOcr(out)) {
     out = stripped;
   }
-  // Strip residual markers to a FIXPOINT: a single pass over a nested token
-  // such as `<<UNTRUSTED_OCR_<<UNTRUSTED_OCR_START:ab>>START:cd>>` would splice
-  // the outer halves back into a well-formed marker.
-  for (let stripped = out.replace(SANDBOX_MARKER_RE, ""); stripped !== out; stripped = out.replace(SANDBOX_MARKER_RE, "")) {
-    out = stripped;
-  }
-  return out;
+  // Strip residual (partial or forged) markers to a fixpoint.
+  return stripSandboxMarkers(out);
 }
 
 interface TextPolicy {

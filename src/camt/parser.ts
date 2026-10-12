@@ -2,6 +2,7 @@ import { XMLParser } from "fast-xml-parser";
 import { roundMoney } from "../money.js";
 import { capture, reject } from "./preflight.js";
 import { normalizeOptionalReference } from "./duplicate-identity.js";
+import { stripSandboxMarkers } from "../sandbox-markers.js";
 import type {
   CamtLegacyIdentity,
   CamtParseResult,
@@ -141,9 +142,25 @@ function textAt(node: unknown, path: string[]): string | undefined {
   return textOf(valueAt(node, path));
 }
 
-function textArrayAt(node: unknown, path: string[]): string[] {
+// Source free text (names, remittance info, references, IBAN/registry ids)
+// with literal sandbox delimiter tokens removed at parse time, so a planted
+// `<<UNTRUSTED_OCR_…>>` can never reach a stored description, client name,
+// marker signature or plan digest. Text without a marker is returned unchanged,
+// keeping every existing identity key byte-identical. Strict-validated fields
+// (amounts, dates, currency, direction) keep plain textAt so a marker there is
+// still rejected rather than laundered.
+function sourceTextOf(value: unknown): string | undefined {
+  const text = textOf(value);
+  return text === undefined ? undefined : textOf(stripSandboxMarkers(text));
+}
+
+function sourceTextAt(node: unknown, path: string[]): string | undefined {
+  return sourceTextOf(valueAt(node, path));
+}
+
+function sourceTextArrayAt(node: unknown, path: string[]): string[] {
   return asArray(valueAt(node, path))
-    .map(item => textOf(item))
+    .map(item => sourceTextOf(item))
     .filter((item): item is string => !!item);
 }
 
@@ -229,14 +246,14 @@ function extractOrgIdByScheme(party: unknown, schemeCode: string): string | unde
   const others = asArray(valueAt(party, ["Id", "OrgId", "Othr"]));
   for (const other of others) {
     if (textAt(other, ["SchmeNm", "Cd"]) === schemeCode) {
-      return textAt(other, ["Id"]);
+      return sourceTextAt(other, ["Id"]);
     }
   }
   return undefined;
 }
 
 function extractIban(account: unknown): string | undefined {
-  return textAt(account, ["Id", "IBAN"]);
+  return sourceTextAt(account, ["Id", "IBAN"]);
 }
 
 function pickCounterparty(txDetails: unknown, direction: "CRDT" | "DBIT"): { party?: unknown; account?: unknown } {
@@ -424,25 +441,25 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
     const legs = detailNodes.map((txDetails, detailIndex) => {
       const { party, account } = pickCounterparty(txDetails, direction);
       const structuredRef = asArray(valueAt(txDetails, ["RmtInf", "Strd"]))
-        .map(node => textAt(node, ["CdtrRefInf", "Ref"]))
+        .map(node => sourceTextAt(node, ["CdtrRefInf", "Ref"]))
         .find((value): value is string => !!value);
-      const ustrd = textArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined;
+      const ustrd = sourceTextArrayAt(txDetails, ["RmtInf", "Ustrd"]).join(" | ") || undefined;
       return {
         amount: bookedAmounts[detailIndex] ?? entryAmount.amount,
         legacyAmount: legacyAmounts[detailIndex] ?? entryAmount.amount,
         originalAmount: originalAmounts[detailIndex],
-        counterparty_name: textAt(party, ["Nm"]),
+        counterparty_name: sourceTextAt(party, ["Nm"]),
         counterparty_iban: extractIban(account),
         counterparty_reg_code: extractOrgIdByScheme(party, "COID"),
         ustrd,
         // An entry with no transaction details (e.g. a bank charge) carries its
         // narrative only in AddtlNtryInf; without it a ref-less charge has no
         // description to corroborate a rerun's possible-duplicate match.
-        description: ustrd ?? (txDetails === undefined ? textAt(entryNode, ["AddtlNtryInf"]) : undefined),
+        description: ustrd ?? (txDetails === undefined ? sourceTextAt(entryNode, ["AddtlNtryInf"]) : undefined),
         reference_number: normalizeOptionalReference(structuredRef) ??
-          normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
-        end_to_end_id: normalizeOptionalReference(textAt(txDetails, ["Refs", "EndToEndId"])),
-        bank_reference: normalizeOptionalReference(textAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? textAt(entryNode, ["AcctSvcrRef"])),
+          normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "EndToEndId"])),
+        end_to_end_id: normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "EndToEndId"])),
+        bank_reference: normalizeOptionalReference(sourceTextAt(txDetails, ["Refs", "AcctSvcrRef"]) ?? sourceTextAt(entryNode, ["AcctSvcrRef"])),
       };
     });
     // Rows stored by 1007fde and earlier carry the bare-original split and no
@@ -471,7 +488,7 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
         description: [...new Set(legs.map((leg) => leg.description).filter((value): value is string => !!value))].join(" | ") || undefined,
         reference_number: common(legs.map((leg) => leg.reference_number)),
         end_to_end_id: common(legs.map((leg) => leg.end_to_end_id)),
-        bank_reference: normalizeOptionalReference(textAt(entryNode, ["AcctSvcrRef"])) ?? legs[0]!.bank_reference,
+        bank_reference: normalizeOptionalReference(sourceTextAt(entryNode, ["AcctSvcrRef"])) ?? legs[0]!.bank_reference,
         // The previous release stored one row per leg; any of them means this
         // entry was already imported.
         legacy_identities: legs.map(legacyIdentity),
@@ -514,11 +531,11 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
 
   return {
     statement_metadata: {
-      statement_id: textAt(statement, ["Id"]),
+      statement_id: sourceTextAt(statement, ["Id"]),
       iban: accountIban,
       currency: accountCurrency,
       bank_bic: textAt(statement, ["Acct", "Svcr", "FinInstnId", "BIC"]),
-      bank_name: textAt(statement, ["Acct", "Svcr", "FinInstnId", "Nm"]),
+      bank_name: sourceTextAt(statement, ["Acct", "Svcr", "FinInstnId", "Nm"]),
       period: { from: periodFrom, to: periodTo },
       opening_balance: openingBalance,
       closing_balance: closingBalance,
