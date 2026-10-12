@@ -157,7 +157,29 @@ export function createOperationSummary(
       }
       warnings = kept;
     };
-    const fitsAfterWarnings = fitsAfterSamples || (largestGroup > 0 && maximizeFittingPrefix(largestGroup, 0, capWarningsPerCode));
+    // Sizes are not monotonic in the per-code cap: a code that keeps no item
+    // gains a retrieval route in the truncation notice, which can outweigh the
+    // item it dropped. So every cap is measured, from the largest down: the
+    // first that fits the target wins; otherwise the smallest rendering stays
+    // (the unpruned list included) and later sections trim from it.
+    const fitWarnings = (): boolean => {
+      let smallestSize = bytes(summary);
+      let smallestCap = largestGroup;
+      for (let perCode = largestGroup - 1; perCode >= 0; perCode -= 1) {
+        capWarningsPerCode(perCode);
+        const size = rebuild();
+        if (size <= budget.target) return true;
+        if (size < smallestSize) {
+          smallestSize = size;
+          smallestCap = perCode;
+        }
+      }
+      if (smallestCap === largestGroup) warnings = allWarnings;
+      else capWarningsPerCode(smallestCap);
+      rebuild();
+      return false;
+    };
+    const fitsAfterWarnings = fitsAfterSamples || (largestGroup > 0 && fitWarnings());
     const fitsAfterDocuments = fitsAfterWarnings || (allSourceDocuments.length > 0 && maximizeFittingPrefix(allSourceDocuments.length, 0, length => { sourceDocuments = allSourceDocuments.slice(0, length); }));
     if (!fitsAfterDocuments && allBlockers.length > 1) {
       maximizeFittingPrefix(allBlockers.length, 1, length => { blockers = allBlockers.slice(0, length); });

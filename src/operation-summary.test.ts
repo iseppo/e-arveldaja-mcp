@@ -110,6 +110,28 @@ describe("operation_summary_v1", () => {
     expect(summary.blockers).toEqual([first]);
   });
 
+  it("measures every per-code cap: a middle cap that fits is kept although dropping everything is larger", () => {
+    // Dropping one of two long `a` warnings shrinks the summary, but dropping
+    // the short `b` warning too adds b's long retrieval route to the notice.
+    const a1 = { code: "a", message: "1" + "a".repeat(600) };
+    const a2 = { code: "a", message: "2" + "a".repeat(600) };
+    const b = { code: "b", message: "b".repeat(50) };
+    const options = {
+      budget: "batch" as const,
+      measureEnvelope: "summary" as const,
+      warningHints: { a: "h".repeat(100), b: "route ".repeat(400) },
+    };
+    const shell = { status: "needs_review" as const, message: "m", warnings: [a1, a2, b] };
+    const padding = RESPONSE_BUDGETS.batch.hard + 50 + 1
+      - mcpPayloadBytes({ summary: { ...shell, contract: "operation_summary_v1" } });
+    const input = { ...shell, message: "m".repeat(padding) };
+    expect(mcpPayloadBytes({ summary: { ...input, contract: "operation_summary_v1" } })).toBe(RESPONSE_BUDGETS.batch.hard + 50);
+    const summary = createOperationSummary(input, options);
+    expect(summary.warnings!.filter(w => w.code !== "warnings_truncated")).toEqual([a1, b]);
+    expect(summary.warnings!.find(w => w.code === "warnings_truncated")!.message).toContain("(a: 1)");
+    expect(mcpPayloadBytes({ summary })).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.hard);
+  });
+
   it("names each dropped code's own retrieval route in warnings_truncated", () => {
     const long = "x".repeat(300);
     const summary = createOperationSummary({

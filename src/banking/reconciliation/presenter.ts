@@ -589,14 +589,17 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     code: "direction_unproven",
     message: row.reason,
   })), moreHint));
-  warnings.push(...cappedWarnings("possible_duplicate", reconDuplicateWarnings(projection).map(line => ({
-    code: "possible_duplicate",
-    message: line,
-  })), moreHint));
   // Blocked suspects are in neither plan section (removed from the confirms,
   // not plan exclusions): only the full dry-run output lists every one.
   const blockedHint = "they are not in the plan; the standard or full profile (EARVELDAJA_PROFILE) lists every one as a "
     + "blocked_duplicate_suspect result row of reconcile_bank_transactions mode=\"dry_run_auto_confirm\" with block_on_duplicate: true.";
+  // With block_on_duplicate the duplicate-warned rows are blocked too, so the
+  // plan does not hold them either.
+  const duplicateHint = input.blockOnDuplicate === true ? blockedHint : moreHint;
+  warnings.push(...cappedWarnings("possible_duplicate", reconDuplicateWarnings(projection).map(line => ({
+    code: "possible_duplicate",
+    message: line,
+  })), duplicateHint));
   warnings.push(...cappedWarnings("blocked_duplicate_suspect", projection.blockedDuplicateSuspects.map(blocked => ({
     item_id: String(blocked.transaction_id),
     code: "blocked_duplicate_suspect",
@@ -722,7 +725,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
     warningHints: {
       ref_number_exact: moreHint,
       direction_unproven: moreHint,
-      possible_duplicate: moreHint,
+      possible_duplicate: duplicateHint,
       blocked_duplicate_suspect: blockedHint,
       ...Object.fromEntries(projection.thirdPartyPayerReviews.map(review => [review.reason, thirdPartyPayerHint])),
     },
