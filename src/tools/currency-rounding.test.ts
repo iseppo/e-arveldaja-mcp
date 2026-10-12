@@ -294,6 +294,7 @@ describe("reconcile_currency_rounding", () => {
     const c = payload.candidates.find((candidate: any) => candidate.invoice_id === 151 || candidate.id === 151) ?? payload.candidates[0];
     expect(c.category).toBe("review");
     expect(c.proposed_currency_rate).toBeUndefined();
+    expect(c.proposed_action).toMatch(/settle to 0\.00 EUR, so no settlement rate/);
   });
 
   it("derives base_net as the residual when only vat_price is present (no net_price)", async () => {

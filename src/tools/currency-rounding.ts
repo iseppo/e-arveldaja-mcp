@@ -592,7 +592,9 @@ export function registerCurrencyRoundingTools(server: McpServer, api: ApiContext
             proposedAction = `Book ${Math.abs(diff).toFixed(2)} EUR FX adjustment journal: ${isOverstated ? `D ${provenance.liabilityAccountId} / C ${fxAccount} (FX gain — booked liability higher than Wise settlement)` : `D ${fxAccount} / C ${provenance.liabilityAccountId} (FX loss — booked liability lower than Wise settlement)`}.`;
           }
         } else {
-          proposedAction = !isForeignCurrency
+          proposedAction = isForeignCurrency && !(paidEur > 0)
+            ? `Flag for review — the confirmed payments settle to ${paidEur.toFixed(2)} EUR, so no settlement rate can be derived; check the payment allocation manually.`
+            : !isForeignCurrency
             ? `Flag for review — EUR invoice residual ${diff.toFixed(2)} EUR is a genuine over/under-payment, not an FX rounding difference.`
             : `Flag for review — diff ${diff.toFixed(2)} EUR exceeds ${FX_DIFFERENCE_LIMIT.toFixed(2)} EUR FX threshold.`;
         }
