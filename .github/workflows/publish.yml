@@ -19,6 +19,7 @@ permissions:
 concurrency:
   group: publish
   cancel-in-progress: false
+  queue: max
 
 env:
   MCP_SERVER_NAME: io.github.iseppo/e-arveldaja-mcp
