@@ -58,7 +58,7 @@ import {
   type OneSidedInference,
   type TransferResolution,
 } from "./inter-account-matcher.js";
-import { computeExactMatchProjection } from "./duplicate-policy.js";
+import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE } from "./duplicate-policy.js";
 import {
   checkReceiptLedger,
   invoiceLinksFromTransaction,
@@ -628,7 +628,7 @@ async function loadExactMatchProjection(
   input: ExactConfirmInput,
   opts?: { fresh?: boolean },
 ): Promise<{ projection: ExactMatchProjection; threshold: number }> {
-  const threshold = input.minConfidence ?? 90;
+  const threshold = input.minConfidence ?? EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
   if (opts?.fresh) {
     // Execute: this projection gates confirms, so bypass the 120 s cache — an
     // invoice paid or a transaction confirmed elsewhere since the dry run must

@@ -146,10 +146,10 @@ export function registerBankReconciliationTools(
   );
 
   registerReconTool("auto_confirm_exact_matches",
-    "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
+    "Batch-confirm bank transactions with a single high-confidence match (>=90, or ref_number_exact: exact EUR amount + the reference of exactly one open unpaid invoice + a signed direction matching the invoice kind). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
-      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90)"),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90; above 90 also disables ref_number_exact)"),
       block_on_duplicate: z.boolean().optional().describe(
         "Refuse (partition out of the confirm set) any exact match whose cash movement appears already booked by another journal (an available cross-mechanism duplicate scan finds a suspect). Default false = advisory only."
       ),

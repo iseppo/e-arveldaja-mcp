@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeExactMatchProjection, THIRD_PARTY_PAYER_NEXT_ACTION } from "./duplicate-policy.js";
+import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE, THIRD_PARTY_PAYER_NEXT_ACTION } from "./duplicate-policy.js";
 import { exactMatchFingerprint } from "./projection.js";
 import { matchScore } from "./match-score.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../../types/api.js";
@@ -296,3 +296,134 @@ describe("computeExactMatchProjection Tier A when the foreign gross equals its b
   });
 });
 
+
+describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () => {
+  // Live shape: every row reads back type "C"; direction comes only from the
+  // signed marker; an unpaid confirmed invoice reads back payment_status "".
+  // exact_amount (40) + ref_number (40) = 80 < the default 90.
+  const DEFAULT = EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
+  const camtCredit = "Payment ARV-501\n[e-arveldaja-mcp:camt br=BR1 dir=CRDT sig=0123456789abcdef]";
+  const wiseOut = "WISE:TRANSFER-77 Vendor [source_direction=OUT]";
+  const liveTx = (overrides: Partial<Transaction> = {}) => tx({
+    type: "C", cl_currencies_id: "EUR", clients_id: undefined, description: camtCredit, ...overrides,
+  } as Partial<Transaction>);
+  const liveSale = (overrides: Partial<SaleInvoice> = {}) => sale({ cl_currencies_id: "EUR", payment_status: "", ...overrides } as Partial<SaleInvoice>);
+  const livePurchase = (overrides: Partial<PurchaseInvoice> = {}) => ({
+    id: 601, number: "P-601", clients_id: INVOICE_CLIENT, client_name: "Vendor", cl_currencies_id: "EUR",
+    gross_price: 1488.0, base_gross_price: 1488.0, bank_ref_number: "REF-1488",
+    payment_status: "", status: "CONFIRMED", ...overrides,
+  }) as unknown as PurchaseInvoice;
+
+  it("auto-confirms an incoming CRDT payment of a sale invoice at the default threshold, setting the client from the invoice", () => {
+    const projection = computeExactMatchProjection([liveTx()], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.thirdPartyPayerReviews).toEqual([]);
+    expect(projection.confirms).toHaveLength(1);
+    expect(projection.confirms[0]).toMatchObject({
+      transactionId: 1210, invoiceTable: "sale_invoices", invoiceId: 501, amount: 1488.0, confidence: 80,
+      autoConfirmRule: "ref_number_exact", clientResolution: "set_missing", needsClientUpdate: true,
+      invoiceClientsId: INVOICE_CLIENT, direction: "D",
+    });
+  });
+
+  it("auto-confirms an outgoing Wise OUT payment of a purchase invoice (null payment_status)", () => {
+    const projection = computeExactMatchProjection(
+      [liveTx({ description: wiseOut })], [], [livePurchase({ payment_status: null } as never)], DEFAULT,
+    );
+    expect(projection.confirms).toHaveLength(1);
+    expect(projection.confirms[0]).toMatchObject({
+      invoiceTable: "purchase_invoices", invoiceId: 601, autoConfirmRule: "ref_number_exact",
+      clientResolution: "set_missing", direction: "C",
+    });
+  });
+
+  it("leaves a score-qualified match unflagged", () => {
+    const projection = computeExactMatchProjection([liveTx({ clients_id: INVOICE_CLIENT })], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toHaveLength(1);
+    expect(projection.confirms[0]!.confidence).toBe(95);
+    expect(projection.confirms[0]!.autoConfirmRule).toBeUndefined();
+  });
+
+  it("binds the rule flag into the plan fingerprint", () => {
+    const projection = computeExactMatchProjection([liveTx()], [liveSale()], NO_PURCHASES, DEFAULT);
+    const unflagged = { ...projection, confirms: [{ ...projection.confirms[0]!, autoConfirmRule: undefined }] };
+    expect(exactMatchFingerprint(projection, DEFAULT)).not.toBe(exactMatchFingerprint(unflagged, DEFAULT));
+  });
+
+  it("never applies to an unsigned row (type C without a marker)", () => {
+    const projection = computeExactMatchProjection([liveTx({ description: "Payment ARV-501" })], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.thirdPartyPayerReviews).toEqual([]);
+  });
+
+  it("never applies when the signed direction does not match the invoice kind", () => {
+    expect(computeExactMatchProjection(
+      [liveTx({ description: "WISE:TRANSFER-78 Vendor [source_direction=IN]" })], [], [livePurchase()], DEFAULT,
+    ).confirms).toEqual([]);
+    expect(computeExactMatchProjection([liveTx({ description: wiseOut })], [liveSale()], NO_PURCHASES, DEFAULT).confirms).toEqual([]);
+  });
+
+  it("never applies when the reference is shared by another open invoice of either kind", () => {
+    const otherSale = computeExactMatchProjection(
+      [liveTx()], [liveSale(), liveSale({ id: 502, number: "ARV-502", gross_price: 10, base_gross_price: 10 })], NO_PURCHASES, DEFAULT,
+    );
+    expect(otherSale.confirms).toEqual([]);
+    const otherPurchase = computeExactMatchProjection(
+      [liveTx()], [liveSale()], [livePurchase({ gross_price: 10, base_gross_price: 10 })], DEFAULT,
+    );
+    expect(otherPurchase.confirms).toEqual([]);
+  });
+
+  it.each([
+    ["partially paid", { payment_status: "PARTIALLY_PAID" }],
+    ["paid", { payment_status: "PAID" }],
+    ["unknown payment status", { payment_status: "SOMETHING_NEW" }],
+    ["not confirmed", { status: "PROJECT" }],
+    ["missing status", { status: undefined }],
+  ])("never applies to a %s invoice", (_label, overrides) => {
+    const projection = computeExactMatchProjection([liveTx()], [liveSale(overrides as Partial<SaleInvoice>)], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it("routes a differing payer to third-party-payer review, never auto", () => {
+    const projection = computeExactMatchProjection([liveTx({ clients_id: PAYER })], [liveSale()], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.thirdPartyPayerReviews.map(r => [r.transaction_id, r.reason])).toEqual([[1210, "third_party_payer"]]);
+  });
+
+  it("never applies to a Tier A (foreign invoice base amount) match", () => {
+    const usd = liveSale({ cl_currencies_id: "USD", gross_price: 1700, currency_rate: 0.8753, base_gross_price: 1488.0 } as Partial<SaleInvoice>);
+    const projection = computeExactMatchProjection([liveTx({ clients_id: INVOICE_CLIENT })], [usd], NO_PURCHASES, DEFAULT);
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it("never applies to a non-EUR row or a row with a differing base amount", () => {
+    expect(computeExactMatchProjection([liveTx({ base_amount: 1400 })], [liveSale()], NO_PURCHASES, DEFAULT).confirms).toEqual([]);
+    // Nominal AND base both match (exact_amount), but the row's EUR base differs from its amount.
+    expect(computeExactMatchProjection(
+      [liveTx({ base_amount: 1400 })], [liveSale({ base_gross_price: 1400 })], NO_PURCHASES, DEFAULT,
+    ).confirms).toEqual([]);
+    // Nominal-only matches across currencies (no base fields): exact_amount, but not EUR on both sides.
+    const noBase = { base_gross_price: undefined, currency_rate: undefined } as Partial<SaleInvoice>;
+    expect(computeExactMatchProjection(
+      [liveTx({ cl_currencies_id: "USD", base_amount: undefined } as Partial<Transaction>)], [liveSale(noBase)], NO_PURCHASES, DEFAULT,
+    ).confirms).toEqual([]);
+    expect(computeExactMatchProjection(
+      [liveTx({ base_amount: undefined })], [liveSale({ ...noBase, cl_currencies_id: "USD" } as Partial<SaleInvoice>)], NO_PURCHASES, DEFAULT,
+    ).confirms).toEqual([]);
+    expect(computeExactMatchProjection(
+      [liveTx({ base_amount: undefined })], [liveSale({ ...noBase, cl_currencies_id: undefined } as Partial<SaleInvoice>)], NO_PURCHASES, DEFAULT,
+    ).confirms).toEqual([]);
+  });
+
+  it("lets an explicit min_confidence above the default opt out", () => {
+    const projection = computeExactMatchProjection([liveTx()], [liveSale()], NO_PURCHASES, 96);
+    expect(projection.confirms).toEqual([]);
+  });
+
+  it("lets the first row claim the invoice; a second same-reference row gets nothing", () => {
+    const projection = computeExactMatchProjection(
+      [liveTx(), liveTx({ id: 1211, date: "2026-09-11" })], [liveSale()], NO_PURCHASES, DEFAULT,
+    );
+    expect(projection.confirms.map(c => c.transactionId)).toEqual([1210]);
+  });
+});

@@ -1,7 +1,14 @@
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
-import { bankPostingSideForInvoiceMatch } from "../../bank-transaction-direction.js";
+import { bankPostingSideForInvoiceMatch, bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { buildInvoiceIndex, getIndexedCandidates, type InvoiceIndex } from "./invoice-index.js";
-import { matchScore, getInvoiceMatchEligibility, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
+import {
+  matchScore,
+  getInvoiceMatchEligibility,
+  isAmbiguousForeignInvoiceBase,
+  isUnpaidPaymentStatus,
+  sameAmountToTheCent,
+  type MatchCandidate,
+} from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
 import type {
   ExactConfirmClientResolution,
@@ -52,6 +59,42 @@ export function thirdPartyPayerReviewReason(
   return undefined;
 }
 
+/** auto_confirm_exact_matches' default min_confidence. */
+export const EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE = 90;
+
+/**
+ * The ref-number rule: a payment carrying an invoice's structured reference
+ * number at the exact EUR amount scores only 80 (exact_amount + ref_number) and
+ * reaches the default 90 only with a matching clients_id, which live CAMT/Wise
+ * rows rarely carry. It is admitted at thresholds up to the default only when
+ * every piece of evidence is present:
+ * - EUR row (no differing base) vs EUR invoice, cents-exact (`exact_amount`,
+ *   never Tier A or a cross-currency reason);
+ * - a signed direction marker matching the invoice kind (incoming ↔ sale,
+ *   outgoing ↔ purchase); an unsigned row is "unknown" and never qualifies;
+ * - the reference names exactly one open invoice of either kind;
+ * - the invoice is CONFIRMED and unpaid ("", null, NOT_PAID).
+ * The caller still requires a single candidate, consumes the invoice key and
+ * applies the third-party-payer partition.
+ */
+function isRefNumberExactMatch(
+  tx: Transaction,
+  inv: SaleInvoice | PurchaseInvoice,
+  type: MatchCandidate["type"],
+  reasons: readonly string[],
+  saleIndex: InvoiceIndex<SaleInvoice>,
+  purchaseIndex: InvoiceIndex<PurchaseInvoice>,
+): boolean {
+  if (!reasons.includes("exact_amount") || !reasons.includes("ref_number")) return false;
+  if (transactionCurrency(tx) !== "EUR") return false;
+  if (typeof inv.cl_currencies_id !== "string" || inv.cl_currencies_id.trim().toUpperCase() !== "EUR") return false;
+  if (tx.base_amount != null && !sameAmountToTheCent(tx.base_amount, tx.amount)) return false;
+  if (bankTransactionDirection(tx) !== (type === "sale_invoice" ? "incoming" : "outgoing")) return false;
+  if (inv.status !== "CONFIRMED" || !isUnpaidPaymentStatus(inv.payment_status)) return false;
+  const ref = tx.ref_number ?? "";
+  return (saleIndex.byRef.get(ref)?.length ?? 0) + (purchaseIndex.byRef.get(ref)?.length ?? 0) === 1;
+}
+
 export function collectExactMatchCandidates(
   tx: Transaction,
   saleIndex: InvoiceIndex<SaleInvoice>,
@@ -61,18 +104,23 @@ export function collectExactMatchCandidates(
 ): MatchCandidate[] {
   const candidates: MatchCandidate[] = [];
   const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
+  // An explicit min_confidence above the default opts out of the rule.
+  const refRuleApplies = threshold <= EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
 
   if (allowSaleInvoices) {
     for (const inv of getIndexedCandidates(saleIndex, tx.ref_number, tx.amount, tx.base_amount)) {
       if (inv.payment_status === "PARTIALLY_PAID") continue;
       if (consumedInvoiceKeys.has(`sale:${inv.id!}`)) continue;
       const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-      if (confidence >= threshold) {
+      const byRule = confidence < threshold && refRuleApplies &&
+        isRefNumberExactMatch(tx, inv, "sale_invoice", reasons, saleIndex, purchaseIndex);
+      if (confidence >= threshold || byRule) {
         candidates.push({
           type: "sale_invoice", id: inv.id!, number: inv.number ?? "",
           client_name: inv.client_name ?? "", clients_id: inv.clients_id,
           gross_price: inv.gross_price ?? 0, payment_status: inv.payment_status ?? "NOT_PAID",
           partially_paid_warning: false, confidence, match_reasons: reasons,
+          ...(byRule ? { auto_confirm_rule: "ref_number_exact" as const } : {}),
         });
       }
     }
@@ -82,12 +130,15 @@ export function collectExactMatchCandidates(
       if (inv.payment_status === "PARTIALLY_PAID") continue;
       if (consumedInvoiceKeys.has(`purchase:${inv.id!}`)) continue;
       const { confidence, reasons } = matchScore(tx, inv, tx.amount);
-      if (confidence >= threshold) {
+      const byRule = confidence < threshold && refRuleApplies &&
+        isRefNumberExactMatch(tx, inv, "purchase_invoice", reasons, saleIndex, purchaseIndex);
+      if (confidence >= threshold || byRule) {
         candidates.push({
           type: "purchase_invoice", id: inv.id!, number: inv.number ?? "",
           client_name: inv.client_name ?? "", clients_id: inv.clients_id,
           gross_price: inv.gross_price ?? 0, payment_status: inv.payment_status ?? "NOT_PAID",
           partially_paid_warning: false, confidence, match_reasons: reasons,
+          ...(byRule ? { auto_confirm_rule: "ref_number_exact" as const } : {}),
         });
       }
     }
@@ -171,6 +222,7 @@ export function computeExactMatchProjection(
       invoiceNumber: match.number,
       invoiceClientsId,
       confidence: match.confidence,
+      ...(match.auto_confirm_rule !== undefined ? { autoConfirmRule: match.auto_confirm_rule } : {}),
       clientResolution,
       needsClientUpdate: clientResolution === "set_missing",
       accountsDimensionsId: tx.accounts_dimensions_id,

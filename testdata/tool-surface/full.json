@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 159610,
-    "descriptionsBytes": 22558,
-    "inputSchemasBytes": 101566,
+    "toolsListBytes": 159788,
+    "descriptionsBytes": 22695,
+    "inputSchemasBytes": 101607,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5088
@@ -3903,7 +3903,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Batch-confirm bank transactions with a single high-confidence match (>=90). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
+      "description": "Batch-confirm bank transactions with a single high-confidence match (>=90, or ref_number_exact: exact EUR amount + the reference of exactly one open unpaid invoice + a signed direction matching the invoice kind). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3919,7 +3919,7 @@
             "type": "boolean"
           },
           "min_confidence": {
-            "description": "Minimum confidence (default 90)",
+            "description": "Minimum confidence (default 90; above 90 also disables ref_number_exact)",
             "maximum": 100,
             "minimum": 0,
             "type": "number"
