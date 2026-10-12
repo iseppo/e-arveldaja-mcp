@@ -12,7 +12,7 @@ import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/c
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import { validateOptionalStrictDateRange } from "../strict-date.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
-import { parseSaleInvoiceItems, tagNotes } from "../tools/crud/shared.js";
+import { parseSaleInvoiceItems, tagNotes, validateUpdateFields } from "../tools/crud/shared.js";
 import { logAudit } from "../audit-log.js";
 import type { SaleInvoiceDeliveryRequest } from "../types/api.js";
 import {
@@ -702,8 +702,24 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // Uncached: the immutability guard must see a confirm made elsewhere.
     this.api.saleInvoices.invalidateListCache();
     const current = await this.api.saleInvoices.get(input.id!);
-    if (decodeInvoiceStatusCritical(current).status === "CONFIRMED") {
+    const status = decodeInvoiceStatusCritical(current).status;
+    if (status === "CONFIRMED") {
       return fail("confirmed_record_immutable", "Confirmed sale_invoice cannot be updated — invalidate, edit the draft, then re-confirm.");
+    }
+    if (status === "VOID") {
+      return fail("void_record_immutable", `Sale invoice ${input.id!} is VOID and cannot be edited — create a new sale invoice instead.`);
+    }
+    // Only positive PROJECT evidence unlocks ledger-bearing fields; a missing,
+    // "", null or unknown status may change only the confirmed-invoice
+    // metadata allowlist (fail closed: the record may well be booked).
+    if (status !== "PROJECT") {
+      const updateErrors = validateUpdateFields(parsed, "sale_invoice", {
+        isConfirmed: true,
+        statusLabel: `non-PROJECT (status=${JSON.stringify(status ?? null)})`,
+      });
+      if (updateErrors.length > 0) {
+        return fail("invoice_status_unverified", `Sale invoice ${input.id!} is not a PROJECT draft; ledger-bearing fields cannot be edited. ${updateErrors.join(" ")}`);
+      }
     }
     const result = await this.api.saleInvoices.update(input.id!, parsed as never);
     logAudit({

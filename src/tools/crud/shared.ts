@@ -348,7 +348,7 @@ function isConfirmableEntity(entity: keyof typeof UPDATE_BLOCKED_FIELDS): entity
 export function validateUpdateFields(
   data: Record<string, unknown>,
   entity: keyof typeof UPDATE_BLOCKED_FIELDS,
-  opts?: { isConfirmed?: boolean },
+  opts?: { isConfirmed?: boolean; statusLabel?: string },
 ): string[] {
   const errors: string[] = [];
   const fields = Object.keys(data);
@@ -362,7 +362,7 @@ export function validateUpdateFields(
     for (const field of fields) {
       if (!allowedFields.includes(field)) {
         errors.push(
-          `Field "${field}" cannot be edited on a CONFIRMED ${entity} — ` +
+          `Field "${field}" cannot be edited on a ${opts.statusLabel ?? "CONFIRMED"} ${entity} — ` +
           `invalidate_${entity}, fetch the draft, edit it, then explicitly re-confirm.`
         );
       }
