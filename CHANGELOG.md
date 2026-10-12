@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Internal
+
+- The publish workflow waits (up to 10 minutes) until npm serves the new version before registering it in the MCP registry, which validates the package against npm.
+
 ## [0.29.1] - 2026-10-12
 
 ### Internal

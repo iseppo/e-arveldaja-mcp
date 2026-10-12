@@ -79,6 +79,17 @@ jobs:
             exit 1
           fi
 
+      # The MCP registry validates the package against npm, and a fresh
+      # publish takes a few minutes to become visible there.
+      - name: Wait until npm serves this version
+        run: |
+          for attempt in $(seq 1 40); do
+            if [ -n "$(npm view --prefer-online "e-arveldaja-mcp@$VERSION" version 2>/dev/null)" ]; then exit 0; fi
+            sleep 15
+          done
+          echo "::error::e-arveldaja-mcp@$VERSION did not appear on npm within 10 minutes"
+          exit 1
+
       - name: Install mcp-publisher
         run: |
           curl -fsSL -o mcp-publisher.tar.gz "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
