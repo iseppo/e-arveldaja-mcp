@@ -14,6 +14,7 @@ import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
 import { logAudit } from "../audit-log.js";
 import { roundMoney } from "../money.js";
+import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
 import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { jsonObjectInput, parseJsonObject, type ApiContext } from "./crud-tools.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
@@ -1173,9 +1174,11 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
  * pair the proposer would not have surfaced:
  *
  *  1. The coarse candidate key (`buildPossibleDuplicateCandidateKey`, scoped to
- *     `accounts_dimensions_id`): bank dimension + date + direction (`type`,
- *     which encodes CRDT→"D"/DBIT→"C" over a positive-magnitude `amount`, so it
- *     is the signed-amount discriminator) + currency + rounded amount. Each of
+ *     `accounts_dimensions_id`): bank dimension + date + direction + currency +
+ *     rounded amount. Direction is the SIGNED importer marker
+ *     (`signedBankTransactionDirection`), never the stored `type` — the live API
+ *     reads `type` back as "C" on every row, so it would pass an incoming refund
+ *     as the duplicate of a same-amount outgoing payment. Each of
  *     these must be PRESENT on both rows and equal — a missing field can never
  *     prove identity, so it fails CLOSED (no `?? EUR`/`?? null` collapsing two
  *     different rows to one identity).
@@ -1222,10 +1225,13 @@ export function compareCamtDuplicateIdentity(
     reasons.push("date missing or differs");
   }
 
-  const keptType = typeof kept.type === "string" ? kept.type.trim() : "";
-  const candidateType = typeof candidate.type === "string" ? candidate.type.trim() : "";
-  if (!keptType || !candidateType || keptType !== candidateType) {
-    reasons.push("direction (type) missing or differs");
+  // The read-back `type` is "C" on every live row whatever was stored, so it
+  // cannot tell an incoming refund from an outgoing payment. Only the signed
+  // importer marker proves direction; an unmarked row can never prove identity.
+  const keptDirection = signedBankTransactionDirection(kept);
+  const candidateDirection = signedBankTransactionDirection(candidate);
+  if (!keptDirection || !candidateDirection || keptDirection !== candidateDirection) {
+    reasons.push("signed direction missing or differs");
   }
 
   const keptCurrency = typeof kept.cl_currencies_id === "string" ? kept.cl_currencies_id.trim() : "";
@@ -1253,7 +1259,7 @@ export function compareCamtDuplicateIdentity(
 
   if (reasons.length > 0) return { matches: false, reasons };
 
-  const identity = [keptDimension, keptDate, keptType, keptCurrency, keptAmount!.toFixed(2)].join("|");
+  const identity = [keptDimension, keptDate, keptDirection, keptCurrency, keptAmount!.toFixed(2)].join("|");
   return { matches: true, identity, corroboration };
 }
 
@@ -2692,7 +2698,8 @@ export function registerAccountingInboxTools(
       if (duplicateTransaction.is_deleted) {
         throw new Error(`Cannot delete transaction ${delete_transaction_id} because it is already deleted`);
       }
-      if ((duplicateTransaction.status ?? "PROJECT") !== "PROJECT") {
+      // A missing status is not proof of PROJECT — never delete on it.
+      if (duplicateTransaction.status !== "PROJECT") {
         throw new Error(
           `Refusing to delete transaction ${delete_transaction_id} because its status is ${duplicateTransaction.status ?? "UNKNOWN"} instead of PROJECT`,
         );
@@ -2703,7 +2710,7 @@ export function registerAccountingInboxTools(
         throw new Error(
           `Refusing to clean up transactions ${keep_transaction_id} and ${delete_transaction_id}: ` +
           `CAMT duplicate identity mismatch (${identityCheck.reasons.join("; ")}). ` +
-          `Only a PROJECT transaction that matches the kept one on bank dimension, date, direction, ` +
+          `Only a PROJECT transaction that matches the kept one on bank dimension, date, signed direction, ` +
           `currency, and amount — with at least one corroborating counterparty field — may be deleted ` +
           `as its duplicate.`,
         );

@@ -50,6 +50,12 @@ const mockedParseDocument = vi.mocked(parseDocument);
 // with the full surface exposed (default hides them behind the merged tools).
 const EXPOSE_GRANULAR = { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
 
+// Live-shaped direction markers: every transaction reads back type "C", so the
+// signed CAMT metadata line is the only proof of direction.
+const CAMT_DBIT_MARKER = "[e-arveldaja-mcp:camt dir=DBIT sig=abc123abc123abcd]";
+const CAMT_CRDT_MARKER = "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]";
+const CAMT_DBIT_DESCRIPTION = `Card purchase\n${CAMT_DBIT_MARKER}`;
+
 function registerAccountingInboxTools(
   server: any,
   runtimeSafetyContext: ReturnType<typeof createTestRuntimeSafetyContext>,
@@ -1484,6 +1490,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Curated supplier",
@@ -1550,6 +1557,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Curated supplier",
@@ -1588,6 +1596,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Curated supplier",
@@ -1681,7 +1690,8 @@ ${entryXml}
     ["date", { date: "2026-07-02" }],
     ["amount", { amount: 99 }],
     ["currency", { cl_currencies_id: "USD" }],
-    ["direction", { type: "D" }],
+    // Live-shaped: both rows read back type "C"; only the signed marker differs.
+    ["direction", { description: `Refund\n${CAMT_CRDT_MARKER}` }],
   ])("cleanup_camt_possible_duplicate refuses cleanup when %s differs (H19)", async (_label, patch) => {
     const { handler, api } = setupAccountingInboxTool({
       transactions: {
@@ -1695,6 +1705,7 @@ ${entryXml}
               accounts_dimensions_id: 5,
               date: "2026-07-01",
               type: "C",
+              description: CAMT_DBIT_DESCRIPTION,
               amount: 42.5,
               cl_currencies_id: "EUR",
               bank_account_name: "Acme OÜ",
@@ -1708,6 +1719,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Acme OÜ",
@@ -1730,6 +1742,82 @@ ${entryXml}
     expect(api.transactions.delete).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["explicit IN/OUT markers differ", "WISE:TRF-1 Refund [source_direction=IN]", "WISE:TRF-2 Payment [source_direction=OUT]"],
+    ["the kept row has no signed marker", "Refund", CAMT_DBIT_DESCRIPTION],
+    ["the deleted row has no signed marker", CAMT_DBIT_DESCRIPTION, "Payment"],
+  ])("cleanup_camt_possible_duplicate refuses when %s even though both rows read type C", async (_label, keptDescription, candidateDescription) => {
+    // A confirmed incoming refund and a PROJECT outgoing payment: same dimension,
+    // date, EUR amount and supplier IBAN, and both read back type "C" from the
+    // live API. Only the signed direction can tell them apart.
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const key = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_no: "EE000000000000000001",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, description: keptDescription, ...key };
+          }
+          return { id, status: "PROJECT", is_deleted: false, description: candidateDescription, ...key };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+    })).rejects.toThrow(/identity mismatch.*signed direction missing or differs/i);
+
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["null", { status: null }],
+    ["omitted", {}],
+  ])("cleanup_camt_possible_duplicate refuses to delete a row whose status is %s", async (_label, statusField) => {
+    const { handler, api } = setupAccountingInboxTool({
+      transactions: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn().mockImplementation(async (id: number) => {
+          const identity = {
+            accounts_dimensions_id: 5,
+            date: "2026-07-01",
+            type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
+            amount: 42.5,
+            cl_currencies_id: "EUR",
+            bank_account_name: "Acme OÜ",
+          };
+          if (id === 77) {
+            return { id: 77, status: "CONFIRMED", is_deleted: false, ...identity };
+          }
+          return { id, is_deleted: false, ...statusField, ...identity };
+        }),
+        update: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({ deleted: true }),
+      },
+    }, "cleanup_camt_possible_duplicate");
+
+    await expect(handler({
+      keep_transaction_id: 77,
+      delete_transaction_id: 9001,
+      patch_missing_fields: { bank_ref_number: "CAMT-REF-1" },
+    })).rejects.toThrow(/status is UNKNOWN instead of PROJECT/i);
+
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.delete).not.toHaveBeenCalled();
+  });
+
   it("cleanup_camt_possible_duplicate refuses cleanup when the coarse key matches but no counterparty corroborates (H19 collision)", async () => {
     // Two separate EUR 42.50 debit-card purchases on the same day: identical
     // dimension/date/direction/currency/amount, different merchants. The coarse
@@ -1742,6 +1830,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
           };
@@ -1779,6 +1868,7 @@ ${entryXml}
               accounts_dimensions_id: 5,
               date: "2026-07-01",
               type: "C",
+              description: CAMT_DBIT_DESCRIPTION,
               amount: 42.5,
               cl_currencies_id: "EUR",
               bank_account_name: "Acme OÜ",
@@ -1790,6 +1880,7 @@ ${entryXml}
             is_deleted: false,
             accounts_dimensions_id: 5,
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Acme OÜ",
@@ -1823,7 +1914,7 @@ ${entryXml}
             type: "C",
             amount: 42.5,
             cl_currencies_id: "EUR",
-            description: "Card purchase",
+            description: `Card purchase\n${CAMT_DBIT_MARKER}`,
           };
           if (id === 77) {
             return { id: 77, status: "CONFIRMED", is_deleted: false, bank_account_name: "Alpha Kohvik OÜ", ...key };
@@ -1854,6 +1945,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Acme OÜ",
@@ -1885,6 +1977,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Acme OÜ",
@@ -2644,6 +2737,7 @@ ${entryXml}
             accounts_dimensions_id: 5,
             date: "2026-07-01",
             type: "C",
+            description: CAMT_DBIT_DESCRIPTION,
             amount: 42.5,
             cl_currencies_id: "EUR",
             bank_account_name: "Acme OÜ",
