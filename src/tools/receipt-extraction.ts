@@ -3122,6 +3122,10 @@ export interface CurrencyEquivalentAmbiguity {
 // Together with the total/payable labels these are the only lines whose
 // amounts can make a document currency-ambiguous; a footer or marketing figure
 // ("Free shipping for orders over 50 EUR") never does.
+// A complete standalone currency label ("Currency: USD", "Valuuta EUR."):
+// nothing else on the line, so "Currency USD accepted for online orders" is not one.
+const STANDALONE_CURRENCY_LABEL_RE =
+  /^\s*(?:currency(?:\s+code)?|valuuta(?:kood)?|w[äa]hrung|devise|valuta|moneda)\s*[:=-]?\s*([A-Za-z]{3})\s*[.,;]?\s*$/i;
 const CURRENCY_EQUIVALENT_LINE_RE =
   /\b(?:equivalent|ekvivalent|eurodes|conversion|converted|charged|billed)\b/i;
 
@@ -3134,7 +3138,8 @@ export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined
     // Same rate stripping the extractor uses: "(1 EUR = 1.08 USD)" names no
     // document currency and contributes no amount.
     const clean = blankExchangeRateNumbers(line);
-    const labelled = [...clean.matchAll(CURRENCY_LABEL_CODE_RE)].length > 0;
+    const labelCode = clean.match(STANDALONE_CURRENCY_LABEL_RE)?.[1]?.toUpperCase();
+    const labelled = labelCode !== undefined && (labelCode === "EUR" || NON_EUR_CURRENCY_CODES.has(labelCode));
     const amountLine = RECEIPT_TOTAL_LABEL_RE.test(clean) ||
       CURRENCY_EQUIVALENT_LINE_RE.test(clean) ||
       RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE.test(clean);
@@ -3142,7 +3147,7 @@ export function detectCurrencyEquivalentAmbiguity(sourceText: string | undefined
     const amounts = amountLine ? extractAmountsFromLine(clean, text) : [];
     if (amounts.length === 0) {
       // A bare "Currency: USD" label names the document currency.
-      if (labelled) for (const code of detectCurrenciesOnLine(clean)) codes.add(code);
+      if (labelled) codes.add(labelCode!);
       continue;
     }
     for (const value of amounts) {

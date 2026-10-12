@@ -103,6 +103,22 @@ function compactKey(value: string | null | undefined): string {
   return (value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
+// IBAN-shaped tokens ("EE38 2200 2210 2014 5685") are removed before looking
+// for an invoice number, so a numeric id never matches inside an account number.
+const IBAN_TOKEN_RE = /(?<![\p{L}\p{N}])[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,7}(?:\s?[A-Z0-9]{1,3})?(?![\p{L}\p{N}])/giu;
+
+/**
+ * The complete invoice identifier as a token: not preceded or followed by a
+ * letter/digit, so INV-1001 never matches inside INV-10010. Separators between
+ * its parts and at letter/digit transitions are optional ("INV-1001",
+ * "INV 1001", "INV1001" all match). Undefined for an identifier under 4 chars.
+ */
+function invoiceIdentifierRe(invoiceNumber: string | undefined): RegExp | undefined {
+  if (compactKey(invoiceNumber).length < 4) return undefined;
+  const parts = (invoiceNumber ?? "").toLowerCase().match(/\p{L}+|\p{N}+/gu) ?? [];
+  return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("[\\s\\-_/.#]?")}(?![\\p{L}\\p{N}])`, "iu");
+}
+
 export interface PaymentCounterparty {
   clientId?: number;
   name?: string;
@@ -120,7 +136,7 @@ export function paymentCurrencySignal(
   counterparty: PaymentCounterparty,
 ): CurrencyEquivalentPaymentSignal | undefined {
   const foreign = ambiguity.foreign_currency;
-  const invoiceKey = compactKey(counterparty.invoiceNumber);
+  const invoiceRe = invoiceIdentifierRe(counterparty.invoiceNumber);
   // A candidate must be linked to THIS supplier/document, not just share an
   // amount and a date: same client id, the supplier's name, the document's
   // payment reference, or its invoice number quoted on the row. A row naming
@@ -137,8 +153,9 @@ export function paymentCurrencySignal(
     });
     if (!reasons.includes("date_within_3_days") && !reasons.includes("date_within_10_days")) return false;
     if (reasons.includes("client_id") || reasons.includes("counterparty_name") || reasons.includes("reference_number")) return true;
-    return invoiceKey.length >= 4 &&
-      [candidate.ref_number, candidate.bank_ref_number, candidate.description].some(field => compactKey(field).includes(invoiceKey));
+    return invoiceRe !== undefined &&
+      [candidate.ref_number, candidate.bank_ref_number, candidate.description]
+        .some(field => invoiceRe.test((field ?? "").replace(IBAN_TOKEN_RE, " ")));
   };
   // Which document figure (if any) an amount in `currency` equals.
   const figureCurrency = (currency: string, amount: number): string | undefined => {

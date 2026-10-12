@@ -93,6 +93,20 @@ describe("detectCurrencyEquivalentAmbiguity false positives (Codex review)", () 
     expect(loadPurchaseInvoices).not.toHaveBeenCalled();
   });
 
+  // Codex round 2, finding 1: only a complete standalone currency label counts.
+  it("does not flag a EUR receipt whose footer mentions a currency in prose", async () => {
+    const text = "Example Shop\nReceipt R-59\nDate 2026-03-10\nTOTAL 100.00 EUR\nCurrency USD accepted for online orders";
+    const extracted = extract(text);
+    expect(extracted.currency).toBe("EUR");
+    expect(detectCurrencyEquivalentAmbiguity(text)).toBeUndefined();
+    expect(await checkCurrencyEquivalent({
+      rawText: text, extractedCurrency: extracted.currency, supplierClientId: SUPPLIER_ID,
+      loadPurchaseInvoices: async () => history(["USD", "USD", "USD"]),
+    })).toBeUndefined();
+    // A standalone label still counts.
+    expect(detectCurrencyEquivalentAmbiguity("TOTAL 100.00 EUR\nCurrency: USD.")?.foreign_currency).toBe("USD");
+  });
+
   // Finding 2: a footer / marketing figure is not a second-currency total.
   it("does not flag a USD receipt whose footer mentions a EUR amount", async () => {
     const text = "Example Shop\nReceipt R-58\nDate 2026-03-10\nTOTAL 100.00 USD\nFree shipping for orders over 50 EUR";
@@ -177,6 +191,25 @@ describe("checkCurrencyEquivalent", () => {
       loadTransactions: async () => [tx({ id: 505, amount: 100, cl_currencies_id: "EUR", description: "Payment inv1001" })],
     });
     expect(warning?.payment).toEqual({ suggested_currency: "EUR", transaction_ids: [505] });
+  });
+
+  // Codex round 2, finding 2: the invoice number must match as a whole token.
+  it("links only the complete invoice identifier, never a longer id or an IBAN substring", async () => {
+    const extracted = extract(USD_WITH_EUR_EQUIVALENT);
+    const run = (invoiceNumber: string, description: string) => checkCurrencyEquivalent({
+      rawText: extracted.raw_text,
+      extractedCurrency: extracted.currency,
+      extractedGross: extracted.total_gross,
+      invoiceDate: "2026-03-10",
+      invoiceNumber,
+      loadTransactions: async () => [tx({ id: 520, amount: 100, date: "2026-03-11", description })],
+    });
+    expect(await run("INV-1001", "Payment INV-10010")).toBeUndefined();
+    expect((await run("INV-1001", "Payment INV-1001."))?.payment?.transaction_ids).toEqual([520]);
+    expect((await run("INV-1001", "Payment inv 1001"))?.payment?.transaction_ids).toEqual([520]);
+    expect((await run("INV-1001", "Payment INV1001"))?.payment?.transaction_ids).toEqual([520]);
+    expect(await run("2014", "Transfer to EE38 2200 2210 2014 5685")).toBeUndefined();
+    expect(await run("20145685", "Transfer to EE382200221020145685")).toBeUndefined();
   });
 
   // Codex finding 3: amount + date alone is not a link to this supplier.
