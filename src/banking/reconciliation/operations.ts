@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../../operation-outcome.js";
+import { plainFailureOutcome, plainSuccessOutcome as ok, type OperationOutcome } from "../../operation-outcome.js";
 import type { ApiContext } from "../../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import {
@@ -37,13 +37,6 @@ import type {
 // command loop, indeterminate stops, partial results, inter-account journal
 // dedup, ownership gating) live in the executor.
 
-// Construct the OperationOutcome union directly rather than through
-// successOutcome(), which deep-clones and freezes its value as PlanData and
-// would reject the rich render data (it carries Maps and nested api objects).
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
 function fail<T>(failure: ReconFailure): OperationOutcome<T> {
   // Rich kinds carry byte-load-bearing data the OperationOutcome error triple
   // cannot fully hold as a stable discriminant; throw the full failure so the
@@ -52,7 +45,7 @@ function fail<T>(failure: ReconFailure): OperationOutcome<T> {
     throw new ReconciliationOperationFailedError(failure);
   }
   // plan_handle_required is fully determined by its category + fixed message.
-  return { ok: false, error: { code: failure.category, message: failure.message, retry: "never" }, blockers: [] };
+  return plainFailureOutcome(failure.category, failure.message);
 }
 
 function project<T>(result: ReconExecResult<T>): OperationOutcome<T> {

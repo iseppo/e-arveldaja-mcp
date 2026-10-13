@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import { computeRecurringClone, recurringPreviewSourceBinding, validateRecurringParams, type RecurringCloneParams } from "../tools/recurring-invoices.js";
@@ -25,13 +25,6 @@ import {
   type SaleInvoicePrepareInput,
   type SaleInvoiceReadInput,
 } from "./invoice-types.js";
-
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-function fail<T>(code: string, message: string): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
-}
 
 const MUTATION_ACTIONS = new Set<SaleInvoiceMutationAction>(["create", "update", "delete", "confirm", "invalidate", "send", "recurring"]);
 

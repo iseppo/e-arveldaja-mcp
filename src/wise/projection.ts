@@ -14,7 +14,8 @@ import { canonicalRefNumber } from "../ref-number.js";
 import { TRANSACTION_DESCRIPTION_MAX_LENGTH, weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { isNonVoidTransaction, isProjectTransaction } from "../transaction-status.js";
 import { bankReferenceLookupKey, journalDocumentReferenceKeys } from "../camt/duplicate-identity.js";
-import { buildInterAccountJournalIndex, normalizeReference, toUtcDay, UNKNOWN_JOURNAL_ID } from "../tools/inter-account-utils.js";
+import { buildInterAccountJournalIndex, normalizeReference, UNKNOWN_JOURNAL_ID } from "../tools/inter-account-utils.js";
+import { toUtcDay } from "../date-utils.js";
 import { findRegistrationJournal } from "../banking/receipt-ledger-check.js";
 import { journalBankDirection, provenBankDirection } from "../bank-transaction-journal-direction.js";
 import {

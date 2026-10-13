@@ -1,5 +1,5 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { failureOutcome, successOutcome, type OperationOutcome } from "./operation-outcome.js";
+import { failureOutcome, plainFailureOutcome, plainSuccessOutcome, successOutcome, type OperationOutcome } from "./operation-outcome.js";
 
 describe("operation outcomes", () => {
   it("creates frozen transport-independent success and failure outcomes", () => {
@@ -28,5 +28,28 @@ describe("operation outcomes", () => {
       expect(Object.isFrozen(outcome.warnings[0])).toBe(true);
       expect(Object.isFrozen(outcome.blockers[0])).toBe(true);
     }
+  });
+
+  it("creates plain (unfrozen, uncloned) outcomes with the canonical key order", () => {
+    const value = { rows: new Map([["a", 1]]) };
+    const success = plainSuccessOutcome(value);
+    expect(success).toEqual({ ok: true, value, warnings: [], blockers: [] });
+    expect(Object.isFrozen(success)).toBe(false);
+    if (success.ok) expect(success.value).toBe(value);
+
+    expect(JSON.stringify(plainFailureOutcome("bad_input", "Bad"))).toBe(
+      '{"ok":false,"error":{"code":"bad_input","message":"Bad","retry":"never"},"blockers":[]}',
+    );
+    expect(JSON.stringify(plainFailureOutcome("net", "Unknown", "unknown", { mutationOccurred: false }))).toBe(
+      '{"ok":false,"error":{"code":"net","message":"Unknown","retry":"unknown"},"blockers":[]}',
+    );
+    const objects = [{ type: "purchase_invoice", id: 7 }];
+    const mutated = plainFailureOutcome("partial", "Partial", "safe", { mutationOccurred: true, mutatedObjects: objects });
+    expect(mutated).toEqual({
+      ok: false,
+      error: { code: "partial", message: "Partial", retry: "safe", mutationOccurred: true, mutatedObjects: objects },
+      blockers: [],
+    });
+    expect(Object.isFrozen(mutated)).toBe(false);
   });
 });

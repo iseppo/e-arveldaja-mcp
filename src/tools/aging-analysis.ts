@@ -9,6 +9,7 @@ import { toolError } from "../tool-error.js";
 import { readOnly } from "../annotations.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { todayInTallinn } from "../local-date.js";
+import { daysPastDue } from "../date-utils.js";
 
 interface AgingBucket {
   label: string;
@@ -65,13 +66,6 @@ export function missingEurAmountWarning(list: readonly MissingEurAmountInvoice[]
 function invalidAsOfDate(as_of_date: string | undefined) {
   if (as_of_date === undefined || isStrictDate(as_of_date)) return undefined;
   return toolError({ error: "as_of_date must be a real calendar date in canonical YYYY-MM-DD form", category: "invalid_date" });
-}
-
-function daysBetween(dateStr: string, today: string): number {
-  // Use UTC noon to avoid timezone/DST shift issues with YYYY-MM-DD dates
-  const d1 = new Date(dateStr + "T12:00:00Z");
-  const d2 = new Date(today + "T12:00:00Z");
-  return Math.floor((d2.getTime() - d1.getTime()) / (1000 * 60 * 60 * 24));
 }
 
 function addDaysToDate(dateStr: string, days: number): string {
@@ -155,7 +149,7 @@ export function computeAgingBuckets(
     // date" instead of producing an invalid due date that would abort the
     // whole report with a RangeError.
     const dueDateStr = addDaysToDate(inv.create_date || asOfDate, inv.term_days ?? 0);
-    const daysOverdue = daysBetween(dueDateStr, asOfDate);
+    const daysOverdue = daysPastDue(dueDateStr, asOfDate);
     const label = bucketLabel(daysOverdue);
     const eur = eurGross(inv);
     const bucket = buckets.get(label) ?? { label, count: 0, total: 0, invoices: [] };

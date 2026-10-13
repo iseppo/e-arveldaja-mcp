@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
@@ -91,17 +91,6 @@ import type {
 // (APPROVAL ONE) and confirm/link (APPROVAL TWO) stay distinct inside
 // createAndMaybeMatchPurchaseInvoice; an ambiguous post-create failure is
 // compensated (rollbackCreatedInvoice) and reported, never retried.
-
-// Construct the OperationOutcome union directly rather than through
-// successOutcome(), which deep-clones + freezes its value; the receipt result
-// carries live api records (Client/PurchaseInvoice) that need not be frozen.
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
-function fail<T>(code: string, message: string): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
-}
 
 // P0-3: the execution-plan domain that binds a reviewed receipt-batch dry run to
 // its create / create_and_confirm. The SHA-256 manifest alone proves only the

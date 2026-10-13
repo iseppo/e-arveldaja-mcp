@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -98,14 +98,6 @@ import {
 // (which transactions, in which category/apply_mode, resolved to which supplier +
 // booking) equals the reviewed one before the first API write.
 export const BANK_CLASSIFICATION_PLAN_DOMAIN = "bank_classification";
-
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
-function fail<T>(code: string, message: string): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
-}
 
 /** Injected at the MCP boundary so this module never imports wrapUntrustedOcr.
  * Used only to sandbox an OCR-origin error message embedded in a note. */

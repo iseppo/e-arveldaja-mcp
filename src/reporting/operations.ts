@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney, effectiveGross } from "../money.js";
@@ -14,6 +14,7 @@ import { computeAgingBuckets, missingEurAmountWarning, type AgingInvoiceInput } 
 import { computeMissingDocuments } from "../tools/document-audit.js";
 import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import { todayInTallinn } from "../local-date.js";
+import { getMonthLastDay } from "../date-utils.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -21,13 +22,6 @@ import type {
   ReportingOperations,
   RunAccountingReportInput,
 } from "./types.js";
-
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-function fail<T>(code: string, message: string): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
-}
 
 // Thin formatter over the shared pure aging core (src/tools/aging-analysis.ts).
 // The bucketing math lives in ONE place (computeAgingBuckets) so the typed op
@@ -67,11 +61,6 @@ const RECEIPT_ALIGNMENT_BATCH_SIZE = 5;
 function shiftMonths(date: string, months: number): string {
   const [year, month, day] = date.split("-").map(Number);
   return new Date(Date.UTC(year!, month! - 1 + months, day!)).toISOString().split("T")[0]!;
-}
-
-function getMonthLastDay(month: string): number {
-  const [year, monthNumber] = month.split("-").map(Number);
-  return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
 }
 
 class ReportingOperationsImpl implements ReportingOperations {

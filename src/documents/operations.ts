@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { CompactReviewItem, CompactWarning, MutatedObject, OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type CompactReviewItem, type CompactWarning, type OperationOutcome } from "../operation-outcome.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -78,29 +78,6 @@ export const ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN = "accounting_document_confirm";
 
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
-
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
-function fail<T>(
-  code: string,
-  message: string,
-  retry: "never" | "safe" | "unknown",
-  mutation?: Readonly<{ mutationOccurred: boolean; mutatedObjects?: readonly MutatedObject[] }>,
-): OperationOutcome<T> {
-  return {
-    ok: false,
-    error: {
-      code,
-      message,
-      retry,
-      ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
-      ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
-    },
-    blockers: [],
-  };
-}
 
 interface MaterializedSnapshot {
   readonly path: string;

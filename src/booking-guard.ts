@@ -13,10 +13,10 @@ import {
   findMatchingJournalEntry,
   isReflessEntry,
   normalizeReference,
-  toUtcDay,
   UNKNOWN_JOURNAL_ID,
   type InterAccountJournalEntry,
 } from "./tools/inter-account-utils.js";
+import { toUtcDay } from "./date-utils.js";
 
 /**
  * BookingGuard — an idempotency layer for journal creation.

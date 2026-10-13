@@ -2,16 +2,6 @@ import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { normalizeIban } from "../resolution/bank-account-resolution.js";
 
-/**
- * Convert a date string (`YYYY-MM-DD` or any ISO prefix) to a UTC day
- * timestamp. Slicing to the first 10 chars drops any time / timezone
- * suffix, so arithmetic stays DST-free.
- */
-export function toUtcDay(s: string): number {
-  const [y, m, d] = s.slice(0, 10).split("-").map(Number);
-  return Date.UTC(y!, (m ?? 1) - 1, d ?? 1);
-}
-
 export interface BankAccountLookups {
   /**
    * Own IBAN -> every own account dimension registered under it. One IBAN can

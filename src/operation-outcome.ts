@@ -62,6 +62,40 @@ export function failureResponsePayload(error: OperationFailure): Record<string, 
   };
 }
 
+/**
+ * Plain success outcome: no clone, no freeze, empty warnings/blockers. Façade
+ * operations whose values carry Maps, Sets, FileInputSource or live api
+ * objects use this instead of successOutcome(), whose PlanData clone+freeze
+ * would reject or detach them.
+ */
+export function plainSuccessOutcome<T>(value: T): OperationOutcome<T> {
+  return { ok: true, value, warnings: [], blockers: [] };
+}
+
+/**
+ * Plain failure outcome: no clone, no freeze, empty blockers. `retry` defaults
+ * to "never"; mutation fields are added only when present, exactly as in
+ * failureOutcome().
+ */
+export function plainFailureOutcome<T>(
+  code: string,
+  message: string,
+  retry: "never" | "safe" | "unknown" = "never",
+  mutation?: Readonly<{ mutationOccurred: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+): OperationOutcome<T> {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+      retry,
+      ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
+      ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
+    },
+    blockers: [],
+  };
+}
+
 export function successOutcome<T>(
   value: T,
   warnings: readonly CompactWarning[] = [],

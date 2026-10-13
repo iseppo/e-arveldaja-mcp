@@ -12,6 +12,7 @@ import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../openin
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import type { ToolExposureConfig } from "../config.js";
 import { todayInTallinn } from "../local-date.js";
+import { daysPastDue, getMonthLastDay } from "../date-utils.js";
 import { validateOptionalStrictDate, validateOptionalStrictDateRange } from "../strict-date.js";
 import { toolError } from "../tool-error.js";
 import { isYearEndClosingJournal } from "../year-end-closing-journal.js";
@@ -311,11 +312,6 @@ export async function computeProfitAndLossReport(
   };
 }
 
-function getMonthLastDay(month: string): number {
-  const [year, monthNumber] = month.split("-").map(Number);
-  return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
-}
-
 const monthRegex = /^\d{4}-\d{2}$/;
 
 // Raw month-end gather scan — the single source of the unconfirmed/overdue
@@ -453,11 +449,6 @@ export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
     partiallyPaidPayables,
     excludedCreditInvoices: openSalesAll.length - openSales.length,
   };
-}
-
-/** Whole days from `dueDate` to `asOf` (both YYYY-MM-DD); positive when past due. */
-export function daysPastDue(dueDate: string, asOf: string): number {
-  return Math.round((Date.parse(asOf + "T12:00:00Z") - Date.parse(dueDate + "T12:00:00Z")) / 86_400_000);
 }
 
 export function monthOpenWarning(month: string, today: string, dateTo: string): string {

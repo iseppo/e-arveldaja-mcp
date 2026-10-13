@@ -16,7 +16,8 @@ import { PlanStoreError, type PlanRecord } from "../../plan-store.js";
 import { isRecord } from "../../record-utils.js";
 import { BookingGuard } from "../../booking-guard.js";
 import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
-import { buildBankAccountLookups, normalizeReference, toUtcDay } from "../../tools/inter-account-utils.js";
+import { buildBankAccountLookups, normalizeReference } from "../../tools/inter-account-utils.js";
+import { toUtcDay } from "../../date-utils.js";
 import {
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,

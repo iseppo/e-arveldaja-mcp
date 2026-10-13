@@ -22,7 +22,8 @@ import {
 } from "../banking/reconciliation/inter-account-matcher.js";
 import { comparableTransactionAmount, isAmbiguousForeignInvoiceBase, sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { legacyTruncatedCamtMarkerHint } from "../camt/duplicate-identity.js";
-import { buildBankAccountLookups, toUtcDay } from "./inter-account-utils.js";
+import { buildBankAccountLookups } from "./inter-account-utils.js";
+import { toUtcDay } from "../date-utils.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { decodeInvoiceStatusCritical } from "../api/critical-codecs.js";
 import { BookingGuard } from "../booking-guard.js";

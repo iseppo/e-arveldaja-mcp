@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSource, FileInputSnapshot } from "../file-input-snapshot.js";
@@ -56,17 +56,6 @@ export interface CamtOperations {
   parse(input: ParseCamtInput): Promise<OperationOutcome<CamtParseResult>>;
   prepareImport(input: CamtImportInput): Promise<OperationOutcome<CamtImportPreview>>;
   executeImport(input: CamtExecuteInput): Promise<OperationOutcome<CamtImportExecution>>;
-}
-
-// Construct the OperationOutcome union directly rather than through
-// successOutcome(), which deep-clones and freezes its value as PlanData and
-// would reject the rich projection (it carries a Set and nested api objects).
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
-function fail<T>(code: string, message: string, retry: "never" | "safe" | "unknown"): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry }, blockers: [] };
 }
 
 class CamtOperationsImpl implements CamtOperations {

@@ -1,4 +1,5 @@
 import { roundMoney } from "./money.js";
+import { isStrictDate } from "./strict-date.js";
 
 // Date-gated Estonian tax reference data + deterministic detectors.
 //
@@ -144,17 +145,10 @@ export const ESTONIAN_VAT_METADATA = deepFreeze({
 export const STANDARD_VAT_RATE_TIMELINE: readonly VatRatePeriod[] =
   ESTONIAN_VAT_METADATA.rates.standard.timeline;
 
-/** True for a strict, real calendar date in YYYY-MM-DD (rejects 2025-13-99, 2025-02-31). */
-function isStrictIsoDate(d: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
-  const parsed = new Date(`${d}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === d;
-}
-
 /** Standard VAT rate (%) in force on the given ISO date, or null if not a valid calendar date. */
 export function standardVatRateOn(dateISO: string | undefined | null): number | null {
   const d = dateISO?.slice(0, 10);
-  if (!d || !isStrictIsoDate(d)) return null;
+  if (!d || !isStrictDate(d)) return null;
   const period = STANDARD_VAT_RATE_TIMELINE.find(p => d >= p.from && (p.to === null || d <= p.to));
   return period ? period.rate : null;
 }
@@ -191,7 +185,7 @@ export const REPRESENTATION_MONTHLY_LIMIT_TIMELINE: readonly RepresentationMonth
 /** Representation tax-free allowance (€/calendar month) in force on the given ISO date, or null if not a valid calendar date. */
 export function representationMonthlyLimitOn(dateISO: string | undefined | null): number | null {
   const d = dateISO?.slice(0, 10);
-  if (!d || !isStrictIsoDate(d)) return null;
+  if (!d || !isStrictDate(d)) return null;
   const period = REPRESENTATION_MONTHLY_LIMIT_TIMELINE.find(p => d >= p.from && (p.to === null || d <= p.to));
   return period ? period.amount : null;
 }
@@ -237,7 +231,7 @@ export interface CitRate {
  * period's rate (pre-2015 distributions are out of scope for this server).
  */
 export function getCitRateForDate(effective_date: string): CitRate {
-  if (!isStrictIsoDate(effective_date)) {
+  if (!isStrictDate(effective_date)) {
     throw new Error(`getCitRateForDate requires YYYY-MM-DD; got ${JSON.stringify(effective_date)}`);
   }
   const period =

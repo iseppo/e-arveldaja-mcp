@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { ListParams } from "../api/base-resource.js";
 import { desandboxText } from "../external-text-renderer.js";
@@ -11,13 +11,6 @@ import type {
   RecordSearchResult,
   SearchAccountingRecordsInput,
 } from "./types.js";
-
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-function fail<T>(code: string, message: string): OperationOutcome<T> {
-  return { ok: false, error: { code, message, retry: "never" }, blockers: [] };
-}
 
 type FilterKey = keyof RecordSearchFilters;
 

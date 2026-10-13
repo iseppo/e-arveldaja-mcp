@@ -3,7 +3,8 @@ import type { InterAccountQuery, InterAccountResolution } from "../booking-guard
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { normalizeIban } from "../resolution/bank-account-resolution.js";
-import { buildBankAccountLookups, toUtcDay } from "../tools/inter-account-utils.js";
+import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
+import { toUtcDay } from "../date-utils.js";
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import {
   bankReferenceLookupKey,

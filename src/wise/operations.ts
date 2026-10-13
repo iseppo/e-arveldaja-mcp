@@ -1,4 +1,4 @@
-import type { OperationOutcome } from "../operation-outcome.js";
+import { plainFailureOutcome, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSource } from "../file-input-snapshot.js";
@@ -35,14 +35,6 @@ export interface WiseOperations {
   execute(input: WiseExecuteInput): Promise<OperationOutcome<WiseImportExecution>>;
 }
 
-// Construct the OperationOutcome union directly rather than through
-// successOutcome(), which deep-clones and freezes its value as PlanData and
-// would reject the rich render data (it carries FileInputSource, Maps, and
-// nested api objects).
-function ok<T>(value: T): OperationOutcome<T> {
-  return { ok: true, value, warnings: [], blockers: [] };
-}
-
 function fail<T>(failure: WiseFailure): OperationOutcome<T> {
   // Rich kinds carry byte-load-bearing data the OperationOutcome error triple
   // cannot hold ({code,message,retry} would drop the preflight rejected fields,
@@ -57,7 +49,7 @@ function fail<T>(failure: WiseFailure): OperationOutcome<T> {
   }
   // Simple kinds are fully determined by their discriminant; renderWiseFailure
   // ignores message/retry for them, so the OperationOutcome error stays byte-safe.
-  return { ok: false, error: { code: failure.kind, message: failure.kind, retry: "never" }, blockers: [] };
+  return plainFailureOutcome(failure.kind, failure.kind);
 }
 
 class WiseOperationsImpl implements WiseOperations {

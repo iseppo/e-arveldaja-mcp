@@ -2,6 +2,7 @@ import type { AccountDimension, BankAccount, Journal } from "./types/api.js";
 import { listAccountDimensionPostings } from "./account-postings.js";
 import { roundMoney } from "./money.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
+import { toUtcDay } from "./date-utils.js";
 
 /**
  * Cross-mechanism bank-posting duplicate guard — core matching logic.
@@ -57,19 +58,14 @@ export interface DuplicatePostingScanResult {
 }
 
 // ---------------------------------------------------------------------------
-// Date helpers — UTC day arithmetic on split ISO parts (no ambient time).
-// Mirrors `toUtcDay` in src/tools/inter-account-utils.ts.
+// Date helpers — UTC day arithmetic on split ISO parts (no ambient time),
+// built on the shared `toUtcDay` (src/date-utils.ts).
 // ---------------------------------------------------------------------------
 
 const MS_PER_DAY = 86_400_000;
 
-function toUtcDayNumber(date: string): number {
-  const [y, m, d] = date.slice(0, 10).split("-").map(Number);
-  return Date.UTC(y!, (m ?? 1) - 1, d ?? 1);
-}
-
 function shiftIsoDate(date: string, deltaDays: number): string {
-  const shifted = new Date(toUtcDayNumber(date) + deltaDays * MS_PER_DAY);
+  const shifted = new Date(toUtcDay(date) + deltaDays * MS_PER_DAY);
   const y = shifted.getUTCFullYear();
   const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
   const d = String(shifted.getUTCDate()).padStart(2, "0");
@@ -77,7 +73,7 @@ function shiftIsoDate(date: string, deltaDays: number): string {
 }
 
 function utcDayDiff(a: string, b: string): number {
-  return Math.round(Math.abs(toUtcDayNumber(a) - toUtcDayNumber(b)) / MS_PER_DAY);
+  return Math.round(Math.abs(toUtcDay(a) - toUtcDay(b)) / MS_PER_DAY);
 }
 
 /**

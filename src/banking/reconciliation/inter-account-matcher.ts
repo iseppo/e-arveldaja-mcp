@@ -2,7 +2,7 @@ import type { Journal, Transaction } from "../../types/api.js";
 import type { BookingGuard, InterAccountQuery, InterAccountResolution } from "../../booking-guard.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
-import { toUtcDay } from "../../tools/inter-account-utils.js";
+import { toUtcDay } from "../../date-utils.js";
 import { normalizeIban } from "../../resolution/bank-account-resolution.js";
 import { REF_NUMBER_MAX_LENGTH } from "../../ref-number.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
