@@ -6,19 +6,12 @@ import {
 import { z } from "zod";
 import { log } from "./logger.js";
 import { toolError } from "./tool-error.js";
+import { MUTATION_OPERATIONS } from "./mutation-outcome.js";
 
 const MutationAuditRecovery = z.object({
   category: z.literal("mutation_indeterminate"),
   mutationMayHaveOccurred: z.literal(true),
-  operation: z.enum([
-    "create",
-    "update",
-    "delete",
-    "upload",
-    "confirm",
-    "invalidate",
-    "rollback",
-  ]),
+  operation: z.enum(MUTATION_OPERATIONS),
   entity: AuditEntityType,
   entityId: z.number().finite().int().optional(),
   businessKey: z.string().trim().min(1),

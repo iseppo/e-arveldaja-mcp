@@ -1,5 +1,5 @@
 import { chmod, mkdtemp, readdir, rm, stat } from "fs/promises";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { LockBusyError, withOwnedFileLockSync } from "./file-lock.js";
@@ -560,6 +560,28 @@ describe("audit log labels", () => {
 
     expect(auditLog.getAuditLog()).toBe("");
     expect(auditLog.getAuditLogByConnection("Acme OÜ")).toContain("#15");
+  });
+
+  it("never writes a merge through a pre-planted predictable temp path", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-merge-temp-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    const victim = join(tempDir, "victim.txt");
+    writeFileSync(victim, "untouched");
+
+    auditLog.initAuditLog(() => "target");
+    auditLog.logAudit({ tool: "create_client", action: "CREATED", entity_type: "client", entity_id: 1, summary: "Target entry", details: {} });
+    auditLog.initAuditLog(() => "source");
+    auditLog.logAudit({ tool: "create_client", action: "CREATED", entity_type: "client", entity_id: 2, summary: "Source entry", details: {} });
+    const targetPath = join(tempDir, "logs", "target.audit.md");
+    symlinkSync(victim, `${targetPath}.tmp-${process.pid}`);
+
+    auditLog.setAuditLogLabel("source", "target");
+
+    expect(readFileSync(victim, "utf8")).toBe("untouched");
+    expect(lstatSync(targetPath).isSymbolicLink()).toBe(false);
+    const merged = readFileSync(targetPath, "utf8");
+    expect(merged).toContain("Target entry");
+    expect(merged).toContain("Source entry");
   });
 
   it("keeps merged audit logs in chronological order for limit and last-entry metadata", async () => {

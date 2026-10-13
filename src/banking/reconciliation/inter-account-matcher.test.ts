@@ -54,6 +54,11 @@ describe("counterpartyIbanOf", () => {
     expect(counterpartyIbanOf(tx)).toBe("EE123456789012345678");
   });
 
+  it("strips grouping spaces so a printed IBAN matches the own-account key", () => {
+    const tx = { ...camtRow(1), bank_account_no: "EE12 3456 7890 1234 5678" } as Transaction;
+    expect(counterpartyIbanOf(tx)).toBe("EE123456789012345678");
+  });
+
   it("uses a checksum-verified CAMT marker IBAN when bank_account_no is empty", () => {
     expect(counterpartyIbanOf(camtRow(1))).toBe(WISE_IBAN);
   });

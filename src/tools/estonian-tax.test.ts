@@ -2592,6 +2592,23 @@ describe("check_vat_registration_threshold", () => {
     return setup(options).handler;
   }
 
+  it("defaults to the Tallinn calendar year, not the UTC one, just after New Year", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // 2027-01-01 00:30 in Tallinn (UTC+2) is still 2026 in UTC.
+      vi.setSystemTime(new Date("2026-12-31T22:30:00Z"));
+      const { api, handler } = setup({ vatRegistered: false, saleInvoices: [] });
+      await handler({});
+      expect(api.saleInvoices.listAll).toHaveBeenCalledWith({
+        start_date: "2027-01-01",
+        end_date: "2027-12-31",
+        status: "CONFIRMED",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("breaks out taxable, real-estate, insurance, and financial turnover so the operator can judge incidental exclusions", async () => {
     const { api, handler } = setup({
       vatRegistered: false,

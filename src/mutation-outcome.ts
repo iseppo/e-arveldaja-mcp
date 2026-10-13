@@ -1,8 +1,11 @@
 import { HttpError } from "./http-client.js";
 
-export type MutationOperation =
-  | "create" | "update" | "delete" | "upload"
-  | "confirm" | "invalidate" | "rollback";
+export const MUTATION_OPERATIONS = [
+  "create", "update", "delete", "upload",
+  "confirm", "invalidate", "rollback",
+] as const;
+
+export type MutationOperation = typeof MUTATION_OPERATIONS[number];
 
 export interface MutationCause {
   name: string;

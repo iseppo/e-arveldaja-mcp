@@ -7,6 +7,7 @@ import type { PlanExecutionReport } from "../../plan-execution.js";
 import {
   formatDuplicatePostingWarnings,
   type DuplicatePostingSuspect,
+  renderDuplicatePostingSuspects,
 } from "../../bank-posting-duplicate-guard.js";
 import { roundMoney } from "../../money.js";
 import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../../operation-summary.js";
@@ -66,14 +67,6 @@ export function renderReconFailure(failure: ReconFailure): CallToolResult {
 
 // --- Suspect wrapping + plan review commands ---------------------------------
 
-// Wrap each suspect's untrusted journal_title / document_number at MCP output (Task 3).
-export function renderSuspects(suspects: DuplicatePostingSuspect[]): Array<Record<string, unknown>> {
-  return suspects.map(s => ({
-    ...s,
-    journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
-    document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
-  }));
-}
 
 export function exactMatchReviewCommands(projection: ExactMatchProjection): ReconciliationReviewCommand[] {
   const commands: ReconciliationReviewCommand[] = [];
@@ -102,7 +95,7 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
         confidence: descriptor.confidence,
         ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
         ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
-          ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
+          ? { possible_duplicate_postings: renderDuplicatePostingSuspects(descriptor.possibleDuplicatePostings) }
           : {}),
       }),
     });
@@ -142,7 +135,7 @@ function wrapSuggestMatch(match: Record<string, unknown>): Record<string, unknow
     };
   }
   if (Array.isArray(match.possible_duplicate_postings)) {
-    out.possible_duplicate_postings = renderSuspects(match.possible_duplicate_postings as DuplicatePostingSuspect[]);
+    out.possible_duplicate_postings = renderDuplicatePostingSuspects(match.possible_duplicate_postings as DuplicatePostingSuspect[]);
   }
   return out;
 }
@@ -190,7 +183,7 @@ export function renderExactMatchPayload(input: {
       match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence, ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}) },
       status: dryRun ? "would_confirm" : confirmed ? "confirmed" : "not_confirmed",
       ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
-        ? { possible_duplicate_postings: renderSuspects(descriptor.possibleDuplicatePostings) }
+        ? { possible_duplicate_postings: renderDuplicatePostingSuspects(descriptor.possibleDuplicatePostings) }
         : {}),
     };
   });
@@ -203,7 +196,7 @@ export function renderExactMatchPayload(input: {
       status: "blocked_duplicate_suspect",
       reason: blockedRow.reason,
       conflicting_journal_ids: blockedRow.conflicting_journal_ids,
-      possible_duplicate_postings: renderSuspects(blockedRow.suspects),
+      possible_duplicate_postings: renderDuplicatePostingSuspects(blockedRow.suspects),
     });
   }
 

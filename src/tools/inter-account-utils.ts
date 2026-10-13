@@ -1,5 +1,6 @@
 import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
+import { normalizeIban } from "../resolution/bank-account-resolution.js";
 
 /**
  * Convert a date string (`YYYY-MM-DD` or any ISO prefix) to a UTC day
@@ -33,7 +34,9 @@ export function buildBankAccountLookups(
   const dimensionToTitle = new Map<number, string>();
   const dimensionToAccountsId = new Map<number, number>();
   for (const ba of bankAccounts) {
-    const iban = (ba.iban_code ?? ba.account_no ?? "").trim().toUpperCase();
+    // One IBAN form for keys and every lookup (counterpartyIbanOf, CAMT Lane B):
+    // a stored "EE12 3456 …" must match a statement's "EE123456…".
+    const iban = normalizeIban(ba.iban_code ?? ba.account_no) ?? "";
     if (iban && ba.accounts_dimensions_id) {
       const dims = ownIbanToDimension.get(iban);
       if (dims) dims.add(ba.accounts_dimensions_id);

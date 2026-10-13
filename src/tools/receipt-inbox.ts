@@ -11,6 +11,7 @@ import { toolError } from "../tool-error.js";
 import { HttpError } from "../http-client.js";
 import { classifyMutationFailure, isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { isGranularTool } from "../tool-catalog.js";
 import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -1100,19 +1101,6 @@ export function registerReceiptInboxTools(
   // error fragment it must sandbox in a note goes through this adapter-owned wrap.
   const classificationOperations = createClassificationOperations(api, runtimeSafetyContext, wrapUntrustedOcr);
 
-  // Constituents fully covered by merged entry points: receipt_batch
-  // (scan / dry_run / create / create_and_confirm) covers scan_receipt_folder +
-  // process_receipt_batch; classify_bank_transactions (classify / dry_run_apply /
-  // execute_apply) covers classify_unmatched_transactions +
-  // apply_transaction_classifications. Handlers stay captured for internal
-  // routing; the tools enter tools/list (a fixed per-session token cost) only
-  // when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
-  const granularOnlyTools = new Set([
-    "process_receipt_batch",
-    "classify_unmatched_transactions",
-    "apply_transaction_classifications",
-  ]);
-
   async function resolveReceiptFolder(folderPath?: string, fileRef?: string): Promise<{
     path: string;
     expectedCanonicalPath?: string;
@@ -1299,7 +1287,7 @@ export function registerReceiptInboxTools(
   ): void {
     // Granular constituents stay registered (routed internally by the merged
     // entry points) but only enter tools/list when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
-    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
+    if (isGranularTool(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 
@@ -1427,7 +1415,7 @@ export function registerReceiptInboxTools(
 
   // scan_receipt_folder is covered by receipt_batch mode="scan" (which calls
   // scanReceiptFolderInternal directly), so it is granular-gated too.
-  if (exposure.exposeGranularTools) registerTool(server,
+  registerCapturedTool(
     "scan_receipt_folder",
     "Scan a folder for supported receipt files (PDF, JPG, PNG) without recursing into subfolders. Returns valid file metadata and skipped entries.",
     {

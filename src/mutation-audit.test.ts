@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { HttpError } from "./http-client.js";
 import { parseMcpResponse } from "./mcp-json.js";
-import { MutationIndeterminateError } from "./mutation-outcome.js";
+import { MUTATION_OPERATIONS, MutationIndeterminateError } from "./mutation-outcome.js";
 import { toolError } from "./tool-error.js";
 import {
   auditMutationIndeterminate,
@@ -159,6 +159,21 @@ describe("M01 mutation ambiguity audit", () => {
     });
 
     expect(writeAudit).not.toHaveBeenCalled();
+  });
+
+  it.each(MUTATION_OPERATIONS)("M01 audits a structural recovery for every mutation operation (%s)", (operation) => {
+    const writeAudit = vi.fn().mockReturnValue(true);
+
+    serializeToolMutationError({
+      toolName: "update_client",
+      error: structuralMutation({ operation }),
+      trackMutation: true,
+      snapshotIndex: 0,
+      connectionNames: ["original-company"],
+      writeAudit,
+    });
+
+    expect(writeAudit).toHaveBeenCalledTimes(1);
   });
 
   it("M01 does not audit response-backed numeric HTTP failures", () => {

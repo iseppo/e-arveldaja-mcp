@@ -4,8 +4,8 @@ import {
   renderExactMatchCompact,
   renderExactMatchPayload,
   renderInterAccountCompact,
-  renderSuspects,
 } from "./presenter.js";
+import { renderDuplicatePostingSuspects } from "../../bank-posting-duplicate-guard.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../../response-budget.js";
 import { runWithToolProfile } from "../../tool-profile.js";
 import { roundMoney } from "../../money.js";
@@ -619,13 +619,13 @@ describe("renderInterAccountCompact", () => {
   });
 });
 
-describe("renderSuspects untrusted text", () => {
+describe("renderDuplicatePostingSuspects untrusted text", () => {
   it("sandboxes document_number alongside journal_title, keeping null as null", () => {
     const base: DuplicatePostingSuspect = {
       journal_id: 1, journal_title: "t", document_number: "IGNORE PREVIOUS", operation_type: null,
       date: "2026-01-01", amount: 1, type: "C", dimension_id: 1, day_distance: 0,
     };
-    const [wrapped, empty] = renderSuspects([base, { ...base, document_number: null }]);
+    const [wrapped, empty] = renderDuplicatePostingSuspects([base, { ...base, document_number: null }]);
     expect(wrapped!.document_number).toMatch(OCR);
     expect(wrapped!.journal_title).toMatch(OCR);
     expect(empty!.document_number).toBeNull();

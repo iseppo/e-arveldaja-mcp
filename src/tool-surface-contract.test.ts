@@ -6,6 +6,7 @@ import {
   type ToolSurfaceProfileName,
   type ToolSurfaceSnapshot,
 } from "./__fixtures__/tool-surface.js";
+import { isGranularTool, TOOL_CATALOG } from "./tool-catalog.js";
 
 const fixtureUrl = (profile: ToolSurfaceProfileName): URL =>
   new URL(`../testdata/tool-surface/${profile}.json`, import.meta.url);
@@ -30,6 +31,16 @@ describe("MCP tool-surface contract", () => {
 
   it.each(TOOL_SURFACE_PROFILES)("captures a deterministic %s surface across repeated bootstraps", async (profile) => {
     expect(await captureToolSurface(profile)).toEqual(snapshots.get(profile));
+  });
+
+  it("lists every granular constituent only when granular tools are exposed", () => {
+    const granular = TOOL_CATALOG.filter((entry) => entry.granular_of).map((entry) => entry.name);
+    expect(granular.every(isGranularTool)).toBe(true);
+    expect(TOOL_CATALOG.filter((entry) => isGranularTool(entry.name)).map((entry) => entry.name)).toEqual(granular);
+    expect(isGranularTool("toString")).toBe(false);
+    const listed = (profile: ToolSurfaceProfileName) => new Set(snapshots.get(profile)!.tools.map((tool) => tool.name));
+    expect(granular.filter((name) => listed("standard").has(name))).toEqual([]);
+    expect(granular.filter((name) => !listed("full").has(name))).toEqual([]);
   });
 
   it("keeps opt-in profile budgets", () => {

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 import { logAudit } from "../audit-log.js";
-vi.mock("../bank-posting-duplicate-guard.js", () => ({
+vi.mock("../bank-posting-duplicate-guard.js", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../bank-posting-duplicate-guard.js")>(),
   checkIntakeCashDuplicates: vi.fn().mockResolvedValue({ scan_available: true, suspects: [] }),
   formatDuplicatePostingWarnings: vi.fn().mockReturnValue([]),
 }));

@@ -82,6 +82,17 @@ describe("parseOpeningBalances", () => {
     expect(acc1020?.credit).toBe(0);
   });
 
+  it("rounds a half cent up like roundMoney (1.005 → 1.01, not 1.00)", () => {
+    const halfCent = [
+      "Nr\tKuupäev\tKonto\tDeebet\tKreedit",
+      "1.\t01.01.2025\t1020 Pank\t1.005 €\t",
+      "\t\t2900 Kapital\t\t1.005 €",
+    ].join("\n");
+    const r = parseOpeningBalances(halfCent);
+    expect(r.accounts.find(a => a.code === "1020")?.debit).toBe(1.01);
+    expect(r.totals).toEqual({ debit: 1.01, credit: 1.01 });
+  });
+
   it("drops a phantom row that resolves to debit==0 and credit==0", () => {
     const withStray = [
       "Nr\tKuupäev\tKonto\tDeebet\tKreedit",

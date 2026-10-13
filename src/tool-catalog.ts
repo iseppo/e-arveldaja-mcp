@@ -106,6 +106,14 @@ export function toolMeta(name: string): ToolMeta {
   return meta;
 }
 
+/**
+ * True for a granular constituent fully covered by a merged entry point. Such
+ * tools enter tools/list only when EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1.
+ */
+export function isGranularTool(name: string): boolean {
+  return Object.hasOwn(GRANULAR, name);
+}
+
 export const TOOL_CATALOG_FINGERPRINT = createHash("sha256")
   .update(JSON.stringify(TOOL_CATALOG))
   .digest("hex");

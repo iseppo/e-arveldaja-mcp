@@ -35,7 +35,7 @@ import {
   checkIntakeCashDuplicates,
   type DuplicatePostingCandidate,
 } from "../bank-posting-duplicate-guard.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
+import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "../tools/purchase-vat-defaults.js";
 import { validateItemDimensions } from "../account-validation.js";
 import { isCompanyVatRegistered, parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
@@ -214,6 +214,20 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     const isVatReg = await isCompanyVatRegistered(this.api);
     const purchaseArticles = await getPurchaseArticlesWithVat(this.api);
     const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(booking.items));
+    // Same guard as create_purchase_invoice and create_purchase_invoice_from_pdf:
+    // a non-VAT company must not book deductible VAT fields
+    // (applyPurchaseVatDefaults would silently strip them).
+    if (!isVatReg) {
+      const details = rawItems.flatMap((item, index) => validateNonVatItem(item).map(error => `items[${index}].${error}`));
+      if (details.length > 0) {
+        return fail(
+          "manual_review_required",
+          `Non-VAT purchase invoice contains deductible VAT fields: ${details.join("; ")}. ` +
+            "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          "never",
+        );
+      }
+    }
     const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
 
     const [accounts, accountDimensions] = await Promise.all([

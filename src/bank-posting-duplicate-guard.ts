@@ -1,6 +1,7 @@
 import type { AccountDimension, BankAccount, Journal } from "./types/api.js";
 import { listAccountDimensionPostings } from "./account-postings.js";
 import { roundMoney } from "./money.js";
+import { wrapUntrustedOcr } from "./mcp-json.js";
 
 /**
  * Cross-mechanism bank-posting duplicate guard — core matching logic.
@@ -183,6 +184,19 @@ export function findDuplicatePostingsInJournals(
   }
 
   return suspects.sort((a, b) => a.day_distance - b.day_distance || a.journal_id - b.journal_id);
+}
+
+/**
+ * Suspects as MCP output: the journal title and document number are
+ * upstream free text, so both are sandbox-wrapped. The one rendering every
+ * `possible_duplicate_postings` list uses.
+ */
+export function renderDuplicatePostingSuspects(suspects: readonly DuplicatePostingSuspect[]): Array<Record<string, unknown>> {
+  return suspects.map(s => ({
+    ...s,
+    journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
+    document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
+  }));
 }
 
 /**

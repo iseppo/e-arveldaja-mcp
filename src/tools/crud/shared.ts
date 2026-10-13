@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isRecord } from "../../record-utils.js";
+import { isStrictDate } from "../../strict-date.js";
 import type { ClientsApi } from "../../api/clients.api.js";
 import type { ProductsApi } from "../../api/products.api.js";
 import type { JournalsApi } from "../../api/journals.api.js";
@@ -234,8 +235,12 @@ export function tagNotes(notes?: string): string | undefined {
   return notes ? `${notes} (${MCP_TAG})` : `(${MCP_TAG})`;
 }
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
+/** A tool-input date: canonical YYYY-MM-DD and a real calendar date (2026-02-31 is refused). */
 export const isoDateString = (description: string) =>
-  z.string().regex(isoDateRegex, "Expected YYYY-MM-DD").describe(description);
+  z.string()
+    .regex(isoDateRegex, "Expected YYYY-MM-DD")
+    .refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)")
+    .describe(description);
 
 /**
  * Server-side filter params shared by the purchase/sale invoice list tools.

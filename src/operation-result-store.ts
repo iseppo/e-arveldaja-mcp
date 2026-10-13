@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
-import { cloneAndFreezePlanData, type PlanData } from "./plan-store.js";
+import { cloneAndFreezePlanData, cloneRuntimeSafetyScope, runtimeSafetyScopesEqual, type PlanData } from "./plan-store.js";
 import { detailItemFitsSinglePage } from "./response-budget.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 
@@ -213,29 +213,6 @@ function readPublicOperationResultDetail(value: unknown): PublicResultRecord {
   return descriptors.data!.value as PublicResultRecord;
 }
 
-function cloneScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
-  return cloneAndFreezePlanData(scope) as unknown as RuntimeSafetyScope;
-}
-function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boolean {
-  return left.serverInstanceId === right.serverInstanceId &&
-    left.connectionIndex === right.connectionIndex &&
-    left.connectionGeneration === right.connectionGeneration &&
-    left.connectionName === right.connectionName &&
-    left.connectionFingerprint === right.connectionFingerprint &&
-    left.environmentKind === right.environmentKind &&
-    left.baseUrl === right.baseUrl &&
-    left.verifiedCompanyIdentity === right.verifiedCompanyIdentity &&
-    left.profile === right.profile &&
-    left.catalogFingerprint === right.catalogFingerprint &&
-    left.features.enableLightyear === right.features.enableLightyear &&
-    left.features.exposeGranularTools === right.features.exposeGranularTools &&
-    left.features.exposeSetupTools === right.features.exposeSetupTools &&
-    left.features.enableTaxTools === right.features.enableTaxTools &&
-    left.features.enableReferenceAdmin === right.features.enableReferenceAdmin &&
-    left.features.enableAnnualReport === right.features.enableAnnualReport &&
-    left.features.enableSales === right.features.enableSales &&
-    left.features.enableProducts === right.features.enableProducts;
-}
 function encodeHandle(bytes: Uint8Array): string {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength !== HANDLE_BYTES) throw new OperationResultStoreError("operation_result_handle_collision");
   const handle = Buffer.from(bytes).toString("base64url");
@@ -312,7 +289,7 @@ export class OperationResultStore {
     this.#purge(now);
     if (this.#active.size >= this.#maxActive) throw new OperationResultStoreError("operation_result_capacity_exceeded");
     let scope: RuntimeSafetyScope;
-    try { scope = cloneScope(this.#getActiveScope()); } catch { invalid(); }
+    try { scope = cloneRuntimeSafetyScope(this.#getActiveScope()); } catch { invalid(); }
     const stored = Object.freeze({ operation: safeInput.operation, status: safeInput.status, items, planHandle: safeInput.plan_handle, scope, issuedAt: now, expiresAt });
     let releasePlanProof: () => void;
     try { releasePlanProof = this.#retainConsumedPlan(safeInput.plan_handle, safeInput.operation); } catch { invalid(); }
@@ -340,8 +317,8 @@ export class OperationResultStore {
     this.#purge(now);
     if (!stored || now >= stored.expiresAt) throw new OperationResultStoreError(stored || this.#tombstones.has(handle) ? "operation_result_expired" : "operation_result_handle_invalid");
     let current: RuntimeSafetyScope;
-    try { current = cloneScope(this.#getActiveScope()); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
-    if (!scopesEqual(stored.scope, current)) throw new OperationResultStoreError("operation_result_scope_mismatch");
+    try { current = cloneRuntimeSafetyScope(this.#getActiveScope()); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
+    if (!runtimeSafetyScopesEqual(stored.scope, current)) throw new OperationResultStoreError("operation_result_scope_mismatch");
     try { this.#assertConsumedPlan(stored.planHandle, stored.operation); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
     return stored;
   }

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
-import { getBaseUrlForServer, type NamedConfig, type ToolExposureConfig } from "./config.js";
+import { getBaseUrlForServer, TOOL_EXPOSURE_KEYS, type NamedConfig, type ToolExposureConfig } from "./config.js";
 import { buildConnectionFingerprint } from "./connection-fingerprint.js";
 import type { ConnectionSnapshot } from "./connection-safety.js";
 import { ExecutionPlanStore, type ExecutionPlanStoreOptions } from "./plan-store.js";
@@ -82,16 +82,7 @@ export function assertRuntimeSafetyContext(value: unknown): asserts value is Run
 }
 
 function freezeFeatures(features: ToolExposureConfig): Readonly<ToolExposureConfig> {
-  const expectedKeys: ReadonlyArray<keyof ToolExposureConfig> = [
-    "enableLightyear",
-    "exposeGranularTools",
-    "exposeSetupTools",
-    "enableTaxTools",
-    "enableReferenceAdmin",
-    "enableAnnualReport",
-    "enableSales",
-    "enableProducts",
-  ];
+  const expectedKeys: ReadonlyArray<keyof ToolExposureConfig> = TOOL_EXPOSURE_KEYS;
   if (utilTypes.isProxy(features)) {
     throw new Error("Runtime safety context requires a complete tool exposure configuration.");
   }

@@ -242,6 +242,23 @@ export interface ToolExposureConfig {
   enableProducts: boolean;
 }
 
+/** Every ToolExposureConfig flag, in declaration order. */
+export const TOOL_EXPOSURE_KEYS = [
+  "enableLightyear",
+  "exposeGranularTools",
+  "exposeSetupTools",
+  "enableTaxTools",
+  "enableReferenceAdmin",
+  "enableAnnualReport",
+  "enableSales",
+  "enableProducts",
+] as const satisfies ReadonlyArray<keyof ToolExposureConfig>;
+
+// Compile-time exhaustiveness: a new ToolExposureConfig flag must be listed above.
+type MissingToolExposureKey = Exclude<keyof ToolExposureConfig, typeof TOOL_EXPOSURE_KEYS[number]>;
+const _toolExposureKeysExhaustive: [MissingToolExposureKey] extends [never] ? true : never = true;
+void _toolExposureKeysExhaustive;
+
 function envFlagEnabled(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }

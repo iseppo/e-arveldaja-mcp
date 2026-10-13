@@ -3,6 +3,7 @@ import type { BookingGuard, InterAccountQuery, InterAccountResolution } from "..
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../tools/inter-account-utils.js";
+import { normalizeIban } from "../../resolution/bank-account-resolution.js";
 import { REF_NUMBER_MAX_LENGTH } from "../../ref-number.js";
 import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.js";
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
@@ -31,7 +32,7 @@ import {
  * marker whose `sig` fails verification yields "" — never trusted evidence.
  */
 export function counterpartyIbanOf(tx: Transaction): string {
-  return (storedBankAccountNo(tx) ?? "").trim().toUpperCase();
+  return normalizeIban(storedBankAccountNo(tx)) ?? "";
 }
 
 /**

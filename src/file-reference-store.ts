@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
-import { cloneAndFreezePlanData } from "./plan-store.js";
+import { cloneRuntimeSafetyScope, runtimeSafetyScopesEqual } from "./plan-store.js";
 
 export const FILE_REFERENCE_TTL_MS = 600_000;
 export const MAX_ACTIVE_FILE_REFERENCES = 128;
@@ -80,35 +80,6 @@ interface StoredFileReference extends IssueFileReferenceInput {
   readonly expiresAt: number;
 }
 
-function cloneScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
-  const cloned = cloneAndFreezePlanData(scope);
-  if (cloned === null || Array.isArray(cloned) || typeof cloned !== "object") {
-    throw new FileReferenceStoreError("file_reference_scope_mismatch");
-  }
-  return cloned as unknown as RuntimeSafetyScope;
-}
-
-function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boolean {
-  return left.serverInstanceId === right.serverInstanceId &&
-    left.connectionIndex === right.connectionIndex &&
-    left.connectionGeneration === right.connectionGeneration &&
-    left.connectionName === right.connectionName &&
-    left.connectionFingerprint === right.connectionFingerprint &&
-    left.environmentKind === right.environmentKind &&
-    left.baseUrl === right.baseUrl &&
-    left.verifiedCompanyIdentity === right.verifiedCompanyIdentity &&
-    left.profile === right.profile &&
-    left.catalogFingerprint === right.catalogFingerprint &&
-    left.features.enableLightyear === right.features.enableLightyear &&
-    left.features.exposeGranularTools === right.features.exposeGranularTools &&
-    left.features.exposeSetupTools === right.features.exposeSetupTools &&
-    left.features.enableTaxTools === right.features.enableTaxTools &&
-    left.features.enableReferenceAdmin === right.features.enableReferenceAdmin &&
-    left.features.enableAnnualReport === right.features.enableAnnualReport &&
-    left.features.enableSales === right.features.enableSales &&
-    left.features.enableProducts === right.features.enableProducts;
-}
-
 function validateOperation(operation: string): void {
   if (typeof operation !== "string" || !OPERATION_PATTERN.test(operation)) {
     throw new FileReferenceStoreError("file_reference_data_invalid");
@@ -164,7 +135,7 @@ export class FileReferenceStore {
 
   #activeScope(): RuntimeSafetyScope {
     try {
-      return cloneScope(this.#getActiveScope());
+      return cloneRuntimeSafetyScope(this.#getActiveScope());
     } catch {
       throw new FileReferenceStoreError("file_reference_scope_mismatch");
     }
@@ -188,7 +159,7 @@ export class FileReferenceStore {
     const scope = this.#activeScope();
     for (const [reference, entry] of this.#active) {
       if (entry.canonicalPath === input.canonicalPath && entry.kind === input.kind &&
-        entry.operation === input.operation && scopesEqual(entry.scope, scope)) {
+        entry.operation === input.operation && runtimeSafetyScopesEqual(entry.scope, scope)) {
         return reference;
       }
     }
@@ -232,7 +203,7 @@ export class FileReferenceStore {
     if (entry.kind !== expected.kind) {
       throw new FileReferenceStoreError("file_reference_kind_mismatch");
     }
-    if (!scopesEqual(entry.scope, this.#activeScope())) {
+    if (!runtimeSafetyScopesEqual(entry.scope, this.#activeScope())) {
       throw new FileReferenceStoreError("file_reference_scope_mismatch");
     }
     return entry.canonicalPath;

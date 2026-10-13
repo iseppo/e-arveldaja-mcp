@@ -15,7 +15,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { randomUUID } from "crypto";
 import { join } from "path";
 import { z } from "zod";
 import {
@@ -23,6 +22,7 @@ import {
   sanitizeAuditLogName,
 } from "./audit-log-labels.js";
 import { withOwnedFileLockSync, type LockOptions } from "./file-lock.js";
+import { writePrivateFile } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Shared audit filter vocabularies (single source of truth)
@@ -346,14 +346,9 @@ function mergeAuditLogFiles(sourcePath: string, targetPath: string): void {
     })
     .map((entry) => entry.section);
 
-  // Atomically replace the target: write a private temp file, then rename over
-  // the target so a reader never sees a half-written merge.
-  const temporary = `${targetPath}.tmp-${process.pid}`;
-  writeFileSync(temporary, renderMergedSections(mergedSections), {
-    encoding: "utf-8",
-    mode: PRIVATE_FILE_MODE,
-  });
-  renameSync(temporary, targetPath);
+  // Atomically replace the target through an unpredictable O_EXCL temp file,
+  // so a reader never sees a half-written merge.
+  writePrivateFile(targetPath, renderMergedSections(mergedSections));
   enforcePrivateFileMode(targetPath);
   unlinkSync(sourcePath);
 }
@@ -1019,19 +1014,7 @@ export function clearAuditLog(): { cleared: boolean; entries_removed: number } {
       // Write the tombstone to a private O_EXCL temp file and rename it over the
       // log: a failed write leaves the original log intact instead of a
       // truncated one while reporting `cleared: false`.
-      const tempPath = `${filePath}.tmp-${randomUUID()}`;
-      try {
-        writeFileSync(tempPath, renderEntry(tombstone) + ENTRY_SEPARATOR, {
-          encoding: "utf-8",
-          mode: PRIVATE_FILE_MODE,
-          flag: "wx",
-        });
-        enforcePrivateFileMode(tempPath);
-        renameSync(tempPath, filePath);
-      } catch (error) {
-        try { unlinkSync(tempPath); } catch { /* best-effort */ }
-        throw error;
-      }
+      writePrivateFile(filePath, renderEntry(tombstone) + ENTRY_SEPARATOR);
       return { cleared: true, entries_removed: entriesRemoved };
     });
   } catch (error) {

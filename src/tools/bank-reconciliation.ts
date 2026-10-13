@@ -3,6 +3,7 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson } from "../mcp-json.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { isGranularTool } from "../tool-catalog.js";
 import type { ApiContext } from "./crud-tools.js";
 import { readOnly, batch } from "../annotations.js";
 import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../workflow-response.js";
@@ -115,8 +116,6 @@ export function registerBankReconciliationTools(
   // tools/list (a fixed per-session token cost) only when
   // EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1. reconcile_inter_account_transfers is
   // never gated: the merged tool has no inter-account execute mode.
-  const granularOnlyTools = new Set(["reconcile_transactions", "auto_confirm_exact_matches"]);
-
   function registerReconTool<Args extends z.ZodRawShape>(
     name: string,
     description: string,
@@ -124,7 +123,7 @@ export function registerBankReconciliationTools(
     annotations: Parameters<typeof registerTool>[4],
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
-    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
+    if (isGranularTool(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 

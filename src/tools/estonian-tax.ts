@@ -48,6 +48,7 @@ import {
   getOwnerExpenseVatDeductionRatioForAccount,
 } from "../accounting-rules.js";
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
+import { todayInTallinn } from "../local-date.js";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
   const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(`${accountName ?? ""} ${description}`);
@@ -1324,7 +1325,8 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       incidental_excluded_turnover,
       manual_bucket_source,
     }) => {
-      const checkYear = year ?? new Date().getUTCFullYear();
+      // Estonian calendar year: at 00:30 Tallinn on 1 January UTC is still the old year.
+      const checkYear = year ?? Number(todayInTallinn().slice(0, 4));
       const from = `${checkYear}-01-01`;
       const to = `${checkYear}-12-31`;
       const [vatRegistered, saleInvoices] = await Promise.all([

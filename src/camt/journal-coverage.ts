@@ -235,7 +235,7 @@ export function classifyCamtJournalCoverage(
   }
 
   // b) Lane B: an own transfer to/from exactly one other own bank dimension.
-  const iban = entry.counterparty_iban?.replace(/\s+/g, "").toUpperCase();
+  const iban = normalizeIban(entry.counterparty_iban);
   const otherDimensions = [...(iban ? context.ownIbanToDimension.get(iban) ?? [] : [])]
     .filter((dimension) => dimension !== context.dimensionId);
   if (otherDimensions.length === 1) {

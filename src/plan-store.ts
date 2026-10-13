@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
+import { TOOL_EXPOSURE_KEYS } from "./config.js";
 
 export const EXECUTION_PLAN_SCHEMA = "execution_plan_v1" as const;
 export const EXECUTION_PLAN_TTL_MS = 600_000;
@@ -197,12 +198,19 @@ function validateDomain(domain: string): void {
   if (!DOMAIN_PATTERN.test(domain)) failData();
 }
 
-function cloneScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
-  const cloned = cloneAndFreezePlanData(scope) as PlanRecord;
+/**
+ * Deep-clone and freeze a runtime safety scope for storage next to a plan,
+ * file reference, operation result or workflow state. Throws on anything
+ * that is not a plain scope object; every caller maps that to its own error.
+ */
+export function cloneRuntimeSafetyScope(scope: RuntimeSafetyScope): RuntimeSafetyScope {
+  const cloned = cloneAndFreezePlanData(scope);
+  if (cloned === null || Array.isArray(cloned) || typeof cloned !== "object") failData();
   return cloned as unknown as RuntimeSafetyScope;
 }
 
-function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boolean {
+/** True when two scopes name the same server, connection, catalog and feature set. */
+export function runtimeSafetyScopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boolean {
   return left.serverInstanceId === right.serverInstanceId &&
     left.connectionIndex === right.connectionIndex &&
     left.connectionGeneration === right.connectionGeneration &&
@@ -213,14 +221,7 @@ function scopesEqual(left: RuntimeSafetyScope, right: RuntimeSafetyScope): boole
     left.verifiedCompanyIdentity === right.verifiedCompanyIdentity &&
     left.profile === right.profile &&
     left.catalogFingerprint === right.catalogFingerprint &&
-    left.features.enableLightyear === right.features.enableLightyear &&
-    left.features.exposeGranularTools === right.features.exposeGranularTools &&
-    left.features.exposeSetupTools === right.features.exposeSetupTools &&
-    left.features.enableTaxTools === right.features.enableTaxTools &&
-    left.features.enableReferenceAdmin === right.features.enableReferenceAdmin &&
-    left.features.enableAnnualReport === right.features.enableAnnualReport &&
-    left.features.enableSales === right.features.enableSales &&
-    left.features.enableProducts === right.features.enableProducts;
+    TOOL_EXPOSURE_KEYS.every(key => left.features[key] === right.features[key]);
 }
 
 function encodeHandle(bytes: Uint8Array): string {
@@ -424,7 +425,7 @@ export class ExecutionPlanStore {
 
   #readScopeForIssue(): RuntimeSafetyScope {
     try {
-      return cloneScope(this.#getActiveScope());
+      return cloneRuntimeSafetyScope(this.#getActiveScope());
     } catch {
       throw new PlanStoreError("plan_data_invalid");
     }
@@ -432,7 +433,7 @@ export class ExecutionPlanStore {
 
   #scopeMatches(expected: RuntimeSafetyScope): boolean {
     try {
-      return scopesEqual(expected, cloneScope(this.#getActiveScope()));
+      return runtimeSafetyScopesEqual(expected, cloneRuntimeSafetyScope(this.#getActiveScope()));
     } catch {
       return false;
     }

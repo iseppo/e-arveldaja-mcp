@@ -41,6 +41,7 @@ import {
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
   type DuplicatePostingSuspect,
+  renderDuplicatePostingSuspects,
 } from "../../bank-posting-duplicate-guard.js";
 import type { Transaction } from "../../types/api.js";
 import type { ApiContext } from "./shared.js";
@@ -427,11 +428,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         "the transaction was created WITHOUT that protection.";
     }
     if (duplicateScan && candidate && duplicateScan.suspects.length > 0) {
-      extra.possible_duplicate_postings = duplicateScan.suspects.map(s => ({
-        ...s,
-        journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
-        document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
-      }));
+      extra.possible_duplicate_postings = renderDuplicatePostingSuspects(duplicateScan.suspects);
     }
 
     return toolResponse({
@@ -565,11 +562,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           );
         }
         if (suspects.length > 0) {
-          interAccountExtra.possible_duplicate_postings = suspects.map(s => ({
-            ...s,
-            journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
-            document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
-          }));
+          interAccountExtra.possible_duplicate_postings = renderDuplicatePostingSuspects(suspects);
         }
       }
     }

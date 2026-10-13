@@ -92,6 +92,16 @@ describe("buildBankAccountLookups", () => {
     expect(result.ownIbanToDimension.has("EE000111")).toBe(true);
   });
 
+  it("keys a space-grouped IBAN in its compact form", () => {
+    const accounts: BankAccount[] = [
+      makeBankAccount({ account_name_est: "LHV", account_no: "x", iban_code: "ee12 3456 7890 1234 5678", accounts_dimensions_id: 41 }),
+    ];
+    const result = buildBankAccountLookups(accounts, []);
+
+    expect(result.ownIbanToDimension.get("EE123456789012345678")).toEqual(new Set([41]));
+    expect(result.dimensionToIban.get(41)).toBe("EE123456789012345678");
+  });
+
   it("skips bank accounts with no accounts_dimensions_id", () => {
     const accounts: BankAccount[] = [
       makeBankAccount({ account_name_est: "NoId", account_no: "EE999" }),

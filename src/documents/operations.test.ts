@@ -289,6 +289,26 @@ describe("AccountingDocumentOperations.create", () => {
     expect(typeof outcome.value.confirmPlan?.planHandle).toBe("string");
   });
 
+  it("refuses deductible VAT fields for a non-VAT company at prepare, as the other purchase-invoice paths do", async () => {
+    const { path, api, ops } = createSetup();
+    api.readonly.getVatInfo = vi.fn().mockResolvedValue({ vat_number: null });
+    const outcome = await ops.prepare({
+      source: { file_path: path },
+      booking: { ...bookingFields(), items: [{ ...bookingFields().items[0], vat_rate_dropdown: "24", vat_accounts_id: 1510 }] },
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("manual_review_required");
+    expect(outcome.error.message).toContain("items[0].vat_accounts_id must be absent");
+    expectNoWrites(api);
+  });
+
+  it("accepts a non-VAT company's item without VAT fields", async () => {
+    const { path, api, ops } = createSetup();
+    api.readonly.getVatInfo = vi.fn().mockResolvedValue({ vat_number: null });
+    await prepareBookingHandle(ops, path);
+  });
+
   it("blocks prepare (no plan handle) when the reviewed supplier+number already exists as a live invoice (finding 7)", async () => {
     const { path, api, ops } = createSetup();
     api.purchaseInvoices.listAll.mockResolvedValue([

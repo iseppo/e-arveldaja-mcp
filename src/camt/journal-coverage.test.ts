@@ -102,6 +102,11 @@ describe("classifyCamtJournalCoverage", () => {
     expect(classify([wiseTransfer()], wiseEntry())).toEqual({ kind: "inter_account", journal_ids: [701] });
   });
 
+  it("6b: Lane B matches a statement IBAN printed with grouping spaces", () => {
+    expect(classify([wiseTransfer()], wiseEntry({ counterparty_iban: "be08 9057 6722 2113" })))
+      .toEqual({ kind: "inter_account", journal_ids: [701] });
+  });
+
   it("7: Lane B with the entry dated one day later → skip", () => {
     expect(classify([wiseTransfer()], wiseEntry({ date: "2026-09-25" }))).toEqual({ kind: "inter_account", journal_ids: [701] });
   });

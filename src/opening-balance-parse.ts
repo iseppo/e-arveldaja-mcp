@@ -1,3 +1,5 @@
+import { roundMoney } from "./money.js";
+
 export interface OpeningBalanceAccount { code: string; name: string; debit: number; credit: number; dimension: string[]; }
 export interface ParsedOpeningBalances {
   openingDate: string;
@@ -131,8 +133,8 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
 
   const accounts = [...byKey.values()].map(a => ({
     ...a,
-    debit: Math.round(a.debit * 100) / 100,
-    credit: Math.round(a.credit * 100) / 100,
+    debit: roundMoney(a.debit),
+    credit: roundMoney(a.credit),
   }));
   if (accounts.length === 0) {
     throw new OpeningBalanceParseError(
@@ -144,8 +146,8 @@ export function parseOpeningBalances(rawText: string): ParsedOpeningBalances {
     (acc, a) => ({ debit: acc.debit + a.debit, credit: acc.credit + a.credit }),
     { debit: 0, credit: 0 },
   );
-  totals.debit = Math.round(totals.debit * 100) / 100;
-  totals.credit = Math.round(totals.credit * 100) / 100;
+  totals.debit = roundMoney(totals.debit);
+  totals.credit = roundMoney(totals.credit);
 
   if (Math.abs(totals.debit - totals.credit) > 0.01) {
     throw new OpeningBalanceParseError(

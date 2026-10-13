@@ -15,6 +15,7 @@ import { validatePostingDimensions } from "../../account-validation.js";
 import {
   findDuplicateBankPostings,
   formatDuplicatePostingWarnings,
+  renderDuplicatePostingSuspects,
   resolveBankDimensionsSafe,
   DUPLICATE_SCAN_WINDOW_DAYS,
   type BankDimensionInfo,
@@ -332,7 +333,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           accounts_dimensions_id: ps.dim.dimensionId,
           amount: ps.candidate.amount,
           direction: ps.candidate.direction,
-          suspects: newSuspects.map(s => ({ ...s, journal_title: wrapUntrustedOcr(s.journal_title) ?? "" })),
+          suspects: renderDuplicatePostingSuspects(newSuspects),
         });
       }
     }

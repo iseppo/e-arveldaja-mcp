@@ -2,10 +2,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import type { OperationFailure } from "../operation-outcome.js";
-import { isStrictDate } from "../strict-date.js";
+import { isoDateString } from "./crud/shared.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { toMcpJson } from "../mcp-json.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import { isGranularTool } from "../tool-catalog.js";
 import { type ApiContext, coerceId } from "./crud-tools.js";
 import type { FileInputSource } from "../file-input-snapshot.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -30,11 +31,6 @@ import {
 // pure ../camt/* modules.
 export { extractCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 export type { ParsedCamtEntry, CamtParseResult, CamtStatementMetadata } from "../camt/types.js";
-
-const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
-
-const isoDateString = (description: string) =>
-  z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").describe(description);
 
 interface AdapterResult {
   payload: Record<string, unknown>;
@@ -99,8 +95,6 @@ export function registerCamtImportTools(
   // Their handlers call the typed operations + presenter directly — there is no
   // captured-handler registry, no serialized-response parsing, and
   // process_camt053 dispatches by mode without invoking a captured handler.
-  const granularOnlyTools = new Set(["parse_camt053", "import_camt053"]);
-
   function maybeRegisterTool<Args extends z.ZodRawShape>(
     name: string,
     description: string,
@@ -108,7 +102,7 @@ export function registerCamtImportTools(
     annotations: ToolAnnotations,
     cb: (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown,
   ): void {
-    if (granularOnlyTools.has(name) && !exposure.exposeGranularTools) return;
+    if (isGranularTool(name) && !exposure.exposeGranularTools) return;
     registerTool(server, name, description, paramsSchema, annotations, cb);
   }
 

@@ -16,7 +16,8 @@ import {
   validateUpdateFields,
 } from "./crud-tools.js";
 import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { isoDateString } from "./crud/shared.js";
+import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
 import { LinkedInvoiceClientMismatchError } from "../api/transactions.api.js";
@@ -319,6 +320,18 @@ describe("M21 create_purchase_invoice non-VAT boundary", () => {
       expect.objectContaining(deductibleItem),
     ]);
     expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, true);
+  });
+});
+
+describe("isoDateString", () => {
+  const schema = isoDateString("date");
+
+  it("accepts a real canonical calendar date", () => {
+    expect(schema.safeParse("2024-02-29").success).toBe(true);
+  });
+
+  it.each(["2026-02-31", "2026-13-01", "2026-00-10", "2025-02-29", "2026-1-01"])("refuses %s", (value) => {
+    expect(schema.safeParse(value).success).toBe(false);
   });
 });
 
@@ -2787,6 +2800,19 @@ describe("create_journal duplicate-posting guard", () => {
     expect(payload.possible_duplicate_postings?.some(
       p => p.suspects.some(s => s.journal_id === DUP_JOURNAL_ID),
     )).toBe(true);
+  });
+
+  it("sandbox-wraps the suspect journal's document number, not only its title", async () => {
+    const { handler } = setupCreateJournal({ journals: [duplicateJournal] });
+
+    const result = await handler(bankJournalParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as {
+      possible_duplicate_postings?: Array<{ suspects: Array<{ journal_title: string; document_number: string }> }>;
+    };
+
+    const suspect = payload.possible_duplicate_postings![0]!.suspects[0]!;
+    expect(suspect.document_number).toContain(UNTRUSTED_OCR_START_PREFIX);
+    expect(suspect.journal_title).toContain(UNTRUSTED_OCR_START_PREFIX);
   });
 
   it("non-bank journal: guard is not consulted at all (journals lister not called)", async () => {

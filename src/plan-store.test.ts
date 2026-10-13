@@ -1,12 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { describe, expect, it } from "vitest";
-import type { ToolExposureConfig } from "./config.js";
+import { TOOL_EXPOSURE_KEYS, type ToolExposureConfig } from "./config.js";
 import type { ConnectionSnapshot } from "./connection-safety.js";
 import {
   EXECUTION_PLAN_TTL_MS,
   ExecutionPlanStore,
   MAX_ACTIVE_EXECUTION_PLANS,
   PlanStoreError,
+  cloneRuntimeSafetyScope,
+  runtimeSafetyScopesEqual,
   type ExecutionPlanInput,
 } from "./plan-store.js";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
@@ -478,5 +480,28 @@ describe("ExecutionPlanStore", () => {
   it("fails closed on an invalid injected clock", () => {
     const runtime = createTestRuntimeSafetyContext({ now: Number.NaN });
     expectCode(() => runtime.planStore.issue("test", input()), "plan_data_invalid");
+  });
+});
+
+describe("shared runtime safety scope helpers", () => {
+  it("lists every tool exposure flag the runtime scope carries", () => {
+    const features = createTestRuntimeSafetyContext().getActiveScope().features;
+    expect([...TOOL_EXPOSURE_KEYS].sort()).toEqual(Object.keys(features).sort());
+  });
+
+  it.each(TOOL_EXPOSURE_KEYS)("treats %s drift as a different scope", (feature) => {
+    const scope = cloneRuntimeSafetyScope(createTestRuntimeSafetyContext().getActiveScope());
+    const drifted = { ...scope, features: { ...scope.features, [feature]: !scope.features[feature] } };
+    expect(runtimeSafetyScopesEqual(scope, cloneRuntimeSafetyScope(scope))).toBe(true);
+    expect(runtimeSafetyScopesEqual(scope, drifted)).toBe(false);
+  });
+
+  it("returns a frozen copy and refuses a non-object scope", () => {
+    const original = createTestRuntimeSafetyContext().getActiveScope();
+    const cloned = cloneRuntimeSafetyScope(original);
+    expect(cloned).toEqual(original);
+    expect(Object.isFrozen(cloned.features)).toBe(true);
+    expect(() => cloneRuntimeSafetyScope(null as unknown as RuntimeSafetyScope)).toThrow(PlanStoreError);
+    expect(() => cloneRuntimeSafetyScope([] as unknown as RuntimeSafetyScope)).toThrow(PlanStoreError);
   });
 });

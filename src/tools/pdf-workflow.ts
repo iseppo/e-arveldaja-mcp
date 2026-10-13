@@ -40,6 +40,7 @@ import {
   checkIntakeCashDuplicates,
   formatDuplicatePostingWarnings,
   type DuplicatePostingCandidate,
+  renderDuplicatePostingSuspects,
 } from "../bank-posting-duplicate-guard.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -1192,10 +1193,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
                   warnings: duplicateWarnings,
                   ...(duplicateScan.suspects.length > 0
                     ? {
-                        possible_duplicate_postings: duplicateScan.suspects.map(s => ({
-                          ...s,
-                          journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
-                        })),
+                        possible_duplicate_postings: renderDuplicatePostingSuspects(duplicateScan.suspects),
                       }
                     : {}),
                 }
