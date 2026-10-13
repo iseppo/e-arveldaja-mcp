@@ -1,5 +1,6 @@
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { PurchaseInvoice } from "../types/api.js";
+import type { ImportRejectedField } from "../camt/preflight.js";
 
 // --- Parsed Wise rows --------------------------------------------------------
 
@@ -86,12 +87,8 @@ export interface WiseTransferDecision {
 
 // --- M05: strict Wise row validation -----------------------------------------
 
-export interface ImportRejectedField {
-  source_row_id: string;
-  field: string;
-  value: string;
-  reason: string;
-}
+// One rejected-field shape for both importers (the CAMT definition).
+export type { ImportRejectedField } from "../camt/preflight.js";
 
 export type WisePreflightResult =
   | { ok: true; source: "wise"; rows: WiseRow[] }

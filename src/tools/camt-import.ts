@@ -14,16 +14,13 @@ import { readOnly, batch } from "../annotations.js";
 import { remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { CamtPreflightRejectedError } from "../camt/executor.js";
-import { CAMT_PLAN_DOMAIN } from "./camt-plan.js";
 import { currentToolProfile } from "../tool-profile.js";
-import type { OperationResultStatus } from "../operation-result-store.js";
 import {
-  buildCamtResultDetailItems,
   importPreflightFailurePayload,
+  issueCamtResultHandle,
   renderCamtImportCompact,
   renderCamtImportPayload,
   renderCamtParsePayload,
-  type CamtImportExecution,
 } from "../camt/presenter.js";
 
 // Re-exported for the identity-only consumers that still import through this
@@ -65,28 +62,6 @@ export function registerCamtImportTools(
   const useCompactCamt = (): boolean => {
     const profile = currentToolProfile();
     return profile === "guided" || profile === "guided-sales";
-  };
-
-  // Execute-only: mint an operation-result handle bound to the just-consumed
-  // CAMT plan so the compact response can reference get_operation_result_page
-  // for the full per-row detail. Fail-safe — the import already mutated, so a
-  // store failure degrades to a compact response without the handle.
-  const issueCamtResultHandle = (execution: CamtImportExecution, planHandle: string | undefined): string | undefined => {
-    if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
-    try {
-      const stopCategory = (execution.executionReport?.stop_reason as { category?: unknown } | undefined)?.category;
-      const status: OperationResultStatus = execution.errorCount === 0
-        ? "completed"
-        : stopCategory === "mutation_indeterminate" ? "indeterminate" : "partial";
-      return runtimeSafetyContext.operationResultStore.issue({
-        operation: CAMT_PLAN_DOMAIN,
-        status,
-        items: buildCamtResultDetailItems(execution),
-        plan_handle: planHandle,
-      });
-    } catch {
-      return undefined;
-    }
   };
 
   // parse_camt053 / import_camt053 are fully covered by the merged
@@ -160,7 +135,7 @@ export function registerCamtImportTools(
       });
       if (!outcome.ok) return { payload: planErrorPayload(outcome.error), isError: true };
       if (useCompactCamt()) {
-        const operationHandle = issueCamtResultHandle(outcome.value, plan_handle);
+        const operationHandle = issueCamtResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, plan_handle);
         return {
           payload: renderCamtImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }),
           isError: false,

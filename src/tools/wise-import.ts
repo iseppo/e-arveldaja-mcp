@@ -9,17 +9,17 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import type { FileInputSource } from "../file-input-snapshot.js";
 import type { OperationOutcome } from "../operation-outcome.js";
 import { currentToolProfile } from "../tool-profile.js";
-import type { OperationResultStatus } from "../operation-result-store.js";
-import { ISO_DATE_REGEX, isNonErrorWiseSkipReason } from "../wise/preflight.js";
-import { SHA256_HEX, WISE_PLAN_DOMAIN } from "../wise/projection.js";
-import { WiseOperationFailedError, type WiseFailure, type WiseRunInput } from "../wise/executor.js";
+import { ISO_DATE_REGEX } from "../wise/preflight.js";
+import { SHA256_HEX } from "../wise/projection.js";
+import { WiseOperationFailedError, type WiseRunInput } from "../wise/executor.js";
 import { createWiseOperations } from "../wise/operations.js";
 import {
-  buildWiseResultDetailItems,
-  digestMismatch,
+  issueWiseResultHandle,
   renderWiseFailure,
   renderWiseImportCompact,
   renderWiseImportFull,
+  simpleWiseFailureFromCode,
+  wiseDigestInputRejection,
   type WiseImportRenderData,
 } from "../wise/presenter.js";
 
@@ -53,55 +53,21 @@ export function registerWiseImportTools(
     return profile === "guided" || profile === "guided-sales";
   };
 
-  // Execute-only: mint an operation-result handle bound to the just-consumed
-  // Wise plan so the compact response can reference get_operation_result_page
-  // for the full per-row detail. Fail-safe — the import already mutated, so a
-  // store failure degrades to a compact response without the handle.
-  const issueWiseResultHandle = (data: WiseImportRenderData, planHandle: string | undefined): string | undefined => {
-    if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
-    try {
-      const errorCount = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
-      const status: OperationResultStatus = errorCount === 0 ? "completed" : "partial";
-      return runtimeSafetyContext.operationResultStore.issue({
-        operation: WISE_PLAN_DOMAIN,
-        status,
-        items: buildWiseResultDetailItems(data),
-        plan_handle: planHandle,
-      });
-    } catch {
-      return undefined;
-    }
-  };
-
   const compactResponse = (payload: { summary: unknown }) => ({
     content: [{ type: "text" as const, text: toMcpJson(payload) }],
   });
-
-  // Reproject a simple-kind OperationOutcome error (which carries no data beyond
-  // its discriminant) back into its WiseFailure so renderWiseFailure emits the
-  // exact same envelope as before. The rich kinds never travel this path — they
-  // are thrown as WiseOperationFailedError and rendered in the handler's catch.
-  const simpleFailureFromCode = (code: string): WiseFailure => {
-    switch (code) {
-      case "plan_handle_required": return { kind: "plan_handle_required" };
-      case "digest_mismatch": return { kind: "digest_mismatch" };
-      case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
-      case "wise_client_not_found": return { kind: "wise_client_not_found" };
-      default: throw new Error(`Unexpected Wise operation error code: ${code}`);
-    }
-  };
 
   function render(
     outcome: OperationOutcome<WiseImportRenderData>,
     executeRequested: boolean,
     planHandle: string | undefined,
   ) {
-    if (!outcome.ok) return renderWiseFailure(simpleFailureFromCode(outcome.error.code));
+    if (!outcome.ok) return renderWiseFailure(simpleWiseFailureFromCode(outcome.error.code));
     if (!useCompactWise()) return renderWiseImportFull(outcome.value);
     if (!executeRequested) {
       return compactResponse(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
     }
-    const operationHandle = issueWiseResultHandle(outcome.value, planHandle);
+    const operationHandle = issueWiseResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, planHandle);
     return compactResponse(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
   }
 
@@ -152,14 +118,8 @@ export function registerWiseImportTools(
     }) => {
       // Digest input-format gate, checked before any file read, ledger read,
       // cache flush, plan consume, or mutation.
-      if (approved_command_digest !== undefined && (
-        typeof approved_command_digest !== "string" || !SHA256_HEX.test(approved_command_digest)
-      )) {
-        return digestMismatch();
-      }
-      if (execute === true && !SHA256_HEX.test(approved_command_digest ?? "")) {
-        return digestMismatch();
-      }
+      const digestRejection = wiseDigestInputRejection(approved_command_digest, execute === true);
+      if (digestRejection) return digestRejection;
 
       const source: FileInputSource = {
         ...(file_path !== undefined ? { file_path } : {}),

@@ -2457,6 +2457,76 @@ function readStoredFingerprint(privatePayload: PlanData): string | undefined {
   return typeof fingerprint === "string" ? fingerprint : undefined;
 }
 
+type LightyearCreatedByIndex = Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
+
+/**
+ * EXECUTE skeleton shared by book_lightyear_trades and book_lightyear_distributions:
+ * drive each reviewed journal creation through the plan tracker. `prepare`
+ * re-reads the ledger and drifts when the `LY:{reference}` journal appeared
+ * since review; `mutate` creates it once under that document number (a 4xx
+ * rejection is a definitive failure, anything ambiguous rethrows as
+ * indeterminate), audits only a real create, and records each row's outcome by
+ * command index. Ids, category, audit tool name and audit details stay
+ * per-path.
+ */
+async function executeLightyearJournalCommands<C extends {
+  reference: string;
+  date: string;
+  title: string;
+  postings: LyPosting[];
+  auditSummary: string;
+}>(params: {
+  api: ApiContext;
+  guard: BookingGuard;
+  commands: readonly C[];
+  commandId: (index: number) => string;
+  category: string;
+  tool: "book_lightyear_trades" | "book_lightyear_distributions";
+  auditDetails: (command: C) => Record<string, unknown>;
+}): Promise<{ executionReport: PlanExecutionReport; createdByIndex: LightyearCreatedByIndex }> {
+  const { api, guard } = params;
+  const createdByIndex: LightyearCreatedByIndex = new Map();
+  const executionReport = await executeLightyearCommands(params.commands.map((command, index): LightyearExecutionCommand => ({
+    id: params.commandId(index),
+    category: params.category,
+    known_object_limit: 1,
+    prepare: async () => {
+      const fresh = findExistingJournalsByRef(await api.journals.listAll(), [{ reference: command.reference, date: command.date }]);
+      return fresh.has(command.reference)
+        ? { outcome: "drift", error_code: "duplicate_appeared" }
+        : { outcome: "ready" };
+    },
+    mutate: async () => {
+      let outcome;
+      try {
+        outcome = await guard.createJournalOnce(
+          { ns: "LY", id: command.reference },
+          { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
+          { confirm: false },
+        );
+      } catch (error) {
+        const rejection = definitiveCreateRejection(error);
+        if (!rejection) throw error;
+        createdByIndex.set(index, rejection);
+        return { outcome: "failed", error_code: "journal_create_rejected", mutation_occurred: false };
+      }
+      if (outcome.status === "duplicate") {
+        createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
+        return { outcome: "completed" };
+      }
+      logAudit({
+        tool: params.tool, action: "CREATED", entity_type: "journal",
+        entity_id: outcome.journal_id,
+        summary: command.auditSummary,
+        details: params.auditDetails(command),
+      });
+      createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
+      return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
+    },
+  })));
+  return { executionReport, createdByIndex };
+}
+
 /**
  * Sandbox-wrap the free-form CSV text fields of a rendered BOOKING result row.
  *
@@ -3200,7 +3270,7 @@ interface TradesRenderInput {
   projection: TradesProjection;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
-  createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
+  createdByIndex?: LightyearCreatedByIndex;
   pendingDuplicateIds?: number[];
 }
 
@@ -3257,7 +3327,7 @@ interface DistributionsRenderInput {
   projection: DistributionsProjection;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
-  createdByIndex?: Map<number, { journal_id?: number; status: string; upstream_detail?: string }>;
+  createdByIndex?: LightyearCreatedByIndex;
   pendingDuplicateIds?: number[];
 }
 
@@ -3807,45 +3877,13 @@ export function registerLightyearTools(
       }
 
       const guard = await BookingGuard.load(api);
-      const createdByIndex = new Map<number, { journal_id?: number; status: string; upstream_detail?: string }>();
-      const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
-        id: lightyearTradeCommandId(index),
+      const { executionReport, createdByIndex } = await executeLightyearJournalCommands({
+        api, guard, commands: projection.commands,
+        commandId: lightyearTradeCommandId,
         category: LIGHTYEAR_TRADE_CREATE_CATEGORY,
-        known_object_limit: 1,
-        prepare: async () => {
-          const fresh = findExistingJournalsByRef(await api.journals.listAll(), [{ reference: command.reference, date: command.date }]);
-          return fresh.has(command.reference)
-            ? { outcome: "drift", error_code: "duplicate_appeared" }
-            : { outcome: "ready" };
-        },
-        mutate: async () => {
-          let outcome;
-          try {
-            outcome = await guard.createJournalOnce(
-              { ns: "LY", id: command.reference },
-              { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
-              { confirm: false },
-            );
-          } catch (error) {
-            const rejection = definitiveCreateRejection(error);
-            if (!rejection) throw error;
-            createdByIndex.set(index, rejection);
-            return { outcome: "failed", error_code: "journal_create_rejected", mutation_occurred: false };
-          }
-          if (outcome.status === "duplicate") {
-            createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
-            return { outcome: "completed" };
-          }
-          logAudit({
-            tool: "book_lightyear_trades", action: "CREATED", entity_type: "journal",
-            entity_id: outcome.journal_id,
-            summary: command.auditSummary,
-            details: command.auditDetails,
-          });
-          createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
-          return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
-        },
-      })));
+        tool: "book_lightyear_trades",
+        auditDetails: command => command.auditDetails,
+      });
 
       return {
         content: [{ type: "text", text: toMcpJson(renderTradesPayload({
@@ -4106,45 +4144,13 @@ export function registerLightyearTools(
         return planErrorResult("plan_drift", "The reviewed Lightyear distribution plan no longer matches the current ledger and source.");
       }
 
-      const createdByIndex = new Map<number, { journal_id?: number; status: string; upstream_detail?: string }>();
-      const executionReport = await executeLightyearCommands(projection.commands.map((command, index): LightyearExecutionCommand => ({
-        id: lightyearDistributionCommandId(index),
+      const { executionReport, createdByIndex } = await executeLightyearJournalCommands({
+        api, guard, commands: projection.commands,
+        commandId: lightyearDistributionCommandId,
         category: LIGHTYEAR_DISTRIBUTION_CREATE_CATEGORY,
-        known_object_limit: 1,
-        prepare: async () => {
-          const fresh = findExistingJournalsByRef(await api.journals.listAll(), [{ reference: command.reference, date: command.date }]);
-          return fresh.has(command.reference)
-            ? { outcome: "drift", error_code: "duplicate_appeared" }
-            : { outcome: "ready" };
-        },
-        mutate: async () => {
-          let outcome;
-          try {
-            outcome = await guard.createJournalOnce(
-              { ns: "LY", id: command.reference },
-              { title: command.title, effective_date: command.date, cl_currencies_id: "EUR", postings: command.postings },
-              { confirm: false },
-            );
-          } catch (error) {
-            const rejection = definitiveCreateRejection(error);
-            if (!rejection) throw error;
-            createdByIndex.set(index, rejection);
-            return { outcome: "failed", error_code: "journal_create_rejected", mutation_occurred: false };
-          }
-          if (outcome.status === "duplicate") {
-            createdByIndex.set(index, { journal_id: outcome.journal_id, status: "duplicate" });
-            return { outcome: "completed" };
-          }
-          logAudit({
-            tool: "book_lightyear_distributions", action: "CREATED", entity_type: "journal",
-            entity_id: outcome.journal_id,
-            summary: command.auditSummary,
-            details: { effective_date: command.date, ...command.sourceFields, postings: command.postings.map(posting => ({ ...posting })) },
-          });
-          createdByIndex.set(index, { journal_id: outcome.journal_id, status: "created" });
-          return { outcome: "completed", known_objects: [{ entity_type: "journal", entity_id: outcome.journal_id, outcome: "created" }] };
-        },
-      })));
+        tool: "book_lightyear_distributions",
+        auditDetails: command => ({ effective_date: command.date, ...command.sourceFields, postings: command.postings.map(posting => ({ ...posting })) }),
+      });
 
       return {
         content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({

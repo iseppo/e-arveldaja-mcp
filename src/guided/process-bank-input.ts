@@ -17,23 +17,20 @@ import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { detectBankInputFormat } from "../banking/input-format.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { CamtPreflightRejectedError } from "../camt/executor.js";
-import { CAMT_PLAN_DOMAIN } from "../tools/camt-plan.js";
 import {
-  buildCamtResultDetailItems,
   importPreflightFailurePayload,
+  issueCamtResultHandle,
   renderCamtImportCompact,
-  type CamtImportExecution,
 } from "../camt/presenter.js";
 import { createWiseOperations } from "../wise/operations.js";
-import { WiseOperationFailedError, type WiseFailure, type WiseRunInput } from "../wise/executor.js";
-import { SHA256_HEX, WISE_PLAN_DOMAIN } from "../wise/projection.js";
-import { isNonErrorWiseSkipReason } from "../wise/preflight.js";
+import { WiseOperationFailedError, type WiseRunInput } from "../wise/executor.js";
+import { SHA256_HEX } from "../wise/projection.js";
 import {
-  buildWiseResultDetailItems,
-  digestMismatch,
+  issueWiseResultHandle,
   renderWiseFailure,
   renderWiseImportCompact,
-  type WiseImportRenderData,
+  simpleWiseFailureFromCode,
+  wiseDigestInputRejection,
 } from "../wise/presenter.js";
 import {
   buildBankDimensionCandidates,
@@ -44,7 +41,6 @@ import type { AccountDimension } from "../types/api.js";
 import type { Resolution } from "../resolution/types.js";
 import type { Elicitor } from "../elicitation.js";
 import type { ConnectionDefaultsStore } from "../connection-defaults-store.js";
-import type { OperationResultStatus } from "../operation-result-store.js";
 import { createOperationResultPageHandler } from "../operation-result-page.js";
 import { getActiveNoticesForFlow, type ReleaseFlow } from "../server/release-notices.js";
 import { failureResponsePayload } from "../operation-outcome.js";
@@ -126,53 +122,6 @@ export function registerProcessBankInputTool(
   // owned by the runtime context, so a cursor issued by get_operation_result_page
   // is valid here and vice versa (P3 §14.4).
   const pageHandler = createOperationResultPageHandler(runtimeSafetyContext, { cursorSecret: runtimeSafetyContext.operationResultPageCursorSecret });
-
-  // Execute-only: mint a get_operation_result_page handle bound to the just
-  // consumed plan. Fail-safe — the import already mutated, so a store failure
-  // degrades to a compact response without the handle.
-  const issueCamtResultHandle = (execution: CamtImportExecution, planHandle: string | undefined): string | undefined => {
-    if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
-    try {
-      const stopCategory = (execution.executionReport?.stop_reason as { category?: unknown } | undefined)?.category;
-      const status: OperationResultStatus = execution.errorCount === 0
-        ? "completed"
-        : stopCategory === "mutation_indeterminate" ? "indeterminate" : "partial";
-      return runtimeSafetyContext.operationResultStore.issue({
-        operation: CAMT_PLAN_DOMAIN,
-        status,
-        items: buildCamtResultDetailItems(execution),
-        plan_handle: planHandle,
-      });
-    } catch {
-      return undefined;
-    }
-  };
-
-  const issueWiseResultHandle = (data: WiseImportRenderData, planHandle: string | undefined): string | undefined => {
-    if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
-    try {
-      const errorCount = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
-      const status: OperationResultStatus = errorCount === 0 ? "completed" : "partial";
-      return runtimeSafetyContext.operationResultStore.issue({
-        operation: WISE_PLAN_DOMAIN,
-        status,
-        items: buildWiseResultDetailItems(data),
-        plan_handle: planHandle,
-      });
-    } catch {
-      return undefined;
-    }
-  };
-
-  const simpleFailureFromCode = (code: string): WiseFailure => {
-    switch (code) {
-      case "plan_handle_required": return { kind: "plan_handle_required" };
-      case "digest_mismatch": return { kind: "digest_mismatch" };
-      case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
-      case "wise_client_not_found": return { kind: "wise_client_not_found" };
-      default: throw new Error(`Unexpected Wise operation error code: ${code}`);
-    }
-  };
 
   interface DimensionResolution {
     resolution: Resolution<number>;
@@ -375,7 +324,7 @@ export function registerProcessBankInputTool(
         source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, planHandle: args.plan_handle, snapshot,
       });
       if (!outcome.ok) return emit(failureResponsePayload(outcome.error), true);
-      const operationHandle = issueCamtResultHandle(outcome.value, args.plan_handle);
+      const operationHandle = issueCamtResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, args.plan_handle);
       return emit(renderCamtImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
     } catch (error) {
       if (error instanceof CamtPreflightRejectedError) {
@@ -395,14 +344,8 @@ export function registerProcessBankInputTool(
     const accountsDimensionsId = resolved.value;
 
     // Preserve the Wise digest gate before any read/mutation.
-    if (args.approved_command_digest !== undefined && (
-      typeof args.approved_command_digest !== "string" || !SHA256_HEX.test(args.approved_command_digest)
-    )) {
-      return digestMismatch();
-    }
-    if (mode === "execute" && !SHA256_HEX.test(args.approved_command_digest ?? "")) {
-      return digestMismatch();
-    }
+    const digestRejection = wiseDigestInputRejection(args.approved_command_digest, mode === "execute");
+    if (digestRejection) return digestRejection;
 
     const runInput: WiseRunInput = {
       source,
@@ -422,9 +365,9 @@ export function registerProcessBankInputTool(
       const outcome = mode === "execute"
         ? await wiseOperations.execute({ ...runInput, planHandle: args.plan_handle })
         : await wiseOperations.prepare(runInput);
-      if (!outcome.ok) return renderWiseFailure(simpleFailureFromCode(outcome.error.code));
+      if (!outcome.ok) return renderWiseFailure(simpleWiseFailureFromCode(outcome.error.code));
       if (mode !== "execute") return emit(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
-      const operationHandle = issueWiseResultHandle(outcome.value, args.plan_handle);
+      const operationHandle = issueWiseResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, args.plan_handle);
       return emit(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
     } catch (error) {
       if (error instanceof WiseOperationFailedError) return renderWiseFailure(error.failure);

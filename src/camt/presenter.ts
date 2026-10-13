@@ -4,7 +4,13 @@ import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
-import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../operation-result-store.js";
+import {
+  createPublicOperationResultDetail,
+  type OperationResultStatus,
+  type OperationResultStore,
+  type PublicOperationResultDetail,
+} from "../operation-result-store.js";
+import { CAMT_PLAN_DOMAIN } from "../tools/camt-plan.js";
 import type { PlanExecutionReport } from "../plan-execution.js";
 import {
   buildPossibleDuplicateRecommendationNote,
@@ -286,6 +292,34 @@ export function buildCamtResultDetailItems(data: CamtImportRenderData): PublicOp
     currency: row.currency,
     ...(typeof row.api_id === "number" ? { id: row.api_id } : {}),
   }));
+}
+
+/**
+ * Execute-only: mint an operation-result handle bound to the just-consumed CAMT
+ * plan so the compact response can reference get_operation_result_page for the
+ * full per-row detail. Fail-safe — the import already mutated, so a store
+ * failure degrades to a compact response without the handle.
+ */
+export function issueCamtResultHandle(
+  store: Pick<OperationResultStore, "issue">,
+  execution: CamtImportExecution,
+  planHandle: string | undefined,
+): string | undefined {
+  if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
+  try {
+    const stopCategory = (execution.executionReport?.stop_reason as { category?: unknown } | undefined)?.category;
+    const status: OperationResultStatus = execution.errorCount === 0
+      ? "completed"
+      : stopCategory === "mutation_indeterminate" ? "indeterminate" : "partial";
+    return store.issue({
+      operation: CAMT_PLAN_DOMAIN,
+      status,
+      items: buildCamtResultDetailItems(execution),
+      plan_handle: planHandle,
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 export interface CamtCompactInput {

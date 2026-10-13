@@ -1,15 +1,11 @@
 import type { Client, Transaction } from "../types/api.js";
 import type { CreateBankTransactionRequest } from "../types/mutations.js";
 import type { StatementBalanceCheck } from "../statement-balance-check.js";
+import type { ImportRejectedField } from "./preflight.js";
 
 // --- Parsed statement data ---------------------------------------------------
 
-export interface ImportRejectedField {
-  source_row_id: string;
-  field: string;
-  value: string;
-  reason: string;
-}
+export type { ImportRejectedField } from "./preflight.js";
 
 export interface CamtBalance {
   amount: number;

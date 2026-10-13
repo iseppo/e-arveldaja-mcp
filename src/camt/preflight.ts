@@ -1,5 +1,3 @@
-import type { ImportRejectedField } from "./types.js";
-
 // --- M05: strict import validation scaffolding -------------------------------
 //
 // External statements are attacker-controlled. Every rejected field is
@@ -10,7 +8,15 @@ import type { ImportRejectedField } from "./types.js";
 //
 // This module is PURE: it imports no MCP, HTTP, filesystem, audit, or
 // environment module. The failure→MCP-envelope projection stays in the
-// tool/presenter layer.
+// tool/presenter layer. The Wise preflight (../wise/preflight.ts) shares this
+// scaffolding, so both importers reject fields identically.
+
+export interface ImportRejectedField {
+  source_row_id: string;
+  field: string;
+  value: string;
+  reason: string;
+}
 
 export class ImportFieldError extends Error {
   constructor(readonly issue: ImportRejectedField) {
@@ -42,4 +48,16 @@ export function capture<T>(sink: ImportRejectedField[], parse: () => T): T | und
     }
     throw error;
   }
+}
+
+/** Reject dates the calendar does not have (2026-02-30, 2026-13-01). */
+export function assertRealDate(date: string, row: string, field: string, original: unknown): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
+  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const utc = new Date(Date.UTC(year, month - 1, day));
+  const roundTrips = utc.getUTCFullYear() === year
+    && utc.getUTCMonth() === month - 1
+    && utc.getUTCDate() === day;
+  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
 }

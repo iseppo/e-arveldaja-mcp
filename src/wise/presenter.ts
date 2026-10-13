@@ -5,7 +5,13 @@ import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
 import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
-import { createPublicOperationResultDetail, type PublicOperationResultDetail } from "../operation-result-store.js";
+import {
+  createPublicOperationResultDetail,
+  type OperationResultStatus,
+  type OperationResultStore,
+  type PublicOperationResultDetail,
+} from "../operation-result-store.js";
+import { importPreflightFailurePayload } from "../camt/presenter.js";
 import type { PlanStoreError } from "../plan-store.js";
 import type { FileInputSource, FileInputIdentity } from "../file-input-snapshot.js";
 import {
@@ -14,7 +20,7 @@ import {
   isNonErrorWiseSkipReason,
   summarizeWiseSkippedEntries,
 } from "./preflight.js";
-import { projectWiseCommand } from "./projection.js";
+import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN } from "./projection.js";
 import { WISE_COMMAND_VERSION } from "./types.js";
 import type { WiseFailure } from "./executor.js";
 import type {
@@ -35,33 +41,11 @@ import type {
 // keep the byte-identical full envelope; guided/guided-sales adopt the compact
 // presenter (added in Phase B).
 
-const MAX_EXPOSED_ISSUES = 100;
-const MAX_EXPOSED_VALUE_CHARS = 256;
+// --- Failure envelopes -------------------------------------------------------
 
-// --- Failure envelopes (moved verbatim from the handler) ---------------------
-
-/**
- * Bounded, sandboxed failure payload. The fixed `error` string is load-bearing:
- * without it toolError() falls through to serializeUnknownError(), which
- * JSON.stringifies the whole payload into one 500-char string and defeats both
- * the sandbox wrapping and the truncation below.
- */
+/** The bounded, sandboxed preflight-failure payload shared with CAMT. */
 export function wisePreflightFailure(rejected: ImportRejectedField[]) {
-  return toolError({
-    error: "Import preflight failed",
-    category: "import_preflight_failed",
-    source: "wise",
-    rejected_field_count: rejected.length,
-    rejected_fields_truncated: rejected.length > MAX_EXPOSED_ISSUES,
-    rejected_fields: rejected.slice(0, MAX_EXPOSED_ISSUES).map(issue => ({
-      source_row_id: issue.source_row_id,
-      field: issue.field,
-      value: wrapUntrustedOcr(issue.value.slice(0, MAX_EXPOSED_VALUE_CHARS)),
-      reason: issue.reason,
-    })),
-    retry: "never",
-    mutation_occurred: false,
-  });
+  return toolError(importPreflightFailurePayload("wise", rejected));
 }
 
 export function digestMismatch() {
@@ -140,6 +124,35 @@ export function wiseClientNotFoundResult() {
     retry: "never",
     mutation_occurred: false,
   });
+}
+
+/** Digest input-format gate, checked by the Wise entry points before any file
+ * read, ledger read, cache flush, plan consume, or mutation. Returns the
+ * digest-mismatch envelope to send, or undefined when the input passes. */
+export function wiseDigestInputRejection(approvedCommandDigest: unknown, executeRequested: boolean) {
+  if (approvedCommandDigest !== undefined && (
+    typeof approvedCommandDigest !== "string" || !SHA256_HEX.test(approvedCommandDigest)
+  )) {
+    return digestMismatch();
+  }
+  if (executeRequested && !SHA256_HEX.test((approvedCommandDigest as string | undefined) ?? "")) {
+    return digestMismatch();
+  }
+  return undefined;
+}
+
+/** Reproject a simple-kind OperationOutcome error (which carries no data beyond
+ * its discriminant) back into its WiseFailure so renderWiseFailure emits the
+ * exact same envelope as before. The rich kinds never travel this path — they
+ * are thrown as WiseOperationFailedError and rendered in the handler's catch. */
+export function simpleWiseFailureFromCode(code: string): WiseFailure {
+  switch (code) {
+    case "plan_handle_required": return { kind: "plan_handle_required" };
+    case "digest_mismatch": return { kind: "digest_mismatch" };
+    case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
+    case "wise_client_not_found": return { kind: "wise_client_not_found" };
+    default: throw new Error(`Unexpected Wise operation error code: ${code}`);
+  }
 }
 
 /** Map a structured executor failure to the exact non-mutating MCP envelope it
@@ -412,6 +425,32 @@ export function buildWiseResultDetailItems(data: WiseImportRenderData): PublicOp
     amount: row.amount,
     ...(typeof row.api_id === "number" ? { id: row.api_id } : {}),
   }));
+}
+
+/**
+ * Execute-only: mint an operation-result handle bound to the just-consumed Wise
+ * plan so the compact response can reference get_operation_result_page for the
+ * full per-row detail. Fail-safe — the import already mutated, so a store
+ * failure degrades to a compact response without the handle.
+ */
+export function issueWiseResultHandle(
+  store: Pick<OperationResultStore, "issue">,
+  data: WiseImportRenderData,
+  planHandle: string | undefined,
+): string | undefined {
+  if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
+  try {
+    const errorCount = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
+    const status: OperationResultStatus = errorCount === 0 ? "completed" : "partial";
+    return store.issue({
+      operation: WISE_PLAN_DOMAIN,
+      status,
+      items: buildWiseResultDetailItems(data),
+      plan_handle: planHandle,
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 export interface WiseCompactInput {

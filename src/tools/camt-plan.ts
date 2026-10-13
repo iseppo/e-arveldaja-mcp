@@ -5,6 +5,7 @@ import {
   type PrepareCommandResult,
 } from "../plan-execution.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
+import { buildExecutionPlanInput, type BuildExecutionPlanInputArgs, type PlanReviewCommand } from "./plan-module-core.js";
 
 // The plan domain string that binds a reviewed CAMT dry run to its execute.
 // It is distinct from the file-reference operation discriminator "camt_input".
@@ -46,22 +47,12 @@ export function canonicalPlanJson(value: unknown): string {
   return JSON.stringify(stripUndefinedDeep(value));
 }
 
-export interface CamtPlanReviewCommand {
-  readonly id: string;
-  readonly category: string;
-  readonly reviewProjection: PlanData;
-}
+export type CamtPlanReviewCommand = PlanReviewCommand;
 
-export interface BuildCamtExecutionPlanInputArgs {
-  readonly normalizedArgs: PlanRecord;
+export interface BuildCamtExecutionPlanInputArgs
+  extends Omit<BuildExecutionPlanInputArgs, "sourceIdentities" | "liveSnapshot"> {
   readonly sourceIdentity: PlanRecord;
   readonly statementIban: string;
-  readonly reviewCommands: readonly CamtPlanReviewCommand[];
-  readonly fingerprint: string;
-  readonly counts: PlanRecord;
-  readonly totals: PlanRecord;
-  readonly exclusions: readonly PlanData[];
-  readonly reviews: readonly PlanData[];
 }
 
 /**
@@ -70,21 +61,17 @@ export interface BuildCamtExecutionPlanInputArgs {
  * every public/inspect view, so the review page cannot leak it.
  */
 export function buildCamtExecutionPlanInput(args: BuildCamtExecutionPlanInputArgs): ExecutionPlanInput {
-  return {
+  return buildExecutionPlanInput({
     normalizedArgs: args.normalizedArgs,
     sourceIdentities: [args.sourceIdentity],
     liveSnapshot: { statement_iban: args.statementIban },
-    commands: args.reviewCommands.map(command => ({
-      id: command.id,
-      category: command.category,
-      reviewProjection: command.reviewProjection,
-    })),
+    reviewCommands: args.reviewCommands,
+    fingerprint: args.fingerprint,
     counts: args.counts,
     totals: args.totals,
     exclusions: args.exclusions,
     reviews: args.reviews,
-    privatePayload: { fingerprint: args.fingerprint },
-  };
+  });
 }
 
 /**

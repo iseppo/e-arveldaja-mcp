@@ -1,6 +1,6 @@
 import { XMLParser } from "fast-xml-parser";
 import { roundMoney } from "../money.js";
-import { capture, reject } from "./preflight.js";
+import { assertRealDate, capture, reject } from "./preflight.js";
 import { normalizeOptionalReference } from "./duplicate-identity.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import type {
@@ -47,18 +47,6 @@ function parseCamtMoney(value: unknown, row: string, field: string): number {
   }
   const amount = Number(text);
   return Number.isFinite(amount) ? amount : reject(row, field, value, "CAMT amount must be finite");
-}
-
-/** Reject dates the calendar does not have (2026-02-30, 2026-13-01). */
-function assertRealDate(date: string, row: string, field: string, original: unknown): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const utc = new Date(Date.UTC(year, month - 1, day));
-  const roundTrips = utc.getUTCFullYear() === year
-    && utc.getUTCMonth() === month - 1
-    && utc.getUTCDate() === day;
-  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
 }
 
 function parseCamtDate(value: unknown, row: string, field: string): string {

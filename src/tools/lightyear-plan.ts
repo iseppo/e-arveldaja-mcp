@@ -1,11 +1,9 @@
-import {
-  runPlanCommands,
-  type MutateCommandResult,
-  type PlanExecutionReport,
-  type PrepareCommandResult,
-} from "../plan-execution.js";
-import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
+import {
+  type BuildExecutionPlanInputArgs,
+  type PlanExecutionCommandSpec,
+  type PlanReviewCommand,
+} from "./plan-module-core.js";
 
 // Re-export the shared canonicalization helpers so the Lightyear tool can import
 // everything plan-related from one module.
@@ -33,23 +31,8 @@ export function lightyearDistributionCommandId(index: number): string {
   return `ly-dist-${index}`;
 }
 
-export interface LightyearPlanReviewCommand {
-  readonly id: string;
-  readonly category: string;
-  readonly reviewProjection: PlanData;
-}
-
-export interface BuildLightyearExecutionPlanInputArgs {
-  readonly normalizedArgs: PlanRecord;
-  readonly sourceIdentities: readonly PlanRecord[];
-  readonly liveSnapshot: PlanData;
-  readonly reviewCommands: readonly LightyearPlanReviewCommand[];
-  readonly fingerprint: string;
-  readonly counts: PlanRecord;
-  readonly totals: PlanRecord;
-  readonly exclusions: readonly PlanData[];
-  readonly reviews: readonly PlanData[];
-}
+export type LightyearPlanReviewCommand = PlanReviewCommand;
+export type BuildLightyearExecutionPlanInputArgs = BuildExecutionPlanInputArgs;
 
 /**
  * PLANNER: assemble the immutable execution-plan input for a reviewed Lightyear
@@ -58,55 +41,18 @@ export interface BuildLightyearExecutionPlanInputArgs {
  * identities (statement CSV, and for trades the capital-gains CSV) are carried
  * so execute can re-validate every source it read against the plan.
  */
-export function buildLightyearExecutionPlanInput(
-  args: BuildLightyearExecutionPlanInputArgs,
-): ExecutionPlanInput {
-  return {
-    normalizedArgs: args.normalizedArgs,
-    sourceIdentities: args.sourceIdentities,
-    liveSnapshot: args.liveSnapshot,
-    commands: args.reviewCommands.map(command => ({
-      id: command.id,
-      category: command.category,
-      reviewProjection: command.reviewProjection,
-    })),
-    counts: args.counts,
-    totals: args.totals,
-    exclusions: args.exclusions,
-    reviews: args.reviews,
-    privatePayload: { fingerprint: args.fingerprint },
-  };
-}
+export { buildExecutionPlanInput as buildLightyearExecutionPlanInput } from "./plan-module-core.js";
 
 /**
  * EXECUTOR command spec. `prepare` rechecks this command's duplicate
  * precondition against a fresh ledger read immediately before its own `mutate`;
  * the tracker stops at the first drift, failure, or indeterminate outcome.
  */
-export interface LightyearExecutionCommand {
-  readonly id: string;
-  readonly category: string;
-  readonly known_object_limit?: number;
-  readonly prepare: () => Promise<PrepareCommandResult>;
-  readonly mutate: () => Promise<MutateCommandResult>;
-}
+export type LightyearExecutionCommand = PlanExecutionCommandSpec;
 
 /**
  * EXECUTOR: drive the reviewed Lightyear journal creations through the shared
- * plan-execution tracker in the exact enumerated order. The plan-data command
- * list handed to the tracker carries no closures; `prepare`/`mutate` dispatch by
- * position into the spec list.
+ * plan-execution tracker in the exact enumerated order (see
+ * executePlanCommandSpecs).
  */
-export async function executeLightyearCommands(
-  commands: readonly LightyearExecutionCommand[],
-): Promise<PlanExecutionReport> {
-  return runPlanCommands({
-    commands: commands.map(command => ({
-      id: command.id,
-      category: command.category,
-      ...(command.known_object_limit !== undefined ? { known_object_limit: command.known_object_limit } : {}),
-    })),
-    prepare: (_command, index) => commands[index]!.prepare(),
-    mutate: (_command, index) => commands[index]!.mutate(),
-  });
-}
+export { executePlanCommandSpecs as executeLightyearCommands } from "./plan-module-core.js";

@@ -6,6 +6,7 @@ import { normalizeCompanyName } from "../company-name.js";
 import { roundMoney } from "../money.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
+import { assertRealDate, capture, reject } from "../camt/preflight.js";
 import type {
   ImportRejectedField,
   ValidatedWiseFields,
@@ -161,31 +162,7 @@ export function classifyWiseOwnTransfer(
   };
 }
 
-// --- M05 scaffolding ---------------------------------------------------------
-
-export class ImportFieldError extends Error {
-  constructor(readonly issue: ImportRejectedField) {
-    super(issue.reason);
-    this.name = "ImportFieldError";
-  }
-}
-
-function reject(source_row_id: string, field: string, value: unknown, reason: string): never {
-  throw new ImportFieldError({ source_row_id, field, value: String(value ?? ""), reason });
-}
-
-/** Run one field parse, recording its issue and continuing. */
-function capture<T>(sink: ImportRejectedField[], parse: () => T): T | undefined {
-  try {
-    return parse();
-  } catch (error) {
-    if (error instanceof ImportFieldError) {
-      sink.push(error.issue);
-      return undefined;
-    }
-    throw error;
-  }
-}
+// --- M05 scaffolding: shared with CAMT (../camt/preflight.ts) ----------------
 
 // Every column consumed into a WiseRow. `Batch` and `Created by` are accepted
 // export columns that nothing reads, so they are not required; unrelated extra
@@ -206,17 +183,6 @@ const WISE_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const WISE_STATUS_REGEX = /^[A-Z][A-Z0-9_]{0,63}$/;
 const WISE_TIMESTAMP_REGEX =
   /^(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
-
-function assertRealWiseDate(date: string, row: string, field: string, original: unknown): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const utc = new Date(Date.UTC(year, month - 1, day));
-  const roundTrips = utc.getUTCFullYear() === year
-    && utc.getUTCMonth() === month - 1
-    && utc.getUTCDate() === day;
-  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
-}
 
 function parseWiseMoney(value: unknown, row: string, field: string, defaultValue?: number): number {
   const text = String(value ?? "").trim();
@@ -251,7 +217,7 @@ function parseWiseTimestamp(value: unknown, row: string, field: string, allowBla
   if (text === "" && allowBlank) return text;
   const match = WISE_TIMESTAMP_REGEX.exec(text);
   if (!match) return reject(row, field, value, "Invalid Wise timestamp");
-  assertRealWiseDate(match[1]!, row, field, value);
+  assertRealDate(match[1]!, row, field, value);
   if (match[2] !== undefined && (Number(match[2]) > 23 || Number(match[3]) > 59 || Number(match[4]) > 59)) {
     return reject(row, field, value, "Impossible Wise clock time");
   }
