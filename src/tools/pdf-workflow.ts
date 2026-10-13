@@ -9,13 +9,12 @@ import { sha256Hex } from "./receipt-inbox-files.js";
 import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
-import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData } from "../types/api.js";
+import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../types/api.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { contentMatchesExtension, resolveFileInput, sanitizeUploadFileName } from "../file-validation.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "./purchase-vat-defaults.js";
+import { applyPurchaseVatDefaultsAndValidateDimensions, getPurchaseArticlesWithVat, refuseNonVatItemsWithVatFields } from "./purchase-vat-defaults.js";
 import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
 import { isStrictDate } from "../strict-date.js";
-import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
 import { readOnly, create } from "../annotations.js";
@@ -26,11 +25,10 @@ import { isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
-import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, LOW_OCR_CONFIDENCE_THRESHOLD, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
-import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
+import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
-import { detectSelfVatOnly, detectSelfRegCodeOnly } from "./receipt-inbox.js";
+import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
 import {
   detectVatDeductionNotes,
   ESTONIAN_VAT_METADATA,
@@ -389,7 +387,7 @@ function wrapExtractionNotes(extractionNotes: string[] | undefined): string[] | 
   return extractionNotes?.map(entry => wrapUntrustedOcr(entry) ?? entry);
 }
 
-function textItemsWithPageNums(pages: NonNullable<Awaited<ReturnType<typeof parseDocument>>["result"]>["pages"] | undefined): LayoutTextItem[] {
+export function textItemsWithPageNums(pages: NonNullable<Awaited<ReturnType<typeof parseDocument>>["result"]>["pages"] | undefined): LayoutTextItem[] {
   return pages?.flatMap(page =>
     (page.textItems ?? []).map(item => ({
       ...item,
@@ -446,25 +444,15 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         const outputExtractionNotes = wrapExtractionNotes(extracted.extraction_notes);
         // Build confidence signals from parser quality metadata so the
         // single-PDF flow reports the same OCR quality issues as the receipt
-        // batch flow (issue #20 consistency).
-        const signals: ExtractionConfidenceSignals = {};
-        if (parsedDocument.ocrPartialFailure) signals.partial_ocr_failure = true;
-        if (minOcrConfidence !== undefined && minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) signals.low_ocr_confidence = true;
-        // The only VAT / registry code on the page was the buyer's own → the
-        // supplier fields are suspect. Surface as a review signal so the
-        // operator verifies the supplier before booking (mirrors receipt_batch).
-        if (detectSelfVatOnly(extracted, ownCompanyVat)) signals.self_vat_detected = true;
-        if (detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
-        if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
-        // #1: an echo-only supplier identifier (coordinate_confirmed_echo) is
-        // kept but UNCONFIRMED — surface it as a review signal so the operator
-        // verifies the supplier before booking rather than trusting it.
-        if (
-          extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
-          extracted.vat_no_rationale === "coordinate_confirmed_echo"
-        ) {
-          signals.supplier_identifier_echo_unconfirmed = true;
-        }
+        // batch flow (issue #20 consistency). A buyer-own VAT / registry code
+        // as the only one on the page, or an echo-only supplier identifier (#1),
+        // makes the supplier fields suspect → review signal.
+        const signals = buildExtractionConfidenceSignals(extracted, {
+          partialOcrFailure: parsedDocument.ocrPartialFailure,
+          minOcrConfidence,
+          ownCompanyVat,
+          ownCompanyRegistryCode,
+        });
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
@@ -928,6 +916,67 @@ export async function computeBookingSuggestion(
   };
 }
 
+/**
+ * Upload the source document to a just-created draft purchase invoice. On an
+ * upload failure the draft is invalidated and the failure message returned
+ * (naming whether the automatic invalidation also failed); undefined means the
+ * document was uploaded. Shared by create_purchase_invoice_from_pdf and
+ * process_accounting_document, which wrap the message in their own error shape.
+ */
+export async function uploadSourceDocumentOrInvalidate(
+  api: ApiContext,
+  invoiceId: number,
+  fileName: string,
+  contentsBase64: string,
+): Promise<string | undefined> {
+  try {
+    await api.purchaseInvoices.uploadDocument(invoiceId, fileName, contentsBase64);
+    return undefined;
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      await api.purchaseInvoices.invalidate(invoiceId);
+    } catch (invalidateError: unknown) {
+      const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
+      return `Purchase invoice ${invoiceId} was created but source document upload failed: ${message}. ` +
+        `Automatic invalidation also failed: ${invalidateMessage}`;
+    }
+    return `Purchase invoice ${invoiceId} was created but source document upload failed and the draft was invalidated: ${message}`;
+  }
+}
+
+/** The CREATED + UPLOADED audit pair for a purchase invoice booked from a source document. */
+export function logDocumentPurchaseInvoiceAudit(entry: {
+  tool: string;
+  invoiceId: number;
+  createdSummary: string;
+  supplierName: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  totalVat: number | undefined;
+  totalGross: number | undefined;
+  items: PurchaseInvoiceItem[];
+  fileName: string;
+}): void {
+  logAudit({
+    tool: entry.tool, action: "CREATED", entity_type: "purchase_invoice",
+    entity_id: entry.invoiceId,
+    summary: entry.createdSummary,
+    details: {
+      supplier_name: entry.supplierName, invoice_number: entry.invoiceNumber,
+      invoice_date: entry.invoiceDate, total_vat: entry.totalVat, total_gross: entry.totalGross,
+      items: entry.items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
+      file_name: entry.fileName,
+    },
+  });
+  logAudit({
+    tool: entry.tool, action: "UPLOADED", entity_type: "purchase_invoice",
+    entity_id: entry.invoiceId,
+    summary: `Uploaded document to purchase invoice ${entry.invoiceId}`,
+    details: { file_name: entry.fileName },
+  });
+}
+
 export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api: ApiContext): void {
   registerTool(server, "create_purchase_invoice_from_pdf",
     "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
@@ -992,27 +1041,11 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
       // Same guard as create_purchase_invoice: a non-VAT company must not book
       // deductible VAT fields (applyPurchaseVatDefaults would silently strip them).
-      if (!isVatReg) {
-        const details = rawItems.flatMap((item, index) =>
-          validateNonVatItem(item).map(error => `items[${index}].${error}`)
-        );
-        if (details.length > 0) {
-          return toolError({
-            error: "Non-VAT purchase invoice contains deductible VAT fields",
-            category: "manual_review_required",
-            details,
-            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
-          });
-        }
-      }
-      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
+      const nonVatRefusal = refuseNonVatItemsWithVatFields(isVatReg, rawItems);
+      if (nonVatRefusal) return nonVatRefusal;
 
       // Validate dimension requirements before hitting the API
-      const [accounts, accountDimensions] = await Promise.all([
-        api.readonly.getAccounts(),
-        api.readonly.getAccountDimensions(),
-      ]);
-      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
       if (dimErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
@@ -1118,44 +1151,22 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         return toolError({ error: "Purchase invoice was created but no invoice ID was returned." });
       }
 
-      try {
-        await api.purchaseInvoices.uploadDocument(result.id, documentUpload.fileName, documentUpload.contentsBase64);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        try {
-          await api.purchaseInvoices.invalidate(result.id);
-        } catch (invalidateError: unknown) {
-          const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-          return toolError({
-            error:
-              `Purchase invoice ${result.id} was created but source document upload failed: ${message}. ` +
-              `Automatic invalidation also failed: ${invalidateMessage}`,
-            invoice_id: result.id,
-          });
-        }
-
-        return toolError({
-          error: `Purchase invoice ${result.id} was created but source document upload failed and the draft was invalidated: ${message}`,
-          invoice_id: result.id,
-        });
+      const uploadFailure = await uploadSourceDocumentOrInvalidate(api, result.id, documentUpload.fileName, documentUpload.contentsBase64);
+      if (uploadFailure !== undefined) {
+        return toolError({ error: uploadFailure, invoice_id: result.id });
       }
 
-      logAudit({
-        tool: "create_purchase_invoice_from_pdf", action: "CREATED", entity_type: "purchase_invoice",
-        entity_id: result.id,
-        summary: `Created purchase invoice "${params.invoice_number}" from PDF`,
-        details: {
-          supplier_name: supplierName, invoice_number: params.invoice_number,
-          invoice_date: params.invoice_date, total_vat: params.vat_price, total_gross: params.gross_price,
-          items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
-          file_name: documentUpload.fileName,
-        },
-      });
-      logAudit({
-        tool: "create_purchase_invoice_from_pdf", action: "UPLOADED", entity_type: "purchase_invoice",
-        entity_id: result.id,
-        summary: `Uploaded document to purchase invoice ${result.id}`,
-        details: { file_name: documentUpload.fileName },
+      logDocumentPurchaseInvoiceAudit({
+        tool: "create_purchase_invoice_from_pdf",
+        invoiceId: result.id,
+        createdSummary: `Created purchase invoice "${params.invoice_number}" from PDF`,
+        supplierName,
+        invoiceNumber: params.invoice_number,
+        invoiceDate: params.invoice_date,
+        totalVat: params.vat_price,
+        totalGross: params.gross_price,
+        items,
+        fileName: documentUpload.fileName,
       });
 
       // Advisory-by-default: the invoice was already created above (or blocked

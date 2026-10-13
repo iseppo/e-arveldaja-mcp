@@ -13,11 +13,10 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import {
   applyPurchaseItemStructuralDefaults,
-  applyPurchaseVatDefaults,
+  applyPurchaseVatDefaultsAndValidateDimensions,
   getPurchaseArticlesWithVat,
-  validateNonVatItem,
+  refuseNonVatItemsWithVatFields,
 } from "../purchase-vat-defaults.js";
-import { validateItemDimensions } from "../../account-validation.js";
 import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
 import {
   PurchaseInvoiceTotalsCorrectionError,
@@ -117,29 +116,12 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       // items arrives as a JSON string, stripping it before parse would leave the
       // wrapper's framing newlines inside a nested title. Parse-then-clean unwraps.
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(rawParams.items));
-      if (!isVatReg) {
-        const details = rawItems.flatMap((item, index) =>
-          validateNonVatItem(item).map(error => `items[${index}].${error}`)
-        );
-        if (details.length > 0) {
-          return toolError({
-            error: "Non-VAT purchase invoice contains deductible VAT fields",
-            category: "manual_review_required",
-            details,
-            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
-          });
-        }
-      }
+      const nonVatRefusal = refuseNonVatItemsWithVatFields(isVatReg, rawItems);
+      if (nonVatRefusal) return nonVatRefusal;
 
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
-
       // Validate dimension requirements before hitting the API
-      const [accounts, accountDimensions] = await Promise.all([
-        api.readonly.getAccounts(),
-        api.readonly.getAccountDimensions(),
-      ]);
-      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
       if (dimErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
@@ -241,26 +223,10 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     if (parsed.items !== undefined && isDraft) {
       const isVatReg = await isCompanyVatRegistered(api);
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
-      if (!isVatReg) {
-        const details = rawItems.flatMap((item, index) =>
-          validateNonVatItem(item).map(error => `items[${index}].${error}`)
-        );
-        if (details.length > 0) {
-          return toolError({
-            error: "Non-VAT purchase invoice contains deductible VAT fields",
-            category: "manual_review_required",
-            details,
-            next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
-          });
-        }
-      }
+      const nonVatRefusal = refuseNonVatItemsWithVatFields(isVatReg, rawItems);
+      if (nonVatRefusal) return nonVatRefusal;
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
-      const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
-      const [accounts, accountDimensions] = await Promise.all([
-        api.readonly.getAccounts(),
-        api.readonly.getAccountDimensions(),
-      ]);
-      const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+      const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
       if (dimErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }

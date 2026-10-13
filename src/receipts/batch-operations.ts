@@ -9,7 +9,6 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { parseDocument } from "../document-parser.js";
 import {
-  type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
 } from "../invoice-extraction-fallback.js";
@@ -26,7 +25,6 @@ import {
   extractReceiptFieldsFromText,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
-  LOW_OCR_CONFIDENCE_THRESHOLD,
   normalizeCounterpartyName,
   suggestBookingInternal,
 } from "../tools/receipt-extraction.js";
@@ -61,9 +59,8 @@ import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import {
   applyReverseChargeAutoDetection,
   buildReferencedInvoiceForPaymentReceipt,
+  buildExtractionConfidenceSignals,
   deriveOwnCompanyRegistryCode,
-  detectSelfRegCodeOnly,
-  detectSelfVatOnly,
   normalizeVatForCompare,
   resolveAutoBookingRuleTargets,
   resolveMergedPurchaseAccountDimension,
@@ -347,26 +344,20 @@ async function processSingleReceipt(
   try {
     const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode, options.ownIbans);
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
-    const selfVatDetected = detectSelfVatOnly(extracted, options.ownCompanyVat);
-    const signals: ExtractionConfidenceSignals = {};
-    if (extracted.partial_ocr_failure) signals.partial_ocr_failure = true;
-    if (extracted.min_ocr_confidence !== undefined && extracted.min_ocr_confidence < LOW_OCR_CONFIDENCE_THRESHOLD) {
-      signals.low_ocr_confidence = true;
-    }
-    if (selfVatDetected) signals.self_vat_detected = true;
-    if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
-    const selfRegCodeDetected = detectSelfRegCodeOnly(extracted, options.ownCompanyRegistryCode);
-    if (selfRegCodeDetected) signals.self_reg_code_detected = true;
+    const signals = buildExtractionConfidenceSignals(extracted, {
+      partialOcrFailure: extracted.partial_ocr_failure,
+      minOcrConfidence: extracted.min_ocr_confidence,
+      ownCompanyVat: options.ownCompanyVat,
+      ownCompanyRegistryCode: options.ownCompanyRegistryCode,
+    });
+    const selfVatDetected = signals.self_vat_detected === true;
+    const selfRegCodeDetected = signals.self_reg_code_detected === true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
     // is kept but UNCONFIRMED — coordinate data cannot tell a legit supplier-id
     // echo in the buyer block from a buyer-id echo in a supplier-column
     // reference line. Route it to review so the operator verifies the supplier
     // before booking, rather than trusting it as coordinate-confirmed.
-    const supplierIdentifierEcho =
-      extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
-      extracted.vat_no_rationale === "coordinate_confirmed_echo";
-    if (supplierIdentifierEcho) {
-      signals.supplier_identifier_echo_unconfirmed = true;
+    if (signals.supplier_identifier_echo_unconfirmed) {
       notes.push(
         "Supplier identifier was only kept because the same value also appears in a supplier column (echo). Coordinate data cannot confirm it is the supplier's own code — verify the supplier before booking (#1).",
       );

@@ -13,21 +13,22 @@ import {
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { sanitizeUploadFileName } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
-import type { LayoutTextItem } from "../document-identifiers.js";
 import {
   computeMinOcrConfidence,
   extractReceiptFieldsFromText,
   inferSupplierCountry,
-  LOW_OCR_CONFIDENCE_THRESHOLD,
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
-import { summarizeInvoiceExtraction, type ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
+import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
-import { detectSelfRegCodeOnly, detectSelfVatOnly } from "../tools/receipt-inbox.js";
+import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import {
   computeBookingSuggestion,
+  logDocumentPurchaseInvoiceAudit,
+  textItemsWithPageNums,
+  uploadSourceDocumentOrInvalidate,
   validateInvoiceData,
 } from "../tools/pdf-workflow.js";
 import { detectDuplicatePurchaseInvoice } from "../tools/document-audit.js";
@@ -35,8 +36,7 @@ import {
   checkIntakeCashDuplicates,
   type DuplicatePostingCandidate,
 } from "../bank-posting-duplicate-guard.js";
-import { applyPurchaseVatDefaults, getPurchaseArticlesWithVat, validateNonVatItem } from "../tools/purchase-vat-defaults.js";
-import { validateItemDimensions } from "../account-validation.js";
+import { applyPurchaseVatDefaultsAndValidateDimensions, collectNonVatItemErrors, getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
 import { isCompanyVatRegistered, parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
@@ -146,14 +146,6 @@ async function loadSnapshot(
   });
 }
 
-function textItemsWithPageNums(
-  pages: NonNullable<Awaited<ReturnType<typeof parseDocument>>["result"]>["pages"] | undefined,
-): LayoutTextItem[] {
-  return pages?.flatMap(page =>
-    (page.textItems ?? []).map(item => ({ ...item, pageNum: page.pageNum })),
-  ) ?? [];
-}
-
 /** The canonical effective write model shared by prepare (bind) and create
  * (recompute + compare). Everything here is post-desandbox, post-default,
  * post-validation — the ACTUAL write model, never the raw caller payload. */
@@ -195,7 +187,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     // a non-VAT company must not book deductible VAT fields
     // (applyPurchaseVatDefaults would silently strip them).
     if (!isVatReg) {
-      const details = rawItems.flatMap((item, index) => validateNonVatItem(item).map(error => `items[${index}].${error}`));
+      const details = collectNonVatItemErrors(rawItems);
       if (details.length > 0) {
         return fail(
           "manual_review_required",
@@ -205,13 +197,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         );
       }
     }
-    const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatReg));
-
-    const [accounts, accountDimensions] = await Promise.all([
-      this.api.readonly.getAccounts(),
-      this.api.readonly.getAccountDimensions(),
-    ]);
-    const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+    const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(this.api, purchaseArticles, rawItems, isVatReg);
     if (dimErrors.length > 0) {
       return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
     }
@@ -328,18 +314,12 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ownIbans,
       });
 
-      const signals: ExtractionConfidenceSignals = {};
-      if (parsedDocument.ocrPartialFailure) signals.partial_ocr_failure = true;
-      if (minOcrConfidence !== undefined && minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) signals.low_ocr_confidence = true;
-      if (detectSelfVatOnly(extracted, ownCompanyVat)) signals.self_vat_detected = true;
-      if (detectSelfRegCodeOnly(extracted, ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
-      if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
-      if (
-        extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
-        extracted.vat_no_rationale === "coordinate_confirmed_echo"
-      ) {
-        signals.supplier_identifier_echo_unconfirmed = true;
-      }
+      const signals = buildExtractionConfidenceSignals(extracted, {
+        partialOcrFailure: parsedDocument.ocrPartialFailure,
+        minOcrConfidence,
+        ownCompanyVat,
+        ownCompanyRegistryCode,
+      });
       let llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
 
       const extractionWarnings: string[] = [];
@@ -672,41 +652,25 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
 
       // APPROVAL ONE (create + upload). Upload failure invalidates the draft.
-      try {
-        await this.api.purchaseInvoices.uploadDocument(result.id, material.fileName, material.contentsBase64);
-      } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
-        try {
-          await this.api.purchaseInvoices.invalidate(result.id);
-        } catch (invalidateError: unknown) {
-          const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-          return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed: ${message}. Automatic invalidation also failed: ${invalidateMessage}`, "never", {
-            mutationOccurred: true,
-            mutatedObjects: [{ type: "purchase_invoice", id: result.id }],
-          });
-        }
-        return fail("document_upload_failed", `Purchase invoice ${result.id} was created but source document upload failed and the draft was invalidated: ${message}`, "never", {
+      const uploadFailure = await uploadSourceDocumentOrInvalidate(this.api, result.id, material.fileName, material.contentsBase64);
+      if (uploadFailure !== undefined) {
+        return fail("document_upload_failed", uploadFailure, "never", {
           mutationOccurred: true,
           mutatedObjects: [{ type: "purchase_invoice", id: result.id }],
         });
       }
 
-      logAudit({
-        tool: "process_accounting_document", action: "CREATED", entity_type: "purchase_invoice",
-        entity_id: result.id,
-        summary: `Created purchase invoice "${invoiceNumber}" from document`,
-        details: {
-          supplier_name: supplierName, invoice_number: invoiceNumber,
-          invoice_date: input.invoiceDate, total_vat: input.vatPrice, total_gross: input.grossPrice,
-          items: items.map(i => ({ title: i.custom_title, cl_purchase_articles_id: i.cl_purchase_articles_id, total_net_price: i.total_net_price })),
-          file_name: material.fileName,
-        },
-      });
-      logAudit({
-        tool: "process_accounting_document", action: "UPLOADED", entity_type: "purchase_invoice",
-        entity_id: result.id,
-        summary: `Uploaded document to purchase invoice ${result.id}`,
-        details: { file_name: material.fileName },
+      logDocumentPurchaseInvoiceAudit({
+        tool: "process_accounting_document",
+        invoiceId: result.id,
+        createdSummary: `Created purchase invoice "${invoiceNumber}" from document`,
+        supplierName,
+        invoiceNumber,
+        invoiceDate: input.invoiceDate,
+        totalVat: input.vatPrice,
+        totalGross: input.grossPrice,
+        items,
+        fileName: material.fileName,
       });
 
       // Advisory duplicate candidate (invoice already created above). The op

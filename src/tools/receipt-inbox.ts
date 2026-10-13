@@ -20,7 +20,7 @@ import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import { type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
+import { type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import {
   type BookingSuggestion,
   type ClassificationApplyMode,
@@ -31,6 +31,7 @@ import {
   detectReverseChargeFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
+  LOW_OCR_CONFIDENCE_THRESHOLD,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
@@ -722,6 +723,39 @@ export function detectSelfRegCodeOnly(extracted: ExtractedReceiptFields, ownComp
     if (!/\d/.test(before) && !/\d/.test(after)) return true;
   }
   return false;
+}
+
+/**
+ * The extraction-quality confidence signals shared by every document intake
+ * flow (extract_pdf_invoice, process_accounting_document, receipt batch):
+ * parser OCR quality, buyer-own identifiers as the only ones on the page, a
+ * layout/text gross-total conflict, and an unconfirmed echo-only supplier
+ * identifier (#1). Callers add their flow-specific signals afterwards.
+ */
+export function buildExtractionConfidenceSignals(
+  extracted: ExtractedReceiptFields,
+  quality: {
+    partialOcrFailure?: boolean;
+    minOcrConfidence?: number;
+    ownCompanyVat?: string;
+    ownCompanyRegistryCode?: string;
+  },
+): ExtractionConfidenceSignals {
+  const signals: ExtractionConfidenceSignals = {};
+  if (quality.partialOcrFailure) signals.partial_ocr_failure = true;
+  if (quality.minOcrConfidence !== undefined && quality.minOcrConfidence < LOW_OCR_CONFIDENCE_THRESHOLD) {
+    signals.low_ocr_confidence = true;
+  }
+  if (detectSelfVatOnly(extracted, quality.ownCompanyVat)) signals.self_vat_detected = true;
+  if (detectSelfRegCodeOnly(extracted, quality.ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
+  if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
+  if (
+    extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
+    extracted.vat_no_rationale === "coordinate_confirmed_echo"
+  ) {
+    signals.supplier_identifier_echo_unconfirmed = true;
+  }
+  return signals;
 }
 
 /**

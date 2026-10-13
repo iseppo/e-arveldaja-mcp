@@ -1,7 +1,10 @@
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { PurchaseArticle, PurchaseInvoiceItem } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { log } from "../logger.js";
 import { DEFAULT_VAT_ACCOUNT } from "../accounting-defaults.js";
+import { validateItemDimensions } from "../account-validation.js";
+import { toolError } from "../tool-error.js";
 
 const VAT_REGISTERED_FALLBACK = {
   vat_accounts_id: DEFAULT_VAT_ACCOUNT,
@@ -82,6 +85,28 @@ export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
   }
 
   return errors;
+}
+
+/** `validateNonVatItem` over a whole item list, each error prefixed `items[<index>].`. */
+export function collectNonVatItemErrors(items: PurchaseInvoiceItem[]): string[] {
+  return items.flatMap((item, index) => validateNonVatItem(item).map(error => `items[${index}].${error}`));
+}
+
+/**
+ * MCP refusal for a non-VAT company whose items carry deductible VAT fields
+ * (applyPurchaseVatDefaults would otherwise silently strip them). Returns
+ * undefined when the company is VAT-registered or the items are clean.
+ */
+export function refuseNonVatItemsWithVatFields(isVatRegistered: boolean, items: PurchaseInvoiceItem[]): CallToolResult | undefined {
+  if (isVatRegistered) return undefined;
+  const details = collectNonVatItemErrors(items);
+  if (details.length === 0) return undefined;
+  return toolError({
+    error: "Non-VAT purchase invoice contains deductible VAT fields",
+    category: "manual_review_required",
+    details,
+    next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+  });
 }
 
 function extractVatDefaults(article?: PurchaseArticleWithVat): PurchaseVatDefaults {
@@ -182,4 +207,24 @@ export function applyPurchaseVatDefaults(
     );
   }
   return merged;
+}
+
+/**
+ * Apply purchase VAT defaults to every item, then validate the referenced
+ * accounts and dimensions against the live chart (validateItemDimensions may
+ * auto-fill a unique dimension on the returned items). An empty `dimErrors`
+ * means the items are ready to write.
+ */
+export async function applyPurchaseVatDefaultsAndValidateDimensions(
+  api: ApiContext,
+  purchaseArticles: PurchaseArticleWithVat[],
+  rawItems: PurchaseInvoiceItem[],
+  isVatRegistered: boolean,
+): Promise<{ items: PurchaseInvoiceItem[]; dimErrors: string[] }> {
+  const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatRegistered));
+  const [accounts, accountDimensions] = await Promise.all([
+    api.readonly.getAccounts(),
+    api.readonly.getAccountDimensions(),
+  ]);
+  return { items, dimErrors: validateItemDimensions(items, accounts, accountDimensions) };
 }
