@@ -24,6 +24,12 @@ describe("getMonthLastDay", () => {
     expect(getMonthLastDay("2000-02")).toBe(29);
     expect(getMonthLastDay("1900-02")).toBe(28);
   });
+
+  it("does not remap years 0000-0099 to 1900-1999", () => {
+    expect(getMonthLastDay("0000-02")).toBe(29);
+    expect(getMonthLastDay("0048-02")).toBe(29);
+    expect(getMonthLastDay("0050-02")).toBe(28);
+  });
 });
 
 describe("daysPastDue", () => {

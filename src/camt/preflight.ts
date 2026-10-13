@@ -11,6 +11,8 @@
 // tool/presenter layer. The Wise preflight (../wise/preflight.ts) shares this
 // scaffolding, so both importers reject fields identically.
 
+import { isStrictDate } from "../strict-date.js";
+
 export interface ImportRejectedField {
   source_row_id: string;
   field: string;
@@ -52,12 +54,6 @@ export function capture<T>(sink: ImportRejectedField[], parse: () => T): T | und
 
 /** Reject dates the calendar does not have (2026-02-30, 2026-13-01). */
 export function assertRealDate(date: string, row: string, field: string, original: unknown): string {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
-  if (!match) return reject(row, field, original, "Expected YYYY-MM-DD");
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const utc = new Date(Date.UTC(year, month - 1, day));
-  const roundTrips = utc.getUTCFullYear() === year
-    && utc.getUTCMonth() === month - 1
-    && utc.getUTCDate() === day;
-  return roundTrips ? date : reject(row, field, original, "Impossible calendar date");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return reject(row, field, original, "Expected YYYY-MM-DD");
+  return isStrictDate(date) ? date : reject(row, field, original, "Impossible calendar date");
 }

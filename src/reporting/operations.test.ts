@@ -74,6 +74,16 @@ describe("ReportingOperations.run", () => {
     expect(outcome.value.payables.aging_buckets[0]!.invoices[0]!.client).toBe("Supplier");
   });
 
+  it("month_end rejects a non-existent calendar month", async () => {
+    const ops = createReportingOperations(makeApi(), true);
+    for (const month of ["2026-13", "2026-00"]) {
+      const outcome = await ops.run({ report: "month_end", month });
+      expect(outcome.ok).toBe(false);
+      if (outcome.ok) return;
+      expect(outcome.error.code).toBe("month_required");
+    }
+  });
+
   it("month_end requires a valid month", async () => {
     const ops = createReportingOperations(makeApi(), true);
     const outcome = await ops.run({ report: "month_end" });

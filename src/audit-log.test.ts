@@ -233,6 +233,24 @@ describe("audit log date filters", () => {
     expect(filtered).not.toContain("#9");
   });
 
+  it("rejects impossible calendar dates in date-only filters instead of rolling them over", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+
+    auditLog.initAuditLog(() => "acme");
+
+    for (const value of ["2026-02-31", "2026-02-29", "0050-02-29"]) {
+      expect(() => auditLog.getAuditLog({ date_from: value })).toThrow(
+        `Invalid date_from filter: "${value}". Expected YYYY-MM-DD or ISO 8601.`,
+      );
+      expect(() => auditLog.getAuditLog({ date_to: value })).toThrow(
+        `Invalid date_to filter: "${value}". Expected YYYY-MM-DD or ISO 8601.`,
+      );
+    }
+    expect(() => auditLog.getAuditLog({ date_from: "2024-02-29", date_to: "2024-02-29" })).not.toThrow();
+    expect(() => auditLog.getAuditLog({ date_from: "0050-03-01" })).not.toThrow();
+  });
+
   it("throws a stable validation error for invalid date filters", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-"));
     const auditLog = await loadAuditLogModule(tempDir);

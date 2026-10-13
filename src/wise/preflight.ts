@@ -7,6 +7,7 @@ import { roundMoney } from "../money.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { assertRealDate, capture, reject } from "../camt/preflight.js";
+import { isStrictDate } from "../strict-date.js";
 import type {
   ImportRejectedField,
   ValidatedWiseFields,
@@ -443,20 +444,7 @@ export function wiseDate(dateStr: string): string {
 
 function assertIsoDate(value: string | undefined, fieldName: "date_from" | "date_to"): void {
   if (value === undefined) return;
-  const match = value.match(ISO_DATE_REGEX);
-  if (!match) {
-    throw new Error(`${fieldName} must be a valid date in YYYY-MM-DD format, got "${value}"`);
-  }
-
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const day = Number(match[3]);
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month - 1 ||
-    date.getUTCDate() !== day
-  ) {
+  if (!isStrictDate(value)) {
     throw new Error(`${fieldName} must be a valid date in YYYY-MM-DD format, got "${value}"`);
   }
 }

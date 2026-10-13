@@ -16,6 +16,7 @@ import {
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
+import { isStrictDate } from "../strict-date.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
@@ -778,15 +779,10 @@ export function toIsoDate(year: number, month: number, day: number): string | un
   if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
     return undefined;
   }
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (
-    date.getUTCFullYear() !== year ||
-    date.getUTCMonth() !== month - 1 ||
-    date.getUTCDate() !== day
-  ) {
-    return undefined;
-  }
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  // OCR plausibility floor: a pre-1900 year on a receipt is a misread, not a date.
+  if (year < 1900) return undefined;
+  const iso = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  return isStrictDate(iso) ? iso : undefined;
 }
 
 function cleanSupplierCandidate(raw: string): string | undefined {
@@ -2375,8 +2371,7 @@ function isCalendarDateToken(token: string): boolean {
     const [a, b, c] = [Number(match[1]), Number(match[2]), Number(match[3])];
     let [year, month, day] = order === "ymd" ? [a, b, c] : [c, b, a];
     if (match[3]!.length === 2 && order === "dmy") year += 2000;
-    const parsed = new Date(Date.UTC(year, month - 1, day));
-    return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+    return toIsoDate(year, month, day) !== undefined;
   }
   return false;
 }

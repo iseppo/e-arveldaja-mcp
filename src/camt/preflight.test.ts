@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertRealDate, capture, ImportFieldError, reject, type ImportRejectedField } from "./preflight.js";
-import { preflightWiseCsv } from "../wise/preflight.js";
+import { preflightWiseCsv, validateWiseDateRange } from "../wise/preflight.js";
 
 describe("shared import preflight scaffolding", () => {
   it("reject throws a positional ImportFieldError with the stringified value", () => {
@@ -26,6 +26,21 @@ describe("shared import preflight scaffolding", () => {
     expect(() => assertRealDate("2026-02-29", "r", "f", "raw")).toThrow("Impossible calendar date");
     expect(() => assertRealDate("2026-13-01", "r", "f", "raw")).toThrow("Impossible calendar date");
     expect(() => assertRealDate("2026-1-01", "r", "f", "raw")).toThrow("Expected YYYY-MM-DD");
+    expect(() => assertRealDate("2026-02-31", "r", "f", "raw")).toThrow("Impossible calendar date");
+  });
+
+  it("assertRealDate judges years 0000-0099 by their own calendar, not 1900-1999", () => {
+    expect(assertRealDate("0050-03-01", "r", "f", "raw")).toBe("0050-03-01");
+    expect(assertRealDate("0048-02-29", "r", "f", "raw")).toBe("0048-02-29");
+    expect(() => assertRealDate("0050-02-29", "r", "f", "raw")).toThrow("Impossible calendar date");
+  });
+
+  it("validateWiseDateRange accepts only real calendar dates", () => {
+    expect(() => validateWiseDateRange("2024-02-29", "2024-03-01")).not.toThrow();
+    expect(() => validateWiseDateRange("0050-03-01", undefined)).not.toThrow();
+    expect(() => validateWiseDateRange("2026-02-31", undefined)).toThrow('date_from must be a valid date in YYYY-MM-DD format, got "2026-02-31"');
+    expect(() => validateWiseDateRange(undefined, "2026-02-29")).toThrow('date_to must be a valid date in YYYY-MM-DD format, got "2026-02-29"');
+    expect(() => validateWiseDateRange("0050-02-29", undefined)).toThrow('date_from must be a valid date in YYYY-MM-DD format, got "0050-02-29"');
   });
 
   it("is what the Wise preflight uses for its date rejections", () => {

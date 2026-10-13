@@ -23,6 +23,7 @@ import {
 } from "./audit-log-labels.js";
 import { withOwnedFileLockSync, type LockOptions } from "./file-lock.js";
 import { writePrivateFile } from "./config.js";
+import { isStrictDate } from "./strict-date.js";
 
 // ---------------------------------------------------------------------------
 // Shared audit filter vocabularies (single source of truth)
@@ -900,6 +901,12 @@ function parseFilterBoundary(value: string, kind: "from" | "to"): number {
   }
 
   if (DATE_ONLY_RE.test(trimmed)) {
+    if (!isStrictDate(trimmed)) {
+      throw new Error(
+        `Invalid ${kind === "from" ? "date_from" : "date_to"} filter: "${value}". ` +
+        "Expected YYYY-MM-DD or ISO 8601."
+      );
+    }
     const suffix = kind === "from" ? "T00:00:00.000Z" : "T23:59:59.999Z";
     const parsed = Date.parse(trimmed + suffix);
     if (Number.isFinite(parsed)) return parsed;

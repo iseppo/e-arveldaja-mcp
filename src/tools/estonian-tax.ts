@@ -49,26 +49,18 @@ import {
 } from "../accounting-rules.js";
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
 import { todayInTallinn } from "../local-date.js";
+import { isStrictDate } from "../strict-date.js";
 
 function requiresOwnerExpenseVatReview(accountName: string | undefined, description: string): boolean {
   const { isPassengerCar, isEntertainmentOrHospitality } = classifyExpenseForVat(`${accountName ?? ""} ${description}`);
   return isPassengerCar || isEntertainmentOrHospitality;
 }
 
-const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const VAT_THRESHOLD_SOURCE = vatSourceById("registration-threshold");
 
 // Strict YYYY-MM-DD + calendar validity (rejects 2025-02-31, 01.01.2025, etc.).
-// Round-trips through Date to catch month/day overflow that regex alone allows.
-function isValidIsoDate(s: string): boolean {
-  if (!ISO_DATE_REGEX.test(s)) return false;
-  const d = new Date(`${s}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return false;
-  return d.toISOString().slice(0, 10) === s;
-}
-
 const isoDateSchema = (description: string) =>
-  z.string().refine(isValidIsoDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
+  z.string().refine(isStrictDate, { message: "Expected valid YYYY-MM-DD date" }).describe(description);
 
 /**
  * Round DOWN to whole cents. Used for the reported maximum distributable

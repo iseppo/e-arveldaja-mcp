@@ -2516,6 +2516,26 @@ describe("bookOwnerExpenseReimbursement (shared core)", () => {
   });
 });
 
+describe("estonian tax date schemas", () => {
+  it("accept only real calendar dates", () => {
+    const mock = makeMockServer();
+    registerEstonianTaxTools(mock.server, {} as ApiContext);
+    const fields: Array<[string, string]> = [
+      ["prepare_dividend_package", "effective_date"],
+      ["create_owner_expense_reimbursement", "effective_date"],
+      ["check_tax_free_limits", "as_of_date"],
+    ];
+    for (const [tool, field] of fields) {
+      const schema = mock.configs.get(tool)!.inputSchema![field] as { safeParse: (v: unknown) => { success: boolean } };
+      expect(schema.safeParse("2026-02-31").success, `${tool}.${field}`).toBe(false);
+      expect(schema.safeParse("2026-02-29").success, `${tool}.${field}`).toBe(false);
+      expect(schema.safeParse("0050-02-29").success, `${tool}.${field}`).toBe(false);
+      expect(schema.safeParse("2024-02-29").success, `${tool}.${field}`).toBe(true);
+      expect(schema.safeParse("0050-03-01").success, `${tool}.${field}`).toBe(true);
+    }
+  });
+});
+
 describe("check_tax_free_limits", () => {
   function getHandler() {
     const mock = makeMockServer();

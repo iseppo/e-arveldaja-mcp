@@ -13,7 +13,7 @@ import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import type { ToolExposureConfig } from "../config.js";
 import { todayInTallinn } from "../local-date.js";
 import { daysPastDue, getMonthLastDay } from "../date-utils.js";
-import { validateOptionalStrictDate, validateOptionalStrictDateRange } from "../strict-date.js";
+import { parseStrictMonth, validateOptionalStrictDate, validateOptionalStrictDateRange } from "../strict-date.js";
 import { toolError } from "../tool-error.js";
 import { isYearEndClosingJournal } from "../year-end-closing-journal.js";
 import { resolveCalculatedResultAccount } from "../account-resolution.js";
@@ -654,7 +654,7 @@ export function registerFinancialStatementTools(
       ? "Generate month-end checklist: unconfirmed journals/invoices, unreconciled bank transactions, and overdue receivables/payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_*)."
       : "Generate a purchase-side month-end checklist: unconfirmed journals/purchase invoices, unreconciled bank transactions, and overdue payables. Overdue = due date before overdue_as_of (the month's last day, or today while the month is still open; invoices falling due from today up to and including month-end are listed separately under due_before_month_end_payables).",
     {
-      month: z.string().regex(monthRegex, "Expected YYYY-MM").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
+      month: z.string().regex(monthRegex, "Expected YYYY-MM").refine(v => parseStrictMonth(v) !== undefined, "Expected a real calendar month (YYYY-MM)").describe("Month to check (YYYY-MM, e.g. 2026-02)"),
       fresh: z.boolean().optional().describe("Clear cached API/reference data before running the checklist (use after web UI changes)."),
     },
     { ...readOnly, title: "Month-End Close Checklist" },

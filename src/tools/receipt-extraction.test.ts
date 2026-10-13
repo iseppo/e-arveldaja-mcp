@@ -5,6 +5,7 @@ import {
   normalizeDate,
   extractDates,
   extractInvoiceNumber,
+  toIsoDate,
   extractAmounts,
   buildKeywordSuggestion,
   computeMinOcrConfidence,
@@ -81,8 +82,24 @@ describe("normalizeDate", () => {
     ["returns undefined for empty string", "", undefined],
     ["returns undefined for invalid date", "not-a-date", undefined],
     ["returns undefined for out-of-range date (Feb 30)", "30.02.2024", undefined],
+    ["rejects impossible ISO dates (Feb 31)", "2026-02-31", undefined],
+    ["rejects Feb 29 on a non-leap year", "29.02.2026", undefined],
+    ["accepts Feb 29 on a leap year", "29.02.2024", "2024-02-29"],
+    ["treats a pre-1900 year as an OCR misread (no date)", "0050-03-01", undefined],
+    ["treats a pre-1900 year as an OCR misread (dmy)", "01.03.1899", undefined],
+    ["accepts the 1900 floor", "01.03.1900", "1900-03-01"],
   ])("%s", (_name, input, expected) => {
     expect(normalizeDate(input)).toBe(expected);
+  });
+
+  it("toIsoDate yields no date (undefined) for impossible dates and pre-1900 years", () => {
+    expect(toIsoDate(2026, 2, 31)).toBeUndefined();
+    expect(toIsoDate(2026, 2, 29)).toBeUndefined();
+    expect(toIsoDate(2024, 2, 29)).toBe("2024-02-29");
+    expect(toIsoDate(50, 3, 1)).toBeUndefined();
+    expect(toIsoDate(1899, 12, 31)).toBeUndefined();
+    expect(toIsoDate(1900, 1, 1)).toBe("1900-01-01");
+    expect(toIsoDate(50, 2, 29)).toBeUndefined();
   });
 
   it("extractDates ignores an impossible ISO invoice date", () => {

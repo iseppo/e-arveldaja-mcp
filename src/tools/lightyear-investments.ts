@@ -45,6 +45,7 @@ import {
   resolveOtherFinancialIncomeAccount,
 } from "../account-resolution.js";
 import { BookingGuard } from "../booking-guard.js";
+import { isStrictDate } from "../strict-date.js";
 import { findDuplicatePostingsInJournals } from "../bank-posting-duplicate-guard.js";
 import type { Account, AccountDimension, Journal } from "../types/api.js";
 
@@ -1140,16 +1141,10 @@ function rawStatementDatePrefix(value: string): string {
 
 function statementDay(value: string): string | null {
   const day = parseLightyearDate(value).split(/[T ]/)[0]!;
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
-  if (!match) return null;
-  const year = Number(match[1]);
-  const month = Number(match[2]);
-  const date = Number(match[3]);
-  const parsed = new Date(Date.UTC(year, month - 1, date));
-  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === date
-    ? day
-    : null;
+  return isStrictDate(day) ? day : null;
 }
+
+export { statementDay as statementDayForTesting };
 
 function conversionRowsByReference(rows: AccountStatementRow[]): Map<string, AccountStatementRow[]> {
   const result = new Map<string, AccountStatementRow[]>();

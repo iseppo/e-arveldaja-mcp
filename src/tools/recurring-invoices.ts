@@ -8,7 +8,7 @@ import type { SaleInvoice } from "../types/api.js";
 import type { CreateSaleInvoiceRequest } from "../types/mutations.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
-import { parseStrictDate, parseStrictMonth } from "../strict-date.js";
+import { isStrictDate, parseStrictDate, parseStrictMonth } from "../strict-date.js";
 import { getMonthLastDay } from "../date-utils.js";
 import { canonicalPlanJson } from "./camt-plan.js";
 
@@ -484,8 +484,8 @@ export function registerRecurringInvoiceTools(server: McpServer, api: ApiContext
     "Clone previous-month sale invoices into DRAFT recurring invoices. dry_run=true previews; invoice numbers are auto-assigned.",
     {
       source_month: z.string().regex(MONTH_REGEX, "Expected YYYY-MM").describe("Source month to copy from (YYYY-MM)"),
-      target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New invoice date (YYYY-MM-DD)"),
-      target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").describe("New turnover date (YYYY-MM-DD)"),
+      target_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").describe("New invoice date (YYYY-MM-DD)"),
+      target_journal_date: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").describe("New turnover date (YYYY-MM-DD)"),
       invoice_ids: z.string().regex(COMMA_SEPARATED_IDS_REGEX, "Expected comma-separated numeric invoice IDs").optional().describe("Comma-separated source invoice IDs to copy (default: all confirmed from source month)"),
       auto_confirm: z.boolean().optional().describe("Confirm created invoices (default false)"),
       dry_run: z.boolean().optional().describe("Preview without creating invoices (default true)"),

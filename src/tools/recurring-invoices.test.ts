@@ -74,6 +74,20 @@ function setupRecurringTool(options: {
 }
 
 describe("recurring invoices tool", () => {
+  it("rejects impossible target dates at the schema boundary", () => {
+    const { server } = setupRecurringTool();
+    const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "create_recurring_sale_invoices");
+    const schema = z.object(registration[1].inputSchema);
+    const base = { source_month: "2026-01", target_date: "2026-02-01", target_journal_date: "2026-02-01" };
+    for (const field of ["target_date", "target_journal_date"] as const) {
+      expect(schema.safeParse({ ...base, [field]: "2026-02-31" }).success).toBe(false);
+      expect(schema.safeParse({ ...base, [field]: "2026-02-29" }).success).toBe(false);
+      expect(schema.safeParse({ ...base, [field]: "0050-02-29" }).success).toBe(false);
+      expect(schema.safeParse({ ...base, [field]: "2024-02-29" }).success).toBe(true);
+      expect(schema.safeParse({ ...base, [field]: "0050-03-01" }).success).toBe(true);
+    }
+  });
+
   it("previews by default when dry_run is omitted", async () => {
     const { api, handler } = setupRecurringTool();
 

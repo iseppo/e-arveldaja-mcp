@@ -15,7 +15,11 @@ export function toUtcDay(s: string): number {
 /** Number of days (28-31) in a `YYYY-MM` month. */
 export function getMonthLastDay(month: string): number {
   const [year, monthNumber] = month.split("-").map(Number);
-  return new Date(Date.UTC(year!, monthNumber!, 0)).getUTCDate();
+  // setUTCFullYear, not Date.UTC: Date.UTC remaps years 0-99 to 1900-1999,
+  // which gets 0000-02 wrong (1900 is not a leap year, year 0 is).
+  const date = new Date(0);
+  date.setUTCFullYear(year!, monthNumber!, 0);
+  return date.getUTCDate();
 }
 
 /** Whole days from `dueDate` to `asOf` (both YYYY-MM-DD); positive when past due. */

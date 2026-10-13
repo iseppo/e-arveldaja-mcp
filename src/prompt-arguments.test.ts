@@ -123,6 +123,8 @@ describe("strict MCP prompt arguments", () => {
   it("accepts only real ISO calendar dates", () => {
     expect(parseIsoDate("2024-02-29")).toBe("2024-02-29");
     expect(parseIsoDate("2026-07-19")).toBe("2026-07-19");
+    expect(parseIsoDate("0050-03-01")).toBe("0050-03-01");
+    expectRejected(parseIsoDate, ["2026-02-31", "2026-02-29", "0050-02-29"]);
 
     expectRejected(parseIsoDate, [
       "",

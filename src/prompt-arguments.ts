@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { isStrictDate } from "./strict-date.js";
 
 export const PROMPT_ARGUMENT_LIMITS = Object.freeze({
   /** Bounds decimal parsing work even when the value is mostly insignificant zeroes. */
@@ -24,7 +25,6 @@ interface IdentifierOptions {
 
 const CANONICAL_POSITIVE_INTEGER = /^[1-9]\d*$/;
 const CANONICAL_DECIMAL = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const DANGEROUS_JSON_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -101,12 +101,7 @@ export function parseExactBoolean(value: string): boolean {
 
 export function parseIsoDate(value: string): string {
   const source = requireString(value, "ISO date");
-  if (!ISO_DATE.test(source)) {
-    throw invalid("ISO date");
-  }
-
-  const parsed = new Date(`${source}T00:00:00.000Z`);
-  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== source) {
+  if (!isStrictDate(source)) {
     throw invalid("ISO date");
   }
   return source;

@@ -12,6 +12,8 @@ import {
   type WorkflowPromptSlug,
 } from "./prompt-registry.js";
 import { renderVatMetadataTokens } from "./estonian-tax-rules.js";
+import { parseStrictMonth } from "./strict-date.js";
+import { getMonthLastDay } from "./date-utils.js";
 
 export function workflowPromptSourcePath(slug: WorkflowPromptSlug): string {
   return `workflows/${slug}.md`;
@@ -45,16 +47,8 @@ function ownDataValue(args: Record<string, unknown>, key: string): unknown {
 }
 
 function lastDayOfMonth(month: string): string | undefined {
-  const match = /^(\d{4})-(\d{2})$/.exec(month);
-  if (!match) return undefined;
-
-  const year = Number(match[1]);
-  const monthNumber = Number(match[2]);
-  if (!Number.isInteger(year) || monthNumber < 1 || monthNumber > 12) {
-    return undefined;
-  }
-
-  return new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0, 10);
+  if (!parseStrictMonth(month)) return undefined;
+  return `${month}-${String(getMonthLastDay(month)).padStart(2, "0")}`;
 }
 
 function deriveWorkflowRunData(args: Record<string, unknown>): Record<string, unknown> {

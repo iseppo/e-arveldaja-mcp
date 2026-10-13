@@ -866,6 +866,18 @@ describe("getMonthLastDay (via month_end_close_checklist)", () => {
 // ---------------------------------------------------------------------------
 
 describe("month_end_close_checklist", () => {
+  it("rejects a non-existent calendar month at the schema boundary", () => {
+    const server = { registerTool: vi.fn() } as any;
+    registerFinancialStatementTools(server, createApi({}));
+    const registration = server.registerTool.mock.calls.find(
+      ([name]: [string]) => name === "month_end_close_checklist",
+    );
+    const month = registration[1].inputSchema.month as { safeParse: (v: unknown) => { success: boolean } };
+    expect(month.safeParse("2026-13").success).toBe(false);
+    expect(month.safeParse("2026-00").success).toBe(false);
+    expect(month.safeParse("2024-02").success).toBe(true);
+  });
+
   it("does not fetch or return sales data when sales are disabled", async () => {
     const server = { registerTool: vi.fn() } as any;
     const api = createApi({

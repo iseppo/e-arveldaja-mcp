@@ -15,6 +15,7 @@ import { agingComputationWarnings, computeAgingBuckets, type AgingInvoiceInput }
 import { computeMissingDocuments } from "../tools/document-audit.js";
 import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import { todayInTallinn } from "../local-date.js";
+import { parseStrictMonth } from "../strict-date.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -109,7 +110,7 @@ class ReportingOperationsImpl implements ReportingOperations {
 
   private async monthEnd(input: RunAccountingReportInput): Promise<OperationOutcome<AccountingReportResult>> {
     const month = input.month;
-    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    if (!month || !parseStrictMonth(month)) {
       return fail("month_required", "month_end requires month in YYYY-MM format.");
     }
     const { scan, dateTo } = await loadMonthEndScan(this.api, month, this.enableSales);

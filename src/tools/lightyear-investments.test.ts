@@ -5761,3 +5761,14 @@ describe("Lightyear CSV text with planted sandbox delimiters (F-IMPORT-SOURCE-MA
     expect(rerun.payload.duplicates_skipped).toBe(1);
   });
 });
+
+describe("Lightyear statement day validation", () => {
+  it("accepts only real calendar days, judging years 0000-0099 by their own calendar", () => {
+    const statementDay = (lightyearInvestments as any).statementDayForTesting as (value: string) => string | null;
+    expect(statementDay("29/02/2024 10:00:00")).toBe("2024-02-29");
+    expect(statementDay("31/02/2026 10:00:00")).toBeNull();
+    expect(statementDay("29/02/2026 10:00:00")).toBeNull();
+    expect(statementDay("01/03/0050 10:00:00")).toBe("0050-03-01");
+    expect(statementDay("29/02/0050 10:00:00")).toBeNull();
+  });
+});
