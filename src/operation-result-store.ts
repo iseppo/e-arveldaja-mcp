@@ -1,66 +1,25 @@
-import { randomBytes } from "node:crypto";
-import { types as utilTypes } from "node:util";
 import { cloneAndFreezePlanData, cloneRuntimeSafetyScope, runtimeSafetyScopesEqual, type PlanData } from "./plan-store.js";
-import { detailItemFitsSinglePage } from "./response-budget.js";
+import {
+  createPublicDetailKit,
+  PublicDetailHandleStore,
+  readExactInputRecord,
+  type PublicDetailInput,
+  type PublicDetailRecord,
+  type PublicDetailScalar,
+  type PublicDetailValue,
+} from "./public-detail-store.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 
 export const OPERATION_RESULT_TTL_MS = 600_000;
 export const MAX_ACTIVE_OPERATION_RESULTS = 128;
 export const MAX_OPERATION_RESULT_TOMBSTONES = 512;
-const HANDLE_BYTES = 32;
-const HANDLE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const MAX_HANDLE_ATTEMPTS = 16;
 const OPERATION_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/;
-const FORBIDDEN_KEYS = new Set([
-  "password", "apikey", "apikeyid", "apipublicvalue", "apipassword", "credential", "credentials", "secret", "token", "authorization",
-  "privatekey", "sessioncookie", "bearer",
-  "privatepayload", "normalizedargs", "sourceidentities", "livesnapshot", "planhandle",
-  "command", "commands", "executable", "tool", "args",
-  "approved", "approval", "approvalrequired", "approvalstate",
-  "__proto__", "constructor", "prototype",
-]);
 
 export type OperationResultStatus = "completed" | "partial" | "indeterminate";
-export type PublicResultScalar = string | number | boolean | null;
-export interface PublicResultRecord { readonly [key: string]: PublicResultValue; }
-export type PublicResultValue = PublicResultScalar | readonly PublicResultScalar[] | PublicResultRecord;
-export interface PublicOperationResultDetailInput {
-  readonly item_id?: PublicResultScalar;
-  readonly id?: PublicResultScalar;
-  readonly index?: PublicResultScalar;
-  readonly i?: PublicResultScalar;
-  readonly label?: PublicResultScalar;
-  readonly name?: PublicResultScalar;
-  readonly code?: PublicResultScalar;
-  readonly message?: PublicResultScalar;
-  readonly severity?: PublicResultScalar;
-  readonly status?: PublicResultScalar;
-  readonly amount?: PublicResultScalar;
-  readonly currency?: PublicResultScalar;
-  readonly date?: PublicResultScalar;
-  readonly account?: PublicResultScalar;
-  readonly account_id?: PublicResultScalar;
-  readonly description?: PublicResultScalar;
-  readonly count?: PublicResultScalar;
-  readonly total?: PublicResultScalar;
-  readonly reason?: PublicResultScalar;
-  readonly text?: PublicResultScalar;
-  readonly value?: PublicResultScalar;
-  readonly values?: readonly PublicResultScalar[];
-  readonly labels?: readonly PublicResultScalar[];
-  readonly codes?: readonly PublicResultScalar[];
-  readonly messages?: readonly PublicResultScalar[];
-  readonly warnings?: readonly PublicResultScalar[];
-  readonly tags?: readonly PublicResultScalar[];
-  readonly source_documents?: readonly PublicResultScalar[];
-  readonly nested?: PublicOperationResultDetailInput;
-  readonly counts?: PublicOperationResultDetailInput;
-  readonly totals?: PublicOperationResultDetailInput;
-  readonly period?: PublicOperationResultDetailInput;
-  readonly range?: PublicOperationResultDetailInput;
-  readonly summary?: PublicOperationResultDetailInput;
-  readonly details?: PublicOperationResultDetailInput;
-}
+export type PublicResultScalar = PublicDetailScalar;
+export type PublicResultRecord = PublicDetailRecord;
+export type PublicResultValue = PublicDetailValue;
+export type PublicOperationResultDetailInput = PublicDetailInput;
 export interface PublicOperationResultDetail {
   readonly contract: "operation_result_detail_v1";
   readonly data: PublicResultRecord;
@@ -95,17 +54,6 @@ const MESSAGES: Readonly<Record<OperationResultStoreErrorCode, string>> = Object
   operation_result_item_too_large: "A single operation-result detail is too large to page within the response budget.",
 });
 
-const PUBLIC_DETAIL_SCALAR_FIELDS = new Set([
-  "item_id", "id", "index", "i", "label", "name", "code", "message", "severity", "status",
-  "amount", "currency", "date", "account", "account_id", "description", "count", "total", "reason", "text", "value",
-]);
-const PUBLIC_DETAIL_LIST_FIELDS = new Set(["values", "labels", "codes", "messages", "warnings", "tags", "source_documents"]);
-const PUBLIC_DETAIL_RECORD_FIELDS = new Set(["nested", "counts", "totals", "period", "range", "summary", "details"]);
-const FORBIDDEN_PUBLIC_FIELD_FRAGMENT = /(?:auth|authorization|bearer|cookie|jwt|accesskey|privatekey|session|token|secret|password|credential|apikey|approval|command|executable|action|parameter|argument|request|payload|tool)/;
-const EXECUTABLE_POSITIONAL_VALUE = /^(?:delete|create|update|confirm|execute|post|put|patch|remove|upload|import)_[a-z0-9_.-]+$/i;
-const CREDENTIAL_VALUE = /^(?:bearer\s+\S+|(?:authorization|auth|cookie|set-cookie|jwt|token|secret|password|access[ _-]?key|api[ _-]?key)\s*(?::|=|$)|(?:session|sid|jwt|token|secret|password|access[ _-]?key|api[ _-]?key)[ _-]*=|eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|-----BEGIN [A-Z ]*PRIVATE KEY-----)/i;
-const publicDetailBrands = new WeakSet<object>();
-
 export class OperationResultStoreError extends Error {
   constructor(readonly code: OperationResultStoreErrorCode) {
     super(MESSAGES[code]);
@@ -125,118 +73,18 @@ export interface OperationResultStoreOptions {
 }
 
 function invalid(): never { throw new OperationResultStoreError("operation_result_data_invalid"); }
-function normalizedKey(key: string): string { return key.replace(/[^a-z0-9]/gi, "").toLowerCase(); }
-function forbiddenKey(key: string): boolean {
-  const normalized = normalizedKey(key);
-  return FORBIDDEN_KEYS.has(normalized) ||
-    /(?:token|secret|password|credential|apikey|privatekey|sessioncookie|bearer)/.test(normalized) ||
-    normalized.includes("approval") || normalized.includes("executionplan") ||
-    normalized.startsWith("command") || normalized.startsWith("tool") ||
-    normalized === "arguments";
-}
 
-function assertPublicProjection(value: unknown): void {
-  const active = new Set<object>();
-  const visit = (candidate: unknown): void => {
-    if (candidate === null || typeof candidate !== "object") return;
-    if (utilTypes.isProxy(candidate) || active.has(candidate)) invalid();
-    active.add(candidate);
-    try {
-      if (Array.isArray(candidate)) {
-        if (Object.getPrototypeOf(candidate) !== Array.prototype) invalid();
-        const descriptors = Object.getOwnPropertyDescriptors(candidate);
-        const ownKeys = Reflect.ownKeys(candidate);
-        const expected = new Set(["length", ...Array.from({ length: candidate.length }, (_, index) => String(index))]);
-        if (ownKeys.some(key => typeof key !== "string" || !expected.has(key)) || ownKeys.length !== expected.size) invalid();
-        for (let index = 0; index < candidate.length; index += 1) {
-          const descriptor = descriptors[String(index)];
-          if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid();
-          visit(descriptor.value);
-        }
-        return;
-      }
-      const keys = Reflect.ownKeys(candidate);
-      if (keys.some(key => typeof key !== "string" || forbiddenKey(key))) invalid();
-      const descriptors = Object.getOwnPropertyDescriptors(candidate);
-      for (const key of keys as string[]) {
-        const descriptor = descriptors[key]!;
-        if (!("value" in descriptor) || !descriptor.enumerable) invalid();
-        visit(descriptor.value);
-      }
-    } finally { active.delete(candidate); }
-  };
-  visit(value);
-}
-
-function assertSafePublicDetailData(value: unknown): asserts value is PublicResultRecord {
-  assertPublicProjection(value);
-  const visitRecord = (record: unknown): void => {
-    if (typeof record !== "object" || record === null || Array.isArray(record) || Object.getPrototypeOf(record) !== Object.prototype) invalid();
-    for (const [key, child] of Object.entries(record)) {
-      const normalized = normalizedKey(key);
-      if (FORBIDDEN_PUBLIC_FIELD_FRAGMENT.test(normalized)) invalid();
-      if (PUBLIC_DETAIL_SCALAR_FIELDS.has(key)) {
-        if (child !== null && typeof child !== "string" && typeof child !== "number" && typeof child !== "boolean") invalid();
-        if (typeof child === "number" && !Number.isFinite(child)) invalid();
-        if (typeof child === "string" && CREDENTIAL_VALUE.test(child.trim())) invalid();
-      } else if (PUBLIC_DETAIL_LIST_FIELDS.has(key)) {
-        if (!Array.isArray(child) || child.some(item =>
-          item !== null && typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean")) invalid();
-        if (child.some(item => typeof item === "number" && !Number.isFinite(item))) invalid();
-        if (child.some(item => typeof item === "string" && (CREDENTIAL_VALUE.test(item.trim()) || EXECUTABLE_POSITIONAL_VALUE.test(item.trim())))) invalid();
-      } else if (PUBLIC_DETAIL_RECORD_FIELDS.has(key)) {
-        visitRecord(child);
-      } else {
-        invalid();
-      }
-    }
-  };
-  visitRecord(value);
-}
+// Module-private brand: only details created here are accepted by this store.
+const detailKit = createPublicDetailKit("operation_result_detail_v1", invalid, cloneAndFreezePlanData);
 
 export function createPublicOperationResultDetail(
   data: PublicOperationResultDetailInput,
 ): PublicOperationResultDetail {
-  assertSafePublicDetailData(data);
-  const safeData = cloneAndFreezePlanData(data) as PublicResultRecord;
-  const detail = Object.freeze({ contract: "operation_result_detail_v1" as const, data: safeData });
-  publicDetailBrands.add(detail);
-  return detail;
-}
-
-function readPublicOperationResultDetail(value: unknown): PublicResultRecord {
-  if (typeof value !== "object" || value === null || !publicDetailBrands.has(value)) invalid();
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== 2 || !keys.includes("contract") || !keys.includes("data") ||
-    descriptors.contract?.value !== "operation_result_detail_v1" || !("value" in (descriptors.data ?? {}))) invalid();
-  return descriptors.data!.value as PublicResultRecord;
-}
-
-function encodeHandle(bytes: Uint8Array): string {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== HANDLE_BYTES) throw new OperationResultStoreError("operation_result_handle_collision");
-  const handle = Buffer.from(bytes).toString("base64url");
-  if (!HANDLE_PATTERN.test(handle)) throw new OperationResultStoreError("operation_result_handle_collision");
-  return handle;
-}
-function canonicalHandle(handle: unknown): handle is string {
-  if (typeof handle !== "string" || !HANDLE_PATTERN.test(handle)) return false;
-  const bytes = Buffer.from(handle, "base64url");
-  return bytes.byteLength === HANDLE_BYTES && bytes.toString("base64url") === handle;
+  return detailKit.create(data);
 }
 
 function readResultInput(candidate: unknown): OperationResultInput {
-  if (typeof candidate !== "object" || candidate === null || utilTypes.isProxy(candidate) || Object.getPrototypeOf(candidate) !== Object.prototype) invalid();
-  const keys = Reflect.ownKeys(candidate);
-  const expected = new Set(["operation", "status", "items", "plan_handle"]);
-  if (keys.length !== expected.size || keys.some(key => typeof key !== "string" || !expected.has(key))) invalid();
-  const descriptors = Object.getOwnPropertyDescriptors(candidate);
-  const values: Record<string, unknown> = {};
-  for (const key of expected) {
-    const descriptor = descriptors[key];
-    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalid();
-    values[key] = descriptor.value;
-  }
+  const values = readExactInputRecord(candidate, ["operation", "status", "items", "plan_handle"], invalid);
   if (typeof values.operation !== "string" || !OPERATION_PATTERN.test(values.operation) ||
     typeof values.status !== "string" || !["completed", "partial", "indeterminate"].includes(values.status) ||
     !Array.isArray(values.items) || typeof values.plan_handle !== "string") invalid();
@@ -244,101 +92,37 @@ function readResultInput(candidate: unknown): OperationResultInput {
 }
 
 export class OperationResultStore {
-  readonly #active = new Map<string, StoredOperationResult>();
-  readonly #tombstones = new Set<string>();
-  readonly #getActiveScope: () => RuntimeSafetyScope;
-  readonly #now: () => number;
-  readonly #handleFactory: () => Uint8Array;
-  readonly #ttlMs: number;
-  readonly #maxActive: number;
-  readonly #maxTombstones: number;
-  readonly #assertConsumedPlan: (handle: string, domain: string) => void;
-  readonly #retainConsumedPlan: (handle: string, domain: string) => () => void;
-  readonly #planProofReleases = new Map<string, () => void>();
+  readonly #store: PublicDetailHandleStore<StoredOperationResult>;
 
   constructor(options: OperationResultStoreOptions) {
-    this.#getActiveScope = options.getActiveScope;
-    this.#now = options.now ?? Date.now;
-    this.#handleFactory = options.handleFactory ?? (() => randomBytes(HANDLE_BYTES));
-    this.#ttlMs = options.ttlMs ?? OPERATION_RESULT_TTL_MS;
-    this.#maxActive = options.maxActive ?? MAX_ACTIVE_OPERATION_RESULTS;
-    this.#maxTombstones = options.maxTombstones ?? MAX_OPERATION_RESULT_TOMBSTONES;
-    this.#assertConsumedPlan = options.assertConsumedPlan;
-    this.#retainConsumedPlan = options.retainConsumedPlan;
-    if (!Number.isSafeInteger(this.#ttlMs) || this.#ttlMs <= 0 || !Number.isSafeInteger(this.#maxActive) || this.#maxActive <= 0 ||
-      !Number.isSafeInteger(this.#maxTombstones) || this.#maxTombstones <= 0) invalid();
+    const assertConsumedPlan = options.assertConsumedPlan;
+    const retainConsumedPlan = options.retainConsumedPlan;
+    this.#store = new PublicDetailHandleStore<StoredOperationResult>(options, {
+      defaultTtlMs: OPERATION_RESULT_TTL_MS,
+      defaultMaxActive: MAX_ACTIVE_OPERATION_RESULTS,
+      defaultMaxTombstones: MAX_OPERATION_RESULT_TOMBSTONES,
+      error: kind => new OperationResultStoreError(`operation_result_${kind}`),
+      detail: detailKit,
+      cloneAndFreezeData: value => cloneAndFreezePlanData(value) as readonly PlanData[],
+      cloneScope: cloneRuntimeSafetyScope,
+      scopesEqual: runtimeSafetyScopesEqual,
+      // The result is readable only while the plan it reports on stays provably
+      // consumed: pin that proof for the handle's lifetime and re-check it on read.
+      retainProof: stored => retainConsumedPlan(stored.planHandle, stored.operation),
+      assertProof: stored => assertConsumedPlan(stored.planHandle, stored.operation),
+    });
   }
 
-  get activeCount(): number { this.#purge(this.#readNow()); return this.#active.size; }
+  get activeCount(): number { return this.#store.activeCount; }
 
   issue(input: OperationResultInput): string {
     const safeInput = readResultInput(input);
-    assertPublicProjection(safeInput.items);
-    const publicItems = safeInput.items.map(readPublicOperationResultDetail);
-    const items = cloneAndFreezePlanData(publicItems) as readonly PlanData[];
-    // Refuse any single detail too large to be returned as a one-item page. This
-    // runs before any side effect (no capacity slot taken, no plan proof pinned),
-    // so an oversized item is a clean structured error rather than an admitted
-    // detail no page size could ever reach.
-    for (const item of items) {
-      if (!detailItemFitsSinglePage(item)) throw new OperationResultStoreError("operation_result_item_too_large");
-    }
-    const now = this.#readNow();
-    const expiresAt = now + this.#ttlMs;
-    if (!Number.isSafeInteger(expiresAt)) invalid();
-    this.#purge(now);
-    if (this.#active.size >= this.#maxActive) throw new OperationResultStoreError("operation_result_capacity_exceeded");
-    let scope: RuntimeSafetyScope;
-    try { scope = cloneRuntimeSafetyScope(this.#getActiveScope()); } catch { invalid(); }
-    const stored = Object.freeze({ operation: safeInput.operation, status: safeInput.status, items, planHandle: safeInput.plan_handle, scope, issuedAt: now, expiresAt });
-    let releasePlanProof: () => void;
-    try { releasePlanProof = this.#retainConsumedPlan(safeInput.plan_handle, safeInput.operation); } catch { invalid(); }
-    try {
-      for (let attempt = 0; attempt < MAX_HANDLE_ATTEMPTS; attempt += 1) {
-        const handle = encodeHandle(this.#handleFactory());
-        if (this.#active.has(handle) || this.#tombstones.has(handle)) continue;
-        this.#active.set(handle, stored);
-        this.#planProofReleases.set(handle, releasePlanProof);
-        return handle;
-      }
-    } catch (error) {
-      releasePlanProof();
-      throw error;
-    }
-    releasePlanProof();
-    throw new OperationResultStoreError("operation_result_handle_collision");
+    return this.#store.issue(safeInput.items, ({ items, scope, issuedAt, expiresAt }) => Object.freeze({
+      operation: safeInput.operation, status: safeInput.status, items, planHandle: safeInput.plan_handle, scope, issuedAt, expiresAt,
+    }));
   }
 
   inspect(handle: string): StoredOperationResult {
-    if (!canonicalHandle(handle)) throw new OperationResultStoreError("operation_result_handle_invalid");
-    const now = this.#readNow();
-    const stored = this.#active.get(handle);
-    if (stored && now >= stored.expiresAt) { this.#expire(handle); this.#addTombstone(handle); }
-    this.#purge(now);
-    if (!stored || now >= stored.expiresAt) throw new OperationResultStoreError(stored || this.#tombstones.has(handle) ? "operation_result_expired" : "operation_result_handle_invalid");
-    let current: RuntimeSafetyScope;
-    try { current = cloneRuntimeSafetyScope(this.#getActiveScope()); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
-    if (!runtimeSafetyScopesEqual(stored.scope, current)) throw new OperationResultStoreError("operation_result_scope_mismatch");
-    try { this.#assertConsumedPlan(stored.planHandle, stored.operation); } catch { throw new OperationResultStoreError("operation_result_scope_mismatch"); }
-    return stored;
-  }
-
-  #readNow(): number { const now = this.#now(); if (!Number.isSafeInteger(now) || now < 0) invalid(); return now; }
-  #purge(now: number): void {
-    for (const [handle, stored] of this.#active) if (now >= stored.expiresAt) { this.#expire(handle); this.#addTombstone(handle); }
-  }
-  #expire(handle: string): void {
-    this.#active.delete(handle);
-    this.#planProofReleases.get(handle)?.();
-    this.#planProofReleases.delete(handle);
-  }
-  #addTombstone(handle: string): void {
-    this.#tombstones.delete(handle);
-    this.#tombstones.add(handle);
-    while (this.#tombstones.size > this.#maxTombstones) {
-      const oldest = this.#tombstones.values().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.#tombstones.delete(oldest);
-    }
+    return this.#store.inspect(handle);
   }
 }

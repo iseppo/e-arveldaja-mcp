@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { types as utilTypes } from "node:util";
+import { encodeStoreHandle, isCanonicalStoreHandle, MAX_STORE_HANDLE_ATTEMPTS, randomStoreHandleBytes } from "./handle-store-core.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 import { TOOL_EXPOSURE_KEYS } from "./config.js";
 
@@ -8,9 +8,6 @@ export const EXECUTION_PLAN_TTL_MS = 600_000;
 export const MAX_ACTIVE_EXECUTION_PLANS = 128;
 export const MAX_EXECUTION_PLAN_TOMBSTONES = 512;
 
-const HANDLE_BYTES = 32;
-const HANDLE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-const MAX_HANDLE_ATTEMPTS = 16;
 const MAX_PLAN_DEPTH = 16;
 const MAX_PLAN_NODES = 10_000;
 const MAX_PLAN_ARRAY_ITEMS = 5_000;
@@ -224,25 +221,6 @@ export function runtimeSafetyScopesEqual(left: RuntimeSafetyScope, right: Runtim
     TOOL_EXPOSURE_KEYS.every(key => left.features[key] === right.features[key]);
 }
 
-function encodeHandle(bytes: Uint8Array): string {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== HANDLE_BYTES) {
-    throw new PlanStoreError("plan_handle_collision");
-  }
-  const handle = Buffer.from(bytes).toString("base64url");
-  if (!HANDLE_PATTERN.test(handle)) throw new PlanStoreError("plan_handle_collision");
-  return handle;
-}
-
-function isCanonicalHandle(handle: string): boolean {
-  if (!HANDLE_PATTERN.test(handle)) return false;
-  try {
-    const decoded = Buffer.from(handle, "base64url");
-    return decoded.byteLength === HANDLE_BYTES && decoded.toString("base64url") === handle;
-  } catch {
-    return false;
-  }
-}
-
 export class ExecutionPlanStore {
   readonly #active = new Map<string, StoredExecutionPlan>();
   readonly #tombstones = new Map<string, Tombstone>();
@@ -256,7 +234,7 @@ export class ExecutionPlanStore {
   constructor(options: ExecutionPlanStoreOptions) {
     this.#getActiveScope = options.getActiveScope;
     this.#now = options.now ?? Date.now;
-    this.#handleFactory = options.handleFactory ?? (() => randomBytes(HANDLE_BYTES));
+    this.#handleFactory = options.handleFactory ?? randomStoreHandleBytes;
     this.#ttlMs = options.ttlMs ?? EXECUTION_PLAN_TTL_MS;
     this.#maxActive = options.maxActive ?? MAX_ACTIVE_EXECUTION_PLANS;
     this.#maxTombstones = options.maxTombstones ?? MAX_EXECUTION_PLAN_TOMBSTONES;
@@ -327,8 +305,9 @@ export class ExecutionPlanStore {
       privatePayload: clonedInput.privatePayload,
     }) satisfies StoredExecutionPlan;
 
-    for (let attempt = 0; attempt < MAX_HANDLE_ATTEMPTS; attempt += 1) {
-      const handle = encodeHandle(this.#handleFactory());
+    for (let attempt = 0; attempt < MAX_STORE_HANDLE_ATTEMPTS; attempt += 1) {
+      const handle = encodeStoreHandle(this.#handleFactory());
+      if (handle === undefined) throw new PlanStoreError("plan_handle_collision");
       if (this.#active.has(handle) || this.#tombstones.has(handle)) continue;
       this.#active.set(handle, plan);
       return handle;
@@ -412,7 +391,7 @@ export class ExecutionPlanStore {
   }
 
   #validateHandle(handle: string): void {
-    if (typeof handle !== "string" || !isCanonicalHandle(handle)) {
+    if (!isCanonicalStoreHandle(handle)) {
       throw new PlanStoreError("plan_handle_invalid");
     }
   }

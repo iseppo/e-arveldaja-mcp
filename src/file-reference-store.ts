@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
+import { encodeStoreHandle, isCanonicalStoreHandle, MAX_STORE_HANDLE_ATTEMPTS, randomStoreHandleBytes } from "./handle-store-core.js";
 import type { RuntimeSafetyScope } from "./runtime-safety-context.js";
 import { cloneRuntimeSafetyScope, runtimeSafetyScopesEqual } from "./plan-store.js";
 
@@ -14,10 +14,7 @@ export const FILE_REFERENCE_OPERATIONS = Object.freeze({
   lightyearGains: "lightyear_gains_input",
 } as const);
 
-const REFERENCE_BYTES = 32;
-const REFERENCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const OPERATION_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/;
-const MAX_REFERENCE_ATTEMPTS = 16;
 const MAX_CANONICAL_PATH_CHARS = 4_096;
 
 export type FileReferenceKind = "file" | "directory";
@@ -94,25 +91,6 @@ function validateCanonicalPath(canonicalPath: string): void {
   }
 }
 
-function encodeReference(bytes: Uint8Array): string {
-  if (!(bytes instanceof Uint8Array) || bytes.byteLength !== REFERENCE_BYTES) {
-    throw new FileReferenceStoreError("file_reference_collision");
-  }
-  const value = Buffer.from(bytes).toString("base64url");
-  if (!REFERENCE_PATTERN.test(value)) throw new FileReferenceStoreError("file_reference_collision");
-  return value;
-}
-
-function isCanonicalReference(value: string): boolean {
-  if (!REFERENCE_PATTERN.test(value)) return false;
-  try {
-    const decoded = Buffer.from(value, "base64url");
-    return decoded.byteLength === REFERENCE_BYTES && decoded.toString("base64url") === value;
-  } catch {
-    return false;
-  }
-}
-
 export class FileReferenceStore {
   readonly #active = new Map<string, StoredFileReference>();
   readonly #getActiveScope: () => RuntimeSafetyScope;
@@ -124,7 +102,7 @@ export class FileReferenceStore {
   constructor(options: FileReferenceStoreOptions) {
     this.#getActiveScope = options.getActiveScope;
     this.#now = options.now ?? Date.now;
-    this.#referenceFactory = options.referenceFactory ?? (() => randomBytes(REFERENCE_BYTES));
+    this.#referenceFactory = options.referenceFactory ?? randomStoreHandleBytes;
     this.#ttlMs = options.ttlMs ?? FILE_REFERENCE_TTL_MS;
     this.#maxActive = options.maxActive ?? MAX_ACTIVE_FILE_REFERENCES;
     if (!Number.isSafeInteger(this.#ttlMs) || this.#ttlMs <= 0 ||
@@ -166,8 +144,9 @@ export class FileReferenceStore {
     if (this.#active.size >= this.#maxActive) {
       throw new FileReferenceStoreError("file_reference_capacity_exceeded");
     }
-    for (let attempt = 0; attempt < MAX_REFERENCE_ATTEMPTS; attempt += 1) {
-      const reference = encodeReference(this.#referenceFactory());
+    for (let attempt = 0; attempt < MAX_STORE_HANDLE_ATTEMPTS; attempt += 1) {
+      const reference = encodeStoreHandle(this.#referenceFactory());
+      if (reference === undefined) throw new FileReferenceStoreError("file_reference_collision");
       if (this.#active.has(reference)) continue;
       this.#active.set(reference, Object.freeze({
         canonicalPath: input.canonicalPath,
@@ -183,7 +162,7 @@ export class FileReferenceStore {
   }
 
   resolve(reference: string, expected: ResolveFileReferenceInput): string {
-    if (typeof reference !== "string" || !isCanonicalReference(reference)) {
+    if (!isCanonicalStoreHandle(reference)) {
       throw new FileReferenceStoreError("file_reference_invalid");
     }
     validateOperation(expected.operation);
