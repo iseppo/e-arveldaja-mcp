@@ -196,9 +196,11 @@ function identitiesMatch(actual: FileInputIdentity, expected: FileInputIdentity)
 
 const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/;
 
+export type FileInputIdentityOptions = Pick<CaptureFileInputOptions, "allowedExtensions" | "maxSize">;
+
 function validatedExpectedIdentity(
   candidate: unknown,
-  options: CaptureFileInputOptions,
+  options: FileInputIdentityOptions,
 ): FileInputIdentity {
   let cloned: unknown;
   try {
@@ -232,16 +234,34 @@ function validatedExpectedIdentity(
   return record as unknown as FileInputIdentity;
 }
 
+/**
+ * The one dry-run→execute source check: an already-captured snapshot must
+ * match the identity the reviewed plan bound (schema, source kind, canonical
+ * locator, digest, size, extension). Throws `file_input_identity_invalid` for a
+ * malformed stored identity and `file_input_changed` for any field mismatch —
+ * so equal bytes at a different canonical path are refused too. Sites that
+ * already hold the snapshot they parse call this directly (no second read).
+ */
+export function assertFileInputSnapshotIdentity(
+  snapshot: FileInputSnapshot,
+  expectedIdentity: unknown,
+  options: FileInputIdentityOptions,
+): FileInputSnapshot {
+  const validatedIdentity = validatedExpectedIdentity(expectedIdentity, options);
+  if (!identitiesMatch(snapshot.identity, validatedIdentity)) {
+    throw new FileInputSnapshotError("file_input_changed");
+  }
+  return snapshot;
+}
+
 export async function assertMatchingFileInputSnapshot(
   source: FileInputSource,
   expectedIdentity: FileInputIdentity,
   options: CaptureFileInputOptions,
   dependencies: FileInputSnapshotDependencies = {},
 ): Promise<FileInputSnapshot> {
+  // Validate before any IO so a malformed identity never triggers a read.
   const validatedIdentity = validatedExpectedIdentity(expectedIdentity, options);
   const snapshot = await captureFileInputSnapshot(source, options, dependencies);
-  if (!identitiesMatch(snapshot.identity, validatedIdentity)) {
-    throw new FileInputSnapshotError("file_input_changed");
-  }
-  return snapshot;
+  return assertFileInputSnapshotIdentity(snapshot, validatedIdentity, options);
 }

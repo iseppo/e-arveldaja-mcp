@@ -174,6 +174,7 @@ function setupCamtTool(options: {
   journals?: unknown[];
   toolName?: string;
   allowWrites?: boolean;
+  runtimeSafetyContext?: ReturnType<typeof createTestRuntimeSafetyContext>;
 } = {}) {
   const server = createMockToolServer();
   const api = createAccountingWorkflowApi({
@@ -195,7 +196,7 @@ function setupCamtTool(options: {
   // Behavior tests exercise the granular constituent tools directly, so
   // register with the full surface exposed (default hides them behind the
   // merged process_camt053 tool).
-  registerCamtImportTools(server, api, createTestRuntimeSafetyContext(), { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+  registerCamtImportTools(server, api, options.runtimeSafetyContext ?? createTestRuntimeSafetyContext(), { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
 
   return {
     api,
@@ -2944,6 +2945,47 @@ describe("camt plan-bound execution", () => {
     expect(result.isError).toBe(true);
     expect(payload.category).toBe("plan_drift");
     expect(payload.mutation_occurred).toBe(false);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects the same CAMT bytes at a different canonical location with plan_drift and zero creates", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { api, handler } = setupCamtTool();
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    // Same path argument and bytes, but it now resolves to a copied statement.
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/copied-camt.xml" });
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(JSON.stringify(payload)).toContain("bytes or location");
+    expect(payload.mutation_occurred).toBe(false);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed stored CAMT source identity with plan_drift and zero creates", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const context = createTestRuntimeSafetyContext();
+    const { api, handler } = setupCamtTool({ runtimeSafetyContext: context });
+
+    const plan_handle = await issueCamtPlanHandle(handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const consume = context.planStore.consume.bind(context.planStore);
+    vi.spyOn(context.planStore, "consume").mockImplementation((handle, domain) => {
+      const plan = consume(handle, domain);
+      return { ...plan, sourceIdentities: [{ ...plan.sourceIdentities[0], extension: ".csv" }] };
+    });
+
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text);
+
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(JSON.stringify(payload)).toContain("source identity is invalid");
     expect(api.transactions.create).not.toHaveBeenCalled();
   });
 

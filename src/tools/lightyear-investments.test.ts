@@ -5062,6 +5062,69 @@ describe("Lightyear plan-bound booking (Task 13)", () => {
     expect(api.journals.create).not.toHaveBeenCalled();
   });
 
+  it("trades execute rejects the same statement bytes at a different canonical location with plan_drift", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_trades");
+    const args = { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 };
+    const plan_handle = await issueTradesHandle(handler, args);
+
+    // Same path argument and bytes, but it now resolves to another file (a
+    // retargeted symlink / copied statement): the reviewed locator no longer holds.
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/copied-lightyear.csv" });
+    const result = await handler({ ...args, dry_run: false, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.error).toContain("bytes or location");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("trades execute rejects the same capital-gains bytes at a different canonical location with plan_drift", async () => {
+    const statement = PLAN_SELL_CSV();
+    const gains = PLAN_GAINS_CSV();
+    let idx = 0;
+    mockedReadFile.mockImplementation(async () => (idx++ % 2 === 0 ? statement : gains) as any);
+    mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_trades");
+    const baseArgs = { file_path: "/tmp/lightyear.csv", capital_gains_file: "/tmp/gains.csv", investment_account: 1550, broker_account: 1120, gain_loss_account: 8320 };
+    const plan_handle = await issueTradesHandle(handler, baseArgs);
+
+    mockedResolveFileInput.mockImplementation(async (input: string) => ({
+      path: input === "/tmp/gains.csv" ? "/tmp/moved-gains.csv" : input,
+    }));
+    const result = await handler({ ...baseArgs, dry_run: false, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.error).toContain("bytes or location");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("trades execute rejects a malformed stored source identity with plan_drift", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_trades");
+    const args = { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 };
+    const plan_handle = await issueTradesHandle(handler, args);
+
+    const consume = context.planStore.consume.bind(context.planStore);
+    vi.spyOn(context.planStore, "consume").mockImplementation((handle, domain) => {
+      const plan = consume(handle, domain);
+      return { ...plan, sourceIdentities: [{ ...plan.sourceIdentities[0], size_bytes: -1 }] };
+    });
+    const result = await handler({ ...args, dry_run: false, plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.error).toContain("identity");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
   it("trades execute rejects argument drift between the reviewed plan and execute", async () => {
     mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
     const context = createTestRuntimeSafetyContext();
@@ -5145,6 +5208,43 @@ describe("Lightyear plan-bound booking (Task 13)", () => {
     expect(done.mode).toBe("EXECUTED");
     expect(done.execution_report.status).toBe("completed");
     expect(done.new_entries).toBe(1);
+  });
+
+  it("distributions execute rejects the same statement bytes at a different canonical location with plan_drift", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_distributions");
+    const args = { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320 };
+    const dry = parseMcpResponse((await handler({ ...args, dry_run: true })).content[0]!.text) as any;
+
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/copied-lightyear.csv" });
+    const result = await handler({ ...args, dry_run: false, plan_handle: dry.plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.error).toContain("bytes or location");
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("distributions execute rejects a malformed stored source identity with plan_drift", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_distributions");
+    const args = { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320 };
+    const dry = parseMcpResponse((await handler({ ...args, dry_run: true })).content[0]!.text) as any;
+
+    const consume = context.planStore.consume.bind(context.planStore);
+    vi.spyOn(context.planStore, "consume").mockImplementation((handle, domain) => ({
+      ...consume(handle, domain), sourceIdentities: [{ schema: "file_input_identity_v1", source_kind: "local_path" }],
+    }));
+    const result = await handler({ ...args, dry_run: false, plan_handle: dry.plan_handle });
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    expect(result.isError).toBe(true);
+    expect(payload.category).toBe("plan_drift");
+    expect(payload.error).toContain("identity");
+    expect(api.journals.create).not.toHaveBeenCalled();
   });
 
   it("rejects cross-domain handles: a trades handle for a distributions execute and vice-versa", async () => {

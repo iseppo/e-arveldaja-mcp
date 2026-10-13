@@ -3,6 +3,7 @@ import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
+  assertFileInputSnapshotIdentity,
   captureFileInputSnapshot,
   FileInputSnapshotError,
   type FileInputSource,
@@ -476,9 +477,22 @@ async function runWiseImport(
     if (!storedApprovedIds || !orderedIdsEqual(approvedTransferIds, storedApprovedIds)) {
       return { ok: false, failure: { kind: "ownership_reapproval_required" } };
     }
-    const storedIdentity = storedWisePlan.sourceIdentities[0];
-    if (!storedIdentity || storedIdentity.digest_sha256 !== inputSnapshot.identity.digest_sha256) {
-      return { ok: false, failure: { kind: "plan_drift", detail: "the Wise source bytes changed since the plan was reviewed" } };
+    try {
+      assertFileInputSnapshotIdentity(inputSnapshot, storedWisePlan.sourceIdentities[0], {
+        allowedExtensions: [".csv"],
+        maxSize: WISE_MAX_FILE_SIZE,
+      });
+    } catch (error) {
+      if (!(error instanceof FileInputSnapshotError)) throw error;
+      return {
+        ok: false,
+        failure: {
+          kind: "plan_drift",
+          detail: error.code === "file_input_changed"
+            ? "the Wise source file (bytes or location) changed since the plan was reviewed"
+            : "the reviewed Wise plan's source identity is invalid",
+        },
+      };
     }
     if (canonicalPlanJson(storedWisePlan.normalizedArgs) !== canonicalPlanJson(canonicalPlanningArgs)) {
       return { ok: false, failure: { kind: "plan_drift", detail: "the import arguments changed since the plan was reviewed" } };

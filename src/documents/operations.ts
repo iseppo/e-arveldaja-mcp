@@ -6,7 +6,9 @@ import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js"
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
+  assertFileInputSnapshotIdentity,
   captureFileInputSnapshot,
+  FileInputSnapshotError,
   type FileInputSnapshot,
   type FileInputSource,
 } from "../file-input-snapshot.js";
@@ -580,6 +582,20 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     // Re-verify the reviewed bytes BEFORE any API mutation (H15 TOCTOU close).
     if (snapshot.identity.digest_sha256 !== input.sourceSha256) {
       return fail("digest_mismatch", "The document no longer matches the reviewed source bytes.", "never");
+    }
+    // The full identity the plan bound at prepare (bytes, size, extension and
+    // canonical location): a copied or moved document is plan drift too — the
+    // same code the effective-model fingerprint below returns for another file.
+    try {
+      assertFileInputSnapshotIdentity(snapshot, storedPlan.sourceIdentities[0], {
+        allowedExtensions: INVOICE_DOCUMENT_EXTENSIONS,
+        maxSize: MAX_INVOICE_DOCUMENT_SIZE,
+      });
+    } catch (error) {
+      if (!(error instanceof FileInputSnapshotError)) throw error;
+      return fail("plan_drift", error.code === "file_input_changed"
+        ? "The document file (bytes or location) no longer matches the reviewed plan. Re-run mode='prepare' on the file to book and review again."
+        : "The reviewed plan's document identity is invalid. Re-run mode='prepare' and review again.", "never");
     }
     const material = await materializeSnapshot(snapshot, input.source, this.runtimeSafetyContext);
     try {

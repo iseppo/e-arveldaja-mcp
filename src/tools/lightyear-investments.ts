@@ -5,6 +5,7 @@ import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { sandboxExternalText } from "../external-text-renderer.js";
 import type { ApiContext } from "./crud-tools.js";
 import {
+  assertFileInputSnapshotIdentity,
   captureFileInputSnapshot,
   FileInputSnapshotError,
   type FileInputSnapshot,
@@ -2446,6 +2447,19 @@ function planErrorResult(category: string, message: string) {
   return toolError({ error: message, category, retry: "never", mutation_occurred: false });
 }
 
+/** plan_drift unless the re-read source matches the identity the reviewed plan bound. */
+function lightyearSourceDrift(snapshot: FileInputSnapshot, storedIdentity: unknown, label: string) {
+  try {
+    assertFileInputSnapshotIdentity(snapshot, storedIdentity, { allowedExtensions: [".csv"], maxSize: MAX_CSV_SIZE });
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof FileInputSnapshotError)) throw error;
+    return planErrorResult("plan_drift", error.code === "file_input_changed"
+      ? `${label} file (bytes or location) changed since the plan was reviewed.`
+      : `${label} identity stored in the reviewed plan is invalid.`);
+  }
+}
+
 function readStoredFingerprint(privatePayload: PlanData): string | undefined {
   if (privatePayload === null || typeof privatePayload !== "object" || Array.isArray(privatePayload)) return undefined;
   const fingerprint = (privatePayload as { readonly [key: string]: PlanData }).fingerprint;
@@ -3759,6 +3773,7 @@ export function registerLightyearTools(
       const buildTradesProjection = async (): Promise<{
         projection: TradesProjection;
         sourceIdentities: PlanRecord[];
+        sourceSnapshots: FileInputSnapshot[];
       }> => {
         const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
         const rows = parseAccountStatement(statementSnapshot.text());
@@ -3766,13 +3781,13 @@ export function registerLightyearTools(
         const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
         const gainsWarnings: string[] = [];
         let gainsMap = new Map<string, CapitalGainsRow>();
-        const sourceIdentities: PlanRecord[] = [sourceIdentityRecord(statementSnapshot)];
+        const sourceSnapshots: FileInputSnapshot[] = [statementSnapshot];
         if (gainsSource) {
           const gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext);
           const gainsRows = parseCapitalGains(gainsSnapshot.text());
           const sells = trades.filter(t => t.type === "Sell");
           gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
-          sourceIdentities.push(sourceIdentityRecord(gainsSnapshot));
+          sourceSnapshots.push(gainsSnapshot);
         }
         const guard = await BookingGuard.load(api);
         const existing = resolveExistingRefs(guard.journals, trades.map(t => ({ reference: t.reference, date: t.date })));
@@ -3791,7 +3806,7 @@ export function registerLightyearTools(
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
           gainAccount, lossAccount, feeAccount,
         });
-        return { projection, sourceIdentities };
+        return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots };
       };
 
       if (isDryRun) {
@@ -3842,9 +3857,9 @@ export function registerLightyearTools(
       }
 
       let projection: TradesProjection;
-      let sourceIdentities: PlanRecord[];
+      let sourceSnapshots: FileInputSnapshot[];
       try {
-        ({ projection, sourceIdentities } = await buildTradesProjection());
+        ({ projection, sourceSnapshots } = await buildTradesProjection());
       } catch (error) {
         if (error instanceof FileInputSnapshotError) {
           return planErrorResult("plan_drift", "A reviewed Lightyear source could not be re-read to match the plan.");
@@ -3852,14 +3867,12 @@ export function registerLightyearTools(
         throw error;
       }
 
-      if (sourceIdentities.length !== storedPlan.sourceIdentities.length) {
+      if (sourceSnapshots.length !== storedPlan.sourceIdentities.length) {
         return planErrorResult("plan_drift", "The set of Lightyear source files changed since the plan was reviewed.");
       }
-      for (let i = 0; i < sourceIdentities.length; i++) {
-        const stored = storedPlan.sourceIdentities[i];
-        if (!stored || stored.digest_sha256 !== sourceIdentities[i]!.digest_sha256) {
-          return planErrorResult("plan_drift", "A reviewed Lightyear source changed since the plan was reviewed.");
-        }
+      for (let i = 0; i < sourceSnapshots.length; i++) {
+        const drift = lightyearSourceDrift(sourceSnapshots[i]!, storedPlan.sourceIdentities[i], "A reviewed Lightyear source");
+        if (drift) return drift;
       }
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
         return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
@@ -4101,10 +4114,8 @@ export function registerLightyearTools(
         }
         throw error;
       }
-      const storedIdentity = storedPlan.sourceIdentities[0];
-      if (!storedIdentity || storedIdentity.digest_sha256 !== snapshot.identity.digest_sha256) {
-        return planErrorResult("plan_drift", "The Lightyear statement bytes changed since the plan was reviewed.");
-      }
+      const drift = lightyearSourceDrift(snapshot, storedPlan.sourceIdentities[0], "The Lightyear statement");
+      if (drift) return drift;
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
         return planErrorResult("plan_drift", "The booking arguments changed since the plan was reviewed.");
       }

@@ -5558,6 +5558,42 @@ describe("wise import server plan handle (P12/P19)", () => {
     expect(setup.api.transactions.create).not.toHaveBeenCalled();
   });
 
+  it("stops with plan_drift when the same bytes now resolve to a different canonical file", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    // Same path argument and bytes, but it resolves to a copied statement now.
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/copied-wise.csv" });
+    clearWiseCallHistory(setup.api);
+    const drifted = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expect(JSON.stringify(drifted)).toContain("bytes or location");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("stops with plan_drift when the stored source identity is malformed", async () => {
+    mockedReadFile.mockResolvedValue(paymentCsv());
+    const context = createTestRuntimeSafetyContext();
+    const setup = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    const consume = context.planStore.consume.bind(context.planStore);
+    vi.spyOn(context.planStore, "consume").mockImplementation((handle, domain) => {
+      const plan = consume(handle, domain);
+      return { ...plan, sourceIdentities: [{ ...plan.sourceIdentities[0], digest_sha256: "not-a-digest" }] };
+    });
+    clearWiseCallHistory(setup.api);
+    const drifted = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expect(JSON.stringify(drifted)).toContain("source identity is invalid");
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("stops with plan_drift when the normalized arguments changed since review", async () => {
     mockedReadFile.mockResolvedValue(paymentCsv());
     const setup = setupWiseTool([]);

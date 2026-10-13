@@ -14,7 +14,7 @@ import { canonicalRefNumber } from "../ref-number.js";
 import { checkStatementClosingBalance } from "../statement-balance-check.js";
 import { appendStatementBalance, getStatementBalanceIdentityWarning, readStatementBalances } from "../statement-balance-store.js";
 import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
-import { captureFileInputSnapshot, FileInputSnapshotError, type FileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import { assertFileInputSnapshotIdentity, captureFileInputSnapshot, FileInputSnapshotError, type FileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { type ApiContext } from "../tools/crud-tools.js";
 import { type RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -621,9 +621,20 @@ export async function executeCamtImport(
   if (!preflight.ok) throw new CamtPreflightRejectedError(preflight.source, preflight.rejected_fields);
   const loaded = preflight.value;
 
-  const storedIdentity = storedPlan.sourceIdentities[0];
-  if (!storedIdentity || storedIdentity.digest_sha256 !== snapshot.identity.digest_sha256) {
-    return { ok: false, code: "plan_drift", message: "The CAMT source bytes changed since the plan was reviewed." };
+  try {
+    assertFileInputSnapshotIdentity(snapshot, storedPlan.sourceIdentities[0], {
+      allowedExtensions: [".xml"],
+      maxSize: CAMT_MAX_FILE_SIZE,
+    });
+  } catch (error) {
+    if (!(error instanceof FileInputSnapshotError)) throw error;
+    return {
+      ok: false,
+      code: "plan_drift",
+      message: error.code === "file_input_changed"
+        ? "The CAMT source file (bytes or location) changed since the plan was reviewed."
+        : "The reviewed CAMT plan's source identity is invalid.",
+    };
   }
   if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(normalizedArgs)) {
     return { ok: false, code: "plan_drift", message: "The import arguments changed since the plan was reviewed." };

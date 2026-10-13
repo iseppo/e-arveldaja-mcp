@@ -489,6 +489,38 @@ describe("AccountingDocumentOperations.create", () => {
   // ——— P0-1 drift matrix: every material field is bound; a change between the
   // reviewed prepare and create rejects as plan_drift with ZERO API writes. ———
 
+  it("prepare file A + execute an identical copy of A elsewhere (same name, bytes and digest) → plan_drift, zero mutation", async () => {
+    const { path: pathA, sha256, api, ops } = createSetup();
+    // writeTempPdf writes `invoice.pdf` with the default bytes into a NEW dir:
+    // only the canonical location differs from the reviewed source.
+    const { path: copyPath, sha256: copySha } = writeTempPdf();
+    expect(copySha).toBe(sha256);
+    expect(copyPath).not.toBe(pathA);
+    const handle = await prepareBookingHandle(ops, pathA);
+    const outcome = await ops.create({ ...baseCreateInput(copyPath, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(outcome.error.message).toContain("bytes or location");
+    expectNoWrites(api);
+  });
+
+  it("a malformed document identity stored in the reviewed plan → plan_drift, zero mutation", async () => {
+    const { path, sha256, api, runtime, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const consume = runtime.planStore.consume.bind(runtime.planStore);
+    vi.spyOn(runtime.planStore, "consume").mockImplementation((planHandle, domain) => {
+      const plan = consume(planHandle, domain);
+      return { ...plan, sourceIdentities: [{ ...plan.sourceIdentities[0], locator_sha256: undefined }] };
+    });
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(outcome.error.message).toContain("identity is invalid");
+    expectNoWrites(api);
+  });
+
   it("prepare file A + execute file B (B's digest, A's handle) → plan_drift, zero mutation", async () => {
     const { path: pathA, api, ops } = createSetup();
     const { path: pathB, sha256: shaB } = writeTempPdf("%PDF-1.4 DIFFERENT bytes");

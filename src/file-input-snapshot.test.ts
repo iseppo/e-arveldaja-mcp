@@ -9,7 +9,9 @@ import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped } from "./bounded-re
 import { resolveFileInput } from "./file-validation.js";
 import {
   FILE_INPUT_IDENTITY_SCHEMA,
+  FileInputSnapshot,
   FileInputSnapshotError,
+  assertFileInputSnapshotIdentity,
   assertMatchingFileInputSnapshot,
   captureFileInputSnapshot,
 } from "./file-input-snapshot.js";
@@ -313,5 +315,53 @@ describe("captureFileInputSnapshot", () => {
     await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context), { readFile: read }))
       .rejects.toThrowError(new FileInputSnapshotError("file_input_unavailable"));
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("assertFileInputSnapshotIdentity", () => {
+  const options = { allowedExtensions: [".csv", ".txt"], maxSize: 1024 };
+  const hex = (seed: string) => createHash("sha256").update(seed).digest("hex");
+  const reviewed = Object.freeze({
+    schema: FILE_INPUT_IDENTITY_SCHEMA,
+    source_kind: "local_path" as const,
+    locator_sha256: hex("/tmp/reviewed.csv"),
+    digest_sha256: hex("a,b\n"),
+    size_bytes: 4,
+    extension: ".csv",
+  });
+  const snapshotWith = (identity: object) =>
+    new FileInputSnapshot({ ...reviewed, ...identity } as any, Buffer.from("a,b\n"));
+
+  it("returns the same snapshot when every bound field matches", () => {
+    const snapshot = snapshotWith({});
+    expect(assertFileInputSnapshotIdentity(snapshot, { ...reviewed }, options)).toBe(snapshot);
+  });
+
+  it.each([
+    ["digest", { digest_sha256: hex("a,c\n") }],
+    ["size only", { size_bytes: 5 }],
+    ["extension", { extension: ".txt" }],
+    ["canonical locator", { locator_sha256: hex("/tmp/copied.csv") }],
+  ])("refuses a %s mismatch as file_input_changed", (_label, change) => {
+    expect(() => assertFileInputSnapshotIdentity(snapshotWith(change), reviewed, options))
+      .toThrowError(new FileInputSnapshotError("file_input_changed"));
+  });
+
+  it("refuses an inline resubmission of a reviewed local file as file_input_changed", () => {
+    const { locator_sha256: _locator, ...inline } = reviewed;
+    const snapshot = new FileInputSnapshot({ ...inline, source_kind: "inline_base64" }, Buffer.from("a,b\n"));
+    expect(() => assertFileInputSnapshotIdentity(snapshot, reviewed, options))
+      .toThrowError(new FileInputSnapshotError("file_input_changed"));
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["extension outside the allowed set", { ...reviewed, extension: ".xml" }],
+    ["oversized", { ...reviewed, size_bytes: 2048 }],
+    ["local path without locator", (({ locator_sha256: _l, ...rest }) => rest)(reviewed)],
+    ["extra key", { ...reviewed, path: "/tmp/reviewed.csv" }],
+  ])("refuses a %s stored identity as file_input_identity_invalid", (_label, stored) => {
+    expect(() => assertFileInputSnapshotIdentity(snapshotWith({}), stored, options))
+      .toThrowError(new FileInputSnapshotError("file_input_identity_invalid"));
   });
 });

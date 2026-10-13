@@ -81,6 +81,9 @@ async function prepareSwallowingBookingGate(handler: Handler, source: string): P
 const parse = (result: { content: Array<{ text: string }> }) => parseMcpResponse(result.content[0]!.text) as any;
 
 describe("process_bank_input", () => {
+  const facadeTempDirs: string[] = [];
+  afterEach(() => { while (facadeTempDirs.length) { try { rmSync(facadeTempDirs.pop()!, { recursive: true, force: true }); } catch { /* ignore */ } } });
+
   it("prepares a CAMT statement, resolves the unique bank dimension silently, and returns a compact plan handle", async () => {
     const { handler } = setup();
     const result = await handler({ mode: "prepare", file_path: inlineXml(fixtureCamtXml()) });
@@ -129,9 +132,49 @@ describe("process_bank_input", () => {
     expect(api.transactions.create).toHaveBeenCalled();
   });
 
+  it("executes a file_ref-prepared plan via file_path of the SAME file, but refuses an identical copy elsewhere", async () => {
+    const dirA = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-a-")));
+    facadeTempDirs.push(dirA);
+    const dirB = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-b-")));
+    facadeTempDirs.push(dirB);
+    const original = join(dirA, "statement.xml");
+    const copy = join(dirB, "statement.xml");
+    await writeFile(original, fixtureCamtXml(), "utf8");
+    await writeFile(copy, fixtureCamtXml(), "utf8");
+
+    const refused = setup();
+    const bankRef = refused.runtime.fileReferenceStore.issue({ canonicalPath: original, kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank });
+    const dry = parse(await refused.handler({ mode: "prepare", file_ref: bankRef }));
+    const drift = await refused.handler({ mode: "execute", file_path: copy, plan_handle: dry.summary.plan_handle });
+    expect(drift.isError).toBe(true);
+    expect(JSON.stringify(parse(drift))).toContain("plan_drift");
+    expect(refused.api.transactions.create).not.toHaveBeenCalled();
+
+    const accepted = setup();
+    const sameRef = accepted.runtime.fileReferenceStore.issue({ canonicalPath: original, kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank });
+    const reviewed = parse(await accepted.handler({ mode: "prepare", file_ref: sameRef }));
+    const executed = parse(await accepted.handler({ mode: "execute", file_path: original, plan_handle: reviewed.summary.plan_handle }));
+    expect(executed.summary.status).toMatch(/completed|partial/);
+    expect(accepted.api.transactions.create).toHaveBeenCalled();
+  });
+
+  it("refuses an inline-prepared plan executed from a local file with the same bytes", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-inline-")));
+    facadeTempDirs.push(dir);
+    const xmlPath = join(dir, "statement.xml");
+    await writeFile(xmlPath, fixtureCamtXml(), "utf8");
+    const { handler, api } = setup();
+    const dry = parse(await handler({ mode: "prepare", file_path: inlineXml(fixtureCamtXml()) }));
+    const drift = await handler({ mode: "execute", file_path: xmlPath, plan_handle: dry.summary.plan_handle });
+    expect(drift.isError).toBe(true);
+    expect(JSON.stringify(parse(drift))).toContain("plan_drift");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("accepts a bank_input file_ref and rejects a camt_input ref passed to the façade", async () => {
     const { handler, runtime } = setup();
     const dir = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-")));
+    facadeTempDirs.push(dir);
     const xmlPath = join(dir, "statement.xml");
     await writeFile(xmlPath, fixtureCamtXml(), "utf8");
 
