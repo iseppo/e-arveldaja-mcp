@@ -7,6 +7,7 @@ import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings } from "../external-text-renderer.js";
 import { toolError } from "../tool-error.js";
 import { toolResponse } from "../tool-response.js";
+import { lifecycleHandler } from "./crud/lifecycle-handler.js";
 import { coerceId } from "./crud/shared.js";
 import type { ApiContext } from "./crud-tools.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
@@ -188,22 +189,7 @@ export function registerReferenceDataTools(
 
   if (exposeReferenceAdmin) registerTool(server, "delete_invoice_series", "Delete an invoice numbering series. Fails if the series is already in use.", {
     id: coerceId.describe("Invoice series ID"),
-  }, { ...destructive, title: "Delete Invoice Series" }, async ({ id }) => {
-    const result = await api.readonly.deleteInvoiceSeries(id);
-    logAudit({
-      tool: "delete_invoice_series", action: "DELETED", entity_type: "invoice_series",
-      entity_id: id,
-      summary: `Deleted invoice series ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "invoice_series",
-      id,
-      message: `Deleted invoice series ${id}.`,
-      raw: result,
-    });
-  });
+  }, { ...destructive, title: "Delete Invoice Series" }, lifecycleHandler("delete_invoice_series", "Deleted", "invoice_series", (id) => api.readonly.deleteInvoiceSeries(id)));
 
   registerTool(server, "list_bank_accounts", "Get company bank accounts", {}, { ...readOnly, title: "List Bank Accounts" }, async () => {
     const result = await api.readonly.getBankAccounts();
@@ -271,20 +257,5 @@ export function registerReferenceDataTools(
 
   if (exposeReferenceAdmin) registerTool(server, "delete_bank_account", "Delete a company bank account. Fails if the account is referenced by existing transactions.", {
     id: coerceId.describe("Bank account ID"),
-  }, { ...destructive, title: "Delete Bank Account" }, async ({ id }) => {
-    const result = await api.readonly.deleteBankAccount(id);
-    logAudit({
-      tool: "delete_bank_account", action: "DELETED", entity_type: "bank_account",
-      entity_id: id,
-      summary: `Deleted bank account ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "bank_account",
-      id,
-      message: `Deleted bank account ${id}.`,
-      raw: result,
-    });
-  });
+  }, { ...destructive, title: "Delete Bank Account" }, lifecycleHandler("delete_bank_account", "Deleted", "bank_account", (id) => api.readonly.deleteBankAccount(id)));
 }

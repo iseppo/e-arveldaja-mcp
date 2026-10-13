@@ -7,6 +7,7 @@ import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { isNotFoundHttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { withOpeningBalanceStatus } from "../../opening-balance-limitations.js";
@@ -438,37 +439,9 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "delete_journal", "Delete a journal entry", idParam.shape, { ...destructive, title: "Delete Journal" }, async ({ id }) => {
-    const result = await api.journals.delete(id);
-    logAudit({
-      tool: "delete_journal", action: "DELETED", entity_type: "journal", entity_id: id,
-      summary: `Deleted journal ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "journal",
-      id,
-      message: `Deleted journal ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "delete_journal", "Delete a journal entry", idParam.shape, { ...destructive, title: "Delete Journal" }, lifecycleHandler("delete_journal", "Deleted", "journal", (id) => api.journals.delete(id)));
 
-  registerTool(server, "confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, { ...destructive, title: "Confirm Journal" }, async ({ id }) => {
-    const result = await api.journals.confirm(id);
-    logAudit({
-      tool: "confirm_journal", action: "CONFIRMED", entity_type: "journal", entity_id: id,
-      summary: `Confirmed journal ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "confirmed",
-      entity: "journal",
-      id,
-      message: `Confirmed journal ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "confirm_journal", "Confirm/register a journal entry. IRREVERSIBLE — use invalidate_journal to reverse if needed.", idParam.shape, { ...destructive, title: "Confirm Journal" }, lifecycleHandler("confirm_journal", "Confirmed", "journal", (id) => api.journals.confirm(id)));
 
   registerTool(server, "batch_confirm_journals",
     "Confirm/register multiple journals. IRREVERSIBLE per success; already-registered rows are skipped; failures and indeterminate outcomes are reported per ID.",
@@ -570,19 +543,5 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "invalidate_journal",
     "Invalidate (reverse) a confirmed journal entry. Returns it to unconfirmed status for editing or deletion. RPS § 10: corrections must stay traceable — tell the user to record why the entry was reversed and what replaces it.",
-    idParam.shape, { ...mutate, title: "Invalidate Journal" }, async ({ id }) => {
-      const result = await api.journals.invalidate(id);
-      logAudit({
-        tool: "invalidate_journal", action: "INVALIDATED", entity_type: "journal", entity_id: id,
-        summary: `Invalidated journal ${id}`,
-        details: {},
-      });
-      return toolResponse({
-        action: "invalidated",
-        entity: "journal",
-        id,
-        message: `Invalidated journal ${id}.`,
-        raw: result,
-      });
-    });
+    idParam.shape, { ...mutate, title: "Invalidate Journal" }, lifecycleHandler("invalidate_journal", "Invalidated", "journal", (id) => api.journals.invalidate(id)));
 }

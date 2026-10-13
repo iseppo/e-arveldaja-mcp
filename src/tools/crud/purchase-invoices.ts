@@ -8,6 +8,7 @@ import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../../accounting-defaults.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import {
@@ -302,21 +303,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     });
   });
 
-  registerTool(server, "delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, async ({ id }) => {
-    const result = await api.purchaseInvoices.delete(id);
-    logAudit({
-      tool: "delete_purchase_invoice", action: "DELETED", entity_type: "purchase_invoice", entity_id: id,
-      summary: `Deleted purchase invoice ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "purchase_invoice",
-      id,
-      message: `Deleted purchase invoice ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "delete_purchase_invoice", "Delete a purchase invoice", idParam.shape, { ...destructive, title: "Delete Purchase Invoice" }, lifecycleHandler("delete_purchase_invoice", "Deleted", "purchase_invoice", (id) => api.purchaseInvoices.delete(id)));
 
   registerTool(server, "preview_purchase_invoice_totals_correction",
     "Preview an explicit EUR draft totals correction without changing or confirming the purchase invoice.",
@@ -391,19 +378,5 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
 
   registerTool(server, "invalidate_purchase_invoice",
     "Return a confirmed purchase invoice to draft status for editing. RPS § 10: corrections must stay traceable — record why and what replaces it.",
-    idParam.shape, { ...mutate, title: "Invalidate Purchase Invoice" }, async ({ id }) => {
-      const result = await api.purchaseInvoices.invalidate(id);
-      logAudit({
-        tool: "invalidate_purchase_invoice", action: "INVALIDATED", entity_type: "purchase_invoice", entity_id: id,
-        summary: `Invalidated purchase invoice ${id}`,
-        details: {},
-      });
-      return toolResponse({
-        action: "invalidated",
-        entity: "purchase_invoice",
-        id,
-        message: `Invalidated purchase invoice ${id}.`,
-        raw: result,
-      });
-    });
+    idParam.shape, { ...mutate, title: "Invalidate Purchase Invoice" }, lifecycleHandler("invalidate_purchase_invoice", "Invalidated", "purchase_invoice", (id) => api.purchaseInvoices.invalidate(id)));
 }

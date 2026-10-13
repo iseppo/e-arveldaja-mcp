@@ -7,6 +7,7 @@ import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { HttpError, isNotFoundHttpError } from "../../http-client.js";
 import { MutationIndeterminateError, classifyMutationFailure, isMutationIndeterminate } from "../../mutation-outcome.js";
 import {
@@ -749,37 +750,9 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
 
   registerTool(server, "invalidate_transaction",
     "Invalidate (unconfirm) a confirmed transaction. Returns it to unconfirmed status for editing or deletion. RPS § 10: corrections must stay traceable — record why and what replaces it.",
-    idParam.shape, { ...mutate, title: "Invalidate Transaction" }, async ({ id }) => {
-      const result = await api.transactions.invalidate(id);
-      logAudit({
-        tool: "invalidate_transaction", action: "INVALIDATED", entity_type: "transaction", entity_id: id,
-        summary: `Invalidated transaction ${id}`,
-        details: {},
-      });
-      return toolResponse({
-        action: "invalidated",
-        entity: "transaction",
-        id,
-        message: `Invalidated transaction ${id}.`,
-        raw: result,
-      });
-    });
+    idParam.shape, { ...mutate, title: "Invalidate Transaction" }, lifecycleHandler("invalidate_transaction", "Invalidated", "transaction", (id) => api.transactions.invalidate(id)));
 
-  registerTool(server, "delete_transaction", "Delete a transaction", idParam.shape, { ...destructive, title: "Delete Transaction" }, async ({ id }) => {
-    const result = await api.transactions.delete(id);
-    logAudit({
-      tool: "delete_transaction", action: "DELETED", entity_type: "transaction", entity_id: id,
-      summary: `Deleted transaction ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "transaction",
-      id,
-      message: `Deleted transaction ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "delete_transaction", "Delete a transaction", idParam.shape, { ...destructive, title: "Delete Transaction" }, lifecycleHandler("delete_transaction", "Deleted", "transaction", (id) => api.transactions.delete(id)));
 
   registerTool(server, "batch_delete_transactions",
     "Delete multiple PROJECT transactions. IRREVERSIBLE. CONFIRMED rows are skipped; lookup failures and indeterminate outcomes are reported per ID.",

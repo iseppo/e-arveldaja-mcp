@@ -8,6 +8,7 @@ import { logAudit } from "../../audit-log.js";
 import { validateLegalEntityIdentity } from "../../legal-entity-identity.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { normalizeVatValue } from "../../document-identifiers.js";
 import { resolveOwnCompanyIdentifiers } from "../own-company-identity.js";
@@ -217,55 +218,13 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "deactivate_client", "Deactivate a client (can be restored with reactivate_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, async ({ id }) => {
-    const result = await api.clients.deactivate(id);
-    logAudit({
-      tool: "deactivate_client", action: "DEACTIVATED", entity_type: "client", entity_id: id,
-      summary: `Deactivated client ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deactivated",
-      entity: "client",
-      id,
-      message: `Deactivated client ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "deactivate_client", "Deactivate a client (can be restored with reactivate_client)", idParam.shape, { ...mutate, title: "Deactivate Client" }, lifecycleHandler("deactivate_client", "Deactivated", "client", (id) => api.clients.deactivate(id)));
 
-  registerTool(server, "reactivate_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Reactivate Client" }, async ({ id }) => {
-    const result = await api.clients.restore(id);
-    logAudit({
-      tool: "reactivate_client", action: "REACTIVATED", entity_type: "client", entity_id: id,
-      summary: `Reactivated client ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "reactivated",
-      entity: "client",
-      id,
-      message: `Reactivated client ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "reactivate_client", "Reactivate a deactivated client", idParam.shape, { ...mutate, title: "Reactivate Client" }, lifecycleHandler("reactivate_client", "Reactivated", "client", (id) => api.clients.restore(id)));
 
   registerTool(server, "delete_client",
     "Permanently delete a client. Fails if the client is referenced by invoices, journals, transactions, or other accounting records — use deactivate_client to hide an in-use client instead. Intended for removing mistakenly-created master data with no history.",
-    idParam.shape, { ...destructive, title: "Delete Client" }, async ({ id }) => {
-    const result = await api.clients.delete(id);
-    logAudit({
-      tool: "delete_client", action: "DELETED", entity_type: "client", entity_id: id,
-      summary: `Deleted client ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "client",
-      id,
-      message: `Deleted client ${id}.`,
-      raw: result,
-    });
-  });
+    idParam.shape, { ...destructive, title: "Delete Client" }, lifecycleHandler("delete_client", "Deleted", "client", (id) => api.clients.delete(id)));
 
   registerTool(server, "search_client", "Search clients by name (fuzzy match)", {
     name: z.string().describe("Name to search for"),

@@ -8,6 +8,7 @@ import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { decodeInvoiceStatusCritical } from "../../api/critical-codecs.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validateSaleInvoiceItemDimensions } from "../../account-validation.js";
 import type { ApiContext } from "./shared.js";
@@ -179,55 +180,13 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
     });
   });
 
-  registerTool(server, "delete_sale_invoice", "Delete a sales invoice", idParam.shape, { ...destructive, title: "Delete Sale Invoice" }, async ({ id }) => {
-    const result = await api.saleInvoices.delete(id);
-    logAudit({
-      tool: "delete_sale_invoice", action: "DELETED", entity_type: "sale_invoice", entity_id: id,
-      summary: `Deleted sale invoice ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "sale_invoice",
-      id,
-      message: `Deleted sale invoice ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "delete_sale_invoice", "Delete a sales invoice", idParam.shape, { ...destructive, title: "Delete Sale Invoice" }, lifecycleHandler("delete_sale_invoice", "Deleted", "sale_invoice", (id) => api.saleInvoices.delete(id)));
 
-  registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. Locks the invoice for editing. Reversible via invalidate_sale_invoice.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, async ({ id }) => {
-    const result = await api.saleInvoices.confirm(id);
-    logAudit({
-      tool: "confirm_sale_invoice", action: "CONFIRMED", entity_type: "sale_invoice", entity_id: id,
-      summary: `Confirmed sale invoice ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "confirmed",
-      entity: "sale_invoice",
-      id,
-      message: `Confirmed sale invoice ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "confirm_sale_invoice", "Confirm a sales invoice. Locks the invoice for editing. Reversible via invalidate_sale_invoice.", idParam.shape, { ...destructive, title: "Confirm Sale Invoice" }, lifecycleHandler("confirm_sale_invoice", "Confirmed", "sale_invoice", (id) => api.saleInvoices.confirm(id)));
 
   registerTool(server, "invalidate_sale_invoice",
     "Return a confirmed sale invoice to draft status for editing. Required before delete_sale_invoice against a CONFIRMED invoice. RPS § 10: corrections must stay traceable — record why and what replaces it.",
-    idParam.shape, { ...mutate, title: "Invalidate Sale Invoice" }, async ({ id }) => {
-      const result = await api.saleInvoices.invalidate(id);
-      logAudit({
-        tool: "invalidate_sale_invoice", action: "INVALIDATED", entity_type: "sale_invoice", entity_id: id,
-        summary: `Invalidated sale invoice ${id}`,
-        details: {},
-      });
-      return toolResponse({
-        action: "invalidated",
-        entity: "sale_invoice",
-        id,
-        message: `Invalidated sale invoice ${id}.`,
-        raw: result,
-      });
-    });
+    idParam.shape, { ...mutate, title: "Invalidate Sale Invoice" }, lifecycleHandler("invalidate_sale_invoice", "Invalidated", "sale_invoice", (id) => api.saleInvoices.invalidate(id)));
 
   registerTool(server, "get_sale_invoice_delivery_options", "Get available delivery methods for a sales invoice (e-invoice or email)", idParam.shape, { ...readOnly, title: "Get Sale Invoice Delivery Options" }, async ({ id }) => {
     const result = await api.saleInvoices.getDeliveryOptions(id);

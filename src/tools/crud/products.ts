@@ -7,6 +7,7 @@ import { readOnly, create, mutate, destructive } from "../../annotations.js";
 import { logAudit } from "../../audit-log.js";
 import { toolError } from "../../tool-error.js";
 import { toolResponse } from "../../tool-response.js";
+import { lifecycleHandler } from "./lifecycle-handler.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import type { ApiContext } from "./shared.js";
 import {
@@ -91,53 +92,11 @@ export function registerProductTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "deactivate_product", "Deactivate a product (can be restored with reactivate_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, async ({ id }) => {
-    const result = await api.products.deactivate(id);
-    logAudit({
-      tool: "deactivate_product", action: "DEACTIVATED", entity_type: "product", entity_id: id,
-      summary: `Deactivated product ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deactivated",
-      entity: "product",
-      id,
-      message: `Deactivated product ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "deactivate_product", "Deactivate a product (can be restored with reactivate_product)", idParam.shape, { ...mutate, title: "Deactivate Product" }, lifecycleHandler("deactivate_product", "Deactivated", "product", (id) => api.products.deactivate(id)));
 
-  registerTool(server, "reactivate_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Reactivate Product" }, async ({ id }) => {
-    const result = await api.products.restore(id);
-    logAudit({
-      tool: "reactivate_product", action: "REACTIVATED", entity_type: "product", entity_id: id,
-      summary: `Reactivated product ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "reactivated",
-      entity: "product",
-      id,
-      message: `Reactivated product ${id}.`,
-      raw: result,
-    });
-  });
+  registerTool(server, "reactivate_product", "Reactivate a deactivated product", idParam.shape, { ...mutate, title: "Reactivate Product" }, lifecycleHandler("reactivate_product", "Reactivated", "product", (id) => api.products.restore(id)));
 
   registerTool(server, "delete_product",
     "Permanently delete a product/service. Fails if the product is referenced by invoices or other accounting records — use deactivate_product to hide an in-use product instead. Intended for removing mistakenly-created master data with no history.",
-    idParam.shape, { ...destructive, title: "Delete Product" }, async ({ id }) => {
-    const result = await api.products.delete(id);
-    logAudit({
-      tool: "delete_product", action: "DELETED", entity_type: "product", entity_id: id,
-      summary: `Deleted product ${id}`,
-      details: {},
-    });
-    return toolResponse({
-      action: "deleted",
-      entity: "product",
-      id,
-      message: `Deleted product ${id}.`,
-      raw: result,
-    });
-  });
+    idParam.shape, { ...destructive, title: "Delete Product" }, lifecycleHandler("delete_product", "Deleted", "product", (id) => api.products.delete(id)));
 }
