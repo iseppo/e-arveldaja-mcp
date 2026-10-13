@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { withOpeningBalanceStatus, OPENING_BALANCE_API_LIMITATION_WARNING } from "./opening-balance-limitations.js";
+import {
+  withOpeningBalanceJournalStatus,
+  withOpeningBalanceStatus,
+  withOpeningBalanceStatusInRange,
+  OPENING_BALANCE_API_LIMITATION_WARNING,
+} from "./opening-balance-limitations.js";
+import type { OpeningBalanceJournal } from "./opening-balance-journal.js";
 import { UNTRUSTED_OCR_START_PREFIX, UNTRUSTED_OCR_END_PREFIX } from "./mcp-json.js";
 
 describe("withOpeningBalanceStatus", () => {
@@ -31,5 +37,34 @@ describe("withOpeningBalanceStatus", () => {
   it("emits no dimension warning when unmappedDimensions is empty", () => {
     const w = withOpeningBalanceStatus([], { captured: true, openingDate: "2024-12-12", unmappedDimensions: [] });
     expect(w.some(x => /without a dimension id/i.test(x))).toBe(false);
+  });
+});
+
+describe("withOpeningBalanceJournalStatus", () => {
+  const opening = {
+    journal: { id: -1 },
+    openingDate: "2025-01-01",
+    unmappedCodes: ["4444"],
+    unmappedDimensions: ["1020: X"],
+  } as unknown as OpeningBalanceJournal;
+
+  it("matches withOpeningBalanceStatusInRange built from the journal's fields", () => {
+    const stripNonce = (w: string[]) => w.map(x => x.replace(/[0-9a-f]{32}/g, "N"));
+    for (const [from, to] of [[undefined, undefined], ["2025-01-01", "2025-12-31"], ["2025-01-02", undefined], [undefined, "2024-12-31"]] as const) {
+      expect(stripNonce(withOpeningBalanceJournalStatus(["w"], opening, from, to))).toEqual(stripNonce(withOpeningBalanceStatusInRange(["w"], {
+        captured: true,
+        openingDate: "2025-01-01",
+        unmappedCodes: ["4444"],
+        unmappedDimensions: ["1020: X"],
+        dateFrom: from,
+        dateTo: to,
+      })));
+    }
+  });
+
+  it("reports applied / out-of-window / not-captured states", () => {
+    expect(withOpeningBalanceJournalStatus([], opening, "2025-01-01", "2025-12-31")[0]).toMatch(/applied.*2025-01-01/);
+    expect(withOpeningBalanceJournalStatus([], opening, "2025-01-02", undefined)[0]).toMatch(/outside this date range/);
+    expect(withOpeningBalanceJournalStatus([], null, "2025-01-01", undefined).some(x => /import_opening_balances/.test(x))).toBe(true);
   });
 });

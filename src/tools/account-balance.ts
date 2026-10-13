@@ -7,8 +7,8 @@ import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
-import { withOpeningBalanceStatus, withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
-import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../opening-balance-journal.js";
+import { withOpeningBalanceJournalStatus, withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { loadJournalsWithOpeningBalance, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import { listAccountDimensionPostings } from "../account-postings.js";
 
@@ -223,11 +223,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const [opening, journalsFromApi] = await Promise.all([
-        loadOpeningBalanceJournal(api),
-        api.journals.listAllWithPostings(),
-      ]);
-      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
+      const { journals: allJournals, journalsFromApi, opening } = await loadJournalsWithOpeningBalance(api);
       const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals);
       const drafts = unregisteredDraftsOutput(findUnregisteredDrafts(journalsFromApi, account_id, {
         clientId: clients_id, dateFrom: date_from, dateTo: date_to,
@@ -253,14 +249,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         }),
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         warnings: clients_id === undefined
-          ? withOpeningBalanceStatusInRange(drafts.warning ? [drafts.warning] : [], {
-              captured: opening !== null,
-              openingDate: opening?.openingDate,
-              unmappedCodes: opening?.unmappedCodes,
-              unmappedDimensions: opening?.unmappedDimensions,
-              dateFrom: date_from,
-              dateTo: date_to,
-            })
+          ? withOpeningBalanceJournalStatus(drafts.warning ? [drafts.warning] : [], opening, date_from, date_to)
           : clientScopedOpeningBalanceWarnings(drafts.warning ? [drafts.warning] : [], opening),
       };
 
@@ -279,13 +268,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Account Balances by Dimension" },
     async ({ account_id, date_from, date_to, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const [opening, journalsFromApi, account, dimensions] = await Promise.all([
-        loadOpeningBalanceJournal(api),
-        api.journals.listAllWithPostings(),
+      const [{ journals: allJournals, journalsFromApi, opening }, account, dimensions] = await Promise.all([
+        loadJournalsWithOpeningBalance(api),
         api.readonly.getAccount(account_id),
         api.readonly.getAccountDimensions(),
       ]);
-      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
       const balanceType = account?.balance_type ?? "D";
 
       const groups = new Map<number | null, { debit: number; credit: number; count: number }>();
@@ -342,14 +329,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
         ...cacheClearMetadata(cacheClear),
-        warnings: withOpeningBalanceStatusInRange(drafts.warning ? [drafts.warning] : [], {
-          captured: opening !== null,
-          openingDate: opening?.openingDate,
-          unmappedCodes: opening?.unmappedCodes,
-          unmappedDimensions: opening?.unmappedDimensions,
-          dateFrom: date_from,
-          dateTo: date_to,
-        }),
+        warnings: withOpeningBalanceJournalStatus(drafts.warning ? [drafts.warning] : [], opening, date_from, date_to),
       };
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
     }
@@ -370,11 +350,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         : DEFAULT_DEBT_CHECK_ACCOUNTS;
 
       // Load journals once, share across all account balance computations
-      const [opening, journalsFromApi] = await Promise.all([
-        loadOpeningBalanceJournal(api),
-        api.journals.listAllWithPostings(),
-      ]);
-      const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
+      const { journals: allJournals, opening } = await loadJournalsWithOpeningBalance(api);
 
       const results = [];
       const partialAccounts: number[] = [];

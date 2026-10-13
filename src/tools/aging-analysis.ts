@@ -217,6 +217,74 @@ export function computeAgingBuckets(
   };
 }
 
+/**
+ * Warnings for an aging computation, shared by compute_*_aging and the
+ * run_accounting_report aging op. `unmatchedAdvice` follows the
+ * "N invoice(s) have no clients_id (totaling X EUR)." sentence.
+ */
+export function agingComputationWarnings(c: AgingComputation, unmatchedAdvice: string): string[] {
+  const warnings: string[] = [];
+  if (c.partially_paid_count > 0) {
+    warnings.push(`${c.partially_paid_count} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
+  }
+  if (c.missing_term_days_count > 0) {
+    warnings.push(`${c.missing_term_days_count} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
+  }
+  if (c.unmatched.count > 0) {
+    warnings.push(`${c.unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(c.unmatched.total)} EUR). ${unmatchedAdvice}`);
+  }
+  const missingEur = missingEurAmountWarning(c.missing_eur_amount);
+  if (missingEur) warnings.push(missingEur);
+  return warnings;
+}
+
+/** compute_receivables_aging ("client"/"debtor") and compute_payables_aging ("supplier"/"creditor") differ only in these names. */
+interface StandaloneAgingSide {
+  party: "client" | "supplier";
+  role: "debtor" | "creditor";
+}
+
+async function standaloneAgingResponse(
+  loadInvoices: () => Promise<unknown[]>,
+  as_of_date: string | undefined,
+  side: StandaloneAgingSide,
+) {
+  const invalid = invalidAsOfDate(as_of_date);
+  if (invalid) return invalid;
+  const actualToday = todayInTallinn();
+  const today = as_of_date ?? actualToday;
+
+  const computed = computeAgingBuckets(await loadInvoices() as AgingInvoiceInput[], today);
+  const { unmatched } = computed;
+  const topParties = computed.top_parties;
+
+  const warnings = agingComputationWarnings(
+    computed,
+    `Reported under unmatched_${side.party}_invoices; investigate and link to a ${side.party} for accurate ${side.role} reports.`,
+  );
+  if (as_of_date && as_of_date !== actualToday) {
+    warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
+  }
+  return {
+    content: [{
+      type: "text" as const,
+      text: toMcpJson({
+        as_of_date: today,
+        total_unpaid_face_value: computed.total_unpaid_face_value,
+        total_invoices: computed.total_invoices,
+        partially_paid_count: computed.partially_paid_count,
+        aging_buckets: sanitizeAgingBucketsForOutput(computed.aging_buckets),
+        [`top_${side.role}s`]: sanitizeNamedTotalsForOutput(topParties),
+        ...(topParties.length > STANDALONE_LIST_CAP && { [`top_${side.role}s_truncated`]: true, [`${side.role}_count`]: topParties.length }),
+        ...(unmatched.count > 0 && {
+          [`unmatched_${side.party}_invoices`]: { count: unmatched.count, total: roundMoney(unmatched.total), oldest_days: unmatched.oldest_days },
+        }),
+        ...(warnings.length > 0 && { warnings }),
+      }),
+    }],
+  };
+}
+
 export function registerAgingTools(
   server: McpServer,
   api: ApiContext,
@@ -231,53 +299,7 @@ export function registerAgingTools(
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
     { ...readOnly, title: "Receivables Aging Report" },
-    async ({ as_of_date }) => {
-      const invalid = invalidAsOfDate(as_of_date);
-      if (invalid) return invalid;
-      const actualToday = todayInTallinn();
-      const today = as_of_date ?? actualToday;
-
-      const allSales = await api.saleInvoices.listAll();
-      const computed = computeAgingBuckets(allSales as AgingInvoiceInput[], today);
-      const { partially_paid_count: partiallyPaidCount, missing_term_days_count: missingTermDaysCount, unmatched } = computed;
-      const r = roundMoney;
-      const sortedBuckets = computed.aging_buckets;
-      const topDebtors = computed.top_parties;
-
-      const warnings = [];
-      if (partiallyPaidCount > 0) {
-        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
-      }
-      if (missingTermDaysCount > 0) {
-        warnings.push(`${missingTermDaysCount} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
-      }
-      if (unmatched.count > 0) {
-        warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_client_invoices; investigate and link to a client for accurate debtor reports.`);
-      }
-      const missingEur = missingEurAmountWarning(computed.missing_eur_amount);
-      if (missingEur) warnings.push(missingEur);
-      if (as_of_date && as_of_date !== actualToday) {
-        warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
-      }
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            as_of_date: today,
-            total_unpaid_face_value: computed.total_unpaid_face_value,
-            total_invoices: computed.total_invoices,
-            partially_paid_count: partiallyPaidCount,
-            aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
-            top_debtors: sanitizeNamedTotalsForOutput(topDebtors),
-            ...(topDebtors.length > STANDALONE_LIST_CAP && { top_debtors_truncated: true, debtor_count: topDebtors.length }),
-            ...(unmatched.count > 0 && {
-              unmatched_client_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
-            }),
-            ...(warnings.length > 0 && { warnings }),
-          }),
-        }],
-      };
-    }
+    async ({ as_of_date }) => standaloneAgingResponse(() => api.saleInvoices.listAll(), as_of_date, { party: "client", role: "debtor" }),
   );
 
   registerTool(server, "compute_payables_aging",
@@ -286,52 +308,6 @@ export function registerAgingTools(
       as_of_date: z.string().optional().describe("Aging date (YYYY-MM-DD, default today)"),
     },
     { ...readOnly, title: "Payables Aging Report" },
-    async ({ as_of_date }) => {
-      const invalid = invalidAsOfDate(as_of_date);
-      if (invalid) return invalid;
-      const actualToday = todayInTallinn();
-      const today = as_of_date ?? actualToday;
-
-      const allPurchases = await api.purchaseInvoices.listAll();
-      const computed = computeAgingBuckets(allPurchases as AgingInvoiceInput[], today);
-      const { partially_paid_count: partiallyPaidCount, missing_term_days_count: missingTermDaysCount, unmatched } = computed;
-      const r = roundMoney;
-      const sortedBuckets = computed.aging_buckets;
-      const topCreditors = computed.top_parties;
-
-      const warnings = [];
-      if (partiallyPaidCount > 0) {
-        warnings.push(`${partiallyPaidCount} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
-      }
-      if (missingTermDaysCount > 0) {
-        warnings.push(`${missingTermDaysCount} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
-      }
-      if (unmatched.count > 0) {
-        warnings.push(`${unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(unmatched.total)} EUR). Reported under unmatched_supplier_invoices; investigate and link to a supplier for accurate creditor reports.`);
-      }
-      const missingEur = missingEurAmountWarning(computed.missing_eur_amount);
-      if (missingEur) warnings.push(missingEur);
-      if (as_of_date && as_of_date !== actualToday) {
-        warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
-      }
-      return {
-        content: [{
-          type: "text",
-          text: toMcpJson({
-            as_of_date: today,
-            total_unpaid_face_value: computed.total_unpaid_face_value,
-            total_invoices: computed.total_invoices,
-            partially_paid_count: partiallyPaidCount,
-            aging_buckets: sanitizeAgingBucketsForOutput(sortedBuckets),
-            top_creditors: sanitizeNamedTotalsForOutput(topCreditors),
-            ...(topCreditors.length > STANDALONE_LIST_CAP && { top_creditors_truncated: true, creditor_count: topCreditors.length }),
-            ...(unmatched.count > 0 && {
-              unmatched_supplier_invoices: { count: unmatched.count, total: r(unmatched.total), oldest_days: unmatched.oldest_days },
-            }),
-            ...(warnings.length > 0 && { warnings }),
-          }),
-        }],
-      };
-    }
+    async ({ as_of_date }) => standaloneAgingResponse(() => api.purchaseInvoices.listAll(), as_of_date, { party: "supplier", role: "creditor" }),
   );
 }

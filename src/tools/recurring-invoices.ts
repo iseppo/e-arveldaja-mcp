@@ -9,6 +9,7 @@ import type { CreateSaleInvoiceRequest } from "../types/mutations.js";
 import { batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { parseStrictDate, parseStrictMonth } from "../strict-date.js";
+import { getMonthLastDay } from "../date-utils.js";
 import { canonicalPlanJson } from "./camt-plan.js";
 
 const RECURRING_CLONE_MARKER_PREFIX = "RECURRING_SOURCE_INVOICE";
@@ -232,7 +233,7 @@ export async function computeRecurringClone(
       if (!isDryRun || options.fresh) api.saleInvoices.invalidateListCache();
       const allSales = await api.saleInvoices.listAll();
       const sourceFrom = `${source_month}-01`;
-      const sourceLastDay = new Date(parseInt(source_month.split("-")[0]!, 10), parseInt(source_month.split("-")[1]!, 10), 0).getDate();
+      const sourceLastDay = getMonthLastDay(source_month);
       const sourceTo = `${source_month}-${String(sourceLastDay).padStart(2, "0")}`;
       const targetMonth = target_date.slice(0, 7);
       const existingCloneMarkers = new Map<string, { id?: number; number?: string }>();

@@ -77,3 +77,24 @@ export function withOpeningBalanceStatusInRange(
   }
   return out;
 }
+
+/**
+ * `withOpeningBalanceStatusInRange` for a loaded `OpeningBalanceJournal`
+ * (null = not captured). Typed structurally so this module does not import
+ * opening-balance-journal.ts.
+ */
+export function withOpeningBalanceJournalStatus(
+  warnings: string[],
+  opening: { openingDate: string; unmappedCodes: string[]; unmappedDimensions: string[] } | null,
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+): string[] {
+  return withOpeningBalanceStatusInRange(warnings, {
+    captured: opening !== null,
+    openingDate: opening?.openingDate,
+    unmappedCodes: opening?.unmappedCodes,
+    unmappedDimensions: opening?.unmappedDimensions,
+    dateFrom,
+    dateTo,
+  });
+}

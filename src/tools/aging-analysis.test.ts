@@ -383,3 +383,26 @@ describe("standalone list caps are flagged", () => {
     expect(core.top_parties).toHaveLength(12);
   });
 });
+
+describe("agingComputationWarnings", () => {
+  it("emits partial / term / unmatched / missing-EUR warnings in order with the caller's unmatched advice", async () => {
+    const { agingComputationWarnings, computeAgingBuckets } = await import("./aging-analysis.js");
+    const c = computeAgingBuckets([
+      invoice({ id: 1, payment_status: "PARTIALLY_PAID" }),
+      invoice({ id: 2, term_days: null as unknown as number }),
+      invoice({ id: 3, clients_id: null as unknown as number, gross_price: 10.005, base_gross_price: 10.005 }),
+      invoice({ id: 4, cl_currencies_id: "USD", gross_price: 50 }),
+    ], "2024-06-01");
+    const w = agingComputationWarnings(c, "ADVICE.");
+    expect(w).toHaveLength(4);
+    expect(w[0]).toMatch(/^1 partially paid invoice/);
+    expect(w[1]).toMatch(/^1 invoice\(s\) have no term_days/);
+    expect(w[2]).toBe("1 invoice(s) have no clients_id (totaling 10.01 EUR). ADVICE.");
+    expect(w[3]).toMatch(/#4 \(50 USD\)/);
+  });
+
+  it("returns no warnings for a clean computation", async () => {
+    const { agingComputationWarnings, computeAgingBuckets } = await import("./aging-analysis.js");
+    expect(agingComputationWarnings(computeAgingBuckets([invoice({ id: 1 })], "2024-06-01"), "x")).toEqual([]);
+  });
+});

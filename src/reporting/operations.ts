@@ -1,20 +1,20 @@
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
-import { roundMoney, effectiveGross } from "../money.js";
+import { effectiveGross } from "../money.js";
 import {
   computeTrialBalanceReport,
   computeBalanceSheetReport,
   computeProfitAndLossReport,
-  gatherMonthEndScan,
+  loadMonthEndScan,
   buildMonthEndDueList,
+  monthEndSummary,
   monthEndWarnings,
 } from "../tools/financial-statements.js";
-import { computeAgingBuckets, missingEurAmountWarning, type AgingInvoiceInput } from "../tools/aging-analysis.js";
+import { agingComputationWarnings, computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
 import { computeMissingDocuments } from "../tools/document-audit.js";
 import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import { todayInTallinn } from "../local-date.js";
-import { getMonthLastDay } from "../date-utils.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -29,19 +29,7 @@ import type {
 // the op's own warnings and AgingSide shape.
 function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string, party: "client" | "supplier"): AgingSide {
   const c = computeAgingBuckets(invoices, today);
-  const warnings: string[] = [];
-  if (c.partially_paid_count > 0) {
-    warnings.push(`${c.partially_paid_count} partially paid invoice(s) shown at full face value — actual outstanding balance is lower. The API does not expose remaining balance.`);
-  }
-  if (c.missing_term_days_count > 0) {
-    warnings.push(`${c.missing_term_days_count} invoice(s) have no term_days set — treated as due on the issue date (term_days=0) for aging purposes.`);
-  }
-  if (c.unmatched.count > 0) {
-    warnings.push(`${c.unmatched.count} invoice(s) have no clients_id (totaling ${roundMoney(c.unmatched.total)} EUR). Investigate and link to a ${party} for accurate reports.`);
-  }
-  const missingEur = missingEurAmountWarning(c.missing_eur_amount);
-  if (missingEur) warnings.push(missingEur);
-
+  const warnings = agingComputationWarnings(c, `Investigate and link to a ${party} for accurate reports.`);
   return {
     total_unpaid_face_value: c.total_unpaid_face_value,
     total_invoices: c.total_invoices,
@@ -124,26 +112,7 @@ class ReportingOperationsImpl implements ReportingOperations {
     if (!month || !/^\d{4}-\d{2}$/.test(month)) {
       return fail("month_required", "month_end requires month in YYYY-MM format.");
     }
-    const dateFrom = `${month}-01`;
-    const lastDay = getMonthLastDay(month);
-    const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
-
-    const [allJournals, allTx, allSales, allPurchases] = await Promise.all([
-      this.api.journals.listAll(),
-      this.api.transactions.listAll(),
-      this.enableSales ? this.api.saleInvoices.listAll() : Promise.resolve([] as SaleInvoice[]),
-      this.api.purchaseInvoices.listAll(),
-    ]);
-
-    const scan = gatherMonthEndScan({
-      journals: allJournals,
-      transactions: allTx,
-      saleInvoices: allSales,
-      purchaseInvoices: allPurchases,
-      dateFrom,
-      dateTo,
-      today: todayInTallinn(),
-    });
+    const { scan, dateTo } = await loadMonthEndScan(this.api, month, this.enableSales);
     const {
       unconfirmedJournals,
       unconfirmedTransactions: unconfirmedTx,
@@ -170,8 +139,6 @@ class ReportingOperationsImpl implements ReportingOperations {
 
     const warnings = monthEndWarnings(scan, month, dateTo);
 
-    const issuesFound = unconfirmedJournals.length + unconfirmedTx.length + unconfirmedSales.length + unconfirmedPurchases.length + overdueReceivables.length + overduePayables.length;
-
     return ok({
       report: "month_end",
       month,
@@ -184,10 +151,7 @@ class ReportingOperationsImpl implements ReportingOperations {
       overdue_payables: dueList(overduePayables, true),
       ...(monthOpen && this.enableSales ? { due_before_month_end_receivables: dueList(dueBeforeMonthEndReceivables, false) } : {}),
       ...(monthOpen ? { due_before_month_end_payables: dueList(dueBeforeMonthEndPayables, false) } : {}),
-      summary: {
-        issues_found: issuesFound,
-        ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 && unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
-      },
+      summary: monthEndSummary(scan),
       warnings,
     });
   }

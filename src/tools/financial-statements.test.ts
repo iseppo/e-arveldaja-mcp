@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
-import { computeAllBalances, registerFinancialStatementTools } from "./financial-statements.js";
+import { computeAllBalances, loadMonthEndScan, monthEndSummary, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { clearRuntimeCaches } from "../cache-control.js";
@@ -1624,5 +1624,32 @@ describe("month_end credit invoices, foreign currency, missing create_date, trun
     expect(payload.overdue_payables.total).toBe(120);
     expect(payload.overdue_payables.items).toHaveLength(10);
     expect(payload.overdue_payables.truncated).toBe(true);
+  });
+});
+
+describe("loadMonthEndScan / monthEndSummary", () => {
+  function scanApi(sales: SaleInvoice[], purchases: PurchaseInvoice[]) {
+    return {
+      journals: { listAll: vi.fn().mockResolvedValue([{ id: 1, effective_date: "2024-02-29", registered: false, is_deleted: false }]) },
+      transactions: { listAll: vi.fn().mockResolvedValue([]) },
+      saleInvoices: { listAll: vi.fn().mockResolvedValue(sales) },
+      purchaseInvoices: { listAll: vi.fn().mockResolvedValue(purchases) },
+    } as unknown as ApiContext;
+  }
+
+  it("bounds the month inclusively at its last day (leap February)", async () => {
+    const { scan, dateTo } = await loadMonthEndScan(scanApi([], []), "2024-02", true);
+    expect(dateTo).toBe("2024-02-29");
+    expect(scan.unconfirmedJournals.map(j => j.id)).toEqual([1]);
+    expect(monthEndSummary(scan)).toEqual({ issues_found: 1, ready_to_close: false });
+  });
+
+  it("does not read sale invoices when sales is disabled", async () => {
+    const api = scanApi([], [makePurchaseInvoice({ id: 5, create_date: "2023-01-01", journal_date: "2023-01-01", term_days: 0, gross_price: 10 })]);
+    const { scan } = await loadMonthEndScan(api, "2024-03", false);
+    expect(api.saleInvoices.listAll).not.toHaveBeenCalled();
+    expect(scan.overduePayables.map(i => i.id)).toEqual([5]);
+    // Overdue items count as issues but do not block ready_to_close.
+    expect(monthEndSummary(scan)).toEqual({ issues_found: 1, ready_to_close: true });
   });
 });

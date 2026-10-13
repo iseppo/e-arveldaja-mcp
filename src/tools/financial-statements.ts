@@ -7,8 +7,8 @@ import type { Account, Journal, SaleInvoice, PurchaseInvoice, Transaction } from
 import { roundMoney, effectiveGross, eurGross } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
-import { loadOpeningBalanceJournal, type OpeningBalanceJournal } from "../opening-balance-journal.js";
+import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
+import { loadJournalsWithOpeningBalance } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import type { ToolExposureConfig } from "../config.js";
 import { todayInTallinn } from "../local-date.js";
@@ -153,39 +153,16 @@ export function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): 
 
 // Shared report cores: compute_trial_balance / compute_balance_sheet /
 // compute_profit_and_loss and the run_accounting_report ops both route through
-// these, so journal loading, the opening-balance (algbilanss) fold + status
-// warnings, date defaults and the year-end-close exclusion cannot drift.
-async function loadLedgerJournals(api: ApiContext): Promise<{ journals: Journal[]; opening: OpeningBalanceJournal | null }> {
-  const [opening, journalsFromApi] = await Promise.all([
-    loadOpeningBalanceJournal(api),
-    api.journals.listAllWithPostings(),
-  ]);
-  return { journals: [...(opening ? [opening.journal] : []), ...journalsFromApi], opening };
-}
-
-function openingBalanceWarnings(
-  warnings: string[],
-  opening: OpeningBalanceJournal | null,
-  dateFrom: string | undefined,
-  dateTo: string | undefined,
-): string[] {
-  return withOpeningBalanceStatusInRange(warnings, {
-    captured: opening !== null,
-    openingDate: opening?.openingDate,
-    unmappedCodes: opening?.unmappedCodes,
-    unmappedDimensions: opening?.unmappedDimensions,
-    dateFrom,
-    dateTo,
-  });
-}
-
+// these (journals via loadJournalsWithOpeningBalance), so journal loading, the
+// opening-balance (algbilanss) fold + status warnings, date defaults and the
+// year-end-close exclusion cannot drift.
 /** Trial balance. With no `dateTo` every posting counts, future-dated ones included (labelled "unbounded"). */
 export async function computeTrialBalanceReport(
   api: ApiContext,
   dateFrom?: string,
   dateTo?: string,
 ): Promise<Omit<TrialBalanceResult, "report">> {
-  const { journals, opening } = await loadLedgerJournals(api);
+  const { journals, opening } = await loadJournalsWithOpeningBalance(api);
   const balances = await computeAllBalances(api, dateFrom, dateTo, { preloadedJournals: journals });
   // Use the raw-accumulated grand totals from computeAllBalances, not a sum of
   // the already-rounded per-account debit_total/credit_total — summing N
@@ -200,7 +177,7 @@ export async function computeTrialBalanceReport(
       credit: roundMoney(balances.totalCredit),
       difference: roundMoney(balances.totalDebit - balances.totalCredit),
     },
-    warnings: openingBalanceWarnings([], opening, dateFrom, dateTo),
+    warnings: withOpeningBalanceJournalStatus([], opening, dateFrom, dateTo),
   };
 }
 
@@ -210,7 +187,7 @@ export async function computeBalanceSheetReport(
   dateTo?: string,
 ): Promise<Omit<BalanceSheetResult, "report">> {
   const date = dateTo ?? todayInTallinn();
-  const { journals, opening } = await loadLedgerJournals(api);
+  const { journals, opening } = await loadJournalsWithOpeningBalance(api);
   // The year-end closing journal stays in: for the balance sheet it is a real
   // posting that moves the year's result into equity.
   const balances = await computeAllBalances(api, undefined, date, { preloadedJournals: journals });
@@ -253,7 +230,7 @@ export async function computeBalanceSheetReport(
       liabilities_plus_equity: roundMoney(totalLiabilities + totalEquityWithCurrentYearPL),
       balanced: Math.abs(totalAssets - totalLiabilities - totalEquityWithCurrentYearPL) < 0.01,
     },
-    warnings: openingBalanceWarnings(warnings, opening, undefined, date),
+    warnings: withOpeningBalanceJournalStatus(warnings, opening, undefined, date),
   };
 }
 
@@ -271,7 +248,7 @@ export async function computeProfitAndLossReport(
   dateFrom: string,
   dateTo: string,
 ): Promise<Omit<ProfitAndLossResult, "report">> {
-  const [{ journals, opening }, accounts] = await Promise.all([loadLedgerJournals(api), api.readonly.getAccounts()]);
+  const [{ journals, opening }, accounts] = await Promise.all([loadJournalsWithOpeningBalance(api), api.readonly.getAccounts()]);
   const calculatedResultAccount = resolveCalculatedResultAccount(accounts);
   const excludedClosing = new Set<number | undefined>();
   const allBalances = await computeAllBalances(api, dateFrom, dateTo, {
@@ -308,7 +285,7 @@ export async function computeProfitAndLossReport(
     revenue: { items: items(revenue), total: roundMoney(totalRevenue) },
     expenses: { items: items(expenses), total: roundMoney(totalExpenses) },
     net_profit: roundMoney(totalRevenue - totalExpenses),
-    warnings: openingBalanceWarnings(warnings, opening, dateFrom, dateTo),
+    warnings: withOpeningBalanceJournalStatus(warnings, opening, dateFrom, dateTo),
   };
 }
 
@@ -448,6 +425,50 @@ export function gatherMonthEndScan(input: MonthEndScanInput): MonthEndScan {
     partiallyPaidReceivables,
     partiallyPaidPayables,
     excludedCreditInvoices: openSalesAll.length - openSales.length,
+  };
+}
+
+/**
+ * Month bounds, the four list reads and gatherMonthEndScan — shared by
+ * month_end_close_checklist and the run_accounting_report month_end op.
+ * `dateTo` is the month's last day.
+ */
+export async function loadMonthEndScan(
+  api: ApiContext,
+  month: string,
+  enableSales: boolean,
+): Promise<{ scan: MonthEndScan; dateTo: string }> {
+  const dateFrom = `${month}-01`;
+  const lastDay = getMonthLastDay(month);
+  const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
+
+  const [allJournals, allTx, allSales, allPurchases] = await Promise.all([
+    api.journals.listAll(),
+    api.transactions.listAll(),
+    enableSales ? api.saleInvoices.listAll() : Promise.resolve([] as SaleInvoice[]),
+    api.purchaseInvoices.listAll(),
+  ]);
+
+  const scan = gatherMonthEndScan({
+    journals: allJournals,
+    transactions: allTx,
+    saleInvoices: allSales,
+    purchaseInvoices: allPurchases,
+    dateFrom,
+    dateTo,
+    today: todayInTallinn(),
+  });
+  return { scan, dateTo };
+}
+
+/** Month-end `summary` block (issue count + ready_to_close). */
+export function monthEndSummary(scan: MonthEndScan): { issues_found: number; ready_to_close: boolean } {
+  return {
+    issues_found: scan.unconfirmedJournals.length + scan.unconfirmedTransactions.length +
+      scan.unconfirmedSales.length + scan.unconfirmedPurchases.length +
+      scan.overdueReceivables.length + scan.overduePayables.length,
+    ready_to_close: scan.unconfirmedJournals.length === 0 && scan.unconfirmedTransactions.length === 0 &&
+      scan.unconfirmedSales.length === 0 && scan.unconfirmedPurchases.length === 0,
   };
 }
 
@@ -639,26 +660,7 @@ export function registerFinancialStatementTools(
     { ...readOnly, title: "Month-End Close Checklist" },
     async ({ month, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
-      const dateFrom = `${month}-01`;
-      const lastDay = getMonthLastDay(month);
-      const dateTo = `${month}-${String(lastDay).padStart(2, "0")}`;
-
-      const [allJournals, allTx, allSales, allPurchases] = await Promise.all([
-        api.journals.listAll(),
-        api.transactions.listAll(),
-        enableSales ? api.saleInvoices.listAll() : Promise.resolve([]),
-        api.purchaseInvoices.listAll(),
-      ]);
-
-      const scan = gatherMonthEndScan({
-        journals: allJournals,
-        transactions: allTx,
-        saleInvoices: allSales,
-        purchaseInvoices: allPurchases,
-        dateFrom,
-        dateTo,
-        today: todayInTallinn(),
-      });
+      const { scan, dateTo } = await loadMonthEndScan(api, month, enableSales);
       const {
         unconfirmedJournals,
         unconfirmedTransactions: unconfirmedTx,
@@ -730,13 +732,7 @@ export function registerFinancialStatementTools(
               ...(enableSales && { due_before_month_end_receivables: dueList(dueBeforeMonthEndReceivables, false) }),
               due_before_month_end_payables: dueList(dueBeforeMonthEndPayables, false),
             }),
-            summary: {
-              issues_found: unconfirmedJournals.length + unconfirmedTx.length +
-                unconfirmedSales.length + unconfirmedPurchases.length +
-                overdueReceivables.length + overduePayables.length,
-              ready_to_close: unconfirmedJournals.length === 0 && unconfirmedTx.length === 0 &&
-                unconfirmedSales.length === 0 && unconfirmedPurchases.length === 0,
-            },
+            summary: monthEndSummary(scan),
             ...cacheClearMetadata(cacheClear),
             ...(warnings.length > 0 && { warnings }),
           }),

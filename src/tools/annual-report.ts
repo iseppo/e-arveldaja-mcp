@@ -21,7 +21,7 @@ import {
   resolveRestrictedReserveAccounts,
   resolveRetainedEarningsAccount,
 } from "../account-resolution.js";
-import { withOpeningBalanceStatusInRange } from "../opening-balance-limitations.js";
+import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
 import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
 import {
   isYearEndClosingJournal,
@@ -1542,13 +1542,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const closingEquity = totalEquity;
   const averageEquity = roundMoney((openingEquity + closingEquity) / 2);
   const openingBalanceApiIncomplete = opening === null;
-  const finalWarnings = withOpeningBalanceStatusInRange(warnings, {
-    captured: opening !== null,
-    openingDate: opening?.openingDate,
-    unmappedCodes: opening?.unmappedCodes,
-    unmappedDimensions: opening?.unmappedDimensions,
-    dateTo: to,
-  });
+  const finalWarnings = withOpeningBalanceJournalStatus(warnings, opening, undefined, to);
 
   return {
     year,

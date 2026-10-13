@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { buildOpeningBalanceJournal, loadOpeningBalanceJournal } from "./opening-balance-journal.js";
+import { buildOpeningBalanceJournal, loadJournalsWithOpeningBalance, loadOpeningBalanceJournal } from "./opening-balance-journal.js";
 import type { Account } from "./types/api.js";
 import { writeOpeningBalances, resetOpeningBalanceCache, type StoredOpeningBalances } from "./opening-balance-store.js";
 import { createAccountingWorkflowApi } from "./__fixtures__/accounting-workflow.js";
@@ -143,5 +143,37 @@ describe("loadOpeningBalanceJournal fail-safe dimensions fetch", () => {
     expect(d.accounts_id).toBe(1020);
     expect(d.amount).toBe(1000);          // account total preserved
     expect(d.accounts_dimensions_id ?? null).toBeNull();  // per-dimension attribution degraded
+  });
+});
+
+describe("loadJournalsWithOpeningBalance", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ob-ledger-"));
+    process.env.EARVELDAJA_RULES_DIR = dir;
+    resetOpeningBalanceCache();
+  });
+  afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; resetOpeningBalanceCache(); rmSync(dir, { recursive: true, force: true }); });
+
+  const apiJournal = { id: 7, effective_date: "2025-02-01", registered: true, is_deleted: false, postings: [] };
+  const api = () => ({
+    readonly: { getAccounts: vi.fn().mockResolvedValue(ACCOUNTS), getAccountDimensions: vi.fn().mockResolvedValue([]) },
+    journals: { listAllWithPostings: vi.fn().mockResolvedValue([apiJournal]) },
+  }) as never;
+
+  it("returns the API journals unchanged and opening=null when nothing is stored", async () => {
+    const r = await loadJournalsWithOpeningBalance(api());
+    expect(r.opening).toBeNull();
+    expect(r.journals).toEqual([apiJournal]);
+    expect(r.journalsFromApi).toEqual([apiJournal]);
+  });
+
+  it("prepends the synthetic opening journal but keeps journalsFromApi API-only", async () => {
+    writeOpeningBalances(STORED, "2026-07-20T00:00:00Z");
+    const r = await loadJournalsWithOpeningBalance(api());
+    expect(r.opening?.openingDate).toBe("2024-12-12");
+    expect(r.journals.map(j => j.id)).toEqual([-1, 7]);
+    expect(r.journals[0]).toBe(r.opening!.journal);
+    expect(r.journalsFromApi.map(j => j.id)).toEqual([7]);
   });
 });

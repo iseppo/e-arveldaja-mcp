@@ -102,3 +102,19 @@ export async function loadOpeningBalanceJournal(api: ApiContext): Promise<Openin
   }
   return buildOpeningBalanceJournal(accounts, dimensions, stored);
 }
+
+/**
+ * The API journals (with postings) with the stored opening-balance journal,
+ * when there is one, prepended. Both are loaded concurrently. `journalsFromApi`
+ * is the API list alone (e.g. for draft scans that must not see the synthetic
+ * journal).
+ */
+export async function loadJournalsWithOpeningBalance(
+  api: ApiContext,
+): Promise<{ journals: Journal[]; journalsFromApi: Journal[]; opening: OpeningBalanceJournal | null }> {
+  const [opening, journalsFromApi] = await Promise.all([
+    loadOpeningBalanceJournal(api),
+    api.journals.listAllWithPostings(),
+  ]);
+  return { journals: [...(opening ? [opening.journal] : []), ...journalsFromApi], journalsFromApi, opening };
+}
