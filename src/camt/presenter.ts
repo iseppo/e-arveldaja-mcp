@@ -32,6 +32,11 @@ const MAX_EXPOSED_VALUE_CHARS = 256;
  * JSON.stringifies the whole payload into one 500-char string and defeats both
  * the sandbox wrapping and the truncation below.
  */
+
+function journalReviewClause(count: number): string {
+  return count > 0 ? ` (${count} of them left unimported for existing-journal review)` : "";
+}
+
 export function importPreflightFailurePayload(
   source: "camt" | "wise",
   rejected: ImportRejectedField[],
@@ -126,6 +131,8 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     skipped_count: projection.skipped.length,
     error_count: input.errorCount,
     possible_duplicate_count: input.possibleDuplicates.length,
+    // Skipped rows an existing journal may already book; they stay unimported.
+    journal_review_count: projection.skipped.filter(row => row.review_code !== undefined).length,
   };
 
   const sanitizedStatementMetadata = {
@@ -188,8 +195,8 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
   const needsReview = [...sanitizedPossibleDuplicates, ...journalReviews];
 
   const workflowSummary = dryRun
-    ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
-    : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
+    ? `CAMT dry run would create ${summary.created_count} bank transaction(s), skip ${summary.skipped_count}${journalReviewClause(summary.journal_review_count)}, flag ${summary.possible_duplicate_count} possible duplicate(s), and report ${summary.error_count} error(s).`
+    : `CAMT import created ${summary.created_count} bank transaction(s), skipped ${summary.skipped_count}${journalReviewClause(summary.journal_review_count)}, flagged ${summary.possible_duplicate_count} possible duplicate(s), and reported ${summary.error_count} error(s).`;
   const workflow = buildWorkflowEnvelope({
     summary: workflowSummary,
     needs_review: needsReview,

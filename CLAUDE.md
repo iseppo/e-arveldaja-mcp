@@ -459,7 +459,7 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `deactivate`,
 - **BRICEKSP** (IE000GWTNRJ7): money market cash fund, always excluded from trades
 - **FX pairing**: Foreign currency trades (e.g., USD) are paired with CN-xxx Conversion entries by date + amount match. Consumed conversions are tracked to prevent double-matching.
 - **Sells require capital gains file**: Cost basis comes from the FIFO capital gains CSV. Sells without cost basis data are skipped with a warning.
-- **Duplicate detection**: Journal `document_number` field stores `LY:{reference}` (e.g., `LY:OR-EVN9C76R7A`)
+- **Duplicate detection**: Journal `document_number` field stores `LY:{reference}` (e.g., `LY:OR-EVN9C76R7A`). A distribution row with no reference match but a non-`LY:` journal debiting the broker account/dimension with its net EUR amount within ±1 day goes to review (`possible_existing_journal`, `candidate_journal_ids`) — legacy hand bookings used generic numbers such as `reward`
 - **Dry run default**: Both `book_lightyear_trades` and `book_lightyear_distributions` default to `dry_run=true`
 
 ## Security Notes

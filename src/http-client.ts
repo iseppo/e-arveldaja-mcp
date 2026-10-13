@@ -276,7 +276,7 @@ export class HttpClient {
       case 409:
         return {
           recovery_hint:
-            "Resolve the conflict before retrying. This often means a duplicate record, stale status, or an operation that must happen in a different order.",
+            "Resolve the conflict before retrying. This often means a duplicate record, stale status, an operation that must happen in a different order, or a field over its length limit (read upstream_detail for the exact cause).",
           next_actions: HttpClient.recoveryActionsForConflict(path),
         };
       case 429:

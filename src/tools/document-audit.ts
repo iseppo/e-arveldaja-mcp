@@ -131,40 +131,60 @@ export async function computeMissingDocuments(
 /**
  * Wrap the untrusted `title` / `description` / `client` fields of a
  * MissingDocumentsCore at MCP output and slice each item list to `limit`.
- * `limit=Infinity` returns every row. Envelope key order is byte-identical to
- * the historical `find_missing_documents` output.
+ * `limit=Infinity` returns every row. Counts always cover the full result; a
+ * section whose items were cut carries `truncated: true` + `items_returned`,
+ * and the envelope then carries a top-level `truncated` hint. Without
+ * truncation the envelope key order is byte-identical to the historical
+ * `find_missing_documents` output.
  */
 export function wrapMissingDocuments(core: MissingDocumentsCore, limit = 20): Record<string, unknown> {
   const slice = <T>(items: readonly T[]): readonly T[] => (limit === Infinity ? items : items.slice(0, limit));
-  return {
+  let anyTruncated = false;
+  const cut = (items: readonly unknown[]): Record<string, unknown> => {
+    if (limit === Infinity || items.length <= limit) return {};
+    anyTruncated = true;
+    return { truncated: true, items_returned: limit };
+  };
+  const envelope: Record<string, unknown> = {
     period: core.period,
     manual_journals_without_documents: {
       count: core.manual_journals_without_documents.count,
       items: slice(core.manual_journals_without_documents.items).map(j => ({
         id: j.id, date: j.date, title: wrapUntrustedOcr(j.title), number: j.number,
       })),
+      ...cut(core.manual_journals_without_documents.items),
     },
     transactions_without_documents: {
       count: core.transactions_without_documents.count,
       items: slice(core.transactions_without_documents.items).map(tx => ({
         id: tx.id, date: tx.date, amount: tx.amount, description: wrapUntrustedOcr(tx.description),
       })),
+      ...cut(core.transactions_without_documents.items),
     },
     purchase_invoices_without_documents: {
       count: core.purchase_invoices_without_documents.count,
       items: slice(core.purchase_invoices_without_documents.items).map(inv => ({
         id: inv.id, date: inv.date, number: inv.number, client: wrapUntrustedOcr(inv.client), gross: inv.gross,
       })),
+      ...cut(core.purchase_invoices_without_documents.items),
     },
     sale_invoices_system_pdfs: {
       count: core.sale_invoices_system_pdfs.count,
       items: slice(core.sale_invoices_system_pdfs.items).map(inv => ({
         id: inv.id, date: inv.date, number: inv.number, client: wrapUntrustedOcr(inv.client), gross: inv.gross,
       })),
+      ...cut(core.sale_invoices_system_pdfs.items),
       note: core.sale_invoices_system_pdfs.note,
     },
     total_missing: core.total_missing,
   };
+  if (anyTruncated) {
+    envelope.truncated = {
+      items_per_section: limit,
+      hint: "Counts cover every matching record; item lists are cut to the first rows. Request full detail or narrow the date range to see every record.",
+    };
+  }
+  return envelope;
 }
 
 /**
@@ -358,18 +378,19 @@ function wrapDuplicateSuppliers(result: Record<string, unknown>): Record<string,
 export function registerDocumentAuditTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "find_missing_documents",
-    "Find journals, transactions, and invoices without attached base documents.",
+    "Find journals, transactions, and invoices without a directly attached base document. Counts are records without their own attachment — a bank transaction linked to an invoice that has a document is still counted. Item lists show 20 rows per section unless detail=\"full\".",
     {
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      detail: z.enum(["compact", "full"]).optional().describe("compact (default): first 20 items per section, cut sections are marked truncated. full: every item."),
     },
     { ...readOnly, title: "Find Missing Documents" },
-    async ({ date_from, date_to }) => {
+    async ({ date_from, date_to, detail }) => {
       const core = await computeMissingDocuments(api, { date_from, date_to });
       return {
         content: [{
           type: "text",
-          text: toMcpJson(wrapMissingDocuments(core)),
+          text: toMcpJson(wrapMissingDocuments(core, detail === "full" ? Infinity : 20)),
         }],
       };
     }

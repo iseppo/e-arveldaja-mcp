@@ -356,7 +356,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   );
 
   registerTool(server, "compute_client_debt",
-    "Compute net position against a client across selected accounts.",
+    "Compute net position against a client across selected accounts. Entries are attributed by the journal header client, so offsetting postings under other clients are excluded — the result is not proof of personal debt when other clients share the account.",
     {
       clients_id: coerceId.describe("Client ID"),
       account_ids: z.string().optional().describe(`Comma-separated account IDs to check (default: ${DEFAULT_DEBT_CHECK_ACCOUNTS.join(",")})`),
@@ -377,10 +377,16 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
 
       const results = [];
+      const partialAccounts: number[] = [];
       for (const accountId of ids) {
         const r = await computeAccountBalance(
           api, accountId, clients_id, undefined, undefined, allJournals
         );
+        const whole = await computeAccountBalance(
+          api, accountId, undefined, undefined, undefined, journalsFromApi
+        );
+        const otherClientEntries = whole.entries.length - r.entries.length;
+        if (otherClientEntries > 0 && r.entries.length > 0) partialAccounts.push(accountId);
         results.push({
           account_id: accountId,
           account_name: r.account?.name_est ?? "Unknown",
@@ -389,6 +395,10 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           debit_total: roundMoney(r.debitTotal),
           credit_total: roundMoney(r.creditTotal),
           entry_count: r.entries.length,
+          // Whole-account context: entries under other (or no) header clients
+          // may be the offsetting side of this client's entries.
+          account_balance_all_clients: roundMoney(whole.balance),
+          other_client_entry_count: otherClientEntries,
         });
       }
 
@@ -404,6 +414,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       // opening-balance journal is ALWAYS excluded from these figures (see
       // clientScopedOpeningBalanceWarnings) — never report "complete".
       const openingBalanceWarnings = clientScopedOpeningBalanceWarnings([], opening);
+      const scopeWarnings = partialAccounts.length > 0
+        ? [
+            `Accounts ${partialAccounts.join(", ")} also carry entries under other header clients. This figure filters by the journal header client only: ` +
+            "offsetting postings booked under another client (e.g. a supplier invoice paid by this person, or the same person under a second client record) are excluded. " +
+            "net_position is NOT proven debt between the company and this client — compare account_balance_all_clients and review the counterpart entries before treating it as a receivable or payable.",
+          ]
+        : [];
 
       return {
         content: [{
@@ -415,6 +432,8 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               total_debt_to_client: roundMoney(totalDebt),
               total_receivable_from_client: roundMoney(totalReceivable),
               net_position: roundMoney(totalReceivable - totalDebt),
+              filter_scope: "journal_header_client",
+              ...(partialAccounts.length > 0 ? { net_position_status: "requires_counterpart_review" } : {}),
             },
             opening_balance_status: opening !== null
               ? "excluded_client_scoped"
@@ -422,7 +441,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
             balance_scope: opening !== null
               ? "client_scoped_excludes_opening_balance"
               : "journal_api_visible_entries_only",
-            warnings: openingBalanceWarnings,
+            warnings: [...scopeWarnings, ...openingBalanceWarnings],
             ...cacheClearMetadata(cacheClear),
           }),
         }],

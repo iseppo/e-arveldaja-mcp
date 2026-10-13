@@ -311,6 +311,17 @@ describe("workflow response helpers", () => {
     expect(invoiceOnly.approval_previews[0]?.execute_args).not.toHaveProperty("command_count");
   });
 
+  it("names CAMT existing-journal review rows in the approval preview instead of claiming no review items", () => {
+    const preview = approvalPreviewFromDryRunStep({
+      tool: "import_camt053",
+      suggested_args: { file_path: "/tmp/statement.xml", accounts_dimensions_id: 7, execute: false },
+      preview: { created_count: 12, skipped_count: 25, possible_duplicate_count: 0, error_count: 0, journal_review_count: 3 },
+    });
+    expect(preview?.duplicate_risk).toContain("3 skipped row(s) need existing-journal review");
+    expect(preview?.duplicate_risk).not.toContain("No possible duplicate review items");
+    expect(preview?.accounting_impact.join(" ")).toContain("3 skipped row(s) match an existing journal ambiguously");
+  });
+
   it("blocks Wise approval while transfer ownership reviews remain", () => {
     const step = {
       tool: "import_wise_transactions",

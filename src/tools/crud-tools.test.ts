@@ -1039,6 +1039,22 @@ describe("structured JSON-compatible inputs", () => {
     });
   });
 
+  it("create_journal refuses a title over 100 characters before calling the API", async () => {
+    const { api, handler } = getCrudToolHarness("create_journal", {
+      readonly: { getAccounts: vi.fn().mockResolvedValue([]), getAccountDimensions: vi.fn().mockResolvedValue([]) },
+      journals: { create: vi.fn() },
+    });
+    const result = await handler({
+      title: "x".repeat(101),
+      effective_date: "2026-04-24",
+      postings: [{ accounts_id: 4000, type: "D", amount: 1 }, { accounts_id: 4000, type: "C", amount: 1 }],
+    }) as { content: Array<{ text: string }>; isError?: boolean };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("at most 100");
+    expect(api.journals.create).not.toHaveBeenCalled();
+    expect(api.readonly.getAccounts).not.toHaveBeenCalled();
+  });
+
   it("confirm_transaction accepts an array of distributions instead of a JSON string", async () => {
     const { api, handler } = getCrudToolHarness("confirm_transaction", {
       transactions: {

@@ -718,11 +718,14 @@ describe("compute_client_debt tool", () => {
       debit_total: 30,
       credit_total: 100,
       entry_count: 2,
+      account_balance_all_clients: 70,
+      other_client_entry_count: 0,
     }]);
     expect(data.summary).toEqual({
       total_debt_to_client: 70,
       total_receivable_from_client: 0,
       net_position: -70,
+      filter_scope: "journal_header_client",
     });
     expect(data.cache).toEqual({
       fresh: true,
@@ -731,6 +734,19 @@ describe("compute_client_debt tool", () => {
     });
     expect(clearRuntimeCachesMock).toHaveBeenCalledOnce();
     expect(listAllWithPostings).toHaveBeenCalledOnce();
+  });
+
+  it("flags net_position as needing counterpart review when other clients share the account", async () => {
+    const api = makeApi([
+      journal({ id: 1, clients_id: CLIENT_ID, postings: [posting(ACCOUNT_ID, "D", 100)] }),
+      journal({ id: 2, clients_id: 99, postings: [posting(ACCOUNT_ID, "C", 100)] }),
+    ], CLIENT_DEBT_ACCOUNT);
+    registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api as unknown as Parameters<typeof registerAccountBalanceTools>[1]);
+    const result = await capturedHandlers["compute_client_debt"]!({ clients_id: CLIENT_ID, account_ids: String(ACCOUNT_ID) });
+    const data = parseMcpResponse(result.content[0]!.text) as any;
+    expect(data.accounts[0]).toMatchObject({ balance: -100, account_balance_all_clients: 0, other_client_entry_count: 1 });
+    expect(data.summary).toMatchObject({ filter_scope: "journal_header_client", net_position_status: "requires_counterpart_review" });
+    expect(data.warnings[0]).toContain("NOT proven debt");
   });
 
   it("adds client debt opening-balance disclosure", async () => {
@@ -804,6 +820,8 @@ describe("compute_client_debt tool — opening balance folding", () => {
       debit_total: 30,
       credit_total: 100,
       entry_count: 2,
+      account_balance_all_clients: 70,
+      other_client_entry_count: 0,
     }]);
     expect(data.opening_balance_status).not.toBe("complete");
     expect(data.balance_scope).not.toBe("complete_balance");

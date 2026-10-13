@@ -554,16 +554,25 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
       duplicateCount: numberAt(preview, "possible_duplicate_count") ?? 0,
       errorCount: numberAt(preview, "error_count") ?? 0,
       skipped: numberAt(preview, "skipped_count") ?? 0,
+      journalReviewCount: numberAt(preview, "journal_review_count") ?? 0,
     }),
     canApprove: counts => counts.created > 0 && counts.duplicateCount <= 0 && counts.errorCount <= 0,
     buildImpact: counts => [
       impactLine(counts.created, "bank transaction"),
       impactLine(counts.skipped, "skipped row"),
+      counts.journalReviewCount > 0
+        ? `${counts.journalReviewCount} skipped row(s) match an existing journal ambiguously and stay unimported until reviewed`
+        : undefined,
       counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
     ].filter((line): line is string => line !== undefined),
-    duplicateRisk: counts => counts.duplicateCount > 0
-      ? `${counts.duplicateCount} possible duplicate(s) were reported; resolve those review items before approval.`
-      : "No possible duplicate review items were reported by the dry run.",
+    duplicateRisk: counts => [
+      counts.duplicateCount > 0
+        ? `${counts.duplicateCount} possible duplicate(s) were reported; resolve those review items before approval.`
+        : "No possible duplicate transactions were reported by the dry run.",
+      counts.journalReviewCount > 0
+        ? `${counts.journalReviewCount} skipped row(s) need existing-journal review (needs_review camt_journal_review); approval does not import them.`
+        : undefined,
+    ].filter((line): line is string => line !== undefined).join(" "),
     blockedReasons: counts => [
       impactLine(counts.duplicateCount, "possible duplicate"),
       impactLine(counts.errorCount, "import error"),

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerDocumentAuditTools, computeMissingDocuments } from "./document-audit.js";
+import { registerDocumentAuditTools, computeMissingDocuments, wrapMissingDocuments } from "./document-audit.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
 
@@ -226,5 +226,30 @@ describe("detectDuplicatePurchaseInvoice — status, number normalization, date 
     const handler = setupDuplicateTool([row({ id: 1, number: "A-1" }), row({ id: 2, number: "B-2" })]);
     const payload = parseMcpResponse((await handler({})).content[0]!.text);
     expect(payload.suspicious_same_amount_date.items[0].invoices[0].number).toMatch(/^<<UNTRUSTED_OCR_START:/);
+  });
+});
+
+describe("wrapMissingDocuments truncation", () => {
+  const core = (n: number) => ({
+    period: { from: "all", to: "all" },
+    manual_journals_without_documents: { count: n, items: Array.from({ length: n }, (_, i) => ({ id: i, date: "2026-09-01", title: `J${i}`, number: i })) },
+    transactions_without_documents: { count: 0, items: [] },
+    purchase_invoices_without_documents: { count: 0, items: [] },
+    sale_invoices_system_pdfs: { count: 0, items: [], note: "n" },
+    total_missing: n,
+  }) as unknown as Parameters<typeof wrapMissingDocuments>[0];
+
+  it("marks a cut section and the envelope instead of silently dropping rows", () => {
+    const out = wrapMissingDocuments(core(25)) as any;
+    expect(out.manual_journals_without_documents).toMatchObject({ count: 25, truncated: true, items_returned: 20 });
+    expect(out.manual_journals_without_documents.items).toHaveLength(20);
+    expect(out.truncated).toMatchObject({ items_per_section: 20 });
+    expect(out.transactions_without_documents).not.toHaveProperty("truncated");
+  });
+
+  it("returns every row and no truncation marker under full detail", () => {
+    const out = wrapMissingDocuments(core(25), Infinity) as any;
+    expect(out.manual_journals_without_documents.items).toHaveLength(25);
+    expect(out).not.toHaveProperty("truncated");
   });
 });

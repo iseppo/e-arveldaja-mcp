@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 85982,
-    "descriptionsBytes": 11914,
-    "inputSchemasBytes": 53417,
+    "toolsListBytes": 86598,
+    "descriptionsBytes": 12304,
+    "inputSchemasBytes": 53641,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4169
@@ -735,7 +735,7 @@
             "description": "Postings [{accounts_id, type: 'D'|'C', amount, accounts_dimensions_id?, base_amount?, projects_project_id?, projects_location_id?, projects_person_id?}]. accounts_dimensions_id is REQUIRED when accounts_id has sub-accounts. base_amount = EUR equivalent for non-EUR entries. projects_* fields link the posting to project tracking dimensions."
           },
           "title": {
-            "description": "Journal entry title",
+            "description": "Journal entry title (max 100 characters — the API rejects longer titles)",
             "type": "string"
           }
         },
@@ -2062,7 +2062,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute net position against a client across selected accounts.",
+      "description": "Compute net position against a client across selected accounts. Entries are attributed by the journal header client, so offsetting postings under other clients are excluded — the result is not proof of personal debt when other clients share the account.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2866,7 +2866,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find journals, transactions, and invoices without attached base documents.",
+      "description": "Find journals, transactions, and invoices without a directly attached base document. Counts are records without their own attachment — a bank transaction linked to an invoice that has a document is still counted. Item lists show 20 rows per section unless detail=\"full\".",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2879,6 +2879,14 @@
           },
           "date_to": {
             "description": "End date (YYYY-MM-DD)",
+            "type": "string"
+          },
+          "detail": {
+            "description": "compact (default): first 20 items per section, cut sections are marked truncated. full: every item.",
+            "enum": [
+              "compact",
+              "full"
+            ],
             "type": "string"
           }
         },

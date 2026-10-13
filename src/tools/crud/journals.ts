@@ -36,6 +36,17 @@ import {
 } from "./shared.js";
 import { isMutationIndeterminate } from "../../mutation-outcome.js";
 
+/** Backend limit: POST/PATCH /journals answers 409 for a longer title. */
+export const JOURNAL_TITLE_MAX_LENGTH = 100;
+
+function journalTitleLengthError(title: unknown) {
+  if (typeof title !== "string" || title.length <= JOURNAL_TITLE_MAX_LENGTH) return undefined;
+  return toolError({
+    error: `Journal title is ${title.length} characters; e-arveldaja accepts at most ${JOURNAL_TITLE_MAX_LENGTH}.`,
+    hint: "Shorten the title and retry. Put longer explanations in the attached source document instead. Nothing was sent to the API.",
+  });
+}
+
 export function registerJournalTools(server: McpServer, api: ApiContext): void {
   // =====================
   // JOURNALS
@@ -140,7 +151,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
   });
 
   registerTool(server, "create_journal", "Create a journal entry with postings", {
-    title: z.string().optional().describe("Journal entry title"),
+    title: z.string().optional().describe(`Journal entry title (max ${JOURNAL_TITLE_MAX_LENGTH} characters — the API rejects longer titles)`),
     effective_date: isoDateString("Entry date (YYYY-MM-DD)"),
     clients_id: z.number().optional().describe("Related client ID"),
     document_number: z.string().optional().describe("Document number. Recommended for imported or mechanism-crossing entries: a stable source reference (e.g. WISE:{id}, LY:{ref}, BANK:{stmt-ref}) — used for duplicate detection."),
@@ -154,6 +165,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     block_on_duplicate: z.boolean().optional().describe("Refuse creation when a bank posting looks like an already-booked duplicate (default false: warn only)."),
   }, { ...create, title: "Create Journal" }, async (rawParams) => {
     const params = desandboxAllStrings(rawParams);
+    const titleError = journalTitleLengthError(params.title);
+    if (titleError) return titleError;
     const postings = parsePostings(params.postings);
     const [accounts, accountDimensions] = await Promise.all([
       api.readonly.getAccounts(),
@@ -373,6 +386,8 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
     data: jsonObjectInput.describe("Object with fields to update."),
   }, { ...mutate, title: "Update Journal" }, async ({ id, data }) => {
     const parsed = desandboxAllStrings(parseJsonObject(data, "data"));
+    const titleError = journalTitleLengthError(parsed.title);
+    if (titleError) return titleError;
     // Fresh read: the registered gate must not act on a cached snapshot.
     api.journals.invalidateListCache();
     const current = await api.journals.get(id);

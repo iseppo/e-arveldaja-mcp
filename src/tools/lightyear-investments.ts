@@ -112,6 +112,7 @@ export type FxReviewCode =
   | "distribution_amount_conflict"
   | "invalid_date"
   | "reference_conflict"
+  | "possible_existing_journal"
   | "portfolio_arithmetic_overflow";
 
 export interface FxReviewReason {
@@ -139,6 +140,7 @@ export const FX_REVIEW_MESSAGES: Record<FxReviewCode, string> = {
   distribution_amount_conflict: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent.",
   invalid_date: "The statement date is not a valid calendar day.",
   reference_conflict: "Several statement rows share this reference with differing content; none is booked automatically.",
+  possible_existing_journal: "A journal without this Lightyear reference already debits the broker account with the same net amount on or next to this date; it may be a legacy booking of this row. Not booked automatically — if it is this row, set its document_number to LY:{reference}; if it is unrelated, book this row by hand with create_journal and document_number LY:{reference}.",
   portfolio_arithmetic_overflow: "The portfolio arithmetic exceeds the supported exact bounds.",
 };
 
@@ -2039,6 +2041,73 @@ function matchJournalsByRef(
   return matches;
 }
 
+const LEGACY_DISTRIBUTION_DATE_WINDOW_DAYS = 1;
+
+function utcDayDistance(a: string, b: string): number {
+  return Math.abs(Date.parse(`${a.slice(0, 10)}T00:00:00Z`) - Date.parse(`${b.slice(0, 10)}T00:00:00Z`)) / 86_400_000;
+}
+
+/**
+ * Legacy-booking candidates for bookable distributions that no `LY:{ref}` /
+ * raw-ref journal claims: live journals (any status, not `LY:`-numbered)
+ * within ±1 day that debit the broker account (and broker dimension, when
+ * given) with the row's net EUR amount. Historical rows booked by hand under
+ * a generic document number (e.g. `reward`) are otherwise re-proposed as new.
+ * A match is a SUSPECT, not proof, so the caller routes the row to review.
+ * Postings are fetched only for the date-window shortlist.
+ */
+async function findLegacyDistributionCandidates(
+  api: ApiContext,
+  allJournals: readonly Journal[],
+  distributions: readonly LightyearDistribution[],
+  existingRefs: ReadonlySet<string>,
+  brokerAccount: number,
+  brokerDimensionId: number | undefined,
+): Promise<Map<number, number[]>> {
+  const result = new Map<number, number[]>();
+  const pending = distributions.filter(d =>
+    isBookableDistribution(d) && !existingRefs.has(d.reference) && (d.net_eur ?? 0) > 0);
+  if (pending.length === 0) return result;
+
+  // A journal numbered with any statement reference belongs to that row
+  // (or a raw-ref booking of another row), never a legacy candidate.
+  const statementRefs = new Set(distributions.map(d => d.reference));
+  const shortlist = new Map<number, number[]>();
+  const journalsById = new Map<number, Journal>();
+  for (const distribution of pending) {
+    const ids: number[] = [];
+    for (const journal of allJournals) {
+      if (journal.is_deleted || typeof journal.id !== "number" || !journal.effective_date) continue;
+      const documentNumber = String(journal.document_number ?? "").trim();
+      if (documentNumber.startsWith("LY:") || statementRefs.has(documentNumber)) continue;
+      if (utcDayDistance(journal.effective_date, distribution.date) > LEGACY_DISTRIBUTION_DATE_WINDOW_DAYS) continue;
+      ids.push(journal.id);
+      journalsById.set(journal.id, journal);
+    }
+    if (ids.length > 0) shortlist.set(distribution.row_index, ids);
+  }
+
+  // Fetch missing postings once per journal, in parallel batches of 5 (as listAllWithPostings does).
+  const toFetch = [...journalsById.values()].filter(j => (j.postings?.length ?? 0) === 0).map(j => j.id as number);
+  for (let i = 0; i < toFetch.length; i += 5) {
+    const batch = toFetch.slice(i, i + 5);
+    const fetched = await Promise.all(batch.map(id => api.journals.get(id)));
+    batch.forEach((id, k) => journalsById.set(id, fetched[k]!));
+  }
+
+  for (const distribution of pending) {
+    const ids = (shortlist.get(distribution.row_index) ?? []).filter(id =>
+      (journalsById.get(id)?.postings ?? []).some(posting =>
+        !posting.is_deleted &&
+        posting.accounts_id === brokerAccount &&
+        (brokerDimensionId === undefined || posting.accounts_dimensions_id === brokerDimensionId) &&
+        posting.type === "D" &&
+        Math.abs((posting.base_amount ?? posting.amount) - distribution.net_eur!) <= 0.005));
+    if (ids.length > 0) result.set(distribution.row_index, ids.sort((a, b) => a - b));
+  }
+  return result;
+}
+
 /**
  * Match sell trades to capital gains entries by date + ticker + quantity + proceeds.
  *
@@ -2595,6 +2664,7 @@ interface DistributionsProjection {
   distributionsInOrder: LightyearDistribution[];
   newSet: Set<number>;
   duplicates: LightyearDistribution[];
+  legacyCandidates: ReadonlyMap<number, number[]>;
   warnings: string[];
   totalDistributions: number;
   bookableCount: number;
@@ -2604,6 +2674,8 @@ interface DistributionsProjection {
 interface DistributionsProjectionParams {
   distributions: LightyearDistribution[];
   existingRefs: Set<string>;
+  /** row_index → journal ids that may be a legacy booking of the row. */
+  legacyCandidates?: ReadonlyMap<number, number[]>;
   seedWarnings: string[];
   broker_account: number;
   broker_dimension_id?: number;
@@ -2633,6 +2705,34 @@ function distributionSourceFields(distribution: LightyearDistribution): Record<s
   };
 }
 
+/**
+ * Extraction-time review warnings name the row by its (wrapped) reference;
+ * drop them for rows that are already booked so they do not read as open work.
+ */
+function dropBookedReviewWarnings(warnings: string[], bookedRows: readonly LightyearDistribution[]): void {
+  if (bookedRows.length === 0) return;
+  const refs = bookedRows.map(d => `\n${d.reference}\n`);
+  for (let i = warnings.length - 1; i >= 0; i--) {
+    const warning = warnings[i]!;
+    if (warning.includes(": distribution review [") && refs.some(ref => warning.includes(ref))) warnings.splice(i, 1);
+  }
+}
+
+function distributionManualResult(
+  distribution: LightyearDistribution,
+  legacyCandidates?: ReadonlyMap<number, number[]>,
+): Record<string, unknown> {
+  const candidates = distribution.fx_review_reason?.code === "possible_existing_journal"
+    ? legacyCandidates?.get(distribution.row_index)
+    : undefined;
+  return {
+    ...distributionSourceFields(distribution),
+    status: "manual_review",
+    review_reason: distribution.fx_review_reason,
+    ...(candidates ? { candidate_journal_ids: candidates } : {}),
+  };
+}
+
 function computeDistributionsProjection(params: DistributionsProjectionParams): DistributionsProjection {
   const {
     existingRefs, broker_account, broker_dimension_id, income_account, interest_account,
@@ -2653,34 +2753,48 @@ function computeDistributionsProjection(params: DistributionsProjectionParams): 
     if (first === undefined) firstContentByRef.set(d.reference, distributionContent(d));
     else if (first !== distributionContent(d)) conflictedRefs.add(d.reference);
   }
-  const distributions = params.distributions.map(d => conflictedRefs.has(d.reference)
-    ? { ...d, fx_review_reason: fxReason("reference_conflict") }
-    : d);
+  const legacyCandidates = params.legacyCandidates ?? new Map<number, number[]>();
+  const distributions = params.distributions.map(d => {
+    if (conflictedRefs.has(d.reference)) return { ...d, fx_review_reason: fxReason("reference_conflict") };
+    if (legacyCandidates.has(d.row_index) && !existingRefs.has(d.reference)) {
+      return { ...d, fx_review_reason: fxReason("possible_existing_journal") };
+    }
+    return d;
+  });
   for (const reference of conflictedRefs) warnings.push(distributionWarning(reference, fxReason("reference_conflict")));
+  for (const d of distributions) {
+    const ids = legacyCandidates.get(d.row_index);
+    if (ids && d.fx_review_reason?.code === "possible_existing_journal") {
+      warnings.push(`${distributionWarning(d.reference, d.fx_review_reason)} Candidate journal id(s): ${ids.join(", ")}.`);
+    }
+  }
+  // A row whose reference is already booked is a duplicate whether or not it
+  // is auto-bookable today: an existing journal must not be re-reported as a
+  // missing booking just because its FX evidence cannot be re-derived.
+  const alreadyBooked = (d: LightyearDistribution) => existingRefs.has(d.reference) && !conflictedRefs.has(d.reference);
+  dropBookedReviewWarnings(warnings, distributions.filter(d => !isBookableDistribution(d) && alreadyBooked(d)));
   const bookable = distributions.filter(isBookableDistribution);
-  const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution));
+  const reviewed = distributions.filter(distribution => !isBookableDistribution(distribution) && !alreadyBooked(distribution));
 
   const seenRefs = new Set<string>();
   const newDist: LightyearDistribution[] = [];
   const duplicates: LightyearDistribution[] = [];
-  for (const d of bookable) {
+  for (const d of distributions) {
+    if (!isBookableDistribution(d)) {
+      if (alreadyBooked(d)) duplicates.push(d);
+      continue;
+    }
     if (existingRefs.has(d.reference) || seenRefs.has(d.reference)) duplicates.push(d);
     else { seenRefs.add(d.reference); newDist.push(d); }
   }
   const newSet = new Set(newDist.map(distribution => distribution.row_index));
   const brokerDim = broker_dimension_id ? { accounts_dimensions_id: broker_dimension_id } : {};
 
-  const manualResult = (distribution: LightyearDistribution) => ({
-    ...distributionSourceFields(distribution),
-    status: "manual_review",
-    review_reason: distribution.fx_review_reason,
-  });
-
   const commands: DistributionCommand[] = [];
   const manualResults: Array<Record<string, unknown>> = [];
   for (const dist of distributions) {
     if (!isBookableDistribution(dist)) {
-      manualResults.push(manualResult(dist));
+      if (!alreadyBooked(dist)) manualResults.push(distributionManualResult(dist, legacyCandidates));
       continue;
     }
     if (!newSet.has(dist.row_index)) continue;
@@ -2719,7 +2833,7 @@ function computeDistributionsProjection(params: DistributionsProjectionParams): 
     commands, manualResults,
     reviewedInOrder: reviewed,
     distributionsInOrder: distributions,
-    newSet, duplicates,
+    newSet, duplicates, legacyCandidates,
     warnings,
     totalDistributions: distributions.length,
     bookableCount: bookable.length,
@@ -2739,6 +2853,7 @@ function distributionsFingerprint(projection: DistributionsProjection, normalize
     manual_review: projection.manualResults.map(row => ({
       reference: row.reference,
       review_reason: (row.review_reason as { code?: string } | null)?.code ?? null,
+      ...(row.candidate_journal_ids !== undefined ? { candidate_journal_ids: row.candidate_journal_ids } : {}),
     })),
     duplicates: projection.duplicates.map(d => ({ reference: d.reference, date: d.date })),
   });
@@ -2869,14 +2984,13 @@ function renderDistributionsPayload(input: DistributionsRenderInput): Record<str
     if (dist) commandByRowIndex.set(dist.row_index, index);
   });
 
+  const duplicateRows = new Set(projection.duplicates.map(d => d.row_index));
   const results: Array<Record<string, unknown>> = [];
   for (const dist of projection.distributionsInOrder) {
     if (!isBookableDistribution(dist)) {
-      results.push(sandboxResultRow({
-        ...distributionSourceFields(dist),
-        status: "manual_review",
-        review_reason: dist.fx_review_reason,
-      }));
+      if (!duplicateRows.has(dist.row_index)) {
+        results.push(sandboxResultRow(distributionManualResult(dist, projection.legacyCandidates)));
+      }
       continue;
     }
     if (!projection.newSet.has(dist.row_index)) continue;
@@ -3313,7 +3427,11 @@ export function registerLightyearTools(
         const existingRefs = findExistingJournalsByRef(guard.journals, trades.map(t => ({ reference: t.reference, date: t.date })));
         const projection = computeTradesProjection({
           trades, gainsMap, existingRefs,
-          seedWarnings: [...extraction.warnings, ...gainsWarnings],
+          // FIFO matching runs over every sell (disambiguation needs them all),
+          // but its warnings are only actionable for sells not yet booked.
+          seedWarnings: [...extraction.warnings, ...gainsWarnings.filter(warning => {
+            return !trades.some(t => t.type === "Sell" && existingRefs.has(t.reference) && warning.includes(`for sell ${t.reference} (`));
+          })],
           hasCapitalGainsFile: hasGainsFile,
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
           gainAccount, lossAccount, feeAccount,
@@ -3496,28 +3614,36 @@ export function registerLightyearTools(
 
       // For zero-bookable statements there is nothing to create on either path,
       // so no plan is issued and no account gate runs — mirrors the historical
-      // manual-review-only response, and needs no handle to "execute".
-      const zeroBookableResponse = (
+      // manual-review-only response, and needs no handle to "execute". Rows
+      // whose reference is already booked are reported as duplicates, not as
+      // missing bookings awaiting review.
+      const zeroBookableResponse = async (
         mode: "DRY_RUN" | "EXECUTED",
         distributions: LightyearDistribution[],
         warnings: string[],
-      ) => ({
-        content: [{ type: "text", text: toMcpJson({
-          mode,
-          total_distributions: distributions.length,
-          bookable_distributions: 0,
-          review_required: distributions.filter(d => !isBookableDistribution(d)).length,
-          new_entries: 0,
-          duplicates_skipped: 0,
-          results: distributions
-            .filter(d => !isBookableDistribution(d))
-            .map(d => sandboxResultRow({ ...distributionSourceFields(d), status: "manual_review", review_reason: d.fx_review_reason })),
-          ...(warnings.length > 0 && { warnings }),
-          note: mode === "DRY_RUN"
-            ? "No bookable distributions. Nothing to create."
-            : "No bookable distributions. Nothing created.",
-        }) }],
-      });
+      ) => {
+        const existingRefs = distributions.length === 0
+          ? new Set<string>()
+          : findExistingJournalsByRef(await api.journals.listAll(), distributions.map(d => ({ reference: d.reference, date: d.date })));
+        const reviewed = distributions.filter(d => !existingRefs.has(d.reference));
+        warnings = [...warnings];
+        dropBookedReviewWarnings(warnings, distributions.filter(d => existingRefs.has(d.reference)));
+        return {
+          content: [{ type: "text" as const, text: toMcpJson({
+            mode,
+            total_distributions: distributions.length,
+            bookable_distributions: 0,
+            review_required: reviewed.length,
+            new_entries: 0,
+            duplicates_skipped: distributions.length - reviewed.length,
+            results: reviewed.map(d => sandboxResultRow(distributionManualResult(d))),
+            ...(warnings.length > 0 && { warnings }),
+            note: mode === "DRY_RUN"
+              ? "No bookable distributions. Nothing to create."
+              : "No bookable distributions. Nothing created.",
+          }) }],
+        };
+      };
 
       const resolveAndValidateAccounts = (distributions: LightyearDistribution[], accounts: Awaited<ReturnType<typeof api.readonly.getAccounts>>) => {
         const bookable = distributions.filter(isBookableDistribution);
@@ -3556,9 +3682,10 @@ export function registerLightyearTools(
           });
         }
         const guard = await BookingGuard.load(api);
-        const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
+        const existingRefs = findExistingJournalsByRef(guard.journals, distributions.map(d => ({ reference: d.reference, date: d.date })));
+        const legacyCandidates = await findLegacyDistributionCandidates(api, guard.journals, distributions, existingRefs, broker_account, broker_dimension_id);
         const projection = computeDistributionsProjection({
-          distributions, existingRefs, seedWarnings: warnings,
+          distributions, existingRefs, legacyCandidates, seedWarnings: warnings,
           broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account,
         });
         const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
@@ -3649,9 +3776,10 @@ export function registerLightyearTools(
       }
 
       const guard = await BookingGuard.load(api);
-      const existingRefs = findExistingJournalsByRef(guard.journals, distributions.filter(isBookableDistribution).map(d => ({ reference: d.reference, date: d.date })));
+      const existingRefs = findExistingJournalsByRef(guard.journals, distributions.map(d => ({ reference: d.reference, date: d.date })));
+      const legacyCandidates = await findLegacyDistributionCandidates(api, guard.journals, distributions, existingRefs, broker_account, broker_dimension_id);
       const projection = computeDistributionsProjection({
-        distributions, existingRefs, seedWarnings: warnings,
+        distributions, existingRefs, legacyCandidates, seedWarnings: warnings,
         broker_account, broker_dimension_id, income_account, interest_account, fund_distribution_account, reward_account, tax_account, fee_account,
       });
       const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);

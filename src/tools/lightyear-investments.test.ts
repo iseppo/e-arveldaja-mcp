@@ -806,6 +806,32 @@ describe("lightyear investments tools", () => {
     expect((payload.warnings ?? []).join("\n")).not.toContain("invalid_conversion_pair");
   });
 
+  it("drops the FIFO tolerance warning for a sell that is already booked", async () => {
+    const statement = buildStatementCsv(realJuly13Rows());
+    const gains = buildCapitalGainsCsv([[
+      "13/07/2026 13:41:07", "BRK.B", "Berkshire Hathaway", "US0846707026", "United States", "equity",
+      "0.91372331128", "4.143531051",
+      "1722.571827425825851481982000000", "1817.044808232594728362410000000", "94.472980806768876880428000000",
+    ]]);
+    const reads: string[] = [];
+    mockedReadFile.mockImplementation(async () => {
+      reads.push("read");
+      return (reads.length === 1 ? statement : gains) as any;
+    });
+    const { handler } = setupLightyearTool("book_lightyear_trades", {
+      journals: [{ id: 5, document_number: "LY:OR-FA2LM3FYJQ", effective_date: "2026-07-13", is_deleted: false }],
+    });
+    const payload = parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv",
+      capital_gains_file: "/tmp/gains.csv",
+      investment_account: 1550,
+      broker_account: 1120,
+      dry_run: true,
+    })).content[0]!.text) as any;
+    expect(payload.duplicate_refs.map((d: any) => d.reference).join(" ")).toContain("OR-FA2LM3FYJQ");
+    expect((payload.warnings ?? []).join("\n")).not.toContain("outside proceeds tolerance");
+  });
+
   it("skips non-EUR cash-equivalent sells without cost basis to avoid FX drift", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["10/11/2025 13:40:29", "CN-GZUJLSKLL2", "", "", "Conversion", "", "EUR", "", "1126.28", "1.15709", "", "1126.28", ""],
@@ -1213,7 +1239,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code, message },
     }));
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   };
@@ -1299,7 +1325,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.results[0]).toMatchObject({ status: "manual_review", gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null, review_reason: { code } });
     expect(payload.warnings).toHaveLength(1);
     expect(api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(api.journals.listAll).not.toHaveBeenCalled();
+    expect(api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -1369,7 +1395,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     const bookPayload = parseMcpResponse((await booked.handler({ file_path: "/tmp/lightyear.csv", broker_account: 999, income_account: 998, dry_run: false })).content[0]!.text) as any;
     expect(bookPayload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code, message: expectedMessage }, gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null });
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -1453,7 +1479,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "invalid_date", message: "The statement date is not a valid calendar day." }, gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null });
     expect(payload.warnings).toHaveLength(1);
     expect(api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(api.journals.listAll).not.toHaveBeenCalled();
+    expect(api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -1725,7 +1751,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings[0]).toContain(H17_MESSAGES.invalid_conversion_pair);
     expect(payload.warnings[0]).toMatch(/Conversion <<UNTRUSTED_OCR_START:([0-9a-f]{32})>>\nCN-ZERO-CONTEXT\n<<UNTRUSTED_OCR_END:\1>>\./);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -1750,7 +1776,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       ["DIV-B-HANDLER-B", "manual_review", { code: "invalid_conversion_pair", message: H17_MESSAGES.invalid_conversion_pair }, null],
     ]);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -1850,7 +1876,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code: "distribution_amount_conflict", message: H17_MESSAGES.distribution_amount_conflict },
     }]);
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2012,7 +2038,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.results).toHaveLength(cardinality);
     expect(payload.results.every((result: any) => result.status === "manual_review" && result.review_reason.code === "invalid_conversion_pair")).toBe(true);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2090,7 +2116,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload).toMatchObject({ total_distributions: 1, bookable_distributions: 0, review_required: 1, new_entries: 0 });
     expect(payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "invalid_conversion_pair" }, fx_provenance: null });
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2121,7 +2147,7 @@ describe("H17 distribution currency and EUR provenance", () => {
         .map(reference => [reference, "manual_review", "invalid_conversion_pair", null]),
     );
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2166,7 +2192,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       gross_eur: null, net_eur: null, tax_eur: null, fee_eur: null, fx_provenance: null,
     });
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2271,7 +2297,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       fx_provenance: null,
     });
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
 
@@ -2406,7 +2432,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(diagnostics.strict_candidate_visits).toBe(1);
     expect(diagnostics.legacy_candidate_visits ?? 0).toBe(0);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2498,7 +2524,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code: "distribution_amount_conflict", message: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent." },
     }]);
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2541,7 +2567,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code: "distribution_amount_conflict", message: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent." },
     }]);
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2572,7 +2598,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code: "distribution_amount_conflict", message: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent." },
     }]);
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2673,7 +2699,7 @@ describe("H17 distribution currency and EUR provenance", () => {
       review_reason: { code: "distribution_amount_conflict", message: "The distribution gross, net, tax, fee, or converted EUR amounts are inconsistent." },
     });
     expect(booked.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(booked.api.journals.listAll).not.toHaveBeenCalled();
+    expect(booked.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(booked.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2842,7 +2868,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings[0]).toContain(references[0]);
     expect(payload.warnings[1]).toContain(references[1]);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2901,7 +2927,7 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.warnings[0]).toContain(references[0]);
     expect(payload.warnings[1]).toContain(references[1]);
     expect(run.api.readonly.getAccounts).not.toHaveBeenCalled();
-    expect(run.api.journals.listAll).not.toHaveBeenCalled();
+    expect(run.api.journals.listAll.mock.calls.length).toBeLessThanOrEqual(1); // read-only reference dedupe only
     expect(run.api.journals.create).not.toHaveBeenCalled();
     expect(logAudit).not.toHaveBeenCalled();
   });
@@ -2949,15 +2975,59 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.results.map((row: any) => [row.reference, row.status])).toEqual([["REVIEW-H17", "manual_review"], ["DUP-H17", "would_create"]]);
   });
 
-  it("H17 coverage partitions reviewed rows before snapshot dedupe", async () => {
+  it("dedupes an already-booked reference before FX review, so review_required counts only unbooked rows", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["01/03/2026", "EXISTING-REVIEW-H17", "", "", "Dividend", "0", "USD", "0", "9", "0", "0", "9", "0"],
       ["02/03/2026", "NEW-H17", "", "", "Interest", "0", "EUR", "0", "5", "1", "0", "5", "0"],
     ]));
     const { handler } = setupLightyearTool("book_lightyear_distributions", { journals: [{ id: 8, document_number: "LY:EXISTING-REVIEW-H17", effective_date: "2026-03-01", is_deleted: false }] });
     const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    expect(payload).toMatchObject({ total_distributions: 2, bookable_distributions: 1, review_required: 0, new_entries: 1, duplicates_skipped: 1 });
+    expect(payload.results.map((row: any) => row.reference)).toEqual(["NEW-H17"]);
+    expect((payload.warnings ?? []).some((w: string) => w.includes("EXISTING-REVIEW-H17"))).toBe(false);
+  });
+
+  it("reports an already-booked unbookable reference as a duplicate on a zero-bookable statement", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026", "EXISTING-USD", "", "", "Dividend", "0", "USD", "0", "9", "0", "0", "9", "0"],
+      ["02/03/2026", "MISSING-USD", "", "", "Dividend", "0", "USD", "0", "7", "0", "0", "7", "0"],
+    ]));
+    const { handler } = setupLightyearTool("book_lightyear_distributions", { journals: [{ id: 8, document_number: "LY:EXISTING-USD", effective_date: "2026-03-01", is_deleted: false }] });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    expect(payload).toMatchObject({ total_distributions: 2, bookable_distributions: 0, review_required: 1, new_entries: 0, duplicates_skipped: 1 });
+    expect(payload.results.map((row: any) => [row.reference, row.status])).toEqual([["MISSING-USD", "manual_review"]]);
+    expect((payload.warnings ?? []).some((w: string) => w.includes("EXISTING-USD"))).toBe(false);
+    expect((payload.warnings ?? []).some((w: string) => w.includes("MISSING-USD"))).toBe(true);
+  });
+
+  it("routes a row matching a legacy journal without its reference to review instead of re-booking it", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["08/01/2026", "RW-LEGACY", "", "", "Reward", "0", "EUR", "0", "25", "0", "0", "25", "0"],
+      ["09/01/2026", "RW-NEW", "", "", "Reward", "0", "EUR", "0", "20", "0", "0", "20", "0"],
+    ]));
+    const legacy = {
+      id: 26781910, document_number: "reward", effective_date: "2026-01-08", is_deleted: false, registered: true,
+      postings: [
+        { accounts_id: 1120, accounts_dimensions_id: 77, type: "D", amount: 25, base_amount: 25 },
+        { accounts_id: 8600, type: "C", amount: 25, base_amount: 25 },
+      ],
+    };
+    // Same amount on another dimension and a far-off date must not match.
+    const otherDim = { ...legacy, id: 2, postings: [{ accounts_id: 1120, accounts_dimensions_id: 99, type: "D", amount: 20 }], effective_date: "2026-01-09" };
+    const run = setupLightyearTool("book_lightyear_distributions", {
+      journals: [legacy, otherDim],
+      accountDimensions: [{ id: 77, accounts_id: 1120, is_deleted: false }],
+    });
+    const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, broker_dimension_id: 77, income_account: 8320, reward_account: 8600, dry_run: true })).content[0]!.text) as any;
     expect(payload).toMatchObject({ total_distributions: 2, bookable_distributions: 1, review_required: 1, new_entries: 1, duplicates_skipped: 0 });
-    expect(payload.results.map((row: any) => row.reference)).toEqual(["EXISTING-REVIEW-H17", "NEW-H17"]);
+    const legacyRow = payload.results.find((row: any) => row.reference === "RW-LEGACY");
+    expect(legacyRow).toMatchObject({ status: "manual_review", review_reason: { code: "possible_existing_journal" }, candidate_journal_ids: [26781910] });
+    expect(payload.results.find((row: any) => row.reference === "RW-NEW")).toMatchObject({ status: "would_create" });
+    expect(payload.warnings.some((w: string) => w.includes("26781910"))).toBe(true);
+
+    const executed = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, broker_dimension_id: 77, income_account: 8320, reward_account: 8600, dry_run: false })).content[0]!.text) as any;
+    expect(run.api.journals.create).toHaveBeenCalledTimes(1);
+    expect(executed.results.find((row: any) => row.reference === "RW-LEGACY")).toMatchObject({ status: "manual_review" });
   });
 
   it.each([
