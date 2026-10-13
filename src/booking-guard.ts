@@ -192,7 +192,6 @@ export class BookingGuard {
   readonly journals: readonly Journal[];
 
   private readonly api: ApiContext;
-  private readonly ownDimensionIds: Set<number>;
 
   // Lane A: document_number -> artifacts (arrays, since duplicates can exist).
   private readonly docIndex = new Map<string, ExistingArtifact[]>();
@@ -203,7 +202,6 @@ export class BookingGuard {
   private constructor(api: ApiContext, journals: Journal[], ownDimensionIds: Set<number>) {
     this.api = api;
     this.journals = journals;
-    this.ownDimensionIds = ownDimensionIds;
     this.interAccountIndex = buildInterAccountJournalIndex(journals, ownDimensionIds);
 
     for (const j of journals) {

@@ -31,7 +31,6 @@ import {
 import { roundMoney } from "../money.js";
 import { readOnly, batch } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
-import { reportProgress } from "../progress.js";
 import { parseCSV } from "../csv.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { validateAccounts, validatePostingDimensions } from "../account-validation.js";
@@ -1547,17 +1546,6 @@ function probeCappedReferences(
   return first === null
     ? { count: 0, uniqueReference: null }
     : { count: 1, uniqueReference: first };
-}
-
-function removeConversionReference(index: ConversionCandidateIndex, reference: string): void {
-  for (const { wildcard, key } of index.bucketKeysByReference.get(reference) ?? []) {
-    const buckets = wildcard ? index.wildcardCurrencyBuckets : index.buckets;
-    const references = buckets.get(key);
-    references?.delete(reference);
-    if (references?.size === 0) buckets.delete(key);
-  }
-  index.bucketKeysByReference.delete(reference);
-  index.evidenceByReference.delete(reference);
 }
 
 type DistributionCandidateIndex = Map<string, Set<LightyearDistribution>>;

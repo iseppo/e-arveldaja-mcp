@@ -3,7 +3,6 @@ import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import type { ApiContext } from "./crud-tools.js";
-import type { SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import { roundMoney, eurGross, signedByInvoiceType } from "../money.js";
 import { isStrictDate } from "../strict-date.js";
 import { toolError } from "../tool-error.js";

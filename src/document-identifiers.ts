@@ -362,10 +362,6 @@ function layoutPageNum(item: Pick<LayoutTextItem, "pageNum">): number {
   return item.pageNum ?? 1;
 }
 
-function compareLayoutTextPosition(a: LayoutTextItem, b: LayoutTextItem): number {
-  return layoutPageNum(a) - layoutPageNum(b) || a.y - b.y || a.x - b.x;
-}
-
 /**
  * For a candidate at (x, y), walk markers above it from nearest to farthest.
  * The first marker in the same x-column classifies the candidate. Markers in

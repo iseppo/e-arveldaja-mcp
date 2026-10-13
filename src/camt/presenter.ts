@@ -1,4 +1,4 @@
-import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { canonicalRefNumber } from "../ref-number.js";

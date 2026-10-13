@@ -29,7 +29,6 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
-  bookedCurrencyForWiseRow,
   classifyWiseOwnTransfer,
   isJarTransfer,
   isPositiveSafeInteger,
@@ -64,7 +63,6 @@ import {
 import type {
   ImportRejectedField,
   MainCreateCommand,
-  WiseImportCommand,
   WiseInterAccountResult,
   WiseJournalizedTransferMapping,
   WiseRow,

@@ -11,7 +11,6 @@ import {
   ONE_CENT,
   TEN_CENTS,
 } from "./money-cents.js";
-import { toExchangeRate, EXCHANGE_RATE_DECIMALS } from "./exchange-rate.js";
 
 describe("toCents", () => {
   it("converts whole-cent euro amounts to integer cents", () => {
@@ -102,16 +101,5 @@ describe("cent comparison helpers", () => {
     expect(eurosWithinTolerance(1.00, 1.11, TEN_CENTS)).toBe(false);
     // Float subtraction of these would be 0.09999999999999998; cents is exact.
     expect(eurosWithinTolerance(1.30, 1.20, TEN_CENTS)).toBe(true);
-  });
-});
-
-describe("exchange rate is separate from cents", () => {
-  it("rounds to rate precision and rejects non-positive / non-finite", () => {
-    expect(EXCHANGE_RATE_DECIMALS).toBe(6);
-    expect(toExchangeRate(1.23456789)).toBe(1.234568);
-    expect(() => toExchangeRate(0)).toThrow("positive");
-    expect(() => toExchangeRate(-1)).toThrow("positive");
-    expect(() => toExchangeRate(NaN)).toThrow("NaN");
-    expect(() => toExchangeRate(Infinity)).toThrow("non-finite");
   });
 });

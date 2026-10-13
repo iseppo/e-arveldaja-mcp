@@ -1,4 +1,3 @@
-import type { Transaction } from "../../types/api.js";
 import type { PlanExecutionReport } from "../../plan-execution.js";
 import type {
   DuplicatePostingCandidate,

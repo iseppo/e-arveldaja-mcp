@@ -17,8 +17,6 @@ import { createPublicOperationResultDetail, type PublicOperationResultDetail } f
 import {
   reconClientUpdateCommandId,
   reconInvoiceConfirmCommandId,
-  reconTransferConfirmCommandId,
-  reconDeleteDuplicateCommandId,
   stripUndefinedDeep,
   RECON_UPDATE_CLIENT_CATEGORY,
   RECON_CONFIRM_INVOICE_CATEGORY,

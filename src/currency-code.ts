@@ -9,6 +9,5 @@
 // Task 18 first introduced this alias inside `src/types/mutations.ts`; Task 19
 // moved the definition here so there is ONE definition and no drift.
 // `src/types/mutations.ts` re-exports it. A currency code is NOT a monetary
-// cent value and NOT an exchange rate — those live in `money-cents.ts` and
-// `exchange-rate.ts` respectively and must stay conceptually separate.
+// cent value and NOT an exchange rate — those must stay conceptually separate.
 export type CurrencyCode = string & { readonly __brand?: "CurrencyCode" };

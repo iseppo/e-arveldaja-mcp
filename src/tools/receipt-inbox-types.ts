@@ -1,4 +1,4 @@
-import type { Account, Client, PurchaseInvoice, Transaction } from "../types/api.js";
+import type { Account, Client, PurchaseInvoice } from "../types/api.js";
 import type { InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import type { BookingSuggestion, ExtractedReceiptFields, ReceiptClassification } from "./receipt-extraction.js";
 import type { SupplierResolution } from "./supplier-resolution.js";

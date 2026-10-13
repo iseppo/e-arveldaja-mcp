@@ -6,7 +6,7 @@ import { ResponseBudgetError } from "../response-budget.js";
 import { PlanStoreError } from "../plan-store.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import { currentToolProfile, isToolVisibleForProfile } from "../tool-profile.js";
-import type { ClassifiedTransactionGroupResult, PartialClassificationMutation } from "../tools/receipt-inbox.js";
+import type { PartialClassificationMutation } from "../tools/receipt-inbox.js";
 import type {
   ApplyClassificationsResult,
   UnmatchedAnalysisResult,

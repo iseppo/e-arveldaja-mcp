@@ -12,38 +12,25 @@ import { HttpError } from "../http-client.js";
 import { classifyMutationFailure, isMutationIndeterminate } from "../mutation-outcome.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { isGranularTool } from "../tool-catalog.js";
-import type { Account, Client, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
+import type { Account, Client, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { readOnly, batch } from "../annotations.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.js";
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
-import { parseDocument } from "../document-parser.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import {
-  type ExtractionConfidenceSignals,
-  type InvoiceExtractionFallback,
-  summarizeInvoiceExtraction,
-} from "../invoice-extraction-fallback.js";
+import { type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import {
   type BookingSuggestion,
   type ClassificationApplyMode,
   type ExtractedReceiptFields,
-  type ReceiptClassification,
   type TransactionClassificationCategory,
   type TransactionGroupClassification,
   CATEGORY_KEYWORD_MAP,
-  buildKeywordSuggestion,
-  classifyReceiptDocument,
   detectReverseChargeFromText,
-  computeMinOcrConfidence,
-  extractReceiptFieldsFromText,
   findAccountByKeywords,
   findPurchaseArticleByKeywords,
-  hasAutoBookableReceiptFields,
-  inferSupplierCountry,
-  LOW_OCR_CONFIDENCE_THRESHOLD,
   normalizeCounterpartyName,
   scoreTransactionToInvoice,
   suggestBookingInternal,
@@ -58,40 +45,24 @@ import {
   findAutoBookingRule,
   hasConcreteAutoBookingRuleBookingTarget,
 } from "../accounting-rules.js";
-import {
-  type ReviewGuidance,
-  buildReceiptReviewGuidance,
-} from "../estonian-accounting-guidance.js";
+import { type ReviewGuidance } from "../estonian-accounting-guidance.js";
 import { remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { DEFAULT_LIABILITY_ACCOUNT, EMTA_PREPAYMENT_ACCOUNT } from "../accounting-defaults.js";
 import {
   RECEIPT_BATCH_EXECUTION_MODES,
   type ReceiptApprovedManifestEntry,
-  type ReceiptBatchSnapshot,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
-  type ReceiptFileSnapshot,
   type ReceiptProcessingContext,
 } from "./receipt-inbox-types.js";
 import {
-  prepareReceiptBatchSnapshot,
   scanReceiptFolderInternal,
   validateReceiptFolderPath,
   type ReceiptDirectoryAccessOptions,
 } from "./receipt-inbox-files.js";
-import { findDuplicateInvoice } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
-import {
-  buildDryRunCreatedInvoicePreview,
-  createAndMaybeMatchPurchaseInvoice,
-} from "./receipt-inbox-booking.js";
-import {
-  buildReceiptBatchExecution,
-  buildReceiptBatchSummary,
-  buildReceiptBatchWorkflow,
-  buildReceiptBatchWorkflowSummary,
-} from "./receipt-inbox-summary.js";
+import { buildDryRunCreatedInvoicePreview } from "./receipt-inbox-booking.js";
 import {
   createReceiptBatchOperations,
   resolveReceiptBatchExecutionMode,

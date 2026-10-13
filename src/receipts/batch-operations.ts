@@ -8,7 +8,6 @@ import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { parseDocument } from "../document-parser.js";
-import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import {
   type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
@@ -39,7 +38,6 @@ import {
 import { buildReceiptReviewGuidance } from "../estonian-accounting-guidance.js";
 import { getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
 import {
-  type ReceiptApprovedManifestEntry,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
@@ -66,7 +64,6 @@ import {
   deriveOwnCompanyRegistryCode,
   detectSelfRegCodeOnly,
   detectSelfVatOnly,
-  loadOwnCompanyIdentity,
   normalizeVatForCompare,
   resolveAutoBookingRuleTargets,
   resolveMergedPurchaseAccountDimension,
