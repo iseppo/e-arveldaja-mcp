@@ -15,7 +15,7 @@ import { HttpError } from "../http-client.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
-const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance } = lightyearInvestments;
+const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance, LEGACY_DISTRIBUTION_FETCH_BUDGET } = lightyearInvestments;
 
 vi.mock("fs/promises", async importOriginal => ({
   ...(await importOriginal<typeof import("fs/promises")>()),
@@ -2998,6 +2998,75 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.results.map((row: any) => [row.reference, row.status])).toEqual([["MISSING-USD", "manual_review"]]);
     expect((payload.warnings ?? []).some((w: string) => w.includes("EXISTING-USD"))).toBe(false);
     expect((payload.warnings ?? []).some((w: string) => w.includes("MISSING-USD"))).toBe(true);
+  });
+
+  it.each([
+    ["forward", false],
+    ["reversed", true],
+  ])("keeps both same-reference rows in review when only one date has a raw-ref journal (%s order)", async (_label, reversed) => {
+    const rows = [
+      ["01/03/2026", "IN-SAME", "", "", "Dividend", "0", "USD", "0", "9", "0", "0", "9", "0"],
+      ["02/03/2026", "IN-SAME", "", "", "Dividend", "0", "USD", "0", "7", "0", "0", "7", "0"],
+    ];
+    mockedReadFile.mockResolvedValue(buildStatementCsv(reversed ? [...rows].reverse() : rows));
+    const { handler } = setupLightyearTool("book_lightyear_distributions", {
+      journals: [{ id: 8, document_number: "IN-SAME", effective_date: "2026-03-02", is_deleted: false }],
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    expect(payload).toMatchObject({ review_required: 2, duplicates_skipped: 0, new_entries: 0 });
+    expect(payload.results.every((row: any) => row.review_reason.code === "reference_conflict")).toBe(true);
+  });
+
+  it("does not create a bookable same-reference row whose sibling is already booked", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026", "IN-EUR-SAME", "", "", "Interest", "0", "EUR", "0", "5", "0", "0", "5", "0"],
+      ["02/03/2026", "IN-EUR-SAME", "", "", "Interest", "0", "EUR", "0", "6", "0", "0", "6", "0"],
+    ]));
+    const run = setupLightyearTool("book_lightyear_distributions", {
+      journals: [{ id: 8, document_number: "IN-EUR-SAME", effective_date: "2026-03-02", is_deleted: false }],
+    });
+    const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
+    expect(payload).toMatchObject({ review_required: 2, new_entries: 0, duplicates_skipped: 0 });
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("names an earlier unregistered draft on a zero-bookable statement", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026", "DRAFT-USD", "", "", "Dividend", "0", "USD", "0", "9", "0", "0", "9", "0"],
+    ]));
+    const { handler } = setupLightyearTool("book_lightyear_distributions", {
+      journals: [{ id: 41, document_number: "LY:DRAFT-USD", effective_date: "2026-03-01", is_deleted: false, registered: false }],
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
+    expect(payload).toMatchObject({ bookable_distributions: 0, review_required: 0, duplicates_skipped: 1, pending_duplicate_journal_ids: [41] });
+    expect(payload.next_actions[0]).toMatchObject({ tool: "batch_confirm_journals", args: { ids: [41] } });
+  });
+
+  it("bounds legacy-check detail fetches and reviews rows it could not check", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026", "IN-BUDGET", "", "", "Interest", "0", "EUR", "0", "5", "0", "0", "5", "0"],
+    ]));
+    const headers = Array.from({ length: LEGACY_DISTRIBUTION_FETCH_BUDGET + 1 }, (_, i) => ({
+      id: 1000 + i, document_number: `X${i}`, effective_date: "2026-03-01", is_deleted: false,
+    }));
+    const run = setupLightyearTool("book_lightyear_distributions", { journals: headers });
+    run.api.journals.get = vi.fn();
+    const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    expect(run.api.journals.get).not.toHaveBeenCalled();
+    expect(payload).toMatchObject({ new_entries: 0, review_required: 1 });
+    expect(payload.results[0]).toMatchObject({ status: "manual_review", review_reason: { code: "legacy_check_incomplete" } });
+  });
+
+  it("fetches postings for a within-budget shortlist once per journal", async () => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      ["01/03/2026", "IN-FETCH", "", "", "Interest", "0", "EUR", "0", "5", "0", "0", "5", "0"],
+    ]));
+    const headers = [1, 2, 3].map(i => ({ id: i, document_number: `X${i}`, effective_date: "2026-03-01", is_deleted: false }));
+    const run = setupLightyearTool("book_lightyear_distributions", { journals: headers });
+    run.api.journals.get = vi.fn(async (id: number) => ({ ...headers[id - 1], postings: [{ accounts_id: 5000, type: "D", amount: 5 }] }));
+    const payload = parseMcpResponse((await run.handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
+    expect(run.api.journals.get).toHaveBeenCalledTimes(3);
+    expect(payload).toMatchObject({ new_entries: 1, review_required: 0 });
   });
 
   it("routes a row matching a legacy journal without its reference to review instead of re-booking it", async () => {
