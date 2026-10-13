@@ -382,10 +382,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         const r = await computeAccountBalance(
           api, accountId, clients_id, undefined, undefined, allJournals
         );
+        // Same journal set as compute_account_balance (opening balance folded
+        // in), so account_balance_all_clients matches that tool's figure.
         const whole = await computeAccountBalance(
-          api, accountId, undefined, undefined, undefined, journalsFromApi
+          api, accountId, undefined, undefined, undefined, allJournals
         );
-        const otherClientEntries = whole.entries.length - r.entries.length;
+        // Header-client entries only: the client-less opening balance is
+        // reported by opening_balance_status, not counted as another client.
+        const openingEntries = opening
+          ? whole.entries.filter(entry => entry.journal_id === opening.journal.id).length
+          : 0;
+        const otherClientEntries = whole.entries.length - openingEntries - r.entries.length;
         if (otherClientEntries > 0 && r.entries.length > 0) partialAccounts.push(accountId);
         results.push({
           account_id: accountId,

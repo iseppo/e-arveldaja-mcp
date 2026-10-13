@@ -107,6 +107,14 @@ function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJourn
   };
 }
 
+/**
+ * A skipped row left unimported because an existing journal may already book
+ * it (or books it wrongly). The single definition every CAMT summary counts by.
+ */
+export function isCamtJournalReviewRow(row: CamtSkippedRow): boolean {
+  return row.review_code !== undefined;
+}
+
 export interface CamtProjectionInput {
   readonly loaded: CamtParseResult;
   readonly accountsDimensionsId: number;

@@ -146,18 +146,22 @@ export async function resolveBankDimensionsSafe(api: {
  * `candidate.accountId` within `+/-windowDays` of `candidate.date`, matching
  * direction and amount (within `amountTolerance`), filtered by dimension
  * (`null` = any) and `excludeJournalIds`. Sorted by day distance, then
- * journal id.
+ * journal id. Only registered journals count unless `includeUnregistered`.
  */
 export function findDuplicatePostingsInJournals(
   journals: Journal[],
   candidate: DuplicatePostingCandidate,
-  opts?: { windowDays?: number; amountTolerance?: number },
+  opts?: { windowDays?: number; amountTolerance?: number; includeUnregistered?: boolean },
 ): DuplicatePostingSuspect[] {
   const windowDays = opts?.windowDays ?? DUPLICATE_SCAN_WINDOW_DAYS;
   const tolerance = opts?.amountTolerance ?? DUPLICATE_AMOUNT_TOLERANCE;
   const from = shiftIsoDate(candidate.date, -windowDays);
   const to = shiftIsoDate(candidate.date, windowDays);
-  const rows = listAccountDimensionPostings(journals, candidate.accountId, { dateFrom: from, dateTo: to });
+  const rows = listAccountDimensionPostings(journals, candidate.accountId, {
+    dateFrom: from,
+    dateTo: to,
+    includeUnregistered: opts?.includeUnregistered,
+  });
 
   const suspects: DuplicatePostingSuspect[] = [];
   for (const row of rows) {

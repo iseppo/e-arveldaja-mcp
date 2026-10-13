@@ -13,7 +13,8 @@ import {
 import type { OperationOutcome } from "../operation-outcome.js";
 import type { AccountingOperations } from "../accounting-operations.js";
 import type { CamtParseResult } from "../camt/types.js";
-import type { CamtImportPreview } from "../camt/presenter.js";
+import { journalReviewClause, type CamtImportPreview } from "../camt/presenter.js";
+import { isCamtJournalReviewRow } from "../camt/projection.js";
 import type { WiseImportPreview } from "../wise/presenter.js";
 import { isNonErrorWiseSkipReason } from "../wise/preflight.js";
 import type { ReceiptBatchResult } from "../receipts/types.js";
@@ -407,12 +408,16 @@ function summarizeAutopilotToolResult(
       const errorCount = preview.errorCount;
       const reviewItems = preview.possibleDuplicates as unknown as Record<string, unknown>[];
       const reviewCount = reviewItems.length;
+      // Skipped rows an existing journal may already book stay unimported;
+      // the approval summary must name them (see DRY_RUN_TOOL_REGISTRY).
+      const journalReviewCount = preview.projection.skipped.filter(isCamtJournalReviewRow).length;
       return {
-        summary: `CAMT dry run would create ${createdCount} transaction(s), skip ${skippedCount}, raise ${reviewCount} possible duplicate review item(s), and report ${errorCount} error(s).`,
+        summary: `CAMT dry run would create ${createdCount} transaction(s), skip ${skippedCount}${journalReviewClause(journalReviewCount)}, raise ${reviewCount} possible duplicate review item(s), and report ${errorCount} error(s).`,
         preview: {
           created_count: createdCount,
           skipped_count: skippedCount,
           possible_duplicate_count: reviewCount,
+          journal_review_count: journalReviewCount,
           error_count: errorCount,
         },
         followUps: [...reviewItems.map((item) => {
@@ -452,8 +457,8 @@ function summarizeAutopilotToolResult(
         }),
         // Rows not created because an existing journal may already book them,
         // or because a previous release imported their entry only in part.
-        ...preview.projection.skipped.filter((row) => row.review_note !== undefined).map((row) => {
-          const journalReview = row.review_code !== undefined;
+        ...preview.projection.skipped.filter((row) => isCamtJournalReviewRow(row) || row.review_note !== undefined).map((row) => {
+          const journalReview = isCamtJournalReviewRow(row);
           // A direct action, not a continuation: no resolver handles these rows,
           // so there is no resolver_input; the id still makes the item resumable.
           return {
@@ -471,7 +476,7 @@ function summarizeAutopilotToolResult(
                 : row.review_code === "camt_duplicate_journal_conflict" || row.review_code === "camt_journal_direction_conflict"
                   ? `an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (${row.review_code})`
                   : `an existing journal may already book it (${row.review_code})`}.`,
-              { recommendation: row.review_note },
+              { recommendation: row.review_note ?? row.reason },
             ),
           };
         })],

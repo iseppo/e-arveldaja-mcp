@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { JOURNAL_TITLE_MAX_LENGTH, journalTitleLengthMessage } from "../api/journals.api.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { registerTool } from "../mcp-compat.js";
@@ -365,6 +366,16 @@ export async function computeOwnerExpenseJournalProjection(
 
   const deductibleVatPosted = deductibleVat > 0 && vatRegistered;
 
+  // The description becomes the journal title; refuse an over-long one here so
+  // preview and approval fail, not only the approved booking.
+  const titleError = journalTitleLengthMessage(description);
+  if (titleError !== undefined) {
+    return { ok: false, error: toolError({
+      error: titleError,
+      hint: `Shorten description to at most ${JOURNAL_TITLE_MAX_LENGTH} characters and retry; put longer explanations in the attached receipt.`,
+    }) };
+  }
+
   // Validate all accounts exist
   const accountErrors = validateAccounts(accounts, [
     { id: expense_account, label: "Expense account" },
@@ -534,6 +545,19 @@ export async function bookOwnerExpenseFromProjection(
       }),
     }],
   };
+}
+
+
+/**
+ * Dividend journal title, shortening the shareholder's name (with "…") so the
+ * title stays within the journal title limit: the name comes from the client
+ * record, so the caller cannot shorten it, and preview and booking must agree.
+ */
+export function dividendJournalTitle(shareholderName: string, amounts: string): string {
+  const prefix = "Dividendi väljamakse - ";
+  const room = JOURNAL_TITLE_MAX_LENGTH - prefix.length - amounts.length - 1;
+  const name = shareholderName.length <= room ? shareholderName : `${shareholderName.slice(0, Math.max(0, room - 1)).trimEnd()}…`;
+  return `${prefix}${name} ${amounts}`;
 }
 
 // Shared owner-expense booking core. Used by BOTH the create_owner_expense_reimbursement
@@ -712,7 +736,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // description field, so the split rationale has to live on the journal
       // itself.
       const journalData = {
-        title: `Dividendi väljamakse - ${shareholderName} (neto ${net_dividend} EUR, TuMa ${citRate.formatted} ${cit} EUR)`,
+        title: dividendJournalTitle(shareholderName, `(neto ${net_dividend} EUR, TuMa ${citRate.formatted} ${cit} EUR)`),
         effective_date,
         clients_id: shareholder_client_id,
         cl_currencies_id: "EUR",

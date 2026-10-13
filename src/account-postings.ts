@@ -15,11 +15,11 @@ export interface AccountPostingRow {
 export function listAccountDimensionPostings(
   journals: Journal[],
   accountId: number,
-  opts?: { dateFrom?: string; dateTo?: string },
+  opts?: { dateFrom?: string; dateTo?: string; includeUnregistered?: boolean },
 ): AccountPostingRow[] {
   const rows: AccountPostingRow[] = [];
   for (const journal of journals) {
-    if (journal.is_deleted || !journal.registered) continue;
+    if (journal.is_deleted || (!journal.registered && opts?.includeUnregistered !== true)) continue;
     if (opts?.dateFrom && journal.effective_date < opts.dateFrom) continue;
     if (opts?.dateTo && journal.effective_date > opts.dateTo) continue;
     if (!journal.postings) continue;

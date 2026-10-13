@@ -182,6 +182,55 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(envelope.available_actions.map(action => [action.kind, action.tool])).toEqual([["review_item", undefined], ["review_item", undefined]]);
   });
 
+  it("carries the CAMT journal-review count into the step preview the approval summary reads", async () => {
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: [
+        { date: "2026-09-24", amount: 10, duplicate_transaction_ids: [], reason: "Already booked by journal 601", journal_ids: [601] },
+        { date: "2026-06-20", amount: 12.83, duplicate_transaction_ids: [], reason: "review", journal_ids: [28424939],
+          review_code: "camt_journal_posting_review", review_note: "note" },
+      ] },
+      createdCount: 2,
+      errorCount: 0,
+      possibleDuplicates: [],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+          suggested_args: { file_path: "/tmp/a.xml", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [], reason: "CAMT found",
+        }],
+      }),
+      operations: mockOperations({ prepareCamtImport }),
+    });
+    const step = result.executed_steps[0]!;
+    expect(step.preview).toMatchObject({ created_count: 2, skipped_count: 2, possible_duplicate_count: 0, journal_review_count: 1 });
+    expect(step.summary).toContain("skip 2 (1 of them left unimported for existing-journal review)");
+  });
+
+  it("raises a follow-up for every journal-review row the count includes, with or without a review note", async () => {
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: [
+        { date: "2026-06-20", amount: 12.83, duplicate_transaction_ids: [], reason: "An existing journal may already book this movement; needs review",
+          journal_ids: [28424939], review_code: "camt_journal_posting_review" },
+      ] },
+      createdCount: 0, errorCount: 0, possibleDuplicates: [],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+          suggested_args: { file_path: "/tmp/a.xml", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [], reason: "CAMT found",
+        }],
+      }),
+      operations: mockOperations({ prepareCamtImport }),
+    });
+    expect(result.executed_steps[0]!.preview).toMatchObject({ journal_review_count: 1 });
+    expect(result.needs_accountant_review).toHaveLength(1);
+    expect(result.needs_accountant_review[0]!.recommendation).toContain("needs review");
+  });
+
   it("marks reconciliation deferred when an import dry run has pending rows (M12)", async () => {
     const { result, prepareInterAccount } = await pipelineWithPendingCamtAndReconciliation();
     expect(result.skipped_steps).toEqual(expect.arrayContaining([

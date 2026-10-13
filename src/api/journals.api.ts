@@ -2,6 +2,34 @@ import type { HttpClient } from "../http-client.js";
 import type { Journal, ApiResponse } from "../types/api.js";
 import type { CreateJournalRequest, UpdateJournalRequest } from "../types/mutations.js";
 import { BaseResource, cache } from "./base-resource.js";
+import { HttpError, type HttpMethod } from "../http-client.js";
+
+/** Backend limit: POST/PATCH /journals answers 409 for a longer title. */
+export const JOURNAL_TITLE_MAX_LENGTH = 100;
+
+/** The over-long-title message, or undefined when `title` fits. */
+export function journalTitleLengthMessage(title: unknown): string | undefined {
+  if (typeof title !== "string" || title.length <= JOURNAL_TITLE_MAX_LENGTH) return undefined;
+  return `Journal title is ${title.length} characters; e-arveldaja accepts at most ${JOURNAL_TITLE_MAX_LENGTH}. Refused before sending; nothing was written.`;
+}
+
+/**
+ * Refuse an over-long title before sending, for every journal creator (CRUD
+ * tools and the Lightyear/dividend/year-end/import flows alike). Raised as a
+ * 4xx HttpError so mutation-outcome classification reads it as definitive:
+ * nothing was written.
+ */
+function assertJournalTitleLength(title: unknown, method: HttpMethod, path: string): void {
+  const message = journalTitleLengthMessage(title);
+  if (message === undefined) return;
+  throw new HttpError(
+    message,
+    400,
+    method,
+    path,
+    { recovery_hint: "Shorten the journal title and retry; put longer explanations in the attached source document." },
+  );
+}
 
 export class JournalsApi extends BaseResource<Journal> {
   constructor(client: HttpClient) {
@@ -12,10 +40,12 @@ export class JournalsApi extends BaseResource<Journal> {
   // that omit server-managed fields (id, number, registered, register_date,
   // operations_id, operation_type, …). Delegates to the base mutate/cache logic.
   override async create(data: CreateJournalRequest): Promise<ApiResponse> {
+    assertJournalTitleLength(data.title, "POST", this.basePath);
     return super.create(data);
   }
 
   override async update(id: number, data: UpdateJournalRequest): Promise<ApiResponse> {
+    assertJournalTitleLength(data.title, "PATCH", `${this.basePath}/${id}`);
     return super.update(id, data);
   }
 

@@ -2083,6 +2083,22 @@ describe("create_owner_expense_reimbursement", () => {
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
+  it("refuses a description longer than the journal title limit before booking", async () => {
+    setup(false);
+    const cb = tools.get("create_owner_expense_reimbursement")!;
+    const result = await cb({
+      owner_client_id: 1,
+      effective_date: "2026-06-01",
+      description: "x".repeat(101),
+      net_amount: 100,
+      vat_rate: 0,
+      expense_account: 5000,
+    });
+    expect(isError(result)).toBe(true);
+    expect((result as { content: Array<{ text: string }> }).content[0].text).toContain("at most 100");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
   it("rejects a negative vat_rate", async () => {
     setup(false);
     const cb = tools.get("create_owner_expense_reimbursement")!;
@@ -2704,5 +2720,17 @@ describe("check_vat_registration_threshold", () => {
     expect(payload.vat_registered).toBe(true);
     expect(payload.status).toBe("already_registered");
     expect(payload.threshold_total_if_all_non_incidental).toBe(150000);
+  });
+});
+
+describe("dividendJournalTitle", () => {
+  it("keeps a short name whole and shortens a long one to fit the journal title limit", async () => {
+    const { dividendJournalTitle } = await import("./estonian-tax.js");
+    const amounts = "(neto 15000 EUR, TuMa 22/78 4230.77 EUR)";
+    expect(dividendJournalTitle("Mari Maasikas", amounts)).toBe(`Dividendi väljamakse - Mari Maasikas ${amounts}`);
+    const long = dividendJournalTitle("Osaühing Põhjamaade Kinnisvara Investeeringud ja Arendus", amounts);
+    expect(long.length).toBeLessThanOrEqual(100);
+    expect(long).toContain("…");
+    expect(long.endsWith(amounts)).toBe(true);
   });
 });

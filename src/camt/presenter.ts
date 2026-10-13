@@ -17,6 +17,7 @@ import type {
   ImportRejectedField,
   StatementBalanceCheckResult,
 } from "./types.js";
+import { isCamtJournalReviewRow } from "./projection.js";
 
 // OUTPUT layer. This is the only CAMT module that shapes MCP envelopes and
 // applies the OCR/untrusted-text sandbox (wrapUntrustedOcr). The pure
@@ -26,16 +27,16 @@ import type {
 const MAX_EXPOSED_ISSUES = 100;
 const MAX_EXPOSED_VALUE_CHARS = 256;
 
+export function journalReviewClause(count: number): string {
+  return count > 0 ? ` (${count} of them left unimported for existing-journal review)` : "";
+}
+
 /**
  * Bounded, sandboxed failure payload. The fixed `error` string is load-bearing:
  * without it toolError() falls through to serializeUnknownError(), which
  * JSON.stringifies the whole payload into one 500-char string and defeats both
  * the sandbox wrapping and the truncation below.
  */
-
-function journalReviewClause(count: number): string {
-  return count > 0 ? ` (${count} of them left unimported for existing-journal review)` : "";
-}
 
 export function importPreflightFailurePayload(
   source: "camt" | "wise",
@@ -132,7 +133,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     error_count: input.errorCount,
     possible_duplicate_count: input.possibleDuplicates.length,
     // Skipped rows an existing journal may already book; they stay unimported.
-    journal_review_count: projection.skipped.filter(row => row.review_code !== undefined).length,
+    journal_review_count: projection.skipped.filter(isCamtJournalReviewRow).length,
   };
 
   const sanitizedStatementMetadata = {
@@ -182,7 +183,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
 
   // Rows not created because an existing journal may already book them.
   const journalReviews = projection.skipped
-    .filter(row => row.review_code !== undefined)
+    .filter(isCamtJournalReviewRow)
     .map(row => ({
       code: "camt_journal_review",
       review_code: row.review_code,
@@ -302,7 +303,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   const possibleDuplicateCount = data.possibleDuplicates.length;
   // Journal reviews are not duplicates: nothing is created and each needs its
   // own follow-up; automatic native-import matches name the stored row.
-  const journalReviews = data.projection.skipped.filter(row => row.review_code !== undefined && row.review_note !== undefined);
+  const journalReviews = data.projection.skipped.filter(isCamtJournalReviewRow);
   const partialLegacy = data.projection.skipped.filter(row => row.review_code === undefined && row.review_note !== undefined);
   const nativeMatches = data.projection.skipped.filter(row => row.skip_code === "camt_native_import_match");
   const counts = {
@@ -335,7 +336,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   // One cap across all journal-review codes; each warning keeps its own code.
   warnings.push(...cappedWarnings("camt_journal_review", journalReviews.map(row => ({
     code: row.review_code!,
-    message: row.review_note!,
+    message: row.review_note ?? row.reason,
   })), moreHint));
   warnings.push(...cappedWarnings("camt_partial_legacy_import", partialLegacy.map(row => ({
     code: "camt_partial_legacy_import",

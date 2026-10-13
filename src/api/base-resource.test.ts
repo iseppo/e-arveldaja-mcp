@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { BaseResource, cache } from "./base-resource.js";
 import type { PaginatedResponse, ApiResponse } from "../types/api.js";
 import { HttpError, type HttpClient } from "../http-client.js";
-import { MutationIndeterminateError } from "../mutation-outcome.js";
+import { MutationIndeterminateError, classifyMutationFailure } from "../mutation-outcome.js";
 import { reportProgress } from "../progress.js";
 import { ClientsApi } from "./clients.api.js";
 import { ProductsApi } from "./products.api.js";
@@ -1326,5 +1326,27 @@ describe("BaseResource", () => {
       expect(client[row.method]).toHaveBeenCalledWith(...row.call);
       expect(cache.get(row.evicted)).toBeUndefined();
     });
+  });
+});
+
+describe("JournalsApi title boundary", () => {
+  it.each([
+    ["create", (api: JournalsApi) => api.create({ title: "x".repeat(101), effective_date: "2026-01-01", postings: [] } as any), "post"],
+    ["update", (api: JournalsApi) => api.update(5, { title: "x".repeat(101) } as any), "patch"],
+  ] as const)("refuses an over-long title on %s before sending, as a definitive rejection", async (_label, invoke, method) => {
+    const client = makeClient();
+    const api = new JournalsApi(client);
+    const error = await invoke(api).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HttpError);
+    expect((error as HttpError).message).toContain("at most 100");
+    expect(classifyMutationFailure(error)).toBe("definitive");
+    expect(client[method]).not.toHaveBeenCalled();
+  });
+
+  it("sends a 100-character title", async () => {
+    const client = makeClient();
+    vi.mocked(client.post).mockResolvedValueOnce({ code: 200, created_object_id: 7, messages: [] });
+    await new JournalsApi(client).create({ title: "x".repeat(100), effective_date: "2026-01-01", postings: [] } as any);
+    expect(client.post).toHaveBeenCalledTimes(1);
   });
 });

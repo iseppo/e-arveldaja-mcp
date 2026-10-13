@@ -35,15 +35,16 @@ import {
   validateUpdateFields,
 } from "./shared.js";
 import { isMutationIndeterminate } from "../../mutation-outcome.js";
+import { JOURNAL_TITLE_MAX_LENGTH, journalTitleLengthMessage } from "../../api/journals.api.js";
 
-/** Backend limit: POST/PATCH /journals answers 409 for a longer title. */
-export const JOURNAL_TITLE_MAX_LENGTH = 100;
-
+// The JournalsApi boundary refuses the same titles; checking here first keeps
+// the tool's structured error and hint instead of a generic HTTP error.
 function journalTitleLengthError(title: unknown) {
-  if (typeof title !== "string" || title.length <= JOURNAL_TITLE_MAX_LENGTH) return undefined;
+  const message = journalTitleLengthMessage(title);
+  if (message === undefined) return undefined;
   return toolError({
-    error: `Journal title is ${title.length} characters; e-arveldaja accepts at most ${JOURNAL_TITLE_MAX_LENGTH}.`,
-    hint: "Shorten the title and retry. Put longer explanations in the attached source document instead. Nothing was sent to the API.",
+    error: message,
+    hint: "Shorten the title and retry. Put longer explanations in the attached source document instead.",
   });
 }
 

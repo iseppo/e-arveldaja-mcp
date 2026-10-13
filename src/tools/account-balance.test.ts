@@ -811,7 +811,9 @@ describe("compute_client_debt tool — opening balance folding", () => {
 
     // The 1000 EUR opening balance carries no client attribution
     // (clients_id: null) and clients_id is mandatory here, so it must be
-    // excluded — balance stays 70 (100 credit - 30 debit), not 1070.
+    // excluded — balance stays 70 (100 credit - 30 debit), not 1070. The
+    // whole-account context matches compute_account_balance (opening folded
+    // in) without counting the opening balance as another client's entry.
     expect(data.accounts).toEqual([{
       account_id: ACCOUNT_ID,
       account_name: "Võlg kliendile",
@@ -820,7 +822,7 @@ describe("compute_client_debt tool — opening balance folding", () => {
       debit_total: 30,
       credit_total: 100,
       entry_count: 2,
-      account_balance_all_clients: 70,
+      account_balance_all_clients: 1070,
       other_client_entry_count: 0,
     }]);
     expect(data.opening_balance_status).not.toBe("complete");

@@ -178,7 +178,8 @@ export interface CamtSkippedRow {
   review_note?: string;
   /** Journals that already book (or may book) this movement. */
   journal_ids?: number[];
-  /** Set when an existing journal may book this movement and needs review. */
+  /** Set when an existing journal may book this movement and needs review.
+   * The projection always sets `review_note` with it. */
   review_code?: string;
   /** Machine-readable reason for an automatic skip (e.g. `camt_native_import_match`). */
   skip_code?: string;
