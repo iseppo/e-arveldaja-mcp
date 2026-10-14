@@ -50,16 +50,20 @@ import {
 } from "./preflight.js";
 import {
   approvalDigest,
+  buildWiseSideJournalIndex,
   canonicalPlanJson,
   createdTransactionMatchesApprovedPayload,
   exactStateMatches,
   journalLabelledWithWiseId,
+  knownWiseLabelsFor,
+  labelledWithOtherWiseId,
   orderedIdsEqual,
   projectWiseCommands,
   transactionCommandExists,
   wisePlanCommandId,
   wisePlanReviewProjection,
   wiseLegAmountNetOfFee,
+  wiseLegEvidence,
   WISE_APPROVAL_DOMAIN,
   WISE_COMMAND_VERSION,
   WISE_PLAN_COMMAND_CATEGORY,
@@ -68,6 +72,7 @@ import {
 import type {
   ImportRejectedField,
   MainCreateCommand,
+  WiseImportCommand,
   WiseInterAccountResult,
   WiseAcknowledgedJournalHold,
   WiseJournalizedTransferMapping,
@@ -595,11 +600,76 @@ async function runWiseImport(
       const runtimeIds = new Map<string, number>();
       const successfulCommands = new Set<string>();
       let stoppedIndeterminate = false;
+      // Per-transfer-leg Wise-side guard: immediately before each write of a
+      // transfer row (main create, fee create, fee confirm, inter-account
+      // confirm) the journals are read again and the plan's identity and
+      // evidence checks re-run. Exempt: the leg's proven coverage, this run's
+      // own registration journals, and journals unchanged since the reviewed
+      // snapshot (so execute is never stricter than the preview, and an
+      // acknowledgement holds only while its journals are unchanged). A block
+      // or a failed read skips the rest of that row; other rows proceed.
+      // Card rows are not transfer rows: they never re-read journals.
+      const holdCheckByRow = new Map(projected.holdCheckRows.map(check => [check.row_index, check]));
+      const wiseLabels = knownWiseLabelsFor(rows, existingTx);
+      const snapshotJournals = new Map(journalSnapshot.filter(journal => journal.id !== undefined).map(journal => [journal.id!, journal]));
+      const blockedRows = new Set<number>();
+      const wiseSideBlock = (command: WiseImportCommand, legKind: "main" | "fee", freshJournals: Journal[]): string | undefined => {
+        const check = holdCheckByRow.get(command.row_index);
+        const leg = check?.legs[legKind];
+        const row = eligible.find(candidate => candidate.rowIndex === command.row_index);
+        if (check === undefined || leg === undefined || row === undefined) return undefined;
+        const createdHere = new Set(runtimeIds.values());
+        const exempt = (journal: Journal | undefined, coverage: ReadonlySet<number>) => journal?.id !== undefined && (
+          coverage.has(journal.id) ||
+          (journal.operation_type === "TRANSACTION" && journal.operations_id !== undefined && createdHere.has(journal.operations_id)) ||
+          exactStateMatches(journal, snapshotJournals.get(journal.id)));
+        const rowCoverage = new Set([...(check.legs.main?.coverage ?? []), ...(check.legs.fee?.coverage ?? [])]);
+        const identityIds = freshJournals
+          .filter(journal => journal.id !== undefined && !journal.is_deleted && journalLabelledWithWiseId(journal, row.id) && !exempt(journal, rowCoverage))
+          .map(journal => journal.id!);
+        if (identityIds.length > 0) {
+          return `journal ${identityIds.sort((left, right) => left - right).join(", ")} labelled with this Wise transfer appeared or changed before the ${legKind} leg was written`;
+        }
+        const evidence = wiseLegEvidence(buildWiseSideJournalIndex(freshJournals, command.wise_dimension_id), leg.leg,
+          journal => labelledWithOtherWiseId(journal, row, wiseLabels));
+        const byId = new Map(freshJournals.map(journal => [journal.id, journal]));
+        const legCoverage = new Set(leg.coverage);
+        const blocking = [...new Set([...evidence.certain, ...evidence.uncertain])]
+          .filter(id => !exempt(byId.get(id), legCoverage))
+          .sort((left, right) => left - right);
+        return blocking.length > 0
+          ? `journal ${blocking.join(", ")} on the Wise account may already book this transfer's ${legKind} leg (appeared or changed since the reviewed plan)`
+          : undefined;
+      };
+      // Reads the journals and runs the guard for one leg; a failed read skips the row.
+      const guardWiseLeg = async (command: WiseImportCommand, legKind: "main" | "fee"): Promise<void> => {
+        if (holdCheckByRow.get(command.row_index)?.legs[legKind] === undefined) return;
+        let freshJournals: Journal[];
+        try {
+          clearRuntimeCaches();
+          freshJournals = await api.journals.listAllWithPostings();
+        } catch (error) {
+          blockedRows.add(command.row_index);
+          throw new Error(`Wise-side journal re-check failed before the ${legKind} leg was written: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const block = wiseSideBlock(command, legKind, freshJournals);
+        if (block !== undefined) {
+          blockedRows.add(command.row_index);
+          throw new Error(`Stale Wise-side precondition: ${block}`);
+        }
+      };
       for (const command of commands) {
       if (command.depends_on && !successfulCommands.has(command.depends_on)) {
         skipped.push({
           wise_id: command.wise_id,
           reason: "Skipped because main transaction was not created",
+        });
+        continue;
+      }
+      if (blockedRows.has(command.row_index)) {
+        skipped.push({
+          wise_id: command.wise_id,
+          reason: "Skipped because an earlier Wise-side check of this transfer failed",
         });
         continue;
       }
@@ -610,6 +680,7 @@ async function runWiseImport(
           if (transactionCommandExists(command, freshTransactions)) {
             throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
           }
+          await guardWiseLeg(command, "main");
           const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
           const apiId = result.created_object_id;
           if (apiId === undefined) throw new Error("Wise transaction creation returned no object ID");
@@ -650,6 +721,7 @@ async function runWiseImport(
           if (transactionCommandExists(command, freshTransactions)) {
             throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
           }
+          await guardWiseLeg(command, "fee");
           const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
           const apiId = result.created_object_id;
           if (apiId === undefined) throw new Error("Wise fee creation returned no object ID");
@@ -673,6 +745,7 @@ async function runWiseImport(
             if (!createdTransactionMatchesApprovedPayload(createdTransaction, apiId, command.create_payload)) {
               throw new Error(`Stale created transaction precondition: fee transaction ${apiId} is missing or changed before confirmation`);
             }
+            await guardWiseLeg(command, "fee");
             await api.transactions.confirm(apiId, command.confirmation_distribution);
             successfulCommands.add(command.row_key);
             logAudit({
@@ -785,6 +858,28 @@ async function runWiseImport(
             // transfer's identity whatever amount it books.
             if (priorJournals.some(journal => !journal.is_deleted && journalLabelledWithWiseId(journal, command.wise_id))) {
               throw new Error("Stale inter-account precondition: a journal labelled with this Wise transfer appeared before confirmation");
+            }
+            // The full Wise-side guard on the main leg, beyond the pair.
+            const wiseSide = wiseSideBlock(command, "main", freshJournals);
+            if (wiseSide !== undefined) throw new Error(`Stale Wise-side precondition: ${wiseSide}`);
+            // The row's counterpart, resolved again from the fresh ledger, must
+            // still be the one the plan confirms against.
+            if (sourceRow !== undefined && otherDimensions.size > 0) {
+              const resolution = resolveWiseRowCounterparts({
+                rows: [sourceRow],
+                allRows: rows,
+                wiseDim: command.wise_dimension_id,
+                otherDims: otherDimensions,
+                existingTx: freshTransactions.filter(isNonVoidTransaction),
+                journals: freshJournals,
+                lookups: bankAccountLookups,
+                companyLegalName: invoiceInfoSnapshot?.invoice_company_name ?? undefined,
+                explicit: inter_account_dimension_id,
+              }).get(sourceRow);
+              const resolved = resolution === undefined ? undefined : "dim" in resolution ? resolution.dim : undefined;
+              if (resolved !== command.counterpart_dimension_id) {
+                throw new Error(`Stale counterpart precondition: the transfer's counterpart bank account is no longer ${command.counterpart_dimension_id} (${resolution !== undefined && "hold" in resolution ? resolution.hold.code : "changed"})`);
+              }
             }
             if (command.client_update) await api.transactions.update(apiId, command.client_update);
             if (!command.confirmation_distribution) throw new Error("Inter-account confirmation distribution is missing");

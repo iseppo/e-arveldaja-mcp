@@ -1760,7 +1760,8 @@ describe("wise import tool", () => {
         target_verified: false,
         approval_required: true,
       }]);
-      expect(api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
+      // The re-plan, then the Wise-side guard before the transfer row's create.
+      expect(api.journals.listAllWithPostings).toHaveBeenCalledTimes(2);
       expect(api.clients.findByName).not.toHaveBeenCalled();
       expect(api.transactions.update).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2138,7 +2139,7 @@ describe("wise import tool", () => {
           approval_required: item.expectedCode === M03_OWNERSHIP_CODE,
         }),
       ]);
-      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(2); // re-plan + the Wise-side guard before the transfer create
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2162,7 +2163,7 @@ describe("wise import tool", () => {
         target_verified: item.expectedTargetVerified,
         approval_required: false,
       }]);
-      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(2); // re-plan + the Wise-side guard before the transfer create
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2177,7 +2178,7 @@ describe("wise import tool", () => {
         target_verified: true,
         approval_required: true,
       }]);
-      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(2); // re-plan + the Wise-side guard before the transfer create
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2517,7 +2518,7 @@ describe("wise import tool", () => {
           target_verified: item.expectedTargetVerified,
         }),
       ]);
-      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(2); // re-plan + the Wise-side guard before the transfer create
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -3861,9 +3862,11 @@ describe("wise import tool", () => {
       setup.api.readonly.getInvoiceInfo,
     ]) expect(read).toHaveBeenCalledTimes(1);
     expect(setup.api.transactions.listAll).toHaveBeenCalledTimes(6);
-    expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(2);
+    // The re-plan, the Wise-side guard before the transfer create, and the
+    // inter-account confirm re-check.
+    expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(3);
     expect(setup.api.purchaseInvoices.listAll).toHaveBeenCalledTimes(1);
-    expect(mockedClearRuntimeCaches).toHaveBeenCalledTimes(6);
+    expect(mockedClearRuntimeCaches).toHaveBeenCalledTimes(7);
     const runtimeObjectIds = new Set([9710, 9711, 9712, 9811, 9812]);
     const numericLeaves: number[] = [];
     const runtimeIdKeys: string[] = [];
@@ -4154,8 +4157,11 @@ describe("wise import tool", () => {
       invoiceInfo: { invoice_company_name: "Seppo AI OÜ" },
       findByNameResult: [{ id: 55, name: "Seppo AI OÜ" }],
     });
+    // Dry run, re-plan and the guard before the create read none; the journal
+    // appears only before the confirm.
     interSetup.api.journals.listAllWithPostings
       .mockReset()
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([appearedJournal]);
@@ -4176,7 +4182,7 @@ describe("wise import tool", () => {
     });
 
     expect(interSetup.api.transactions.create).toHaveBeenCalledTimes(1);
-    expect(interSetup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(2);
+    expect(interSetup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(3);
     expect(interSetup.api.transactions.update).not.toHaveBeenCalled();
     expect(interSetup.api.transactions.confirm).not.toHaveBeenCalled();
     expect(interRun.executed.execution.errors).toEqual([
@@ -6179,9 +6185,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     // is caught by the same ±1-day recheck.
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-STALE", "2026-02-02")]));
     const stale = setupWiseTool([], undefined, transferOptions());
-    let journalReads = 0;
     stale.api.journals.listAllWithPostings.mockImplementation(async () =>
-      ++journalReads > 2 ? [lhvWiseJournal(602, "2026-02-01", 500)] : []);
+      stale.api.transactions.create.mock.calls.length > 0 ? [lhvWiseJournal(602, "2026-02-01", 500)] : []);
     const staleRun = await runApprovedWiseImport(stale, transferArgs);
 
     expect(stale.api.transactions.confirm).not.toHaveBeenCalled();
@@ -6288,8 +6293,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     // execute recheck.
     mockedReadFile.mockResolvedValue(buildCsvRows([row]));
     const stale = setupWiseTool([storedFee], undefined, transferOptions());
-    let journalReads = 0;
-    stale.api.journals.listAllWithPostings.mockImplementation(async () => ++journalReads > 2 ? [netJournal(702)] : []);
+    stale.api.journals.listAllWithPostings.mockImplementation(async () =>
+      stale.api.transactions.create.mock.calls.length > 0 ? [netJournal(702)] : []);
     const staleRun = await runApprovedWiseImport(stale, transferArgs);
     expect(stale.api.transactions.confirm).not.toHaveBeenCalled();
     expect(staleRun.executed.execution.errors).toEqual([expect.objectContaining({
@@ -6435,9 +6440,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   it("the execute recheck refuses to confirm when a journal labelled with the Wise ID appears at another amount", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-ID-STALE", "2026-02-02", "100")]));
     const stale = setupWiseTool([], undefined, transferOptions());
-    let journalReads = 0;
     stale.api.journals.listAllWithPostings.mockImplementation(async () =>
-      ++journalReads > 2 ? [lhvWiseJournal(721, "2026-02-02", 110, { document_number: "TRANSFER-ID-STALE", operation_type: "ENTRY" })] : []);
+      stale.api.transactions.create.mock.calls.length > 0 ? [lhvWiseJournal(721, "2026-02-02", 110, { document_number: "TRANSFER-ID-STALE", operation_type: "ENTRY" })] : []);
     const staleRun = await runApprovedWiseImport(stale, transferArgs);
 
     expect(staleRun.dry.execution.commands).toEqual(expect.arrayContaining([expect.objectContaining({
@@ -6670,12 +6674,13 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       expect(executed.execution.errors).toEqual([]);
     });
 
-    it("(d) with one create_then_confirm transfer, execute reads journals three times and lists the confirmation first", async () => {
+    it("(d) with one create_then_confirm transfer, execute reads journals four times and lists the confirmation first", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), transferIn("TRANSFER-AJ-NEW", "2026-02-28", "250")]));
       const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
       const { executed } = await runApprovedWiseImport(setup, transferArgs);
 
-      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(3);
+      // Re-plan, the Wise-side guard before the create, the confirm re-check, the already-journalized re-check.
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(4);
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
       expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(reconciled(executed)).toEqual([
@@ -6861,6 +6866,140 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(result.isError).toBeFalsy();
     expect(payload.summary).toMatchObject({ created: 0, skipped: 2, error_count: 0 });
     expect(setup.api.clients.listAll).not.toHaveBeenCalled();
+  });
+
+  describe("per-transfer-leg Wise-side guards at execute", () => {
+    // A journal on the Wise account outside the LHV pair (an owner loan): the
+    // pair re-check alone would not see it.
+    const loanJournal = (id: number, date: string, amount: number, wiseType: "D" | "C" = "D") => ({
+      id, is_deleted: false, registered: true, effective_date: date, document_number: "", operation_type: "ENTRY",
+      postings: [
+        { is_deleted: false, accounts_dimensions_id: 5, accounts_id: 1010, type: wiseType, amount, base_amount: amount },
+        { is_deleted: false, accounts_id: 2500, type: wiseType === "D" ? "C" : "D", amount, base_amount: amount },
+      ],
+    });
+    const feeOptions = (journals: unknown[] = []) => ({
+      ...transferOptions(journals),
+      accountDimensions: [...configuredTransferDimensions(), { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false }],
+    });
+    const transferOutWithFee = (id: string) => buildM04Values({
+      id, direction: "OUT", date: "2026-02-02", sourceName: "Wise Own Account", targetName: "LHV Own Account",
+      sourceAmount: "100", targetAmount: "100", sourceFeeAmount: "1",
+    });
+    const feeArgs = { ...transferArgs, fee_account_dimensions_id: 9 };
+    const STALE_WISE_SIDE = "Stale Wise-side precondition: journal 990 on the Wise account may already book this transfer's";
+    const SINCE_PLAN = " (appeared or changed since the reviewed plan)";
+
+    it("a journal appearing after the reviewed plan, before the create, stops the row before any write; the card row proceeds", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-RACE-MAIN", "2026-02-02"), cardPaymentValues("2026-02-05")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      let reads = 0;
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => ++reads > 2 ? [loanJournal(990, "2026-02-02", 500)] : []);
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ wise_id: "TRANSFER-RACE-MAIN", reason: expect.stringMatching(wrapped(`${STALE_WISE_SIDE} main leg${SINCE_PLAN}`)) }),
+      ]));
+      expect(JSON.stringify(executed.execution.skipped)).toContain("Skipped because main transaction was not created");
+    });
+
+    it("mid-loop: a journal for the second transfer appearing after the first transfer's create stops only the second", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-LOOP-1", "2026-02-02"), transferIn("TRANSFER-LOOP-2", "2026-02-04", "300")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal(990, "2026-02-04", 300)] : []);
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.confirm.mock.calls.map(([id]: [number]) => id)).toEqual([9001]);
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ wise_id: "TRANSFER-LOOP-2", reason: expect.stringMatching(wrapped(`${STALE_WISE_SIDE} main leg${SINCE_PLAN}`)) }),
+      ]));
+    });
+
+    it("a fee-leg journal appearing before the fee create stops the fee and the confirm of that transfer", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-FEE")]));
+      const setup = setupWiseTool([], undefined, feeOptions());
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
+      const { dry, executed } = await runApprovedWiseImport(setup, feeArgs);
+      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm", "inter_account"]);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({ wise_id: "FEE:TRANSFER-RACE-FEE", reason: expect.stringMatching(wrapped(`${STALE_WISE_SIDE} fee leg${SINCE_PLAN}`)) }),
+      ]));
+    });
+
+    it("a fee-leg journal appearing between the fee create and its confirm leaves the fee unconfirmed and stops the transfer confirm", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-FEE-CONFIRM")]));
+      const setup = setupWiseTool([], undefined, feeOptions());
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 1 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
+      const { executed } = await runApprovedWiseImport(setup, feeArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          wise_id: "FEE:TRANSFER-RACE-FEE-CONFIRM",
+          reason: expect.stringMatching(wrapped(`Fee confirmation failed: ${STALE_WISE_SIDE} fee leg${SINCE_PLAN}`)),
+        }),
+      ]));
+      expect(JSON.stringify(executed.execution)).toContain("Skipped because an earlier Wise-side check of this transfer failed");
+    });
+
+    it("a journal outside the pair appearing before the inter-account confirm stops the confirm; the row stays PROJECT", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-RACE-CONFIRM", "2026-02-02")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal(990, "2026-02-03", 500)] : []);
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-RACE-CONFIRM",
+        reason: expect.stringMatching(wrapped(`Inter-account confirmation failed: ${STALE_WISE_SIDE} main leg${SINCE_PLAN}`)),
+      })]);
+      expect(executed.inter_account_reconciliation.details).toEqual([expect.objectContaining({ orphan_project_transaction_id: 9001 })]);
+    });
+
+    it("this run's own fee registration journal never blocks the transfer confirm", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-OWN-FEE")]));
+      const setup = setupWiseTool([], undefined, feeOptions());
+      // The fee row (9002) is confirmed first: its registration journal credits Wise by the fee.
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => setup.api.transactions.confirm.mock.calls.length > 0
+        ? [{ ...loanJournal(991, "2026-02-02", 1, "C"), operation_type: "TRANSACTION", operations_id: 9002 }]
+        : []);
+      const { executed } = await runApprovedWiseImport(setup, feeArgs);
+      expect(setup.api.transactions.confirm.mock.calls.map(([id]: [number]) => id)).toEqual([9002, 9001]);
+      expect(executed.execution.errors).toEqual([]);
+    });
+
+    it("a failed journal re-read skips that transfer only", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-READ-FAIL", "2026-02-02"), cardPaymentValues("2026-02-05")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      let reads = 0;
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => {
+        if (++reads > 2) throw new Error("journals unavailable");
+        return [];
+      });
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([expect.objectContaining({
+        wise_id: "TRANSFER-READ-FAIL",
+        reason: expect.stringMatching(wrapped("Wise-side journal re-check failed before the main leg was written: journals unavailable")),
+      })]));
+    });
+
+    it("a card-only CSV never re-reads journals", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-02-05")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.journals.listAllWithPostings).not.toHaveBeenCalled();
+    });
   });
 
   describe("acknowledged_journal_holds (owner-confirmed release)", () => {
@@ -7295,6 +7434,34 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
       expect.objectContaining({ wise_id: "TRANSFER-T2", status: "confirmed_inter_account" }),
       expect.objectContaining({ wise_id: "TRANSFER-T1", status: "already_journalized", journal_id: 700 }),
     ]));
+  });
+
+  it("a counterpart transaction appearing on another bank before the confirm stops it (stale counterpart); the row stays PROJECT", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const setup = setupTwoBanks();
+    // An LHV statement row of the same movement (signed DBIT, counterparty Wise IBAN) appears after the create.
+    const lhvRace = {
+      id: 602, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-06-05",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("To Wise", {
+        date: "2026-06-05", amount: 250, currency: "EUR", direction: "DBIT",
+        counterparty_name: COMPANY, counterparty_iban: WISE_IBAN, bank_reference: "LHV-REF-9", description: "To Wise",
+      }),
+    };
+    const listed = setup.api.transactions.listAll.getMockImplementation()!;
+    setup.api.transactions.listAll.mockImplementation(async () => [
+      ...await listed(), ...(setup.api.transactions.create.mock.calls.length > 0 ? [lhvRace] : []),
+    ]);
+
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(dry.results).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T2", counterpart_dimension_id: 30 })]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(executed.execution.errors).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-T2",
+      reason: expect.stringContaining("Stale counterpart precondition: the transfer's counterpart bank account is no longer 30 (wise_transfer_counterpart_conflict)"),
+    })]);
   });
 
   it("explicit inter_account_dimension_id = LHV never overrides the Coop evidence: T2 is held, T1 unchanged", async () => {
