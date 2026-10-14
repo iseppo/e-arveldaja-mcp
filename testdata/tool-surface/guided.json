@@ -2,9 +2,9 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 31816,
+    "toolsListBytes": 32310,
     "descriptionsBytes": 4592,
-    "inputSchemasBytes": 22592,
+    "inputSchemasBytes": 23086,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5105
@@ -423,6 +423,32 @@
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
+          },
+          "acknowledged_journal_holds": {
+            "description": "Wise only, owner-confirmed only: { wise_id, journal_ids } stating those journals do not book that held transfer; releases the row only when it lists every required_acknowledgement_ids journal.",
+            "items": {
+              "properties": {
+                "journal_ids": {
+                  "items": {
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991,
+                    "type": "integer"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "wise_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "wise_id",
+                "journal_ids"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           },
           "approved_command_digest": {
             "description": "Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'.",

@@ -33,6 +33,7 @@ import type {
   WiseInvoiceFixCandidate,
   WiseSkippedEntry,
   WiseSkippedJarRow,
+  WiseAcknowledgedJournalHold,
   WiseJournalizedTransferMapping,
   WiseTransferReview,
 } from "./types.js";
@@ -220,6 +221,8 @@ export interface WiseImportRenderData {
    * contradicts the selected one (conflict). Info only: the other rows still
    * form the plan. Candidates are the other configured bank accounts, listed
    * neutrally; labels are raw upstream text. */
+  /** Rows released by acknowledged_journal_holds (info only, not a review). */
+  acknowledgedHolds?: WiseAcknowledgedJournalHold[];
   transferCounterpart?: {
     unresolved_row_count: number;
     conflict_row_count: number;
@@ -231,6 +234,7 @@ export interface WiseImportRenderData {
     interAccountDimensionId: number | undefined;
     confirmOwnTransferIds: string[] | undefined;
     journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
+    acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
     dateFrom: string | undefined;
     dateTo: string | undefined;
     skipJarTransfers: boolean | undefined;
@@ -356,6 +360,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...(inter_account_dimension_id !== undefined ? { inter_account_dimension_id } : {}),
     ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
     ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
+    ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
     ...(date_from ? { date_from } : {}),
     ...(date_to ? { date_to } : {}),
     ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
@@ -432,6 +437,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
             })),
           },
         } : {}),
+        ...(data.acknowledgedHolds !== undefined ? { acknowledged_holds: data.acknowledgedHolds } : {}),
         ...(ownershipReviews.length > 0 ? { ownership_reviews: ownershipReviews } : {}),
         ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
         results: outputResults,
@@ -622,8 +628,23 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     .map(review => ({
     item_id: review.wise_id,
     code: review.code,
-    message: review.reason,
+    // The compact surface carries only the message: name the journals an
+    // acknowledgement must list, and any a short one left out.
+    message: review.required_acknowledgement_ids === undefined
+      ? review.reason
+      : `${review.reason} required_acknowledgement_ids: ${review.required_acknowledgement_ids.join(", ")}.${review.unacknowledged_journal_ids !== undefined
+        ? ` Not acknowledged: ${review.unacknowledged_journal_ids.join(", ")}.`
+        : ""}`,
   }));
+  // Rows released by an acknowledgement: info, so the owner sees what the
+  // acknowledgement did (not a review; approval is not blocked).
+  for (const hold of data.acknowledgedHolds ?? []) {
+    warnings.push({
+      item_id: hold.wise_id,
+      code: "wise_acknowledged_hold_released",
+      message: `Released by acknowledged_journal_holds: journal(s) ${hold.journal_ids.join(", ")} acknowledged as not booking this transfer; the row is imported and confirmed normally, and execute re-checks those journals.`,
+    });
+  }
   if (counterpartInfo !== undefined) {
     warnings.unshift({
       item_id: "wise-import",
@@ -766,6 +787,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
           ...(data.args.interAccountDimensionId !== undefined ? { inter_account_dimension_id: data.args.interAccountDimensionId } : {}),
           ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
           ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
+          ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
           ...(data.args.skipJarTransfers !== undefined ? { skip_jar_transfers: data.args.skipJarTransfers } : {}),
           plan_handle: data.planHandle,
           approved_command_digest: data.approvedCommandDigest,

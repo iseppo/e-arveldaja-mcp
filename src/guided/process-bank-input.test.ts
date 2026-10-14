@@ -236,6 +236,18 @@ describe("process_bank_input — Wise journalized_transfer_ids", () => {
     expect(JSON.stringify(result)).toContain("unused_mapping");
   });
 
+  it("accepts acknowledged_journal_holds and forwards it: the reviewed next_action repeats it", async () => {
+    const { handler } = setup();
+    const server = { registerTool: vi.fn() } as any;
+    registerProcessBankInputTool(server, createAccountingWorkflowApi({ transactionRows: [] }), createTestRuntimeSafetyContext(), {});
+    const schema = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_bank_input")[1].inputSchema;
+    expect(Object.keys(schema)).toContain("acknowledged_journal_holds");
+
+    const acknowledged_journal_holds = [{ wise_id: "TRANSFER-ABSENT", journal_ids: [9] }];
+    const result = parse(await handler({ mode: "prepare", file_path: csv, accounts_dimensions_id: 7, acknowledged_journal_holds }));
+    expect(result.summary.next_action.args.acknowledged_journal_holds).toEqual(acknowledged_journal_holds);
+  });
+
   it("an override naming a dimension that is not a bank account is refused by the Wise import, before any write", async () => {
     // The explicit override wins resolution even when it is not a bank
     // candidate; the Wise executor then refuses it (wise_dimension_not_bank_account).

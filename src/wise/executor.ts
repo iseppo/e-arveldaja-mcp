@@ -69,6 +69,7 @@ import type {
   ImportRejectedField,
   MainCreateCommand,
   WiseInterAccountResult,
+  WiseAcknowledgedJournalHold,
   WiseJournalizedTransferMapping,
   WiseRow,
   WiseTransferDecision,
@@ -137,6 +138,9 @@ export interface WiseRunInput {
   readonly confirmOwnTransferIds: string[] | undefined;
   /** Operator-reviewed Wise ID → labelled journal mappings (journalized_transfer_ids). */
   readonly journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
+  /** Owner acknowledgements (acknowledged_journal_holds): journals that do not
+   * book a held Wise transfer. */
+  readonly acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
   readonly approvedCommandDigest: string | undefined;
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
@@ -177,6 +181,7 @@ async function runWiseImport(
     interAccountDimensionId: inter_account_dimension_id,
     confirmOwnTransferIds: confirm_own_transfer_ids,
     journalizedTransferIds: journalized_transfer_ids,
+    acknowledgedJournalHolds: acknowledged_journal_holds,
     approvedCommandDigest: approved_command_digest,
     dateFrom: date_from,
     dateTo: date_to,
@@ -250,6 +255,14 @@ async function runWiseImport(
   if (new Set(approvedTransferIds).size !== approvedTransferIds.length) {
     throw new Error("confirm_own_transfer_ids must contain unique exact Wise transfer IDs.");
   }
+  const acknowledgements = acknowledged_journal_holds ?? [];
+  if (new Set(acknowledgements.map(hold => hold.wise_id)).size !== acknowledgements.length) {
+    throw new Error("acknowledged_journal_holds must list each Wise ID once.");
+  }
+  // Sorted and de-duplicated: the order the operator lists them in is not a decision.
+  const canonicalAcknowledgements: WiseAcknowledgedJournalHold[] = acknowledgements
+    .map(({ wise_id, journal_ids }) => ({ wise_id, journal_ids: [...new Set(journal_ids)].sort((left, right) => left - right) }))
+    .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : 0);
   const eligibleHintIds = new Set(hintedRows.map(row => row.id));
   if (approvedTransferIds.some(id => !eligibleHintIds.has(id))) {
     throw new Error(
@@ -386,6 +399,7 @@ async function runWiseImport(
       BookingGuard.fromSnapshot(api, journalSnapshot, ownDimensionIds),
     approvedTransferIds: new Set(approvedTransferIds),
     journalizedTransferIds: journalized_transfer_ids,
+    acknowledgedJournalHolds: canonicalAcknowledgements,
     ownCompanyClientId,
     ownCompanyClientMatches,
     allPurchaseInvoices,
@@ -435,6 +449,9 @@ async function runWiseImport(
             .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : left.journal_id - right.journal_id),
         }
       : {}),
+    // Acknowledgements release held rows, so they bind the digest and the plan
+    // scope too. Omitted when empty, keeping earlier plans byte-identical.
+    ...(canonicalAcknowledgements.length > 0 ? { acknowledged_journal_holds: canonicalAcknowledgements } : {}),
     date_from,
     date_to,
     skip_jar_transfers: skipJars,
@@ -733,9 +750,16 @@ async function runWiseImport(
             const priorJournals = freshJournals.filter(journal =>
               !(journal.operation_type === "TRANSACTION" && journal.operations_id !== undefined && createdHere.has(journal.operations_id))
             );
+            // Journals the owner acknowledged as not this transfer
+            // (acknowledged_journal_holds) are exempt only while unchanged
+            // since the reviewed snapshot; the exact-label check below never is.
+            const acknowledgedIds = new Set(projected.holdCheckRows
+              .find(row => row.row_index === command.row_index)?.acknowledged_ids ?? []);
+            const pairJournals = priorJournals.filter(journal => !(journal.id !== undefined && acknowledgedIds.has(journal.id) &&
+              exactStateMatches(journal, journalSnapshot.find(snapshot => snapshot.id === journal.id))));
             const freshGuard = BookingGuard.fromSnapshot(
               api,
-              priorJournals,
+              pairJournals,
               new Set([command.wise_dimension_id, command.counterpart_dimension_id]),
             );
             const journalQuery = {
@@ -911,6 +935,7 @@ async function runWiseImport(
     interAccountResults,
     ownershipReviews,
     invoiceFixCandidates,
+    ...(projected.acknowledgedHolds.length > 0 ? { acknowledgedHolds: projected.acknowledgedHolds } : {}),
     ...(counterpartHoldReviews.length > 0
       ? (() => {
           const labels = new Map(buildBankDimensionCandidates(bankAccountsSnapshot, accountDimensionsSnapshot)
@@ -933,6 +958,7 @@ async function runWiseImport(
       interAccountDimensionId: inter_account_dimension_id,
       confirmOwnTransferIds: confirm_own_transfer_ids,
       journalizedTransferIds: journalized_transfer_ids,
+      acknowledgedJournalHolds: acknowledged_journal_holds,
       dateFrom: date_from,
       dateTo: date_to,
       skipJarTransfers: skip_jar_transfers,

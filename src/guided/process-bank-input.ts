@@ -299,6 +299,7 @@ export function registerProcessBankInputTool(
     inter_account_dimension_id?: number;
     confirm_own_transfer_ids?: string[];
     journalized_transfer_ids?: Array<{ wise_id: string; journal_id: number }>;
+    acknowledged_journal_holds?: Array<{ wise_id: string; journal_ids: number[] }>;
     approved_command_digest?: string;
     skip_jar_transfers?: boolean;
     operation_handle?: string;
@@ -355,6 +356,7 @@ export function registerProcessBankInputTool(
       interAccountDimensionId: args.inter_account_dimension_id,
       confirmOwnTransferIds: args.confirm_own_transfer_ids,
       journalizedTransferIds: args.journalized_transfer_ids,
+      acknowledgedJournalHolds: args.acknowledged_journal_holds,
       approvedCommandDigest: args.approved_command_digest,
       dateFrom: args.date_from,
       dateTo: args.date_to,
@@ -390,6 +392,7 @@ export function registerProcessBankInputTool(
       inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers. Fallback for transfer rows without own-account evidence on another bank; with several other bank accounts such rows are held (not imported) until it is given."),
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe("Wise only: exact Wise IDs explicitly approved as own transfers."),
       journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe("Wise only: checked { wise_id, journal_id } pairs whose labelled journal already books that transfer; each is validated."),
+      acknowledged_journal_holds: z.array(z.object({ wise_id: z.string().min(1), journal_ids: z.array(coerceId).min(1) })).optional().describe("Wise only, owner-confirmed only: { wise_id, journal_ids } stating those journals do not book that held transfer; releases the row only when it lists every required_acknowledgement_ids journal."),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe("Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'."),
       skip_jar_transfers: z.boolean().optional().describe("Wise only: skip Jar (savings pot) transfers (default true)."),
       operation_handle: z.string().regex(HANDLE_PATTERN).optional().describe("mode='show_details' only: operation-result handle from a prior execute."),

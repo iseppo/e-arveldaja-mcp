@@ -88,6 +88,9 @@ export function registerWiseImportTools(
       journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe(
         "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or held for review)."
       ),
+      acknowledged_journal_holds: z.array(z.object({ wise_id: z.string().min(1), journal_ids: z.array(coerceId).min(1) })).optional().describe(
+        "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds."
+      ),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe(
         "Exact lowercase SHA-256 command digest returned by the reviewed dry run. Required for execute=true when mutations are planned."
       ),
@@ -109,6 +112,7 @@ export function registerWiseImportTools(
       inter_account_dimension_id,
       confirm_own_transfer_ids,
       journalized_transfer_ids,
+      acknowledged_journal_holds,
       approved_command_digest,
       plan_handle,
       execute,
@@ -133,6 +137,7 @@ export function registerWiseImportTools(
         interAccountDimensionId: inter_account_dimension_id,
         confirmOwnTransferIds: confirm_own_transfer_ids,
         journalizedTransferIds: journalized_transfer_ids,
+        acknowledgedJournalHolds: acknowledged_journal_holds,
         approvedCommandDigest: approved_command_digest,
         dateFrom: date_from,
         dateTo: date_to,

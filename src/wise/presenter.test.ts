@@ -473,3 +473,44 @@ describe("renderWiseImportCompact — disjoint skip counts", () => {
     });
   }
 });
+
+describe("Wise acknowledged_journal_holds round trip (compact and full)", () => {
+  const acknowledgement = [{ wise_id: "TRANSFER-ACK", journal_ids: [801, 802] }];
+
+  it("the guided next_action and the standard execute args carry the acknowledgement; a release is info, not a review", () => {
+    const data = makeData(1);
+    data.args.acknowledgedJournalHolds = acknowledgement;
+    data.acknowledgedHolds = acknowledgement;
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.next_action?.args).toMatchObject({ acknowledged_journal_holds: acknowledgement, plan_handle: "PLAN-HANDLE-XYZ" });
+    expect(summary.status).toBe("ready_for_approval");
+    expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({
+      item_id: "TRANSFER-ACK", code: "wise_acknowledged_hold_released", message: expect.stringContaining("journal(s) 801, 802"),
+    })]));
+
+    const command = {
+      version: 2, action: "main_create", mutation_mode: "create", row_index: 0, row_key: "row:0:main", identity_hash: "h", wise_id: "WISE-0",
+      date: "2026-02-01", transaction_type: "C", source_direction: "OUT", booked_amount: 10, booked_currency: "EUR",
+      source_amount: 10, source_currency: "EUR", target_amount: 10, target_currency: "EUR", exchange_rate: 1,
+      exchange_rate_orientation: "source_to_target", wise_dimension_id: 5, depends_on: null,
+      create_payload: { accounts_dimensions_id: 5, type: "C", amount: 10, cl_currencies_id: "EUR", date: "2026-02-01", description: "WISE:WISE-0 [source_direction=OUT]" },
+    } as unknown as WiseImportCommand;
+    const full = parseMcpResponse(renderWiseImportFull({ ...data, commands: [command] }).content[0]!.text) as any;
+    expect(full.acknowledged_holds).toEqual(acknowledgement);
+    expect(full.workflow.approval_previews[0].execute_args.acknowledged_journal_holds).toEqual(acknowledgement);
+  });
+
+  it("a held review names the journals to acknowledge, and the ones a short acknowledgement left out, in the compact message", () => {
+    const data = makeData(1);
+    data.ownershipReviews = [{
+      wise_id: "TRANSFER-ACK", code: "wise_transfer_journal_existing_elsewhere", reason: "Held.", source_verified: true,
+      target_verified: true, approval_required: false, required_acknowledgement_ids: [801, 802], unacknowledged_journal_ids: [802],
+    }];
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.warnings).toEqual(expect.arrayContaining([{
+      item_id: "TRANSFER-ACK",
+      code: "wise_transfer_journal_existing_elsewhere",
+      message: "Held. required_acknowledgement_ids: 801, 802. Not acknowledged: 802.",
+    }]));
+  });
+});

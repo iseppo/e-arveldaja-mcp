@@ -1192,6 +1192,82 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
     });
   });
 
+  describe("release by acknowledged_journal_holds (owner-confirmed; OQ-1)", () => {
+    const gross = (id: number, label: string) => journal(id, [[WISE, "D", 100], [LHV, "C", 100]], { document_number: label });
+    const feeJournal = journal(703, [[WISE, "C", 0.5], [FEE_DIM, "D", 0.5]]);
+    const evidence = [gross(701, "LHVREF-1"), gross(702, "LHVREF-2"), feeJournal];
+    const csv = [line("TRANSFER-A", "IN", "100.00", { fee: "0.50" })];
+    const ack = (...journalIds: number[]) => ({ extra: { acknowledgedJournalHolds: [{ wise_id: "TRANSFER-A", journal_ids: journalIds }] } });
+
+    it("acknowledging only the candidates leaves the row held, naming the fee-leg journal it did not list", () => {
+      const output = run(csv, evidence, ack(701, 702));
+      expect(actions(output)).toEqual(["held:TRANSFER-A:Held for review (wise_transfer_journal_ambiguous): not imported"]);
+      expect(onlyReview(output)).toMatchObject({
+        code: "wise_transfer_journal_ambiguous",
+        required_acknowledgement_ids: [701, 702, 703],
+        unacknowledged_journal_ids: [703],
+        fee_leg_journal_ids: [703],
+      });
+      expect(output.acknowledgedHolds).toEqual([]);
+    });
+
+    it("the full union releases the row into the ordinary flow: created, fee booked, confirmed against its counterpart", () => {
+      const output = run(csv, evidence, ack(703, 702, 701));
+      expect(actions(output)).toEqual([
+        "main_create:TRANSFER-A",
+        "fee_create_and_confirm:FEE:TRANSFER-A",
+        "inter_account:TRANSFER-A",
+      ]);
+      expect(output.ownershipReviews).toEqual([]);
+      expect(output.alreadyJournalized).toEqual([]);
+      expect(output.commands[2]).toMatchObject({
+        mutation_mode: "create_then_confirm",
+        existing_journal_id: null,
+        counterpart_dimension_id: LHV,
+        confirmation_distribution: [{ related_table: "accounts", related_id: 1021, related_sub_id: LHV, amount: 100.5 }],
+      });
+      expect(output.acknowledgedHolds).toEqual([{ wise_id: "TRANSFER-A", journal_ids: [701, 702, 703] }]);
+      expect(output.holdCheckRows).toEqual([expect.objectContaining({ wise_id: "TRANSFER-A", acknowledged_ids: [701, 702, 703] })]);
+    });
+
+    it("an existing-elsewhere hold is released the same way", () => {
+      const loan = journal(745, [[WISE, "D", 100], [LOAN, "C", 100]]);
+      expect(actions(run([line("TRANSFER-S", "IN", "100.00")], [loan]))).toEqual([`held:TRANSFER-S:${HELD_ELSEWHERE}`]);
+      const released = run([line("TRANSFER-S", "IN", "100.00")], [loan], { extra: { acknowledgedJournalHolds: [{ wise_id: "TRANSFER-S", journal_ids: [745] }] } });
+      expect(actions(released)).toEqual(["main_create:TRANSFER-S", "inter_account:TRANSFER-S"]);
+      expect(released.alreadyJournalized).toEqual([]);
+    });
+
+    it("an acknowledgement never releases an identity, counterpart or untagged-row hold", () => {
+      const labelled = journal(720, [[WISE, "D", 110], [LHV, "C", 110]], { document_number: "TRANSFER-A" });
+      const identity = run([line("TRANSFER-A", "IN", "100.00")], [labelled], ack(720));
+      expect(actions(identity)).toEqual([`held:TRANSFER-A:${HELD_INCONSISTENT}`]);
+
+      const counterpartHold = {
+        wise_id: "TRANSFER-A", code: "wise_transfer_counterpart_conflict", reason: "conflict", source_verified: true, target_verified: true,
+        approval_required: false, counterpart_candidate_dimension_ids: [LIGHTYEAR],
+      } as const;
+      const counterpart = run([line("TRANSFER-A", "IN", "100.00")], [gross(701, "LHVREF-1")], {
+        decision: () => ({ sourceVerified: true, targetVerified: true, counterpartHold }) as WiseTransferDecision,
+        ...ack(701),
+      });
+      expect(actions(counterpart)).toEqual(["held:TRANSFER-A:Held for review (wise_transfer_counterpart_conflict): not imported"]);
+
+      const lookalike = {
+        id: 54, status: "PROJECT", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-04-10",
+        description: "Ülekanne käsitsi", bank_account_name: "Firma OÜ",
+      } as Transaction;
+      const untagged = run([line("TRANSFER-A", "IN", "100.00")], [], { existingTx: [lookalike], ...ack(54) });
+      expect(actions(untagged)).toEqual(["held:TRANSFER-A:Held for review (wise_untagged_ledger_match): not imported"]);
+    });
+
+    it("an acknowledgement of a row without evidence changes nothing", () => {
+      const output = run([line("TRANSFER-P", "IN", "100.00")], [], { extra: { acknowledgedJournalHolds: [{ wise_id: "TRANSFER-P", journal_ids: [9] }] } });
+      expect(actions(output)).toEqual(["main_create:TRANSFER-P", "inter_account:TRANSFER-P"]);
+      expect(output.acknowledgedHolds).toEqual([]);
+    });
+  });
+
   it("byte-identity: a 2-bank transfer without other Wise-side journals plans exactly as before, and is listed for the execute re-check", () => {
     const output = run([line("TRANSFER-P", "OUT", "100.00", { fee: "0.50" })], []);
     expect(output.commands.map(command => `${command.action}:${command.wise_id}:${command.depends_on}`)).toEqual([

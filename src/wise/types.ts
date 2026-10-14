@@ -80,6 +80,16 @@ export interface WiseTransferReview {
   uncertain_journal_ids?: number[];
   /** Journals that may book this row's fee leg. */
   fee_leg_journal_ids?: number[];
+  /** A short acknowledged_journal_holds entry: the required journals it did not list. */
+  unacknowledged_journal_ids?: number[];
+}
+
+/** One owner acknowledgement (acknowledged_journal_holds): the listed journals
+ * do not book this Wise transfer. Releases a held row only when it lists every
+ * required_acknowledgement_ids journal. */
+export interface WiseAcknowledgedJournalHold {
+  wise_id: string;
+  journal_ids: number[];
 }
 
 /** One operator-reviewed journalized_transfer_ids entry. */

@@ -6862,6 +6862,102 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(payload.summary).toMatchObject({ created: 0, skipped: 2, error_count: 0 });
     expect(setup.api.clients.listAll).not.toHaveBeenCalled();
   });
+
+  describe("acknowledged_journal_holds (owner-confirmed release)", () => {
+    // Two same-key journals on the selected pair: the row cannot be told apart.
+    const candidates = () => [
+      lhvWiseJournal(801, "2026-02-02", 500, { document_number: "LHVREF801" }),
+      lhvWiseJournal(802, "2026-02-02", 500, { document_number: "LHVREF802" }),
+    ];
+    const ackArgs = (journalIds: number[]) => ({
+      ...transferArgs, acknowledged_journal_holds: [{ wise_id: "TRANSFER-ACK", journal_ids: journalIds }],
+    });
+    beforeEach(() => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-ACK", "2026-02-02")]));
+    });
+
+    it("a short acknowledgement stays held and names the missing journal; the full one is created and confirmed against its counterpart", async () => {
+      const short = setupWiseTool([], undefined, transferOptions(candidates()));
+      expect(Object.keys(short.options.inputSchema ?? {})).toContain("acknowledged_journal_holds");
+      const held = parseWiseResponse(await short.handler({ ...ackArgs([801]), execute: false }));
+      expect(held.execution.commands).toEqual([]);
+      expect(held.plan_handle).toBeUndefined();
+      expect(held.execution.needs_review).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-ACK", code: "wise_transfer_journal_ambiguous",
+        required_acknowledgement_ids: [801, 802], unacknowledged_journal_ids: [802],
+      })]);
+
+      const setup = setupWiseTool([], undefined, transferOptions(candidates()));
+      const { dry, executed } = await runApprovedWiseImport(setup, ackArgs([802, 801]));
+      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "inter_account"]);
+      expect(dry.execution.needs_review).toEqual([]);
+      expect(dry.acknowledged_holds).toEqual([{ wise_id: "TRANSFER-ACK", journal_ids: [801, 802] }]);
+      expect(dry.workflow.approval_previews[0].execute_args.acknowledged_journal_holds).toEqual([{ wise_id: "TRANSFER-ACK", journal_ids: [802, 801] }]);
+      // The unchanged acknowledged journals on the counterpart pair do not block the confirm.
+      expect(setup.api.transactions.confirm.mock.calls).toEqual([
+        [9001, [{ related_table: "accounts", related_id: 1020, related_sub_id: 20, amount: 500 }]],
+      ]);
+      expect(executed.inter_account_reconciliation).toMatchObject({ confirmed: 1, already_journalized: 0 });
+      expect(executed.execution.errors).toEqual([]);
+    });
+
+    it("the acknowledgement binds the plan: omitted, extended or reordered-into-another-set at execute is drift", async () => {
+      for (const executeArgs of [transferArgs, ackArgs([801, 802, 999])]) {
+        const setup = setupWiseTool([], undefined, transferOptions(candidates()));
+        const reviewed = parseWiseResponse(await setup.handler({ ...ackArgs([801, 802]), execute: false }));
+        clearWiseCallHistory(setup.api);
+        const drifted = parseWiseResponse(await setup.rawHandler({
+          ...executeArgs, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+        }));
+        expect(drifted.code).toBe("plan_drift");
+        expectNoWiseMutations(setup.api);
+      }
+      // The order the journals are listed in is not a decision: same digest.
+      const first = parseWiseResponse(await setupWiseTool([], undefined, transferOptions(candidates())).handler({ ...ackArgs([801, 802]), execute: false }));
+      const second = parseWiseResponse(await setupWiseTool([], undefined, transferOptions(candidates())).handler({ ...ackArgs([802, 801]), execute: false }));
+      expect(second.approved_command_digest).toBe(first.approved_command_digest);
+    });
+
+    it("an acknowledged journal that changed before execute is drift; one that changes or a new journal that appears before the confirm blocks it", async () => {
+      const before = setupWiseTool([], undefined, transferOptions(candidates()));
+      const reviewed = parseWiseResponse(await before.handler({ ...ackArgs([801, 802]), execute: false }));
+      before.api.journals.listAllWithPostings.mockResolvedValue([
+        { ...candidates()[0], document_number: "LHVREF801-EDITED" }, candidates()[1],
+      ]);
+      clearWiseCallHistory(before.api);
+      const drifted = parseWiseResponse(await before.rawHandler({
+        ...ackArgs([801, 802]), execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+      }));
+      expect(drifted.code).toBe("plan_drift");
+      expectNoWiseMutations(before.api);
+
+      for (const afterCreate of [
+        [{ ...candidates()[0], effective_date: "2026-02-03" }, candidates()[1]],
+        [...candidates(), lhvWiseJournal(803, "2026-02-02", 500)],
+      ]) {
+        const setup = setupWiseTool([], undefined, transferOptions(candidates()));
+        setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+          setup.api.transactions.create.mock.calls.length > 0 ? afterCreate : candidates());
+        const { executed } = await runApprovedWiseImport(setup, ackArgs([801, 802]));
+        expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+        expect(executed.execution.errors).toEqual([expect.objectContaining({
+          wise_id: "TRANSFER-ACK",
+          reason: expect.stringMatching(wrapped("Inter-account confirmation failed: Stale inter-account precondition: a matching journal appeared before confirmation")),
+        })]);
+      }
+    });
+
+    it("rejects an acknowledgement that lists the same Wise ID twice, before any write", async () => {
+      const setup = setupWiseTool([], undefined, transferOptions(candidates()));
+      const outcome = await captureM03Outcome(setup.handler, {
+        ...transferArgs,
+        acknowledged_journal_holds: [{ wise_id: "TRANSFER-ACK", journal_ids: [801] }, { wise_id: "TRANSFER-ACK", journal_ids: [802] }],
+        execute: false,
+      });
+      expect(String((outcome.error as Error | undefined)?.message ?? JSON.stringify(outcome.payload))).toContain("acknowledged_journal_holds must list each Wise ID once");
+      expectNoWiseMutations(setup.api);
+    });
+  });
 });
 
 describe("Wise transfer counterpart unresolved (per-row hold, no whole-plan block)", () => {
