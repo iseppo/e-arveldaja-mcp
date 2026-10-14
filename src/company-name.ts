@@ -63,7 +63,7 @@ export function normalizeCompanyName(name?: string | null, options?: NormalizeCo
  * before supplier matching.
  */
 export function stripSocialHandles(name: string): string {
-  return name.replace(/(^|\s)@\S*/gu, "$1").replace(/\s+/g, " ").trim();
+  return name.replace(/(^|\s)@[^\s@]+/gu, "$1").replace(/\s+/g, " ").trim();
 }
 
 // Spelled-out Estonian legal forms, folded to their abbreviation so

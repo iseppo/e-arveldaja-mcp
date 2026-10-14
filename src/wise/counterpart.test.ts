@@ -384,6 +384,19 @@ describe("resolveWiseRowCounterparts — review findings 0f4e518", () => {
     // The same row unconfirmed (no journal expected) stays strong evidence.
     expect(only(resolve({ existingTx: [camtTx(1, LHV)], journals: [] }))).toEqual({ dim: LHV, basis: "evidence" });
   });
+
+  it("N2: another statement row booked in a foreign currency never contests an EUR candidate by its nominal amount", () => {
+    const eurRow = row("TRANSFER-EUR", { rowIndex: 0 });
+    const usdRow = row("TRANSFER-USD", {
+      rowIndex: 1, sourceCurrency: "USD", targetCurrency: "USD", sourceAmount: 100, targetAmount: 100,
+    });
+    expect(only(resolve({ rows: [eurRow], allRows: [eurRow, usdRow], existingTx: [camtTx(1, LHV)] }))).toEqual({ dim: LHV, basis: "evidence" });
+    // An EUR row of the same amount still contests.
+    const eurTwin = row("TRANSFER-EUR-2", { rowIndex: 1 });
+    expect(only(resolve({ rows: [eurRow], allRows: [eurRow, eurTwin], existingTx: [camtTx(1, LHV)] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true },
+    });
+  });
 });
 
 describe("wiseCounterpartHoldReview texts", () => {

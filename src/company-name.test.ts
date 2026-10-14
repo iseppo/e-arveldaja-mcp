@@ -104,6 +104,11 @@ describe("stripSocialHandles", () => {
     expect(stripSocialHandles("info@foo.ee")).toBe("info@foo.ee");
   });
 
+  it("keeps a bare '@' that is not followed by a handle", () => {
+    expect(stripSocialHandles("Foo @ Bar OÜ")).toBe("Foo @ Bar OÜ");
+    expect(stripSocialHandles("Foo OÜ @")).toBe("Foo OÜ @");
+  });
+
   it("is not part of the shared normalizer or legal identity: a handle cannot add a legal form", () => {
     expect(sameCompanyIdentity("Jaan Tamm @tamm.ou", "Jaan Tamm OÜ")).toBe(false);
     expect(normalizeCompanyName("Acme @handle")).not.toBe(normalizeCompanyName("Acme"));

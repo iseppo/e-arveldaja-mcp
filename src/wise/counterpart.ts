@@ -236,7 +236,9 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     const currency = (tx.cl_currencies_id ?? "EUR").toUpperCase();
     const eur = currency === "EUR" ? tx.amount! : tx.base_amount!;
     const rowDirection = sourceDirectionForWiseDirection(row.direction);
+    // Another row's amounts are comparable with EUR only when it books EUR.
     if (allRows.some(other => other.rowIndex !== row.rowIndex &&
+      bookedCurrencyForWiseRow(other) === "EUR" &&
       sourceDirectionForWiseDirection(other.direction) === rowDirection &&
       withinOneDay(rowDate(other), tx.date) &&
       rowAmounts(other).some(amount => sameAmountToTheCent(amount, eur)))) return true;
