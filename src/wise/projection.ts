@@ -178,7 +178,9 @@ export function projectWiseCommand(command: WiseImportCommand): Record<string, u
     date: command.date,
     row_key: command.row_key,
     identity_hash: command.identity_hash,
-    wise_id: projectUntrustedCommandText(command, "wise_id", command.wise_id),
+    // Validated at preflight (WISE_ID_REGEX) plus server-built FEE:/leg
+    // affixes: an identifier, emitted raw like every other Wise id.
+    wise_id: command.wise_id,
     transaction_type: command.transaction_type,
     source_direction: command.source_direction,
     booked_amount: command.booked_amount,
@@ -244,8 +246,8 @@ export function wisePlanCommandId(index: number): string {
 }
 
 /** Safe, review-only projection of a compiled Wise command for the paged plan
- * review surface. Untrusted text (the Wise ID) is sandbox-wrapped; every other
- * field is server-derived or numeric. Executable payloads never enter here. */
+ * review surface. The Wise ID is a preflight-validated identifier (emitted
+ * raw); every other field is server-derived or numeric. Executable payloads never enter here. */
 export function wisePlanReviewProjection(command: WiseImportCommand): PlanData {
   return stripUndefinedDeep({
     action: command.action,
@@ -253,7 +255,9 @@ export function wisePlanReviewProjection(command: WiseImportCommand): PlanData {
     booked_amount: command.booked_amount,
     booked_currency: command.booked_currency,
     source_direction: command.source_direction,
-    wise_id: projectUntrustedCommandText(command, "wise_id", command.wise_id),
+    // Validated at preflight (WISE_ID_REGEX) plus server-built FEE:/leg
+    // affixes: an identifier, emitted raw like every other Wise id.
+    wise_id: command.wise_id,
   });
 }
 

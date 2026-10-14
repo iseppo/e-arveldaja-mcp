@@ -11,7 +11,7 @@ describe("summarizeWiseSkippedEntries", () => {
     ]);
     expect(groups).toHaveLength(3);
     expect(groups[0]).toEqual({
-      reason: "Already journalized: inter-account journal {record_id} books this transfer; no Wise bank row created",
+      reason: "Already journalized: inter-account journal (see records) books this transfer; no Wise bank row created",
       count: 2,
       sample_ids: ["TRANSFER-1", "TRANSFER-2"],
       records: [{ wise_id: "TRANSFER-1", record_id: 29443702 }, { wise_id: "TRANSFER-2", record_id: 29537438 }],

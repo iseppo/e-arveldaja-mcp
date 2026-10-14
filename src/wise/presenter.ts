@@ -39,7 +39,10 @@ import type {
 
 // OUTPUT layer. The only Wise module that shapes MCP envelopes and applies the
 // OCR/untrusted-text sandbox (wrapUntrustedOcr). The pure preflight/projection
-// modules never sandbox — the presenter does, exactly as before. Standard/full
+// modules never sandbox — the presenter does, exactly as before. Policy:
+// validated identifiers (Wise IDs match WISE_ID_REGEX at preflight; FEE:/leg
+// forms only add server-built affixes) are emitted raw; free-form text
+// (counterparty, description, reference, reasons) is wrapped. Standard/full
 // keep the byte-identical full envelope; guided/guided-sales adopt the compact
 // presenter (added in Phase B).
 
@@ -447,7 +450,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           ...(alreadyJournalizedRows.length > 0 ? {
             already_journalized_count: alreadyJournalizedRows.length,
             already_journalized_rows: alreadyJournalizedRows.map(assertion => ({
-              wise_id: wrapUntrustedOcr(assertion.wise_id) ?? assertion.wise_id,
+              wise_id: assertion.wise_id,
               existing_journal_id: assertion.existing_journal_id,
               date: assertion.date,
               booked_amount: assertion.booked_amount,
@@ -554,6 +557,11 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   const autoMatched = data.skipped.filter((entry): entry is WiseSkippedEntry & { auto_match: NonNullable<WiseSkippedEntry["auto_match"]> } =>
     entry.auto_match !== undefined);
 
+  // Counts are disjoint: a legacy auto-matched row is also an already-journalized
+  // assertion, but is counted only under auto_matched, so
+  // skipped = duplicates + auto_matched + already_journalized + other.
+  const autoMatchedIds = new Set(autoMatched.map(entry => entry.wise_id));
+
   const inEntries = data.created.filter(entry => entry.source_direction === "IN");
   const outEntries = data.created.filter(entry => entry.source_direction === "OUT");
 
@@ -573,8 +581,8 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     // Preview: the rows the plan asserts as already booked. Execute: only the
     // ones whose journal the post-write re-check verified.
     already_journalized: dryRun
-      ? data.alreadyJournalized.length
-      : data.interAccountResults.filter(result => result.status === "already_journalized").length,
+      ? data.alreadyJournalized.filter(assertion => !autoMatchedIds.has(assertion.wise_id)).length
+      : data.interAccountResults.filter(result => result.status === "already_journalized" && !autoMatchedIds.has(result.wise_id)).length,
     invoice_currency_fixes: data.invoiceFixCandidates.length,
   };
   // A Wise statement can hold rows booked in different currencies, and these are

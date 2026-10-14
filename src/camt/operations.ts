@@ -112,7 +112,8 @@ class CamtOperationsImpl implements CamtOperations {
         )
       : undefined;
     const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);
-    const planHandle = input.mintPlanHandles === false
+    // A dry run with nothing to create has nothing to approve: no plan (as Wise).
+    const planHandle = input.mintPlanHandles === false || projection.descriptors.length === 0
       ? undefined
       : issueCamtPlan(this.runtimeSafetyContext, snapshot, projection, normalizedArgs);
     const results = projection.descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));

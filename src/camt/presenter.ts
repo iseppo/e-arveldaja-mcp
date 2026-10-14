@@ -334,6 +334,8 @@ export interface CamtCompactInput {
 export function renderCamtImportCompact(input: CamtCompactInput): { summary: OperationSummaryV1 } {
   const { mode, data } = input;
   const dryRun = mode === "DRY_RUN";
+  // A dry run with no rows to create has nothing to approve and issues no plan.
+  const zeroWrite = dryRun && data.createdCount === 0;
   const meta = data.projection.statementMetadata;
 
   const possibleDuplicateCount = data.possibleDuplicates.length;
@@ -362,7 +364,9 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     .map(message => ({ code: "closing_balance", message }));
   const pageHint = (section: "commands" | "exclusions"): string => dryRun && data.planHandle !== undefined
     ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "${section}", detail: "full" }.`
-    : `re-run the preview and page its plan ${section} with get_execution_plan_page.`;
+    : zeroWrite
+      ? "nothing will be written; to see them all, re-run process_bank_input mode='prepare' with a narrower date_from/date_to, or use process_camt053 on the standard/full profile."
+      : `re-run the preview and page its plan ${section} with get_execution_plan_page.`;
   const moreHint = pageHint("exclusions");
   // Unsplit entries are created rows, so the full list is in the plan commands.
   warnings.push(...cappedWarnings("camt_unsplit_entry", data.results.filter(result => result.review_note !== undefined).map(row => ({
@@ -415,11 +419,15 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     ...(row.counterparty !== undefined ? { counterparty: wrapUntrustedOcr(row.counterparty) } : {}),
   }));
 
-  const message = dryRun
+  const message = zeroWrite
+    ? `Nothing to approve: the CAMT dry run found no rows to write (${data.projection.skipped.length} skipped); no plan handle was issued.`
+    : dryRun
     ? `CAMT dry run would create ${data.createdCount} bank transaction(s), skip ${data.projection.skipped.length}, flag ${possibleDuplicateCount} possible duplicate(s), and report ${data.errorCount} error(s).`
     : `CAMT import created ${data.createdCount} bank transaction(s), skipped ${data.projection.skipped.length}, flagged ${possibleDuplicateCount} possible duplicate(s), and reported ${data.errorCount} error(s).`;
 
-  const status = dryRun
+  const status = zeroWrite
+    ? (journalReviews.length + partialLegacy.length + data.errorCount > 0 ? "needs_review" as const : "completed" as const)
+    : dryRun
     ? "ready_for_approval" as const
     : (data.errorCount > 0 ? "partial" as const : "completed" as const);
 

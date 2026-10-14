@@ -526,7 +526,7 @@ export function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; re
   const groups = new Map<string, WiseSkippedGroup>();
   for (const entry of skipped) {
     const record = isNonErrorWiseSkipReason(entry.reason) ? LEDGER_RECORD_ID_RE.exec(entry.reason) : null;
-    const key = record ? entry.reason.replace(LEDGER_RECORD_ID_RE, "$1 {record_id}") : entry.reason;
+    const key = record ? entry.reason.replace(LEDGER_RECORD_ID_RE, "$1 (see records)") : entry.reason;
     let group = groups.get(key);
     if (group) {
       group.count++;

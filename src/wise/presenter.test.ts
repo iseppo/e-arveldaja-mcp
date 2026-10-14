@@ -309,7 +309,8 @@ describe("renderWiseImportFull — already-journalized rows", () => {
     ]);
     expect(out.execution.already_journalized_commands).toBeUndefined();
     expect(out.execution.already_journalized_note).toMatch(/^Not part of the approved commands: no writes\./);
-    expect(String(out.execution.already_journalized_rows[0].wise_id)).toMatch(/UNTRUSTED_OCR_START/);
+    // Validated identifiers are emitted raw.
+    expect(out.execution.already_journalized_rows[0].wise_id).not.toMatch(/UNTRUSTED_OCR_START/);
     expect(out.execution.skipped.map((entry: any) => entry.wise_id)).toEqual(["ODD-1", "FEE:X"]);
     expect(out.execution.skipped_displayed).toBe(2);
     expect(out.execution.skipped_omitted_already_booked).toBe(3);
@@ -430,4 +431,43 @@ describe("renderWiseImportCompact — dry-run status ladder", () => {
     expect(summary.plan_handle).toBe("PLAN-HANDLE-XYZ");
     expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "wise_transfer_journal_ambiguous" })]));
   });
+});
+
+describe("renderWiseImportCompact — disjoint skip counts", () => {
+  function legacyAndLabelledData(mode: "DRY_RUN" | "EXECUTED"): WiseImportRenderData {
+    const data = makeData(1, mode);
+    const legacy = (id: string, journalId: number): WiseSkippedEntry => ({
+      wise_id: id,
+      reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${journalId} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+      auto_match: { code: "wise_transfer_journal_unique_legacy", journal_id: journalId },
+    });
+    const labelled = (id: string, journalId: number): WiseSkippedEntry => ({
+      wise_id: id,
+      reason: `Already journalized: inter-account journal ${journalId} books this transfer; no Wise bank row created`,
+    });
+    const assertion = (id: string, journalId: number) => ({ wise_id: id, existing_journal_id: journalId }) as unknown as WiseAlreadyJournalizedAssertion;
+    data.skipped = [
+      legacy("TRANSFER-L1", 701), legacy("TRANSFER-L2", 702),
+      labelled("TRANSFER-J1", 801), labelled("TRANSFER-J2", 802),
+      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
+    ];
+    data.alreadyJournalized = mode === "DRY_RUN"
+      ? [assertion("TRANSFER-L1", 701), assertion("TRANSFER-L2", 702), assertion("TRANSFER-J1", 801), assertion("TRANSFER-J2", 802)]
+      : [];
+    data.interAccountResults = mode === "EXECUTED"
+      ? ["TRANSFER-L1", "TRANSFER-L2", "TRANSFER-J1", "TRANSFER-J2"].map((id, index) => ({
+          wise_id: id, amount: 100, status: "already_journalized", ownership_basis: "verified_endpoints", journal_id: 700 + index,
+        }))
+      : [];
+    return data;
+  }
+
+  for (const mode of ["DRY_RUN", "EXECUTED"] as const) {
+    it(`${mode}: skipped = duplicates + auto_matched + already_journalized`, () => {
+      const { summary } = renderWiseImportCompact({ mode, data: legacyAndLabelledData(mode) });
+      const counts = summary.counts as Record<string, number>;
+      expect(counts).toMatchObject({ skipped: 5, duplicates: 1, auto_matched: 2, already_journalized: 2 });
+      expect(counts.duplicates! + counts.auto_matched! + counts.already_journalized!).toBe(counts.skipped);
+    });
+  }
 });

@@ -269,3 +269,37 @@ describe("camtPossibleDuplicateRow", () => {
     expect(row.movement_identity).toMatch(/^[0-9a-f]{64}$/);
   });
 });
+
+describe("renderCamtImportCompact — zero-create dry run", () => {
+  const zeroCreate = (skipped: CamtImportProjection["skipped"]) => {
+    const data = makeData(0);
+    return { ...data, planHandle: undefined, projection: { ...data.projection, skipped } };
+  };
+  const plainSkip = { date: "2026-02-01", amount: 10, duplicate_transaction_ids: [901], reason: "Existing transaction matched by bank reference" };
+
+  it("is completed with a nothing-to-approve message and no plan handle", () => {
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: zeroCreate([plainSkip]) });
+    expect(summary.status).toBe("completed");
+    expect(summary.message).toBe("Nothing to approve: the CAMT dry run found no rows to write (1 skipped); no plan handle was issued.");
+    expect(summary.plan_handle).toBeUndefined();
+  });
+
+  it("is needs_review with a journal review, and the overflow hint narrows dates instead of paging a plan", () => {
+    const reviews = [1, 2, 3, 4].map(index => ({
+      date: "2026-02-05", amount: index, duplicate_transaction_ids: [], journal_ids: [800 + index],
+      reason: "r", review_code: "camt_journal_posting_review", review_note: `note ${index}`,
+    }));
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: zeroCreate(reviews) });
+    expect(summary.status).toBe("needs_review");
+    const more = summary.warnings?.find(w => w.code === "camt_journal_review_more")?.message ?? "";
+    expect(more).toContain("date_from/date_to");
+    expect(more).not.toContain("get_execution_plan_page");
+  });
+
+  it("is needs_review with a partial-legacy row", () => {
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: zeroCreate([
+      { date: "2026-02-04", amount: 95, duplicate_transaction_ids: [], reason: "r", review_note: "partial legacy" },
+    ]) });
+    expect(summary.status).toBe("needs_review");
+  });
+});

@@ -2694,7 +2694,7 @@ describe("wise import tool", () => {
       const publicProjection = JSON.stringify(payload.execution.commands);
       expect(publicProjection, item.id).not.toContain("RAW-NOTE");
       for (const command of payload.execution.commands) {
-        expect(command.wise_id, item.id).toMatch(wrapped(item.id));
+        expect(command.wise_id, item.id).toBe(item.id);
       }
       expect(payload.execution.commands[0].create_payload).toEqual(expect.objectContaining({
         bank_account_name: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/),
@@ -2846,7 +2846,7 @@ describe("wise import tool", () => {
     expect(payload.results).toEqual([]);
     expect(payload.execution.skipped).toEqual([]);
     expect(payload.skipped_details).toEqual([expect.objectContaining({
-      reason: expect.stringMatching(wrapped("Already journalized: inter-account journal {record_id} books this transfer; no Wise bank row created")),
+      reason: expect.stringMatching(wrapped("Already journalized: inter-account journal (see records) books this transfer; no Wise bank row created")),
       records: [{ wise_id: "TRANSFER-M04-JOURNAL", record_id: 441 }],
     })]);
     expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
@@ -2961,7 +2961,7 @@ describe("wise import tool", () => {
         row_key: "row:0:main",
         mutation_mode: "create",
         date: "2026-06-10",
-        wise_id: expect.stringMatching(wrapped("M04-FX-FEE")),
+        wise_id: "M04-FX-FEE",
         create_payload: {
           accounts_dimensions_id: 5,
           type: "C",
@@ -2981,7 +2981,7 @@ describe("wise import tool", () => {
         posting_dimension_id: 9,
         wise_client_id: 77,
         date: "2026-06-10",
-        wise_id: expect.stringMatching(wrapped("FEE:M04-FX-FEE")),
+        wise_id: "FEE:M04-FX-FEE",
         create_payload: {
           accounts_dimensions_id: 5,
           type: "C",
@@ -3452,7 +3452,7 @@ describe("wise import tool", () => {
         date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
         row_key: expect.any(String),
         identity_hash: expect.stringMatching(/^[0-9a-f]{64}$/),
-        wise_id: expect.stringMatching(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>/),
+        wise_id: expect.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
       }));
       for (const privateField of [
         "raw_command", "source_row", "confirm_payload",
@@ -5997,7 +5997,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
     expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 501 })]);
     // The executed run lists only write commands: the card payment.
-    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: "CARD_TRANSACTION-PLAN-1" })]);
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
     expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
@@ -6017,7 +6017,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
     expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 502 })]);
-    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: "CARD_TRANSACTION-PLAN-1" })]);
     expect(dry.execution.needs_review).toEqual([]);
     expect(JSON.stringify(dry.skipped_details)).toContain("wise_transfer_journal_unique_legacy");
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
@@ -6130,9 +6130,9 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const setup = setupWiseTool([], undefined, transferOptions(journals));
     const { dry, executed } = await runApprovedWiseImport(setup, { ...transferArgs, ...mapping });
-    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: "CARD_TRANSACTION-PLAN-1" })]);
     expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 510 })]);
-    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: "CARD_TRANSACTION-PLAN-1" })]);
     expect(dry.approved_command_digest).not.toBe(plain.approved_command_digest);
     expect(dry.workflow.approval_previews[0].execute_args.journalized_transfer_ids).toEqual(mapping.journalized_transfer_ids);
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
@@ -6194,7 +6194,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([row, cardPaymentValues("2026-02-05")]));
     const setup = setupWiseTool([storedFee], undefined, transferOptions([netJournal(701)]));
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
-    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: "CARD_TRANSACTION-PLAN-1" })]);
     expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 701 })]);
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
@@ -6538,7 +6538,9 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
         expect(payload.summary.message).toBe("Nothing to approve: the Wise dry run found no rows to write (5 already booked: 5 already journalized, 0 already imported); no plan handle was issued.");
         expect(payload.summary.next_action).toBeUndefined();
         expect(payload.summary.plan_handle).toBeUndefined();
-        expect(payload.summary.counts.already_journalized).toBe(5);
+        // Disjoint counts: the automatic matches are counted only as auto_matched.
+        expect(payload.summary.counts.auto_matched).toBe(5);
+        expect(payload.summary.counts.already_journalized).toBe(0);
         const legacy = payload.summary.warnings.filter((warning: any) => warning.code === "wise_transfer_journal_unique_legacy");
         expect(legacy).toHaveLength(3);
         const more = payload.summary.warnings.find((warning: any) => warning.code === "wise_transfer_journal_unique_legacy_more");
@@ -6914,5 +6916,47 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     expect(dry.ownership_reviews).toEqual([expect.objectContaining({ code: M03_DIMENSIONS_CODE })]);
     expect(executed.summary.created).toBe(1);
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Wise id output policy: validated identifiers raw, free-form text wrapped", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+  });
+
+  it("every wise_id / sample_ids / item_id is a raw Wise id (or its FEE:/leg form); descriptions stay wrapped", async () => {
+    const identifier = /^(FEE:)?[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "CARD-POLICY-1", sourceFeeAmount: "1.5" }),
+      buildM04Values({ id: "CARD-POLICY-2", date: "2026-06-11" }),
+    ]));
+    const setup = setupWiseTool([
+      { id: 7400, status: "CONFIRMED", is_deleted: false, date: "2026-06-11", amount: 100, cl_currencies_id: "EUR", description: "WISE:CARD-POLICY-2 Ordinary Vendor [source_direction=OUT]" },
+    ], undefined, { clients: [{ id: 77, name: "Wise" }] });
+    const collect = (value: unknown, found: string[] = []): string[] => {
+      if (Array.isArray(value)) value.forEach(item => collect(item, found));
+      else if (value !== null && typeof value === "object") {
+        for (const [key, inner] of Object.entries(value)) {
+          if ((key === "wise_id" || key === "item_id") && typeof inner === "string") found.push(inner);
+          else if (key === "sample_ids" && Array.isArray(inner)) found.push(...inner);
+          else collect(inner, found);
+        }
+      }
+      return found;
+    };
+
+    const dry = parseWiseResponse(await setup.rawHandler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }));
+    const ids = collect(dry);
+    expect(ids).toEqual(expect.arrayContaining(["CARD-POLICY-1", "FEE:CARD-POLICY-1", "CARD-POLICY-2"]));
+    for (const id of ids) expect(id).toMatch(identifier);
+    for (const command of dry.execution.commands) {
+      expect(command.create_payload.description).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nWISE:/);
+    }
+
+    const guided = await runWithToolProfile("guided", async () =>
+      parseWiseResponse(await setup.rawHandler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false })));
+    for (const id of collect(guided).filter(id => id !== "wise-import")) expect(id).toMatch(identifier);
   });
 });

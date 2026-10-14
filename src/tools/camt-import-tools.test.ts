@@ -218,6 +218,18 @@ async function issueCamtPlanHandle(
   return handle;
 }
 
+// A dry run with nothing to create issues no plan: these skip-only fixtures
+// are checked on the preview, which carries the same projection.
+async function previewZeroCreate(
+  handler: ReturnType<typeof setupCamtTool>["handler"],
+  baseArgs: Record<string, unknown>,
+) {
+  const result = await handler({ ...baseArgs, execute: false });
+  const payload = parseMcpResponse(result.content[0]!.text);
+  if (payload.plan_handle !== undefined) throw new Error("a zero-create dry run must not issue a plan_handle");
+  return result;
+}
+
 async function executeGranularWithPlan(
   handler: ReturnType<typeof setupCamtTool>["handler"],
   baseArgs: Record<string, unknown>,
@@ -624,7 +636,7 @@ describe("camt import tool", () => {
         }],
       });
 
-      const result = await executeGranularWithPlan(handler, {
+      const result = await previewZeroCreate(handler, {
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
       });
@@ -632,7 +644,7 @@ describe("camt import tool", () => {
 
       expect(api.transactions.create).not.toHaveBeenCalled();
       expect(payload).toMatchObject({
-        mode: "EXECUTED",
+        mode: "DRY_RUN",
         total_statement_entries: 1,
         eligible_entries: 1,
         created_count: 0,
@@ -645,7 +657,7 @@ describe("camt import tool", () => {
         },
         sample: [],
         execution: expect.objectContaining({
-          mode: "EXECUTED",
+          mode: "DRY_RUN",
           summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
           results: [],
           skipped: [expect.objectContaining({
@@ -795,7 +807,7 @@ describe("camt import tool", () => {
           }],
         });
 
-        const result = await executeGranularWithPlan(handler, {
+        const result = await previewZeroCreate(handler, {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
         });
@@ -803,7 +815,7 @@ describe("camt import tool", () => {
 
         expect(api.transactions.create).not.toHaveBeenCalled();
         expect(payload).toMatchObject({
-          mode: "EXECUTED",
+          mode: "DRY_RUN",
           total_statement_entries: 1,
           eligible_entries: 1,
           created_count: 0,
@@ -811,7 +823,7 @@ describe("camt import tool", () => {
           summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
           sample: [],
           execution: expect.objectContaining({
-            mode: "EXECUTED",
+            mode: "DRY_RUN",
             summary: expect.objectContaining({ created_count: 0, skipped_count: 1 }),
             results: [],
             skipped: [expect.objectContaining({ duplicate_transaction_ids: [variant.id] })],
@@ -1745,7 +1757,7 @@ describe("camt import tool", () => {
       ],
     });
 
-    const result = await executeGranularWithPlan(handler, {
+    const result = await previewZeroCreate(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
     });
@@ -1787,7 +1799,7 @@ describe("camt import tool", () => {
       }],
     });
 
-    const payload = parseMcpResponse((await executeGranularWithPlan(handler, {
+    const payload = parseMcpResponse((await previewZeroCreate(handler, {
       file_path: "/tmp/camt.xml",
       accounts_dimensions_id: 7,
     })).content[0]!.text);
@@ -3414,7 +3426,7 @@ describe("camt import — journals that already book the movement (F1)", () => {
     mockedReadFile.mockResolvedValue(singleEntryXml);
     const { api, handler } = setupCamtTool({ allowWrites: true, journals: [journalCoverageFixture(501, "BANK:REF-VOID-1")] });
 
-    const payload = parseMcpResponse((await executeGranularWithPlan(handler, args)).content[0]!.text);
+    const payload = parseMcpResponse((await previewZeroCreate(handler, args)).content[0]!.text);
 
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.created_count).toBe(0);
@@ -3442,7 +3454,7 @@ describe("camt import — journals that already book the movement (F1)", () => {
       })],
     });
 
-    const payload = parseMcpResponse((await executeGranularWithPlan(handler, args)).content[0]!.text);
+    const payload = parseMcpResponse((await previewZeroCreate(handler, args)).content[0]!.text);
 
     expect(api.transactions.create).not.toHaveBeenCalled();
     expect(payload.execution.skipped[0]).toMatchObject({ journal_ids: [701] });
@@ -3460,7 +3472,9 @@ describe("camt import — journals that already book the movement (F1)", () => {
     })]);
     expect(dry.execution.needs_review).toEqual(dry.workflow.needs_review);
 
-    await executeGranularWithPlan(handler, args);
+    // Nothing to create: the dry run issues no plan to execute.
+    expect(dry.plan_handle).toBeUndefined();
+    expect(dry.workflow.approval_previews).toEqual([]);
     expect(api.transactions.create).not.toHaveBeenCalled();
   });
 
