@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-10-14
+
 ### Fixed
 
 - **`book_lightyear_distributions` no longer re-proposes rows booked by hand under another document number.** A bookable row with no `LY:{ref}` / raw-ref journal is now checked against live journals within ±1 day that debit the broker account (and `broker_dimension_id`, when given) with the row's net EUR amount and are not `LY:`-numbered. Such a row goes to `manual_review` with `review_reason.code = "possible_existing_journal"` and `candidate_journal_ids`, instead of `would_create` (seen live: three January 2026 rewards booked under document number `reward` were proposed again, 56 EUR). If the candidate is the row, set its `document_number` to `LY:{reference}`. The candidates are part of the plan fingerprint.
