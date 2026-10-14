@@ -76,7 +76,7 @@ export function registerWiseImportTools(
     {
       file_path: z.string().optional().describe("Absolute path/base64 Wise CSV input. Provide exactly one of file_path or file_ref."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox Wise CSV reference. Provide exactly one of file_path or file_ref."),
-      accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja"),
+      accounts_dimensions_id: coerceId.describe("Bank account dimension ID for the Wise account in e-arveldaja. Must be the dimension of a configured bank account; otherwise refused with wise_dimension_not_bank_account before any write."),
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
       inter_account_dimension_id: coerceId.optional().describe(

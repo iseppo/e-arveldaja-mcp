@@ -104,7 +104,8 @@ export type WiseFailure =
   | { kind: "plan_drift"; detail: string }
   | { kind: "ownership_reapproval_required" }
   | { kind: "wise_client_not_found" }
-  | { kind: "wise_transfer_counterpart_required" };
+  | { kind: "wise_transfer_counterpart_required" }
+  | { kind: "wise_dimension_not_bank_account" };
 
 export type WiseRunResult =
   | { readonly ok: true; readonly data: WiseImportRenderData }
@@ -254,31 +255,35 @@ async function runWiseImport(
     );
   }
 
-  let bankAccountsSnapshot: BankAccount[] = [];
-  let bankDimensionIds = new Set<number>();
-  let invoiceInfoSnapshot: Awaited<ReturnType<typeof api.readonly.getInvoiceInfo>> | undefined;
+  // Bank accounts and the posting dimensions are read for every run: the Wise
+  // dimension itself must be a configured bank account (Step 1 gate below).
   const accountDimensionsSnapshot: AccountDimension[] = await api.readonly.getAccountDimensions();
-  let postingDimensionsSnapshot = new Map<number, AccountDimension>();
+  const bankAccountsSnapshot: BankAccount[] = await api.readonly.getBankAccounts();
+  const { dimensions: bankDimensionIds, identityDimensions } = bankIdentitiesByDimension(bankAccountsSnapshot);
+  const postingDimensionsSnapshot = uniqueActivePostingDimensions(accountDimensionsSnapshot);
+  const configuredDimensions = new Set(
+    [...bankDimensionIds].filter(id => postingDimensionsSnapshot.has(id)),
+  );
+  // Get existing transactions for duplicate detection
+  const existingTx = (await api.transactions.listAll()).filter(isNonVoidTransaction);
+
+  // A Wise dimension that is not a configured bank account (unlinked, deleted,
+  // or duplicated) would book every row onto a non-bank account. Same path on
+  // dry run and execute, so an old handle executed after unlinking writes nothing.
+  if (!isPositiveSafeInteger(accounts_dimensions_id) || !configuredDimensions.has(accounts_dimensions_id)) {
+    return { ok: false, failure: { kind: "wise_dimension_not_bank_account" } };
+  }
+
+  let invoiceInfoSnapshot: Awaited<ReturnType<typeof api.readonly.getInvoiceInfo>> | undefined;
   let autoDetectedInterAccountDimId: number | undefined;
   // Configured bank dimensions other than Wise that could be the transfer
   // counterpart, populated only when the counterpart is unresolved or invalid.
   let counterpartCandidateIds: number[] = [];
   const transferDecisions = new Map<WiseRow, WiseTransferDecision>();
   if (hintedRows.length > 0) {
-    [bankAccountsSnapshot, invoiceInfoSnapshot] = await Promise.all([
-      api.readonly.getBankAccounts(),
-      api.readonly.getInvoiceInfo(),
-    ]);
-    const { dimensions: bankDimensions, identityDimensions } = bankIdentitiesByDimension(bankAccountsSnapshot);
-    bankDimensionIds = bankDimensions;
-    postingDimensionsSnapshot = uniqueActivePostingDimensions(accountDimensionsSnapshot);
-    const configuredDimensions = new Set(
-      [...bankDimensions].filter(id => postingDimensionsSnapshot.has(id)),
-    );
-    const wiseDimensionId = isPositiveSafeInteger(accounts_dimensions_id)
-      ? accounts_dimensions_id
-      : undefined;
-    const otherDimensions = [...bankDimensions].filter(id => id !== wiseDimensionId);
+    invoiceInfoSnapshot = await api.readonly.getInvoiceInfo();
+    const wiseDimensionId = accounts_dimensions_id;
+    const otherDimensions = [...bankDimensionIds].filter(id => id !== wiseDimensionId);
     autoDetectedInterAccountDimId = otherDimensions.length === 1 ? otherDimensions[0] : undefined;
     const targetDimensionId = inter_account_dimension_id === undefined
       ? autoDetectedInterAccountDimId
@@ -290,9 +295,7 @@ async function runWiseImport(
     // created as a plain PROJECT row, duplicating a transfer an inter-account
     // journal may already book. Such a plan is blocked below (no handle, no
     // digest) until inter_account_dimension_id names the counterpart.
-    if (wiseDimensionId !== undefined && configuredDimensions.has(wiseDimensionId) && (
-      targetDimensionId === undefined || targetDimensionId === wiseDimensionId || !configuredDimensions.has(targetDimensionId)
-    )) {
+    if (targetDimensionId === undefined || targetDimensionId === wiseDimensionId || !configuredDimensions.has(targetDimensionId)) {
       counterpartCandidateIds = [...configuredDimensions].filter(id => id !== wiseDimensionId).sort((a, b) => a - b);
     }
     const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
@@ -311,9 +314,6 @@ async function runWiseImport(
       transferDecisions.set(row, decision);
     }
   }
-
-  // Get existing transactions for duplicate detection
-  const existingTx = (await api.transactions.listAll()).filter(isNonVoidTransaction);
 
   // Resolve the conditional journal / own-company reads BEFORE the pure
   // projection so the command build receives every ledger snapshot as data.

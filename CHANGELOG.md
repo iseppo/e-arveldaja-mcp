@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- **The Wise import refuses an `accounts_dimensions_id` that is not a bank account.** The Wise dimension was only checked for transfer rows, so a CSV of card payments booked every row onto whatever dimension was passed (for example an expense dimension, or a bank account that was unlinked or deleted). Now every Wise preview and execute first checks that the dimension belongs to a configured bank account with exactly one active posting dimension, and otherwise stops with `wise_dimension_not_bank_account` (`retry: never`, nothing written), also when a plan minted earlier is executed after the bank account was unlinked. The bank accounts are now read on every run, so a failed bank-account read also stops a card-only run.
 - **A CAMT dry run with nothing to create issues no plan.** It used to mint a `plan_handle` for zero creates, and the guided `process_bank_input` preview said `ready_for_approval`, although the standard approval was already refused. Now no `plan_handle` is issued (standard and guided), and the guided status is `completed` (`needs_review` when journal reviews, partial-legacy rows or errors remain) with a "Nothing to approve" message; the overflow hint for more than 3 warnings points at narrowing `date_from` / `date_to`.
 - **`skipped_details` reasons no longer read like an unfilled template.** The ledger id in a grouped already-booked reason is now `journal (see records)` / `transaction (see records)` instead of `{record_id}`.
 

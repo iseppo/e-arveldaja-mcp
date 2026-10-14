@@ -44,8 +44,12 @@ function setup() {
       findByName: vi.fn().mockResolvedValue([]),
     },
     readonly: {
-      getAccountDimensions: vi.fn().mockResolvedValue([{ id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false }]),
-      getBankAccounts: vi.fn().mockResolvedValue([]),
+      // The Wise account (dimension 5) is a linked bank account.
+      getAccountDimensions: vi.fn().mockResolvedValue([
+        { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false },
+        { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+      ]),
+      getBankAccounts: vi.fn().mockResolvedValue([{ accounts_dimensions_id: 5, account_name_est: "Wise EUR" }]),
       getInvoiceInfo: vi.fn().mockResolvedValue({}),
     },
     journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },

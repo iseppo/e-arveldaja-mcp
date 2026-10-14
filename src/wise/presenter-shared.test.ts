@@ -47,7 +47,7 @@ describe("wiseDigestInputRejection", () => {
 
 describe("simpleWiseFailureFromCode", () => {
   it("reprojects the simple operation error codes and refuses anything else", () => {
-    for (const kind of ["plan_handle_required", "digest_mismatch", "ownership_reapproval_required", "wise_client_not_found"] as const) {
+    for (const kind of ["plan_handle_required", "digest_mismatch", "ownership_reapproval_required", "wise_client_not_found", "wise_dimension_not_bank_account"] as const) {
       expect(simpleWiseFailureFromCode(kind)).toEqual({ kind });
     }
     expect(() => simpleWiseFailureFromCode("plan_drift")).toThrow("Unexpected Wise operation error code: plan_drift");

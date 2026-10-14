@@ -235,6 +235,18 @@ describe("process_bank_input — Wise journalized_transfer_ids", () => {
     }));
     expect(JSON.stringify(result)).toContain("unused_mapping");
   });
+
+  it("an override naming a dimension that is not a bank account is refused by the Wise import, before any write", async () => {
+    // The explicit override wins resolution even when it is not a bank
+    // candidate; the Wise executor then refuses it (wise_dimension_not_bank_account).
+    const { handler, api } = setup({
+      accountDimensions: [fixtureAccountDimension({ id: 7 }), fixtureAccountDimension({ id: 99 })],
+    });
+    const result = await handler({ mode: "prepare", file_path: csv, accounts_dimensions_id: 99 });
+    expect(result.isError).toBe(true);
+    expect(parse(result)).toMatchObject({ code: "wise_dimension_not_bank_account", mutation_occurred: false });
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
 });
 
 describe("process_bank_input — capability-aware elicitation + persisted default", () => {

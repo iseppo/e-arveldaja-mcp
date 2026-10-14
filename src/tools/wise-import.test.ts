@@ -205,6 +205,9 @@ const M03_OWNERSHIP_REASON = "Wise transfer ownership is unverified; both endpoi
 const M03_DIMENSIONS_CODE = "wise_transfer_dimensions_unverified";
 const M03_DIMENSIONS_REASON = "Wise and target dimensions must resolve to two distinct configured bank accounts before reconciliation.";
 
+const DEFAULT_WISE_DIMENSION = { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false };
+const DEFAULT_WISE_BANK_ACCOUNT = { accounts_dimensions_id: 5, account_name_est: "Wise EUR" };
+
 function setupWiseTool(
   existingTransactions: unknown[],
   createImpl?: ReturnType<typeof vi.fn>,
@@ -244,13 +247,18 @@ function setupWiseTool(
       findByName: vi.fn().mockResolvedValue(options.findByNameResult ?? []),
     },
     readonly: {
-      getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? [{
-        id: 9,
-        accounts_id: 8610,
-        title_est: "Muud finantskulud",
-        is_deleted: false,
-      }]),
-      getBankAccounts: vi.fn().mockResolvedValue(options.bankAccounts ?? []),
+      // Default: the Wise account (dimension 5) is a linked bank account, plus
+      // the 8610 fee dimension (wise_dimension_not_bank_account otherwise).
+      getAccountDimensions: vi.fn().mockResolvedValue(options.accountDimensions ?? [
+        DEFAULT_WISE_DIMENSION,
+        {
+          id: 9,
+          accounts_id: 8610,
+          title_est: "Muud finantskulud",
+          is_deleted: false,
+        },
+      ]),
+      getBankAccounts: vi.fn().mockResolvedValue(options.bankAccounts ?? [DEFAULT_WISE_BANK_ACCOUNT]),
       getInvoiceInfo: vi.fn().mockResolvedValue(options.invoiceInfo ?? {}),
     },
     journals: {
@@ -1155,7 +1163,7 @@ describe("wise import tool", () => {
     ]));
 
     const { handler } = setupWiseTool([], undefined, {
-      accountDimensions: [{
+      accountDimensions: [DEFAULT_WISE_DIMENSION, {
         id: 99,
         accounts_id: 5000,
         title_est: "Muud kulud",
@@ -1182,7 +1190,7 @@ describe("wise import tool", () => {
       .mockResolvedValueOnce({ created_object_id: 9050 })
       .mockResolvedValueOnce({ created_object_id: 9051 });
     const { api, handler } = setupWiseTool([], create, {
-      accountDimensions: [{
+      accountDimensions: [DEFAULT_WISE_DIMENSION, {
         id: 9,
         accounts_id: 8610,
         title_est: "Muud finantskulud",
@@ -1212,6 +1220,7 @@ describe("wise import tool", () => {
 
     const { handler } = setupWiseTool([], undefined, {
       accountDimensions: [
+        DEFAULT_WISE_DIMENSION,
         { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
         { id: 10, accounts_id: 8610, title_est: "Muud finantskulud 2", is_deleted: false },
       ],
@@ -2079,8 +2088,21 @@ describe("wise import tool", () => {
       readFailures.push({ item, outcome, api: setup.api, auditCalls: mockedLogAudit.mock.calls.length - auditBefore });
     }
 
+    // A Wise dimension that is not a configured bank account (unlinked, or a
+    // missing, deleted or duplicated posting dimension) is refused before any write.
+    const wiseDimensionRefused = new Set([
+      "Wise dimension is not configured as a bank account",
+      "Wise posting dimension missing",
+      "Wise posting dimension deleted",
+      "Wise posting dimension has an active malformed duplicate",
+    ]);
     for (const { item, outcome, api } of outcomes) {
       expect(outcome.error, item.label).toBeUndefined();
+      if (wiseDimensionRefused.has(item.label)) {
+        expect(outcome.payload, item.label).toMatchObject({ code: "wise_dimension_not_bank_account", mutation_occurred: false });
+        for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
+        continue;
+      }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([
         expect.objectContaining({
           wise_id: item.id,
@@ -2098,6 +2120,11 @@ describe("wise import tool", () => {
     }
     for (const { item, outcome, api } of structuralOutcomes) {
       expect(outcome.error, item.label).toBeUndefined();
+      if (wiseDimensionRefused.has(item.label)) {
+        expect(outcome.payload, item.label).toMatchObject({ code: "wise_dimension_not_bank_account", mutation_occurred: false });
+        for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
+        continue;
+      }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([{
         wise_id: item.id,
         code: M03_DIMENSIONS_CODE,
@@ -2129,7 +2156,10 @@ describe("wise import tool", () => {
     for (const { item, outcome, api, auditCalls } of readFailures) {
       expect(outcome.error, item.read).toBeInstanceOf(Error);
       expect((outcome.error as Error).message, item.read).toBe(item.message);
-      expect(api.transactions.listAll, item.read).not.toHaveBeenCalled();
+      // The transaction list is read with the bank accounts, before the
+      // transfer-only company identity read.
+      if (item.read === "invoice info") expect(api.transactions.listAll, item.read).toHaveBeenCalledTimes(1);
+      else expect(api.transactions.listAll, item.read).not.toHaveBeenCalled();
       expect(api.transactions.create, item.read).not.toHaveBeenCalled();
       expect(api.transactions.update, item.read).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.read).not.toHaveBeenCalled();
@@ -2150,6 +2180,7 @@ describe("wise import tool", () => {
       "explicit target is runtime non-number",
     ]);
     for (const { item, outcome, api } of [...outcomes, ...structuralOutcomes]) {
+      if (wiseDimensionRefused.has(item.label)) continue;
       const blocked = counterpartBlocked.has(item.label);
       expect(outcome.payload?.transfer_counterpart_required?.code, item.label)
         .toBe(blocked ? "wise_transfer_counterpart_required" : undefined);
@@ -2427,8 +2458,18 @@ describe("wise import tool", () => {
       outcomes.push({ item, outcome, api: setup.api });
     }
 
+    // A Wise dimension that is not a configured bank account (unlinked, or a
+    // missing, deleted or duplicated posting dimension) is refused before any write.
+    const wiseDimensionRefused = new Set([
+      "Wise source absent",
+    ]);
     for (const { item, outcome, api } of outcomes) {
       expect(outcome.error, item.label).toBeUndefined();
+      if (wiseDimensionRefused.has(item.label)) {
+        expect(outcome.payload, item.label).toMatchObject({ code: "wise_dimension_not_bank_account", mutation_occurred: false });
+        for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
+        continue;
+      }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([
         expect.objectContaining({
           wise_id: item.id,
@@ -2558,7 +2599,9 @@ describe("wise import tool", () => {
         expect.objectContaining({ wise_id: item.id, status: item.expectedStatus }),
       ]);
       expect(outcome.payload?.execution.needs_review).toEqual([]);
-      expect(api.readonly.getBankAccounts, item.id).not.toHaveBeenCalled();
+      // Every run reads the bank accounts once (the Wise dimension must be a
+      // configured bank account); company identity is still transfer-only.
+      expect(api.readonly.getBankAccounts, item.id).toHaveBeenCalledTimes(1);
       expect(api.readonly.getInvoiceInfo, item.id).not.toHaveBeenCalled();
       expect(api.journals.listAllWithPostings, item.id).not.toHaveBeenCalled();
       expect(api.transactions.create, item.id).toHaveBeenCalledTimes(item.execute ? 1 : 0);
@@ -4923,7 +4966,7 @@ describe("wise import tool", () => {
       const { handler, api } = setupWiseTool([]);
 
       const payload = parseWiseResponse(await handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
       }));
 
       expectPreflightFailure(payload);
@@ -4955,7 +4998,7 @@ describe("wise import tool", () => {
       ));
       const second = setupWiseTool([]);
       const okPayload = parseWiseResponse(await second.handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false,
       }));
       expect(okPayload.category).not.toBe("import_preflight_failed");
 
@@ -4969,7 +5012,7 @@ describe("wise import tool", () => {
         withHeader(paddedHeader, [VALID_ROW]), "utf8",
       ));
       const padded = parseWiseResponse(await setupWiseTool([]).handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false,
       }));
       expect(padded.category, "a padded header must normalize, not reject").not.toBe("import_preflight_failed");
 
@@ -4982,7 +5025,7 @@ describe("wise import tool", () => {
         withHeader(wrongCaseHeader, [VALID_ROW]), "utf8",
       ));
       const wrongCase = parseWiseResponse(await setupWiseTool([]).handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
       }));
       expectPreflightFailure(wrongCase);
       expect(wrongCase.rejected_fields).toEqual(expect.arrayContaining([
@@ -5001,7 +5044,7 @@ describe("wise import tool", () => {
       const { handler, api } = setupWiseTool([]);
 
       const payload = parseWiseResponse(await handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
       }));
 
       expectPreflightFailure(payload);
@@ -5025,7 +5068,7 @@ describe("wise import tool", () => {
       mockedReadFile.mockResolvedValue(Buffer.from(`${CSV_HEADER}\n`, "utf8"));
       const headersOnly = setupWiseTool([]);
       await expect(
-        headersOnly.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true }),
+        headersOnly.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true }),
         "a headers-only CSV must fail, not import zero rows",
       ).rejects.toThrow("CSV has no data rows");
       expectNoWiseReadsOrMutations(headersOnly.api);
@@ -5107,7 +5150,7 @@ describe("wise import tool", () => {
       const { handler, api } = setupWiseTool([]);
 
       const payload = parseWiseResponse(await handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
       }));
 
       expectPreflightFailure(payload);
@@ -5253,7 +5296,7 @@ describe("wise import tool", () => {
 
       // A malformed execute digest is rejected before the file is even resolved.
       const badDigest = parseWiseResponse(await rawHandler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
         approved_command_digest: "not-a-digest",
       }));
       expect(badDigest.category).toBe("digest_mismatch");
@@ -5262,7 +5305,7 @@ describe("wise import tool", () => {
       // A valid dry run plans the command and exposes an approval digest.
       clearWiseCallHistory(api);
       const preview = parseWiseResponse(await rawHandler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false,
       }));
       expect(preview.category).not.toBe("import_preflight_failed");
       expect(preview.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
@@ -5350,7 +5393,7 @@ describe("wise import tool", () => {
       const { rawHandler, api } = setupWiseTool([]);
 
       const preview = parseWiseResponse(await rawHandler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false,
       }));
 
       // The blank finish time rejects nothing.
@@ -5371,7 +5414,7 @@ describe("wise import tool", () => {
          "0", "EUR", "0", "EUR", "Seppo OÜ", "80", "EUR", "V", "80", "EUR", "1", "R6", "", "", "General", ""],
       ]), "utf8"));
       const blankCreated = parseWiseResponse(await rawHandler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: false,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false,
       }));
       expect(blankCreated.category).toBe("import_preflight_failed");
       expect(blankCreated.rejected_fields).toEqual([
@@ -5471,7 +5514,7 @@ describe("wise import tool", () => {
       const { handler, api } = setupWiseTool([]);
 
       const payload = parseWiseResponse(await handler({
-        file_path: "/tmp/wise.csv", accounts_dimensions_id: 10, execute: true,
+        file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: true,
       }));
 
       expectPreflightFailure(payload);
@@ -6768,7 +6811,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     const setup = setupWiseTool([
       { id: 7200, status: "CONFIRMED", is_deleted: false, date: "2026-06-10", amount: 100, cl_currencies_id: "EUR", description: "WISE:M6-FEE Ordinary Vendor [source_direction=OUT]" },
       { id: 7201, status: "CONFIRMED", is_deleted: false, date: "2026-06-10", amount: 2, cl_currencies_id: "EUR", description: "WISE:FEE:M6-FEE Wise teenustasu [source_direction=OUT]" },
-    ], undefined, { clients: [{ id: 1, name: "Not Wise" }], accountDimensions: [] });
+    ], undefined, { clients: [{ id: 1, name: "Not Wise" }], accountDimensions: [DEFAULT_WISE_DIMENSION] });
 
     const result = await setup.handler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false }) as any;
     const payload = parseWiseResponse(result);
@@ -6958,5 +7001,74 @@ describe("Wise id output policy: validated identifiers raw, free-form text wrapp
     const guided = await runWithToolProfile("guided", async () =>
       parseWiseResponse(await setup.rawHandler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false })));
     for (const id of collect(guided).filter(id => id !== "wise-import")) expect(id).toMatch(identifier);
+  });
+});
+
+describe("Wise dimension must be a configured bank account (wise_dimension_not_bank_account)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+  const baseArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 };
+  const expectRefusal = (result: any) => {
+    expect(result.isError).toBe(true);
+    const payload = parseWiseResponse(result);
+    expect(payload).toMatchObject({
+      category: "wise_dimension_not_bank_account",
+      code: "wise_dimension_not_bank_account",
+      retry: "never",
+      mutation_occurred: false,
+    });
+    expect(payload.error).toContain("is not the dimension of a bank account in e-arveldaja");
+    expect(payload.error).not.toContain("5");
+  };
+
+  it("refuses a card-only CSV on a dimension that is not a bank account, on dry run and execute", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-06-11")]));
+    const setup = setupWiseTool([], undefined, { bankAccounts: [] });
+
+    expectRefusal(await setup.rawHandler({ ...baseArgs, execute: false }));
+    expectRefusal(await setup.handler({ ...baseArgs, execute: true }));
+    expectNoWiseMutations(setup.api);
+  });
+
+  it.each([
+    ["deleted", [{ ...DEFAULT_WISE_DIMENSION, is_deleted: true }]],
+    ["duplicated", [DEFAULT_WISE_DIMENSION, { ...DEFAULT_WISE_DIMENSION, title_est: "Duplicate" }]],
+    ["missing", []],
+  ])("refuses a card-only CSV when the Wise posting dimension is %s", async (_label, accountDimensions) => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-06-11")]));
+    const setup = setupWiseTool([], undefined, { accountDimensions });
+
+    expectRefusal(await setup.rawHandler({ ...baseArgs, execute: false }));
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("a bank-account read failure also fails a card-only run, before any write", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-06-11")]));
+    const setup = setupWiseTool([]);
+    setup.api.readonly.getBankAccounts.mockRejectedValue(new Error("bank identity read failed"));
+
+    await expect(setup.rawHandler({ ...baseArgs, execute: false })).rejects.toThrow("bank identity read failed");
+    expect(setup.api.transactions.listAll).not.toHaveBeenCalled();
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("a handle minted while the Wise account was linked is refused after unlinking, with zero mutations", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-06-11")]));
+    const setup = setupWiseTool([]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+    expect(dry.plan_handle).toEqual(expect.any(String));
+    expect(dry.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
+
+    setup.api.readonly.getBankAccounts.mockResolvedValue([]);
+    clearWiseCallHistory(setup.api);
+    expectRefusal(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expectNoWiseMutations(setup.api);
   });
 });

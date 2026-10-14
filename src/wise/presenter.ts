@@ -138,6 +138,21 @@ export function wiseTransferCounterpartRequiredResult() {
   });
 }
 
+/** The Wise accounts_dimensions_id is not the dimension of a configured bank
+ * account (unlinked, deleted or duplicated): refused before any write, on dry
+ * run and execute alike. The id is not echoed (simple kind). */
+export function wiseDimensionNotBankAccountResult() {
+  return toolError({
+    error: "The Wise accounts_dimensions_id is not the dimension of a bank account in e-arveldaja. Nothing was created. Link the Wise account as a bank account in e-arveldaja (bank account → account dimension), or pass the accounts_dimensions_id of the Wise bank account.",
+    category: "wise_dimension_not_bank_account",
+    code: "wise_dimension_not_bank_account",
+    retry: "never",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  });
+}
+
 export function wiseClientNotFoundResult() {
   return toolError({
     error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
@@ -172,6 +187,7 @@ export function simpleWiseFailureFromCode(code: string): WiseFailure {
     case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
     case "wise_client_not_found": return { kind: "wise_client_not_found" };
     case "wise_transfer_counterpart_required": return { kind: "wise_transfer_counterpart_required" };
+    case "wise_dimension_not_bank_account": return { kind: "wise_dimension_not_bank_account" };
     default: throw new Error(`Unexpected Wise operation error code: ${code}`);
   }
 }
@@ -188,6 +204,7 @@ export function renderWiseFailure(failure: WiseFailure) {
     case "ownership_reapproval_required": return ownershipReapprovalRequiredResult();
     case "wise_client_not_found": return wiseClientNotFoundResult();
     case "wise_transfer_counterpart_required": return wiseTransferCounterpartRequiredResult();
+    case "wise_dimension_not_bank_account": return wiseDimensionNotBankAccountResult();
   }
 }
 
