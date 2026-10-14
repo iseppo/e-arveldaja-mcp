@@ -17,6 +17,7 @@ import type { FileInputSource, FileInputIdentity } from "../file-input-snapshot.
 import {
   bookedCurrencyForWiseRow,
   counterpartyNameForWiseRow,
+  isAlreadyBookedWiseSkipReason,
   isNonErrorWiseSkipReason,
   summarizeWiseSkippedEntries,
 } from "./preflight.js";
@@ -283,7 +284,23 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...group,
     reason: wrapUntrustedOcr(group.reason) ?? group.reason,
   }));
-  const sanitizedExecutionSkipped = executionSkipped.map(sanitizeReason);
+  // Dry run: already-booked rows are not repeated one by one in
+  // execution.skipped — skipped_details groups them (with per-row `records`
+  // for ledger-matched rows). Every other skip stays itemised; an executed run
+  // keeps the full per-row record.
+  const dryRun = mode === "DRY_RUN";
+  const displayedExecutionSkipped = dryRun
+    ? executionSkipped.filter(entry => !isAlreadyBookedWiseSkipReason(entry.reason))
+    : executionSkipped;
+  const sanitizedExecutionSkipped = displayedExecutionSkipped.map(sanitizeReason);
+  // Dry run: no-op inter-account commands (the transfer is already booked by a
+  // journal; execute only re-asserts that journal's state) are listed as a
+  // compact table instead of full command objects. The approval digest is
+  // computed from the internal command list, never from this display.
+  const isAlreadyJournalizedCommand = (command: WiseImportCommand): command is Extract<WiseImportCommand, { action: "inter_account" }> =>
+    command.action === "inter_account" && command.mutation_mode === "create_only_already_journalized";
+  const alreadyJournalizedCommands = dryRun ? commands.filter(isAlreadyJournalizedCommand) : [];
+  const displayedCommands = dryRun ? commands.filter(command => !isAlreadyJournalizedCommand(command)) : commands;
   const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
   const workflowArgs = {
     ...(file_ref !== undefined ? { file_ref } : {}),
@@ -373,7 +390,26 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
             errors: sanitizedExecutionErrors,
             needs_review: ownershipReviews,
           }),
-          commands: commands.map(projectWiseCommand),
+          commands: displayedCommands.map(projectWiseCommand),
+          ...(dryRun ? {
+            skipped_displayed: displayedExecutionSkipped.length,
+            skipped_omitted_already_booked: executionSkipped.length - displayedExecutionSkipped.length,
+            ...(executionSkipped.length > displayedExecutionSkipped.length
+              ? { skipped_omitted_note: "Already-booked rows are grouped in skipped_details (records lists each ledger-matched row's journal/transaction id)." }
+              : {}),
+          } : {}),
+          ...(alreadyJournalizedCommands.length > 0 ? {
+            already_journalized_command_count: alreadyJournalizedCommands.length,
+            already_journalized_commands: alreadyJournalizedCommands.map(command => ({
+              wise_id: wrapUntrustedOcr(command.wise_id) ?? command.wise_id,
+              existing_journal_id: command.existing_journal_id,
+              date: command.date,
+              booked_amount: command.booked_amount,
+              booked_currency: command.booked_currency,
+              source_direction: command.source_direction,
+            })),
+            already_journalized_note: "No writes: execute re-checks that each journal is unchanged before accepting the row as already booked.",
+          } : {}),
         },
       }),
     }],

@@ -2527,10 +2527,13 @@ describe("wise import tool", () => {
 
     expect(duplicateOutcome.error).toBeUndefined();
     expect(duplicateOutcome.payload?.results).toEqual([]);
-    expect(duplicateOutcome.payload?.execution.skipped).toEqual([{
-      wise_id: duplicateId,
+    // Dry run: already-booked rows are grouped in skipped_details, not itemised.
+    expect(duplicateOutcome.payload?.execution.skipped).toEqual([]);
+    expect(duplicateOutcome.payload?.execution.skipped_omitted_already_booked).toBe(1);
+    expect(duplicateOutcome.payload?.skipped_details).toEqual([expect.objectContaining({
       reason: expect.stringMatching(wrapped("Already imported (Wise ID match)")),
-    }]);
+      sample_ids: [duplicateId],
+    })]);
     expect(duplicateOutcome.payload?.execution.needs_review).toEqual([]);
     expect(duplicateOutcome.payload?.ownership_reviews ?? []).toEqual([]);
     expect(duplicateSetup.api.transactions.create).not.toHaveBeenCalled();
@@ -2790,20 +2793,17 @@ describe("wise import tool", () => {
     ]);
 
     // m4: an already-journalized transfer creates no Wise bank row at all.
-    expect(payload.execution.commands).toEqual([
-      expect.objectContaining({
-        action: "inter_account",
-        mutation_mode: "create_only_already_journalized",
-        depends_on: null,
-        existing_journal_id: 441,
-        client_update: null,
-        confirmation_distribution: null,
-      }),
+    // Dry run lists the no-op command compactly; nothing mutating is planned.
+    expect(payload.execution.commands).toEqual([]);
+    expect(payload.execution.already_journalized_command_count).toBe(1);
+    expect(payload.execution.already_journalized_commands).toEqual([
+      expect.objectContaining({ existing_journal_id: 441 }),
     ]);
     expect(payload.results).toEqual([]);
-    expect(payload.execution.skipped).toEqual([expect.objectContaining({
-      wise_id: "TRANSFER-M04-JOURNAL",
-      reason: expect.stringMatching(wrapped("Already journalized: inter-account journal 441 books this transfer; no Wise bank row created")),
+    expect(payload.execution.skipped).toEqual([]);
+    expect(payload.skipped_details).toEqual([expect.objectContaining({
+      reason: expect.stringMatching(wrapped("Already journalized: inter-account journal {record_id} books this transfer; no Wise bank row created")),
+      records: [{ wise_id: "TRANSFER-M04-JOURNAL", record_id: 441 }],
     })]);
     expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
     expect(repeatedPayload.execution.commands.filter((command: any) => command.action === "main_create")).toEqual([
@@ -4107,12 +4107,8 @@ describe("wise import tool", () => {
         inter_account_dimension_id: 20,
       });
 
-      expect(dry.execution.commands).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          action: "inter_account",
-          mutation_mode: "create_only_already_journalized",
-          existing_journal_id: 441,
-        }),
+      expect(dry.execution.already_journalized_commands).toEqual(expect.arrayContaining([
+        expect.objectContaining({ existing_journal_id: 441 }),
       ]));
       expect(setup.api.journals.listAllWithPostings, label).toHaveBeenCalledTimes(2);
       expect(setup.api.transactions.update, label).not.toHaveBeenCalled();
@@ -4377,8 +4373,9 @@ describe("wise import tool", () => {
       approval_required: false,
     }]);
     expect(duplicatePayload.results).toEqual([]);
-    expect(duplicatePayload.execution.skipped).toEqual([
-      expect.objectContaining({ wise_id: "TRANSFER-M04-LEGACY-DUPLICATE" }),
+    expect(duplicatePayload.execution.skipped).toEqual([]);
+    expect(duplicatePayload.skipped_details).toEqual([
+      expect.objectContaining({ sample_ids: ["TRANSFER-M04-LEGACY-DUPLICATE"] }),
     ]);
     expect(duplicatePayload.execution.needs_review).toEqual([]);
     expect(duplicatePayload.ownership_reviews ?? []).toEqual([]);
@@ -5947,7 +5944,10 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
 
-    expect(dry.execution.commands).toEqual([expect.objectContaining({
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 501 })]);
+    // The executed run keeps the full command objects.
+    expect(executed.execution.commands).toEqual([expect.objectContaining({
       action: "inter_account",
       mutation_mode: "create_only_already_journalized",
       existing_journal_id: 501,
@@ -5969,7 +5969,9 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
 
-    expect(dry.execution.commands).toEqual([expect.objectContaining({
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 502 })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({
       action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 502,
     })]);
     expect(dry.execution.needs_review).toEqual([]);
@@ -6021,8 +6023,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     expect(dry.execution.commands).toEqual([
       expect.objectContaining({ action: "main_create", row_key: "row:1:main" }),
-      expect.objectContaining({ action: "inter_account", row_key: "row:0:inter_account", existing_journal_id: 503 }),
     ]);
+    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 503 })]);
     expect(dry.execution.needs_review).toEqual([
       expect.objectContaining({ wise_id: "TRANSFER-M1-B", code: "wise_transfer_journal_ambiguous" }),
     ]);
@@ -6083,7 +6085,9 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const setup = setupWiseTool([], undefined, transferOptions(journals));
     const { dry, executed } = await runApprovedWiseImport(setup, { ...transferArgs, ...mapping });
-    expect(dry.execution.commands).toEqual([expect.objectContaining({
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 510 })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({
       action: "inter_account",
       mutation_mode: "create_only_already_journalized",
       existing_journal_id: 510,
@@ -6148,9 +6152,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([row]));
     const setup = setupWiseTool([storedFee], undefined, transferOptions([netJournal(701)]));
     const { dry } = await runApprovedWiseImport(setup, transferArgs);
-    expect(dry.execution.commands).toEqual([expect.objectContaining({
-      action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 701,
-    })]);
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 701 })]);
     expect(setup.api.transactions.create).not.toHaveBeenCalled();
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
 
@@ -6232,9 +6235,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     it("a journal reproducing both bank nets and debiting the fee books the row and its fee", async () => {
       const dry = await run(outJournal(730, [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit]));
-      expect(dry.execution.commands).toEqual([expect.objectContaining({
-        action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 730,
-      })]);
+      expect(dry.execution.commands).toEqual([]);
+      expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 730 })]);
       expect(dry.execution.needs_review).toEqual([]);
     });
 

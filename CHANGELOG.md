@@ -11,6 +11,8 @@
 
 - **`import_wise_transactions` groups already-booked skips by reason.** `skipped_details` made one group per ledger record, because the record id was part of the reason text (35 groups on a live CSV). The id is now templated out of the group reason (`journal {record_id}` / `transaction {record_id}`), and each group lists every row's record in `records` (`wise_id`, `record_id`); on the live CSV that is 5 groups. Error reasons are grouped verbatim as before.
 
+- **`import_wise_transactions` dry runs are about four times smaller** (81 KB → 21 KB on a live 169-row CSV). In a dry run, transfers already booked by a journal (no-op `create_only_already_journalized` commands) are listed as a compact `execution.already_journalized_commands` table (`wise_id`, `existing_journal_id`, date, amount, currency, direction) instead of full command objects, and already-booked skips are no longer repeated one by one in `execution.skipped` (counted in `skipped_omitted_already_booked`, grouped in `skipped_details`). Commands that write, other skips, errors, the approval digest, `command_count` and the summary are unchanged, and an executed run keeps everything itemised.
+
 ### Documentation
 
 - **`EARVELDAJA_ALLOWED_PATHS` replaces the default file roots** (working directory + OS temp directory, `$TMPDIR`), it does not add to them; `EARVELDAJA_ALLOW_HOME` is ignored while it is set. README, `.env.example` and `server.json` said otherwise.

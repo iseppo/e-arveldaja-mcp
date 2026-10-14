@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { renderWiseImportCompact, type WiseImportRenderData } from "./presenter.js";
+import { renderWiseImportCompact, renderWiseImportFull, type WiseImportRenderData } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
-import type { WiseCreatedEntry, WiseRow, WiseSkippedEntry } from "./types.js";
+import type { InterAccountCommand, WiseCreatedEntry, WiseImportCommand, WiseRow, WiseSkippedEntry } from "./types.js";
+import { parseMcpResponse } from "../mcp-json.js";
 
 // B2: the guided compact Wise response must stay approximately CONSTANT in size
 // as the clean-row count grows, and always fit under the batch response budget.
@@ -269,5 +270,64 @@ describe("renderWiseImportCompact — fee rows vote on the totals currency", () 
     const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
     expect(warning).toBeDefined();
     expect(warning!.message).toContain("USD");
+  });
+});
+
+describe("renderWiseImportFull — dry-run slimming", () => {
+  function noOpCommand(index: number, journalId: number): InterAccountCommand {
+    return {
+      version: "wise_import_command_v2" as InterAccountCommand["version"],
+      action: "inter_account",
+      mutation_mode: "create_only_already_journalized",
+      row_index: index, row_key: `row:${index}:inter_account`, identity_hash: "h".repeat(64),
+      wise_id: `TRANSFER-${index}`, date: "2026-07-19", transaction_type: "C", source_direction: "OUT",
+      booked_amount: 100, booked_currency: "EUR", source_amount: 100, source_currency: "EUR",
+      target_amount: 100, target_currency: "EUR", exchange_rate: 1, exchange_rate_orientation: "source_to_target",
+      wise_dimension_id: 5, depends_on: null, counterpart_dimension_id: 20, flow_source_dimension_id: 5,
+      flow_target_dimension_id: 20, posting_account_id: 1020, posting_dimension_id: 20,
+      ownership_basis: "verified_endpoints" as InterAccountCommand["ownership_basis"],
+      existing_journal_id: journalId, client_update: null, confirmation_distribution: null,
+      current_journal_state: {}, current_client_state: null,
+    };
+  }
+
+  function slimData(mode: "DRY_RUN" | "EXECUTED"): WiseImportRenderData {
+    const data = makeData(0, mode);
+    const commands: WiseImportCommand[] = [noOpCommand(1, 501), noOpCommand(2, 502)];
+    const skipped: WiseSkippedEntry[] = [
+      { wise_id: "TRANSFER-1", reason: "Already journalized: inter-account journal 501 books this transfer; no Wise bank row created" },
+      { wise_id: "TRANSFER-2", reason: "Already journalized: inter-account journal 502 books this transfer; no Wise bank row created" },
+      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
+      { wise_id: "ODD-1", reason: "Unsupported Wise direction \"NEUTRAL\"" },
+      { wise_id: "FEE:X", reason: "Skipped because main transaction was not created" },
+    ];
+    return { ...data, commands, skipped };
+  }
+
+  const render = (data: WiseImportRenderData) => parseMcpResponse(renderWiseImportFull(data).content[0]!.text) as any;
+
+  it("dry run: no-op commands become a compact table; already-booked skips are omitted, others stay itemised", () => {
+    const out = render(slimData("DRY_RUN"));
+    expect(out.execution.commands).toEqual([]);
+    expect(out.execution.already_journalized_command_count).toBe(2);
+    expect(out.execution.already_journalized_commands).toEqual([
+      expect.objectContaining({ existing_journal_id: 501, date: "2026-07-19", booked_amount: 100, booked_currency: "EUR", source_direction: "OUT" }),
+      expect.objectContaining({ existing_journal_id: 502 }),
+    ]);
+    expect(String(out.execution.already_journalized_commands[0].wise_id)).toMatch(/UNTRUSTED_OCR_START/);
+    expect(out.execution.skipped.map((entry: any) => entry.wise_id)).toEqual(["ODD-1", "FEE:X"]);
+    expect(out.execution.skipped_displayed).toBe(2);
+    expect(out.execution.skipped_omitted_already_booked).toBe(3);
+    // Internal counts are unchanged.
+    expect(out.command_count).toBe(2);
+    expect(out.summary.skipped).toBe(5);
+  });
+
+  it("executed run keeps every command object and every skipped row", () => {
+    const out = render(slimData("EXECUTED"));
+    expect(out.execution.commands).toHaveLength(2);
+    expect(out.execution.already_journalized_commands).toBeUndefined();
+    expect(out.execution.skipped).toHaveLength(5);
+    expect(out.execution.skipped_omitted_already_booked).toBeUndefined();
   });
 });

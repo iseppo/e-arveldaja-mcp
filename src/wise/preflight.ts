@@ -499,6 +499,16 @@ export function isNonErrorWiseSkipReason(reason: string): boolean {
     reason === "Skipped because main transaction was not created";
 }
 
+/** A skip because the row (or its fee) is already in the ledger — nothing to
+ * review or fix. Narrower than {@link isNonErrorWiseSkipReason}, which also
+ * covers unsupported directions and dependency skips. */
+export function isAlreadyBookedWiseSkipReason(reason: string): boolean {
+  return reason.startsWith("Already imported") ||
+    reason.startsWith("Already journalized") ||
+    reason.startsWith("Fee already imported") ||
+    reason.startsWith("Fee already journalized");
+}
+
 // Already-booked reasons name the ledger record that books the row ("inter-account
 // journal 29443702 books this transfer"). Grouping on the raw text made one group
 // per record (35 groups, ~89 KB on a live CSV), so the id is templated out of the
