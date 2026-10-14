@@ -375,6 +375,17 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
   });
 });
 
+describe("resolveWiseRowCounterparts — review findings 0f4e518", () => {
+  it("M1: a CONFIRMED evidence row whose registration journal is not in the snapshot is uncertain, never strong", () => {
+    const confirmedNoJournal = { ...camtTx(1, LHV), status: "CONFIRMED" } as Transaction;
+    expect(only(resolve({ existingTx: [confirmedNoJournal], journals: [] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+    });
+    // The same row unconfirmed (no journal expected) stays strong evidence.
+    expect(only(resolve({ existingTx: [camtTx(1, LHV)], journals: [] }))).toEqual({ dim: LHV, basis: "evidence" });
+  });
+});
+
 describe("wiseCounterpartHoldReview texts", () => {
   const review = (code: "wise_transfer_counterpart_conflict" | "wise_transfer_dimensions_unverified", evidence: number[]) =>
     wiseCounterpartHoldReview(row("TRANSFER-1"), { code, candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: evidence }, true, false).reason;

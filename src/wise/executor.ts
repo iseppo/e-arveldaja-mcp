@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AccountDimension, BankAccount, Journal } from "../types/api.js";
+import type { AccountDimension, BankAccount, Journal, Transaction } from "../types/api.js";
 import type { ApiContext } from "../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
@@ -71,6 +71,7 @@ import {
 } from "./projection.js";
 import type {
   ImportRejectedField,
+  InterAccountCommand,
   MainCreateCommand,
   WiseImportCommand,
   WiseInterAccountResult,
@@ -600,15 +601,18 @@ async function runWiseImport(
       const runtimeIds = new Map<string, number>();
       const successfulCommands = new Set<string>();
       let stoppedIndeterminate = false;
-      // Per-transfer-leg Wise-side guard: immediately before each write of a
-      // transfer row (main create, fee create, fee confirm, inter-account
-      // confirm) the journals are read again and the plan's identity and
-      // evidence checks re-run. Exempt: the leg's proven coverage, this run's
-      // own registration journals, and journals unchanged since the reviewed
-      // snapshot (so execute is never stricter than the preview, and an
-      // acknowledgement holds only while its journals are unchanged). A block
-      // or a failed read skips the rest of that row; other rows proceed.
-      // Card rows are not transfer rows: they never re-read journals.
+      // Per-transfer-leg Wise-side guard: before each write of a transfer row
+      // (main create, fee create, fee confirm, inter-account confirm) the
+      // plan's identity and evidence checks re-run on fresh journals. The
+      // journals are read once per row, just before its first write; the row's
+      // later creates and its fee confirm reuse that read, since the only
+      // writes in between are this row's own creates (no journal). The
+      // inter-account confirm reads again. Exempt: the leg's proven coverage,
+      // this run's own registration journals, and journals unchanged since
+      // the reviewed snapshot (so execute is never stricter than the preview,
+      // and an acknowledgement holds only while its journals are unchanged).
+      // A block or a failed read skips the rest of that row; other rows
+      // proceed. Card rows are not transfer rows: they never re-read journals.
       const holdCheckByRow = new Map(projected.holdCheckRows.map(check => [check.row_index, check]));
       const wiseLabels = knownWiseLabelsFor(rows, existingTx);
       const snapshotJournals = new Map(journalSnapshot.filter(journal => journal.id !== undefined).map(journal => [journal.id!, journal]));
@@ -641,21 +645,60 @@ async function runWiseImport(
           ? `journal ${blocking.join(", ")} on the Wise account may already book this transfer's ${legKind} leg (appeared or changed since the reviewed plan)`
           : undefined;
       };
-      // Reads the journals and runs the guard for one leg; a failed read skips the row.
-      const guardWiseLeg = async (command: WiseImportCommand, legKind: "main" | "fee"): Promise<void> => {
-        if (holdCheckByRow.get(command.row_index)?.legs[legKind] === undefined) return;
-        let freshJournals: Journal[];
-        try {
-          clearRuntimeCaches();
-          freshJournals = await api.journals.listAllWithPostings();
-        } catch (error) {
-          blockedRows.add(command.row_index);
-          throw new Error(`Wise-side journal re-check failed before the ${legKind} leg was written: ${error instanceof Error ? error.message : String(error)}`);
+      // The row's counterpart, resolved again from the fresh ledger, must
+      // still be the one the plan confirms against.
+      const counterpartDrift = (row: WiseRow, command: InterAccountCommand, freshTransactions: Transaction[], freshJournals: Journal[]): string | undefined => {
+        if (otherDimensions.size === 0) return undefined;
+        const resolution = resolveWiseRowCounterparts({
+          rows: [row],
+          allRows: rows,
+          wiseDim: command.wise_dimension_id,
+          otherDims: otherDimensions,
+          existingTx: freshTransactions.filter(isNonVoidTransaction),
+          journals: freshJournals,
+          lookups: bankAccountLookups,
+          companyLegalName: invoiceInfoSnapshot?.invoice_company_name ?? undefined,
+          explicit: inter_account_dimension_id,
+        }).get(row);
+        const resolved = resolution === undefined ? undefined : "dim" in resolution ? resolution.dim : undefined;
+        return resolved === command.counterpart_dimension_id
+          ? undefined
+          : `Stale counterpart precondition: the transfer's counterpart bank account is no longer ${command.counterpart_dimension_id} (${resolution !== undefined && "hold" in resolution ? resolution.hold.code : "changed"})`;
+      };
+      const rowJournals = new Map<number, Journal[]>();
+      // Runs the guard for one leg on the row's journal read (taken on its
+      // first write); a failed read skips the row. Before the main create of a
+      // row the plan confirms against another bank, the counterpart is
+      // re-resolved too, so a changed counterpart writes nothing for the row.
+      const guardWiseLeg = async (command: WiseImportCommand, legKind: "main" | "fee", freshTransactions: Transaction[]): Promise<void> => {
+        const interAccount = legKind === "main"
+          ? commands.find((candidate): candidate is InterAccountCommand =>
+            candidate.action === "inter_account" && candidate.row_index === command.row_index)
+          : undefined;
+        if (holdCheckByRow.get(command.row_index)?.legs[legKind] === undefined && interAccount === undefined) return;
+        let freshJournals = rowJournals.get(command.row_index);
+        if (freshJournals === undefined) {
+          try {
+            clearRuntimeCaches();
+            freshJournals = await api.journals.listAllWithPostings();
+          } catch (error) {
+            blockedRows.add(command.row_index);
+            throw new Error(`Wise-side journal re-check failed before the ${legKind} leg was written: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          rowJournals.set(command.row_index, freshJournals);
         }
         const block = wiseSideBlock(command, legKind, freshJournals);
         if (block !== undefined) {
           blockedRows.add(command.row_index);
           throw new Error(`Stale Wise-side precondition: ${block}`);
+        }
+        const row = eligible.find(candidate => candidate.rowIndex === command.row_index);
+        const drift = interAccount === undefined || row === undefined
+          ? undefined
+          : counterpartDrift(row, interAccount, freshTransactions, freshJournals);
+        if (drift !== undefined) {
+          blockedRows.add(command.row_index);
+          throw new Error(drift);
         }
       };
       for (const command of commands) {
@@ -680,7 +723,7 @@ async function runWiseImport(
           if (transactionCommandExists(command, freshTransactions)) {
             throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
           }
-          await guardWiseLeg(command, "main");
+          await guardWiseLeg(command, "main", freshTransactions);
           const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
           const apiId = result.created_object_id;
           if (apiId === undefined) throw new Error("Wise transaction creation returned no object ID");
@@ -721,7 +764,7 @@ async function runWiseImport(
           if (transactionCommandExists(command, freshTransactions)) {
             throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
           }
-          await guardWiseLeg(command, "fee");
+          await guardWiseLeg(command, "fee", freshTransactions);
           const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
           const apiId = result.created_object_id;
           if (apiId === undefined) throw new Error("Wise fee creation returned no object ID");
@@ -745,7 +788,7 @@ async function runWiseImport(
             if (!createdTransactionMatchesApprovedPayload(createdTransaction, apiId, command.create_payload)) {
               throw new Error(`Stale created transaction precondition: fee transaction ${apiId} is missing or changed before confirmation`);
             }
-            await guardWiseLeg(command, "fee");
+            await guardWiseLeg(command, "fee", freshTransactions);
             await api.transactions.confirm(apiId, command.confirmation_distribution);
             successfulCommands.add(command.row_key);
             logAudit({
@@ -862,25 +905,9 @@ async function runWiseImport(
             // The full Wise-side guard on the main leg, beyond the pair.
             const wiseSide = wiseSideBlock(command, "main", freshJournals);
             if (wiseSide !== undefined) throw new Error(`Stale Wise-side precondition: ${wiseSide}`);
-            // The row's counterpart, resolved again from the fresh ledger, must
-            // still be the one the plan confirms against.
-            if (sourceRow !== undefined && otherDimensions.size > 0) {
-              const resolution = resolveWiseRowCounterparts({
-                rows: [sourceRow],
-                allRows: rows,
-                wiseDim: command.wise_dimension_id,
-                otherDims: otherDimensions,
-                existingTx: freshTransactions.filter(isNonVoidTransaction),
-                journals: freshJournals,
-                lookups: bankAccountLookups,
-                companyLegalName: invoiceInfoSnapshot?.invoice_company_name ?? undefined,
-                explicit: inter_account_dimension_id,
-              }).get(sourceRow);
-              const resolved = resolution === undefined ? undefined : "dim" in resolution ? resolution.dim : undefined;
-              if (resolved !== command.counterpart_dimension_id) {
-                throw new Error(`Stale counterpart precondition: the transfer's counterpart bank account is no longer ${command.counterpart_dimension_id} (${resolution !== undefined && "hold" in resolution ? resolution.hold.code : "changed"})`);
-              }
-            }
+            // Checked again at the confirm (first before the main create).
+            const drift = sourceRow === undefined ? undefined : counterpartDrift(sourceRow, command, freshTransactions, freshJournals);
+            if (drift !== undefined) throw new Error(drift);
             if (command.client_update) await api.transactions.update(apiId, command.client_update);
             if (!command.confirmation_distribution) throw new Error("Inter-account confirmation distribution is missing");
             await api.transactions.confirm(apiId, command.confirmation_distribution);

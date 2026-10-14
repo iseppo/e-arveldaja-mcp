@@ -6918,11 +6918,12 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       ]));
     });
 
-    it("a fee-leg journal appearing before the fee create stops the fee and the confirm of that transfer", async () => {
+    it("a fee-leg journal appearing before the row's first write stops the fee and the confirm of that transfer", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-FEE")]));
       const setup = setupWiseTool([], undefined, feeOptions());
-      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
-        setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
+      // Reads 1-2: preview and execute re-plan; read 3: the row's guard read.
+      let reads = 0;
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => ++reads > 2 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
       const { dry, executed } = await runApprovedWiseImport(setup, feeArgs);
       expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm", "inter_account"]);
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
@@ -6932,21 +6933,22 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       ]));
     });
 
-    it("a fee-leg journal appearing between the fee create and its confirm leaves the fee unconfirmed and stops the transfer confirm", async () => {
-      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-FEE-CONFIRM")]));
+    it("M7: the journals are read once per row before its first write; its creates and fee confirm share that read, the inter-account confirm reads again", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-ONE-READ-1"), buildM04Values({
+        id: "TRANSFER-ONE-READ-2", direction: "OUT", date: "2026-02-04", sourceName: "Wise Own Account", targetName: "LHV Own Account",
+        sourceAmount: "200", targetAmount: "200", sourceFeeAmount: "1",
+      })]));
       const setup = setupWiseTool([], undefined, feeOptions());
-      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
-        setup.api.transactions.create.mock.calls.length > 1 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
-      const { executed } = await runApprovedWiseImport(setup, feeArgs);
-      expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
-      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
-      expect(executed.execution.errors).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          wise_id: "FEE:TRANSFER-RACE-FEE-CONFIRM",
-          reason: expect.stringMatching(wrapped(`Fee confirmation failed: ${STALE_WISE_SIDE} fee leg${SINCE_PLAN}`)),
-        }),
-      ]));
-      expect(JSON.stringify(executed.execution)).toContain("Skipped because an earlier Wise-side check of this transfer failed");
+      const { dry, executed } = await runApprovedWiseImport(setup, feeArgs);
+      expect(dry.execution.commands.map((command: any) => command.action)).toEqual([
+        "main_create", "fee_create_and_confirm", "main_create", "fee_create_and_confirm", "inter_account", "inter_account",
+      ]);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(4);
+      expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(4);
+      expect(executed.execution.errors).toEqual([]);
+      // Re-plan 1 + one read per row (2) + one per inter-account confirm (2);
+      // per-leg reads were 1 + 3 per row + 1 per confirm = 9.
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(5);
     });
 
     it("a journal outside the pair appearing before the inter-account confirm stops the confirm; the row stays PROJECT", async () => {
@@ -7526,6 +7528,39 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
       wise_id: "TRANSFER-T2",
       reason: expect.stringContaining("Stale counterpart precondition: the transfer's counterpart bank account is no longer 30 (wise_transfer_counterpart_conflict)"),
     })]);
+  });
+
+  it("M2: a counterpart change between the reviewed plan and the main create writes nothing for the row (no orphan PROJECT row)", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const setup = setupTwoBanks();
+    // The same LHV statement row as above appears after the execute re-plan
+    // read, before the main create's fresh read.
+    const lhvRace = {
+      id: 602, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-06-05",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("To Wise", {
+        date: "2026-06-05", amount: 250, currency: "EUR", direction: "DBIT",
+        counterparty_name: COMPANY, counterparty_iban: WISE_IBAN, bank_reference: "LHV-REF-9", description: "To Wise",
+      }),
+    };
+    const dry = parseWiseResponse(await setup.rawHandler({ ...args, execute: false }));
+    expect(dry.results).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T2", counterpart_dimension_id: 30 })]);
+    clearWiseCallHistory(setup.api);
+    const listed = setup.api.transactions.listAll.getMockImplementation()!;
+    let executeReads = 0;
+    setup.api.transactions.listAll.mockImplementation(async () => [...await listed(), ...(++executeReads > 1 ? [lhvRace] : [])]);
+
+    const executed = parseWiseResponse(await setup.rawHandler({
+      ...args, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(executed.execution.errors).toEqual(expect.arrayContaining([expect.objectContaining({
+      wise_id: "TRANSFER-T2",
+      reason: expect.stringContaining("Stale counterpart precondition: the transfer's counterpart bank account is no longer 30 (wise_transfer_counterpart_conflict)"),
+    })]));
+    expect(JSON.stringify(executed.execution.skipped)).toContain("Skipped because main transaction was not created");
   });
 
   it("explicit inter_account_dimension_id = LHV never overrides the Coop evidence: T2 is held, T1 unchanged", async () => {

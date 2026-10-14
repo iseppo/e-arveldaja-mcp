@@ -178,9 +178,12 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     // A confirmed row's registration journal shows what it booked on Wise:
     // a Wise side moving another amount is a different movement (no
     // evidence); one that cannot be compared (foreign row, no EUR value, no
-    // side) proves nothing (uncertain at most).
+    // side) proves nothing (uncertain at most). A confirmed row whose
+    // registration journal is not in the snapshot proves nothing either.
     let wiseSideProven = true;
-    if (tx.status === "CONFIRMED" && registration.length > 0) {
+    if (tx.status === "CONFIRMED" && registration.length === 0) {
+      wiseSideProven = false;
+    } else if (tx.status === "CONFIRMED") {
       const nets = registration.map(journal => dimensionNetEurCents(journal, wiseDim));
       if (bookedCurrencyForWiseRow(row) !== "EUR" || nets.some(net => net === undefined)) {
         wiseSideProven = false;
