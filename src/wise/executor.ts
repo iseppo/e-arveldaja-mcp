@@ -27,6 +27,7 @@ import { createBankTransaction } from "../bank-transaction-create.js";
 import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { BookingGuard } from "../booking-guard.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
+import { buildBankDimensionCandidates } from "../resolution/bank-account-resolution.js";
 import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
@@ -102,7 +103,8 @@ export type WiseFailure =
   | { kind: "digest_mismatch" }
   | { kind: "plan_drift"; detail: string }
   | { kind: "ownership_reapproval_required" }
-  | { kind: "wise_client_not_found" };
+  | { kind: "wise_client_not_found" }
+  | { kind: "wise_transfer_counterpart_required" };
 
 export type WiseRunResult =
   | { readonly ok: true; readonly data: WiseImportRenderData }
@@ -258,6 +260,9 @@ async function runWiseImport(
   const accountDimensionsSnapshot: AccountDimension[] = await api.readonly.getAccountDimensions();
   let postingDimensionsSnapshot = new Map<number, AccountDimension>();
   let autoDetectedInterAccountDimId: number | undefined;
+  // Configured bank dimensions other than Wise that could be the transfer
+  // counterpart, populated only when the counterpart is unresolved or invalid.
+  let counterpartCandidateIds: number[] = [];
   const transferDecisions = new Map<WiseRow, WiseTransferDecision>();
   if (hintedRows.length > 0) {
     [bankAccountsSnapshot, invoiceInfoSnapshot] = await Promise.all([
@@ -280,6 +285,16 @@ async function runWiseImport(
       : isPositiveSafeInteger(inter_account_dimension_id)
         ? inter_account_dimension_id
         : undefined;
+    // The counterpart cannot be guessed when several own bank accounts exist:
+    // every TRANSFER row then classifies as dimensions_unverified and would be
+    // created as a plain PROJECT row, duplicating a transfer an inter-account
+    // journal may already book. Such a plan is blocked below (no handle, no
+    // digest) until inter_account_dimension_id names the counterpart.
+    if (wiseDimensionId !== undefined && configuredDimensions.has(wiseDimensionId) && (
+      targetDimensionId === undefined || targetDimensionId === wiseDimensionId || !configuredDimensions.has(targetDimensionId)
+    )) {
+      counterpartCandidateIds = [...configuredDimensions].filter(id => id !== wiseDimensionId).sort((a, b) => a - b);
+    }
     const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
     const approvedSet = new Set(approvedTransferIds);
 
@@ -374,6 +389,11 @@ async function runWiseImport(
   const ownershipReviews = projected.ownershipReviews;
   const invoiceFixCandidates = projected.invoiceFixCandidates;
   const alreadyJournalized = projected.alreadyJournalized;
+  // Whole-plan block: some row that would be created is an unresolvable
+  // transfer and another configured bank account could be its counterpart.
+  // Single-Wise-account companies (no candidate) keep today's behaviour.
+  const transferCounterpartRequired = counterpartCandidateIds.length > 0 &&
+    ownershipReviews.some(review => review.code === "wise_transfer_dimensions_unverified");
 
   const canonicalPlanningArgs = {
     source_identity: inputSnapshot.identity,
@@ -397,7 +417,7 @@ async function runWiseImport(
     date_to,
     skip_jar_transfers: skipJars,
   };
-  const approvedCommandDigest = commands.length > 0
+  const approvedCommandDigest = commands.length > 0 && !transferCounterpartRequired
     ? approvalDigest({
         domain: WISE_APPROVAL_DOMAIN,
         version: WISE_COMMAND_VERSION,
@@ -477,6 +497,11 @@ async function runWiseImport(
   // EXECUTE gates (zero mutations on any failure), before the mutation loop.
   // Ownership re-preview is checked first so a mismatched approval yields a
   // clear ownership signal rather than a generic digest mismatch.
+  // Checked first: an old handle/digest minted before the counterpart became
+  // ambiguous (e.g. a bank account was added) must never execute.
+  if (executeRequested && transferCounterpartRequired) {
+    return { ok: false, failure: { kind: "wise_transfer_counterpart_required" } };
+  }
   if (executeRequested && storedWisePlan) {
     const storedPrivate = isRecord(storedWisePlan.privatePayload) ? storedWisePlan.privatePayload : undefined;
     const storedApprovedIds = Array.isArray(storedPrivate?.approved_transfer_ids)
@@ -519,7 +544,9 @@ async function runWiseImport(
   )) {
     return { ok: false, failure: { kind: "digest_mismatch" } };
   }
-  if (!executeRequested && approved_command_digest !== undefined && approvedCommandDigest === undefined) {
+  // A re-preview carrying an old digest reports the counterpart blocker, not a
+  // digest mismatch, so the operator learns what to supply.
+  if (!executeRequested && approved_command_digest !== undefined && approvedCommandDigest === undefined && !transferCounterpartRequired) {
     return { ok: false, failure: { kind: "digest_mismatch" } };
   }
 
@@ -869,6 +896,21 @@ async function runWiseImport(
     interAccountResults,
     ownershipReviews,
     invoiceFixCandidates,
+    ...(transferCounterpartRequired
+      ? (() => {
+          const labels = new Map(buildBankDimensionCandidates(bankAccountsSnapshot, accountDimensionsSnapshot)
+            .map(candidate => [candidate.accounts_dimensions_id, candidate.label]));
+          return {
+            transferCounterpart: {
+              transfer_row_count: ownershipReviews.filter(review => review.code === "wise_transfer_dimensions_unverified").length,
+              candidates: counterpartCandidateIds.map(id => ({
+                accounts_dimensions_id: id,
+                label: labels.get(id) ?? `Dimension ${id}`,
+              })),
+            },
+          };
+        })()
+      : {}),
     args: {
       feeAccountDimensionsId: fee_account_dimensions_id,
       feeAccountRelationId: fee_account_relation_id,

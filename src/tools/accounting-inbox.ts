@@ -542,6 +542,7 @@ function buildBankDefaults(
   overrides: {
     bank_account_dimension_id?: number;
     wise_account_dimension_id?: number;
+    wise_inter_account_dimension_id?: number;
     receipt_matching_dimension_id?: number;
   },
 ) {
@@ -569,6 +570,17 @@ function buildBankDefaults(
     dimension.id !== undefined
   );
   const suggestedWiseFeeDimensionId = feeDimensions.length === 1 ? feeDimensions[0]!.id : undefined;
+  // Wise transfer counterpart: a valid override (one of the other bank
+  // accounts) or the single other bank account; otherwise undefined and the
+  // inbox asks. A non-candidate override is ignored so the question stays.
+  const interOverride = overrides.wise_inter_account_dimension_id;
+  const suggestedWiseInterAccountDimensionId = projectBankResolution(resolveBankAccountSync({
+    candidates: localBankCandidates,
+    override: interOverride !== undefined &&
+      localBankCandidates.some(candidate => candidate.accounts_dimensions_id === interOverride)
+      ? interOverride
+      : undefined,
+  }));
 
   return {
     candidates,
@@ -578,6 +590,7 @@ function buildBankDefaults(
     suggested_receipt_dimension_id: suggestedReceiptDimensionId,
     suggested_wise_dimension_id: wiseCandidate?.accounts_dimensions_id,
     suggested_wise_fee_dimension_id: suggestedWiseFeeDimensionId,
+    suggested_wise_inter_account_dimension_id: suggestedWiseInterAccountDimensionId,
     bank_dimension_from_override: overrides.bank_account_dimension_id !== undefined,
   };
 }
@@ -700,6 +713,10 @@ export function buildRecommendedSteps(params: {
     if (defaults.suggested_wise_fee_dimension_id !== undefined) {
       suggestedArgs.fee_account_dimensions_id = defaults.suggested_wise_fee_dimension_id;
     }
+    const interAccountDimensionId = wiseDimensionId !== undefined
+      ? defaults.suggested_wise_inter_account_dimension_id
+      : undefined;
+    if (interAccountDimensionId !== undefined) suggestedArgs.inter_account_dimension_id = interAccountDimensionId;
 
     steps.push({
       step: stepNumber++,
@@ -713,7 +730,7 @@ export function buildRecommendedSteps(params: {
             defaults.suggested_wise_fee_dimension_id !== undefined
               ? `Fee dimension ${defaults.suggested_wise_fee_dimension_id} also looks safe.`
               : "Wise fees may still need a manual fee dimension if auto-detection is not unique."
-          }`
+          }${interAccountDimensionId !== undefined ? ` Inter-account counterpart: ${interAccountDimensionId}.` : ""}`
         : "A Wise bank account dimension is still needed before the CSV can be imported safely.",
     });
   }
@@ -724,6 +741,25 @@ export function buildRecommendedSteps(params: {
       "Which bank account dimension should be used for the detected Wise CSV?",
       defaults.candidates.filter(candidate => /\bwise\b/i.test(candidate.label)),
     ));
+  }
+
+  // Several other own bank accounts: the Wise transfer counterpart cannot be
+  // picked by count, so ask. The Wise step stays runnable — its dry run is
+  // fail-closed (wise_transfer_counterpart_required) when the CSV has
+  // transfers, and a CSV without transfers needs no answer.
+  if (
+    wiseFiles.length > 0 &&
+    defaults.suggested_wise_dimension_id !== undefined &&
+    defaults.suggested_wise_inter_account_dimension_id === undefined &&
+    defaults.local_bank_candidates.length > 1
+  ) {
+    const topCandidates = defaults.local_bank_candidates.slice(0, 3);
+    questions.push({
+      id: "wise_inter_account_dimension_id",
+      question: "Which own bank account do the Wise transfers go to and from (the Wise inter-account counterpart)?",
+      recommendation: "Needed only if the Wise CSV has own-account transfers; the Wise dry run then blocks with wise_transfer_counterpart_required until it is known. Ask the owner; no candidate is preferred. Answer with wise_inter_account_dimension_id.",
+      candidates: topCandidates,
+    });
   }
 
   // Emit one dry-run step per discovered receipt folder, not just the first, so
@@ -1251,6 +1287,7 @@ async function prepareAccountingInbox(
     bank_account_dimension_id?: number;
     receipt_matching_dimension_id?: number;
     wise_account_dimension_id?: number;
+    wise_inter_account_dimension_id?: number;
   },
 ): Promise<PreparedInboxData> {
   const root = await validateWorkspacePath(params.workspace_path);
@@ -1281,6 +1318,7 @@ async function prepareAccountingInbox(
     bank_account_dimension_id: params.bank_account_dimension_id,
     receipt_matching_dimension_id: params.receipt_matching_dimension_id,
     wise_account_dimension_id: params.wise_account_dimension_id,
+    wise_inter_account_dimension_id: params.wise_inter_account_dimension_id,
   });
   const { steps, questions } = buildRecommendedSteps({
     camtFiles,
@@ -1818,6 +1856,7 @@ const accountingInboxInputShape = {
   bank_account_dimension_id: z.number().optional().describe("Optional default bank account dimension to reuse for CAMT and receipt suggestions."),
   receipt_matching_dimension_id: z.number().optional().describe("Optional bank account dimension to use specifically for receipt matching suggestions."),
   wise_account_dimension_id: z.number().optional().describe("Optional bank account dimension to use specifically for Wise suggestions."),
+  wise_inter_account_dimension_id: z.number().optional().describe("Optional own bank account dimension that Wise transfers go to and from (answers the wise_inter_account_dimension_id question; becomes the Wise step's inter_account_dimension_id). Ignored unless it is one of the other bank accounts."),
 };
 
 type AccountingInboxToolParams = {
@@ -1826,6 +1865,7 @@ type AccountingInboxToolParams = {
   bank_account_dimension_id?: number;
   receipt_matching_dimension_id?: number;
   wise_account_dimension_id?: number;
+  wise_inter_account_dimension_id?: number;
 };
 
 // Reduce the review/decision rows of a v1 workflow envelope to safe, inert
@@ -1865,6 +1905,7 @@ function workflowStateDetailItems(workflow: unknown): PublicWorkflowStateDetail[
 const QUESTION_ANSWER_INPUTS: Readonly<Record<string, string>> = {
   camt_accounts_dimensions_id: "bank_account_dimension_id",
   wise_accounts_dimensions_id: "wise_account_dimension_id",
+  wise_inter_account_dimension_id: "wise_inter_account_dimension_id",
   receipt_accounts_dimensions_id: "receipt_matching_dimension_id",
 };
 

@@ -80,7 +80,7 @@ export function registerWiseImportTools(
       fee_account_dimensions_id: z.number().optional().describe("Account dimension ID for the Wise fee expense account."),
       fee_account_relation_id: z.number().optional().describe("Deprecated alias for fee_account_dimensions_id."),
       inter_account_dimension_id: coerceId.optional().describe(
-        "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists; required with 3+ bank accounts."
+        "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists. When transfer rows exist and it cannot be resolved, the preview is blocked with wise_transfer_counterpart_required (candidates listed, no plan) and execute is refused."
       ),
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe(
         "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only."

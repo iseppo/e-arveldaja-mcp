@@ -9,6 +9,7 @@ Start from one workspace-level scan, propose only the next safe dry-run steps, a
   - `bank_account_dimension_id`: default bank-account dimension reused for CAMT and receipt suggestions
   - `receipt_matching_dimension_id`: bank-account dimension used specifically for receipt matching
   - `wise_account_dimension_id`: bank-account dimension used specifically for Wise suggestions
+  - `wise_inter_account_dimension_id`: the company's other own bank account that Wise transfers go to and from; becomes the Wise step's `inter_account_dimension_id` (ignored unless it is one of the other bank accounts). With exactly one other bank account it is suggested automatically.
 
 ## Workflow
 
@@ -46,7 +47,8 @@ If `autopilot.needs_one_decision` is non-empty:
 - ask only those listed questions
 - ask them one at a time
 - always start with the recommended default
-- if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, or `wise_account_dimension_id`), before continuing
+- if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, `wise_account_dimension_id`, or `wise_inter_account_dimension_id`), before continuing
+- the `wise_inter_account_dimension_id` question has no preferred candidate: ask the owner. It matters only when the Wise CSV has own-account transfers; until it is answered the Wise dry run reports one `wise_transfer_counterpart_required` review item and issues no plan
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row

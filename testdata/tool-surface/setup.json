@@ -2,15 +2,15 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 133312,
+    "toolsListBytes": 133748,
     "descriptionsBytes": 18951,
-    "inputSchemasBytes": 83040,
+    "inputSchemasBytes": 83476,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4169
     },
     "serverInstructionsBytes": 765,
-    "promptMetadataBytes": 11460,
+    "promptMetadataBytes": 11508,
     "resourceMetadataBytes": 3251
   },
   "serverInstructions": "Setup mode:\n- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.\n- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, parse_lightyear_statement, parse_lightyear_capital_gains, receipt_batch (mode=\"scan\") remain available.\n- Call get_setup_instructions for the exact credential setup steps.\n- list_connections returns the currently configured connections (0 until credentials are added).\n- Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.\n- Audit logs remain human-readable Markdown under logs/, but no audit log file exists until a configured connection performs a mutating action.\n  ",
@@ -5203,7 +5203,7 @@
             "type": "string"
           },
           "inter_account_dimension_id": {
-            "description": "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists; required with 3+ bank accounts.",
+            "description": "Other bank account dimension ID for inter-account transfers. Auto-detected if only one other bank account exists. When transfer rows exist and it cannot be resolved, the preview is blocked with wise_transfer_counterpart_required (candidates listed, no plan) and execute is refused.",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
@@ -5342,6 +5342,10 @@
           },
           "wise_account_dimension_id": {
             "description": "Optional bank account dimension to use specifically for Wise suggestions.",
+            "type": "number"
+          },
+          "wise_inter_account_dimension_id": {
+            "description": "Optional own bank account dimension that Wise transfers go to and from (answers the wise_inter_account_dimension_id question; becomes the Wise step's inter_account_dimension_id). Ignored unless it is one of the other bank accounts.",
             "type": "number"
           },
           "workspace_path": {
@@ -5952,7 +5956,7 @@
           "required": false
         },
         {
-          "description": "Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts and auto-detection cannot pick one",
+          "description": "Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts (the preview is blocked with wise_transfer_counterpart_required until it is given)",
           "name": "inter_account_dimension_id",
           "required": false
         },

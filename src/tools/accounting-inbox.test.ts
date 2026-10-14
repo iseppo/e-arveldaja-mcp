@@ -4420,3 +4420,79 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
     expect(JSON.stringify(payload.autopilot)).not.toContain("pending_input");
   });
 });
+
+describe("accounting_inbox Wise inter-account counterpart", () => {
+  const wiseBank = fixtureBankAccount({
+    accounts_dimensions_id: 202, account_name_est: "Wise konto", account_no: "BE62510007547061", iban_code: "BE62510007547061",
+  });
+  const lhvBank = fixtureBankAccount();
+  const lightyearBank = fixtureBankAccount({
+    accounts_dimensions_id: 404, account_name_est: "Lightyear konto", account_no: "EE001", iban_code: "EE001",
+  });
+
+  async function scan(bankAccounts: Array<ReturnType<typeof fixtureBankAccount>>, extraArgs: Record<string, unknown> = {}) {
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const { handler } = setupAccountingInboxTool({ bankAccounts, accountDimensions: [] });
+    const payload = parseMcpResponse((await handler({ workspace_path: workspace, ...extraArgs })).content[0]!.text) as any;
+    const wiseStep = payload.recommended_steps.find((step: any) => step.tool === "import_wise_transactions");
+    const question = payload.questions.find((item: any) => item.id === "wise_inter_account_dimension_id");
+    return { payload, wiseStep, question };
+  }
+
+  it("suggests the single other bank account as inter_account_dimension_id", async () => {
+    const { wiseStep, question } = await scan([lhvBank, wiseBank]);
+    expect(wiseStep.suggested_args.inter_account_dimension_id).toBe(101);
+    expect(wiseStep.reason).toContain("Inter-account counterpart: 101.");
+    expect(question).toBeUndefined();
+  });
+
+  it("asks neutrally when two other bank accounts exist and keeps the Wise step runnable", async () => {
+    const { wiseStep, question } = await scan([lhvBank, wiseBank, lightyearBank]);
+    expect(wiseStep.suggested_args.inter_account_dimension_id).toBeUndefined();
+    expect(wiseStep.recommended).toBe(true);
+    expect(wiseStep.missing_inputs).toEqual([]);
+    expect(question.candidates.map((candidate: any) => candidate.accounts_dimensions_id)).toEqual([101, 404]);
+    expect(question.recommendation).not.toContain("Recommended default");
+    expect(question.recommendation).toContain("wise_inter_account_dimension_id");
+  });
+
+  it("a valid wise_inter_account_dimension_id answers the question", async () => {
+    const { wiseStep, question } = await scan([lhvBank, wiseBank, lightyearBank], { wise_inter_account_dimension_id: 404 });
+    expect(wiseStep.suggested_args.inter_account_dimension_id).toBe(404);
+    expect(wiseStep.reason).toContain("Inter-account counterpart: 404.");
+    expect(question).toBeUndefined();
+  });
+
+  it("ignores an override that is not one of the other bank accounts", async () => {
+    for (const override of [999, 202]) {
+      const { wiseStep, question } = await scan([lhvBank, wiseBank, lightyearBank], { wise_inter_account_dimension_id: override });
+      expect(wiseStep.suggested_args.inter_account_dimension_id, String(override)).toBeUndefined();
+      expect(question, String(override)).toBeDefined();
+    }
+  });
+
+  it("a Wise-only company gets neither the argument nor the question", async () => {
+    const { wiseStep, question } = await scan([wiseBank]);
+    expect(wiseStep.suggested_args.inter_account_dimension_id).toBeUndefined();
+    expect(question).toBeUndefined();
+  });
+
+  it("guided keeps the Wise step runnable and lists the counterpart question as the open input", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: [lhvBank, wiseBank, lightyearBank], accountDimensions: [] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
+    registerAccountingInboxTools(server, runtime, api, { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const payload = parseMcpResponse((await runWithToolProfile("guided", () => handler({ mode: "scan", workspace_path: workspace }))).content[0]!.text) as any;
+
+    // The Wise step stays the runnable next action; the counterpart question is
+    // the one open input.
+    expect(payload.workflow.next_action.tool).toBe("process_bank_input");
+    expect(payload.workflow.blockers).toEqual([
+      expect.objectContaining({ item_id: "wise_inter_account_dimension_id", code: "needs_input" }),
+    ]);
+  });
+});

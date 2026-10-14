@@ -387,7 +387,7 @@ export function registerProcessBankInputTool(
       date_to: z.string().regex(ISO_DATE_REGEX, "Expected YYYY-MM-DD").refine(isStrictDate, "Expected a real calendar date (canonical YYYY-MM-DD)").optional().describe("Only import entries up to this date (YYYY-MM-DD)."),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for mode='execute'."),
       fee_account_dimensions_id: z.number().optional().describe("Wise only: account dimension ID for the Wise fee expense account."),
-      inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers."),
+      inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers. Needed when several other bank accounts exist: the prepare is blocked with wise_transfer_counterpart_required until it is given."),
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe("Wise only: exact Wise IDs explicitly approved as own transfers."),
       journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe("Wise only: checked { wise_id, journal_id } pairs whose labelled journal already books that transfer; each is validated."),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe("Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'."),

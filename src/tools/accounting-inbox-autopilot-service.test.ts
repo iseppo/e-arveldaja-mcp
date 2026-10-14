@@ -708,6 +708,48 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(second.needs_accountant_review.map(item => item.id)).toEqual(ids);
   });
 
+  it("collapses a counterpart-blocked Wise preview's per-row dimension reviews into one file-scoped follow-up", async () => {
+    const unverified = (id: string) => ({
+      wise_id: id, code: "wise_transfer_dimensions_unverified", reason: "Dimensions unverified.",
+      source_verified: false, target_verified: false, approval_required: false,
+    });
+    const wisePreview = (digest: string) => ({
+      created: [{}, {}, {}],
+      skipped: [],
+      commands: [{ action: "main_create" }, { action: "main_create" }, { action: "main_create" }],
+      ownershipReviews: [unverified("TRANSFER-1"), unverified("TRANSFER-2"), unverified("TRANSFER-3")],
+      invoiceFixCandidates: [],
+      accountsDimensionsId: 5,
+      sourceIdentity: { digest_sha256: digest },
+      transferCounterpart: {
+        transfer_row_count: 3,
+        candidates: [{ accounts_dimensions_id: 20, label: "LHV" }, { accounts_dimensions_id: 30, label: "Lightyear" }],
+      },
+    });
+    const prepareWiseImport = vi.fn()
+      .mockResolvedValueOnce(ok(wisePreview("a".repeat(64))))
+      .mockResolvedValueOnce(ok(wisePreview("b".repeat(64))));
+    const wiseStep = (n: number, file: string) => ({
+      step: n, tool: "import_wise_transactions", purpose: "Wise", recommended: true,
+      suggested_args: { file_path: file, accounts_dimensions_id: 5, execute: false },
+      missing_inputs: [], reason: "Wise found",
+    });
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({ steps: [wiseStep(1, "/tmp/a.csv"), wiseStep(2, "/tmp/b.csv")] }),
+      operations: mockOperations({ prepareWiseImport }),
+    });
+
+    expect(result.executed_steps[0]!.preview).toMatchObject({ needs_review: 3, transfer_counterpart_required: 3, command_count: 3 });
+    // One per file (file-scoped ids never merge), none per row.
+    expect(result.needs_accountant_review).toHaveLength(2);
+    const [first, second] = result.needs_accountant_review;
+    expect(first!.summary).toContain("3 Wise transfer row(s) need the counterpart bank account (wise_transfer_counterpart_required)");
+    expect(first!.summary).toContain("LHV (20), Lightyear (30)");
+    expect(first!.recommendation).toContain("wise_inter_account_dimension_id");
+    expect(first!.id).not.toBe(second!.id);
+    expect(result.needs_accountant_review.some(item => item.summary.includes("TRANSFER-1"))).toBe(false);
+  });
+
   it("defers ledger steps as pending_input (not failed) when an import step was only skipped", async () => {
     const classifyTransactions = vi.fn();
     const result = await runAccountingInboxDryRunPipeline({

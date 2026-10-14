@@ -2136,6 +2136,31 @@ describe("wise import tool", () => {
       expect(api.journals.listAllWithPostings, item.read).not.toHaveBeenCalled();
       expect(auditCalls, item.read).toBe(0);
     }
+    // An unresolvable counterpart with another configured bank account blocks
+    // the whole plan (no digest, no handle): nothing is created. Without a
+    // candidate (unconfigured Wise or counterpart posting dimension) the row is
+    // still created unconfirmed with its review, as before.
+    const counterpartBlocked = new Set([
+      "explicit target is missing",
+      "explicit target equals Wise",
+      "explicit target is not a configured bank account",
+      "explicit target is zero",
+      "explicit target is negative",
+      "explicit target is fractional",
+      "explicit target is runtime non-number",
+    ]);
+    for (const { item, outcome, api } of [...outcomes, ...structuralOutcomes]) {
+      const blocked = counterpartBlocked.has(item.label);
+      expect(outcome.payload?.transfer_counterpart_required?.code, item.label)
+        .toBe(blocked ? "wise_transfer_counterpart_required" : undefined);
+      if (blocked) {
+        expect(outcome.payload?.approved_command_digest, item.label).toBeUndefined();
+        expect(outcome.payload?.plan_handle, item.label).toBeUndefined();
+        expect(api.transactions.create, item.label).not.toHaveBeenCalled();
+      } else {
+        expect(api.transactions.create, item.label).toHaveBeenCalledTimes(1);
+      }
+    }
   });
 
   it("M03 validates exact explicit transfer approvals before mutation", async () => {
@@ -6749,5 +6774,145 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(result.isError).toBeFalsy();
     expect(payload.summary).toMatchObject({ created: 0, skipped: 2, error_count: 0 });
     expect(setup.api.clients.listAll).not.toHaveBeenCalled();
+  });
+});
+
+describe("Wise transfer counterpart required (unresolvable inter-account counterpart)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const threeBankDimensions = () => [
+    ...configuredTransferDimensions(),
+    { id: 30, accounts_id: 1030, title_est: "Lightyear", is_deleted: false },
+  ];
+  const threeBankAccounts = () => [
+    ...configuredTransferBankAccounts(),
+    { accounts_dimensions_id: 30, beneficiary_name: "Lightyear Own Account", account_name_est: "Lightyear Own Account" },
+  ];
+  const transferValues = (id: string) => buildM04Values({
+    id, direction: "IN", sourceName: "LHV Own Account", targetName: "Wise Own Account", sourceAmount: "100",
+  });
+  const baseArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 };
+
+  function setupThreeBanks(existing: unknown[] = []) {
+    return setupWiseTool(existing, undefined, {
+      accountDimensions: threeBankDimensions(),
+      bankAccounts: threeBankAccounts(),
+      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+    });
+  }
+
+  it("blocks the whole plan: no plan_handle, no digest, candidates listed neutrally and wrapped", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-1"), cardPaymentValues("2026-06-11")]));
+    const setup = setupThreeBanks();
+
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    expect(dry.approved_command_digest).toBeUndefined();
+    expect(dry.plan_handle).toBeUndefined();
+    expect(dry.transfer_counterpart_required).toMatchObject({
+      code: "wise_transfer_counterpart_required",
+      transfer_row_count: 1,
+    });
+    expect(dry.transfer_counterpart_required.recommended_inter_account_dimension_id).toBeUndefined();
+    expect(dry.transfer_counterpart_required.candidates.map((c: any) => c.accounts_dimensions_id)).toEqual([20, 30]);
+    expect(dry.transfer_counterpart_required.candidates[0].label).toMatch(wrapped("LHV Own Account"));
+    expect(dry.transfer_counterpart_required.candidates[1].label).toMatch(wrapped("Lightyear Own Account"));
+    expect(dry.workflow.approval_previews).toEqual([]);
+    const blocked = dry.workflow.available_actions.find((action: any) => action.label === "Review blocked Wise dry run");
+    expect(blocked.args.preview.transfer_counterpart_required).toBe(1);
+    expect(blocked.why).toContain("1 transfer(s) need the counterpart bank account (inter_account_dimension_id)");
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("refuses execute with a handle minted under a two-bank ledger once a third bank account appears", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-2")]));
+    const setup = setupWiseTool([], undefined, {
+      accountDimensions: configuredTransferDimensions(),
+      bankAccounts: configuredTransferBankAccounts(),
+      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+    });
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+    expect(dry.plan_handle).toEqual(expect.any(String));
+    expect(dry.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
+
+    setup.api.readonly.getAccountDimensions.mockResolvedValue(threeBankDimensions());
+    setup.api.readonly.getBankAccounts.mockResolvedValue(threeBankAccounts());
+    clearWiseCallHistory(setup.api);
+    const result = await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }) as any;
+    const payload = parseWiseResponse(result);
+
+    expect(result.isError).toBe(true);
+    expect(payload).toMatchObject({
+      category: "wise_transfer_counterpart_required",
+      code: "wise_transfer_counterpart_required",
+      retry: "never",
+      mutation_occurred: false,
+    });
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("a re-preview carrying an old digest reports the counterpart blocker, not digest_mismatch", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-3")]));
+    const setup = setupThreeBanks();
+    const result = await setup.rawHandler({ ...baseArgs, execute: false, approved_command_digest: "a".repeat(64) }) as any;
+    const payload = parseWiseResponse(result);
+
+    expect(result.isError).toBeFalsy();
+    expect(payload.transfer_counterpart_required.code).toBe("wise_transfer_counterpart_required");
+    expect(payload.plan_handle).toBeUndefined();
+  });
+
+  it("an explicit inter_account_dimension_id resolves the block and mints a plan", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-4")]));
+    const setup = setupThreeBanks();
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, inter_account_dimension_id: 20, execute: false }));
+
+    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.plan_handle).toEqual(expect.any(String));
+    expect(dry.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("a CSV without transfer rows is not blocked on a three-bank ledger", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([cardPaymentValues("2026-06-11")]));
+    const setup = setupThreeBanks();
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.plan_handle).toEqual(expect.any(String));
+  });
+
+  it("transfers that are all already imported do not block the remaining rows", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-5"), cardPaymentValues("2026-06-11")]));
+    const setup = setupThreeBanks([
+      { id: 7300, status: "CONFIRMED", is_deleted: false, date: "2026-06-10", amount: 100, cl_currencies_id: "EUR", accounts_dimensions_id: 5, description: "WISE:TRANSFER-CP-5 LHV Own Account [source_direction=IN]" },
+    ]);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
+
+    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.summary.created).toBe(1);
+    expect(dry.plan_handle).toEqual(expect.any(String));
+  });
+
+  it("a Wise-only company keeps today's behaviour (row created unconfirmed with its review)", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-6")]));
+    const setup = setupWiseTool([], undefined, {
+      accountDimensions: [configuredTransferDimensions()[0]],
+      bankAccounts: [configuredTransferBankAccounts()[0]],
+      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+    });
+    const { dry, executed } = await runApprovedWiseImport(setup, baseArgs);
+
+    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({ code: M03_DIMENSIONS_CODE })]);
+    expect(executed.summary.created).toBe(1);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
   });
 });

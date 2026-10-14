@@ -360,7 +360,7 @@ function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][
     case "wise_transfer_ownership_unverified":
       return "Verify that both accounts belong to the company, then rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true.";
     case "wise_transfer_dimensions_unverified":
-      return "Configure the source and target bank account dimensions for this transfer, then rerun the Wise dry run before execute=true.";
+      return "Rerun the Wise dry run with inter_account_dimension_id naming the company's other own bank account in this transfer (and make sure the Wise account is a configured bank account) before execute=true.";
     case "wise_untagged_ledger_match":
       return `Advisory only: the row is still imported, no rerun is needed. Compare it with stored transaction(s) ${(review.ledger_transaction_ids ?? []).join(", ") || "named in the reason"}; if they are the same movement, delete one of them after the owner approves.`;
     case "wise_transfer_journal_ambiguous":
@@ -496,12 +496,28 @@ function summarizeAutopilotToolResult(
       // follow-up per review, keyed by wise_id so the id is resume-stable.
       const wiseReviewId = (...key: string[]) =>
         `${tool}:${createHash("sha256").update(JSON.stringify([tool, ...key])).digest("hex").slice(0, 16)}`;
-      const ownershipFollowUps: AutopilotFollowUp[] = preview.ownershipReviews.map(review => ({
-        id: wiseReviewId("wise_transfer_review", review.wise_id, review.code),
-        source: tool,
-        summary: `Wise transfer ${review.wise_id} needs review (${review.code}): ${review.reason}`,
-        recommendation: wiseReviewRecommendation(review),
-      }));
+      // A counterpart-blocked plan collapses its per-row dimensions_unverified
+      // reviews into ONE follow-up, scoped to this file and Wise account.
+      const counterpart = preview.transferCounterpart;
+      const ownershipFollowUps: AutopilotFollowUp[] = preview.ownershipReviews
+        .filter(review => counterpart === undefined || review.code !== "wise_transfer_dimensions_unverified")
+        .map(review => ({
+          id: wiseReviewId("wise_transfer_review", review.wise_id, review.code),
+          source: tool,
+          summary: `Wise transfer ${review.wise_id} needs review (${review.code}): ${review.reason}`,
+          recommendation: wiseReviewRecommendation(review),
+        }));
+      if (counterpart !== undefined) {
+        const candidates = counterpart.candidates
+          .map(candidate => `${candidate.label} (${candidate.accounts_dimensions_id})`)
+          .join(", ");
+        ownershipFollowUps.unshift({
+          id: wiseReviewId("wise_transfer_counterpart_required", preview.sourceIdentity.digest_sha256, String(preview.accountsDimensionsId)),
+          source: tool,
+          summary: `${counterpart.transfer_row_count} Wise transfer row(s) need the counterpart bank account (wise_transfer_counterpart_required); candidate own bank account(s): ${candidates}. The Wise dry run issued no plan.`,
+          recommendation: "Ask the owner which own bank account the Wise transfers go to and from, then answer accounting_inbox with wise_inter_account_dimension_id (or rerun the Wise dry run with inter_account_dimension_id).",
+        });
+      }
       // Invoice FX corrections are advisory only (the import never applies
       // them); surface each so the manual correction is not silently dropped.
       const invoiceFixFollowUps: AutopilotFollowUp[] = preview.invoiceFixCandidates.map(fix => ({
@@ -516,8 +532,9 @@ function summarizeAutopilotToolResult(
           created,
           skipped,
           error_count: errorCount,
-          needs_review: ownershipFollowUps.length,
+          needs_review: preview.ownershipReviews.length,
           command_count: preview.commands.length,
+          ...(counterpart !== undefined ? { transfer_counterpart_required: counterpart.transfer_row_count } : {}),
         },
         followUps: [
           ...ownershipFollowUps,

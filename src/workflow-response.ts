@@ -389,6 +389,12 @@ function planHandleActionFromDryRunStep(step: unknown): WorkflowAction | undefin
   };
 }
 
+function counterpartLine(count: number): string | undefined {
+  return count > 0
+    ? `${count} transfer(s) need the counterpart bank account (inter_account_dimension_id)`
+    : undefined;
+}
+
 function blockedDryRunLabel(tool: MaterializingDryRunTool): string {
   switch (tool) {
     case "import_camt053":
@@ -589,18 +595,22 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
       errorCount: numberAt(preview, "error_count") ?? 0,
       skipped: numberAt(preview, "skipped") ?? 0,
       reviewCount: numberAt(preview, "needs_review") ?? 0,
+      counterpartRequired: numberAt(preview, "transfer_counterpart_required") ?? 0,
     }),
-    canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0 && counts.reviewCount <= 0,
+    canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0 && counts.reviewCount <= 0 &&
+      counts.counterpartRequired <= 0,
     buildImpact: (counts, preview) => [
       impactLine(counts.created, "bank transaction"),
       impactLine(counts.skipped, "skipped row"),
       invoiceCurrencyFixImpact(preview),
       counts.reviewCount > 0 ? `${counts.reviewCount} transfer(s) still need ownership review before approval` : undefined,
+      counterpartLine(counts.counterpartRequired),
       counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
     ].filter((line): line is string => line !== undefined),
     duplicateRisk: () => "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
     blockedReasons: counts => [
       impactLine(counts.reviewCount, "transfer needing ownership review", "transfers needing ownership review"),
+      counterpartLine(counts.counterpartRequired),
       impactLine(counts.errorCount, "import error"),
     ].filter((line): line is string => line !== undefined),
   },

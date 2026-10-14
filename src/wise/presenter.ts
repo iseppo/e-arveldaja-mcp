@@ -120,6 +120,21 @@ export function ownershipReapprovalRequiredResult() {
   });
 }
 
+/** Some transfer row cannot be bound to a counterpart bank account and the
+ * company has another configured bank account: the plan is not approvable and
+ * execute (also with an older handle/digest) is refused before any write. */
+export function wiseTransferCounterpartRequiredResult() {
+  return toolError({
+    error: "The Wise plan needs inter_account_dimension_id (the other own bank account in Wise transfers). Nothing was created. Re-run the preview with inter_account_dimension_id.",
+    category: "wise_transfer_counterpart_required",
+    code: "wise_transfer_counterpart_required",
+    retry: "never",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  });
+}
+
 export function wiseClientNotFoundResult() {
   return toolError({
     error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
@@ -153,6 +168,7 @@ export function simpleWiseFailureFromCode(code: string): WiseFailure {
     case "digest_mismatch": return { kind: "digest_mismatch" };
     case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
     case "wise_client_not_found": return { kind: "wise_client_not_found" };
+    case "wise_transfer_counterpart_required": return { kind: "wise_transfer_counterpart_required" };
     default: throw new Error(`Unexpected Wise operation error code: ${code}`);
   }
 }
@@ -168,6 +184,7 @@ export function renderWiseFailure(failure: WiseFailure) {
     case "plan_drift": return planDriftResult(failure.detail);
     case "ownership_reapproval_required": return ownershipReapprovalRequiredResult();
     case "wise_client_not_found": return wiseClientNotFoundResult();
+    case "wise_transfer_counterpart_required": return wiseTransferCounterpartRequiredResult();
   }
 }
 
@@ -195,6 +212,13 @@ export interface WiseImportRenderData {
   interAccountResults: WiseInterAccountResult[];
   ownershipReviews: WiseTransferReview[];
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
+  /** Set when the plan is blocked because the transfer counterpart bank account
+   * cannot be determined (no plan handle, no digest). Candidates are the other
+   * configured bank accounts, listed neutrally; labels are raw upstream text. */
+  transferCounterpart?: {
+    transfer_row_count: number;
+    candidates: Array<{ accounts_dimensions_id: number; label: string }>;
+  };
   args: {
     feeAccountDimensionsId: number | undefined;
     feeAccountRelationId: number | undefined;
@@ -209,6 +233,15 @@ export interface WiseImportRenderData {
 
 export type WiseImportPreview = WiseImportRenderData;
 export type WiseImportExecution = WiseImportRenderData;
+
+/** Operator-facing text for a counterpart-blocked plan. Candidate labels are
+ * upstream bank-account names, so they are sandbox-wrapped here. */
+export function wiseTransferCounterpartMessage(block: NonNullable<WiseImportRenderData["transferCounterpart"]>): string {
+  const candidates = block.candidates
+    .map(candidate => `${wrapUntrustedOcr(candidate.label) ?? candidate.label} (${candidate.accounts_dimensions_id})`)
+    .join(", ");
+  return `${block.transfer_row_count} Wise transfer row(s) need the counterpart bank account (inter_account_dimension_id), which could not be determined. Candidate own bank account(s): ${candidates}. No plan was issued and nothing can be executed. Ask the owner which account the Wise transfers go to and from, then re-run the preview with inter_account_dimension_id.`;
+}
 
 // --- FULL envelope (standard/full — byte-identical to the pre-refactor tool) --
 
@@ -234,6 +267,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     interAccountResults,
     ownershipReviews,
     invoiceFixCandidates,
+    transferCounterpart,
   } = data;
   const file_ref = source.file_ref;
   const file_path = source.file_path;
@@ -334,6 +368,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           preview: {
             ...summary,
             command_count: commands.length,
+            ...(transferCounterpart ? { transfer_counterpart_required: transferCounterpart.transfer_row_count } : {}),
           },
         }]
       : [],
@@ -375,6 +410,17 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
             already_journalized: interAccountResults.filter(r => r.status === "already_journalized").length,
             confirmed: interAccountResults.filter(r => r.status === "confirmed_inter_account").length,
             details: interAccountResults,
+          },
+        } : {}),
+        ...(transferCounterpart ? {
+          transfer_counterpart_required: {
+            code: "wise_transfer_counterpart_required",
+            message: wiseTransferCounterpartMessage(transferCounterpart),
+            transfer_row_count: transferCounterpart.transfer_row_count,
+            candidates: transferCounterpart.candidates.map(candidate => ({
+              accounts_dimensions_id: candidate.accounts_dimensions_id,
+              label: wrapUntrustedOcr(candidate.label) ?? candidate.label,
+            })),
           },
         } : {}),
         ...(ownershipReviews.length > 0 ? { ownership_reviews: ownershipReviews } : {}),
@@ -554,8 +600,12 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   };
 
   // Ownership transfers that could not be auto-verified surface as warnings —
-  // never dropped from the lean surface.
-  const warnings: CompactWarning[] = data.ownershipReviews.map(review => ({
+  // never dropped from the lean surface. A counterpart-blocked plan collapses
+  // its per-row dimensions_unverified reviews into the one blocker below.
+  const counterpartBlock = dryRun ? data.transferCounterpart : undefined;
+  const warnings: CompactWarning[] = data.ownershipReviews
+    .filter(review => counterpartBlock === undefined || review.code !== "wise_transfer_dimensions_unverified")
+    .map(review => ({
     item_id: review.wise_id,
     code: review.code,
     message: review.reason,
@@ -587,6 +637,14 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   // Execution errors (indeterminate / failed commands) surface as blockers —
   // never hidden.
   const blockers: CompactReviewItem[] = [];
+  if (counterpartBlock !== undefined) {
+    blockers.push({
+      item_id: "wise-import",
+      code: "wise_transfer_counterpart_required",
+      message: `${wiseTransferCounterpartMessage(counterpartBlock)} Use process_bank_input mode='prepare' with inter_account_dimension_id.`,
+      severity: "blocker",
+    });
+  }
   if (!dryRun && executionErrors.length > 0) {
     blockers.push({
       item_id: "wise-import",
@@ -623,14 +681,21 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     entry.reason.startsWith("Already imported") || entry.reason.startsWith("Fee already imported")).length;
   const baseMessage = zeroWrite
     ? `Nothing to approve: the Wise dry run found no rows to write (${journalizedSkips + importedSkips} already booked: ${journalizedSkips} already journalized, ${importedSkips} already imported); no plan handle was issued.`
+    : counterpartBlock !== undefined
+      ? `Nothing to approve yet: the Wise dry run previewed ${data.created.length} bank transaction(s), but ${counterpartBlock.transfer_row_count} transfer row(s) need inter_account_dimension_id; no plan handle was issued.`
     : dryRun
       ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
       : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
 
+  // Dry-run ladder: an unresolved counterpart needs input; open reviews mirror
+  // the standard surface's canApprove (reviews block approval) while the plan
+  // handle and next_action stay available, as the standard digest/handle do.
   const status = zeroWrite
     ? (executionErrors.length > 0 || data.ownershipReviews.length > 0 ? "needs_review" as const : "completed" as const)
     : dryRun
-      ? "ready_for_approval" as const
+      ? (counterpartBlock !== undefined
+          ? "needs_input" as const
+          : data.ownershipReviews.length > 0 ? "needs_review" as const : "ready_for_approval" as const)
       : (executionErrors.length > 0 ? "partial" as const : "completed" as const);
 
   // Statement identity: the Wise bank dimension identifies the account; the

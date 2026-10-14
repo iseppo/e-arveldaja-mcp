@@ -382,3 +382,52 @@ describe("renderWiseImportCompact — zero-write preview", () => {
     expect(summary.status).toBe("ready_for_approval");
   });
 });
+
+describe("renderWiseImportCompact — dry-run status ladder", () => {
+  const review = (wiseId: string, code: "wise_transfer_dimensions_unverified" | "wise_transfer_journal_ambiguous") => ({
+    wise_id: wiseId,
+    code,
+    reason: `reason for ${wiseId}`,
+    source_verified: false,
+    target_verified: false,
+    approval_required: false,
+  });
+
+  it("an unresolved transfer counterpart is needs_input with one blocker, no next_action or plan_handle, per-row warnings collapsed", () => {
+    const data = makeData(2);
+    data.approvedCommandDigest = undefined;
+    data.planHandle = undefined;
+    data.ownershipReviews = [review("TRANSFER-1", "wise_transfer_dimensions_unverified"), review("TRANSFER-2", "wise_transfer_dimensions_unverified")];
+    data.transferCounterpart = {
+      transfer_row_count: 2,
+      candidates: [
+        { accounts_dimensions_id: 20, label: "LHV Own Account" },
+        { accounts_dimensions_id: 30, label: "Lightyear" },
+      ],
+    };
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+
+    expect(summary.status).toBe("needs_input");
+    expect(summary.next_action).toBeUndefined();
+    expect(summary.plan_handle).toBeUndefined();
+    expect(summary.counts?.needs_review).toBe(2);
+    expect(summary.blockers).toHaveLength(1);
+    const blocker = summary.blockers![0]!;
+    expect(blocker).toMatchObject({ item_id: "wise-import", code: "wise_transfer_counterpart_required", severity: "blocker" });
+    expect(blocker.message).toMatch(/<<UNTRUSTED_OCR_START:[0-9a-f]+>>\nLHV Own Account\n<<UNTRUSTED_OCR_END:[0-9a-f]+>> \(20\)/);
+    expect(blocker.message).toContain("(30)");
+    expect(blocker.message).toContain("inter_account_dimension_id");
+    expect(summary.warnings?.some(w => w.code === "wise_transfer_dimensions_unverified") ?? false).toBe(false);
+  });
+
+  it("write commands plus an open review are needs_review and keep next_action and plan_handle", () => {
+    const data = makeData(1);
+    data.ownershipReviews = [review("TRANSFER-9", "wise_transfer_journal_ambiguous")];
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+
+    expect(summary.status).toBe("needs_review");
+    expect(summary.next_action?.args).toMatchObject({ plan_handle: "PLAN-HANDLE-XYZ" });
+    expect(summary.plan_handle).toBe("PLAN-HANDLE-XYZ");
+    expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "wise_transfer_journal_ambiguous" })]));
+  });
+});
