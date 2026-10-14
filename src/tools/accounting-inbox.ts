@@ -9,6 +9,7 @@ import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { currentToolProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
+import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
 import { getAllowedRoots, isPathWithinRoot, resolveFilePath } from "../file-validation.js";
@@ -573,11 +574,15 @@ function buildBankDefaults(
   // Wise transfer counterpart: a valid override (one of the other bank
   // accounts) or the single other bank account; otherwise undefined and the
   // inbox asks. A non-candidate override is ignored so the question stays.
+  // Only bank accounts the Wise import can book against count: those with
+  // exactly one active posting dimension (its configured bank dimensions).
+  const postingDimensions = uniqueActivePostingDimensions(accountDimensions);
+  const interCandidates = localBankCandidates.filter(candidate => postingDimensions.has(candidate.accounts_dimensions_id));
   const interOverride = overrides.wise_inter_account_dimension_id;
   const suggestedWiseInterAccountDimensionId = projectBankResolution(resolveBankAccountSync({
-    candidates: localBankCandidates,
+    candidates: interCandidates,
     override: interOverride !== undefined &&
-      localBankCandidates.some(candidate => candidate.accounts_dimensions_id === interOverride)
+      interCandidates.some(candidate => candidate.accounts_dimensions_id === interOverride)
       ? interOverride
       : undefined,
   }));
@@ -585,6 +590,7 @@ function buildBankDefaults(
   return {
     candidates,
     local_bank_candidates: localBankCandidates,
+    wise_inter_account_candidates: interCandidates,
     wise_candidate: wiseCandidate,
     suggested_bank_dimension_id: suggestedBankDimensionId,
     suggested_receipt_dimension_id: suggestedReceiptDimensionId,
@@ -752,9 +758,9 @@ export function buildRecommendedSteps(params: {
     wiseFiles.length > 0 &&
     defaults.suggested_wise_dimension_id !== undefined &&
     defaults.suggested_wise_inter_account_dimension_id === undefined &&
-    defaults.local_bank_candidates.length > 1
+    defaults.wise_inter_account_candidates.length > 1
   ) {
-    const topCandidates = defaults.local_bank_candidates.slice(0, 3);
+    const topCandidates = defaults.wise_inter_account_candidates.slice(0, 3);
     questions.push({
       id: "wise_inter_account_dimension_id",
       question: "Which own bank account do the Wise transfers go to and from (the Wise inter-account counterpart)?",
@@ -1986,20 +1992,26 @@ async function buildAccountingInboxDryRunResponse(
   const prepared = await prepareAccountingInbox(api, runtimeSafetyContext, params);
   const operations = createAccountingOperations(api, runtimeSafetyContext);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, operations });
+  // Guided profiles have only process_bank_input for statements: a step of a
+  // CAMT / Wise tool gets its file reference under bank_input there, as in
+  // detected_inputs (the step keeps naming the tool that ran).
+  const profile = currentToolProfile();
+  const guided = profile === "guided" || profile === "guided-sales";
+  const referenceTool = (tool: string) => (guided ? remapGuidedBankFacade(tool, {})?.tool : undefined) ?? tool;
   const publicAutopilot: Record<string, unknown> = {
     ...autopilot,
     executed_steps: autopilot.executed_steps.map(step => ({
       ...step,
       purpose: sandboxExternalText(step.purpose),
       summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
+      suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
       source_documents: publicSourceDocuments(step.suggested_args),
     })),
     skipped_steps: autopilot.skipped_steps.map(step => ({
       ...step,
       purpose: sandboxExternalText(step.purpose),
       summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
+      suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
       source_documents: publicSourceDocuments(step.suggested_args),
     })),
     needs_one_decision: autopilot.needs_one_decision.map(item => publicFollowUp(item, runtimeSafetyContext)),

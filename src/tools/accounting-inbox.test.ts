@@ -4430,11 +4430,21 @@ describe("accounting_inbox Wise inter-account counterpart", () => {
   const lightyearBank = fixtureBankAccount({
     accounts_dimensions_id: 404, account_name_est: "Lightyear konto", account_no: "EE001", iban_code: "EE001",
   });
+  // The bank accounts' active posting dimensions (what the Wise import books against).
+  const bankDimensions = [
+    fixtureAccountDimension(),
+    fixtureAccountDimension({ id: 202, title_est: "Wise" }),
+    fixtureAccountDimension({ id: 404, title_est: "Lightyear" }),
+  ];
 
-  async function scan(bankAccounts: Array<ReturnType<typeof fixtureBankAccount>>, extraArgs: Record<string, unknown> = {}) {
+  async function scan(
+    bankAccounts: Array<ReturnType<typeof fixtureBankAccount>>,
+    extraArgs: Record<string, unknown> = {},
+    accountDimensions: Array<ReturnType<typeof fixtureAccountDimension>> = bankDimensions,
+  ) {
     const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeReceipts: false });
     workspacesToClean.push(workspace);
-    const { handler } = setupAccountingInboxTool({ bankAccounts, accountDimensions: [] });
+    const { handler } = setupAccountingInboxTool({ bankAccounts, accountDimensions });
     const payload = parseMcpResponse((await handler({ workspace_path: workspace, ...extraArgs })).content[0]!.text) as any;
     const wiseStep = payload.recommended_steps.find((step: any) => step.tool === "import_wise_transactions");
     const question = payload.questions.find((item: any) => item.id === "wise_inter_account_dimension_id");
@@ -4486,11 +4496,29 @@ describe("accounting_inbox Wise inter-account counterpart", () => {
     expect(question).toBeUndefined();
   });
 
+  it("N3: only bank accounts with one active posting dimension are counterpart candidates, as in the Wise import", async () => {
+    const lightyearDeleted = [bankDimensions[0]!, bankDimensions[1]!, fixtureAccountDimension({ id: 404, title_est: "Lightyear", is_deleted: true })];
+    const lightyearDuplicated = [...bankDimensions, fixtureAccountDimension({ id: 404, accounts_id: 1030, title_est: "Lightyear 2" })];
+    for (const [label, dims] of [["deleted", lightyearDeleted], ["duplicated", lightyearDuplicated]] as const) {
+      // LHV is then the only other bank account the import can book against.
+      const { wiseStep, question } = await scan([lhvBank, wiseBank, lightyearBank], {}, [...dims]);
+      expect(wiseStep.suggested_args.inter_account_dimension_id, label).toBe(101);
+      expect(question, label).toBeUndefined();
+      // An override naming it is not a valid counterpart either.
+      const overridden = await scan([lhvBank, wiseBank, lightyearBank], { wise_inter_account_dimension_id: 404 }, [...dims]);
+      expect(overridden.wiseStep.suggested_args.inter_account_dimension_id, label).toBe(101);
+    }
+    // No bookable other bank account: neither a suggestion nor a question.
+    const { wiseStep, question } = await scan([lhvBank, wiseBank], {}, [bankDimensions[1]!]);
+    expect(wiseStep.suggested_args.inter_account_dimension_id).toBeUndefined();
+    expect(question).toBeUndefined();
+  });
+
   it("guided keeps the Wise step runnable and lists the counterpart question as the open input", async () => {
     const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const server = createMockToolServer();
-    const api = createAccountingWorkflowApi({ bankAccounts: [lhvBank, wiseBank, lightyearBank], accountDimensions: [] });
+    const api = createAccountingWorkflowApi({ bankAccounts: [lhvBank, wiseBank, lightyearBank], accountDimensions: bankDimensions });
     const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
     registerAccountingInboxTools(server, runtime, api, { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
     const handler = getRegisteredToolHandler(server, "accounting_inbox");
@@ -4543,6 +4571,38 @@ describe("accounting_inbox detected file_refs per profile", () => {
     const refused = await runWithToolProfile("guided", () => bank({ mode: "prepare", file_ref: camtInputRef, accounts_dimensions_id: 101 }));
     expect(refused.isError).toBe(true);
     expect(parseMcpResponse(refused.content[0]!.text)).toMatchObject({ category: "file_input_reference_mismatch", retry: "never" });
+  });
+
+  it("M6: guided dry_run executed / skipped step refs of the CAMT and Wise tools are bank_input refs; standard keeps camt_input / wise_input", async () => {
+    const stepRefs = (payload: any) => [...payload.autopilot.executed_steps, ...payload.autopilot.skipped_steps]
+      .filter((step: any) => typeof step.suggested_args?.file_ref === "string")
+      .map((step: any) => ({ tool: step.tool as string, ref: step.suggested_args.file_ref as string }));
+    const resolves = (runtime: ReturnType<typeof createTestRuntimeSafetyContext>, ref: string, operation: string) => {
+      try {
+        runtime.fileReferenceStore.resolve(ref, { kind: "file", operation: operation as never });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const dims = [fixtureAccountDimension(), fixtureAccountDimension({ id: 202, title_est: "Wise" })];
+
+    for (const profile of ["guided", "standard"] as const) {
+      const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+      workspacesToClean.push(workspace);
+      const server = createMockToolServer();
+      const runtime = createTestRuntimeSafetyContext(profile === "guided" ? { scope: { profile } } : undefined);
+      registerAccountingInboxTools(server, runtime, createAccountingWorkflowApi({ bankAccounts: banks, accountDimensions: dims }), exposure);
+      const payload = parseMcpResponse((await runWithToolProfile(profile, () =>
+        getRegisteredToolHandler(server, "accounting_inbox")({ mode: "dry_run", workspace_path: workspace }))).content[0]!.text) as any;
+      const refs = stepRefs(payload);
+      expect(refs.map(entry => entry.tool), profile).toEqual(expect.arrayContaining(["parse_camt053", "import_wise_transactions"]));
+      for (const { tool, ref } of refs) {
+        const own = tool === "import_wise_transactions" ? FILE_REFERENCE_OPERATIONS.wise : FILE_REFERENCE_OPERATIONS.camt;
+        expect(resolves(runtime, ref, FILE_REFERENCE_OPERATIONS.bank), `${profile} ${tool} bank_input`).toBe(profile === "guided");
+        expect(resolves(runtime, ref, own), `${profile} ${tool} ${own}`).toBe(profile === "standard");
+      }
+    }
   });
 
   it("standard detected refs stay camt_input / wise_input refs", async () => {
