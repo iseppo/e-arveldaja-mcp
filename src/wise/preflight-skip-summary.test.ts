@@ -26,4 +26,13 @@ describe("summarizeWiseSkippedEntries", () => {
     expect(groups.map(g => g.reason)).toEqual([reason, "Inter-account confirmation failed: transaction 456 is locked"]);
     expect(groups[0]!.records).toBeUndefined();
   });
+
+  it("does not template an id followed by a decimal point or dash", () => {
+    const groups = summarizeWiseSkippedEntries([
+      { wise_id: "A", reason: "Already journalized: journal 123.45 odd" },
+      { wise_id: "B", reason: "Already journalized: journal 123-456 odd" },
+    ]);
+    expect(groups.map(g => g.reason)).toEqual(["Already journalized: journal 123.45 odd", "Already journalized: journal 123-456 odd"]);
+    expect(groups.every(g => g.records === undefined)).toBe(true);
+  });
 });

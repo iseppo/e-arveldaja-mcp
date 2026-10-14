@@ -503,7 +503,7 @@ export function isNonErrorWiseSkipReason(reason: string): boolean {
 // journal 29443702 books this transfer"). Grouping on the raw text made one group
 // per record (35 groups, ~89 KB on a live CSV), so the id is templated out of the
 // group key and kept per row in `records`. Error reasons are grouped verbatim.
-const LEDGER_RECORD_ID_RE = /\b(journal|transaction) (\d+)\b/;
+const LEDGER_RECORD_ID_RE = /\b(journal|transaction) (\d+)(?![\d.\-])\b/;
 
 export interface WiseSkippedGroup {
   reason: string;

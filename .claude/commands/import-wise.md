@@ -98,12 +98,12 @@ The compact preview returns a `summary`: `summary.counts` (CSV rows, eligible, f
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `import_wise_transactions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-The dry run returns top-level `plan_handle` and `approved_command_digest`, a `summary` (`total_csv_rows`, `eligible`, `filtered_out`, `created` = would-create, `skipped`, `error_count`, `inter_account_total`, `needs_review`), `ownership_reviews` (transfers that could not be auto-verified as own-account transfers; never dropped), `inter_account_reconciliation`, advisory `invoice_currency_fixes`, and `skipped_details` (every skipped row with its reason).
+The dry run returns top-level `plan_handle` and `approved_command_digest`, a `summary` (`total_csv_rows`, `eligible`, `filtered_out`, `created` = would-create, `skipped`, `error_count`, `inter_account_total`, `needs_review`), `ownership_reviews` (transfers that could not be auto-verified as own-account transfers; never dropped), `inter_account_reconciliation`, advisory `invoice_currency_fixes`, and `skipped_details`: skipped rows grouped by reason, each group with `count` and up to 5 `sample_ids`; for already-booked rows the ledger id is templated out of the reason (`journal {record_id}` / `transaction {record_id}`) and the group's `records` lists every row's `wise_id` + `record_id`. Every skipped row with its full reason is also in `execution.skipped`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 
 Show main transactions and fee rows that would be created, exact duplicate / skip reasons, whether fees will be auto-confirmed to the chosen dimension, inter-account transfer confirmations or skips, and advisory invoice FX corrections (reported only — the import never changes confirmed purchase invoices).
 
-**Automatic matches.** Some rows are skipped automatically, and there is no flag to turn this off. Their skip reason names the stored transaction or journal:
+**Automatic matches.** Some rows are skipped automatically, and there is no flag to turn this off. Their skip reason names the stored transaction or journal (in `skipped_details`, read the per-row `records` for the ids):
 - `wise_untagged_ledger_unique`: a confirmed transaction without a `WISE:` tag is the only stored row of this movement on this Wise account.
 - `wise_transfer_journal_unique_legacy`: an inter-account journal is the only same-amount journal within one day and books exactly this transfer.
 - "Fee already journalized": that journal books the transfer net of the fee, so the fee row is not created either.
