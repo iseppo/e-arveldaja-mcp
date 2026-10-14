@@ -712,16 +712,18 @@ describe("runAccountingInboxDryRunPipeline", () => {
   });
 
   it("collapses a Wise preview's per-row counterpart holds into one file-scoped follow-up", async () => {
-    const unverified = (id: string) => ({
+    const unverified = (id: string, evidence: number[]) => ({
       wise_id: id, code: "wise_transfer_dimensions_unverified", reason: "Dimensions unverified.",
       source_verified: false, target_verified: false, approval_required: false,
       counterpart_candidate_dimension_ids: [20, 30],
+      ...(evidence.length > 0 ? { evidence_transaction_ids: evidence } : {}),
     });
-    const wisePreview = (digest: string) => ({
+    // The second file's rows have inconclusive evidence on an imported statement.
+    const wisePreview = (digest: string, evidence: number[] = []) => ({
       created: [{}, {}, {}],
       skipped: [],
       commands: [{ action: "main_create" }, { action: "main_create" }, { action: "main_create" }],
-      ownershipReviews: [unverified("TRANSFER-1"), unverified("TRANSFER-2"), unverified("TRANSFER-3")],
+      ownershipReviews: [unverified("TRANSFER-1", evidence), unverified("TRANSFER-2", evidence), unverified("TRANSFER-3", evidence)],
       invoiceFixCandidates: [],
       accountsDimensionsId: 5,
       sourceIdentity: { digest_sha256: digest },
@@ -733,7 +735,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
     });
     const prepareWiseImport = vi.fn()
       .mockResolvedValueOnce(ok(wisePreview("a".repeat(64))))
-      .mockResolvedValueOnce(ok(wisePreview("b".repeat(64))));
+      .mockResolvedValueOnce(ok(wisePreview("b".repeat(64), [601])));
     const wiseStep = (n: number, file: string) => ({
       step: n, tool: "import_wise_transactions", purpose: "Wise", recommended: true,
       suggested_args: { file_path: file, accounts_dimensions_id: 5, execute: false },
@@ -751,6 +753,8 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(first!.summary).toContain("3 Wise transfer row(s) are held for their counterpart bank account (wise_transfer_counterpart_unresolved: 3 unresolved, 0 contradicted by own-account evidence)");
     expect(first!.summary).toContain("LHV (20), Lightyear (30)");
     expect(first!.recommendation).toContain("wise_inter_account_dimension_id");
+    expect(first!.recommendation).toMatch(/^If the other bank's statement is not imported yet, import it first; otherwise ask the owner/);
+    expect(second!.recommendation).toMatch(/^Bank rows that may be these transfers are already imported but do not prove the account: ask the owner/);
     expect(first!.id).not.toBe(second!.id);
     expect(result.needs_accountant_review.some(item => item.summary.includes("TRANSFER-1"))).toBe(false);
   });

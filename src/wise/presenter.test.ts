@@ -534,6 +534,20 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
     expect(full.workflow.approval_previews[0].execute_args.acknowledged_journal_holds).toEqual(acknowledgement);
   });
 
+  it("guided counts.inter_account counts the planned inter-account confirmations of a preview (a released row)", () => {
+    const data = makeData(1);
+    data.acknowledgedHolds = acknowledgement;
+    data.commands = [
+      { action: "main_create", wise_id: "TRANSFER-ACK" },
+      { action: "inter_account", wise_id: "TRANSFER-ACK" },
+    ] as unknown as WiseImportCommand[];
+    expect(renderWiseImportCompact({ mode: "DRY_RUN", data }).summary.counts).toMatchObject({ inter_account: 1 });
+    // Execute: the inter-account results.
+    const executed = makeData(1, "EXECUTED");
+    executed.interAccountResults = [{ wise_id: "TRANSFER-ACK", amount: 10, status: "confirmed_inter_account", ownership_basis: "verified_endpoints" }] as WiseImportRenderData["interAccountResults"];
+    expect(renderWiseImportCompact({ mode: "EXECUTED", data: executed }).summary.counts).toMatchObject({ inter_account: 1 });
+  });
+
   it("a held review names the journals to acknowledge, and the ones a short acknowledgement left out, in the compact message", () => {
     const data = makeData(1);
     data.ownershipReviews = [{

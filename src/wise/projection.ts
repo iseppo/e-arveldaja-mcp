@@ -350,9 +350,9 @@ const WISE_INTER_ACCOUNT_ROUTE =
 const WISE_TRANSFER_CROSS_CURRENCY_REASON =
   `Wise transfer is not a same-currency EUR movement, so its booked amount is not the base EUR the counterpart bank account records. The row is imported unconfirmed; ${WISE_INTER_ACCOUNT_ROUTE}.`;
 const WISE_JOURNAL_HOLD_RELEASE =
-  "If none does and the owner confirms it, re-run with acknowledged_journal_holds [{ wise_id, journal_ids: <required_acknowledgement_ids> }]: the row is then imported and confirmed normally.";
+  "Use acknowledged_journal_holds [{ wise_id, journal_ids: <required_acknowledgement_ids> }] only when the owner confirms every one of those journals is a different movement: the row is then created and confirmed as a new transaction.";
 const WISE_TRANSFER_JOURNAL_AMBIGUOUS_REASON =
-  `A same-amount journal on the Wise account within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row and its fee are not imported. If one of the candidate journals books exactly this Wise transfer, re-run the import with journalized_transfer_ids [{ wise_id, journal_id }] so it is recorded as already journalized (the mapping is validated and needs a journal with a document number). ${WISE_JOURNAL_HOLD_RELEASE}`;
+  `A same-amount journal on the Wise account within one day of this Wise transfer cannot be told apart from this transfer (ambiguous or differently labelled). The row and its fee are not imported. First check whether a candidate journal IS this transfer (likely when date and amount agree): then re-run with journalized_transfer_ids [{ wise_id, journal_id }] to record it as already journalized (validated; the journal needs a document number). ${WISE_JOURNAL_HOLD_RELEASE}`;
 const WISE_TRANSFER_JOURNAL_INCONSISTENT_REASON =
   "A journal labelled with this Wise transfer's ID already exists, but it is not the journal that books this row's amount (gross, or net of a fee the journal also books) in this row's direction. The transfer may already be booked, so the row and its fee are not imported. Correct or remove the labelled journal, then re-run the preview.";
 const WISE_LEGACY_LEG_AMBIGUOUS_REASON =
@@ -366,7 +366,7 @@ const WISE_UNTAGGED_LEDGER_MATCH_REASON =
 const WISE_UNTAGGED_LEDGER_MATCH_TRANSFER_REASON =
   "A bank row without a WISE: identity tag, already stored on this Wise account, has the same date, amount and currency as this transfer. It may be this transfer entered by hand, so the row and its fee are not imported. If the stored row is this transfer, nothing is left to do; otherwise book the transfer with the owner.";
 const WISE_TRANSFER_JOURNAL_EXISTING_ELSEWHERE_REASON =
-  `A registered journal already moves this amount on the Wise account within one day of this transfer (or may, for a journal of several Wise postings). The row and its fee are not imported. If one of those journals books this transfer, nothing is needed (or re-run with journalized_transfer_ids). ${WISE_JOURNAL_HOLD_RELEASE}`;
+  `A registered journal already moves this amount on the Wise account within one day of this transfer (or may, for a journal of several Wise postings). The row and its fee are not imported. First check whether one of those journals IS this transfer: then it is already booked and nothing is needed (an inter-account journal can be recorded with journalized_transfer_ids). ${WISE_JOURNAL_HOLD_RELEASE}`;
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   `This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. If the existing bank transaction is already CONFIRMED, nothing is left to do; if it is still unconfirmed (PROJECT), ${WISE_INTER_ACCOUNT_ROUTE}.`;
 

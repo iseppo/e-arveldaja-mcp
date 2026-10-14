@@ -4,7 +4,7 @@ import { counterpartyIbanOf, hasUnverifiableCamtMarker } from "../banking/reconc
 import { sameCompanyIdentity } from "../company-name.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import { sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
-import { provenBankDirection } from "../bank-transaction-journal-direction.js";
+import { journalBankDirection, provenBankDirection } from "../bank-transaction-journal-direction.js";
 import { findRegistrationJournal } from "../banking/receipt-ledger-check.js";
 import {
   bookedAmountForWiseRow,
@@ -74,9 +74,11 @@ interface Candidate {
 }
 
 const WISE_TRANSFER_COUNTERPART_CONFLICT_REASON = (dims: readonly number[]) =>
-  `Own-account evidence points to bank account(s) ${dims.join(", ")} for this transfer, not to the selected/only one. The row is not imported. Re-run without inter_account_dimension_id (or with ${dims.length === 1 ? dims[0] : "the right one"}) if ${dims.length === 1 ? dims[0] : "one of them"} is right; if several banks show evidence, book it with the owner.`;
+  `Own-account evidence for this transfer (evidence_transaction_ids) points to bank account(s) ${dims.join(", ")}, which disagrees with the selected or only other bank account, or with itself. The row is not imported. If the owner confirms that one account is right, re-run with inter_account_dimension_id set to it (evidence on another bank still holds the row); otherwise book it with the owner.`;
 const WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON =
   "No own-account evidence shows which own bank account this Wise transfer goes to or from (an imported transaction of that bank with the Wise IBAN, the company's own name or Wise as counterparty, the same amount, within one day), and several are configured. The row is not imported. Pass inter_account_dimension_id, or import the other bank's statement first, then re-run the preview.";
+const WISE_TRANSFER_COUNTERPART_INCONCLUSIVE_REASON =
+  "Bank row(s) on another own bank may be this transfer (evidence_transaction_ids), but their amount, currency, direction or own-transfer marking cannot be proven, and several bank accounts are configured. The row is not imported. Ask the owner which own bank account it goes to or from and pass it as inter_account_dimension_id, then re-run the preview.";
 
 /** The review a counterpart hold carries: the held row's only review. */
 export function wiseCounterpartHoldReview(
@@ -90,7 +92,9 @@ export function wiseCounterpartHoldReview(
     code: hold.code,
     reason: hold.code === "wise_transfer_counterpart_conflict"
       ? WISE_TRANSFER_COUNTERPART_CONFLICT_REASON(hold.candidate_dimension_ids)
-      : WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON,
+      : hold.evidence_transaction_ids.length > 0
+        ? WISE_TRANSFER_COUNTERPART_INCONCLUSIVE_REASON
+        : WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON,
     source_verified: sourceVerified,
     target_verified: targetVerified,
     approval_required: false,
@@ -170,11 +174,14 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
       usableAmount = false;
     }
 
-    // Direction: the signed marker or the confirmed ledger side; a CAMT
-    // marker whose signature does not verify proves nothing.
+    // Direction: the signed marker or the confirmed ledger side. A CAMT
+    // marker whose signature does not verify proves nothing (legacy markers
+    // were signed over the stored type, which the API reads back as "C"), but
+    // the registration journal of a confirmed row still proves its side.
+    const bankAccountsId = lookups.dimensionToAccountsId.get(dim);
     const direction = hasUnverifiableCamtMarker(tx)
-      ? undefined
-      : provenBankDirection(tx, journals, lookups.dimensionToAccountsId.get(dim));
+      ? journalBankDirection(tx, journals, bankAccountsId)
+      : provenBankDirection(tx, journals, bankAccountsId);
     const opposite = sourceDirectionForWiseDirection(row.direction) === "IN" ? "outgoing" : "incoming";
     if (direction !== undefined && direction !== opposite) return undefined;
 

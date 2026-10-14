@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AccountDimension, BankAccount, Journal, Transaction } from "../types/api.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
-import { resolveWiseRowCounterparts, type WiseCounterpartInput } from "./counterpart.js";
+import { resolveWiseRowCounterparts, wiseCounterpartHoldReview, type WiseCounterpartInput } from "./counterpart.js";
 import { isWiseCounterpartyName } from "./preflight.js";
 import type { WiseRow } from "./types.js";
 
@@ -231,6 +231,17 @@ describe("resolveWiseRowCounterparts — Codex r3 M2 (proven direction)", () => 
     });
   });
 
+  it("a CONFIRMED row with an unverifiable legacy CAMT marker is strong when its registration journal proves the side", () => {
+    const { tx, journal } = confirmedTx(1, LHV, "C", WISE);
+    const legacy = { ...tx, description: tamperSig(camtTx(1, LHV)).description } as Transaction;
+    expect(only(resolve({ existingTx: [legacy], journals: [journal] }))).toEqual({ dim: LHV, basis: "evidence" });
+    // The journal proves the same side as the row: an incoming LHV row is no evidence for an IN Wise row.
+    const incoming = confirmedTx(1, LHV, "D", WISE);
+    expect(only(resolve({ existingTx: [{ ...incoming.tx, description: legacy.description } as Transaction], journals: [incoming.journal] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [] },
+    });
+  });
+
   it("a CONFIRMED unsigned row whose registration journal proves the opposite side is strong", () => {
     const { tx, journal } = confirmedTx(1, LHV, "C", WISE);
     expect(only(resolve({ existingTx: [tx], journals: [journal] }))).toEqual({ dim: LHV, basis: "evidence" });
@@ -329,6 +340,22 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
       accounts_dimensions_id: WISE, description: "WISE:CARD-9 Shop [source_direction=OUT]",
     } as unknown as Transaction;
     expect(only(resolve({ existingTx: [camtTx(1, LHV), outgoing] }))).toEqual({ dim: LHV, basis: "evidence" });
+  });
+});
+
+describe("wiseCounterpartHoldReview texts", () => {
+  const review = (code: "wise_transfer_counterpart_conflict" | "wise_transfer_dimensions_unverified", evidence: number[]) =>
+    wiseCounterpartHoldReview(row("TRANSFER-1"), { code, candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: evidence }, true, false).reason;
+
+  it("unresolved without evidence says there is none; with inconclusive evidence it says what was found", () => {
+    expect(review("wise_transfer_dimensions_unverified", [])).toMatch(/^No own-account evidence shows/);
+    const inconclusive = review("wise_transfer_dimensions_unverified", [1]);
+    expect(inconclusive).toMatch(/^Bank row\(s\) on another own bank may be this transfer \(evidence_transaction_ids\)/);
+    expect(inconclusive).not.toContain("No own-account evidence");
+  });
+
+  it("a conflict names the accounts the evidence points to", () => {
+    expect(review("wise_transfer_counterpart_conflict", [1])).toMatch(/points to bank account\(s\) 20, 30, which disagrees with the selected or only other bank account, or with itself/);
   });
 });
 

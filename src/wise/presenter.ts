@@ -254,7 +254,7 @@ export function wiseTransferCounterpartMessage(info: NonNullable<WiseImportRende
     info.unresolved_row_count > 0 ? `${info.unresolved_row_count} Wise transfer row(s) have no determinable counterpart bank account` : undefined,
     info.conflict_row_count > 0 ? `${info.conflict_row_count} Wise transfer row(s) have own-account evidence that contradicts the selected counterpart` : undefined,
   ].filter((part): part is string => part !== undefined);
-  return `${parts.join("; ")}. Those rows are held (not imported); the other rows are unaffected. Own bank account(s): ${candidates}. Pass inter_account_dimension_id, or import the other bank's statement first, then re-run the preview.`;
+  return `${parts.join("; ")}. Those rows are held (not imported); the other rows are unaffected. Own bank account(s): ${candidates}. Pass inter_account_dimension_id, or import the other bank's statement first if it is not imported yet, then re-run the preview.`;
 }
 
 // --- FULL envelope (standard/full — byte-identical to the pre-refactor tool) --
@@ -593,7 +593,11 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     auto_matched: autoMatched.length,
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
-    inter_account: data.interAccountResults.length,
+    // Preview: the planned inter-account confirmations (results exist only
+    // after execute). Execute: the inter-account results.
+    inter_account: dryRun
+      ? data.commands.filter(command => command.action === "inter_account").length
+      : data.interAccountResults.length,
     // Preview: the rows the plan asserts as already booked. Execute: only the
     // ones whose journal the post-write re-check verified.
     already_journalized: dryRun
