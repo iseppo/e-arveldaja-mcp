@@ -109,7 +109,7 @@ export interface ValidatedWiseFields {
 
 // --- Compiled commands -------------------------------------------------------
 
-export const WISE_COMMAND_VERSION = "wise_import_command_v2";
+export const WISE_COMMAND_VERSION = "wise_import_command_v3";
 
 export type TransactionCreatePayload = Parameters<ApiContext["transactions"]["create"]>[0];
 export type TransactionConfirmPayload = Parameters<ApiContext["transactions"]["confirm"]>[1];
@@ -153,7 +153,7 @@ export interface FeeCreateCommand extends WiseCommandBase {
 
 export interface InterAccountCommand extends WiseCommandBase {
   action: "inter_account";
-  mutation_mode: "create_then_confirm" | "create_only_already_journalized";
+  mutation_mode: "create_then_confirm";
   counterpart_dimension_id: number;
   flow_source_dimension_id: number;
   flow_target_dimension_id: number;
@@ -168,6 +168,22 @@ export interface InterAccountCommand extends WiseCommandBase {
 }
 
 export type WiseImportCommand = MainCreateCommand | FeeCreateCommand | InterAccountCommand;
+
+/** An approved own transfer an existing journal already books. Not a command:
+ * nothing is written for it. The plan digest binds it, and execute re-checks
+ * the journal once after all writes. */
+export interface WiseAlreadyJournalizedAssertion {
+  row_index: number;
+  row_key: string;
+  wise_id: string;
+  date: string;
+  booked_amount: number;
+  booked_currency: string;
+  source_direction: "IN" | "OUT";
+  ownership_basis: WiseTransferOwnershipBasis;
+  existing_journal_id: number;
+  current_journal_state: unknown;
+}
 
 // --- Preview / execution accumulators ----------------------------------------
 

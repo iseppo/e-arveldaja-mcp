@@ -228,7 +228,8 @@ describe("Wise inter-account row matched to a journal that already books its fee
 
   it("drops the fee row too when the journal carries the fee leg", () => {
     const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])]);
-    expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
+    expect(output.commands).toEqual([]);
+    expect(output.alreadyJournalized.map(assertion => assertion.existing_journal_id)).toEqual([8]);
     expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
   });
 
@@ -239,7 +240,8 @@ describe("Wise inter-account row matched to a journal that already books its fee
       description: "WISE:FEE:TRANSFER-1 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise",
     } as Transaction;
     const output = run([journal(8, [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]])], [storedFee]);
-    expect(output.commands).toEqual([expect.objectContaining({ action: "inter_account", existing_journal_id: 8 })]);
+    expect(output.commands).toEqual([]);
+    expect(output.alreadyJournalized).toEqual([expect.objectContaining({ wise_id: "TRANSFER-1", existing_journal_id: 8 })]);
   });
 
   it("compares the journal in base EUR, like the guard that matched it", () => {
@@ -253,13 +255,15 @@ describe("Wise inter-account row matched to a journal that already books its fee
       ],
     } as unknown as Journal;
     const output = run([usdJournal]);
-    expect(output.commands.map(command => command.action)).toEqual(["inter_account"]);
+    expect(output.commands).toEqual([]);
+    expect(output.alreadyJournalized.map(assertion => assertion.existing_journal_id)).toEqual([9]);
     expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1", "FEE:TRANSFER-1"]);
   });
 
   it("still books the fee when the journal moved the gross amount only", () => {
     const output = run([journal(7, [[LHV, "C", 100], [WISE, "D", 100]])]);
-    expect(output.commands.map(command => command.action)).toEqual(["fee_create_and_confirm", "inter_account"]);
+    expect(output.commands.map(command => command.action)).toEqual(["fee_create_and_confirm"]);
+    expect(output.alreadyJournalized.map(assertion => assertion.existing_journal_id)).toEqual([7]);
   });
 });
 
@@ -305,7 +309,10 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     });
   };
   const actions = (output: ReturnType<typeof project>) =>
-    output.commands.map(command => `${command.action}:${command.wise_id}${command.action === "inter_account" ? `:${command.mutation_mode}:${command.existing_journal_id}` : ""}`);
+    [
+      ...output.commands.map(command => `${command.action}:${command.wise_id}${command.action === "inter_account" ? `:${command.mutation_mode}:${command.existing_journal_id}` : ""}`),
+      ...output.alreadyJournalized.map(assertion => `already_journalized:${assertion.wise_id}:${assertion.existing_journal_id}`),
+    ];
   const reviewCodesOf = (output: ReturnType<typeof project>) => output.ownershipReviews.map(review => `${review.wise_id}:${review.code}`);
   const mapped = (...pairs: Array<[string, number]>) => ({
     journalizedTransferIds: pairs.map(([wise_id, journal_id]) => ({ wise_id, journal_id })),
@@ -347,7 +354,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
 
     it("is accepted as already journalized when it books exactly this transfer (live shape: labelled with the LHV bank ref)", () => {
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal()]);
-      expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+      expect(actions(output)).toEqual(["already_journalized:TRANSFER-1001:701"]);
       expect(output.ownershipReviews).toEqual([]);
       expect(output.created).toEqual([]);
       expect(output.skipped).toEqual([expect.objectContaining({
@@ -358,7 +365,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     it("is accepted for an outgoing transfer and for a journal one day away", () => {
       const transferOut = `TRANSFER-1003,COMPLETED,OUT,"2026-03-24 10:00:00","2026-03-24 10:00:01",0,EUR,,,"Firma OÜ",100.00,EUR,"Firma OÜ",100.00,EUR,1,,,,"Money added",`;
       const output = run([transferOut], [labelledJournal({}, "C")]);
-      expect(actions(output)).toEqual(["inter_account:TRANSFER-1003:create_only_already_journalized:701"]);
+      expect(actions(output)).toEqual(["already_journalized:TRANSFER-1003:701"]);
     });
 
     it("is accepted net of the fee when it also books the fee, and the fee row is dropped", () => {
@@ -371,7 +378,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
         ],
       });
       const output = run([withFee], [netJournal]);
-      expect(actions(output)).toEqual(["inter_account:TRANSFER-1004:create_only_already_journalized:701"]);
+      expect(actions(output)).toEqual(["already_journalized:TRANSFER-1004:701"]);
       expect(output.skipped.map(entry => entry.wise_id)).toEqual(["TRANSFER-1004", "FEE:TRANSFER-1004"]);
       // Both the row and its fee name the journal they were automatically matched to.
       expect(output.skipped.map(entry => entry.auto_match)).toEqual([
@@ -449,12 +456,13 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
       // Without its fee row the stored 100.50 has another key: the journal is unique again.
       const alone = run([transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedMain] });
-      expect(actions(alone)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+      expect(actions(alone)).toEqual(["already_journalized:TRANSFER-1001:701"]);
     });
 
     it("is never taken from an unregistered journal", () => {
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal({ registered: false })]);
-      expect(output.commands.some(command => command.action === "inter_account" && command.mutation_mode === "create_only_already_journalized")).toBe(false);
+      expect(output.alreadyJournalized).toEqual([]);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "inter_account:TRANSFER-1001:create_then_confirm:null"]);
     });
   });
 
@@ -472,16 +480,28 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
 
   it("an operator mapping records the row as already journalized by that journal, with no create", () => {
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
-    expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+    expect(actions(output)).toEqual(["already_journalized:TRANSFER-1001:701"]);
     expect(output.ownershipReviews).toEqual([]);
     expect(output.created).toEqual([]);
+  });
+
+  it("a journalized transfer is not re-matched to an untagged stored lookalike on the Wise account", () => {
+    const untagged = {
+      id: 5002, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR",
+      date: "2026-03-23", bank_account_name: "Firma OÜ", ref_number: "1001", description: "Firma OÜ sissemakse",
+    } as Transaction;
+    const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], { ...mapped(["TRANSFER-1001", 701]), existingTx: [counterpartTx, untagged] });
+    expect(actions(output)).toEqual(["already_journalized:TRANSFER-1001:701"]);
+    expect(output.created).toEqual([]);
+    expect(output.skipped.map(entry => entry.reason)).toEqual([expect.stringMatching(/^Already journalized: inter-account journal 701/)]);
+    expect(output.skipped.some(entry => entry.auto_match?.code === "wise_untagged_ledger_unique")).toBe(false);
   });
 
   it("the mapped journal still never absorbs a distinct same-key Wise ID", () => {
     const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-9999")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
     expect(actions(output)).toEqual([
       "main_create:TRANSFER-9999",
-      "inter_account:TRANSFER-1001:create_only_already_journalized:701",
+      "already_journalized:TRANSFER-1001:701",
     ]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-9999:wise_transfer_journal_ambiguous"]);
   });
@@ -522,7 +542,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   it("a Wise ID listed twice in the mapping is rejected, even with the same journal; the row resolves as unmapped", () => {
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701], ["TRANSFER-1001", 701]));
     // Unmapped, the journal is the row's only candidate (unique legacy match).
-    expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:701"]);
+    expect(actions(output)).toEqual(["already_journalized:TRANSFER-1001:701"]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
@@ -565,7 +585,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       const journal = labelledJournal({ id: 801, document_number: "TRANSFER-B", operation_type: "JOURNAL", operations_id: undefined });
       const output = run(ids.map(id => transferIn(id)), [journal], mapped(["TRANSFER-A", 801]));
       expect(actions(output).sort()).toEqual([
-        "inter_account:TRANSFER-B:create_only_already_journalized:801",
+        "already_journalized:TRANSFER-B:801",
         "main_create:TRANSFER-A",
       ]);
       expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_ambiguous", "TRANSFER-A:wise_transfer_mapping_rejected:801"]);
@@ -576,7 +596,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     const own = labelledJournal({ id: 802, document_number: "TRANSFER-1001", operation_type: "JOURNAL", operations_id: undefined });
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal(), own], mapped(["TRANSFER-1001", 701]));
     // The rejected mapping is ignored: the row's own identity journal books it, as without a mapping.
-    expect(actions(output)).toEqual(["inter_account:TRANSFER-1001:create_only_already_journalized:802"]);
+    expect(actions(output)).toEqual(["already_journalized:TRANSFER-1001:802"]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
@@ -595,12 +615,12 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     (_order, journals) => {
       const unmapped = run([transferInWithFee("TRANSFER-A")], journals);
       const output = run([transferInWithFee("TRANSFER-A")], journals, mapped(["TRANSFER-A", 702]));
-      expect(actions(output)).not.toContain("inter_account:TRANSFER-A:create_only_already_journalized:702");
+      expect(actions(output)).not.toContain("already_journalized:TRANSFER-A:702");
       expect(actions(output)).toEqual(actions(unmapped));
       expect(reviewCodes(output)).toEqual([...reviewCodes(unmapped), "TRANSFER-A:wise_transfer_mapping_rejected:702"]);
       // Alone, the own journal books the row and its fee: no fee is created again.
       const own = run([transferInWithFee("TRANSFER-A")], [ownNet]);
-      expect(actions(own)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+      expect(actions(own)).toEqual(["already_journalized:TRANSFER-A:701"]);
     },
   );
 
@@ -615,7 +635,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     "the own exact-reference journal net of the fee books the row and its fee; no fee is confirmed again (%s)",
     (_case, journals, mappedTo) => {
       const output = run([transferInWithFee("TRANSFER-A")], journals, mappedTo === undefined ? {} : mapped(["TRANSFER-A", mappedTo]));
-      expect(actions(output)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+      expect(actions(output)).toEqual(["already_journalized:TRANSFER-A:701"]);
       expect(output.commands.some(command => command.action === "fee_create_and_confirm")).toBe(false);
       expect(reviewCodes(output)).toEqual(mappedTo === undefined ? [] : ["TRANSFER-A:wise_transfer_mapping_rejected:702"]);
     },
@@ -660,7 +680,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     "a mapping to a missing journal is rejected and the row resolves as unmapped: its own journal books it and the fee (%s)",
     (_case, journals) => {
       const output = run([transferInWithFee("TRANSFER-A")], journals, mapped(["TRANSFER-A", 999]));
-      expect(actions(output)).toEqual(["inter_account:TRANSFER-A:create_only_already_journalized:701"]);
+      expect(actions(output)).toEqual(["already_journalized:TRANSFER-A:701"]);
       expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_mapping_rejected:999"]);
     },
   );

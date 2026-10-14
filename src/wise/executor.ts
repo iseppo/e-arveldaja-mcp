@@ -373,6 +373,7 @@ async function runWiseImport(
   const skipped = projected.skipped;
   const ownershipReviews = projected.ownershipReviews;
   const invoiceFixCandidates = projected.invoiceFixCandidates;
+  const alreadyJournalized = projected.alreadyJournalized;
 
   const canonicalPlanningArgs = {
     source_identity: inputSnapshot.identity,
@@ -404,6 +405,12 @@ async function runWiseImport(
         raw_csv_sha256: rawCsvSha256,
         planning_args: canonicalPlanningArgs,
         commands,
+        already_journalized: alreadyJournalized.map(assertion => ({
+          wise_id: assertion.wise_id,
+          row_key: assertion.row_key,
+          existing_journal_id: assertion.existing_journal_id,
+          current_journal_state: assertion.current_journal_state,
+        })),
         current_state: {
           transactions: existingTx,
           account_dimensions: accountDimensionsSnapshot,
@@ -446,6 +453,7 @@ async function runWiseImport(
         filtered_out: rows.length - eligible.length,
         would_create: created.length,
         command_count: commands.length,
+        already_journalized: alreadyJournalized.length,
         needs_review: ownershipReviews.length,
         invoice_currency_fixes: invoiceFixCandidates.length,
       },
@@ -527,6 +535,7 @@ async function runWiseImport(
       created.splice(0, created.length);
       const runtimeIds = new Map<string, number>();
       const successfulCommands = new Set<string>();
+      let stoppedIndeterminate = false;
       for (const command of commands) {
       if (command.depends_on && !successfulCommands.has(command.depends_on)) {
         skipped.push({
@@ -656,32 +665,6 @@ async function runWiseImport(
         }
 
         if (command.action === "inter_account") {
-          if (command.mutation_mode === "create_only_already_journalized") {
-            clearRuntimeCaches();
-            const freshJournals = await api.journals.listAllWithPostings();
-            const expectedJournal = freshJournals.find(journal => journal.id === command.existing_journal_id);
-            if (!expectedJournal || !exactStateMatches(expectedJournal, command.current_journal_state)) {
-              const reason = `Stale already-journalized precondition: expected journal ${command.existing_journal_id} changed before acceptance`;
-              skipped.push({ wise_id: command.wise_id, reason });
-              interAccountResults.push({
-                wise_id: command.wise_id,
-                amount: command.booked_amount,
-                status: `precondition_failed: ${reason}`,
-                ownership_basis: command.ownership_basis,
-              });
-              continue;
-            }
-            successfulCommands.add(command.row_key);
-            interAccountResults.push({
-              wise_id: command.wise_id,
-              amount: command.booked_amount,
-              status: "already_journalized",
-              ownership_basis: command.ownership_basis,
-              ...(command.existing_journal_id !== null ? { journal_id: command.existing_journal_id } : {}),
-            });
-            continue;
-          }
-
           const apiId = command.depends_on ? runtimeIds.get(command.depends_on) : undefined;
           if (apiId === undefined) throw new Error("Inter-account command dependency returned no transaction ID");
           try {
@@ -800,6 +783,7 @@ async function runWiseImport(
               reason: "Not attempted: import stopped after an indeterminate mutation",
             });
           }
+          stoppedIndeterminate = true;
           break;
         }
         skipped.push({
@@ -808,6 +792,56 @@ async function runWiseImport(
         });
       }
     }
+      // Already-journalized rows: no write depends on them, so their journals
+      // are re-checked once, after every write and still inside the lock. This
+      // check only reports; it never throws after writes.
+      if (alreadyJournalized.length > 0) {
+        if (stoppedIndeterminate) {
+          for (const assertion of alreadyJournalized) {
+            skipped.push({
+              wise_id: assertion.wise_id,
+              reason: "Not attempted: import stopped after an indeterminate mutation",
+            });
+          }
+        } else {
+          let freshJournals: Journal[] | undefined;
+          let readError: string | undefined;
+          try {
+            clearRuntimeCaches();
+            freshJournals = await api.journals.listAllWithPostings();
+          } catch (error) {
+            readError = error instanceof Error ? error.message : String(error);
+          }
+          for (const assertion of alreadyJournalized) {
+            if (freshJournals === undefined) {
+              skipped.push({
+                wise_id: assertion.wise_id,
+                reason: `Already-journalized re-check failed: journal ${assertion.existing_journal_id} could not be read (${readError})`,
+              });
+              continue;
+            }
+            const expectedJournal = freshJournals.find(journal => journal.id === assertion.existing_journal_id);
+            if (!expectedJournal || !exactStateMatches(expectedJournal, assertion.current_journal_state)) {
+              const reason = `Stale already-journalized precondition: expected journal ${assertion.existing_journal_id} changed before acceptance`;
+              skipped.push({ wise_id: assertion.wise_id, reason });
+              interAccountResults.push({
+                wise_id: assertion.wise_id,
+                amount: assertion.booked_amount,
+                status: `precondition_failed: ${reason}`,
+                ownership_basis: assertion.ownership_basis,
+              });
+              continue;
+            }
+            interAccountResults.push({
+              wise_id: assertion.wise_id,
+              amount: assertion.booked_amount,
+              status: "already_journalized",
+              ownership_basis: assertion.ownership_basis,
+              journal_id: assertion.existing_journal_id,
+            });
+          }
+        }
+      }
     } finally {
       releaseExecutionLock();
     }
@@ -827,6 +861,7 @@ async function runWiseImport(
     created,
     skipped,
     commands,
+    alreadyJournalized,
     approvedCommandDigest,
     planHandle,
     autoDetectedInterAccountDimId,

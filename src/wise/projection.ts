@@ -38,6 +38,7 @@ import {
   type FeeCreateCommand,
   type MainCreateCommand,
   type TransactionCreatePayload,
+  type WiseAlreadyJournalizedAssertion,
   type WiseCreatedEntry,
   type WiseImportCommand,
   type WiseInvoiceFixCandidate,
@@ -303,6 +304,9 @@ export interface WiseProjectionOutput {
   mainCommandKeysByRow: Map<number, string>;
   ownershipReviews: WiseTransferReview[];
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
+  /** Approved own transfers an existing journal already books: no command, no
+   * write. Bound into the plan digest and re-checked once after the writes. */
+  alreadyJournalized: WiseAlreadyJournalizedAssertion[];
   /** True when a fee row still needs booking but the fee dimension / Wise
    * client were not supplied: resolve them and project again. */
   feeResolutionRequired: boolean;
@@ -598,6 +602,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const created: WiseCreatedEntry[] = [];
   const skipped: WiseSkippedEntry[] = [];
   const commands: WiseImportCommand[] = [];
+  const alreadyJournalized: WiseAlreadyJournalizedAssertion[] = [];
   const mainCommandKeysByRow = new Map<number, string>();
   const alreadyImportedApprovalReviews: WiseTransferReview[] = [];
   const legacyLegReviews: WiseTransferReview[] = [];
@@ -1267,21 +1272,28 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       }
 
       const direction = sourceDirectionForWiseDirection(row.direction)!;
+      if (existingJournalId !== undefined) {
+        // Nothing to write: the assertion binds the journal into the plan
+        // digest and execute re-checks it once after all writes.
+        alreadyJournalized.push({
+          row_index: row.rowIndex,
+          row_key: `row:${row.rowIndex}:inter_account`,
+          wise_id: row.id,
+          date: entry.date,
+          booked_amount: entry.amount,
+          booked_currency: bookedCurrencyForWiseRow(row),
+          source_direction: direction,
+          ownership_basis: ownershipBasis,
+          existing_journal_id: existingJournalId,
+          current_journal_state: existingJournal ?? null,
+        });
+        continue;
+      }
       const interAccountType = direction === "IN" ? "D" : "C";
-      const confirmationDistribution = existingJournalId === undefined
-        ? [{
-            related_table: "accounts" as const,
-            related_id: targetDim.accounts_id,
-            related_sub_id: targetDim.id,
-            amount: entry.amount,
-          }]
-        : null;
       commands.push({
         version: WISE_COMMAND_VERSION,
         action: "inter_account",
-        mutation_mode: existingJournalId === undefined
-          ? "create_then_confirm"
-          : "create_only_already_journalized",
+        mutation_mode: "create_then_confirm",
         row_index: row.rowIndex,
         row_key: `row:${row.rowIndex}:inter_account`,
         identity_hash: commandIdentity(row, "inter_account"),
@@ -1305,12 +1317,17 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         posting_account_id: targetDim.accounts_id,
         posting_dimension_id: targetDim.id,
         ownership_basis: ownershipBasis,
-        existing_journal_id: existingJournalId ?? null,
-        client_update: existingJournalId === undefined && ownCompanyClientId !== undefined
+        existing_journal_id: null,
+        client_update: ownCompanyClientId !== undefined
           ? { clients_id: ownCompanyClientId }
           : null,
-        confirmation_distribution: confirmationDistribution,
-        current_journal_state: existingJournal ?? null,
+        confirmation_distribution: [{
+          related_table: "accounts" as const,
+          related_id: targetDim.accounts_id,
+          related_sub_id: targetDim.id,
+          amount: entry.amount,
+        }],
+        current_journal_state: null,
         current_client_state: ownCompanyClientMatches,
       });
     }
@@ -1371,6 +1388,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     if (Math.round(tx.amount * 100) !== Math.round(entry.amount * 100) || (tx.cl_currencies_id ?? "EUR") !== "EUR") return false;
     if (!commands.some(command => command.row_key === `row:${row.rowIndex}:main` && command.action === "main_create")) return false;
     if (commands.some(command => command.row_index === row.rowIndex && command.action === "inter_account")) return false;
+    if (alreadyJournalized.some(assertion => assertion.row_index === row.rowIndex)) return false;
     if (ownershipReviews.some(review => review.wise_id === row.id || review.wise_id === entry.wise_id)) return false;
     if (!untaggedRowNamesWiseRow(row, tx) || lookalikeContested(row, tx)) return false;
     const direction = entry.source_direction === "IN" ? "incoming" : "outgoing";
@@ -1545,6 +1563,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     mainCommandKeysByRow,
     ownershipReviews,
     invoiceFixCandidates,
+    alreadyJournalized,
     feeResolutionRequired,
   };
 }

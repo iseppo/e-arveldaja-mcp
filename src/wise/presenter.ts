@@ -26,6 +26,7 @@ import { WISE_COMMAND_VERSION } from "./types.js";
 import type { WiseFailure } from "./executor.js";
 import type {
   ImportRejectedField,
+  WiseAlreadyJournalizedAssertion,
   WiseCreatedEntry,
   WiseImportCommand,
   WiseInterAccountResult,
@@ -185,6 +186,8 @@ export interface WiseImportRenderData {
   created: WiseCreatedEntry[];
   skipped: WiseSkippedEntry[];
   commands: WiseImportCommand[];
+  /** Transfers an existing journal already books: not commands, no writes. */
+  alreadyJournalized: WiseAlreadyJournalizedAssertion[];
   approvedCommandDigest: string | undefined;
   planHandle: string | undefined;
   autoDetectedInterAccountDimId: number | undefined;
@@ -223,6 +226,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     created,
     skipped,
     commands,
+    alreadyJournalized,
     approvedCommandDigest,
     planHandle,
     autoDetectedInterAccountDimId,
@@ -293,14 +297,9 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ? executionSkipped.filter(entry => !isAlreadyBookedWiseSkipReason(entry.reason))
     : executionSkipped;
   const sanitizedExecutionSkipped = displayedExecutionSkipped.map(sanitizeReason);
-  // Dry run: no-op inter-account commands (the transfer is already booked by a
-  // journal; execute only re-asserts that journal's state) are listed as a
-  // compact table instead of full command objects. The approval digest is
-  // computed from the internal command list, never from this display.
-  const isAlreadyJournalizedCommand = (command: WiseImportCommand): command is Extract<WiseImportCommand, { action: "inter_account" }> =>
-    command.action === "inter_account" && command.mutation_mode === "create_only_already_journalized";
-  const alreadyJournalizedCommands = dryRun ? commands.filter(isAlreadyJournalizedCommand) : [];
-  const displayedCommands = dryRun ? commands.filter(command => !isAlreadyJournalizedCommand(command)) : commands;
+  // Dry run: transfers an existing journal already books are not commands;
+  // they are listed as a compact table.
+  const alreadyJournalizedRows = dryRun ? alreadyJournalized : [];
   const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
   const workflowArgs = {
     ...(file_ref !== undefined ? { file_ref } : {}),
@@ -369,7 +368,8 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
         ...(autoDetectedInterAccountDimId && hasHintedRows ? {
           inter_account_auto_detected_dimension_id: autoDetectedInterAccountDimId,
         } : {}),
-        ...(interAccountResults.length > 0 || (executeRequested && commands.some(command => command.action === "inter_account")) ? {
+        ...(interAccountResults.length > 0 ||
+          (executeRequested && (commands.some(command => command.action === "inter_account") || alreadyJournalized.length > 0)) ? {
           inter_account_reconciliation: {
             total: interAccountResults.length,
             already_journalized: interAccountResults.filter(r => r.status === "already_journalized").length,
@@ -390,7 +390,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
             errors: sanitizedExecutionErrors,
             needs_review: ownershipReviews,
           }),
-          commands: displayedCommands.map(projectWiseCommand),
+          commands: commands.map(projectWiseCommand),
           ...(dryRun ? {
             skipped_displayed: displayedExecutionSkipped.length,
             skipped_omitted_already_booked: executionSkipped.length - displayedExecutionSkipped.length,
@@ -398,17 +398,17 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
               ? { skipped_omitted_note: "Already-booked rows are grouped in skipped_details (records lists each ledger-matched row's journal/transaction id)." }
               : {}),
           } : {}),
-          ...(alreadyJournalizedCommands.length > 0 ? {
-            already_journalized_command_count: alreadyJournalizedCommands.length,
-            already_journalized_commands: alreadyJournalizedCommands.map(command => ({
-              wise_id: wrapUntrustedOcr(command.wise_id) ?? command.wise_id,
-              existing_journal_id: command.existing_journal_id,
-              date: command.date,
-              booked_amount: command.booked_amount,
-              booked_currency: command.booked_currency,
-              source_direction: command.source_direction,
+          ...(alreadyJournalizedRows.length > 0 ? {
+            already_journalized_count: alreadyJournalizedRows.length,
+            already_journalized_rows: alreadyJournalizedRows.map(assertion => ({
+              wise_id: wrapUntrustedOcr(assertion.wise_id) ?? assertion.wise_id,
+              existing_journal_id: assertion.existing_journal_id,
+              date: assertion.date,
+              booked_amount: assertion.booked_amount,
+              booked_currency: assertion.booked_currency,
+              source_direction: assertion.source_direction,
             })),
-            already_journalized_note: "No writes: execute re-checks that each journal is unchanged before accepting the row as already booked.",
+            already_journalized_note: "Not part of the approved commands: no writes. Execute re-checks each journal once, after all writes, and reports a changed journal as an error.",
           } : {}),
         },
       }),
@@ -499,6 +499,8 @@ export interface WiseCompactInput {
 export function renderWiseImportCompact(input: WiseCompactInput): { summary: OperationSummaryV1 } {
   const { mode, data } = input;
   const dryRun = mode === "DRY_RUN";
+  // A dry run with no commands has nothing to approve and issues no plan.
+  const zeroWrite = dryRun && data.commands.length === 0;
 
   const executionSkipped = data.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
   const executionErrors = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
@@ -522,6 +524,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
     inter_account: data.interAccountResults.length,
+    already_journalized: data.alreadyJournalized.length,
     invoice_currency_fixes: data.invoiceFixCandidates.length,
   };
   // A Wise statement can hold rows booked in different currencies, and these are
@@ -562,9 +565,11 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   }
   // Automatic matches name the stored row / journal and how to undo them;
   // there is no flag to switch them off.
-  const autoMatchMoreHint = dryRun && data.planHandle !== undefined
-    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "exclusions", detail: "full" }.`
-    : "re-run the preview and page its plan exclusions with get_execution_plan_page.";
+  const autoMatchMoreHint = zeroWrite
+    ? "nothing will be written; to see them all, re-run process_bank_input mode='prepare' with a narrower date_from/date_to (each preview lists up to 3 per kind), or use import_wise_transactions on the standard/full profile, where skipped_details[].records lists every match."
+    : dryRun && data.planHandle !== undefined
+      ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "exclusions", detail: "full" }.`
+      : "re-run the preview and page its plan exclusions with get_execution_plan_page.";
   for (const code of ["wise_untagged_ledger_unique", "wise_transfer_journal_unique_legacy"] as const) {
     warnings.push(...cappedWarnings(code, autoMatched.filter(entry => entry.auto_match.code === code).map(autoMatchWarning), autoMatchMoreHint));
   }
@@ -608,13 +613,21 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
       : {}),
   }));
 
-  const baseMessage = dryRun
-    ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
-    : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
+  const journalizedSkips = data.skipped.filter(entry =>
+    entry.reason.startsWith("Already journalized") || entry.reason.startsWith("Fee already journalized")).length;
+  const importedSkips = data.skipped.filter(entry =>
+    entry.reason.startsWith("Already imported") || entry.reason.startsWith("Fee already imported")).length;
+  const baseMessage = zeroWrite
+    ? `Nothing to approve: the Wise dry run found no rows to write (${journalizedSkips + importedSkips} already booked: ${journalizedSkips} already journalized, ${importedSkips} already imported); no plan handle was issued.`
+    : dryRun
+      ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
+      : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
 
-  const status = dryRun
-    ? "ready_for_approval" as const
-    : (executionErrors.length > 0 ? "partial" as const : "completed" as const);
+  const status = zeroWrite
+    ? (executionErrors.length > 0 || data.ownershipReviews.length > 0 ? "needs_review" as const : "completed" as const)
+    : dryRun
+      ? "ready_for_approval" as const
+      : (executionErrors.length > 0 ? "partial" as const : "completed" as const);
 
   // Statement identity: the Wise bank dimension identifies the account; the
   // source-file identity (opaque file_ref, otherwise the content digest, and an

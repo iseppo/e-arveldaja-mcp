@@ -12,6 +12,8 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { createExecutionPlanPageHandler } from "../plan-tools.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { runWithToolProfile } from "../tool-profile.js";
+import { approvalDigest } from "../wise/projection.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -143,6 +145,12 @@ function buildM04Values({
     targetName, targetAmount, targetCurrency,
     exchangeRate, reference, "", "", category, note,
   ];
+}
+
+// A plain card payment (one main_create): gives a CSV whose transfers are all
+// already journalized a write, so the dry run issues a plan to execute.
+function cardPaymentValues(date: string, id = "CARD_TRANSACTION-PLAN-1"): string[] {
+  return buildM04Values({ id, date, sourceName: "Wise Own Account", targetName: "Ordinary Vendor", sourceAmount: "12.34" });
 }
 
 function configuredTransferBankAccounts(
@@ -1323,13 +1331,13 @@ describe("wise import tool", () => {
   });
 
   it("leaves transfer unconfirmed when already journalized from other side", async () => {
-    mockedReadFile.mockResolvedValue(buildCsvRow([
+    mockedReadFile.mockResolvedValue(buildCsvRows([[
       "TRANSFER-xfer-1", "COMPLETED", "IN", "2026-02-01 10:00:00", "2026-02-01 10:00:00",
       "0", "EUR", "0", "EUR",
       "LHV Bank", "500", "EUR",
       "Seppo AI OÜ", "500", "EUR",
       "1", "", "", "", "General", "",
-    ]));
+    ], cardPaymentValues("2026-02-03")]));
 
     // accounts_dimensions_id=5 (Wise), inter_account_dimension_id=20 (LHV)
     // Existing journal has postings from LHV(dim=20) to Wise(dim=5) for 500 EUR on 2026-02-01
@@ -2417,12 +2425,14 @@ describe("wise import tool", () => {
     const outcomes: Array<{ item: typeof cases[number]; outcome: Awaited<ReturnType<typeof captureM03Outcome>>; api: any }> = [];
 
     for (const item of cases) {
+      // An already-journalized transfer alone has nothing to approve; the card
+      // payment gives the run a plan to execute.
       mockedReadFile.mockResolvedValue(buildM03Row({
         id: item.id,
         direction: item.direction,
         sourceName: item.direction === "IN" ? "LHV Own Account" : "Wise Own Account",
         targetName: item.direction === "IN" ? "Wise Own Account" : "LHV Own Account",
-      }));
+      }) + (item.alreadyJournalized ? `${cardPaymentValues("2026-06-03").join(",")}\n` : ""));
       const journals = item.alreadyJournalized ? [{
         id: 9450,
         is_deleted: false,
@@ -2578,7 +2588,7 @@ describe("wise import tool", () => {
         execute: false,
       }));
       outcomes.push({ item, payload, api: setup.api });
-      expect(payload.command_version).toBe("wise_import_command_v2");
+      expect(payload.command_version).toBe("wise_import_command_v3");
     }
 
     mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
@@ -2793,10 +2803,13 @@ describe("wise import tool", () => {
     ]);
 
     // m4: an already-journalized transfer creates no Wise bank row at all.
-    // Dry run lists the no-op command compactly; nothing mutating is planned.
+    // It is not a command: the dry run lists it compactly and plans nothing.
     expect(payload.execution.commands).toEqual([]);
-    expect(payload.execution.already_journalized_command_count).toBe(1);
-    expect(payload.execution.already_journalized_commands).toEqual([
+    expect(payload.command_count).toBe(0);
+    expect(payload.plan_handle).toBeUndefined();
+    expect(payload.approved_command_digest).toBeUndefined();
+    expect(payload.execution.already_journalized_count).toBe(1);
+    expect(payload.execution.already_journalized_rows).toEqual([
       expect.objectContaining({ existing_journal_id: 441 }),
     ]);
     expect(payload.results).toEqual([]);
@@ -4089,7 +4102,9 @@ describe("wise import tool", () => {
       ["missing", []],
       ["changed", [{ ...expectedJournal, registered: false }]],
     ] as const) {
-      mockedReadFile.mockResolvedValue(buildCsvRows([row]));
+      // The card payment (main_create only, no journal read) gives the run a
+      // plan; the journalized transfer is re-checked once after it.
+      mockedReadFile.mockResolvedValue(buildCsvRows([row, cardPaymentValues("2026-06-12")]));
       const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 8840 }), {
         accountDimensions: configuredTransferDimensions(),
         bankAccounts: configuredTransferBankAccounts(),
@@ -4107,9 +4122,10 @@ describe("wise import tool", () => {
         inter_account_dimension_id: 20,
       });
 
-      expect(dry.execution.already_journalized_commands).toEqual(expect.arrayContaining([
+      expect(dry.execution.already_journalized_rows).toEqual([
         expect.objectContaining({ existing_journal_id: 441 }),
-      ]));
+      ]);
+      // Execute reads journals twice: the projection and the post-loop re-check.
       expect(setup.api.journals.listAllWithPostings, label).toHaveBeenCalledTimes(2);
       expect(setup.api.transactions.update, label).not.toHaveBeenCalled();
       expect(setup.api.transactions.confirm, label).not.toHaveBeenCalled();
@@ -4120,8 +4136,11 @@ describe("wise import tool", () => {
         }),
       ]);
       // m4: an already-journalized transfer never created a Wise row, so a
-      // failed precondition leaves no orphan PROJECT transaction behind.
-      expect(setup.api.transactions.create, label).not.toHaveBeenCalled();
+      // failed precondition leaves no orphan PROJECT transaction behind; the
+      // card payment written before the re-check is kept.
+      expect(setup.api.transactions.create, label).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0]![0].description, label).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+      expect(executed.created, label).toBe(1);
       expect(executed.inter_account_reconciliation.details, label).toEqual([{
         wise_id: wiseId,
         amount: 75,
@@ -5939,21 +5958,17 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   const transferArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20 };
 
   it("M1: a counterpart journal one day earlier already books the transfer — no Wise row, no second journal", async () => {
-    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-GAP", "2026-02-02")]));
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-GAP", "2026-02-02"), cardPaymentValues("2026-02-05")]));
     const setup = setupWiseTool([], undefined, transferOptions([lhvWiseJournal(501, "2026-02-01", 500)]));
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
 
-    expect(dry.execution.commands).toEqual([]);
-    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 501 })]);
-    // The executed run keeps the full command objects.
-    expect(executed.execution.commands).toEqual([expect.objectContaining({
-      action: "inter_account",
-      mutation_mode: "create_only_already_journalized",
-      existing_journal_id: 501,
-      depends_on: null,
-    })]);
-    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 501 })]);
+    // The executed run lists only write commands: the card payment.
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
     expect(executed.inter_account_reconciliation).toMatchObject({ already_journalized: 1, confirmed: 0 });
     expect(executed.inter_account_reconciliation.details).toEqual([
@@ -5963,20 +5978,19 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   });
 
   it("M1: the only same-key journal, differently labelled but booking exactly this transfer, is accepted as already journalized (unique legacy)", async () => {
-    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02")]));
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02"), cardPaymentValues("2026-02-05")]));
     const journal = lhvWiseJournal(502, "2026-02-02", 500, { document_number: "BANK:abc", operation_type: "TRANSACTION", operations_id: 4001 });
     const setup = setupWiseTool([], undefined, transferOptions([journal]));
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
 
-    expect(dry.execution.commands).toEqual([]);
-    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 502 })]);
-    expect(executed.execution.commands).toEqual([expect.objectContaining({
-      action: "inter_account", mutation_mode: "create_only_already_journalized", existing_journal_id: 502,
-    })]);
+    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 502 })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
     expect(dry.execution.needs_review).toEqual([]);
     expect(JSON.stringify(dry.skipped_details)).toContain("wise_transfer_journal_unique_legacy");
-    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
     expect(executed.inter_account_reconciliation).toMatchObject({ already_journalized: 1, confirmed: 0 });
     expect(executed.execution.errors).toEqual([]);
@@ -6024,7 +6038,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(dry.execution.commands).toEqual([
       expect.objectContaining({ action: "main_create", row_key: "row:1:main" }),
     ]);
-    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 503 })]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 503 })]);
     expect(dry.execution.needs_review).toEqual([
       expect.objectContaining({ wise_id: "TRANSFER-M1-B", code: "wise_transfer_journal_ambiguous" }),
     ]);
@@ -6066,7 +6080,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   });
 
   it("F2a: a reviewed journalized_transfer_ids mapping records the transfer as already journalized and is bound to the plan", async () => {
-    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-MAP", "2026-02-02")]));
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-MAP", "2026-02-02"), cardPaymentValues("2026-02-05")]));
     // Two same-key candidates: without the mapping the row cannot be told apart.
     const journals = [
       lhvWiseJournal(510, "2026-02-02", 500, { document_number: "LHVREF510" }),
@@ -6077,7 +6091,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     const plainSetup = setupWiseTool([], undefined, transferOptions(journals));
     expect(Object.keys(plainSetup.options.inputSchema ?? {})).toContain("journalized_transfer_ids");
     const plain = parseWiseResponse(await plainSetup.handler({ ...transferArgs, execute: false }));
-    expect(plain.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(plain.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "main_create"]);
     expect(plain.execution.needs_review).toEqual([expect.objectContaining({
       code: "wise_transfer_journal_ambiguous",
       candidate_journal_ids: [510, 511],
@@ -6085,16 +6099,13 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const setup = setupWiseTool([], undefined, transferOptions(journals));
     const { dry, executed } = await runApprovedWiseImport(setup, { ...transferArgs, ...mapping });
-    expect(dry.execution.commands).toEqual([]);
-    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 510 })]);
-    expect(executed.execution.commands).toEqual([expect.objectContaining({
-      action: "inter_account",
-      mutation_mode: "create_only_already_journalized",
-      existing_journal_id: 510,
-    })]);
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 510 })]);
+    expect(executed.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
     expect(dry.approved_command_digest).not.toBe(plain.approved_command_digest);
     expect(dry.workflow.approval_previews[0].execute_args.journalized_transfer_ids).toEqual(mapping.journalized_transfer_ids);
-    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
     expect(executed.inter_account_reconciliation).toMatchObject({ already_journalized: 1, confirmed: 0 });
 
     // Executing without the mapping after a dry run with it is drift, never a create.
@@ -6149,13 +6160,16 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       ],
     });
 
-    mockedReadFile.mockResolvedValue(buildCsvRows([row]));
+    mockedReadFile.mockResolvedValue(buildCsvRows([row, cardPaymentValues("2026-02-05")]));
     const setup = setupWiseTool([storedFee], undefined, transferOptions([netJournal(701)]));
-    const { dry } = await runApprovedWiseImport(setup, transferArgs);
-    expect(dry.execution.commands).toEqual([]);
-    expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 701 })]);
-    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
+    expect(dry.execution.commands).toEqual([expect.objectContaining({ action: "main_create", wise_id: expect.stringMatching(wrapped("CARD_TRANSACTION-PLAN-1")) })]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 701 })]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+    expect(executed.inter_account_reconciliation.details).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-NET-FEE", status: "already_journalized", journal_id: 701 }),
+    ]);
 
     // The same journal appearing only before confirmation is caught by the
     // execute recheck.
@@ -6236,7 +6250,8 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     it("a journal reproducing both bank nets and debiting the fee books the row and its fee", async () => {
       const dry = await run(outJournal(730, [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit]));
       expect(dry.execution.commands).toEqual([]);
-      expect(dry.execution.already_journalized_commands).toEqual([expect.objectContaining({ existing_journal_id: 730 })]);
+      expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 730 })]);
+      expect(dry.plan_handle).toBeUndefined();
       expect(dry.execution.needs_review).toEqual([]);
     });
 
@@ -6436,6 +6451,218 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       code: "wise_transfer_already_imported",
       reason: expect.stringMatching(/reconcile_bank_transactions mode 'inter_account_dry_run'.*reconcile_inter_account_transfers.*'execute_inter_account' with that preview's plan_handle/),
     })]);
+  });
+
+  describe("already-journalized transfers are not commands (plan contract v3)", () => {
+    // Three transfers, each booked by its own ref-less journal (dates far
+    // enough apart that each journal is the only candidate).
+    const journalizedRows = () => [
+      transferIn("TRANSFER-AJ-1", "2026-02-01"),
+      transferIn("TRANSFER-AJ-2", "2026-02-10"),
+      transferIn("TRANSFER-AJ-3", "2026-02-20"),
+    ];
+    const journalizedJournals = () => [
+      lhvWiseJournal(521, "2026-02-01", 500),
+      lhvWiseJournal(522, "2026-02-10", 500),
+      lhvWiseJournal(523, "2026-02-20", 500),
+    ];
+    const reconciled = (executed: any) => executed.inter_account_reconciliation.details
+      .map((detail: any) => `${detail.wise_id}:${detail.status}${detail.journal_id !== undefined ? `:${detail.journal_id}` : ""}`);
+
+    it("(a) an all-journalized CSV has nothing to approve: no plan handle, no digest, rows listed compactly", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows(journalizedRows()));
+      const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+
+      expect(dry.plan_handle).toBeUndefined();
+      expect(dry.approved_command_digest).toBeUndefined();
+      expect(dry.command_count).toBe(0);
+      expect(dry.execution.commands).toEqual([]);
+      expect(dry.workflow.approval_previews).toEqual([]);
+      expect(dry.execution.already_journalized_count).toBe(3);
+      expect(dry.execution.already_journalized_rows.map((row: any) => row.existing_journal_id)).toEqual([521, 522, 523]);
+      expect(dry.skipped_details).toEqual([expect.objectContaining({
+        count: 3,
+        records: [
+          { wise_id: "TRANSFER-AJ-1", record_id: 521 },
+          { wise_id: "TRANSFER-AJ-2", record_id: 522 },
+          { wise_id: "TRANSFER-AJ-3", record_id: 523 },
+        ],
+      })]);
+      expectNoWiseMutations(setup.api);
+    });
+
+    it("(b) the guided all-journalized preview is completed, with nothing to approve and a date-narrowing hint", async () => {
+      // Five transfers, each the only candidate of its journal: automatic
+      // matches (wise_transfer_journal_unique_legacy), more than the three the
+      // compact surface lists.
+      const dates = ["2026-03-01", "2026-03-05", "2026-03-09", "2026-03-13", "2026-03-17"];
+      mockedReadFile.mockResolvedValue(buildCsvRows(dates.map((date, index) => transferIn(`TRANSFER-AJ-G${index}`, date))));
+      const journals = dates.map((date, index) => lhvWiseJournal(540 + index, date, 500, { document_number: `BANK:LHV-${index}` }));
+      const setup = setupWiseTool([], undefined, transferOptions(journals));
+
+      await runWithToolProfile("guided", async () => {
+        const payload = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+        expect(payload.summary.status).toBe("completed");
+        expect(payload.summary.message).toBe("Nothing to approve: the Wise dry run found no rows to write (5 already booked: 5 already journalized, 0 already imported); no plan handle was issued.");
+        expect(payload.summary.next_action).toBeUndefined();
+        expect(payload.summary.plan_handle).toBeUndefined();
+        expect(payload.summary.counts.already_journalized).toBe(5);
+        const legacy = payload.summary.warnings.filter((warning: any) => warning.code === "wise_transfer_journal_unique_legacy");
+        expect(legacy).toHaveLength(3);
+        const more = payload.summary.warnings.find((warning: any) => warning.code === "wise_transfer_journal_unique_legacy_more");
+        expect(more.message).toContain("date_from/date_to");
+        expect(more.message).not.toContain("get_execution_plan_page");
+      });
+
+      // The same CSV plus an already-imported own transfer the operator
+      // approved (an ownership review, still nothing to write) needs review.
+      mockedReadFile.mockResolvedValue(buildCsvRows([
+        ...dates.map((date, index) => transferIn(`TRANSFER-AJ-G${index}`, date)),
+        transferIn("TRANSFER-AJ-OLD", "2026-03-25", "40", { sourceName: "Claimed source", targetName: "Claimed target" }),
+      ]));
+      const reviewed = setupWiseTool([{
+        id: 7101, status: "PROJECT", is_deleted: false, date: "2026-03-25", amount: 40, cl_currencies_id: "EUR",
+        description: "WISE:TRANSFER-AJ-OLD Claimed source [source_direction=IN]",
+      }], undefined, transferOptions(journals));
+      await runWithToolProfile("guided", async () => {
+        const payload = parseWiseResponse(await reviewed.handler({ ...transferArgs, confirm_own_transfer_ids: ["TRANSFER-AJ-OLD"], execute: false }));
+        expect(payload.summary.status).toBe("needs_review");
+        expect(payload.summary.counts.needs_review).toBe(1);
+        expect(payload.summary.next_action).toBeUndefined();
+        expect(payload.summary.plan_handle).toBeUndefined();
+      });
+    });
+
+    it("(c) with one card payment, execute reads journals twice (projection + one re-check) and reports all three", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
+
+      expect(dry.command_count).toBe(1);
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(2);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(reconciled(executed)).toEqual([
+        "TRANSFER-AJ-1:already_journalized:521",
+        "TRANSFER-AJ-2:already_journalized:522",
+        "TRANSFER-AJ-3:already_journalized:523",
+      ]);
+      expect(executed.inter_account_reconciliation).toMatchObject({ total: 3, already_journalized: 3, confirmed: 0 });
+      expect(executed.execution.errors).toEqual([]);
+    });
+
+    it("(d) with one create_then_confirm transfer, execute reads journals three times and lists the confirmation first", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), transferIn("TRANSFER-AJ-NEW", "2026-02-28", "250")]));
+      const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(3);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(reconciled(executed)).toEqual([
+        "TRANSFER-AJ-NEW:confirmed_inter_account",
+        "TRANSFER-AJ-1:already_journalized:521",
+        "TRANSFER-AJ-2:already_journalized:522",
+        "TRANSFER-AJ-3:already_journalized:523",
+      ]);
+      expect(executed.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "inter_account"]);
+    });
+
+    it("(f) a failing re-check read never throws after writes: every assertion is an error, the write is kept", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      let reads = 0;
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => {
+        reads++;
+        if (reads === 3) throw new Error("journals endpoint unavailable");
+        return journalizedJournals();
+      });
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(executed.created).toBe(1);
+      expect(executed.execution.errors.map((error: any) => error.wise_id)).toEqual(["TRANSFER-AJ-1", "TRANSFER-AJ-2", "TRANSFER-AJ-3"]);
+      expect(executed.execution.errors[0].reason).toEqual(expect.stringMatching(
+        wrapped("Already-journalized re-check failed: journal 521 could not be read (journals endpoint unavailable)"),
+      ));
+      expect(executed.inter_account_reconciliation.details).toEqual([]);
+    });
+
+    it("(g) after an indeterminate mutation the assertions are not attempted and the re-check read is skipped", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const create = vi.fn().mockRejectedValue(new MutationIndeterminateError({
+        operation: "create", entity: "transaction", businessKey: "wise:CARD_TRANSACTION-PLAN-1",
+        affectedCaches: ["/transactions"], cause: new Error("socket hang up"),
+        nextAction: "Freshly read transactions before retrying.",
+      }));
+      const setup = setupWiseTool([], create, transferOptions(journalizedJournals()));
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+
+      // Only the projection read: no post-loop re-check.
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
+      const errors = executed.execution.errors as Array<{ wise_id: string; reason: string }>;
+      expect(errors.find(error => error.wise_id.includes("CARD_TRANSACTION-PLAN-1") || error.wise_id === "CARD_TRANSACTION-PLAN-1")!.reason).toMatch(/Outcome unknown/);
+      for (const wiseId of ["TRANSFER-AJ-1", "TRANSFER-AJ-2", "TRANSFER-AJ-3"]) {
+        expect(errors.find(error => error.wise_id === wiseId)!.reason).toEqual(expect.stringMatching(
+          wrapped("Not attempted: import stopped after an indeterminate mutation"),
+        ));
+      }
+      expect(executed.inter_account_reconciliation.details).toEqual([]);
+    });
+
+    it("(h) the re-check runs while the execution lock is held: a second execute on the connection waits for it", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const options = { ...transferOptions(journalizedJournals()), connectionFingerprint: "wise-lock-recheck" };
+      const first = setupWiseTool([], undefined, options);
+      const second = setupWiseTool([], undefined, options);
+      const firstDry = parseWiseResponse(await first.handler({ ...transferArgs, execute: false }));
+      const secondDry = parseWiseResponse(await second.handler({ ...transferArgs, execute: false }));
+      clearWiseCallHistory(first.api);
+      clearWiseCallHistory(second.api);
+
+      let releaseRecheck!: () => void;
+      const recheckGate = new Promise<void>(resolve => { releaseRecheck = resolve; });
+      let firstReads = 0;
+      first.api.journals.listAllWithPostings.mockImplementation(async () => {
+        firstReads++;
+        if (firstReads === 2) await recheckGate;
+        return journalizedJournals();
+      });
+
+      const firstRun = first.handler({
+        ...transferArgs, execute: true, approved_command_digest: firstDry.approved_command_digest, plan_handle: firstDry.plan_handle,
+      });
+      await vi.waitFor(() => expect(first.api.journals.listAllWithPostings).toHaveBeenCalledTimes(2));
+      const secondRun = second.handler({
+        ...transferArgs, execute: true, approved_command_digest: secondDry.approved_command_digest, plan_handle: secondDry.plan_handle,
+      });
+      await vi.waitFor(() => expect(second.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      // The second execute has done its reads but waits on the lock.
+      expect(second.api.transactions.create).not.toHaveBeenCalled();
+
+      releaseRecheck();
+      const [firstResult, secondResult] = await Promise.all([firstRun, secondRun]);
+      expect(parseWiseResponse(firstResult).inter_account_reconciliation.already_journalized).toBe(3);
+      expect(second.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(parseWiseResponse(secondResult).execution.errors).toEqual([]);
+    });
+
+    it("(j) a stale (v2-era) digest replayed with a fresh plan handle is refused before any write", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+      const v2Digest = approvalDigest({ version: "wise_import_command_v2", commands: dry.execution.commands });
+      expect(v2Digest).not.toBe(dry.approved_command_digest);
+      clearWiseCallHistory(setup.api);
+
+      const replay = parseWiseResponse(await setup.rawHandler({
+        ...transferArgs, execute: true, approved_command_digest: v2Digest, plan_handle: dry.plan_handle,
+      }));
+      expect(replay.code).toBe("approval_digest_mismatch");
+      expectNoWiseMutations(setup.api);
+    });
   });
 
   it("m6: a fully imported re-run with fee rows needs neither the fee dimension nor a Wise client", async () => {

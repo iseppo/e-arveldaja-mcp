@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderWiseImportCompact, renderWiseImportFull, type WiseImportRenderData } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
-import type { InterAccountCommand, WiseCreatedEntry, WiseImportCommand, WiseRow, WiseSkippedEntry } from "./types.js";
+import type { WiseAlreadyJournalizedAssertion, WiseCreatedEntry, WiseImportCommand, WiseRow, WiseSkippedEntry } from "./types.js";
 import { parseMcpResponse } from "../mcp-json.js";
 
 // B2: the guided compact Wise response must stay approximately CONSTANT in size
@@ -72,7 +72,10 @@ function makeData(rows: number, mode: "DRY_RUN" | "EXECUTED" = "DRY_RUN", errorC
     skippedJarRows: [],
     created,
     skipped,
-    commands: [],
+    // One write command: the default preview is approvable (a zero-command
+    // dry run has nothing to approve).
+    commands: [{ action: "main_create" } as WiseImportCommand],
+    alreadyJournalized: [],
     approvedCommandDigest: "d".repeat(64),
     planHandle: "PLAN-HANDLE-XYZ",
     autoDetectedInterAccountDimId: undefined,
@@ -273,27 +276,17 @@ describe("renderWiseImportCompact — fee rows vote on the totals currency", () 
   });
 });
 
-describe("renderWiseImportFull — dry-run slimming", () => {
-  function noOpCommand(index: number, journalId: number): InterAccountCommand {
+describe("renderWiseImportFull — already-journalized rows", () => {
+  function assertion(index: number, journalId: number): WiseAlreadyJournalizedAssertion {
     return {
-      version: "wise_import_command_v2" as InterAccountCommand["version"],
-      action: "inter_account",
-      mutation_mode: "create_only_already_journalized",
-      row_index: index, row_key: `row:${index}:inter_account`, identity_hash: "h".repeat(64),
-      wise_id: `TRANSFER-${index}`, date: "2026-07-19", transaction_type: "C", source_direction: "OUT",
-      booked_amount: 100, booked_currency: "EUR", source_amount: 100, source_currency: "EUR",
-      target_amount: 100, target_currency: "EUR", exchange_rate: 1, exchange_rate_orientation: "source_to_target",
-      wise_dimension_id: 5, depends_on: null, counterpart_dimension_id: 20, flow_source_dimension_id: 5,
-      flow_target_dimension_id: 20, posting_account_id: 1020, posting_dimension_id: 20,
-      ownership_basis: "verified_endpoints" as InterAccountCommand["ownership_basis"],
-      existing_journal_id: journalId, client_update: null, confirmation_distribution: null,
-      current_journal_state: {}, current_client_state: null,
+      row_index: index, row_key: `row:${index}:inter_account`, wise_id: `TRANSFER-${index}`, date: "2026-07-19",
+      booked_amount: 100, booked_currency: "EUR", source_direction: "OUT", ownership_basis: "verified_endpoints",
+      existing_journal_id: journalId, current_journal_state: {},
     };
   }
 
   function slimData(mode: "DRY_RUN" | "EXECUTED"): WiseImportRenderData {
     const data = makeData(0, mode);
-    const commands: WiseImportCommand[] = [noOpCommand(1, 501), noOpCommand(2, 502)];
     const skipped: WiseSkippedEntry[] = [
       { wise_id: "TRANSFER-1", reason: "Already journalized: inter-account journal 501 books this transfer; no Wise bank row created" },
       { wise_id: "TRANSFER-2", reason: "Already journalized: inter-account journal 502 books this transfer; no Wise bank row created" },
@@ -301,33 +294,91 @@ describe("renderWiseImportFull — dry-run slimming", () => {
       { wise_id: "ODD-1", reason: "Unsupported Wise direction \"NEUTRAL\"" },
       { wise_id: "FEE:X", reason: "Skipped because main transaction was not created" },
     ];
-    return { ...data, commands, skipped };
+    return { ...data, commands: [], alreadyJournalized: [assertion(1, 501), assertion(2, 502)], skipped };
   }
 
   const render = (data: WiseImportRenderData) => parseMcpResponse(renderWiseImportFull(data).content[0]!.text) as any;
 
-  it("dry run: no-op commands become a compact table; already-booked skips are omitted, others stay itemised", () => {
+  it("dry run: already-journalized rows are a compact table, not commands; already-booked skips are omitted, others stay itemised", () => {
     const out = render(slimData("DRY_RUN"));
     expect(out.execution.commands).toEqual([]);
-    expect(out.execution.already_journalized_command_count).toBe(2);
-    expect(out.execution.already_journalized_commands).toEqual([
+    expect(out.execution.already_journalized_count).toBe(2);
+    expect(out.execution.already_journalized_rows).toEqual([
       expect.objectContaining({ existing_journal_id: 501, date: "2026-07-19", booked_amount: 100, booked_currency: "EUR", source_direction: "OUT" }),
       expect.objectContaining({ existing_journal_id: 502 }),
     ]);
-    expect(String(out.execution.already_journalized_commands[0].wise_id)).toMatch(/UNTRUSTED_OCR_START/);
+    expect(out.execution.already_journalized_commands).toBeUndefined();
+    expect(out.execution.already_journalized_note).toMatch(/^Not part of the approved commands: no writes\./);
+    expect(String(out.execution.already_journalized_rows[0].wise_id)).toMatch(/UNTRUSTED_OCR_START/);
     expect(out.execution.skipped.map((entry: any) => entry.wise_id)).toEqual(["ODD-1", "FEE:X"]);
     expect(out.execution.skipped_displayed).toBe(2);
     expect(out.execution.skipped_omitted_already_booked).toBe(3);
-    // Internal counts are unchanged.
-    expect(out.command_count).toBe(2);
+    expect(out.command_count).toBe(0);
     expect(out.summary.skipped).toBe(5);
   });
 
-  it("executed run keeps every command object and every skipped row", () => {
-    const out = render(slimData("EXECUTED"));
-    expect(out.execution.commands).toHaveLength(2);
-    expect(out.execution.already_journalized_commands).toBeUndefined();
+  it("executed run lists every write command and every skipped row; the re-check results are in inter_account_reconciliation", () => {
+    const data = slimData("EXECUTED");
+    data.interAccountResults = [
+      { wise_id: "TRANSFER-1", amount: 100, status: "already_journalized", ownership_basis: "verified_endpoints", journal_id: 501 },
+      { wise_id: "TRANSFER-2", amount: 100, status: "already_journalized", ownership_basis: "verified_endpoints", journal_id: 502 },
+    ];
+    const out = render(data);
+    expect(out.execution.commands).toEqual([]);
+    expect(out.execution.already_journalized_rows).toBeUndefined();
     expect(out.execution.skipped).toHaveLength(5);
     expect(out.execution.skipped_omitted_already_booked).toBeUndefined();
+    expect(out.inter_account_reconciliation).toMatchObject({ total: 2, already_journalized: 2, confirmed: 0 });
+  });
+});
+
+describe("renderWiseImportCompact — zero-write preview", () => {
+  function zeroWriteData(autoMatches: number): WiseImportRenderData {
+    const data = makeData(0);
+    return {
+      ...data,
+      commands: [],
+      approvedCommandDigest: undefined,
+      planHandle: undefined,
+      skipped: [
+        ...Array.from({ length: autoMatches }, (_, index) => ({
+          wise_id: `TRANSFER-${index}`,
+          reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${700 + index} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+          auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 700 + index },
+        })),
+        { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
+      ],
+    };
+  }
+
+  it("is completed with a nothing-to-approve message, no next_action or plan handle, and a date-narrowing hint for more automatic matches", () => {
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: zeroWriteData(5) });
+    expect(summary.status).toBe("completed");
+    expect(summary.message).toBe("Nothing to approve: the Wise dry run found no rows to write (6 already booked: 5 already journalized, 1 already imported); no plan handle was issued.");
+    expect(summary.next_action).toBeUndefined();
+    expect(summary.plan_handle).toBeUndefined();
+    const legacy = summary.warnings?.filter(w => w.code === "wise_transfer_journal_unique_legacy") ?? [];
+    expect(legacy).toHaveLength(3);
+    const more = summary.warnings?.find(w => w.code === "wise_transfer_journal_unique_legacy_more")?.message ?? "";
+    expect(more).toMatch(/^2 more /);
+    expect(more).toContain("date_from/date_to");
+    expect(more).not.toContain("get_execution_plan_page");
+  });
+
+  it("needs review when an ownership review is open", () => {
+    const data = zeroWriteData(5);
+    data.ownershipReviews = [{
+      wise_id: "TRANSFER-77",
+      code: "wise_transfer_dimensions_unverified",
+      reason: "The Wise transfer between own accounts could not be verified against a bank dimension.",
+    }];
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.status).toBe("needs_review");
+    expect(summary.next_action).toBeUndefined();
+  });
+
+  it("a preview with write commands stays ready_for_approval", () => {
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(1) });
+    expect(summary.status).toBe("ready_for_approval");
   });
 });
