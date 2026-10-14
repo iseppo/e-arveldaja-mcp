@@ -6,7 +6,7 @@ import { access } from "fs/promises";
 import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped } from "../bounded-read.js";
 import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
-import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools } from "./pdf-workflow.js";
+import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools, validateInvoiceData } from "./pdf-workflow.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
@@ -1696,5 +1696,18 @@ describe("extract_pdf_invoice currency-equivalent cross-check (F-CURRENCY-EQUIVA
     expect(listAll).not.toHaveBeenCalled();
     expect(JSON.stringify(payload.extracted.warnings ?? [])).not.toContain("currency_equivalent_ambiguity");
     expect(payload.llm_fallback.confidence_signals).not.toContain("currency_equivalent_ambiguity");
+  });
+});
+
+describe("validateInvoiceData — foreign VAT shape", () => {
+  const items = JSON.stringify([{ total_net_price: 90 }]);
+  const warningsFor = (vat_no: string) => (validateInvoiceData({ total_net: 90, total_vat: 0, total_gross: 90, items, vat_no } as never).warnings as string[]).join("\n");
+
+  it("treats a letters-only value as not a VAT number", () => {
+    expect(warningsFor("REGISTRATION")).toContain("does not match the expected VAT number shape");
+  });
+
+  it("still accepts a foreign VAT number with digits", () => {
+    expect(warningsFor("IE4276970QH")).toContain("is a foreign VAT number");
   });
 });

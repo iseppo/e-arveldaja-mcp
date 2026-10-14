@@ -6,6 +6,12 @@
 
 - **`receipt_batch` no longer proposes creating an invoice that already exists when the supplier is not recognised.** The invoice-number duplicate check ran only when the receipt's supplier resolved to an existing client. When the OCR supplier name differed from the client name (seen live: "Anthropic, PBC @anthropic" vs client "Anthropic"), an already-booked invoice came out as `would_create`. Now an unresolved supplier's invoice number is also checked against live purchase invoices of every client (case, spaces and dashes ignored; `AUTO-` placeholders and invalidated invoices excluded). A match goes to `needs_review` with `duplicate_candidates` (id, number, client, gross, date), never `skipped_duplicate`, because invoice numbers are not unique across suppliers. The guided compact output names the existing invoice ids (`possible_duplicate_invoice`). Same-batch duplicate detection now compares invoice numbers the same way.
 - **Receipt keyword booking suggestions use expense accounts only.** With no supplier history, the fallback could pick an asset-acquisition purchase article and its non-expense account (seen live: "Arvutitarkvara" → 1972 accumulated software depreciation, a contra-asset not flagged as a fixed asset, for a 90 EUR subscription). Articles bound to expense (Kulud) accounts are now preferred; a non-expense article account is replaced by a keyword-matched expense account. When no expense account resolves, no suggestion is made and the receipt goes to review.
+- **Supplier matching ignores a social handle printed next to the name.** An invoice header "Anthropic, PBC @anthropic" did not match the existing client "Anthropic", so the receipt was treated as a new supplier without history. The normalized supplier-name match now drops tokens that start with "@" (emails are unaffected). The shared company-name key used for saved auto-booking rules and legal-identity checks is unchanged.
+- **A letters-only word is no longer taken as a foreign VAT number.** "VAT Registration EU VAT: IE4276970QH" was read as VAT number "REGISTRATION" (which would also be stored on a newly created supplier). A non-EE VAT number must now contain a digit, in extraction and in `validate_invoice_data`.
+
+### Documentation
+
+- **`EARVELDAJA_ALLOWED_PATHS` replaces the default file roots** (working directory + OS temp directory, `$TMPDIR`), it does not add to them; `EARVELDAJA_ALLOW_HOME` is ignored while it is set. README, `.env.example` and `server.json` said otherwise.
 
 ## [0.29.2] - 2026-10-14
 

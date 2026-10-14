@@ -47,7 +47,7 @@
         },
         {
           "name": "EARVELDAJA_ALLOWED_PATHS",
-          "description": "Platform-separated (colon on Linux/macOS, semicolon on Windows) list of directories that file-reading tools are allowed to read from. Defaults to the working directory and the OS temp dir.",
+          "description": "Platform-separated (colon on Linux/macOS, semicolon on Windows) list of directories that file-reading tools are allowed to read from. Replaces the default (the working directory and the OS temp dir); EARVELDAJA_ALLOW_HOME is ignored when set.",
           "isRequired": false,
           "isSecret": false,
           "format": "string"

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeCompanyName, sameCompanyIdentity } from "./company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity, stripSocialHandles } from "./company-name.js";
 
 describe("normalizeCompanyName", () => {
   it("removes punctuation left behind by legal suffix stripping", () => {
@@ -90,5 +90,22 @@ describe("sameCompanyIdentity", () => {
     expect(sameCompanyIdentity("Männipuu Client OÜ", "Männipuu OÜ")).toBe(false);
     expect(sameCompanyIdentity("", "Männipuu OÜ")).toBe(false);
     expect(sameCompanyIdentity(null, "Männipuu OÜ")).toBe(false);
+  });
+});
+
+describe("stripSocialHandles", () => {
+  it("drops a handle printed next to the name (live: 'Anthropic, PBC @anthropic')", () => {
+    expect(stripSocialHandles("Anthropic, PBC @anthropic")).toBe("Anthropic, PBC");
+    expect(normalizeCompanyName(stripSocialHandles("Anthropic, PBC @anthropic"))).toBe("anthropic");
+    expect(stripSocialHandles("@acme Acme OÜ")).toBe("Acme OÜ");
+  });
+
+  it("keeps email addresses (their @ does not start a token)", () => {
+    expect(stripSocialHandles("info@foo.ee")).toBe("info@foo.ee");
+  });
+
+  it("is not part of the shared normalizer or legal identity: a handle cannot add a legal form", () => {
+    expect(sameCompanyIdentity("Jaan Tamm @tamm.ou", "Jaan Tamm OÜ")).toBe(false);
+    expect(normalizeCompanyName("Acme @handle")).not.toBe(normalizeCompanyName("Acme"));
   });
 });

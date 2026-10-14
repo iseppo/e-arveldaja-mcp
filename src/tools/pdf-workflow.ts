@@ -312,11 +312,11 @@ export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<s
         } else {
           warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" is not a valid EE+9-digit VAT number. Verify manually.`);
         }
-      } else if (/^[A-Z]{2}[0-9A-Z]{6,}$/.test(normalized)) {
+      } else if (/^[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}$/.test(normalized)) {
         // Foreign VAT — permissive shape check only, soft warning.
         warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" is a foreign VAT number; structural checksum not implemented for non-EE VATs. Verify manually if uncertain.`);
       } else {
-        warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" does not match the expected VAT number shape (XX + 6+ alphanumeric). Verify before booking.`);
+        warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" does not match the expected VAT number shape (XX + 6+ alphanumeric, with digits). Verify before booking.`);
       }
     }
   }

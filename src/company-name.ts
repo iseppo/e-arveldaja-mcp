@@ -53,6 +53,19 @@ export function normalizeCompanyName(name?: string | null, options?: NormalizeCo
     .trim();
 }
 
+/**
+ * Drop tokens that START with "@" — a social handle printed next to the name
+ * on an invoice ("Anthropic, PBC @anthropic"). Emails ("info@foo.ee") are
+ * untouched: their "@" does not start a token. Deliberately NOT part of
+ * {@link normalizeCompanyName}: that key also names persisted auto-booking
+ * rule files and feeds {@link sameCompanyIdentity}, where a handle such as
+ * "@tamm.ou" must not change the result. Use only on OCR supplier names
+ * before supplier matching.
+ */
+export function stripSocialHandles(name: string): string {
+  return name.replace(/(^|\s)@\S*/gu, "$1").replace(/\s+/g, " ").trim();
+}
+
 // Spelled-out Estonian legal forms, folded to their abbreviation so
 // "Osaühing Foo" and "Foo OÜ" compare equal. Applied after diacritic stripping.
 const SPELLED_OUT_LEGAL_FORMS: Array<[RegExp, string]> = [

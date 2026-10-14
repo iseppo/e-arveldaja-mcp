@@ -17,7 +17,7 @@
  */
 import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
-import { normalizeCompanyName } from "../company-name.js";
+import { normalizeCompanyName, stripSocialHandles } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { desandboxText } from "../external-text-renderer.js";
 import { ambiguous, notFound, resolved, type Resolution } from "./types.js";
@@ -149,7 +149,7 @@ export function matchSupplier(
   if (fields.supplier_name) {
     const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
 
-    const normalizedSupplierName = normalizeCompanyName(fields.supplier_name);
+    const normalizedSupplierName = normalizeCompanyName(stripSocialHandles(fields.supplier_name));
     if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
       const normalizedExactMatches = activeClients.filter(
         client => normalizeCompanyName(client.name) === normalizedSupplierName,

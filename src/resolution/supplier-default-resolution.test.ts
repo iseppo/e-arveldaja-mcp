@@ -80,6 +80,34 @@ describe("matchSupplier — extracted pure match-decision core", () => {
     }
   });
 
+  it("resolves an OCR name carrying a social handle (live: 'Anthropic, PBC @anthropic')", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 2010417, name: "Anthropic", cl_code_country: "USA" })],
+      { supplier_name: "Anthropic, PBC @anthropic", supplier_vat_no: "IE4276970QH" },
+    );
+    expect(outcome.kind).toBe("matched");
+    if (outcome.kind === "matched") {
+      expect(outcome.match_type).toBe("name_normalized");
+      expect(outcome.client.id).toBe(2010417);
+    }
+  });
+
+  it("a handle-only OCR name never matches through the normalized tier", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 1, name: "Acme OÜ" }), makeClient({ id: 2, name: "Beta AS" })],
+      { supplier_name: "@acme" },
+    );
+    expect(outcome.kind).not.toBe("matched");
+  });
+
+  it("a handle does not break a legal-form tie: still ambiguous", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 1, name: "Acme OÜ" }), makeClient({ id: 2, name: "Acme AS" })],
+      { supplier_name: "Acme OÜ @acme" },
+    );
+    expect(outcome.kind).toBe("ambiguous");
+  });
+
   it("strips OCR sandbox markers before matching (write/match boundary)", () => {
     const nonce = "deadbeef";
     const wrap = (s: string) => `<<UNTRUSTED_OCR_START:${nonce}>>\n${s}\n<<UNTRUSTED_OCR_END:${nonce}>>`;

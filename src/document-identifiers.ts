@@ -189,7 +189,10 @@ const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*
 //   "VAT nr", "VAT number", "VAT no.", "Tax ID"
 // "KMKR" alone matches with no suffix; "KMKR nr" needs the optional \s*(nr|...)
 // group. "KM Reg. Nr." is the Jysk variant — KM + Reg + Nr.
-const VAT_LABEL_RE = /(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:[A-Z]{2}[0-9A-Z]{6,}))/gi;
+// A foreign VAT number must contain a digit: without that, the case-insensitive
+// shape accepts any 8+ letter word, e.g. "Registration" in
+// "VAT Registration EU VAT: IE4276970QH" (Anthropic invoice).
+const VAT_LABEL_RE = /(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}))/gi;
 
 function normalizeVatCandidate(value: string): string {
   return value.replace(/\s+/g, "").toUpperCase();

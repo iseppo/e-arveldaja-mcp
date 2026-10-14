@@ -63,6 +63,11 @@ describe("extractRegistryCode", () => {
 });
 
 describe("extractVatNumber", () => {
+  it("does not take a letters-only word as a foreign VAT (live: Anthropic invoice)", () => {
+    expect(extractVatNumber("VAT Registration EU VAT: IE4276970QH")).toBe("IE4276970QH");
+    expect(extractVatNumber("VAT Registration pending")).toBeUndefined();
+  });
+
   it("extracts an Estonian VAT number (EE prefix)", () => {
     expect(extractVatNumber("KMKR: EE100594102")).toBe("EE100594102");
   });
