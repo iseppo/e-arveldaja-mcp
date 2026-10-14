@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 133930,
+    "toolsListBytes": 133927,
     "descriptionsBytes": 18951,
-    "inputSchemasBytes": 83658,
+    "inputSchemasBytes": 83655,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4169
@@ -5209,7 +5209,7 @@
             "type": "integer"
           },
           "journalized_transfer_ids": {
-            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or created for review).",
+            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or held for review).",
             "items": {
               "properties": {
                 "journal_id": {

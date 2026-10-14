@@ -278,6 +278,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
         review("wise_untagged_ledger_match", { ledger_transaction_ids: [61] }),
         review("wise_transfer_journal_ambiguous", { candidate_journal_ids: [71, 72] }),
         review("wise_transfer_mapping_rejected", { journal_id: 73 }),
+        review("wise_transfer_journal_existing_elsewhere", { candidate_journal_ids: [81, 82], required_acknowledgement_ids: [81, 82] }),
       ],
     }));
     const result = await runAccountingInboxDryRunPipeline({
@@ -291,12 +292,14 @@ describe("runAccountingInboxDryRunPipeline", () => {
       operations: mockOperations({ prepareWiseImport }),
     });
     const recommendations = result.needs_accountant_review.map(item => item.recommendation ?? "");
-    expect(recommendations[0]).toContain("Advisory only: the row is still imported, no rerun is needed");
+    expect(recommendations[0]).toContain("A card or payment row is still imported (advisory only)");
+    expect(recommendations[0]).toContain("A transfer row is held (not imported)");
     expect(recommendations[0]).toContain("61");
     expect(recommendations[1]).toContain("candidate journal(s) 71, 72");
     expect(recommendations[1]).toContain("journalized_transfer_ids");
     expect(recommendations[2]).toContain("journal 73 was rejected");
-    expect(new Set(recommendations).size).toBe(3);
+    expect(recommendations[3]).toContain("Journal(s) 81, 82 already move this amount on the Wise account");
+    expect(new Set(recommendations).size).toBe(4);
   });
 
   it("surfaces every held inter-account row with its ids, mirror proposals as report-only, and errors (PA09)", async () => {

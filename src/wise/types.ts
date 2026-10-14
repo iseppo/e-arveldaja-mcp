@@ -47,7 +47,8 @@ export interface WiseTransferReview {
     | "wise_transfer_mapping_rejected"
     | "unused_mapping"
     | "wise_untagged_ledger_match"
-    | "wise_transfer_counterpart_conflict";
+    | "wise_transfer_counterpart_conflict"
+    | "wise_transfer_journal_existing_elsewhere";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -69,6 +70,16 @@ export interface WiseTransferReview {
   counterpart_candidate_dimension_ids?: number[];
   /** Counterpart holds: the other banks' stored transactions behind the hold. */
   evidence_transaction_ids?: number[];
+  /** Releasable Wise-side journal holds (wise_transfer_journal_ambiguous /
+   * _existing_elsewhere): every journal acknowledged_journal_holds must list
+   * to release the row (all pending legs, certain and uncertain evidence, and
+   * the ambiguous candidates). */
+  required_acknowledgement_ids?: number[];
+  /** Journals that may move this row's amount on the Wise account but cannot
+   * be shown to (composite journal, or no shared currency). */
+  uncertain_journal_ids?: number[];
+  /** Journals that may book this row's fee leg. */
+  fee_leg_journal_ids?: number[];
 }
 
 /** One operator-reviewed journalized_transfer_ids entry. */

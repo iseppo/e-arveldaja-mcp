@@ -312,6 +312,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     [
       ...output.commands.map(command => `${command.action}:${command.wise_id}${command.action === "inter_account" ? `:${command.mutation_mode}:${command.existing_journal_id}` : ""}`),
       ...output.alreadyJournalized.map(assertion => `already_journalized:${assertion.wise_id}:${assertion.existing_journal_id}`),
+      ...output.skipped.filter(entry => entry.reason.startsWith("Held for review")).map(entry => `held:${entry.wise_id}`),
     ];
   const reviewCodesOf = (output: ReturnType<typeof project>) => output.ownershipReviews.map(review => `${review.wise_id}:${review.code}`);
   const mapped = (...pairs: Array<[string, number]>) => ({
@@ -321,13 +322,16 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   // A second same-key journal (a manual entry) keeps the row ambiguous.
   const secondCandidate = () => labelledJournal({ id: 702, operation_type: "ENTRY", operations_id: undefined, document_number: "Manual 702" });
 
-  it("with two candidate journals the row is still created, and the review names them and the counterpart bank row", () => {
+  it("with two candidate journals the row is held (not imported), and the review names them and the counterpart bank row", () => {
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal(), secondCandidate()]);
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
+    expect(output.created).toEqual([]);
+    expect(output.skipped).toEqual([{ wise_id: "TRANSFER-1001", reason: "Held for review (wise_transfer_journal_ambiguous): not imported" }]);
     expect(output.ownershipReviews).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-1001",
       code: "wise_transfer_journal_ambiguous",
       candidate_journal_ids: [701, 702],
+      required_acknowledgement_ids: [701, 702],
       candidates: [
         { journal_id: 701, counterpart_transaction_id: 5001, label_source: "counterpart_bank_ref" },
         { journal_id: 702, label_source: "other" },
@@ -405,13 +409,13 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       })],
     ] as Array<[string, Journal]>)("stays a review when %s", (_case, journal) => {
       const output = run([transferIn("TRANSFER-1001")], [journal]);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
       expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
     });
 
     it("stays a review when another row of the import is a candidate of the same journal (one day apart)", () => {
       const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1002", "2026-03-24")], [labelledJournal()]);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-1002"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001", "held:TRANSFER-1002"]);
       expect(reviewCodesOf(output)).toEqual([
         "TRANSFER-1001:wise_transfer_journal_ambiguous",
         "TRANSFER-1002:wise_transfer_journal_ambiguous",
@@ -421,12 +425,12 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     it("stays a review when the journal registers a stored Wise bank row", () => {
       const storedWise = { ...counterpartTx, id: 5002, accounts_dimensions_id: WISE, description: "Firma OÜ" } as Transaction;
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal({ operations_id: 5002 })], { existingTx: [counterpartTx, storedWise] });
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
     });
 
     it("stays a review when another Wise ID's mapping names the journal", () => {
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-OTHER", 701]));
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
       expect(reviewCodesOf(output)).toContain("TRANSFER-1001:wise_transfer_journal_ambiguous");
     });
 
@@ -434,15 +438,18 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       const storedWise = { id: 5003, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 100, cl_currencies_id: "EUR",
         date: "2026-03-23", description: "WISE:TRANSFER-1000 Firma OÜ [source_direction=IN]" } as Transaction;
       const output = run([transferIn("TRANSFER-1000"), transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedWise] });
-      expect(output.skipped.map(entry => `${entry.wise_id}:${entry.reason}`)).toEqual(["TRANSFER-1000:Already imported (Wise ID match)"]);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(output.skipped.map(entry => `${entry.wise_id}:${entry.reason}`)).toEqual([
+        "TRANSFER-1000:Already imported (Wise ID match)",
+        "TRANSFER-1001:Held for review (wise_transfer_journal_ambiguous): not imported",
+      ]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
       expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
     });
 
     it("stays a review when a statement row outside the date filter has the same key", () => {
       const all = rowsOf([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1000", "2026-03-22")]);
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], { allRows: all.map((row, index) => index === 0 ? { ...row } : row) });
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
       expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
     });
 
@@ -452,7 +459,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       const storedFee = { id: 5005, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 0.5, cl_currencies_id: "EUR",
         date: "2026-03-24", description: "WISE:FEE:TRANSFER-0999 Wise teenustasu" } as Transaction;
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedMain, storedFee] });
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
       expect(reviewCodesOf(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous"]);
       // Without its fee row the stored 100.50 has another key: the journal is unique again.
       const alone = run([transferIn("TRANSFER-1001")], [labelledJournal()], { existingTx: [counterpartTx, storedMain] });
@@ -468,7 +475,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
 
   it("a distinct Wise ID with the same key is never absorbed by the labelled journal (Codex counterexample)", () => {
     const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-9999")], [labelledJournal()]);
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-9999"]);
+    expect(actions(output)).toEqual(["held:TRANSFER-1001", "held:TRANSFER-9999"]);
     expect(output.ownershipReviews.map(review => `${review.wise_id}:${review.code}`)).toEqual([
       "TRANSFER-1001:wise_transfer_journal_ambiguous",
       "TRANSFER-9999:wise_transfer_journal_ambiguous",
@@ -500,8 +507,8 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   it("the mapped journal still never absorbs a distinct same-key Wise ID", () => {
     const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-9999")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
     expect(actions(output)).toEqual([
-      "main_create:TRANSFER-9999",
       "already_journalized:TRANSFER-1001:701",
+      "held:TRANSFER-9999",
     ]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-9999:wise_transfer_journal_ambiguous"]);
   });
@@ -524,13 +531,13 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     const unmapped = run([transferIn("TRANSFER-1001")], journals);
     const output = run([transferIn("TRANSFER-1001")], journals, mapped(["TRANSFER-1001", 701]));
     expect(actions(output)).toEqual(actions(unmapped));
-    expect(reviewCodes(output)).toEqual([...reviewCodes(unmapped), "TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
+    expect(reviewCodes(output).sort()).toEqual([...reviewCodes(unmapped), "TRANSFER-1001:wise_transfer_mapping_rejected:701"].sort());
   });
 
-  it("two Wise IDs mapped to one journal: both mappings are rejected and both rows created", () => {
+  it("two Wise IDs mapped to one journal: both mappings are rejected and both rows held", () => {
     const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1002")], [labelledJournal()],
       mapped(["TRANSFER-1001", 701], ["TRANSFER-1002", 701]));
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "main_create:TRANSFER-1002"]);
+    expect(actions(output)).toEqual(["held:TRANSFER-1001", "held:TRANSFER-1002"]);
     expect(reviewCodes(output)).toEqual([
       "TRANSFER-1001:wise_transfer_journal_ambiguous",
       "TRANSFER-1002:wise_transfer_journal_ambiguous",
@@ -546,9 +553,10 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 
-  it("a mapped Wise ID shared by several statement rows is ambiguous: rejected, every row created", () => {
+  it("a mapped Wise ID shared by several statement rows is ambiguous: rejected, every row held", () => {
     const output = run([transferIn("TRANSFER-1001"), transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-1001", 701]));
-    expect(output.commands.map(command => command.action)).toEqual(["main_create", "main_create"]);
+    expect(output.commands).toEqual([]);
+    expect(actions(output)).toEqual(["held:TRANSFER-1001", "held:TRANSFER-1001"]);
     expect(output.ownershipReviews.filter(review => review.code === "wise_transfer_mapping_rejected")).toHaveLength(2);
   });
 
@@ -563,7 +571,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
 
   it("a mapping for a Wise ID that is not in the statement, or already imported, is reported as unused", () => {
     const absent = run([transferIn("TRANSFER-1001")], [labelledJournal()], mapped(["TRANSFER-5555", 701]));
-    expect(actions(absent)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(actions(absent)).toEqual(["held:TRANSFER-1001"]);
     expect(reviewCodes(absent)).toEqual([
       "TRANSFER-1001:wise_transfer_journal_ambiguous",
       "TRANSFER-5555:unused_mapping:701",
@@ -586,7 +594,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       const output = run(ids.map(id => transferIn(id)), [journal], mapped(["TRANSFER-A", 801]));
       expect(actions(output).sort()).toEqual([
         "already_journalized:TRANSFER-B:801",
-        "main_create:TRANSFER-A",
+        "held:TRANSFER-A",
       ]);
       expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_ambiguous", "TRANSFER-A:wise_transfer_mapping_rejected:801"]);
     },
@@ -642,11 +650,11 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   );
 
   it.each([["net journal first", true], ["net journal last", false]])(
-    "when the row goes to review and a candidate journal already books its fee, the fee is held out of the plan (%s)",
+    "when the row goes to review and a candidate journal already books its fee, the row and its fee are held (%s)",
     (_order, netFirst) => {
       const otherNet = journalOf(703, "LHVREF-703", [[LHV, "C", 100], [WISE, "D", 99.5], [FEE_DIM, "D", 0.5, 8610]]);
       const output = run([transferInWithFee("TRANSFER-A")], netFirst ? [otherNet, otherGross] : [otherGross, otherNet]);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-A"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-A"]);
       expect(output.ownershipReviews).toEqual([expect.objectContaining({
         wise_id: "TRANSFER-A",
         code: "wise_transfer_journal_ambiguous",
@@ -655,7 +663,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       // The review text itself says the fee is held, so a compact surface
       // that carries only the message does not drop it.
       expect(output.ownershipReviews[0]!.reason).toContain("Its fee row is not imported while journal 703 may already book it");
-      expect(output.created.map(entry => entry.wise_id)).toEqual(["TRANSFER-A"]);
+      expect(output.created).toEqual([]);
     },
   );
 
@@ -663,11 +671,12 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   // direction, and a rejected mapping never skips the fee-coverage check.
   const oppositeOwnNet = journalOf(701, "TRANSFER-A", [[LHV, "D", 100], [WISE, "C", 99.5], [FEE_DIM, "C", 0.5, 8610]]);
   it.each([["own journal first", [oppositeOwnNet, otherGross]], ["own journal last", [otherGross, oppositeOwnNet]]] as Array<[string, Journal[]]>)(
-    "an own-reference journal net of the fee in the opposite direction does not book the row: it is created and reviewed (%s)",
+    "an own-reference journal net of the fee in the opposite direction does not book the row: the row and its fee are held as inconsistent (%s)",
     (_order, journals) => {
       const output = run([transferInWithFee("TRANSFER-A")], journals);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-A", "fee_create_and_confirm:FEE:TRANSFER-A"]);
-      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_ambiguous"]);
+      expect(actions(output)).toEqual(["held:TRANSFER-A"]);
+      // The journal labelled with the row's own ID is a hard (identity) hold.
+      expect(reviewCodes(output)).toEqual(["TRANSFER-A:wise_transfer_journal_inconsistent"]);
       expect(output.ownershipReviews[0]!.fee_held_journal_ids).toBeUndefined();
     },
   );
@@ -690,28 +699,30 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   // before it may stand in for the row; otherwise the row is created and reviewed.
   const oppositeOwnGross = journalOf(701, "TRANSFER-A", [[LHV, "D", 100], [WISE, "C", 100]]);
   const oppositeRefless = journalOf(701, "", [[LHV, "D", 100], [WISE, "C", 100]]);
+  const INCONSISTENT = "wise_transfer_journal_inconsistent";
+  const AMBIGUOUS = "wise_transfer_journal_ambiguous";
   it.each([
-    ["own gross, alone, no mapping", [oppositeOwnGross], undefined, transferIn("TRANSFER-A")],
-    ["own gross, alone, mapped to it", [oppositeOwnGross], 701, transferIn("TRANSFER-A")],
-    ["own gross first, mapped to it", [oppositeOwnGross, otherGross], 701, transferIn("TRANSFER-A")],
-    ["own gross last, mapped to it", [otherGross, oppositeOwnGross], 701, transferIn("TRANSFER-A")],
-    ["own gross first, no mapping", [oppositeOwnGross, otherGross], undefined, transferIn("TRANSFER-A")],
-    ["own gross last, no mapping", [otherGross, oppositeOwnGross], undefined, transferIn("TRANSFER-A")],
-    ["own net, alone, no mapping", [oppositeOwnNet], undefined, transferInWithFee("TRANSFER-A")],
-    ["own net, alone, mapped to it", [oppositeOwnNet], 701, transferInWithFee("TRANSFER-A")],
-    ["ref-less, alone, no mapping", [oppositeRefless], undefined, transferIn("TRANSFER-A")],
-  ] as Array<[string, Journal[], number | undefined, string]>)(
-    "an opposite-direction journal never stands in for an incoming transfer: created and reviewed (%s)",
-    (_case, journals, mappedTo, line) => {
+    ["own gross, alone, no mapping", [oppositeOwnGross], undefined, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own gross, alone, mapped to it", [oppositeOwnGross], 701, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own gross first, mapped to it", [oppositeOwnGross, otherGross], 701, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own gross last, mapped to it", [otherGross, oppositeOwnGross], 701, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own gross first, no mapping", [oppositeOwnGross, otherGross], undefined, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own gross last, no mapping", [otherGross, oppositeOwnGross], undefined, transferIn("TRANSFER-A"), INCONSISTENT],
+    ["own net, alone, no mapping", [oppositeOwnNet], undefined, transferInWithFee("TRANSFER-A"), INCONSISTENT],
+    ["own net, alone, mapped to it", [oppositeOwnNet], 701, transferInWithFee("TRANSFER-A"), INCONSISTENT],
+    ["ref-less, alone, no mapping", [oppositeRefless], undefined, transferIn("TRANSFER-A"), AMBIGUOUS],
+  ] as Array<[string, Journal[], number | undefined, string, string]>)(
+    "an opposite-direction journal never stands in for an incoming transfer: the row is held (%s)",
+    (_case, journals, mappedTo, line, code) => {
       const output = run([line], journals, mappedTo === undefined ? {} : mapped(["TRANSFER-A", mappedTo]));
-      expect(actions(output)).toContain("main_create:TRANSFER-A");
-      expect(output.commands.some(command => command.action === "inter_account")).toBe(false);
-      expect(reviewCodes(output)).toContain("TRANSFER-A:wise_transfer_journal_ambiguous");
+      expect(actions(output)).toEqual(["held:TRANSFER-A"]);
+      expect(output.commands).toEqual([]);
+      expect(reviewCodes(output)).toContain(`TRANSFER-A:${code}`);
       if (mappedTo !== undefined) expect(reviewCodes(output)).toContain(`TRANSFER-A:wise_transfer_mapping_rejected:${mappedTo}`);
     },
   );
 
-  it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is created", () => {
+  it("a mapping to a journal whose foreign-currency postings carry no EUR base amount is rejected; the row is held", () => {
     const usd = labelledJournal({
       document_number: "LHVREF-USD",
       cl_currencies_id: "USD",
@@ -721,7 +732,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
       ],
     });
     const output = run([transferIn("TRANSFER-1001")], [usd], mapped(["TRANSFER-1001", 701]));
-    expect(actions(output)).toEqual(["main_create:TRANSFER-1001"]);
+    expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
     expect(reviewCodes(output)).toEqual(["TRANSFER-1001:wise_transfer_journal_ambiguous", "TRANSFER-1001:wise_transfer_mapping_rejected:701"]);
   });
 });
@@ -948,5 +959,260 @@ describe("Wise CSV text with planted sandbox delimiters (F-IMPORT-SOURCE-MARKER-
     const fresh = project(rowsOf([plantedLine]), []);
     expect(fresh.commands).toHaveLength(1);
     expect(project(rowsOf([plantedLine]), ledgerOf(fresh.commands)).commands).toEqual([]);
+  });
+});
+
+describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
+  const LHV = 200;
+  const LIGHTYEAR = 300;
+  const LOAN = 2500;
+  const dims = [
+    { id: WISE, accounts_id: 1020, is_deleted: false },
+    { id: LHV, accounts_id: 1021, is_deleted: false },
+    { id: LIGHTYEAR, accounts_id: 1022, is_deleted: false },
+    { id: FEE_DIM, accounts_id: 8610, is_deleted: false },
+  ] as AccountDimension[];
+  const line = (id: string, direction: "IN" | "OUT", amount: string, options: { date?: string; fee?: string; currency?: string; sourceCurrency?: string } = {}) => {
+    const date = options.date ?? "2026-04-10";
+    const currency = options.currency ?? "EUR";
+    // Wise charges an incoming transfer's fee on the target side, an outgoing one's on the source side.
+    const fees = direction === "IN" ? `0,${currency},${options.fee ?? "0"},${currency}` : `${options.fee ?? "0"},${currency},,`;
+    return `${id},COMPLETED,${direction},"${date} 10:00:00","${date} 10:00:01",${fees},"Firma OÜ",${amount},${options.sourceCurrency ?? currency},"Firma OÜ",${amount},${currency},1,,,,"Money added",`;
+  };
+  const verified = (target = LHV) =>
+    ({ targetDimensionId: target, sourceVerified: true, targetVerified: true, ownershipBasis: "verified_endpoints" }) as WiseTransferDecision;
+  const unverified = (wiseId: string, target = LHV) => ({
+    targetDimensionId: target, sourceVerified: false, targetVerified: true,
+    review: { wise_id: wiseId, code: "wise_transfer_ownership_unverified", reason: "unverified", source_verified: false, target_verified: true, approval_required: true },
+  }) as WiseTransferDecision;
+  const journal = (id: number, postings: Array<[number, "D" | "C", number, Record<string, unknown>?]>, extra: Record<string, unknown> = {}) => ({
+    id, registered: true, is_deleted: false, effective_date: "2026-04-10", document_number: "", operation_type: "ENTRY",
+    postings: postings.map(([dim, type, amount, more]) => ({
+      accounts_dimensions_id: dim, accounts_id: dims.find(entry => entry.id === dim)?.accounts_id ?? dim, type, amount, ...more,
+    })),
+    ...extra,
+  }) as unknown as Journal;
+  const run = (
+    lines: string[],
+    journals: Journal[],
+    options: { decision?: (row: WiseRow) => WiseTransferDecision; existingTx?: Transaction[]; extra?: Partial<Parameters<typeof projectWiseCommands>[0]> } = {},
+  ) => {
+    const rows = rowsOf(lines);
+    return project(rows, options.existingTx ?? [], {
+      accountDimensions: dims,
+      transferDecisions: new Map(rows.map(row => [row, options.decision?.(row) ?? verified()])),
+      postingDimensionsSnapshot: new Map(dims.map(dim => [dim.id!, dim])),
+      bankDimensionIds: new Set([WISE, LHV, LIGHTYEAR]),
+      journalSnapshot: journals,
+      createInterAccountGuard: own => BookingGuard.fromSnapshot({} as never, journals, own),
+      ...options.extra,
+    });
+  };
+  const actions = (output: ReturnType<typeof project>) => [
+    ...output.commands.map(command => `${command.action}:${command.wise_id}`),
+    ...output.alreadyJournalized.map(assertion => `already_journalized:${assertion.wise_id}:${assertion.existing_journal_id}`),
+    ...output.skipped.filter(entry => entry.reason.startsWith("Held for review")).map(entry => `held:${entry.wise_id}:${entry.reason}`),
+  ];
+  const HELD_ELSEWHERE = "Held for review (wise_transfer_journal_existing_elsewhere): not imported";
+  const HELD_INCONSISTENT = "Held for review (wise_transfer_journal_inconsistent): not imported";
+  const onlyReview = (output: ReturnType<typeof project>) => {
+    expect(output.ownershipReviews).toHaveLength(1);
+    return output.ownershipReviews[0]!;
+  };
+
+  describe("exact-ID identity check for every pending transfer row (Codex r2 M1)", () => {
+    const labelled = (amount: number) => journal(720, [[WISE, "D", amount], [LHV, "C", amount]], { document_number: "TRANSFER-ID" });
+
+    it("an ownership-unverified row with a journal labelled with its ID at another amount is held, never created", () => {
+      const output = run([line("TRANSFER-ID", "IN", "100.00")], [labelled(110)], { decision: row => unverified(row.id) });
+      expect(actions(output)).toEqual([`held:TRANSFER-ID:${HELD_INCONSISTENT}`]);
+      expect(output.created).toEqual([]);
+      expect(onlyReview(output)).toMatchObject({ code: "wise_transfer_journal_inconsistent", candidate_journal_ids: [720] });
+      expect(onlyReview(output).required_acknowledgement_ids).toBeUndefined();
+    });
+
+    it("a cross-currency row with a journal labelled with its ID is held, never created", () => {
+      const output = run([line("TRANSFER-ID", "IN", "100.00", { sourceCurrency: "USD" })], [labelled(92)]);
+      expect(actions(output)).toEqual([`held:TRANSFER-ID:${HELD_INCONSISTENT}`]);
+      expect(onlyReview(output)).toMatchObject({ code: "wise_transfer_journal_inconsistent", candidate_journal_ids: [720] });
+    });
+
+    it("a fee-only row whose ID-labelled journal is not its booking is held: no fee is created", () => {
+      const storedMain = {
+        id: 41, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-04-10",
+        description: "WISE:TRANSFER-ID Firma OÜ [source_direction=IN]",
+      } as Transaction;
+      const registration = journal(721, [[WISE, "D", 100], [LHV, "C", 100]], { operation_type: "TRANSACTION", operations_id: 41 });
+      const output = run([line("TRANSFER-ID", "IN", "100.00", { fee: "0.50" })], [registration, labelled(250)], { existingTx: [storedMain] });
+      expect(actions(output)).toEqual([`held:TRANSFER-ID:${HELD_INCONSISTENT}`]);
+      expect(onlyReview(output)).toMatchObject({ code: "wise_transfer_journal_inconsistent", candidate_journal_ids: [720] });
+      // Control: without the labelled journal, the stored main row's own journal is its coverage and the fee books.
+      expect(actions(run([line("TRANSFER-ID", "IN", "100.00", { fee: "0.50" })], [registration], { existingTx: [storedMain] })))
+        .toEqual(["fee_create_and_confirm:FEE:TRANSFER-ID"]);
+    });
+
+    it("control: the row's own reference journal booking it stays already journalized, and its fee still books", () => {
+      // Booked gross: 100 credited + the 0.50 fee.
+      const output = run([line("TRANSFER-ID", "IN", "100.00", { fee: "0.50" })], [labelled(100.5)]);
+      expect(actions(output)).toEqual(["fee_create_and_confirm:FEE:TRANSFER-ID", "already_journalized:TRANSFER-ID:720"]);
+      expect(output.ownershipReviews).toEqual([]);
+    });
+  });
+
+  describe("composite and per-posting journals (Codex r2 M2), counterpart Lightyear", () => {
+    const toLightyear = { decision: () => verified(LIGHTYEAR) };
+    it("a batch journal D Wise 100 + D Wise 50 / C LHV 150 holds the IN 100 row: certain by its single 100 posting", () => {
+      const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(730, [[WISE, "D", 100], [WISE, "D", 50], [LHV, "C", 150]])], toLightyear);
+      expect(actions(output)).toEqual([`held:TRANSFER-B:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output)).toMatchObject({
+        code: "wise_transfer_journal_existing_elsewhere", candidate_journal_ids: [730], required_acknowledgement_ids: [730],
+      });
+      expect(onlyReview(output).uncertain_journal_ids).toBeUndefined();
+    });
+
+    it("D Wise 60 + D Wise 40 + D Wise 50 / C LHV 150 holds the 100 row as uncertain", () => {
+      const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(731, [[WISE, "D", 60], [WISE, "D", 40], [WISE, "D", 50], [LHV, "C", 150]])], toLightyear);
+      expect(actions(output)).toEqual([`held:TRANSFER-B:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output)).toMatchObject({ required_acknowledgement_ids: [731], uncertain_journal_ids: [731] });
+    });
+
+    it("a mixed-direction journal D Wise 100 / C Wise 30 / C LHV 70 holds the IN 100 row", () => {
+      const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(732, [[WISE, "D", 100], [WISE, "C", 30], [LHV, "C", 70]])], toLightyear);
+      expect(actions(output)).toEqual([`held:TRANSFER-B:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output).required_acknowledgement_ids).toEqual([732]);
+    });
+
+    it("a composite whose same-direction postings are all comparable and sum below the amount is no evidence", () => {
+      const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(733, [[WISE, "D", 30], [WISE, "D", 20], [LHV, "C", 50]])], toLightyear);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-B", "inter_account:TRANSFER-B"]);
+      expect(output.ownershipReviews).toEqual([]);
+    });
+
+    it("a composite with a foreign same-direction posting without an EUR base cannot be shown below: uncertain", () => {
+      const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(734, [[WISE, "D", 30], [WISE, "D", 20, { cl_currencies_id: "USD" }], [LHV, "C", 50]])], toLightyear);
+      expect(onlyReview(output)).toMatchObject({ required_acknowledgement_ids: [734], uncertain_journal_ids: [734] });
+    });
+  });
+
+  describe("evidence on the Wise account outside the selected pair (rev. 6 set)", () => {
+    it("an untagged confirmed transfer on the Wise account one day away holds the row", () => {
+      const untagged = {
+        id: 51, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-04-11",
+        description: "Ülekanne", bank_account_name: "Firma OÜ",
+      } as Transaction;
+      const registration = journal(740, [[WISE, "D", 100], [LIGHTYEAR, "C", 100]], { effective_date: "2026-04-11", operation_type: "TRANSACTION", operations_id: 51 });
+      const output = run([line("TRANSFER-U", "IN", "100.00")], [registration], { existingTx: [untagged] });
+      expect(actions(output)).toEqual([`held:TRANSFER-U:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output).required_acknowledgement_ids).toEqual([740]);
+    });
+
+    it("the registration journal of another Wise ID's stored row is evidence (OQ-2)", () => {
+      const other = {
+        id: 52, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-04-10",
+        description: "WISE:TRANSFER-OTHER Firma OÜ [source_direction=IN]",
+      } as Transaction;
+      const registration = journal(741, [[WISE, "D", 100], [LIGHTYEAR, "C", 100]], { operation_type: "TRANSACTION", operations_id: 52 });
+      const output = run([line("TRANSFER-T", "IN", "100.00")], [registration], { existingTx: [other] });
+      expect(actions(output)).toEqual([`held:TRANSFER-T:${HELD_ELSEWHERE}`]);
+    });
+
+    it("a stored fee's journal covers only the fee leg: it is still evidence for an equal main leg", () => {
+      const storedFee = {
+        id: 53, status: "CONFIRMED", accounts_dimensions_id: WISE, type: "C", amount: 0.5, cl_currencies_id: "EUR", date: "2026-04-10",
+        description: "WISE:FEE:TRANSFER-F Wise teenustasu [source_direction=OUT]",
+      } as Transaction;
+      const feeJournal = journal(742, [[WISE, "C", 0.5], [FEE_DIM, "D", 0.5]], { operation_type: "TRANSACTION", operations_id: 53 });
+      const output = run([line("TRANSFER-F", "OUT", "0.50", { fee: "0.50" })], [feeJournal], { existingTx: [storedFee] });
+      expect(actions(output)).toEqual([`held:TRANSFER-F:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output).required_acknowledgement_ids).toEqual([742]);
+    });
+
+    it("a journal that may book the fee leg holds the row and is listed as a fee-leg journal", () => {
+      const output = run([line("TRANSFER-G", "IN", "100.00", { fee: "0.50" })], [journal(743, [[WISE, "C", 0.5], [FEE_DIM, "D", 0.5]])]);
+      expect(actions(output)).toEqual([`held:TRANSFER-G:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output)).toMatchObject({ required_acknowledgement_ids: [743], fee_leg_journal_ids: [743] });
+    });
+
+    it("compares the Wise posting's own EUR amount: a USD posting with base 92 is evidence for EUR 92, not for EUR 100", () => {
+      const usd = journal(744, [[WISE, "D", 100, { cl_currencies_id: "USD", base_amount: 92 }], [LIGHTYEAR, "C", 92]]);
+      expect(actions(run([line("TRANSFER-E", "IN", "92.00")], [usd]))).toEqual([`held:TRANSFER-E:${HELD_ELSEWHERE}`]);
+      expect(actions(run([line("TRANSFER-E", "IN", "100.00")], [usd]))).toEqual(["main_create:TRANSFER-E", "inter_account:TRANSFER-E"]);
+    });
+
+    it.each([
+      ["a split journal outside the selected pair", journal(745, [[WISE, "D", 100], [LIGHTYEAR, "C", 60], [LOAN, "C", 40]])],
+      ["an owner-loan journal", journal(745, [[WISE, "D", 100], [LOAN, "C", 100]])],
+      ["a journal one day away", journal(745, [[WISE, "D", 100], [LOAN, "C", 100]], { effective_date: "2026-04-09" })],
+    ])("%s holds the row", (_case, evidence) => {
+      const output = run([line("TRANSFER-S", "IN", "100.00")], [evidence]);
+      expect(actions(output)).toEqual([`held:TRANSFER-S:${HELD_ELSEWHERE}`]);
+      expect(onlyReview(output).required_acknowledgement_ids).toEqual([745]);
+    });
+
+    it.each([
+      ["the opposite direction", journal(746, [[WISE, "C", 100], [LOAN, "D", 100]])],
+      ["another Wise ID's label", journal(746, [[WISE, "D", 100], [LOAN, "C", 100]], { document_number: "WISE:TRANSFER-OTHER" })],
+      ["two days away", journal(746, [[WISE, "D", 100], [LOAN, "C", 100]], { effective_date: "2026-04-12" })],
+      ["an unregistered journal", journal(746, [[WISE, "D", 100], [LOAN, "C", 100]], { registered: false })],
+      ["a different amount", journal(746, [[WISE, "D", 100.01], [LOAN, "C", 100.01]])],
+    ])("%s is no evidence: the row is confirmed as before", (_case, other) => {
+      const output = run([line("TRANSFER-S", "IN", "100.00")], [other]);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-S", "inter_account:TRANSFER-S"]);
+    });
+
+    it("the first held response lists every journal to acknowledge: ambiguous candidates and fee-leg evidence", () => {
+      const gross = (id: number, label: string) => journal(id, [[WISE, "D", 100], [LHV, "C", 100]], { document_number: label });
+      const output = run([line("TRANSFER-A", "IN", "100.00", { fee: "0.50" })], [gross(701, "LHVREF-1"), gross(702, "LHVREF-2"), journal(703, [[WISE, "C", 0.5], [FEE_DIM, "D", 0.5]])]);
+      expect(actions(output)).toEqual(["held:TRANSFER-A:Held for review (wise_transfer_journal_ambiguous): not imported"]);
+      expect(onlyReview(output)).toMatchObject({
+        code: "wise_transfer_journal_ambiguous",
+        candidate_journal_ids: [701, 702],
+        required_acknowledgement_ids: [701, 702, 703],
+        fee_leg_journal_ids: [703],
+      });
+    });
+
+    it("a stored untagged lookalike of a transfer is a hard hold", () => {
+      const lookalike = {
+        id: 54, status: "PROJECT", accounts_dimensions_id: WISE, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-04-10",
+        description: "Ülekanne käsitsi", bank_account_name: "Firma OÜ",
+      } as Transaction;
+      const output = run([line("TRANSFER-L", "IN", "100.00")], [], { existingTx: [lookalike] });
+      expect(actions(output)).toEqual(["held:TRANSFER-L:Held for review (wise_untagged_ledger_match): not imported"]);
+      expect(onlyReview(output)).toMatchObject({ wise_id: "TRANSFER-L", ledger_transaction_ids: [54] });
+      expect(onlyReview(output).reason).toContain("not imported");
+      expect(onlyReview(output).required_acknowledgement_ids).toBeUndefined();
+    });
+
+    it("a card row is never held by Wise-side evidence (only transfer rows are checked)", () => {
+      const card = `CARD_TRANSACTION-1,COMPLETED,OUT,"2026-04-10 10:00:00","2026-04-10 10:00:01",0,EUR,,,"Firma OÜ",100.00,EUR,"Shop",100.00,EUR,1,,,,"Shopping",`;
+      const output = project(rowsOf([card]), [], { accountDimensions: dims, journalSnapshot: [journal(747, [[WISE, "C", 100], [LOAN, "D", 100]])] });
+      expect(output.commands.map(command => command.action)).toEqual(["main_create"]);
+      expect(output.holdCheckRows).toEqual([]);
+    });
+  });
+
+  it("byte-identity: a 2-bank transfer without other Wise-side journals plans exactly as before, and is listed for the execute re-check", () => {
+    const output = run([line("TRANSFER-P", "OUT", "100.00", { fee: "0.50" })], []);
+    expect(output.commands.map(command => `${command.action}:${command.wise_id}:${command.depends_on}`)).toEqual([
+      "main_create:TRANSFER-P:null",
+      "fee_create_and_confirm:FEE:TRANSFER-P:row:0:main",
+      "inter_account:TRANSFER-P:row:0:main",
+    ]);
+    expect(output.commands[2]).toMatchObject({
+      counterpart_dimension_id: LHV,
+      confirmation_distribution: [{ related_table: "accounts", related_id: 1021, related_sub_id: LHV, amount: 100 }],
+    });
+    expect(output.ownershipReviews).toEqual([]);
+    expect(output.skipped).toEqual([]);
+    expect(output.holdCheckRows).toEqual([{
+      row_index: 0,
+      wise_id: "TRANSFER-P",
+      legs: {
+        main: { leg: { date: "2026-04-10", direction: "OUT", currency: "EUR", amounts: [100, 100.5] }, coverage: [] },
+        fee: { leg: { date: "2026-04-10", direction: "OUT", currency: "EUR", amounts: [0.5] }, coverage: [] },
+      },
+      counterpart_dimension_id: LHV,
+    }]);
   });
 });

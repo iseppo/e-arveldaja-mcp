@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 162258,
+    "toolsListBytes": 162255,
     "descriptionsBytes": 23672,
-    "inputSchemasBytes": 103094,
+    "inputSchemasBytes": 103091,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5105
@@ -5533,7 +5533,7 @@
             "type": "integer"
           },
           "journalized_transfer_ids": {
-            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or created for review).",
+            "description": "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or held for review).",
             "items": {
               "properties": {
                 "journal_id": {

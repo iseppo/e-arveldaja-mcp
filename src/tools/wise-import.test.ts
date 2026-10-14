@@ -6118,21 +6118,24 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expectNoWiseMutations(drift.api);
   });
 
-  it("M1: a same-key journal labelled with another Wise ID routes the transfer to review instead of create_then_confirm", async () => {
-    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02")]));
+  it("M1: a same-key journal labelled with another Wise ID holds the transfer for review instead of create_then_confirm", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02"), cardPaymentValues("2026-02-05")]));
     const setup = setupWiseTool([], undefined, transferOptions([
       lhvWiseJournal(502, "2026-02-02", 500, { document_number: "TRANSFER-77001" }),
     ]));
 
     const { dry, executed } = await runApprovedWiseImport(setup, transferArgs);
 
-    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.execution.commands.map((command: any) => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
     expect(dry.execution.needs_review).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-M1-LABELLED",
       code: "wise_transfer_journal_ambiguous",
       approval_required: false,
+      required_acknowledgement_ids: [502],
     })]);
+    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (wise_transfer_journal_ambiguous): not imported");
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
     expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
     expect(executed.execution.errors).toEqual([]);
   });
@@ -6146,12 +6149,10 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
 
     const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
 
-    expect(dry.execution.commands).toEqual([
-      expect.objectContaining({ action: "main_create", row_key: "row:1:main" }),
-    ]);
+    expect(dry.execution.commands).toEqual([]);
     expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ existing_journal_id: 503 })]);
     expect(dry.execution.needs_review).toEqual([
-      expect.objectContaining({ wise_id: "TRANSFER-M1-B", code: "wise_transfer_journal_ambiguous" }),
+      expect.objectContaining({ wise_id: "TRANSFER-M1-B", code: "wise_transfer_journal_ambiguous", required_acknowledgement_ids: [503] }),
     ]);
   });
 
@@ -6202,10 +6203,11 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     const plainSetup = setupWiseTool([], undefined, transferOptions(journals));
     expect(Object.keys(plainSetup.options.inputSchema ?? {})).toContain("journalized_transfer_ids");
     const plain = parseWiseResponse(await plainSetup.handler({ ...transferArgs, execute: false }));
-    expect(plain.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "main_create"]);
+    expect(plain.execution.commands.map((command: any) => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
     expect(plain.execution.needs_review).toEqual([expect.objectContaining({
       code: "wise_transfer_journal_ambiguous",
       candidate_journal_ids: [510, 511],
+      required_acknowledgement_ids: [510, 511],
     })]);
 
     const setup = setupWiseTool([], undefined, transferOptions(journals));
@@ -6299,7 +6301,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   it.each([
     ["ref-less", {}],
     ["exact-reference", { document_number: "TRANSFER-NET-NOFEE" }],
-  ])("a %s net-of-fee journal that does not book the fee is reviewed, never suppressing the gross row", async (_label, extra) => {
+  ])("a %s net-of-fee journal that does not book the fee holds the row and its fee, never suppressing the gross row", async (_label, extra) => {
     // Gross 100, credited 99.50, fee 0.50. Journal D Wise 99.50 / C LHV 99.50
     // has no fee posting: suppressing the row while still booking the fee row
     // would leave Wise +99.00 and LHV -99.50 against the statement's +99.50 / -100.
@@ -6315,11 +6317,12 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     });
     const dry = parseWiseResponse(await setup.handler({ ...transferArgs, fee_account_dimensions_id: 9, execute: false }));
 
-    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+    expect(dry.execution.commands).toEqual([]);
     expect(JSON.stringify(dry.skipped_details ?? [])).not.toContain("Already journalized");
     expect(dry.execution.needs_review).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-NET-NOFEE",
-      code: "wise_transfer_journal_ambiguous",
+      // The exact-reference journal is the row's identity, not its booking: a hard hold.
+      code: "document_number" in extra ? "wise_transfer_journal_inconsistent" : "wise_transfer_journal_ambiguous",
       candidate_journal_ids: [711],
     })]);
     expectNoWiseMutations(setup.api);
@@ -6377,13 +6380,15 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
         { accounts_id: 1030, accounts_dimensions_id: 30, type: "D", amount: 1 }]],
       ["the \"fee\" debited to another bank account's GL account without a dimension", [wiseOut,
         { accounts_dimensions_id: 20, type: "D", amount: 100 }, { accounts_id: 1030, type: "D", amount: 1 }]],
-    ])("a journal with %s is reviewed and suppresses nothing", async (_label, postings) => {
+    ])("a journal with %s holds the row and suppresses nothing", async (_label, postings) => {
       const dry = await run(outJournal(731, postings));
-      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+      expect(dry.execution.commands).toEqual([]);
+      expect(JSON.stringify(dry.skipped_details ?? [])).not.toContain("Already journalized");
       expect(dry.execution.needs_review).toEqual([expect.objectContaining({
         wise_id: "TRANSFER-OUT-FEE",
         code: "wise_transfer_journal_ambiguous",
         candidate_journal_ids: [731],
+        required_acknowledgement_ids: [731],
       })]);
       expect(dry.execution.needs_review[0].fee_held_journal_ids).toBeUndefined();
     });
@@ -6395,13 +6400,13 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
           { ...feeDebit, base_amount: null }],
       }],
       ["an unregistered exact-reference journal", { registered: false, document_number: "TRANSFER-OUT-FEE" }],
-    ])("%s with the fee shape is reviewed and does not hold the fee", async (_label, override) => {
+    ])("%s with the fee shape holds the row and does not record the fee as booked", async (_label, override) => {
       const base = outJournal(732, [wiseOut, { accounts_dimensions_id: 20, type: "D", amount: 100 }, feeDebit]);
       const journal = "postings" in override
         ? { ...base, ...override, postings: (override.postings as Array<Record<string, unknown>>).map(posting => ({ is_deleted: false, ...posting })) }
         : { ...base, ...override };
       const dry = await run(journal);
-      expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm"]);
+      expect(dry.execution.commands).toEqual([]);
       expect(dry.execution.needs_review).toEqual([expect.objectContaining({
         wise_id: "TRANSFER-OUT-FEE",
         candidate_journal_ids: [732],
@@ -6413,12 +6418,12 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   it.each([
     ["a different amount", lhvWiseJournal(720, "2026-02-02", 110, { document_number: "TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
     ["a WISE:-prefixed label outside the ±1 day window", lhvWiseJournal(720, "2026-02-09", 100, { document_number: "WISE:TRANSFER-ID-OTHER", operation_type: "ENTRY" })],
-  ])("a journal labelled with the Wise ID at %s is reviewed, never booked again", async (_label, journal) => {
+  ])("a journal labelled with the Wise ID at %s holds the row, never booked again", async (_label, journal) => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-ID-OTHER", "2026-02-02", "100")]));
     const setup = setupWiseTool([], undefined, transferOptions([journal]));
     const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
 
-    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.execution.commands).toEqual([]);
     expect(dry.execution.needs_review).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-ID-OTHER",
       code: "wise_transfer_journal_inconsistent",
