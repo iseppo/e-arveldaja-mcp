@@ -135,7 +135,7 @@ describe("resolveWiseRowCounterparts — classes and resolution", () => {
 
   it("explicit never overrides contrary evidence; explicit equal to the evidence is evidence", () => {
     expect(only(resolve({ existingTx: [camtTx(1, COOP)], explicit: LHV }))).toEqual({
-      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [COOP], evidence_transaction_ids: [1], selected_dimension_id: LHV },
     });
     expect(only(resolve({ existingTx: [camtTx(1, LHV)], explicit: LHV }))).toEqual({ dim: LHV, basis: "evidence" });
   });
@@ -143,7 +143,7 @@ describe("resolveWiseRowCounterparts — classes and resolution", () => {
   it("weak evidence on another bank holds an explicit row; weak evidence on the explicit bank resolves to it", () => {
     const weakCoop = camtTx(1, COOP, { iban: "EE999999999999999999", name: "Some Supplier OÜ" });
     expect(only(resolve({ existingTx: [weakCoop], explicit: LHV }))).toEqual({
-      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], selected_dimension_id: LHV },
     });
     const weakLhv = camtTx(2, LHV, { iban: "EE999999999999999999", name: "Some Supplier OÜ" });
     expect(only(resolve({ existingTx: [weakLhv], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit" });
@@ -202,7 +202,7 @@ describe("resolveWiseRowCounterparts — Codex r3 M1 (usable amount)", () => {
     });
     expect(only(resolve({ existingTx: [usd], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit" });
     expect(only(resolve({ existingTx: [usd], explicit: COOP }))).toEqual({
-      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], selected_dimension_id: COOP },
     });
   });
 
@@ -242,6 +242,38 @@ describe("resolveWiseRowCounterparts — Codex r3 M2 (proven direction)", () => 
     });
   });
 
+  it("a confirmed row whose registration journal moves another amount on Wise is a different movement; an uncomparable Wise side is uncertain", () => {
+    const legacyMarker = tamperSig(camtTx(1, LHV)).description;
+    const lhv = { ...confirmedTx(1, LHV, "C", WISE).tx, description: legacyMarker } as Transaction;
+    const netPlusFee = (wisePosting: Record<string, unknown>) => ({
+      id: 9001, registered: true, is_deleted: false, operation_type: "TRANSACTION", operations_id: 1, effective_date: "2026-06-01",
+      postings: [
+        { accounts_id: BANK_GL, accounts_dimensions_id: LHV, type: "C", amount: 100 },
+        { accounts_id: BANK_GL, accounts_dimensions_id: WISE, type: "D", amount: 80, ...wisePosting },
+        { accounts_id: 8610, type: "D", amount: 20 },
+      ],
+    }) as unknown as Journal;
+    // Wise D 80 for a Wise IN 100 row: not this movement, no evidence.
+    expect(only(resolve({ existingTx: [lhv], journals: [netPlusFee({})] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [] },
+    });
+    // A foreign Wise posting without an EUR base cannot be compared: uncertain.
+    expect(only(resolve({ existingTx: [lhv], journals: [netPlusFee({ cl_currencies_id: "USD" })] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+    });
+    // So can a missing or non-finite Wise amount.
+    expect(only(resolve({ existingTx: [lhv], journals: [netPlusFee({ amount: Number.NaN })] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+    });
+  });
+
+  it("live-like: a confirmed legacy-marker LHV row whose journal books D LHV 1000 / C Wise 1000 is strong for a Wise OUT 1000", () => {
+    const { tx, journal } = confirmedTx(1, LHV, "D", WISE, { amount: 1000 });
+    const legacy = { ...tx, description: tamperSig(camtTx(1, LHV, { direction: "CRDT", amount: 1000 })).description } as Transaction;
+    const out = row("TRANSFER-OUT", { direction: "OUT", sourceAmount: 1000, targetAmount: 1000 });
+    expect(only(resolve({ rows: [out], existingTx: [legacy], journals: [journal] }))).toEqual({ dim: LHV, basis: "evidence" });
+  });
+
   it("a CONFIRMED unsigned row whose registration journal proves the opposite side is strong", () => {
     const { tx, journal } = confirmedTx(1, LHV, "C", WISE);
     expect(only(resolve({ existingTx: [tx], journals: [journal] }))).toEqual({ dim: LHV, basis: "evidence" });
@@ -258,11 +290,11 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
     } as unknown as Transaction;
     // In the statement and stored:
     expect(only(resolve({ rows: [newRow], allRows: [oldRow, newRow], existingTx: [camtTx(1, LHV), storedOld] }))).toEqual({
-      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true },
     });
     // Stored only (another statement):
     expect(only(resolve({ rows: [newRow], existingTx: [camtTx(1, LHV), storedOld] }))).toEqual({
-      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true },
     });
   });
 
@@ -271,7 +303,7 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
     const resolved = resolve({ rows, existingTx: [camtTx(1, LHV)] });
     for (const wiseRow of rows) {
       expect(resolved.get(wiseRow), wiseRow.id).toEqual({
-        hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+        hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true },
       });
     }
   });
@@ -321,7 +353,7 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
       accounts_dimensions_id: WISE, description: `${tag} Seppo AI OÜ [source_direction=IN]`,
     }) as unknown as Transaction;
     expect(only(resolve({ existingTx: [camtTx(1, LHV), stored("WISE:TRANSFER-1:B")] }))).toEqual({
-      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true },
     });
     expect(only(resolve({ existingTx: [camtTx(1, LHV), stored("WISE:TRANSFER-1:EUR")] }))).toEqual({ dim: LHV, basis: "evidence" });
   });
@@ -354,8 +386,24 @@ describe("wiseCounterpartHoldReview texts", () => {
     expect(inconclusive).not.toContain("No own-account evidence");
   });
 
-  it("a conflict names the accounts the evidence points to", () => {
-    expect(review("wise_transfer_counterpart_conflict", [1])).toMatch(/points to bank account\(s\) 20, 30, which disagrees with the selected or only other bank account, or with itself/);
+  it("a contested demotion says several Wise transfers could match the same bank rows", () => {
+    const reason = wiseCounterpartHoldReview(row("TRANSFER-1"), {
+      code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], contested: true,
+    }, true, false).reason;
+    expect(reason).toContain("several Wise transfers could match the same bank rows");
+    expect(reason).not.toContain("cannot be proven");
+  });
+
+  it("a conflict lists only the evidence accounts as evidence and names the selected account separately", () => {
+    const conflict = (hold: Partial<Parameters<typeof wiseCounterpartHoldReview>[1]>) => wiseCounterpartHoldReview(row("TRANSFER-1"), {
+      code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], ...hold,
+    }, true, false).reason;
+    expect(conflict({ selected_dimension_id: LHV })).toMatch(/points to bank account\(s\) 30, not to 20 \(the selected inter_account_dimension_id or the only other bank account\)/);
+    expect(conflict({})).toMatch(/points to several bank accounts \(20, 30\)/);
+    // End to end: weak evidence on Coop with the explicit LHV.
+    const weakCoop = camtTx(1, COOP, { iban: "EE999999999999999999", name: "Some Supplier OÜ" });
+    const resolved = only(resolve({ existingTx: [weakCoop], explicit: LHV }));
+    expect("hold" in resolved! && wiseCounterpartHoldReview(row("TRANSFER-1"), resolved.hold, true, false).reason).toContain("points to bank account(s) 30, not to 20");
   });
 });
 

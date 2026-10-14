@@ -15,6 +15,7 @@ import {
   wiseDate,
 } from "./preflight.js";
 import {
+  dimensionNetEurCents,
   journalLabelledWithWiseId,
   knownWiseLabelsFor,
   labelledWithOtherWiseId,
@@ -40,6 +41,11 @@ export interface WiseCounterpartHold {
   readonly code: WiseCounterpartHoldCode;
   readonly candidate_dimension_ids: number[];
   readonly evidence_transaction_ids: number[];
+  /** Conflict with the explicit / only other bank account: that account
+   * (evidence points elsewhere). */
+  readonly selected_dimension_id?: number;
+  /** Some evidence was demoted because several Wise movements could be it. */
+  readonly contested?: true;
 }
 
 export type WiseCounterpartResolution =
@@ -71,12 +77,21 @@ interface Candidate {
   readonly tx: Transaction;
   readonly dim: number;
   readonly cls: CandidateClass;
+  readonly contested?: true;
 }
 
-const WISE_TRANSFER_COUNTERPART_CONFLICT_REASON = (dims: readonly number[]) =>
-  `Own-account evidence for this transfer (evidence_transaction_ids) points to bank account(s) ${dims.join(", ")}, which disagrees with the selected or only other bank account, or with itself. The row is not imported. If the owner confirms that one account is right, re-run with inter_account_dimension_id set to it (evidence on another bank still holds the row); otherwise book it with the owner.`;
+const WISE_TRANSFER_COUNTERPART_CONFLICT_REASON = (hold: WiseCounterpartHold) => {
+  const selected = hold.selected_dimension_id;
+  if (selected === undefined) {
+    return `Own-account evidence for this transfer (evidence_transaction_ids) points to several bank accounts (${hold.candidate_dimension_ids.join(", ")}). The row is not imported; book it with the owner.`;
+  }
+  const evidence = hold.candidate_dimension_ids.filter(dim => dim !== selected);
+  return `Own-account evidence for this transfer (evidence_transaction_ids) points to bank account(s) ${evidence.join(", ")}, not to ${selected} (the selected inter_account_dimension_id or the only other bank account). The row is not imported. If the owner confirms ${evidence.length === 1 ? evidence[0] : "one of them"} is right, re-run with inter_account_dimension_id set to it (evidence on another bank still holds the row); otherwise book it with the owner.`;
+};
 const WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON =
   "No own-account evidence shows which own bank account this Wise transfer goes to or from (an imported transaction of that bank with the Wise IBAN, the company's own name or Wise as counterparty, the same amount, within one day), and several are configured. The row is not imported. Pass inter_account_dimension_id, or import the other bank's statement first, then re-run the preview.";
+const WISE_TRANSFER_COUNTERPART_CONTESTED_REASON =
+  "Bank row(s) on another own bank may be this transfer (evidence_transaction_ids), but several Wise transfers could match the same bank rows, so they do not show which one this is, and several bank accounts are configured. The row is not imported. Ask the owner which own bank account it goes to or from and pass it as inter_account_dimension_id, then re-run the preview.";
 const WISE_TRANSFER_COUNTERPART_INCONCLUSIVE_REASON =
   "Bank row(s) on another own bank may be this transfer (evidence_transaction_ids), but their amount, currency, direction or own-transfer marking cannot be proven, and several bank accounts are configured. The row is not imported. Ask the owner which own bank account it goes to or from and pass it as inter_account_dimension_id, then re-run the preview.";
 
@@ -91,9 +106,11 @@ export function wiseCounterpartHoldReview(
     wise_id: row.id,
     code: hold.code,
     reason: hold.code === "wise_transfer_counterpart_conflict"
-      ? WISE_TRANSFER_COUNTERPART_CONFLICT_REASON(hold.candidate_dimension_ids)
-      : hold.evidence_transaction_ids.length > 0
-        ? WISE_TRANSFER_COUNTERPART_INCONCLUSIVE_REASON
+      ? WISE_TRANSFER_COUNTERPART_CONFLICT_REASON(hold)
+      : hold.contested === true
+        ? WISE_TRANSFER_COUNTERPART_CONTESTED_REASON
+        : hold.evidence_transaction_ids.length > 0
+          ? WISE_TRANSFER_COUNTERPART_INCONCLUSIVE_REASON
         : WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON,
     source_verified: sourceVerified,
     target_verified: targetVerified,
@@ -158,6 +175,21 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     // Amount: usable only in EUR or with a numeric base amount; a foreign
     // amount without a base is never compared with EUR (uncertain at most).
     const amounts = rowAmounts(row);
+    // A confirmed row's registration journal shows what it booked on Wise:
+    // a Wise side moving another amount is a different movement (no
+    // evidence); one that cannot be compared (foreign row, no EUR value, no
+    // side) proves nothing (uncertain at most).
+    let wiseSideProven = true;
+    if (tx.status === "CONFIRMED" && registration.length > 0) {
+      const nets = registration.map(journal => dimensionNetEurCents(journal, wiseDim));
+      if (bookedCurrencyForWiseRow(row) !== "EUR" || nets.some(net => net === undefined)) {
+        wiseSideProven = false;
+      } else {
+        const wiseNet = nets.reduce<number>((sum, net) => sum + net!, 0);
+        const sign = sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1;
+        if (!amounts.some(amount => Math.round(amount * 100) * sign === wiseNet)) return undefined;
+      }
+    }
     const txCurrency = (tx.cl_currencies_id ?? "EUR").toUpperCase();
     const usableEur = txCurrency === "EUR" ? tx.amount : typeof tx.base_amount === "number" ? tx.base_amount : undefined;
     let usableAmount: boolean;
@@ -186,7 +218,7 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     if (direction !== undefined && direction !== opposite) return undefined;
 
     const dateReadable = /^\d{4}-\d{2}-\d{2}/.test(tx.date ?? "");
-    if (!usableAmount || direction === undefined || !dateReadable) return "uncertain";
+    if (!usableAmount || direction === undefined || !dateReadable || !wiseSideProven) return "uncertain";
     const indicator = ibanDims?.has(wiseDim) === true ||
       sameCompanyIdentity(tx.bank_account_name, companyLegalName) ||
       isWiseCounterpartyName(tx.bank_account_name);
@@ -220,30 +252,38 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
 
   for (const row of rows) {
     const candidates: Candidate[] = existingTx.flatMap((tx): Candidate[] => {
-      let cls = classify(row, tx);
+      const cls = classify(row, tx);
       if (cls === undefined) return [];
-      if (cls === "strong" && !authoritative(row, tx) && contested(row, tx)) cls = "uncertain";
+      if (cls === "strong" && !authoritative(row, tx) && contested(row, tx)) {
+        return [{ tx, dim: tx.accounts_dimensions_id!, cls: "uncertain", contested: true }];
+      }
       return [{ tx, dim: tx.accounts_dimensions_id!, cls }];
     });
     const strong = candidates.filter(candidate => candidate.cls === "strong");
     const others = candidates.filter(candidate => candidate.cls !== "strong");
     const strongDims = sortedIds(strong.map(candidate => candidate.dim));
     const otherEvidenceDims = sortedIds(others.map(candidate => candidate.dim));
-    const hold = (code: WiseCounterpartHoldCode, dims: number[], evidence: Candidate[]): WiseCounterpartResolution => ({
-      hold: { code, candidate_dimension_ids: dims, evidence_transaction_ids: sortedIds(evidence.map(candidate => candidate.tx.id!)) },
+    const hold = (code: WiseCounterpartHoldCode, dims: number[], evidence: Candidate[], selected?: number): WiseCounterpartResolution => ({
+      hold: {
+        code,
+        candidate_dimension_ids: dims,
+        evidence_transaction_ids: sortedIds(evidence.map(candidate => candidate.tx.id!)),
+        ...(selected !== undefined ? { selected_dimension_id: selected } : {}),
+        ...(evidence.some(candidate => candidate.contested) ? { contested: true as const } : {}),
+      },
     });
 
     if (strongDims.length === 1) {
       const [dim] = strongDims as [number];
       result.set(row, explicitDim === undefined || explicitDim === dim
         ? { dim, basis: "evidence" }
-        : hold("wise_transfer_counterpart_conflict", strongDims, strong));
+        : hold("wise_transfer_counterpart_conflict", strongDims, strong, explicitDim));
     } else if (strongDims.length >= 2) {
       result.set(row, hold("wise_transfer_counterpart_conflict", strongDims, strong));
     } else if (fallback !== undefined) {
       result.set(row, otherEvidenceDims.every(dim => dim === fallback)
         ? { dim: fallback, basis: fallbackBasis }
-        : hold("wise_transfer_counterpart_conflict", sortedIds([...otherEvidenceDims, fallback]), others));
+        : hold("wise_transfer_counterpart_conflict", sortedIds([...otherEvidenceDims, fallback]), others, fallback));
     } else {
       result.set(row, hold("wise_transfer_dimensions_unverified", sortedIds(otherDims), others));
     }

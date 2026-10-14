@@ -405,15 +405,18 @@ const WISE_ID_SHAPED_LABEL = /^[A-Z]+(?:_[A-Z]+)*-\d+$/;
 /**
  * Signed net (D +, C −) in base EUR cents that `journal` posts on
  * `dimensionId`, or `undefined` when a posting there cannot show its EUR
- * amount (foreign currency without a base amount) or has no side.
+ * amount (foreign currency without a base amount, or a missing / non-finite
+ * amount) or has no side.
  */
-function dimensionNetEurCents(journal: Journal, dimensionId: number): number | undefined {
+export function dimensionNetEurCents(journal: Journal, dimensionId: number): number | undefined {
   let net = 0;
   for (const posting of journal.postings ?? []) {
     if (posting.is_deleted || posting.accounts_dimensions_id !== dimensionId) continue;
     const currency = (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase();
     if ((posting.base_amount == null && currency !== "EUR") || (posting.type !== "D" && posting.type !== "C")) return undefined;
-    net += (posting.type === "D" ? 1 : -1) * Math.round((posting.base_amount ?? posting.amount) * 100);
+    const eur = posting.base_amount ?? posting.amount;
+    if (!Number.isFinite(eur)) return undefined;
+    net += (posting.type === "D" ? 1 : -1) * Math.round(eur * 100);
   }
   return net;
 }

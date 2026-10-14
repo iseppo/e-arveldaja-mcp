@@ -7456,6 +7456,32 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
     ]));
   });
 
+  it("an LHV row whose unlabelled journal books Wise 80 + fees 20 is no evidence for a new Wise IN 100: held, nothing created or confirmed", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-NEW", "2026-06-10", "100")]));
+    const lhvOld = {
+      id: 660, status: "CONFIRMED", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-06-10",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, description: "To Wise",
+    };
+    const lhvOldJournal = {
+      id: 760, registered: true, is_deleted: false, effective_date: "2026-06-10", operation_type: "TRANSACTION", operations_id: 660,
+      postings: [
+        { is_deleted: false, accounts_id: 1020, accounts_dimensions_id: 20, type: "C", amount: 100, base_amount: 100 },
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "D", amount: 80, base_amount: 80 },
+        { is_deleted: false, accounts_id: 8610, type: "D", amount: 20, base_amount: 20 },
+      ],
+    };
+    const setup = setupWiseTool([lhvOld], undefined, {
+      accountDimensions: dims, bankAccounts: banks, journals: [lhvOldJournal], invoiceInfo: { invoice_company_name: COMPANY },
+    });
+
+    const preview = parseMcpResponse((await setup.handler(args)).content[0]!.text) as any;
+
+    expect(preview.ownership_reviews).toEqual([expect.objectContaining({ wise_id: "TRANSFER-NEW", code: "wise_transfer_dimensions_unverified" })]);
+    expect(preview.execution.commands).toEqual([]);
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("a stored Wise row of a colliding ID (WISE:TRANSFER-T2:B) is another movement: T2 is held, nothing is created or confirmed", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
     const colliding = {
