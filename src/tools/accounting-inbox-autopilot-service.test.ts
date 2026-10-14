@@ -750,6 +750,98 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(result.needs_accountant_review.some(item => item.summary.includes("TRANSFER-1"))).toBe(false);
   });
 
+  describe("CAMT review items across overlapping statements", () => {
+    const journalRow = (overrides: Record<string, unknown> = {}) => ({
+      date: "2026-03-02", amount: 50, bank_reference: "REF-1", duplicate_transaction_ids: [],
+      journal_ids: [7], review_code: "camt_journal_ambiguous", review_note: "check", reason: "needs review",
+      movement_identity: "leg-0", ...overrides,
+    });
+    const camtPreview = (skipped: unknown[], possibleDuplicates: unknown[] = []) =>
+      ok({ projection: { skipped }, createdCount: 0, errorCount: 0, possibleDuplicates });
+    const camtStep = (n: number, dimension = 101) => ({
+      step: n, tool: "import_camt053", purpose: "CAMT", recommended: true,
+      suggested_args: { file_path: `/tmp/s${n}.xml`, accounts_dimensions_id: dimension, execute: false },
+      missing_inputs: [], reason: "CAMT found",
+    });
+    async function run(previews: unknown[], dimensions: number[] = previews.map(() => 101)) {
+      const prepareCamtImport = vi.fn();
+      for (const preview of previews) prepareCamtImport.mockResolvedValueOnce(preview);
+      return runAccountingInboxDryRunPipeline({
+        prepared: preparedInbox({ steps: dimensions.map((dimension, index) => camtStep(index + 1, dimension)) }),
+        operations: mockOperations({ prepareCamtImport }),
+      });
+    }
+
+    it("merges the same referenced leg raised by two files into one item with seen_in_steps", async () => {
+      const result = await run([camtPreview([journalRow()]), camtPreview([journalRow()])]);
+      expect(result.needs_accountant_review).toHaveLength(1);
+      expect(result.needs_accountant_review[0]!.seen_in_steps).toEqual([1, 2]);
+      expect(result.review_page.total).toBe(1);
+      expect(result.user_summary).toContain("1 review item(s)");
+    });
+
+    it("file A raising one leg and file B raising two legs of that reference keeps two items", async () => {
+      const result = await run([
+        camtPreview([journalRow()]),
+        camtPreview([journalRow(), journalRow({ movement_identity: "leg-1" })]),
+      ]);
+      expect(result.needs_accountant_review).toHaveLength(2);
+      expect(result.needs_accountant_review[0]!.seen_in_steps).toEqual([1, 2]);
+      expect(result.needs_accountant_review[1]!.seen_in_steps).toBeUndefined();
+    });
+
+    it("keeps the maximum per-step multiplicity of identical items", async () => {
+      const result = await run([camtPreview([journalRow()]), camtPreview([journalRow(), journalRow()])]);
+      expect(result.needs_accountant_review).toHaveLength(2);
+    });
+
+    it("never merges reference-less rows, other review codes, other journals or other dimensions", async () => {
+      const refLess = await run([camtPreview([journalRow({ bank_reference: undefined })]), camtPreview([journalRow({ bank_reference: undefined })])]);
+      expect(refLess.needs_accountant_review).toHaveLength(2);
+      expect(refLess.needs_accountant_review[0]!.id).toBe(refLess.needs_accountant_review[1]!.id);
+
+      const otherLeg = await run([camtPreview([journalRow()]), camtPreview([journalRow({ movement_identity: "other-direction-or-currency" })])]);
+      expect(otherLeg.needs_accountant_review).toHaveLength(2);
+
+      const otherCode = await run([camtPreview([journalRow()]), camtPreview([journalRow({ review_code: "camt_duplicate_journal_conflict" })])]);
+      expect(otherCode.needs_accountant_review).toHaveLength(2);
+
+      const otherJournal = await run([camtPreview([journalRow()]), camtPreview([journalRow({ journal_ids: [8] })])]);
+      expect(otherJournal.needs_accountant_review).toHaveLength(2);
+
+      const otherDimension = await run([camtPreview([journalRow()]), camtPreview([journalRow()])], [101, 202]);
+      expect(otherDimension.needs_accountant_review).toHaveLength(2);
+    });
+
+    it("merges possible-duplicate items on the same leg and existing transactions", async () => {
+      const duplicate = (existingId: number) => ({
+        date: "2026-03-02", amount: 50, currency: "EUR", bank_reference: "REF-9", movement_identity: "leg-0",
+        existing_transactions: [{ id: existingId, status: "PROJECT" }],
+      });
+      const same = await run([camtPreview([], [duplicate(5)]), camtPreview([], [duplicate(5)])]);
+      expect(same.needs_accountant_review).toHaveLength(1);
+      expect(same.needs_accountant_review[0]!.seen_in_steps).toEqual([1, 2]);
+      const different = await run([camtPreview([], [duplicate(5)]), camtPreview([], [duplicate(6)])]);
+      expect(different.needs_accountant_review).toHaveLength(2);
+    });
+
+    it("never merges failed-step notices and never exposes merge_key", async () => {
+      const prepareCamtImport = vi.fn()
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockRejectedValueOnce(new Error("boom"))
+        .mockResolvedValueOnce(camtPreview([journalRow()]));
+      const result = await runAccountingInboxDryRunPipeline({
+        prepared: preparedInbox({ steps: [camtStep(1), camtStep(2), camtStep(3)] }),
+        operations: mockOperations({ prepareCamtImport }),
+      });
+      expect(result.needs_accountant_review).toHaveLength(3);
+      for (const item of result.needs_accountant_review) {
+        expect(item).not.toHaveProperty("merge_key");
+        expect(item).not.toHaveProperty("seen_in_steps");
+      }
+    });
+  });
+
   it("defers ledger steps as pending_input (not failed) when an import step was only skipped", async () => {
     const classifyTransactions = vi.fn();
     const result = await runAccountingInboxDryRunPipeline({

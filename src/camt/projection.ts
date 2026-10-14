@@ -5,6 +5,7 @@ import {
   buildCamtDescriptionWithMetadata,
   buildDuplicateLookup,
   buildPossibleDuplicateLookup,
+  camtMovementIdentity,
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
   findPartialLegacyEntries,
@@ -91,6 +92,7 @@ function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJourn
       ...base,
       reason: "An existing confirmed transaction's journal books this movement in the opposite direction; needs correction",
       review_code: coverage.code,
+      movement_identity: camtMovementIdentity(entry),
       review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} matches a confirmed transaction whose registration ` +
         `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids} book${coverage.journal_ids.length === 1 ? "s" : ""} it in the opposite direction ` +
         `(${coverage.code}): that row is booked wrongly. It was not created; correct the existing transaction: invalidate it, ` +
@@ -101,6 +103,7 @@ function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJourn
     ...base,
     reason: "An existing journal may already book this movement; needs review",
     review_code: coverage.code,
+    movement_identity: camtMovementIdentity(entry),
     review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} may already be booked by ` +
       `journal${coverage.journal_ids.length === 1 ? "" : "s"} ${ids || "(unidentified own transfer)"} (${coverage.code}). ` +
       "It was not created; check the journal and create the transaction manually only if the movement is not booked yet.",
@@ -173,6 +176,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
         bank_reference: entry.bank_reference,
         duplicate_transaction_ids: entry.duplicate_transaction_ids,
         reason: CAMT_PARTIAL_LEGACY_REASON,
+        movement_identity: camtMovementIdentity(entry),
         review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} belongs to a statement entry a previous release imported only in part: some of its old per-leg rows are in the ledger, others are not. It was not created; compare the ledger with the statement entry and book the missing amount manually.`,
       });
       continue;
@@ -192,6 +196,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
           journal_ids: registration.journal_ids,
           reason: "Existing transaction matched, but its registration journal does not book this movement; needs review",
           review_code: CAMT_DUPLICATE_JOURNAL_CONFLICT,
+          movement_identity: camtMovementIdentity(entry),
           review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} is already in the ledger as ` +
             `transaction ${rows}, but ` +
             (registration.missing_transaction_ids.length > 0

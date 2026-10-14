@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   bankReferenceLookupKey,
+  batchDuplicateIdentityParts,
+  buildBatchDuplicateKey,
   buildCamtDescriptionWithMetadata,
+  camtMovementIdentity,
   buildDuplicateLookup,
   extractCamtDescriptionMetadata,
   findDuplicateTransactionIds,
@@ -105,5 +108,42 @@ describe("CAMT marker instruction id (instr=)", () => {
     const lookup = buildDuplicateLookup([old], 100);
     expect(findDuplicateTransactionIds(entry, lookup, new Set(), 100)).toEqual([7]);
     expect(findMarkerSignatureMatches(entry, lookup, 100)).toEqual([7]);
+  });
+});
+
+describe("CAMT leg identity (batch key and movement_identity)", () => {
+  const entry = {
+    date: "2026-05-04",
+    amount: 12.5,
+    currency: "EUR",
+    direction: "DBIT" as const,
+    counterparty_name: "Näide OÜ",
+    counterparty_iban: "EE001",
+    bank_reference: "REF-1",
+    reference_number: undefined,
+    end_to_end_id: "E2E",
+    description: "Invoice 7",
+    leg_index: 1,
+    duplicate: false,
+    duplicate_transaction_ids: [],
+  } as any;
+
+  it("keeps buildBatchDuplicateKey byte-identical (the |-join of the identity parts)", () => {
+    expect(buildBatchDuplicateKey(entry)).toBe("REF-1|1|2026-05-04|DBIT|EUR|1250||e2e|ee001|näide oü|invoice 7");
+    expect(buildBatchDuplicateKey(entry)).toBe(batchDuplicateIdentityParts(entry).join("|"));
+  });
+
+  it("gives entries whose |-joined keys collide different movement identities", () => {
+    const left = { ...entry, counterparty_name: "A|B", description: "C" };
+    const right = { ...entry, counterparty_name: "A", description: "B|C" };
+    expect(buildBatchDuplicateKey(left)).toBe(buildBatchDuplicateKey(right));
+    expect(camtMovementIdentity(left)).not.toBe(camtMovementIdentity(right));
+    expect(camtMovementIdentity(left)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("separates legs of one entry and opposite directions", () => {
+    expect(camtMovementIdentity({ ...entry, leg_index: 0 })).not.toBe(camtMovementIdentity(entry));
+    expect(camtMovementIdentity({ ...entry, direction: "CRDT" })).not.toBe(camtMovementIdentity(entry));
+    expect(camtMovementIdentity({ ...entry })).toBe(camtMovementIdentity(entry));
   });
 });

@@ -954,7 +954,10 @@ export function buildPossibleDuplicateRecommendationNote(
   return "A likely duplicate was found, but the older match is not confirmed. Review both transaction statuses before deciding whether to keep the old row or the newly imported PROJECT transaction.";
 }
 
-export function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
+/** The normalized identity parts of one CAMT leg, as used by the import's
+ * batch dedup. Exposed so other consumers can hash them with a structured
+ * encoding (the `|`-joined key below is ambiguous when a part contains `|`). */
+export function batchDuplicateIdentityParts(entry: ParsedCamtEntry): string[] {
   return [
     normalizeOptionalReference(entry.bank_reference) ?? "",
     // Legs of one <Ntry> are parts of a split total, not repeats of each other:
@@ -971,7 +974,17 @@ export function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
     normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
     normalizeBatchDuplicateKeyPart(entry.counterparty_name),
     normalizeBatchDuplicateKeyPart(entry.description),
-  ].join("|");
+  ];
+}
+
+export function buildBatchDuplicateKey(entry: ParsedCamtEntry): string {
+  return batchDuplicateIdentityParts(entry).join("|");
+}
+
+/** Opaque, collision-safe identity of one CAMT leg: sha256 of the JSON-encoded
+ * batch-duplicate identity parts. Carries no statement text. */
+export function camtMovementIdentity(entry: ParsedCamtEntry): string {
+  return createHash("sha256").update(JSON.stringify(batchDuplicateIdentityParts(entry))).digest("hex");
 }
 
 export function findRepeatedBankReferences(entries: ParsedCamtEntry[]): Set<string> {

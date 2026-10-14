@@ -95,6 +95,35 @@ export interface AutopilotFollowUp {
   follow_up_questions?: string[];
   policy_hint?: string;
   resolver_input?: Record<string, unknown>;
+  /** Set when the same review item was raised by more than one step (e.g.
+   * overlapping CAMT statements); lists those steps' numbers. */
+  seen_in_steps?: number[];
+  /** Internal only (never emitted): positive leg identity used to merge
+   * repeats of one CAMT review item across steps. */
+  merge_key?: string;
+}
+
+/** Internal merge identity of a CAMT review row: only a row with a bank
+ * reference and a leg identity is positively identified; anything else is
+ * never merged. */
+function camtReviewMergeKey(fields: {
+  category: string;
+  review_code?: string;
+  bank_reference?: unknown;
+  movement_identity?: unknown;
+  journal_ids?: readonly number[];
+  transaction_ids?: readonly number[];
+}): string | undefined {
+  if (typeof fields.bank_reference !== "string" || fields.bank_reference.trim().length === 0) return undefined;
+  if (typeof fields.movement_identity !== "string" || fields.movement_identity.length === 0) return undefined;
+  const sorted = (ids: readonly number[] | undefined) => [...(ids ?? [])].sort((a, b) => a - b);
+  return JSON.stringify({
+    category: fields.category,
+    review_code: fields.review_code ?? null,
+    movement_identity: fields.movement_identity,
+    journal_ids: sorted(fields.journal_ids),
+    transaction_ids: sorted(fields.transaction_ids),
+  });
 }
 
 export interface AutopilotReviewPage {
@@ -444,24 +473,42 @@ function summarizeAutopilotToolResult(
           const existingLabel = existingIds.length > 0
             ? ` against existing transaction${existingIds.length === 1 ? "" : "s"} ${existingIdsSummary}`
             : "";
-          return toAutopilotFollowUp(
-            tool,
-            `CAMT row ${dateLabel} ${amountLabel}${counterpartyLabel} looks like a possible duplicate${existingLabel}.`,
-            duplicateGuidance,
-            {
-              review_type: "camt_possible_duplicate",
-              source_tool: tool,
-              item,
-            },
-          );
+          const mergeKey = camtReviewMergeKey({
+            category: "camt_possible_duplicate",
+            bank_reference: item.bank_reference,
+            movement_identity: item.movement_identity,
+            transaction_ids: existingIds,
+          });
+          return {
+            ...toAutopilotFollowUp(
+              tool,
+              `CAMT row ${dateLabel} ${amountLabel}${counterpartyLabel} looks like a possible duplicate${existingLabel}.`,
+              duplicateGuidance,
+              {
+                review_type: "camt_possible_duplicate",
+                source_tool: tool,
+                item,
+              },
+            ),
+            ...(mergeKey !== undefined ? { merge_key: mergeKey } : {}),
+          };
         }),
         // Rows not created because an existing journal may already book them,
         // or because a previous release imported their entry only in part.
         ...preview.projection.skipped.filter((row) => isCamtJournalReviewRow(row) || row.review_note !== undefined).map((row) => {
           const journalReview = isCamtJournalReviewRow(row);
+          const mergeKey = camtReviewMergeKey({
+            category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
+            review_code: row.review_code,
+            bank_reference: row.bank_reference,
+            movement_identity: row.movement_identity,
+            journal_ids: row.journal_ids,
+            transaction_ids: row.duplicate_transaction_ids,
+          });
           // A direct action, not a continuation: no resolver handles these rows,
           // so there is no resolver_input; the id still makes the item resumable.
           return {
+            ...(mergeKey !== undefined ? { merge_key: mergeKey } : {}),
             id: stableReviewId(tool, {
               category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
               date: row.date,
@@ -826,6 +873,34 @@ export async function runAccountingInboxDryRunPipeline({
     recommendation: question.recommendation,
   }));
   const needsAccountantReview: AutopilotFollowUp[] = [];
+  // Overlapping statements raise the same CAMT review item once per file. A
+  // positively identified item (merge_key) is kept once per occurrence: the
+  // merged multiplicity is the maximum count any single step raised, so two
+  // distinct legs one file raises never collapse into one.
+  const keptByMergeKey = new Map<string, AutopilotFollowUp[]>();
+  const stepsByItem = new Map<AutopilotFollowUp, number[]>();
+  const mergeStepFollowUps = (stepNumber: number, accountId: number | undefined, followUps: AutopilotFollowUp[]) => {
+    const countThisStep = new Map<string, number>();
+    for (const followUp of followUps) {
+      if (followUp.merge_key === undefined) {
+        needsAccountantReview.push(followUp);
+        continue;
+      }
+      const key = JSON.stringify([accountId ?? null, followUp.merge_key]);
+      const occurrence = countThisStep.get(key) ?? 0;
+      countThisStep.set(key, occurrence + 1);
+      const kept = keptByMergeKey.get(key) ?? [];
+      keptByMergeKey.set(key, kept);
+      if (occurrence === 0) {
+        for (const item of kept) stepsByItem.get(item)!.push(stepNumber);
+      }
+      if (occurrence >= kept.length) {
+        kept.push(followUp);
+        stepsByItem.set(followUp, [stepNumber]);
+        needsAccountantReview.push(followUp);
+      }
+    }
+  };
   let materializationBlockReason: MaterializationBlockReason | undefined;
 
   for (const step of prepared.steps) {
@@ -896,7 +971,7 @@ export async function runAccountingInboxDryRunPipeline({
         preview: summarized.preview,
       });
       doneAutomatically.push(summarized.summary);
-      needsAccountantReview.push(...summarized.followUps);
+      mergeStepFollowUps(step.step, numberAt(step.suggested_args, "accounts_dimensions_id"), summarized.followUps);
       if (leavesPendingMaterializationAfterDryRun(step.tool, summarized.preview)) {
         materializationBlockReason = "pending_materialization";
       }
@@ -923,6 +998,14 @@ export async function runAccountingInboxDryRunPipeline({
         materializationBlockReason = "earlier_step_failed";
       }
     }
+  }
+
+  for (const [index, item] of needsAccountantReview.entries()) {
+    const { merge_key: _mergeKey, ...publicItem } = item;
+    const steps = stepsByItem.get(item);
+    needsAccountantReview[index] = steps !== undefined && steps.length > 1
+      ? { ...publicItem, seen_in_steps: steps }
+      : publicItem;
   }
 
   const nextQuestion = needsOneDecision[0];

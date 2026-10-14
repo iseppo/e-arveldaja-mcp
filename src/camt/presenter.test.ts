@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  camtPossibleDuplicateRow,
   camtResultRow,
   renderCamtImportCompact,
   renderCamtImportPayload,
@@ -8,6 +9,7 @@ import {
 } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
+import { camtMovementIdentity } from "./duplicate-identity.js";
 import type { CamtCreateDescriptor, CamtImportProjection, ParsedCamtEntry } from "./types.js";
 
 // B2: the guided compact CAMT response must stay approximately CONSTANT in size
@@ -253,5 +255,17 @@ describe("CAMT full-envelope untrusted-text wrapping", () => {
     for (const value of Object.values(match.suggested_patch_missing_fields as Record<string, unknown>)) {
       expect(value).toMatch(OCR);
     }
+  });
+});
+
+describe("camtPossibleDuplicateRow", () => {
+  it("carries the opaque leg identity of its statement entry", () => {
+    const entry = {
+      date: "2026-02-01", amount: 5, currency: "EUR", direction: "DBIT", counterparty_name: "Vendor",
+      bank_reference: "REF-1", description: "x", duplicate: false, duplicate_transaction_ids: [],
+    } as unknown as ParsedCamtEntry;
+    const row = camtPossibleDuplicateRow({ entry, possibleDuplicateMatches: [] } as unknown as CamtCreateDescriptor);
+    expect(row.movement_identity).toBe(camtMovementIdentity(entry));
+    expect(row.movement_identity).toMatch(/^[0-9a-f]{64}$/);
   });
 });

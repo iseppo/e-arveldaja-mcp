@@ -14,6 +14,7 @@ import { CAMT_PLAN_DOMAIN } from "../tools/camt-plan.js";
 import type { PlanExecutionReport } from "../plan-execution.js";
 import {
   buildPossibleDuplicateRecommendationNote,
+  camtMovementIdentity,
   determinePossibleDuplicateAction,
 } from "./duplicate-identity.js";
 import type {
@@ -102,6 +103,7 @@ export function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newAp
     counterparty: descriptor.entry.counterparty_name,
     bank_reference: descriptor.entry.bank_reference,
     ref_number: canonicalRefNumber(descriptor.entry.reference_number).value,
+    movement_identity: camtMovementIdentity(descriptor.entry),
     ...(newApiId !== undefined ? { new_transaction_api_id: newApiId } : {}),
     existing_transactions: descriptor.possibleDuplicateMatches,
     recommended_default_action: recommendedDefaultAction,

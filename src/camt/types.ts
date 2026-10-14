@@ -179,6 +179,9 @@ export interface CamtSkippedRow {
   review_code?: string;
   /** Machine-readable reason for an automatic skip (e.g. `camt_native_import_match`). */
   skip_code?: string;
+  /** Review rows only: opaque sha256 leg identity (camtMovementIdentity), so
+   * the same leg raised from overlapping statements can be recognised. */
+  movement_identity?: string;
 }
 
 export interface CamtImportProjection {

@@ -50,6 +50,8 @@ If `autopilot.needs_one_decision` is non-empty:
 - if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, `wise_account_dimension_id`, or `wise_inter_account_dimension_id`), before continuing
 - the `wise_inter_account_dimension_id` question has no preferred candidate: ask the owner. It matters only when the Wise CSV has own-account transfers; until it is answered the Wise dry run reports one `wise_transfer_counterpart_required` review item and issues no plan
 
+Overlapping CAMT statements raise the same review item once per file. An item for the same statement leg (same bank reference, leg, review code, journals or transactions, and bank account) is listed once, with `seen_in_steps` naming the dry-run steps that raised it; items without a bank reference are never merged, so a repeat of one of those may still be listed per file.
+
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row
 - `compliance_basis`: summarize it briefly in plain language

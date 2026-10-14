@@ -282,6 +282,9 @@ describe("journal coverage through the projection (Codex round 2)", () => {
     expect(projection.descriptors).toHaveLength(0);
     expect(projection.skipped.find(row => row.bank_reference === "R2")?.duplicate_transaction_ids).toEqual([801]);
     expect(projection.skipped.find(row => row.bank_reference === "R")).toMatchObject({ review_code: "camt_journal_conflict", journal_ids: [601] });
+    // Review rows carry the opaque leg identity; plain duplicate skips do not.
+    expect(projection.skipped.find(row => row.bank_reference === "R")!.movement_identity).toMatch(/^[0-9a-f]{64}$/);
+    expect(projection.skipped.find(row => row.bank_reference === "R2")!.movement_identity).toBeUndefined();
   });
 });
 
@@ -329,6 +332,7 @@ describe("a matched duplicate's registration journal (Codex live round 3, findin
     expect(projection.skipped).toHaveLength(1);
     expect(projection.skipped[0]).toMatchObject({
       duplicate_transaction_ids: [9100], journal_ids: [9200], review_code: "camt_duplicate_journal_conflict",
+      movement_identity: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
     expect(projection.skipped[0]!.review_note).toMatch(/transaction 9100.*journal 9200 does not book 15 EUR into this bank account/);
   });
@@ -472,7 +476,9 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     const projection = await project([native()], [registration("D", 42.5)]);
     expect(projection.descriptors).toHaveLength(0);
     expect(projection.skipped).toHaveLength(1);
-    expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_direction_conflict", journal_ids: [9400] });
+    expect(projection.skipped[0]).toMatchObject({
+      review_code: "camt_journal_direction_conflict", journal_ids: [9400], movement_identity: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
     expect(projection.skipped[0]!.skip_code).toBeUndefined();
     // The stored row is booked wrongly: the note asks for a correction, not
     // "create it if not booked yet".
