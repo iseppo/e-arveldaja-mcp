@@ -6964,6 +6964,26 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       expect(executed.inter_account_reconciliation.details).toEqual([expect.objectContaining({ orphan_project_transaction_id: 9001 })]);
     });
 
+    it("a journal labelled with the transfer's Wise ID appearing before the create stops it, even off the Wise account", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-RACE-LABEL", "2026-02-02")]));
+      const setup = setupWiseTool([], undefined, transferOptions());
+      const labelled = {
+        id: 992, is_deleted: false, registered: true, effective_date: "2026-03-10", document_number: "WISE:TRANSFER-RACE-LABEL", operation_type: "ENTRY",
+        postings: [
+          { is_deleted: false, accounts_id: 5000, type: "D", amount: 77, base_amount: 77 },
+          { is_deleted: false, accounts_id: 2500, type: "C", amount: 77, base_amount: 77 },
+        ],
+      };
+      let reads = 0;
+      setup.api.journals.listAllWithPostings.mockImplementation(async () => ++reads > 2 ? [labelled] : []);
+      const { executed } = await runApprovedWiseImport(setup, transferArgs);
+      expect(setup.api.transactions.create).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-RACE-LABEL",
+        reason: expect.stringMatching(wrapped("Stale Wise-side precondition: journal 992 labelled with this Wise transfer appeared or changed before the main leg was written")),
+      })]);
+    });
+
     it("this run's own fee registration journal never blocks the transfer confirm", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-OWN-FEE")]));
       const setup = setupWiseTool([], undefined, feeOptions());
