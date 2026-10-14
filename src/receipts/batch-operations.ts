@@ -7,6 +7,7 @@ import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js"
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
 import {
   type InvoiceExtractionFallback,
@@ -46,7 +47,7 @@ import {
   prepareReceiptBatchSnapshot,
   scanReceiptFolderInternal,
 } from "../tools/receipt-inbox-files.js";
-import { findDuplicateInvoice } from "../tools/receipt-inbox-matching.js";
+import { findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
@@ -272,7 +273,7 @@ function buildNeedsReviewResult(
   extracted: ExtractedReceiptFields,
   fallback: InvoiceExtractionFallback,
   notes: string[],
-  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice">,
+  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice" | "duplicate_candidates">,
 ): ReceiptBatchFileResult {
   return {
     file,
@@ -451,6 +452,27 @@ async function processSingleReceipt(
     }
 
     const resolvedClientId = supplierResolution.client?.id;
+    // Unresolved supplier: the supplier-scoped duplicate check below cannot
+    // run, but the invoice may already be booked under a differently named
+    // client (OCR "Anthropic, PBC @anthropic" vs client "Anthropic"). A number
+    // match across suppliers is not proof (#23), so route to review instead of
+    // creating.
+    if (!resolvedClientId && extracted.invoice_number) {
+      const numberMatches = findInvoiceNumberMatchesAnySupplier(context.purchaseInvoices, extracted.invoice_number);
+      if (numberMatches.length > 0) {
+        const ids = numberMatches.map(match => match.invoice_id).join(", ");
+        notes.push(
+          `Possible duplicate: this invoice number already exists as purchase invoice ${ids}, but the receipt's supplier ` +
+          "could not be resolved to that invoice's client. If it is the same supplier, the receipt is already entered — do not " +
+          "create it again; otherwise resolve the supplier and re-run. See duplicate_candidates.",
+        );
+        return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
+          supplier_resolution: supplierResolution,
+          duplicate_candidates: numberMatches,
+        });
+      }
+    }
+
     if (!resolvedClientId && options.dryRun) {
       notes.push("Dry run: supplier would need to be created before invoice creation.");
     }
@@ -505,12 +527,12 @@ async function processSingleReceipt(
     }
 
     if (extracted.invoice_number) {
-      const myInvoice = extracted.invoice_number.trim().toLowerCase();
+      const myInvoice = normalizeInvoiceNumberForComparison(extracted.invoice_number);
       const myRegCode = extracted.supplier_reg_code?.trim();
       const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
       const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
       const earlier = options.previousResults.find(prev => {
-        if (prev.extracted?.invoice_number?.trim().toLowerCase() !== myInvoice) return false;
+        if (!myInvoice || normalizeInvoiceNumberForComparison(prev.extracted?.invoice_number) !== myInvoice) return false;
         if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
         if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
         if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;

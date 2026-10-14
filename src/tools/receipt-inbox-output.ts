@@ -100,6 +100,19 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
     };
   }
 
+  // Candidate client names can come from receipt-OCR auto-created suppliers and
+  // invoice numbers from earlier OCR intake — wrap both at output.
+  if (next.duplicate_candidates !== undefined && next.duplicate_candidates.length > 0) {
+    next = {
+      ...next,
+      duplicate_candidates: next.duplicate_candidates.map(candidate => ({
+        ...candidate,
+        invoice_number: wrapUntrustedOcr(candidate.invoice_number) ?? candidate.invoice_number,
+        ...(candidate.client_name !== undefined && { client_name: capThenWrap(candidate.client_name) ?? candidate.client_name }),
+      })),
+    };
+  }
+
   if (next.error !== undefined) {
     next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
   }

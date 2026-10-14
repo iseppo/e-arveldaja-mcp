@@ -1466,6 +1466,26 @@ describe("sanitizeReceiptResultForOutput OCR trust boundary", () => {
     expect(out.extracted!.invoice_number).toBe("INV-1");
   });
 
+  it("wraps duplicate_candidates client_name and invoice_number, keeps ids", () => {
+    const input = {
+      file: { path: "/x.pdf" } as any,
+      classification: "purchase_invoice" as any,
+      status: "needs_review" as any,
+      duplicate_candidates: [
+        { invoice_id: 5501110, invoice_number: "60E2BBAF-0027", client_id: 2010417, client_name: "Anthropic", gross_price: 90, create_date: "2026-09-20" },
+      ],
+      notes: [],
+    } as any;
+
+    const out = sanitizeReceiptResultForOutput(input);
+    const candidate = out.duplicate_candidates![0]!;
+    expect(candidate.client_name).toMatch(WRAP_START);
+    expect(candidate.client_name).toContain("Anthropic");
+    expect(candidate.invoice_number).toMatch(WRAP_START);
+    expect(candidate.invoice_id).toBe(5501110);
+    expect(candidate.client_id).toBe(2010417);
+  });
+
   // PASS4 #4: the structured referenced_invoice.invoice_number is OCR-derived
   // and must be wrapped at the output-sanitization site, like the note fragment.
   it("wraps referenced_invoice.invoice_number", () => {

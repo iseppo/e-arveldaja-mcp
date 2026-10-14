@@ -94,6 +94,16 @@ export interface InvoiceDuplicateMatch {
   gross_price?: number;
 }
 
+/** A live purchase invoice of ANY supplier whose number equals the receipt's. */
+export interface InvoiceNumberCandidate {
+  invoice_id: number;
+  invoice_number: string;
+  client_id: number;
+  client_name?: string;
+  gross_price?: number;
+  create_date: string;
+}
+
 export interface ReceiptProcessingContext {
   clients: Client[];
   purchaseInvoices: PurchaseInvoice[];
@@ -111,6 +121,7 @@ export interface ReceiptBatchFileResult {
   supplier_resolution?: SupplierResolution;
   booking_suggestion?: BookingSuggestion;
   duplicate_match?: InvoiceDuplicateMatch;
+  duplicate_candidates?: InvoiceNumberCandidate[];
   created_invoice?: {
     id?: number;
     number: string;

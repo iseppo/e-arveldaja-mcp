@@ -13,6 +13,7 @@ import {
   detectReverseChargeFromText,
   extractPdfIdentifiers,
   findAccountByKeywords,
+  isExpenseBookableAccount,
   findPurchaseArticleByKeywords,
   hasRecurringSimilarAmounts,
   normalizeCounterpartyName,
@@ -1466,6 +1467,45 @@ describe("buildKeywordSuggestion (#17)", () => {
     const result = buildKeywordSuggestion(articles, baseAccounts, "OpenAI subscription");
     expect(result?.item.purchase_accounts_id).not.toBe(1810);
     expect(result?.item.purchase_accounts_id).toBe(result?.suggested_account?.id);
+  });
+});
+
+describe("buildKeywordSuggestion — expense accounts only (live smoke 0.29.2)", () => {
+  // Live chart: purchase article "Arvutitarkvara" is bound to 1972
+  // "Arvutitarkvara akumuleeritud kulum" — a Varad contra-asset that is NOT
+  // flagged is_fixed_asset — and won the SaaS keyword match for an Anthropic receipt.
+  const contra = makeAccount({ id: 1972, name_est: "Arvutitarkvara akumuleeritud kulum", account_type_est: "Varad", account_type_eng: "Assets", balance_type: "C" });
+  const software = makeAccount({ id: 4800, name_est: "Tarkvara ja litsentsid", account_type_est: "Kulud", account_type_eng: "Expenses" });
+  const other = makeAccount({ id: 5990, name_est: "Muud mitmesugused tegevuskulud", account_type_est: "Kulud", account_type_eng: "Expenses" });
+  const assetArticle = { id: 14, name_est: "Arvutitarkvara", name_eng: "Computer software", accounts_id: 1972 };
+  const expenseArticle = { id: 31, name_est: "Tarkvara kulu", name_eng: "Software expense", accounts_id: 4800 };
+  const otherArticle = { id: 99, name_est: "Muu kulu", name_eng: "Other expense", accounts_id: 5990 };
+
+  it("prefers an expense-bound article over an asset article for a SaaS hint", () => {
+    const result = buildKeywordSuggestion([assetArticle, expenseArticle, otherArticle], [contra, software, other], "Anthropic, PBC Claude Max subscription software");
+    expect(result?.suggested_account?.id).toBe(4800);
+    expect(result?.suggested_purchase_article?.id).toBe(31);
+    expect(result?.item.purchase_accounts_id).toBe(4800);
+  });
+
+  it("never suggests the contra-asset account, even when only the asset article matches", () => {
+    const result = buildKeywordSuggestion([assetArticle, otherArticle], [contra, software, other], "Anthropic Claude subscription software");
+    expect(result?.suggested_account?.id).not.toBe(1972);
+    expect(result?.suggested_account?.account_type_est).toBe("Kulud");
+    expect(result?.item.purchase_accounts_id).toBe(result?.suggested_account?.id);
+  });
+
+  it("returns undefined when no expense account exists", () => {
+    const result = buildKeywordSuggestion([assetArticle], [contra], "Anthropic Claude subscription software");
+    expect(result).toBeUndefined();
+  });
+
+  it("isExpenseBookableAccount: Kulud yes; Varad, fixed assets no; untyped allowed", () => {
+    expect(isExpenseBookableAccount(software)).toBe(true);
+    expect(isExpenseBookableAccount(contra)).toBe(false);
+    expect(isExpenseBookableAccount(makeAccount({ id: 2310, name_est: "Võlad tarnijatele", account_type_est: "Kohustused" }))).toBe(false);
+    expect(isExpenseBookableAccount(makeAccount({ id: 1810, name_est: "Ehitised", is_fixed_asset: true }))).toBe(false);
+    expect(isExpenseBookableAccount(makeAccount({ id: 5000, name_est: "Kulu" }))).toBe(true);
   });
 });
 

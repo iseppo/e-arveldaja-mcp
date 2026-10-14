@@ -245,6 +245,21 @@ describe("renderReceiptBatchCompact — dry_run", () => {
     const reviewWarning = summary.warnings?.find(w => w.code === "needs_review");
     expect(String(reviewWarning?.item_id)).toMatch(OCR);
   });
+
+  it("names the existing invoice ids for an unresolved-supplier duplicate", () => {
+    const batch = makeBatch(0, {
+      extraRows: [
+        fileResult(903, "needs_review", {
+          duplicate_candidates: [{ invoice_id: 5501110, invoice_number: "60E2BBAF-0027", client_id: 2010417, client_name: "Anthropic", gross_price: 90, create_date: "2026-09-20" }],
+        }),
+      ],
+    });
+    const { summary } = renderReceiptBatchCompact(compactInput(batch));
+    const warning = summary.warnings?.find(w => w.code === "possible_duplicate_invoice");
+    expect(warning?.message).toContain("5501110");
+    expect(warning?.message).not.toContain("Anthropic");
+    expect(String(warning?.item_id)).toMatch(OCR);
+  });
 });
 
 describe("renderReceiptBatchCompact — executed", () => {

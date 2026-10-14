@@ -3363,6 +3363,21 @@ export function findAccountByKeywords(accounts: Account[], keywords: string[]): 
   });
 }
 
+/**
+ * True when the account can take a generic receipt expense: not a fixed
+ * asset, and a Kulud (expense) account. An account with no type label is let
+ * through (the type may be absent or localised differently); a known
+ * non-expense type — Varad incl. contra-assets such as accumulated
+ * depreciation, Kohustused, Omakapital, Tulud — is refused.
+ */
+export function isExpenseBookableAccount(account: Account): boolean {
+  if (account.is_fixed_asset) return false;
+  const typeEst = (account.account_type_est ?? "").trim();
+  const typeEng = (account.account_type_eng ?? "").trim();
+  if (!typeEst && !typeEng) return true;
+  return typeEst === "Kulud" || /^expense/i.test(typeEng);
+}
+
 export function findPurchaseArticleByKeywords(
   purchaseArticles: Array<{ id: number; name_est: string; name_eng: string; accounts_id?: number; is_disabled?: boolean; priority?: number }>,
   keywords: string[],
@@ -3403,30 +3418,42 @@ export function buildKeywordSuggestion(
     accountKeywords = keywordMatch.accountKeywords;
   }
 
-  const fallbackArticle = findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
-  const article = findPurchaseArticleByKeywords(purchaseArticles, articleKeywords) ?? fallbackArticle;
+  // A receipt fallback books an expense, so prefer articles bound to an
+  // expense account: "Arvutitarkvara" is an asset-acquisition article whose
+  // account is 1972 accumulated depreciation (a contra-asset, not flagged
+  // is_fixed_asset), and it must not win over an expense article.
+  const expenseBoundArticles = purchaseArticles.filter(candidate => {
+    if (!candidate.accounts_id) return true;
+    const bound = accounts.find(acc => acc.id === candidate.accounts_id);
+    return !bound || isExpenseBookableAccount(bound);
+  });
+  const fallbackArticle = findPurchaseArticleByKeywords(expenseBoundArticles, ["muu", "other", "general"])
+    ?? findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
+  const article = findPurchaseArticleByKeywords(expenseBoundArticles, articleKeywords)
+    ?? findPurchaseArticleByKeywords(purchaseArticles, articleKeywords)
+    ?? fallbackArticle;
   // Resolve the suggested account. If the article's own accounts_id points
-  // at a fixed-asset account (rare misconfiguration), refuse it and fall
-  // back to keyword search — `findAccountByKeywords` already filters fixed
-  // assets out (#17). Without this layer, a single bad purchase-article
-  // configuration could re-introduce the Ehitised miscoding through the
-  // back door.
+  // at a fixed-asset or other non-expense account (misconfiguration or an
+  // asset-acquisition article), refuse it and fall back to keyword search
+  // over expense accounts only (#17). Without this layer, a single bad
+  // purchase-article configuration could re-introduce the Ehitised
+  // miscoding through the back door.
   const articleAccount = article?.accounts_id
     ? accounts.find(candidate => candidate.id === article.accounts_id)
     : undefined;
-  const articleAccountUsable = !!articleAccount && !articleAccount.is_fixed_asset;
+  const articleAccountUsable = !!articleAccount && isExpenseBookableAccount(articleAccount);
+  const expenseAccounts = accounts.filter(isExpenseBookableAccount);
   const account = articleAccountUsable
     ? articleAccount
-    : findAccountByKeywords(accounts, accountKeywords)
-      ?? findAccountByKeywords(accounts, ["muu", "general", "kulud"]);
+    : findAccountByKeywords(expenseAccounts, accountKeywords)
+      ?? findAccountByKeywords(expenseAccounts, ["muu", "general", "kulud"]);
 
   if (!article) return undefined;
-  // If the article maps to a fixed-asset account AND we have no non-fixed
-  // replacement, refuse to emit a suggestion. Otherwise the article-fallback
-  // path below would silently propagate the fixed-asset account into
-  // `purchase_accounts_id` — the same back door #17 closed elsewhere.
-  // Returning undefined forces the caller to route the row to needs_review.
-  if (articleAccount?.is_fixed_asset && !account) return undefined;
+  // No expense account resolved: refuse to emit a suggestion rather than
+  // propagate a non-expense article account (or none) into
+  // `purchase_accounts_id`. Returning undefined forces the caller to route
+  // the row to needs_review.
+  if (!account) return undefined;
 
   return {
     source: article === fallbackArticle ? "fallback" : "keyword_match",
@@ -3434,8 +3461,7 @@ export function buildKeywordSuggestion(
     suggested_purchase_article: { id: article.id, name: article.name_est || article.name_eng },
     item: {
       cl_purchase_articles_id: article.id,
-      // article.accounts_id is only used as a fallback when itself non-fixed.
-      purchase_accounts_id: account?.id ?? (articleAccountUsable ? article.accounts_id : undefined),
+      purchase_accounts_id: account.id,
       custom_title: "Receipt expense",
       amount: 1,
     },

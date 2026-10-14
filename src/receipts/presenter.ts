@@ -301,11 +301,20 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
   // OCR / supplier text is embedded in the message.
   const warnings: CompactWarning[] = cappedWarnings(
     "needs_review",
-    results.filter(candidate => candidate.status === "needs_review").map(row => ({
-      item_id: wrapUntrustedOcr(row.file.name) ?? "",
-      code: "needs_review",
-      message: "Receipt needs manual review before booking.",
-    })),
+    results.filter(candidate => candidate.status === "needs_review").map(row => {
+      const duplicateIds = (row.duplicate_candidates ?? []).map(candidate => candidate.invoice_id);
+      return duplicateIds.length > 0
+        ? {
+          item_id: wrapUntrustedOcr(row.file.name) ?? "",
+          code: "possible_duplicate_invoice",
+          message: `Invoice number already exists as purchase invoice ${duplicateIds.join(", ")} under another client; do not book it again if it is the same supplier.`,
+        }
+        : {
+          item_id: wrapUntrustedOcr(row.file.name) ?? "",
+          code: "needs_review",
+          message: "Receipt needs manual review before booking.",
+        };
+    }),
     "the standard/full profile lists every receipt; or process a smaller folder to see them here.",
   );
   if (ocrIssueCount > 0) {

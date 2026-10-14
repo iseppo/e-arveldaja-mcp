@@ -661,3 +661,86 @@ describe("receipt batch typed operation — P0-3 plan-handle drift gate", () => 
     expectZeroMutation(spies);
   });
 });
+
+describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29.2)", () => {
+  function primeUnresolvedSupplier(invoiceNumber = "60E2BBAF-0027"): void {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Anthropic, PBC @anthropic",
+      invoice_number: invoiceNumber,
+      invoice_date: "2026-09-20",
+      due_date: "2026-09-20",
+      total_net: 90,
+      total_vat: 0,
+      total_gross: 90,
+      currency: "EUR",
+      description: "Claude Max plan",
+      raw_text: "ignored",
+    } as never);
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: false,
+      created: false,
+      preview_client: {
+        name: "Anthropic, PBC @anthropic", is_client: false, is_supplier: true, cl_code_country: "USA",
+        is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+      },
+    } as never);
+  }
+
+  function apiWithInvoices(invoices: unknown[]) {
+    const made = makeApi();
+    (made.api as { purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } }).purchaseInvoices.listAll
+      .mockResolvedValue(invoices);
+    return made;
+  }
+
+  const booked = {
+    id: 5501110, number: "60E2BBAF-0027", clients_id: 2010417, client_name: "Anthropic",
+    status: "CONFIRMED", create_date: "2026-09-20", journal_date: "2026-09-20", gross_price: 90,
+  };
+
+  it("routes to needs_review with duplicate_candidates when another client already has the number", async () => {
+    primeUnresolvedSupplier();
+    const { api, spies } = apiWithInvoices([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.duplicate_candidates?.map(c => c.invoice_id)).toEqual([5501110]);
+    expect(result.duplicate_candidates?.[0]?.client_id).toBe(2010417);
+    expect(result.notes.join(" ")).toContain("purchase invoice 5501110");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("matches despite separator differences in the invoice number", async () => {
+    primeUnresolvedSupplier("60E2BBAF 0027");
+    const { api } = apiWithInvoices([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("needs_review");
+    expect(outcome.value.results[0]!.duplicate_candidates?.[0]?.invoice_id).toBe(5501110);
+  });
+
+  it("ignores invalidated invoices with the same number", async () => {
+    primeUnresolvedSupplier();
+    const { api } = apiWithInvoices([{ ...booked, status: "VOID" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
+  });
+
+  it("never matches an AUTO- placeholder number", async () => {
+    primeUnresolvedSupplier("AUTO-20260920-ANTHROPIC");
+    const { api } = apiWithInvoices([{ ...booked, number: "AUTO-20260920-ANTHROPIC" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
+  });
+
+  it("keeps the resolved-supplier exact match as skipped_duplicate", async () => {
+    const { api } = apiWithInvoices([{ ...booked, id: 900, number: "INV-1", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-20", gross_price: 124 }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("skipped_duplicate");
+    expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
+  });
+});
