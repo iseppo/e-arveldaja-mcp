@@ -605,9 +605,10 @@ async function runWiseImport(
       // (main create, fee create, fee confirm, inter-account confirm) the
       // plan's identity and evidence checks re-run on fresh journals. The
       // journals are read once per row, just before its first write; the row's
-      // later creates and its fee confirm reuse that read, since the only
-      // writes in between are this row's own creates (no journal). The
-      // inter-account confirm reads again. Exempt: the leg's proven coverage,
+      // later creates reuse that read, since the only writes in between are
+      // this row's own creates (no journal). The fee confirm and the
+      // inter-account confirm read again: the lock is per process, so another
+      // process may have confirmed the same fee meanwhile. Exempt: the leg's proven coverage,
       // this run's own registration journals, and journals unchanged since
       // the reviewed snapshot (so execute is never stricter than the preview,
       // and an acknowledgement holds only while its journals are unchanged).
@@ -788,6 +789,8 @@ async function runWiseImport(
             if (!createdTransactionMatchesApprovedPayload(createdTransaction, apiId, command.create_payload)) {
               throw new Error(`Stale created transaction precondition: fee transaction ${apiId} is missing or changed before confirmation`);
             }
+            // A confirm never uses the row's cached read.
+            rowJournals.delete(command.row_index);
             await guardWiseLeg(command, "fee", freshTransactions);
             await api.transactions.confirm(apiId, command.confirmation_distribution);
             successfulCommands.add(command.row_key);
