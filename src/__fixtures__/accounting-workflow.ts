@@ -276,14 +276,38 @@ export function fixtureCamtXml(options: { iban?: string } = {}): string {
 </Document>`;
 }
 
-export function fixtureCamtStatementXml(options: { iban?: string } = {}): string {
+export interface FixtureCamtEntry {
+  date: string;
+  amount: string;
+  direction?: "CRDT" | "DBIT";
+  reference?: string;
+}
+
+export function fixtureCamtStatementXml(options: {
+  iban?: string;
+  /** Optional <FrToDt> statement period (YYYY-MM-DD). */
+  period?: { from: string; to: string };
+  /** Optional booked entries; omitted by default. */
+  entries?: FixtureCamtEntry[];
+} = {}): string {
+  const period = options.period
+    ? `
+      <FrToDt><FrDtTm>${options.period.from}T00:00:00</FrDtTm><ToDtTm>${options.period.to}T23:59:59</ToDtTm></FrToDt>`
+    : "";
+  const entries = (options.entries ?? []).map((entry, index) => `
+      <Ntry>
+        <Amt Ccy="EUR">${entry.amount}</Amt>
+        <CdtDbtInd>${entry.direction ?? "DBIT"}</CdtDbtInd>
+        <BookgDt><Dt>${entry.date}</Dt></BookgDt>
+        <AcctSvcrRef>${entry.reference ?? `FIXTURE-REF-${index + 1}`}</AcctSvcrRef>
+      </Ntry>`).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
   <BkToCstmrStmt>
     <Stmt>
       <Acct>
         <Id><IBAN>${options.iban ?? "EE637700771011212909"}</IBAN></Id>
-      </Acct>
+      </Acct>${period}${entries}
     </Stmt>
   </BkToCstmrStmt>
 </Document>`;

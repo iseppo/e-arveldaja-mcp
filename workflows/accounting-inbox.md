@@ -36,6 +36,7 @@ Present:
 - what dry runs were already completed automatically
 - what still needs one small decision
 - whether anything already looks like accountant-review territory
+- CAMT files that are byte-identical copies of another (`coverage: "duplicate"`, `duplicate_of`): they have no steps; importing one is harmless but unnecessary, and the user may still import one explicitly. The kept file's step references are bound to the scanned bytes: if that file was changed or removed, its step is refused (parse/dry run: `file_input_changed` or `file_input_unavailable`; an execute with a plan reports `plan_drift`), so re-run `accounting_inbox` and the duplicates are reconsidered. Passing a raw `file_path` instead of the step's `file_ref` bypasses this binding. Statements listed in `overlaps_with` (same account and currency, intersecting periods) are information only: both keep their steps, rows in the overlap are deduplicated on import, and reference-less rows there may come back as possible-duplicate review.
 
 Avoid raw internal field names unless they help the user make a concrete choice.
 

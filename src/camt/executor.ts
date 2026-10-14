@@ -63,7 +63,7 @@ import type {
   Transaction,
 } from "./types.js";
 
-const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
+export const CAMT_MAX_FILE_SIZE = 10 * 1024 * 1024;
 const CANONICAL_ACCOUNT_IDENTITY_REGEX = /^[A-Z0-9]{1,34}$/;
 
 /**
@@ -107,7 +107,7 @@ export async function ensureAccountDimensionExists(api: ApiContext, accountsDime
   }
 }
 
-function normalizeAccountIdentity(value: string | undefined | null): string | undefined {
+export function normalizeAccountIdentity(value: string | undefined | null): string | undefined {
   if (typeof value !== "string") return undefined;
   const compact = value.replace(/\s+/g, "");
   if (!/^[A-Za-z0-9]+$/.test(compact)) return undefined;

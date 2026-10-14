@@ -266,4 +266,38 @@ describe("FileReferenceStore", () => {
       .toThrowError(new FileReferenceStoreError("file_reference_scope_mismatch"));
     expect(traps).toBe(0);
   });
+
+  describe("references bound to content (expectedSha256)", () => {
+    const sha = createHash("sha256").update("bytes").digest("hex");
+    const expected = { kind: "file" as const, operation: FILE_REFERENCE_OPERATIONS.camt };
+
+    it("resolves a bound reference only through resolveBound; plain resolve refuses it", () => {
+      const runtime = createTestRuntimeSafetyContext();
+      const bound = runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/kept.xml", ...expected, expectedSha256: sha });
+      expect(runtime.fileReferenceStore.resolveBound(bound, expected)).toEqual({ canonicalPath: "/tmp/kept.xml", expectedSha256: sha });
+      expect(() => runtime.fileReferenceStore.resolve(bound, expected))
+        .toThrowError(new FileReferenceStoreError("file_reference_operation_mismatch"));
+      // resolveBound still applies the operation / kind / scope checks.
+      expect(() => runtime.fileReferenceStore.resolveBound(bound, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise }))
+        .toThrowError(new FileReferenceStoreError("file_reference_operation_mismatch"));
+      expect(() => runtime.fileReferenceStore.resolveBound(bound, { kind: "directory", operation: FILE_REFERENCE_OPERATIONS.camt }))
+        .toThrowError(new FileReferenceStoreError("file_reference_kind_mismatch"));
+    });
+
+    it("issues distinct references for the bound and the unbound binding of one path", () => {
+      const runtime = createTestRuntimeSafetyContext();
+      const unbound = runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/kept.xml", ...expected });
+      const bound = runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/kept.xml", ...expected, expectedSha256: sha });
+      expect(bound).not.toBe(unbound);
+      expect(runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/kept.xml", ...expected, expectedSha256: sha })).toBe(bound);
+      expect(runtime.fileReferenceStore.resolve(unbound, expected)).toBe("/tmp/kept.xml");
+      expect(runtime.fileReferenceStore.resolveBound(unbound, expected)).toEqual({ canonicalPath: "/tmp/kept.xml" });
+    });
+
+    it.each(["", "ABC", "a".repeat(63), "A".repeat(64), "g".repeat(64)])("refuses a malformed expectedSha256 %j", (value) => {
+      const runtime = createTestRuntimeSafetyContext();
+      expect(() => runtime.fileReferenceStore.issue({ canonicalPath: "/tmp/kept.xml", ...expected, expectedSha256: value }))
+        .toThrowError(new FileReferenceStoreError("file_reference_data_invalid"));
+    });
+  });
 });

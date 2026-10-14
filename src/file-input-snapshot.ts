@@ -98,6 +98,7 @@ function resolveSource(source: FileInputSource, options: CaptureFileInputOptions
   input: string;
   inline: boolean;
   expectedCanonicalPath?: string;
+  expectedSha256?: string;
 } {
   const hasPath = Object.prototype.hasOwnProperty.call(source, "file_path");
   const hasReference = Object.prototype.hasOwnProperty.call(source, "file_ref");
@@ -106,7 +107,7 @@ function resolveSource(source: FileInputSource, options: CaptureFileInputOptions
     if (typeof source.file_ref !== "string" || source.file_ref.length === 0) {
       throw new FileInputSnapshotError("file_input_source_invalid");
     }
-    const canonicalPath = options.runtimeSafetyContext.fileReferenceStore.resolve(source.file_ref!, {
+    const { canonicalPath, expectedSha256 } = options.runtimeSafetyContext.fileReferenceStore.resolveBound(source.file_ref!, {
       kind: "file",
       operation: options.operation,
     });
@@ -114,6 +115,7 @@ function resolveSource(source: FileInputSource, options: CaptureFileInputOptions
       input: canonicalPath,
       inline: false,
       expectedCanonicalPath: canonicalPath,
+      ...(expectedSha256 !== undefined ? { expectedSha256 } : {}),
     };
   }
   if (typeof source.file_path !== "string" || source.file_path.length === 0) {
@@ -145,7 +147,7 @@ export async function captureFileInputSnapshot(
     if (error instanceof FileInputSnapshotError) throw error;
     throw new FileInputSnapshotError("file_input_unavailable");
   }
-  const { input, inline, expectedCanonicalPath } = resolvedSource;
+  const { input, inline, expectedCanonicalPath, expectedSha256 } = resolvedSource;
   const allowedExtensions = [...options.allowedExtensions];
   let resolved: Awaited<ReturnType<typeof resolveFileInput>>;
   try {
@@ -170,6 +172,10 @@ export async function captureFileInputSnapshot(
   const immutable = Buffer.from(content);
   if (immutable.byteLength > options.maxSize) {
     throw new FileInputSnapshotError("file_input_identity_invalid");
+  }
+  // A reference bound to reviewed bytes refuses any other content.
+  if (expectedSha256 !== undefined && digest(immutable) !== expectedSha256) {
+    throw new FileInputSnapshotError("file_input_changed");
   }
   const extension = extname(resolved.path).toLowerCase();
   if (!allowedExtensions.includes(extension)) {

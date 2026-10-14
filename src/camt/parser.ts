@@ -71,6 +71,21 @@ function parseCamtDate(value: unknown, row: string, field: string): string {
   return date;
 }
 
+/**
+ * The validated calendar day (YYYY-MM-DD) of a CAMT date or date-time, using the
+ * same strict rule as the parser; undefined when absent or invalid. The
+ * statement period strings are kept verbatim in statement_metadata, so callers
+ * that compare periods take the day through this instead of slicing.
+ */
+export function camtDateDay(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return parseCamtDate(value, "camt:statement:1", "period");
+  } catch {
+    return undefined;
+  }
+}
+
 function parseCurrency(value: unknown, row: string, field: string): string {
   const text = String(value ?? "").trim().toUpperCase();
   return CURRENCY_REGEX.test(text)

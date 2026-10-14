@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import { buildOwnerExpenseVatReviewGuidance } from "../estonian-accounting-guidance.js";
-import { mkdir, mkdtemp, opendir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, opendir, readFile, rm, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +15,7 @@ import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
 import { parseDocument } from "../document-parser.js";
 import {
+  analyzeInboxCamtFiles,
   buildRecommendedSteps,
   MAX_SCANNED_FILES,
   registerAccountingInboxTools as registerAccountingInboxToolsProduction,
@@ -30,6 +31,7 @@ import {
   createMockToolServer,
   fixtureAccountDimension,
   fixtureBankAccount,
+  fixtureCamtStatementXml,
   fixtureCamtXml,
   getRegisteredToolHandler,
   type AccountingWorkflowApiOptions,
@@ -4109,5 +4111,306 @@ describe("live accounting-inbox v1/v2 profile emission", () => {
     expect(payload.workflow.needs_review[0]).toEqual({ item_id: "r1", summary: wrapped });
     expect(payload.workflow.recommended_next_action).toMatchObject({ label: wrapped, why: wrapped, tool: "accounting_inbox", args: { mode: "scan" } });
     expect(payload.message).toContain("<<UNTRUSTED_OCR_START:");
+  });
+});
+
+describe("accounting_inbox CAMT duplicates and overlaps", () => {
+  const OLDER = new Date("2026-10-01T10:00:00Z");
+  const NEWER = new Date("2026-10-02T10:00:00Z");
+  const withEntries = (period?: { from: string; to: string }) => fixtureCamtStatementXml({
+    ...(period ? { period } : {}),
+    entries: [{ date: period?.from ?? "2026-09-03", amount: "12.50", reference: "DUP-REF-1" }],
+  });
+
+  async function workspaceWith(files: Array<{ name: string; xml: string; mtime: Date }>): Promise<string> {
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    for (const file of files) {
+      await writeFile(join(workspace, file.name), file.xml);
+      await utimes(join(workspace, file.name), file.mtime, file.mtime);
+    }
+    return workspace;
+  }
+
+  function setup(apiOptions: AccountingWorkflowApiOptions = {}) {
+    const context = createTestRuntimeSafetyContext();
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      transactionRows: [],
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+      ...apiOptions,
+    });
+    registerAccountingInboxTools(server, context, api, EXPOSE_GRANULAR);
+    registerCamtImportTools(server, api, context, EXPOSE_GRANULAR);
+    const inbox = getRegisteredToolHandler(server, "accounting_inbox");
+    const camt = getRegisteredToolHandler(server, "process_camt053");
+    return {
+      context,
+      api,
+      scan: async (workspace: string) => parseMcpResponse((await inbox({ mode: "scan", workspace_path: workspace })).content[0]!.text) as any,
+      dryRun: async (workspace: string) => parseMcpResponse((await inbox({ mode: "dry_run", workspace_path: workspace })).content[0]!.text) as any,
+      camt,
+    };
+  }
+
+  const camtStepRefs = (payload: any) => payload.recommended_steps
+    .filter((step: any) => step.tool === "parse_camt053" || step.tool === "import_camt053")
+    .map((step: any) => step.suggested_args.file_ref);
+  const resolvedPath = (context: ReturnType<typeof createTestRuntimeSafetyContext>, ref: string) =>
+    context.fileReferenceStore.resolveBound(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt }).canonicalPath;
+
+  it("leaves a byte-identical copy out of the steps and binds the kept file's step refs to its bytes", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const { context, scan } = setup();
+    const payload = await scan(workspace);
+    const sha256 = createHash("sha256").update(xml).digest("hex");
+
+    const [kept, duplicate] = payload.detected_inputs.camt_files;
+    expect(kept).toMatchObject({ analysis: "analyzed", sha256, stands_in_for: [1], statement: { from: "2026-09-03", to: "2026-09-03", currency: "EUR" } });
+    expect(duplicate).toMatchObject({ analysis: "analyzed", sha256, coverage: "duplicate", duplicate_of: 0 });
+    expect(duplicate.statement).toBeUndefined();
+    expect(payload.camt_overlap).toEqual({ analyzed: 2, duplicate_count: 1, overlap_pair_count: 0 });
+    expect(payload.user_summary).toContain("1 CAMT file(s) are byte-identical copies of another and are left out of the steps.");
+    expect(payload.assistant_guidance.join("\n")).toContain("coverage=duplicate");
+
+    // Steps only for the kept file, and none for the duplicate (not even recommended:false).
+    const refs = camtStepRefs(payload);
+    expect(refs).toHaveLength(2);
+    for (const ref of refs) {
+      expect(resolvedPath(context, ref)).toBe(join(workspace, "statement.xml"));
+      expect(context.fileReferenceStore.resolveBound(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt }).expectedSha256).toBe(sha256);
+      expect(() => context.fileReferenceStore.resolve(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt }))
+        .toThrow("different operation");
+    }
+    const keptStep = payload.recommended_steps.find((step: any) => step.tool === "import_camt053");
+    expect(desandboxText(keptStep.reason)).toContain("stands in for byte-identical file(s) at camt_files index 1; if it was changed or removed, re-run accounting_inbox");
+    // The detected-file refs stay unbound: the duplicate can still be imported explicitly.
+    expect(context.fileReferenceStore.resolve(duplicate.file_ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt }))
+      .toBe(join(workspace, "statement (1).xml"));
+  });
+
+  it("new CAMT analysis fields carry only indices, enums, a hex digest, dates and a currency", async () => {
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml: withEntries({ from: "2026-09-01", to: "2026-09-30" }), mtime: NEWER },
+      { name: "statement-copy.xml", xml: withEntries({ from: "2026-09-01", to: "2026-09-30" }), mtime: OLDER },
+      { name: "statement-q3.xml", xml: withEntries({ from: "2026-07-01", to: "2026-09-30" }), mtime: OLDER },
+    ]);
+    const payload = await setup().scan(workspace);
+    for (const file of payload.detected_inputs.camt_files) {
+      expect(["analyzed", "hash_only", "not_analyzed"]).toContain(file.analysis);
+      if (file.sha256 !== undefined) expect(file.sha256).toMatch(/^[0-9a-f]{64}$/);
+      if (file.coverage !== undefined) {
+        expect(file.coverage).toBe("duplicate");
+        expect(Number.isInteger(file.duplicate_of)).toBe(true);
+      }
+      for (const index of file.stands_in_for ?? []) expect(Number.isInteger(index)).toBe(true);
+      if (file.statement !== undefined) {
+        expect(Object.keys(file.statement).sort()).toEqual(["currency", "from", "to"]);
+        expect(file.statement.currency).toMatch(/^[A-Z]{3}$/);
+        expect(file.statement.from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      }
+      for (const overlap of file.overlaps_with ?? []) {
+        expect(Object.keys(overlap).sort()).toEqual(["from", "index", "to"]);
+        expect(Number.isInteger(overlap.index)).toBe(true);
+      }
+      // No IBAN echo in the new fields (detected_iban is the pre-existing field).
+      const { analysis, sha256, coverage, duplicate_of, stands_in_for, statement, overlaps_with } = file;
+      expect(JSON.stringify({ analysis, sha256, coverage, duplicate_of, stands_in_for, statement, overlaps_with })).not.toContain("EE63");
+    }
+    expect(Object.keys(payload.camt_overlap).sort()).toEqual(["analyzed", "duplicate_count", "overlap_pair_count"]);
+  });
+
+  it("keeps overlapping, non-identical statements recommended and reports the overlap (period or entry range)", async () => {
+    const workspace = await workspaceWith([
+      { name: "statement-q3.xml", xml: withEntries({ from: "2026-07-01", to: "2026-09-30" }), mtime: NEWER },
+      { name: "statement-aug.xml", xml: withEntries({ from: "2026-08-01", to: "2026-08-31" }), mtime: OLDER },
+      // No FrToDt: its entry range (2026-09-03) is used.
+      { name: "statement-entries.xml", xml: withEntries(), mtime: new Date("2026-09-20T10:00:00Z") },
+    ]);
+    const { context, scan } = setup();
+    const payload = await scan(workspace);
+    const files = payload.detected_inputs.camt_files;
+    expect(files.map((file: any) => file.statement)).toEqual([
+      { from: "2026-07-01", to: "2026-09-30", currency: "EUR" },
+      { from: "2026-08-01", to: "2026-08-31", currency: "EUR" },
+      { from: "2026-09-03", to: "2026-09-03", currency: "EUR" },
+    ]);
+    expect(files[0].overlaps_with).toEqual([
+      { index: 1, from: "2026-08-01", to: "2026-08-31" },
+      { index: 2, from: "2026-09-03", to: "2026-09-03" },
+    ]);
+    expect(files[1].overlaps_with).toEqual([{ index: 0, from: "2026-07-01", to: "2026-09-30" }]);
+    expect(files.some((file: any) => file.coverage !== undefined)).toBe(false);
+    expect(payload.camt_overlap).toEqual({ analyzed: 3, duplicate_count: 0, overlap_pair_count: 2 });
+    // Every file keeps its parse + import steps, unbound.
+    const refs = camtStepRefs(payload);
+    expect(refs).toHaveLength(6);
+    expect(new Set(refs.map((ref: string) => resolvedPath(context, ref))).size).toBe(3);
+    for (const ref of refs) {
+      expect(context.fileReferenceStore.resolveBound(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt }).expectedSha256).toBeUndefined();
+    }
+  });
+
+  it("an invalid statement account identity leaves overlap unanalyzed (hash only)", async () => {
+    const workspace = await workspaceWith([
+      { name: "statement-a.xml", xml: fixtureCamtStatementXml({ iban: "EE63-7700-7710-1121-2909", period: { from: "2026-09-01", to: "2026-09-30" } }), mtime: NEWER },
+      { name: "statement-b.xml", xml: fixtureCamtStatementXml({ iban: "EE63-7700-7710-1121-2909", period: { from: "2026-09-15", to: "2026-10-15" } }), mtime: OLDER },
+    ]);
+    const payload = await setup().scan(workspace);
+    expect(payload.detected_inputs.camt_files.map((file: any) => file.analysis)).toEqual(["hash_only", "hash_only"]);
+    expect(payload.detected_inputs.camt_files.some((file: any) => file.overlaps_with !== undefined)).toBe(false);
+  });
+
+  it("kept file changed after the scan: its step ref is refused (file_input_changed), and a re-scan recommends both", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const { api, scan, camt } = setup();
+    const payload = await scan(workspace);
+    const importStep = payload.recommended_steps.find((step: any) => step.tool === "import_camt053");
+    await writeFile(join(workspace, "statement.xml"), withEntries({ from: "2026-09-01", to: "2026-09-30" }));
+
+    const parsed = await camt({ mode: "dry_run", file_ref: importStep.suggested_args.file_ref, accounts_dimensions_id: 101 })
+      .then(result => parseMcpResponse(result.content[0]!.text) as any, (error: Error) => ({ thrown: error.message }));
+    expect(JSON.stringify(parsed)).toContain("no longer matches the reviewed source bytes");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+
+    const rescan = await scan(workspace);
+    expect(rescan.camt_overlap.duplicate_count).toBe(0);
+    expect(camtStepRefs(rescan)).toHaveLength(4);
+  });
+
+  it("kept file deleted after the scan: its step ref is unavailable, and a re-scan recommends the former duplicate", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const { context, scan, camt } = setup();
+    const payload = await scan(workspace);
+    const importStep = payload.recommended_steps.find((step: any) => step.tool === "import_camt053");
+    await rm(join(workspace, "statement.xml"));
+
+    const outcome = await camt({ mode: "dry_run", file_ref: importStep.suggested_args.file_ref, accounts_dimensions_id: 101 })
+      .then(result => parseMcpResponse(result.content[0]!.text) as any, (error: Error) => ({ thrown: error.message }));
+    expect(JSON.stringify(outcome)).toContain("could not be safely resolved and read");
+
+    const rescan = await scan(workspace);
+    expect(rescan.detected_inputs.camt_files).toHaveLength(1);
+    expect(rescan.detected_inputs.camt_files[0].coverage).toBeUndefined();
+    const refs = camtStepRefs(rescan);
+    expect(refs).toHaveLength(2);
+    expect(resolvedPath(context, refs[0])).toBe(join(workspace, "statement (1).xml"));
+  });
+
+  it("granular execute refuses with plan_drift and zero mutations when the bound kept file changed after its dry run", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const { api, scan, camt } = setup({ allowWrites: true });
+    const payload = await scan(workspace);
+    const fileRef = payload.recommended_steps.find((step: any) => step.tool === "import_camt053").suggested_args.file_ref;
+
+    const dry = parseMcpResponse((await camt({ mode: "dry_run", file_ref: fileRef, accounts_dimensions_id: 101 })).content[0]!.text) as any;
+    const planHandle = dry.result.plan_handle;
+    expect(planHandle).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    await writeFile(join(workspace, "statement.xml"), withEntries({ from: "2026-09-01", to: "2026-09-30" }));
+    const executed = await camt({ mode: "execute", file_ref: fileRef, accounts_dimensions_id: 101, plan_handle: planHandle });
+    const result = parseMcpResponse(executed.content[0]!.text) as any;
+    expect(executed.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("plan_drift");
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable CAMT file stays recommended (not_analyzed)", async () => {
+    const workspace = await workspaceWith([{ name: "statement.xml", xml: withEntries(), mtime: NEWER }]);
+    const context = createTestRuntimeSafetyContext();
+    const candidates = [
+      { path: join(workspace, "statement.xml"), name: "statement.xml", modified_at: NEWER.toISOString(), size_bytes: 10 },
+      { path: join(workspace, "missing.xml"), name: "missing.xml", modified_at: OLDER.toISOString(), size_bytes: 10 },
+    ];
+    const analysis = await analyzeInboxCamtFiles(candidates, context);
+    expect(analysis.files.map(file => file.analysis)).toEqual(["analyzed", "not_analyzed"]);
+    expect(analysis.summary).toEqual({ analyzed: 1, duplicate_count: 0, overlap_pair_count: 0 });
+    const { steps } = buildRecommendedSteps({
+      camtFiles: analysis.files,
+      wiseFiles: [],
+      receiptFolders: [],
+      defaults: { candidates: [], local_bank_candidates: [], bank_dimension_from_override: false } as any,
+    });
+    expect(steps.filter(step => step.tool === "parse_camt053").map(step => step.suggested_args.file_path))
+      .toEqual([candidates[0]!.path, candidates[1]!.path]);
+  });
+
+  it("budget on actual bytes: a file that grew after the scan's stat abandons dedup and keeps every file recommended", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const context = createTestRuntimeSafetyContext();
+    const actualSize = Buffer.byteLength(xml);
+    // The scan saw 10 bytes per file; the files are really larger.
+    const candidates = [
+      { path: join(workspace, "statement.xml"), name: "statement.xml", modified_at: NEWER.toISOString(), size_bytes: 10 },
+      { path: join(workspace, "statement (1).xml"), name: "statement (1).xml", modified_at: OLDER.toISOString(), size_bytes: 10 },
+    ];
+    const withinStatBudget = { maxFiles: 40, maxBytes: actualSize + 20 };
+    const analysis = await analyzeInboxCamtFiles(candidates, context, withinStatBudget);
+    expect(analysis.summary).toEqual({ analyzed: 0, duplicate_count: 0, overlap_pair_count: 0, budget_exceeded: true });
+    expect(analysis.files.map(file => [file.analysis, file.coverage])).toEqual([["not_analyzed", undefined], ["not_analyzed", undefined]]);
+    expect(analysis.bindings.size).toBe(0);
+
+    // Enough budget for the real bytes: the copy is deduplicated.
+    const enough = await analyzeInboxCamtFiles(candidates, context, { maxFiles: 40, maxBytes: 2 * actualSize });
+    expect(enough.summary).toEqual({ analyzed: 2, duplicate_count: 1, overlap_pair_count: 0 });
+    // Too many files abandons dedup before any read.
+    const tooMany = await analyzeInboxCamtFiles(candidates, context, { maxFiles: 1, maxBytes: 2 * actualSize });
+    expect(tooMany.summary.budget_exceeded).toBe(true);
+  });
+
+  it("classification runs when the kept file has zero pending writes (no pending_input from a left-out duplicate)", async () => {
+    const xml = fixtureCamtStatementXml();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const payload = await setup().dryRun(workspace);
+    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
+      "parse_camt053",
+      "import_camt053",
+      "classify_unmatched_transactions",
+    ]);
+    expect(JSON.stringify(payload.autopilot)).not.toContain("pending_input");
+  });
+
+  it("classification is deferred as pending_imports when the kept file has creates (intentional deferral)", async () => {
+    const xml = withEntries();
+    const workspace = await workspaceWith([
+      { name: "statement.xml", xml, mtime: NEWER },
+      { name: "statement (1).xml", xml, mtime: OLDER },
+    ]);
+    const payload = await setup().dryRun(workspace);
+    expect(payload.autopilot.executed_steps.filter((step: any) => step.tool === "import_camt053")).toHaveLength(1);
+    expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tool: "classify_unmatched_transactions",
+        status: "deferred",
+        materialization_state: "pending_imports",
+      }),
+    ]));
+    expect(JSON.stringify(payload.autopilot)).not.toContain("pending_input");
   });
 });

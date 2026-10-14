@@ -365,3 +365,40 @@ describe("assertFileInputSnapshotIdentity", () => {
       .toThrowError(new FileInputSnapshotError("file_input_identity_invalid"));
   });
 });
+
+describe("captureFileInputSnapshot with a content-bound file_ref", () => {
+  async function boundSetup() {
+    const root = await mkdtemp(join(tmpdir(), "file-ref-bound-"));
+    roots.push(root);
+    const path = join(root, "statement.csv");
+    await writeFile(path, "a,b\n");
+    const context = runtime();
+    const fileRef = context.fileReferenceStore.issue({
+      canonicalPath: await realpath(path),
+      kind: "file",
+      operation: FILE_REFERENCE_OPERATIONS.wise,
+      expectedSha256: createHash("sha256").update("a,b\n").digest("hex"),
+    });
+    return { path, context, fileRef };
+  }
+
+  it("loads the file while its bytes match", async () => {
+    const { context, fileRef } = await boundSetup();
+    const snapshot = await captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context));
+    expect(snapshot.text()).toBe("a,b\n");
+  });
+
+  it("refuses bytes changed after the reference was issued (file_input_changed)", async () => {
+    const { path, context, fileRef } = await boundSetup();
+    await writeFile(path, "a,c\n");
+    await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context)))
+      .rejects.toMatchObject({ code: "file_input_changed" });
+  });
+
+  it("reports a deleted file as file_input_unavailable", async () => {
+    const { path, context, fileRef } = await boundSetup();
+    await rm(path);
+    await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context)))
+      .rejects.toMatchObject({ code: "file_input_unavailable" });
+  });
+});

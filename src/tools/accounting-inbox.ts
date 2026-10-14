@@ -41,6 +41,10 @@ import { createPublicWorkflowStateDetail, WorkflowStateStoreError, type PublicWo
 import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
+import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-snapshot.js";
+import { CAMT_MAX_FILE_SIZE, normalizeAccountIdentity } from "../camt/executor.js";
+import { camtDateDay, preflightCamt053Xml } from "../camt/parser.js";
+import { groupCamtStatementFiles, type CamtStatementFingerprint } from "../camt/statement-duplicates.js";
 import {
   buildBankDimensionCandidates,
   normalizeIban,
@@ -99,7 +103,27 @@ interface InboxFileCandidate {
   modified_at: string;
   size_bytes: number;
   detected_iban?: string;
+  /** CAMT only: "analyzed" (hashed, statement read), "hash_only" (hashed, the
+   * statement period/account could not be analyzed), "not_analyzed". */
+  analysis?: "analyzed" | "hash_only" | "not_analyzed";
+  sha256?: string;
+  /** CAMT only: a byte-identical copy of camt_files[duplicate_of]; no steps. */
+  coverage?: "duplicate";
+  duplicate_of?: number;
+  stands_in_for?: number[];
+  statement?: { from: string; to: string; currency: string };
+  overlaps_with?: Array<{ index: number; from: string; to: string }>;
 }
+
+interface CamtOverlapSummary {
+  analyzed: number;
+  duplicate_count: number;
+  overlap_pair_count: number;
+  budget_exceeded?: true;
+}
+
+/** Bounds the inbox CAMT hash/parse pass (actual bytes read). */
+export const CAMT_ANALYSIS_BUDGET = Object.freeze({ maxFiles: 40, maxBytes: 32 * 1024 * 1024 });
 
 interface ReceiptFolderCandidate {
   path: string;
@@ -145,6 +169,10 @@ interface PreparedInboxData {
     continuation_guidance?: string;
   };
   camtFiles: InboxFileCandidate[];
+  camtOverlap: CamtOverlapSummary;
+  /** Kept CAMT files that stand in for byte-identical copies: path -> SHA-256.
+   * Their step file references are bound to these bytes. */
+  camtDigestBindings: Map<string, string>;
   wiseFiles: InboxFileCandidate[];
   receiptFolders: ReceiptFolderCandidate[];
   defaults: ReturnType<typeof buildBankDefaults>;
@@ -338,6 +366,116 @@ async function detectCamtFiles(files: ScannedFileInfo[]): Promise<InboxFileCandi
   return candidates.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
 }
 
+/**
+ * Hash every detected CAMT file (the import's own bounded reader) and group
+ * byte-identical copies; statements of the same account and currency whose
+ * periods intersect are reported as overlapping (information only). Bounded by
+ * `budget` on the bytes actually read: when exceeded, no file is deduplicated.
+ * Returns annotated copies of `camtFiles` (same order).
+ */
+export async function analyzeInboxCamtFiles(
+  camtFiles: InboxFileCandidate[],
+  runtimeSafetyContext: RuntimeSafetyContext,
+  // Test seam: production callers always use the default budget.
+  budget: { maxFiles: number; maxBytes: number } = CAMT_ANALYSIS_BUDGET,
+): Promise<{ files: InboxFileCandidate[]; summary: CamtOverlapSummary; bindings: Map<string, string> }> {
+  const fingerprints: CamtStatementFingerprint[] = [];
+  const statements = new Map<number, { from: string; to: string; currency: string }>();
+  let bytesRead = 0;
+  let budgetExceeded = camtFiles.length > budget.maxFiles;
+  for (const [index, file] of camtFiles.entries()) {
+    if (budgetExceeded) break;
+    if (bytesRead + file.size_bytes > budget.maxBytes) {
+      budgetExceeded = true;
+      break;
+    }
+    let snapshot: FileInputSnapshot;
+    try {
+      snapshot = await captureFileInputSnapshot({ file_path: file.path }, {
+        runtimeSafetyContext,
+        operation: FILE_REFERENCE_OPERATIONS.camt,
+        allowedExtensions: [".xml"],
+        maxSize: CAMT_MAX_FILE_SIZE,
+      });
+    } catch {
+      continue; // not_analyzed; the file stays recommended
+    }
+    // A file that grew after the scan's stat counts with its real size.
+    bytesRead += snapshot.identity.size_bytes;
+    if (bytesRead > budget.maxBytes) {
+      budgetExceeded = true;
+      break;
+    }
+    let accountKey: string | undefined;
+    let period: { from: string; to: string } | undefined;
+    try {
+      const preflight = preflightCamt053Xml(snapshot.text());
+      if (preflight.ok) {
+        const { statement_metadata: metadata, entries } = preflight.value;
+        const identity = normalizeAccountIdentity(metadata.iban);
+        const currency = metadata.currency ?? "EUR";
+        const entryDates = entries.map(entry => entry.date).sort();
+        const from = metadata.period.from !== undefined ? camtDateDay(metadata.period.from) : entryDates[0];
+        const to = metadata.period.to !== undefined ? camtDateDay(metadata.period.to) : entryDates[entryDates.length - 1];
+        if (identity !== undefined && from !== undefined && to !== undefined && from <= to) {
+          accountKey = `${identity}:${currency}`;
+          period = { from, to };
+          statements.set(index, { from, to, currency });
+        }
+      }
+    } catch {
+      // Structural parse failure: overlap is not analyzed; bytes still dedupe.
+    }
+    fingerprints.push({
+      index,
+      path: file.path,
+      modifiedAt: file.modified_at,
+      digest: snapshot.identity.digest_sha256,
+      ...(accountKey !== undefined ? { accountKey } : {}),
+      ...(period !== undefined ? { period } : {}),
+    });
+  }
+
+  if (budgetExceeded) {
+    return {
+      files: camtFiles.map(file => ({ ...file, analysis: "not_analyzed" as const })),
+      summary: { analyzed: 0, duplicate_count: 0, overlap_pair_count: 0, budget_exceeded: true },
+      bindings: new Map(),
+    };
+  }
+
+  const grouped = new Map(groupCamtStatementFiles(fingerprints).map(info => [info.index, info]));
+  const digests = new Map(fingerprints.map(fingerprint => [fingerprint.index, fingerprint.digest!]));
+  const bindings = new Map<string, string>();
+  let overlapLinks = 0;
+  const files = camtFiles.map((file, index): InboxFileCandidate => {
+    const sha256 = digests.get(index);
+    if (sha256 === undefined) return { ...file, analysis: "not_analyzed" };
+    const info = grouped.get(index)!;
+    const statement = statements.get(index);
+    if (info.stands_in_for !== undefined) bindings.set(file.path, sha256);
+    overlapLinks += info.overlaps_with?.length ?? 0;
+    return {
+      ...file,
+      analysis: statement !== undefined ? "analyzed" : "hash_only",
+      sha256,
+      ...(info.duplicate_of !== undefined ? { coverage: "duplicate" as const, duplicate_of: info.duplicate_of } : {}),
+      ...(info.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
+      ...(statement !== undefined && info.duplicate_of === undefined ? { statement } : {}),
+      ...(info.overlaps_with !== undefined ? { overlaps_with: info.overlaps_with } : {}),
+    };
+  });
+  return {
+    files,
+    summary: {
+      analyzed: fingerprints.length,
+      duplicate_count: files.filter(file => file.duplicate_of !== undefined).length,
+      overlap_pair_count: overlapLinks / 2,
+    },
+    bindings,
+  };
+}
+
 async function detectWiseCsvFiles(files: ScannedFileInfo[]): Promise<InboxFileCandidate[]> {
   const candidates: InboxFileCandidate[] = [];
   for (const file of files.filter(candidate => candidate.extension === ".csv")) {
@@ -508,7 +646,14 @@ export function buildRecommendedSteps(params: {
   const questions: InboxQuestion[] = [];
   let stepNumber = 1;
 
-  for (const file of camtFiles) {
+  // A byte-identical copy of another detected statement gets no steps (never a
+  // recommended:false step, which the dry-run autopilot would treat as a
+  // skipped prerequisite and defer classification on).
+  const steppedCamtFiles = camtFiles.filter(file => file.duplicate_of === undefined);
+  for (const file of steppedCamtFiles) {
+    const standInNote = file.stands_in_for !== undefined
+      ? ` This file stands in for byte-identical file(s) at camt_files index ${file.stands_in_for.join(", ")}; if it was changed or removed, re-run accounting_inbox so the duplicates are reconsidered.`
+      : "";
     steps.push({
       step: stepNumber++,
       tool: "parse_camt053",
@@ -516,7 +661,7 @@ export function buildRecommendedSteps(params: {
       recommended: true,
       suggested_args: { file_path: file.path },
       missing_inputs: [],
-      reason: `Detected CAMT statement ${file.name}. Start with a read-only parse so the user sees what will be imported.`,
+      reason: `Detected CAMT statement ${file.name}. Start with a read-only parse so the user sees what will be imported.${standInNote}`,
     });
 
     const dimensionId = resolveSuggestedCamtDimensionId(file, defaults);
@@ -532,11 +677,11 @@ export function buildRecommendedSteps(params: {
         execute: false,
       },
       missing_inputs: missingInputs,
-      reason: buildCamtImportReason(file, dimensionId, defaults),
+      reason: `${buildCamtImportReason(file, dimensionId, defaults)}${standInNote}`,
     });
   }
 
-  if (camtFiles.some(file => resolveSuggestedCamtDimensionId(file, defaults) === undefined)) {
+  if (steppedCamtFiles.some(file => resolveSuggestedCamtDimensionId(file, defaults) === undefined)) {
     questions.push(buildMissingDimensionQuestion(
       "camt_accounts_dimensions_id",
       "Which bank account dimension should be used for the detected CAMT statement(s)?",
@@ -648,6 +793,7 @@ export function buildRecommendedSteps(params: {
 
 function buildUserSummary(params: {
   camtFiles: InboxFileCandidate[];
+  camtDuplicateCount: number;
   wiseFiles: InboxFileCandidate[];
   receiptFolders: ReceiptFolderCandidate[];
   questions: InboxQuestion[];
@@ -663,6 +809,9 @@ function buildUserSummary(params: {
     `Found ${params.camtFiles.length} CAMT file(s), ${params.wiseFiles.length} Wise CSV file(s), ` +
     `and ${params.receiptFolders.length} receipt folder(s).`
   );
+  if (params.camtDuplicateCount > 0) {
+    parts.push(`${params.camtDuplicateCount} CAMT file(s) are byte-identical copies of another and are left out of the steps.`);
+  }
 
   const readySteps = params.steps.filter(step => step.recommended && step.missing_inputs.length === 0);
   if (readySteps.length > 0) {
@@ -710,6 +859,7 @@ function projectPublicRecommendedSteps(
   rawSteps: RecommendedStep[],
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig,
+  digestBindings: ReadonlyMap<string, string>,
 ): { steps: RecommendedStep[]; blocked?: BlockedRecommendedAction } {
   const steps: RecommendedStep[] = [];
   let blocked: BlockedRecommendedAction | undefined;
@@ -733,7 +883,7 @@ function projectPublicRecommendedSteps(
     const normalizedStep = bankRemap
       ? { ...legacyStep, tool: bankRemap.tool, suggested_args: bankRemap.args }
       : legacyStep;
-    const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext);
+    const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext, digestBindings);
     const projected = projectActionForCurrentProfile({
       kind: "tool_call",
       label: publicStep.purpose,
@@ -800,6 +950,13 @@ function publicInboxFile(
     modified_at: file.modified_at,
     size_bytes: file.size_bytes,
     ...(file.detected_iban !== undefined ? { detected_iban: file.detected_iban } : {}),
+    // CAMT analysis: indices, enums, a hex digest, validated dates and currency only.
+    ...(file.analysis !== undefined ? { analysis: file.analysis } : {}),
+    ...(file.sha256 !== undefined ? { sha256: file.sha256 } : {}),
+    ...(file.coverage !== undefined ? { coverage: file.coverage, duplicate_of: file.duplicate_of } : {}),
+    ...(file.stands_in_for !== undefined ? { stands_in_for: file.stands_in_for } : {}),
+    ...(file.statement !== undefined ? { statement: file.statement } : {}),
+    ...(file.overlaps_with !== undefined ? { overlaps_with: file.overlaps_with } : {}),
   };
 }
 
@@ -823,8 +980,9 @@ function publicReceiptFolder(
 function publicRecommendedStep(
   step: RecommendedStep,
   runtimeSafetyContext: RuntimeSafetyContext,
+  digestBindings: ReadonlyMap<string, string>,
 ): RecommendedStep {
-  const suggestedArgs = publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext);
+  const suggestedArgs = publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, digestBindings);
   return {
     ...step,
     purpose: sandboxExternalText(step.purpose),
@@ -837,6 +995,9 @@ function publicSuggestedArgs(
   tool: string,
   args: Record<string, unknown>,
   runtimeSafetyContext: RuntimeSafetyContext,
+  // Paths whose reference must be bound to the scanned bytes (a kept CAMT file
+  // standing in for byte-identical copies).
+  digestBindings: ReadonlyMap<string, string>,
 ): Record<string, unknown> {
   const suggestedArgs = { ...args };
   const directFilePath = typeof suggestedArgs.file_path === "string" ? suggestedArgs.file_path : undefined;
@@ -848,10 +1009,12 @@ function publicSuggestedArgs(
         ? FILE_REFERENCE_OPERATIONS.wise
         : FILE_REFERENCE_OPERATIONS.camt;
     delete suggestedArgs.file_path;
+    const expectedSha256 = digestBindings.get(directFilePath);
     suggestedArgs.file_ref = runtimeSafetyContext.fileReferenceStore.issue({
       canonicalPath: directFilePath,
       kind: "file",
       operation,
+      ...(expectedSha256 !== undefined ? { expectedSha256 } : {}),
     });
   }
   if (directFolderPath !== undefined) {
@@ -1021,7 +1184,7 @@ function buildPreparedInboxPayload(
   // Project every caller-facing structured action through the selected profile
   // after paths become opaque refs. This remaps safe granular aliases and fails
   // closed if a future/advanced action is not public in a guided profile.
-  const projected = projectPublicRecommendedSteps(prepared.steps, runtimeSafetyContext, exposure);
+  const projected = projectPublicRecommendedSteps(prepared.steps, runtimeSafetyContext, exposure, prepared.camtDigestBindings);
   const steps = projected.steps;
   const questions = prepared.questions.map(publicQuestion);
   return {
@@ -1032,6 +1195,7 @@ function buildPreparedInboxPayload(
       wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, FILE_REFERENCE_OPERATIONS.wise)),
       receipt_folders: prepared.receiptFolders.map(folder => publicReceiptFolder(folder, runtimeSafetyContext)),
     },
+    camt_overlap: prepared.camtOverlap,
     defaults: {
       live_api_defaults_available: prepared.liveApiDefaultsAvailable,
       suggested_bank_dimension_id: prepared.defaults.suggested_bank_dimension_id,
@@ -1059,12 +1223,16 @@ function buildPreparedInboxPayload(
       "Ask only the questions listed under questions, and always start with the recommendation.",
       "Run dry-run steps before any execute=true mutation.",
       "Summarize work as: done automatically, needs one decision, and needs accountant review.",
+      ...(prepared.camtOverlap.duplicate_count > 0 || prepared.camtOverlap.overlap_pair_count > 0
+        ? ["CAMT files marked coverage=duplicate are byte-identical copies of the camt_files entry named by duplicate_of; they are listed for transparency only. Importing one is harmless but unnecessary, and the user may still import one explicitly. Statements listed in overlaps_with are both kept: rows in the overlap are deduplicated on import, and reference-less rows there may surface as possible-duplicate review."]
+        : []),
       ...(prepared.liveApiDefaultsAvailable
         ? []
         : ["Live bank-account defaults were unavailable because credentials are not configured yet. File scanning still works, but bank dimension defaults may need manual confirmation."]),
     ],
     user_summary: buildUserSummary({
       camtFiles: prepared.camtFiles,
+      camtDuplicateCount: prepared.camtOverlap.duplicate_count,
       wiseFiles: prepared.wiseFiles,
       receiptFolders: prepared.receiptFolders,
       questions: prepared.questions,
@@ -1076,6 +1244,7 @@ function buildPreparedInboxPayload(
 
 async function prepareAccountingInbox(
   api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
   params: {
     workspace_path?: string;
     max_depth?: number;
@@ -1101,10 +1270,12 @@ async function prepareAccountingInbox(
     liveApiDefaultsAvailable = false;
   }
 
-  const [camtFiles, wiseFiles] = await Promise.all([
+  const [detectedCamtFiles, wiseFiles] = await Promise.all([
     detectCamtFiles(files),
     detectWiseCsvFiles(files),
   ]);
+  const camtAnalysis = await analyzeInboxCamtFiles(detectedCamtFiles, runtimeSafetyContext);
+  const camtFiles = camtAnalysis.files;
   const receiptFolders = detectReceiptFolders(files);
   const defaults = buildBankDefaults(bankAccounts, accountDimensions, {
     bank_account_dimension_id: params.bank_account_dimension_id,
@@ -1130,6 +1301,8 @@ async function prepareAccountingInbox(
       ...(continuation_guidance !== undefined ? { continuation_guidance } : {}),
     },
     camtFiles,
+    camtOverlap: camtAnalysis.summary,
+    camtDigestBindings: camtAnalysis.bindings,
     wiseFiles,
     receiptFolders,
     defaults,
@@ -1728,7 +1901,7 @@ async function buildAccountingInboxScanResponse(
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  const prepared = await prepareAccountingInbox(api, params);
+  const prepared = await prepareAccountingInbox(api, runtimeSafetyContext, params);
   const payload = buildPreparedInboxPayload(prepared, runtimeSafetyContext, exposure);
 
   return {
@@ -1756,7 +1929,7 @@ async function buildAccountingInboxDryRunResponse(
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  const prepared = await prepareAccountingInbox(api, params);
+  const prepared = await prepareAccountingInbox(api, runtimeSafetyContext, params);
   const operations = createAccountingOperations(api, runtimeSafetyContext);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, operations });
   const publicAutopilot: Record<string, unknown> = {
@@ -1765,14 +1938,14 @@ async function buildAccountingInboxDryRunResponse(
       ...step,
       purpose: sandboxExternalText(step.purpose),
       summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext),
+      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
       source_documents: publicSourceDocuments(step.suggested_args),
     })),
     skipped_steps: autopilot.skipped_steps.map(step => ({
       ...step,
       purpose: sandboxExternalText(step.purpose),
       summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext),
+      suggested_args: publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
       source_documents: publicSourceDocuments(step.suggested_args),
     })),
     needs_one_decision: autopilot.needs_one_decision.map(item => publicFollowUp(item, runtimeSafetyContext)),
@@ -1783,7 +1956,7 @@ async function buildAccountingInboxDryRunResponse(
     ? publicFollowUp(autopilot.next_question, runtimeSafetyContext)
     : undefined;
   const nextProjection = autopilot.next_recommended_action
-    ? projectPublicRecommendedSteps([autopilot.next_recommended_action], runtimeSafetyContext, exposure)
+    ? projectPublicRecommendedSteps([autopilot.next_recommended_action], runtimeSafetyContext, exposure, prepared.camtDigestBindings)
     : { steps: [] as RecommendedStep[] };
   const nextRecommendedAction = nextProjection.steps[0];
   if (!isRecord(preparedPayload.blocker)) {
