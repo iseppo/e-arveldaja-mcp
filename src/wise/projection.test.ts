@@ -1088,6 +1088,14 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
       expect(output.ownershipReviews).toEqual([]);
     });
 
+    it("a Wise posting with a missing or non-finite amount is unreadable: uncertain, the row is held", () => {
+      for (const [id, broken] of [[735, { amount: undefined }], [736, { amount: Number.NaN }], [737, { base_amount: Number.POSITIVE_INFINITY }]] as const) {
+        const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(id, [[WISE, "D", 100, broken], [LHV, "C", 100]])], toLightyear);
+        expect(actions(output), String(id)).toEqual([`held:TRANSFER-B:${HELD_ELSEWHERE}`]);
+        expect(onlyReview(output), String(id)).toMatchObject({ required_acknowledgement_ids: [id], uncertain_journal_ids: [id] });
+      }
+    });
+
     it("a composite with a foreign same-direction posting without an EUR base cannot be shown below: uncertain", () => {
       const output = run([line("TRANSFER-B", "IN", "100.00")], [journal(734, [[WISE, "D", 30], [WISE, "D", 20, { cl_currencies_id: "USD" }], [LHV, "C", 50]])], toLightyear);
       expect(onlyReview(output)).toMatchObject({ required_acknowledgement_ids: [734], uncertain_journal_ids: [734] });

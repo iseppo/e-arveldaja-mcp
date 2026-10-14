@@ -426,6 +426,15 @@ export function withinOneDay(left: string | undefined, right: string | undefined
   return !Number.isFinite(gap) || gap <= 86400000;
 }
 
+/** Whether a stored description tag is `prefix` (e.g. `WISE:{id}`) itself or
+ * `prefix` with a generated split-leg suffix (`:CUR` or `:CUR-n`); a suffixed
+ * tag also gives its currency. Any other continuation is a distinct ID. */
+export function matchWiseLegTag(tag: string, prefix: string): { suffixCurrency: string | undefined } | undefined {
+  if (tag === prefix) return { suffixCurrency: undefined };
+  const match = tag.startsWith(`${prefix}:`) ? tag.slice(prefix.length + 1).match(/^([A-Z]{3})(?:-\d+)?$/) : null;
+  return match ? { suffixCurrency: match[1] } : undefined;
+}
+
 /** Wise IDs and references a journal label could name: the statement's rows
  * and the WISE: tags already stored. */
 export function knownWiseLabelsFor(allRows: readonly WiseRow[], existingTx: readonly Transaction[]): string[] {
@@ -447,7 +456,7 @@ export function labelledWithOtherWiseId(journal: Journal, row: WiseRow, knownWis
 
 /** One live posting on the Wise account dimension. */
 interface WiseSidePosting {
-  /** D +1, C −1; 0 when the posting carries no side. */
+  /** D +1, C −1; 0 when the posting carries no side or no readable amount. */
   readonly sign: 1 | -1 | 0;
   readonly currency: string;
   readonly nominalCents: number;
@@ -480,6 +489,10 @@ export function buildWiseSideJournalIndex(journals: readonly Journal[], wiseDim:
     const postings = (journal.postings ?? []).flatMap((posting): WiseSidePosting[] => {
       if (posting.is_deleted || posting.accounts_dimensions_id !== wiseDim) return [];
       const currency = (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase();
+      // A missing or non-finite amount cannot be compared: no side, so the
+      // journal is uncertain evidence.
+      const readable = Number.isFinite(posting.amount) && (posting.base_amount == null || Number.isFinite(posting.base_amount));
+      if (!readable) return [{ sign: 0, currency, nominalCents: 0, eurCents: undefined }];
       return [{
         sign: posting.type === "D" ? 1 : posting.type === "C" ? -1 : 0,
         currency,
@@ -731,10 +744,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const storedTagged = (prefix: string): StoredWiseLeg[] => existingTx.flatMap((tx): StoredWiseLeg[] => {
     const tag = tx.description?.split(" ")[0];
     if (tag === undefined || typeof tx.amount !== "number") return [];
-    if (tag === prefix) return [{ tx, tag, suffixCurrency: undefined }];
-    const suffix = tag.startsWith(`${prefix}:`) ? tag.slice(prefix.length + 1) : undefined;
-    const match = suffix?.match(/^([A-Z]{3})(?:-\d+)?$/);
-    return match ? [{ tx, tag, suffixCurrency: match[1] }] : [];
+    const match = matchWiseLegTag(tag, prefix);
+    return match ? [{ tx, tag, ...match }] : [];
   });
   const legSuffix = new Map<WiseRow, string>();
   const storedMainLegs = new Map<string, StoredWiseLeg[]>();

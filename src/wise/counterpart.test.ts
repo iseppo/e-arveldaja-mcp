@@ -270,9 +270,49 @@ describe("resolveWiseRowCounterparts — Codex r3 M3 (one-to-one attribution)", 
     const { tx, journal } = confirmedTx(1, LHV, "C", WISE, { documentNumber: "TRANSFER-A" });
     const resolved = resolve({ rows, existingTx: [tx], journals: [journal] });
     expect(resolved.get(rows[0]!)).toEqual({ dim: LHV, basis: "evidence" });
+    // Attributed to TRANSFER-A, the row is no evidence for TRANSFER-B at all.
     expect(resolved.get(rows[1]!)).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [] },
+    });
+  });
+
+  it("an old net+fee transfer's bank row (journal labelled with its Wise ID) is never evidence for a new same-gross transfer", () => {
+    // LHV 100 out; its registration journal books Wise 80 + fee 20 and is labelled TRANSFER-123.
+    const lhv = {
+      id: 1, status: "CONFIRMED", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-06-01",
+      accounts_dimensions_id: LHV, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, description: "To Wise",
+    } as unknown as Transaction;
+    const journal = {
+      id: 9001, registered: true, is_deleted: false, operation_type: "TRANSACTION", operations_id: 1,
+      effective_date: "2026-06-01", document_number: "TRANSFER-123",
+      postings: [
+        { accounts_id: BANK_GL, accounts_dimensions_id: LHV, type: "C", amount: 100 },
+        { accounts_id: BANK_GL, accounts_dimensions_id: WISE, type: "D", amount: 80 },
+        { accounts_id: 8610, type: "D", amount: 20 },
+      ],
+    } as unknown as Journal;
+    const newRow = row("TRANSFER-999");
+    expect(only(resolve({ rows: [newRow], existingTx: [lhv], journals: [journal] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [] },
+    });
+    // An explicit Coop is not contradicted by it either.
+    expect(only(resolve({ rows: [newRow], existingTx: [lhv], journals: [journal], explicit: COOP }))).toEqual({ dim: COOP, basis: "explicit" });
+    // A bank row tagged with another Wise ID is likewise that transfer's.
+    const tagged = { ...camtTx(2, LHV), description: "WISE:TRANSFER-123 To Wise" } as Transaction;
+    expect(only(resolve({ rows: [newRow], existingTx: [tagged] }))).toEqual({
+      hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [] },
+    });
+  });
+
+  it("a stored WISE:{id}:<not a leg suffix> row is a distinct Wise ID and contests; a generated split-leg suffix does not", () => {
+    const stored = (tag: string) => ({
+      id: 502, status: "PROJECT", is_deleted: false, type: "D", amount: 100, cl_currencies_id: "EUR", date: "2026-06-01",
+      accounts_dimensions_id: WISE, description: `${tag} Seppo AI OÜ [source_direction=IN]`,
+    }) as unknown as Transaction;
+    expect(only(resolve({ existingTx: [camtTx(1, LHV), stored("WISE:TRANSFER-1:B")] }))).toEqual({
       hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
     });
+    expect(only(resolve({ existingTx: [camtTx(1, LHV), stored("WISE:TRANSFER-1:EUR")] }))).toEqual({ dim: LHV, basis: "evidence" });
   });
 
   it("execute re-check: the row's own just-created WISE:{legId} row (and its fee row) never competes", () => {

@@ -14,7 +14,14 @@ import {
   sourceDirectionForWiseDirection,
   wiseDate,
 } from "./preflight.js";
-import { journalLabelledWithWiseId, wiseLegAmountNetOfFee, withinOneDay } from "./projection.js";
+import {
+  journalLabelledWithWiseId,
+  knownWiseLabelsFor,
+  labelledWithOtherWiseId,
+  matchWiseLegTag,
+  wiseLegAmountNetOfFee,
+  withinOneDay,
+} from "./projection.js";
 import type { WiseCounterpartBasis, WiseRow, WiseTransferReview } from "./types.js";
 
 // PURE per-row counterpart detection for Wise transfer rows. Evidence is the
@@ -116,6 +123,12 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
   const fallback = explicitDim ?? (explicit === undefined && otherDims.size === 1 ? [...otherDims][0] : undefined);
   const fallbackBasis: WiseCounterpartBasis = explicitDim !== undefined ? "explicit" : "only_other_bank";
 
+  const wiseLabels = knownWiseLabelsFor(allRows, existingTx);
+  // A stored tag naming this row's own main or fee leg (exact ID, or the ID
+  // with a generated split-leg suffix).
+  const ownLeg = (row: WiseRow, tag: string) =>
+    [`WISE:${row.id}`, `WISE:FEE:${row.id}`].some(own => matchWiseLegTag(tag, own) !== undefined);
+
   const touchesWise = (journal: Journal) =>
     (journal.postings ?? []).some(posting => !posting.is_deleted && posting.accounts_dimensions_id === wiseDim);
 
@@ -123,6 +136,12 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     const dim = tx.accounts_dimensions_id;
     if (typeof dim !== "number" || !otherDims.has(dim) || tx.id === undefined || typeof tx.amount !== "number") return undefined;
     if (!withinOneDay(tx.date, rowDate(row))) return undefined;
+    // A bank row already attributed to another Wise transfer (its own WISE:
+    // tag, or a registration journal labelled with another Wise ID) is that
+    // transfer's evidence, never this row's.
+    const tag = tx.description?.split(" ")[0] ?? "";
+    if (tag.startsWith("WISE:") && !ownLeg(row, tag)) return undefined;
+    if (findRegistrationJournal(journals, tx.id).some(journal => labelledWithOtherWiseId(journal, row, wiseLabels))) return undefined;
     // A transfer to (or from) another own account is not this Wise movement.
     const iban = counterpartyIbanOf(tx);
     const ibanDims = iban === "" ? undefined : lookups.ownIbanToDimension.get(iban);
@@ -179,10 +198,9 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
       sourceDirectionForWiseDirection(other.direction) === rowDirection &&
       withinOneDay(rowDate(other), tx.date) &&
       rowAmounts(other).some(amount => sameAmountToTheCent(amount, eur)))) return true;
-    const ownLeg = (tag: string) => [`WISE:${row.id}`, `WISE:FEE:${row.id}`].some(own => tag === own || tag.startsWith(`${own}:`));
     return existingTx.some(stored => {
       if (stored.accounts_dimensions_id !== wiseDim || typeof stored.amount !== "number") return false;
-      if (ownLeg(stored.description?.split(" ")[0] ?? "")) return false;
+      if (ownLeg(row, stored.description?.split(" ")[0] ?? "")) return false;
       if (!sameAmountToTheCent(stored.amount, eur) &&
         !(typeof stored.base_amount === "number" && sameAmountToTheCent(stored.base_amount, eur))) return false;
       if (!withinOneDay(stored.date, tx.date)) return false;

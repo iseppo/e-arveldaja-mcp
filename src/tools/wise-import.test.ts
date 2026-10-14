@@ -7456,6 +7456,24 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
     ]));
   });
 
+  it("a stored Wise row of a colliding ID (WISE:TRANSFER-T2:B) is another movement: T2 is held, nothing is created or confirmed", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const colliding = {
+      id: 650, status: "PROJECT", is_deleted: false, type: "D", amount: 250, cl_currencies_id: "EUR", date: "2026-06-05",
+      accounts_dimensions_id: 5, bank_account_name: COMPANY, description: `WISE:TRANSFER-T2:B ${COMPANY} [source_direction=IN]`,
+    };
+    const setup = setupWiseTool([lhvT1, coopT2, colliding], undefined, {
+      accountDimensions: dims, bankAccounts: banks, journals: [lhvT1Journal], invoiceInfo: { invoice_company_name: COMPANY },
+    });
+
+    const preview = parseMcpResponse((await setup.handler(args)).content[0]!.text) as any;
+
+    expect(preview.ownership_reviews).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T2", code: "wise_transfer_dimensions_unverified" })]);
+    expect(preview.execution.commands).toEqual([]);
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
   it("a counterpart transaction appearing on another bank before the confirm stops it (stale counterpart); the row stays PROJECT", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
     const setup = setupTwoBanks();
