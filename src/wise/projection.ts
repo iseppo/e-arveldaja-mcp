@@ -25,6 +25,7 @@ import {
   bookedFeeCurrencyForWiseRow,
   buildAccountDistributionFromDimension,
   counterpartyNameForWiseRow,
+  isWiseTransferCandidate,
   normalizeWiseCompanyName,
   normalizeWiseCurrency,
   oppositeSideForWiseRow,
@@ -722,6 +723,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // through the ordinary flow, and the hold pass releases them only when the
   // acknowledgement covers the row's full evidence (else this review holds).
   const pendingReleaseReviews = new Map<WiseRow, WiseTransferReview>();
+  // The statement row each row-specific review belongs to. Split legs of one
+  // Wise ID share row.id, so the review's wise_id cannot tell them apart.
+  const reviewRows = new Map<WiseTransferReview, number>();
+  const forRow = (row: WiseRow, review: WiseTransferReview): WiseTransferReview => {
+    reviewRows.set(review, row.rowIndex);
+    return review;
+  };
 
   // The explicit direction marker a stored row carries, "?" when it has none.
   // Only the marker counts: the read-back `type` is unreliable (0.22.0 forced "C").
@@ -848,14 +856,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
     const wiseIdTag = `WISE:${legId}`;
     if (ambiguousLegacyIds.has(row.id) && (!claimedMainLegs.has(row) || (fee > 0 && !claimedFeeLegs.has(row)))) {
-      legacyLegReviews.push({
+      legacyLegReviews.push(forRow(row, {
         wise_id: legId,
         code: "wise_legacy_leg_ambiguous",
         reason: WISE_LEGACY_LEG_AMBIGUOUS_REASON,
         source_verified: false,
         target_verified: false,
         approval_required: false,
-      });
+      }));
       continue;
     }
     // The WISE:{id} tag is the dedup identity and the source-direction marker is
@@ -904,14 +912,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       });
       if (approvedTransferIds.has(row.id)) {
         const decision = transferDecisions.get(row);
-        alreadyImportedApprovalReviews.push({
+        alreadyImportedApprovalReviews.push(forRow(row, {
           wise_id: row.id,
           code: "wise_transfer_already_imported",
           reason: WISE_TRANSFER_ALREADY_IMPORTED_REASON,
           source_verified: decision?.sourceVerified ?? false,
           target_verified: decision?.targetVerified ?? false,
           approval_required: false,
-        });
+        }));
       }
       mainAvailableForFee = true;
     } else {
@@ -1059,7 +1067,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const ownershipReviews = created.flatMap(entry => {
     if (!entry.source_row) return [];
     const review = transferDecisions.get(entry.source_row)?.review;
-    return review ? [review] : [];
+    return review ? [forRow(entry.source_row, review)] : [];
   });
   ownershipReviews.push(...alreadyImportedApprovalReviews, ...legacyLegReviews);
 
@@ -1281,7 +1289,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           normalizeWiseCurrency(row.sourceCurrency) !== normalizeWiseCurrency(row.targetCurrency)
         )
       ) {
-        ownershipReviews.push(reviewFor("wise_transfer_cross_currency", WISE_TRANSFER_CROSS_CURRENCY_REASON));
+        ownershipReviews.push(forRow(row, reviewFor("wise_transfer_cross_currency", WISE_TRANSFER_CROSS_CURRENCY_REASON)));
         continue;
       }
 
@@ -1377,11 +1385,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         reason: string, candidateIds: number[]): boolean => {
         const acknowledged = acknowledgedIds.get(row.id);
         if (code === "wise_transfer_journal_ambiguous" && acknowledged !== undefined && candidateIds.every(id => acknowledged.has(id))) {
-          pendingReleaseReviews.set(row, {
+          pendingReleaseReviews.set(row, forRow(row, {
             ...reviewFor(code, reason),
             candidate_journal_ids: candidateIds,
             candidates: candidateIds.map(describeCandidate),
-          });
+          }));
           return true;
         }
         const feeCommand = commands.find(command => command.row_key === feeKey);
@@ -1390,12 +1398,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         const feeHeldNote = feeCommand && feeHeldIds.length > 0
           ? ` Its fee row is not imported while journal${feeHeldIds.length === 1 ? "" : "s"} ${feeHeldIds.join(", ")} may already book it; if ${feeHeldIds.length === 1 ? "that journal is" : "none of those journals is"} this transfer, book the fee by hand.`
           : "";
-        ownershipReviews.push({
+        ownershipReviews.push(forRow(row, {
           ...reviewFor(code, reason + feeHeldNote),
           candidate_journal_ids: candidateIds,
           candidates: candidateIds.map(describeCandidate),
           ...(feeHeldIds.length > 0 ? { fee_held_journal_ids: feeHeldIds } : {}),
-        });
+        }));
         return false;
       };
 
@@ -1643,7 +1651,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       });
       continue;
     }
-    ownershipReviews.push({
+    const untaggedReview: WiseTransferReview = {
       wise_id: entry.wise_id,
       code: "wise_untagged_ledger_match",
       reason: WISE_UNTAGGED_LEDGER_MATCH_REASON,
@@ -1651,31 +1659,49 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       target_verified: false,
       approval_required: false,
       ledger_transaction_ids: matches.map(tx => tx.id!),
-    });
+    };
+    // A fee entry has no source row: its command names the row.
+    const entryRowIndex = entry.source_row?.rowIndex ?? commands.find(command => command.wise_id === entry.wise_id)?.row_index;
+    if (entryRowIndex !== undefined) reviewRows.set(untaggedReview, entryRowIndex);
+    ownershipReviews.push(untaggedReview);
   }
 
   // --- Hold pass: every eligible hinted (transfer) row that still has a
   // command. A held row loses all of its commands (main, fee, inter-account)
   // and its created entries, is skipped as "Held for review (<code>): not
-  // imported", and carries exactly one review (mapping feedback aside).
-  const holdRow = (row: WiseRow, review: WiseTransferReview) => {
+  // imported", and carries exactly one review (mapping feedback aside). Only
+  // this row's own reviews are replaced: split legs of one Wise ID share
+  // row.id. A row whose transfer is already journalized holds only its fee
+  // leg: the assertion stays, and the skip and review say so.
+  const heldCodes = new Map<WiseRow, WiseTransferReview["code"]>();
+  const holdRow = (row: WiseRow, holdReview: WiseTransferReview) => {
     const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
-    const heldIds = new Set([row.id, ...rowCommands.map(command => command.wise_id)]);
+    const commandWiseIds = new Set(rowCommands.map(command => command.wise_id));
     for (const command of rowCommands) commands.splice(commands.indexOf(command), 1);
     for (const entry of [...created]) {
-      if (entry.source_row === row || heldIds.has(entry.wise_id)) created.splice(created.indexOf(entry), 1);
+      if (entry.source_row === row || commandWiseIds.has(entry.wise_id)) created.splice(created.indexOf(entry), 1);
     }
     mainCommandKeysByRow.delete(row.rowIndex);
     // The hold review takes the place of the row's first replaced review.
     let at = -1;
     for (const other of [...ownershipReviews]) {
-      if (heldIds.has(other.wise_id) && other.code !== "wise_transfer_mapping_rejected" && other.code !== "unused_mapping") {
+      if (reviewRows.get(other) === row.rowIndex) {
         const index = ownershipReviews.indexOf(other);
         if (at < 0) at = index;
         ownershipReviews.splice(index, 1);
       }
     }
-    skipped.push({ wise_id: row.id, reason: `Held for review (${review.code}): not imported` });
+    const journalized = alreadyJournalized.find(assertion => assertion.row_index === row.rowIndex);
+    const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
+    const review = journalized === undefined ? holdReview : {
+      ...holdReview,
+      reason: `${holdReview.reason} Only this transfer's fee leg (FEE:${legId}) is held: the transfer itself is already journalized by journal ${journalized.existing_journal_id}.`,
+    };
+    skipped.push(journalized === undefined
+      ? { wise_id: row.id, reason: `Held for review (${review.code}): not imported` }
+      : { wise_id: `FEE:${legId}`, reason: `Held for review (${review.code}): fee leg not imported; the transfer is already journalized by journal ${journalized.existing_journal_id}` });
+    heldCodes.set(row, review.code);
+    reviewRows.set(review, row.rowIndex);
     ownershipReviews.splice(at < 0 ? ownershipReviews.length : at, 0, review);
   };
   const wiseSideIndex = buildWiseSideJournalIndex(journalSnapshot, accounts_dimensions_id);
@@ -1722,7 +1748,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       .map(journal => journal.id!)
       .sort((left, right) => left - right);
     if (identityIds.length > 0) {
-      const existing = ownershipReviews.find(review => review.wise_id === row.id && review.code === "wise_transfer_journal_inconsistent");
+      const existing = ownershipReviews.find(review => reviewRows.get(review) === row.rowIndex && review.code === "wise_transfer_journal_inconsistent");
       holdRow(row, existing ?? {
         wise_id: row.id,
         code: "wise_transfer_journal_inconsistent",
@@ -1755,7 +1781,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     };
     const mainEvidence = evidenceFor(mainLeg, mainCoverage);
     const feeEvidence = evidenceFor(feeLeg, feeCoverage);
-    const ambiguous = ownershipReviews.find(review => review.wise_id === row.id && review.code === "wise_transfer_journal_ambiguous") ??
+    const ambiguous = ownershipReviews.find(review => reviewRows.get(review) === row.rowIndex && review.code === "wise_transfer_journal_ambiguous") ??
       pendingReleaseReviews.get(row);
     const sortedUnion = (...lists: readonly (readonly number[])[]) =>
       [...new Set(lists.flat())].sort((left, right) => left - right);
@@ -1799,6 +1825,31 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       ...(uncertainIds.length > 0 ? { uncertain_journal_ids: uncertainIds } : {}),
       ...(feeLegIds.length > 0 ? { fee_leg_journal_ids: feeLegIds } : {}),
       ...(acknowledged !== undefined ? { unacknowledged_journal_ids: unacknowledged } : {}),
+    });
+  }
+
+  // acknowledged_journal_holds entries that release nothing are reported, as
+  // an unused journalized_transfer_ids mapping is. A row still held by a
+  // releasable hold already names the journals its acknowledgement missed.
+  for (const acknowledgement of acknowledgedJournalHolds) {
+    if (acknowledgedHolds.some(hold => hold.wise_id === acknowledgement.wise_id)) continue;
+    const legs = eligible.filter(row => row.id === acknowledgement.wise_id);
+    const codes = legs.flatMap(row => heldCodes.get(row) ?? []);
+    if (codes.some(code => code === "wise_transfer_journal_ambiguous" || code === "wise_transfer_journal_existing_elsewhere")) continue;
+    const why = legs.length === 0
+      ? "no eligible row of this statement has this Wise ID"
+      : !legs.some(isWiseTransferCandidate)
+        ? "the row is not a Wise transfer row, and only transfer rows are held by journals"
+        : codes.length > 0
+          ? `the row is held for ${codes[0]}, which an acknowledgement cannot release`
+          : "the row is not held by a journal on the Wise account, so there is nothing to release";
+    ownershipReviews.push({
+      wise_id: acknowledgement.wise_id,
+      code: "unused_acknowledgement",
+      reason: `This acknowledged_journal_holds entry was not used: ${why}.`,
+      source_verified: false,
+      target_verified: false,
+      approval_required: false,
     });
   }
 

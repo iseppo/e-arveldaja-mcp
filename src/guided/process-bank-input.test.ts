@@ -246,6 +246,9 @@ describe("process_bank_input — Wise journalized_transfer_ids", () => {
     const acknowledged_journal_holds = [{ wise_id: "TRANSFER-ABSENT", journal_ids: [9] }];
     const result = parse(await handler({ mode: "prepare", file_path: csv, accounts_dimensions_id: 7, acknowledged_journal_holds }));
     expect(result.summary.next_action.args.acknowledged_journal_holds).toEqual(acknowledged_journal_holds);
+    // It releases nothing (no such row), so it is reported, not silently ignored.
+    expect(JSON.stringify(result)).toContain("unused_acknowledgement");
+    expect(JSON.stringify(result)).toContain("no eligible row of this statement has this Wise ID");
   });
 
   it("an override naming a dimension that is not a bank account is refused by the Wise import, before any write", async () => {

@@ -402,6 +402,8 @@ function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][
       return `The journalized_transfer_ids mapping${review.journal_id !== undefined ? ` to journal ${review.journal_id}` : ""} was rejected; tell the owner why, fix or drop the mapping and rerun the Wise dry run. The row resolves as if unmapped meanwhile (see its own result).`;
     case "unused_mapping":
       return "Tell the owner this journalized_transfer_ids mapping did nothing (row absent or already imported); drop it and rerun the Wise dry run.";
+    case "unused_acknowledgement":
+      return "Tell the owner this acknowledged_journal_holds entry released nothing (see the reason); drop or correct it and rerun the Wise dry run.";
     case "wise_legacy_leg_ambiguous":
       return "This leg and its fee are not imported. Compare the stored row with the Wise statement and book the missing leg manually with the owner.";
     case "wise_transfer_cross_currency":

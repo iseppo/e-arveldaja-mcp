@@ -46,6 +46,7 @@ export interface WiseTransferReview {
     | "wise_legacy_leg_ambiguous"
     | "wise_transfer_mapping_rejected"
     | "unused_mapping"
+    | "unused_acknowledgement"
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
     | "wise_transfer_journal_existing_elsewhere";

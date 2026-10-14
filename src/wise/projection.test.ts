@@ -1280,6 +1280,64 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
     });
   });
 
+  describe("review findings 0f4e518 (M3/M4/M5)", () => {
+    it("M3: holding one split leg of a Wise ID keeps the other leg's review", () => {
+      // Two EUR legs of one transfer ID, both ownership-unverified (created
+      // unconfirmed with a review); only the 100 leg has Wise-side evidence.
+      const output = run(
+        [line("TRANSFER-SPLIT", "IN", "100.00"), line("TRANSFER-SPLIT", "IN", "50.00")],
+        [journal(760, [[WISE, "D", 100], [LOAN, "C", 100]])],
+        { decision: row => unverified(row.id) },
+      );
+      expect(actions(output)).toEqual(["main_create:TRANSFER-SPLIT:EUR-2", `held:TRANSFER-SPLIT:${HELD_ELSEWHERE}`]);
+      expect(output.ownershipReviews.map(review => `${review.wise_id}:${review.code}`)).toEqual([
+        "TRANSFER-SPLIT:wise_transfer_journal_existing_elsewhere",
+        "TRANSFER-SPLIT:wise_transfer_ownership_unverified",
+      ]);
+      expect(output.ownershipReviews[0]!.candidate_journal_ids).toEqual([760]);
+    });
+
+    it("M4: a held fee leg of an already-journalized transfer is reported as the fee leg only; the assertion stays", () => {
+      const labelled = journal(720, [[WISE, "D", 100.5], [LHV, "C", 100.5]], { document_number: "TRANSFER-ID" });
+      const feeJournal = journal(770, [[WISE, "C", 0.5], [FEE_DIM, "D", 0.5]]);
+      const output = run([line("TRANSFER-ID", "IN", "100.00", { fee: "0.50" })], [labelled, feeJournal]);
+      expect(actions(output)).toEqual([
+        "already_journalized:TRANSFER-ID:720",
+        "held:FEE:TRANSFER-ID:Held for review (wise_transfer_journal_existing_elsewhere): fee leg not imported; the transfer is already journalized by journal 720",
+      ]);
+      expect(onlyReview(output)).toMatchObject({ wise_id: "TRANSFER-ID", required_acknowledgement_ids: [770], fee_leg_journal_ids: [770] });
+      expect(onlyReview(output).reason).toContain("Only this transfer's fee leg (FEE:TRANSFER-ID) is held: the transfer itself is already journalized by journal 720.");
+    });
+
+    it("M5: an acknowledgement that releases nothing is reported as unused_acknowledgement, with the reason", () => {
+      const unusedReasons = (output: ReturnType<typeof project>) => output.ownershipReviews
+        .filter(review => review.code === "unused_acknowledgement")
+        .map(review => `${review.wise_id}: ${review.reason}`);
+      const card = `CARD_TRANSACTION-7,COMPLETED,OUT,"2026-04-10 10:00:00","2026-04-10 10:00:01",0,EUR,,,"Firma OÜ",12.00,EUR,"Shop",12.00,EUR,1,,,,"General",`;
+      const acks = (...ids: string[]) => ({ extra: { acknowledgedJournalHolds: ids.map(wise_id => ({ wise_id, journal_ids: [9] })) } });
+      // Not in the statement, not a transfer row, not held.
+      expect(unusedReasons(run([line("TRANSFER-P", "IN", "100.00"), card], [], acks("TRANSFER-ABSENT", "CARD_TRANSACTION-7", "TRANSFER-P")))).toEqual([
+        "TRANSFER-ABSENT: This acknowledged_journal_holds entry was not used: no eligible row of this statement has this Wise ID.",
+        "CARD_TRANSACTION-7: This acknowledged_journal_holds entry was not used: the row is not a Wise transfer row, and only transfer rows are held by journals.",
+        "TRANSFER-P: This acknowledged_journal_holds entry was not used: the row is not held by a journal on the Wise account, so there is nothing to release.",
+      ]);
+      // A hold an acknowledgement cannot release.
+      const labelled = journal(720, [[WISE, "D", 110], [LHV, "C", 110]], { document_number: "TRANSFER-ID" });
+      expect(unusedReasons(run([line("TRANSFER-ID", "IN", "100.00")], [labelled], acks("TRANSFER-ID")))).toEqual([
+        "TRANSFER-ID: This acknowledged_journal_holds entry was not used: the row is held for wise_transfer_journal_inconsistent, which an acknowledgement cannot release.",
+      ]);
+      // A short acknowledgement of a releasable hold is not unused: the hold review names what it missed.
+      const short = run([line("TRANSFER-ID", "IN", "100.00")], [journal(730, [[WISE, "D", 100], [LOAN, "C", 100]])], acks("TRANSFER-ID"));
+      expect(unusedReasons(short)).toEqual([]);
+      expect(onlyReview(short)).toMatchObject({ code: "wise_transfer_journal_existing_elsewhere", unacknowledged_journal_ids: [730] });
+      // A releasing acknowledgement is used.
+      const released = run([line("TRANSFER-ID", "IN", "100.00")], [journal(730, [[WISE, "D", 100], [LOAN, "C", 100]])],
+        { extra: { acknowledgedJournalHolds: [{ wise_id: "TRANSFER-ID", journal_ids: [730] }] } });
+      expect(released.acknowledgedHolds).toEqual([{ wise_id: "TRANSFER-ID", journal_ids: [730] }]);
+      expect(unusedReasons(released)).toEqual([]);
+    });
+  });
+
   it("byte-identity: a 2-bank transfer without other Wise-side journals plans exactly as before, and is listed for the execute re-check", () => {
     const output = run([line("TRANSFER-P", "OUT", "100.00", { fee: "0.50" })], []);
     expect(output.commands.map(command => `${command.action}:${command.wise_id}:${command.depends_on}`)).toEqual([

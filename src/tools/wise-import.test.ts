@@ -6094,6 +6094,51 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     expect(executed.execution.errors).toEqual([]);
   });
 
+  it("M4: a held fee leg of an already-journalized transfer is reported the same way by the dry run and the execute", async () => {
+    // Booked gross (500 credited + 0.50 fee) by journal 510, labelled with the
+    // Wise ID; journal 511 may already book the fee on the Wise account.
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      transferIn("TRANSFER-M4-FEE", "2026-02-02", "500", { targetFeeAmount: "0.5" }),
+      cardPaymentValues("2026-02-05"),
+    ]));
+    const feeJournal = {
+      id: 511, is_deleted: false, registered: true, effective_date: "2026-02-02", document_number: "", operation_type: "ENTRY",
+      postings: [
+        { is_deleted: false, accounts_dimensions_id: 5, accounts_id: 1010, type: "C", amount: 0.5, base_amount: 0.5 },
+        { is_deleted: false, accounts_dimensions_id: 9, accounts_id: 8610, type: "D", amount: 0.5, base_amount: 0.5 },
+      ],
+    };
+    const setup = setupWiseTool([], undefined, {
+      ...transferOptions([lhvWiseJournal(510, "2026-02-02", 500.5, { document_number: "TRANSFER-M4-FEE" }), feeJournal]),
+      accountDimensions: [...configuredTransferDimensions(), { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false }],
+    });
+
+    const { dry, executed } = await runApprovedWiseImport(setup, { ...transferArgs, fee_account_dimensions_id: 9 });
+
+    const heldFee = expect.objectContaining({
+      wise_id: "FEE:TRANSFER-M4-FEE",
+      reason: expect.stringContaining("Held for review (wise_transfer_journal_existing_elsewhere): fee leg not imported; the transfer is already journalized by journal 510"),
+    });
+    const feeOnlyReview = expect.objectContaining({
+      wise_id: "TRANSFER-M4-FEE",
+      code: "wise_transfer_journal_existing_elsewhere",
+      required_acknowledgement_ids: [511],
+      reason: expect.stringContaining("Only this transfer's fee leg (FEE:TRANSFER-M4-FEE) is held: the transfer itself is already journalized by journal 510."),
+    });
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ wise_id: "TRANSFER-M4-FEE", existing_journal_id: 510 })]);
+    expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create"]);
+    expect(dry.ownership_reviews).toEqual([feeOnlyReview]);
+    expect(dry.execution.skipped).toEqual(expect.arrayContaining([heldFee]));
+    expect(executed.ownership_reviews).toEqual([feeOnlyReview]);
+    expect(executed.execution.skipped).toEqual(expect.arrayContaining([heldFee]));
+    expect(executed.inter_account_reconciliation.details).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-M4-FEE", status: "already_journalized", journal_id: 510 }),
+    ]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+    expect(executed.execution.errors).toEqual([]);
+  });
+
   it("M1: the only same-key journal, differently labelled but booking exactly this transfer, is accepted as already journalized (unique legacy)", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferIn("TRANSFER-M1-LABELLED", "2026-02-02"), cardPaymentValues("2026-02-05")]));
     const journal = lhvWiseJournal(502, "2026-02-02", 500, { document_number: "BANK:abc", operation_type: "TRANSACTION", operations_id: 4001 });
