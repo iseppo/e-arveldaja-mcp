@@ -474,6 +474,40 @@ describe("renderWiseImportCompact — disjoint skip counts", () => {
   }
 });
 
+describe("already-journalized automatic matches: standard and guided labels", () => {
+  // 31 already-journalized rows, 10 of them legacy automatic matches.
+  function data(): WiseImportRenderData {
+    const base = makeData(0);
+    const ids = Array.from({ length: 31 }, (_, index) => `TRANSFER-${index}`);
+    return {
+      ...base,
+      commands: [],
+      approvedCommandDigest: undefined,
+      planHandle: undefined,
+      skipped: ids.map((id, index) => index < 10
+        ? {
+            wise_id: id,
+            reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${700 + index} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+            auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 700 + index },
+          }
+        : { wise_id: id, reason: `Already journalized: inter-account journal ${700 + index} books this transfer; no Wise bank row created` }),
+      alreadyJournalized: ids.map((id, index) => ({ wise_id: id, existing_journal_id: 700 + index }) as unknown as WiseAlreadyJournalizedAssertion),
+    };
+  }
+
+  it("standard counts all 31 and names the 10 automatic matches", () => {
+    const out = parseMcpResponse(renderWiseImportFull(data()).content[0]!.text) as any;
+    expect(out.execution.already_journalized_count).toBe(31);
+    expect(out.execution.already_journalized_auto_matched_count).toBe(10);
+    expect(out.execution.already_journalized_note).toContain("already_journalized_auto_matched_count");
+  });
+
+  it("guided keeps the disjoint split: 21 already journalized + 10 auto_matched", () => {
+    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: data() });
+    expect(summary.counts).toMatchObject({ already_journalized: 21, auto_matched: 10 });
+  });
+});
+
 describe("Wise acknowledged_journal_holds round trip (compact and full)", () => {
   const acknowledgement = [{ wise_id: "TRANSFER-ACK", journal_ids: [801, 802] }];
 

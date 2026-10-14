@@ -33,6 +33,7 @@
 
 ### Changed
 
+- **The standard Wise envelope names its automatic matches among the already-journalized rows.** `execution.already_journalized_count` counts every already-booked transfer, legacy automatic matches included, while guided splits them into `already_journalized` and `auto_matched`, so the two surfaces showed different numbers for the same CSV (31 vs 21). The standard dry run now also reports `execution.already_journalized_auto_matched_count` (10 of the 31), and the note says so; the guided counts are unchanged.
 - **Guided Wise skip counts are disjoint.** An automatically matched legacy transfer (`wise_transfer_journal_unique_legacy`) was counted under both `auto_matched` and `already_journalized`; it now counts only under `auto_matched`, so `skipped` = `duplicates` + `auto_matched` + `already_journalized` + other skips. The standard envelope is unchanged.
 - **Wise IDs are emitted raw everywhere.** `execution.commands[].wise_id`, the plan-review projection and `execution.already_journalized_rows[].wise_id` were sandbox-wrapped while other Wise id fields were not. Wise IDs are validated at preflight (`[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`), so all are now raw; free-form text (descriptions, counterparty names, references, reasons) stays wrapped.
 

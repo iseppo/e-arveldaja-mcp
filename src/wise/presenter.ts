@@ -348,6 +348,9 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
   // Dry run: transfers an existing journal already books are not commands;
   // they are listed as a compact table.
   const alreadyJournalizedRows = dryRun ? alreadyJournalized : [];
+  // Of those, the legacy rows matched automatically (also in skipped_details
+  // with an auto_match); the guided surface counts them as auto_matched.
+  const autoMatchedIds = new Set(skipped.filter(entry => entry.auto_match !== undefined).map(entry => entry.wise_id));
   const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
   const workflowArgs = {
     ...(file_ref !== undefined ? { file_ref } : {}),
@@ -461,6 +464,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           } : {}),
           ...(alreadyJournalizedRows.length > 0 ? {
             already_journalized_count: alreadyJournalizedRows.length,
+            already_journalized_auto_matched_count: alreadyJournalizedRows.filter(assertion => autoMatchedIds.has(assertion.wise_id)).length,
             already_journalized_rows: alreadyJournalizedRows.map(assertion => ({
               wise_id: assertion.wise_id,
               existing_journal_id: assertion.existing_journal_id,
@@ -469,7 +473,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
               booked_currency: assertion.booked_currency,
               source_direction: assertion.source_direction,
             })),
-            already_journalized_note: "Not part of the approved commands: no writes. Execute re-checks each journal once, after all writes, and reports a changed journal as an error.",
+            already_journalized_note: "Not part of the approved commands: no writes. Execute re-checks each journal once, after all writes, and reports a changed journal as an error. already_journalized_auto_matched_count of these rows are legacy transfers matched automatically (see skipped_details auto_match).",
           } : {}),
         },
       }),
