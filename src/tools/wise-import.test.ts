@@ -19,6 +19,12 @@ const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
 
+// Pass-through spy: lets a test read the exact production digest input.
+vi.mock("../wise/projection.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../wise/projection.js")>();
+  return { ...actual, approvalDigest: vi.fn(actual.approvalDigest) };
+});
+
 // Wise reason strings are OCR-sandbox-wrapped at MCP output since they
 // can carry raw exception / API text — match plain text inside the wrap.
 const wrapped = (text: string): RegExp =>
@@ -6649,11 +6655,76 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       expect(parseWiseResponse(secondResult).execution.errors).toEqual([]);
     });
 
+    describe("guided execute counts only verified already-journalized rows", () => {
+      async function guidedExecute(setup: ReturnType<typeof setupWiseTool>): Promise<any> {
+        return runWithToolProfile("guided", async () => {
+          const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+          expect(dry.summary.counts.already_journalized).toBe(3);
+          const next = dry.summary.next_action.args;
+          clearWiseCallHistory(setup.api);
+          return parseWiseResponse(await setup.rawHandler({
+            ...transferArgs,
+            execute: true,
+            plan_handle: next.plan_handle,
+            approved_command_digest: next.approved_command_digest,
+          }));
+        });
+      }
+
+      it("counts all three when the re-check verifies them", async () => {
+        mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+        const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+        const executed = await guidedExecute(setup);
+        expect(executed.summary.status).toBe("completed");
+        expect(executed.summary.counts.already_journalized).toBe(3);
+      });
+
+      it("counts none when the re-check read fails", async () => {
+        mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+        const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+        let reads = 0;
+        setup.api.journals.listAllWithPostings.mockImplementation(async () => {
+          reads++;
+          if (reads === 3) throw new Error("journals endpoint unavailable");
+          return journalizedJournals();
+        });
+        const executed = await guidedExecute(setup);
+        expect(executed.summary.status).toBe("partial");
+        expect(executed.summary.counts.already_journalized).toBe(0);
+        expect(executed.summary.counts.errors).toBe(3);
+      });
+
+      it("counts none when the re-check was not attempted after an indeterminate mutation", async () => {
+        mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+        const create = vi.fn().mockRejectedValue(new MutationIndeterminateError({
+          operation: "create", entity: "transaction", businessKey: "wise:CARD_TRANSACTION-PLAN-1",
+          affectedCaches: ["/transactions"], cause: new Error("socket hang up"),
+          nextAction: "Freshly read transactions before retrying.",
+        }));
+        const setup = setupWiseTool([], create, transferOptions(journalizedJournals()));
+        const executed = await guidedExecute(setup);
+        expect(executed.summary.status).toBe("partial");
+        expect(executed.summary.counts.already_journalized).toBe(0);
+        expect(executed.summary.counts.errors).toBe(4);
+        expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
+      });
+    });
+
     it("(j) a stale (v2-era) digest replayed with a fresh plan handle is refused before any write", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
       const setup = setupWiseTool([], undefined, transferOptions(journalizedJournals()));
+      vi.mocked(approvalDigest).mockClear();
       const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
-      const v2Digest = approvalDigest({ version: "wise_import_command_v2", commands: dry.execution.commands });
+      // The exact snapshot the executor digested for this plan.
+      const productionInput = vi.mocked(approvalDigest).mock.calls
+        .map(([snapshot]) => snapshot as Record<string, unknown>)
+        .filter(snapshot => snapshot?.version === "wise_import_command_v3")
+        .at(-1)!;
+      expect(productionInput).toBeDefined();
+      expect(approvalDigest(productionInput)).toBe(dry.approved_command_digest);
+      // Identical input except the command version: the v2-era digest.
+      const v2Digest = approvalDigest({ ...productionInput, version: "wise_import_command_v2" });
+      expect(v2Digest).toMatch(/^[0-9a-f]{64}$/);
       expect(v2Digest).not.toBe(dry.approved_command_digest);
       clearWiseCallHistory(setup.api);
 

@@ -524,7 +524,11 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
     inter_account: data.interAccountResults.length,
-    already_journalized: data.alreadyJournalized.length,
+    // Preview: the rows the plan asserts as already booked. Execute: only the
+    // ones whose journal the post-write re-check verified.
+    already_journalized: dryRun
+      ? data.alreadyJournalized.length
+      : data.interAccountResults.filter(result => result.status === "already_journalized").length,
     invoice_currency_fixes: data.invoiceFixCandidates.length,
   };
   // A Wise statement can hold rows booked in different currencies, and these are

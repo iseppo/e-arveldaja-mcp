@@ -4388,11 +4388,15 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
       { name: "statement (1).xml", xml, mtime: OLDER },
     ]);
     const payload = await setup().dryRun(workspace);
-    expect(payload.autopilot.executed_steps.map((step: any) => step.tool)).toEqual([
-      "parse_camt053",
-      "import_camt053",
-      "classify_unmatched_transactions",
+    // Failed steps also land in executed_steps: assert each one completed.
+    expect(payload.autopilot.executed_steps.map((step: any) => `${step.tool}:${step.status}`)).toEqual([
+      "parse_camt053:completed",
+      "import_camt053:completed",
+      "classify_unmatched_transactions:completed",
     ]);
+    const importStep = payload.autopilot.executed_steps.find((step: any) => step.tool === "import_camt053");
+    expect(importStep.preview).toMatchObject({ created_count: 0, error_count: 0 });
+    expect(payload.autopilot.skipped_steps.filter((step: any) => step.tool === "classify_unmatched_transactions")).toEqual([]);
     expect(JSON.stringify(payload.autopilot)).not.toContain("pending_input");
   });
 
@@ -4403,7 +4407,9 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
       { name: "statement (1).xml", xml, mtime: OLDER },
     ]);
     const payload = await setup().dryRun(workspace);
-    expect(payload.autopilot.executed_steps.filter((step: any) => step.tool === "import_camt053")).toHaveLength(1);
+    const importSteps = payload.autopilot.executed_steps.filter((step: any) => step.tool === "import_camt053");
+    expect(importSteps.map((step: any) => step.status)).toEqual(["completed"]);
+    expect(importSteps[0].preview).toMatchObject({ created_count: 1, error_count: 0 });
     expect(payload.autopilot.skipped_steps).toEqual(expect.arrayContaining([
       expect.objectContaining({
         tool: "classify_unmatched_transactions",
