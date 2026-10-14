@@ -4458,6 +4458,13 @@ describe("accounting_inbox Wise inter-account counterpart", () => {
     expect(question.recommendation).toContain("wise_inter_account_dimension_id");
   });
 
+  it("the user summary does not claim a recommended default for the neutral counterpart question", async () => {
+    const { payload } = await scan([lhvBank, wiseBank, lightyearBank]);
+    expect(payload.questions).toHaveLength(1);
+    expect(payload.user_summary).not.toContain("Each one includes a recommended default");
+    expect(payload.user_summary).toContain("1 small decision(s) are still needed. None has a recommended default: ask the owner to choose.");
+  });
+
   it("a valid wise_inter_account_dimension_id answers the question", async () => {
     const { wiseStep, question } = await scan([lhvBank, wiseBank, lightyearBank], { wise_inter_account_dimension_id: 404 });
     expect(wiseStep.suggested_args.inter_account_dimension_id).toBe(404);

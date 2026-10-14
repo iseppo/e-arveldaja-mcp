@@ -793,6 +793,13 @@ describe("runAccountingInboxDryRunPipeline", () => {
     it("keeps the maximum per-step multiplicity of identical items", async () => {
       const result = await run([camtPreview([journalRow()]), camtPreview([journalRow(), journalRow()])]);
       expect(result.needs_accountant_review).toHaveLength(2);
+      expect(result.needs_accountant_review.map(item => item.seen_in_steps)).toEqual([[1, 2], undefined]);
+    });
+
+    it("descending multiplicities credit a later step only to the occurrences it raised", async () => {
+      const result = await run([camtPreview([journalRow(), journalRow()]), camtPreview([journalRow()])]);
+      expect(result.needs_accountant_review).toHaveLength(2);
+      expect(result.needs_accountant_review.map(item => item.seen_in_steps)).toEqual([[1, 2], undefined]);
     });
 
     it("never merges reference-less rows, other review codes, other journals or other dimensions", async () => {

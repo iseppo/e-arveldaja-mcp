@@ -774,7 +774,7 @@ describe("registerPrompts", () => {
     const server = setupPromptServer();
     const cases: Array<[string, string[]]> = [
       // workflows/accounting-inbox.md documents these three overrides.
-      ["accounting-inbox", ["bank_account_dimension_id", "receipt_matching_dimension_id", "wise_account_dimension_id"]],
+      ["accounting-inbox", ["bank_account_dimension_id", "receipt_matching_dimension_id", "wise_account_dimension_id", "wise_inter_account_dimension_id"]],
       // workflows/import-wise.md documents inter_account_dimension_id.
       ["import-wise", ["inter_account_dimension_id"]],
       // workflows/reconcile-bank.md documents target_accounts_dimensions_id.
@@ -798,6 +798,10 @@ describe("registerPrompts", () => {
     const inbox = await getPromptText(server, "accounting-inbox", { bank_account_dimension_id: 4242 });
     expect(inbox).toContain("bank_account_dimension_id");
     expect(inbox).toContain("4242");
+
+    const inboxInter = await getPromptText(server, "accounting-inbox", { wise_inter_account_dimension_id: 5151 });
+    expect(inboxInter).toContain("wise_inter_account_dimension_id");
+    expect(inboxInter).toContain("5151");
 
     const wise = await getPromptText(server, "import-wise", { file_path: "/tmp/w.csv", inter_account_dimension_id: 77 });
     expect(wise).toContain("inter_account_dimension_id");

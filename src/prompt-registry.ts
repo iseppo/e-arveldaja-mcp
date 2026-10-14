@@ -256,6 +256,7 @@ const PROMPT_DEFINITIONS = [
       bank_account_dimension_id: optionalPositiveId("Optional default bank-account dimension ID reused for CAMT and receipt suggestions"),
       receipt_matching_dimension_id: optionalPositiveId("Optional bank-account dimension ID used specifically for receipt matching"),
       wise_account_dimension_id: optionalPositiveId("Optional bank-account dimension ID used specifically for Wise suggestions"),
+      wise_inter_account_dimension_id: optionalPositiveId("Optional own bank-account dimension ID that Wise transfers go to and from (the Wise inter-account counterpart)"),
     },
     setupOptions: undefined,
     featurePredicate: enabled,

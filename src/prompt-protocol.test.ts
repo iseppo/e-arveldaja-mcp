@@ -28,6 +28,7 @@ const EXPECTED_PROTOCOL_ARGUMENTS: Record<string, Record<string, boolean>> = {
     bank_account_dimension_id: false,
     receipt_matching_dimension_id: false,
     wise_account_dimension_id: false,
+    wise_inter_account_dimension_id: false,
   },
   "resolve-accounting-review": { review_item_json: true },
   "prepare-accounting-review-action": {
@@ -236,6 +237,7 @@ describe("MCP prompt protocol", () => {
         bank_account_dimension_id: "101",
         receipt_matching_dimension_id: "102",
         wise_account_dimension_id: "103",
+        wise_inter_account_dimension_id: "107",
       }],
       ["resolve-accounting-review", { review_item_json: '{"review_type":"classification_group"}' }],
       ["prepare-accounting-review-action", {

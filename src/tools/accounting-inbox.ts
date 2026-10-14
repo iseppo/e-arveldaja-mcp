@@ -855,8 +855,15 @@ function buildUserSummary(params: {
   }
 
   if (params.questions.length > 0) {
-    parts.push(
-      `${params.questions.length} small decision(s) are still needed. Each one includes a recommended default so the user only needs to confirm or correct it.`
+    // The Wise counterpart question is deliberately neutral, and a dimension
+    // question without candidates has nothing to recommend.
+    const withoutDefault = params.questions.filter(question =>
+      question.id === "wise_inter_account_dimension_id" || (question.candidates ?? []).length === 0).length;
+    parts.push(withoutDefault === 0
+      ? `${params.questions.length} small decision(s) are still needed. Each one includes a recommended default so the user only needs to confirm or correct it.`
+      : withoutDefault === params.questions.length
+        ? `${params.questions.length} small decision(s) are still needed. None has a recommended default: ask the owner to choose.`
+        : `${params.questions.length} small decision(s) are still needed. ${params.questions.length - withoutDefault} include a recommended default to confirm or correct; ${withoutDefault} have none: ask the owner to choose.`
     );
   } else {
     parts.push("No essential setup questions are blocking the first dry-run pass.");

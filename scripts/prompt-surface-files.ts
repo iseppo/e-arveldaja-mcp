@@ -65,6 +65,7 @@ export const MAXIMUM_VALID_PROMPT_ARGUMENTS: Readonly<Record<WorkflowPromptName,
     bank_account_dimension_id: MAX_ID,
     receipt_matching_dimension_id: MAX_ID,
     wise_account_dimension_id: MAX_ID,
+    wise_inter_account_dimension_id: MAX_ID,
   }),
   "resolve-accounting-review": Object.freeze({ review_item_json: MAX_JSON_OBJECT }),
   "prepare-accounting-review-action": Object.freeze({

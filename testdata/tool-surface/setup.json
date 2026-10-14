@@ -10,7 +10,7 @@
       "bytes": 4169
     },
     "serverInstructionsBytes": 765,
-    "promptMetadataBytes": 11508,
+    "promptMetadataBytes": 11695,
     "resourceMetadataBytes": 3251
   },
   "serverInstructions": "Setup mode:\n- No API credentials are configured, so e-arveldaja API-dependent tools and resources return setup guidance.\n- Local file-analysis tools such as accounting_inbox, extract_pdf_invoice, validate_invoice_data, parse_lightyear_statement, parse_lightyear_capital_gains, receipt_batch (mode=\"scan\") remain available.\n- Call get_setup_instructions for the exact credential setup steps.\n- list_connections returns the currently configured connections (0 until credentials are added).\n- Workflow prompts remain listed for discovery, but API-backed workflows require credentials and will tell you to run setup first.\n- Audit logs remain human-readable Markdown under logs/, but no audit log file exists until a configured connection performs a mutating action.\n  ",
@@ -5831,6 +5831,11 @@
         {
           "description": "Optional bank-account dimension ID used specifically for Wise suggestions",
           "name": "wise_account_dimension_id",
+          "required": false
+        },
+        {
+          "description": "Optional own bank-account dimension ID that Wise transfers go to and from (the Wise inter-account counterpart)",
+          "name": "wise_inter_account_dimension_id",
           "required": false
         }
       ],

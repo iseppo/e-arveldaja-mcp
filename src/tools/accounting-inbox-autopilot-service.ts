@@ -891,10 +891,11 @@ export async function runAccountingInboxDryRunPipeline({
       countThisStep.set(key, occurrence + 1);
       const kept = keptByMergeKey.get(key) ?? [];
       keptByMergeKey.set(key, kept);
-      if (occurrence === 0) {
-        for (const item of kept) stepsByItem.get(item)!.push(stepNumber);
-      }
-      if (occurrence >= kept.length) {
+      // The n-th occurrence in this step is the n-th kept item: only that item
+      // gains this step's provenance.
+      if (occurrence < kept.length) {
+        stepsByItem.get(kept[occurrence]!)!.push(stepNumber);
+      } else {
         kept.push(followUp);
         stepsByItem.set(followUp, [stepNumber]);
         needsAccountantReview.push(followUp);
