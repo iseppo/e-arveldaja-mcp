@@ -543,11 +543,11 @@ function summarizeAutopilotToolResult(
       // follow-up per review, keyed by wise_id so the id is resume-stable.
       const wiseReviewId = (...key: string[]) =>
         `${tool}:${createHash("sha256").update(JSON.stringify([tool, ...key])).digest("hex").slice(0, 16)}`;
-      // A counterpart-blocked plan collapses its per-row dimensions_unverified
-      // reviews into ONE follow-up, scoped to this file and Wise account.
+      // Rows held for their counterpart collapse into ONE follow-up, scoped to
+      // this file and Wise account; the other rows are unaffected.
       const counterpart = preview.transferCounterpart;
       const ownershipFollowUps: AutopilotFollowUp[] = preview.ownershipReviews
-        .filter(review => counterpart === undefined || review.code !== "wise_transfer_dimensions_unverified")
+        .filter(review => counterpart === undefined || review.counterpart_candidate_dimension_ids === undefined)
         .map(review => ({
           id: wiseReviewId("wise_transfer_review", review.wise_id, review.code),
           source: tool,
@@ -558,11 +558,12 @@ function summarizeAutopilotToolResult(
         const candidates = counterpart.candidates
           .map(candidate => `${candidate.label} (${candidate.accounts_dimensions_id})`)
           .join(", ");
+        const held = counterpart.unresolved_row_count + counterpart.conflict_row_count;
         ownershipFollowUps.unshift({
-          id: wiseReviewId("wise_transfer_counterpart_required", preview.sourceIdentity.digest_sha256, String(preview.accountsDimensionsId)),
+          id: wiseReviewId("wise_transfer_counterpart_unresolved", preview.sourceIdentity.digest_sha256, String(preview.accountsDimensionsId)),
           source: tool,
-          summary: `${counterpart.transfer_row_count} Wise transfer row(s) need the counterpart bank account (wise_transfer_counterpart_required); candidate own bank account(s): ${candidates}. The Wise dry run issued no plan.`,
-          recommendation: "Ask the owner which own bank account the Wise transfers go to and from, then answer accounting_inbox with wise_inter_account_dimension_id (or rerun the Wise dry run with inter_account_dimension_id).",
+          summary: `${held} Wise transfer row(s) are held for their counterpart bank account (wise_transfer_counterpart_unresolved: ${counterpart.unresolved_row_count} unresolved, ${counterpart.conflict_row_count} contradicted by own-account evidence); own bank account(s): ${candidates}. The other rows are unaffected.`,
+          recommendation: "Import the other bank's statement first, or ask the owner which own bank account the held Wise transfers go to and from, then answer accounting_inbox with wise_inter_account_dimension_id (or rerun the Wise dry run with inter_account_dimension_id). Evidence on another bank is never overridden.",
         });
       }
       // Invoice FX corrections are advisory only (the import never applies
@@ -581,7 +582,9 @@ function summarizeAutopilotToolResult(
           error_count: errorCount,
           needs_review: preview.ownershipReviews.length,
           command_count: preview.commands.length,
-          ...(counterpart !== undefined ? { transfer_counterpart_required: counterpart.transfer_row_count } : {}),
+          ...(counterpart !== undefined
+            ? { transfer_counterpart_unresolved: counterpart.unresolved_row_count + counterpart.conflict_row_count }
+            : {}),
         },
         followUps: [
           ...ownershipFollowUps,

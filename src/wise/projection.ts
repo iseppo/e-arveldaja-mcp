@@ -390,7 +390,7 @@ function dimensionNetEurCents(journal: Journal, dimensionId: number): number | u
 
 /** Whether two ISO dates are at most one day apart; an unreadable date is near
  * anything (fails closed for a uniqueness check). */
-function withinOneDay(left: string | undefined, right: string | undefined): boolean {
+export function withinOneDay(left: string | undefined, right: string | undefined): boolean {
   const day = (value: string | undefined) => /^\d{4}-\d{2}-\d{2}/.test(value ?? "") ? toUtcDay(value!) : NaN;
   const gap = Math.abs(day(left) - day(right));
   return !Number.isFinite(gap) || gap <= 86400000;
@@ -728,6 +728,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         create_payload: createPayload,
       });
       mainCommandKeysByRow.set(row.rowIndex, `row:${row.rowIndex}:main`);
+      const counterpartDecision = transferDecisions.get(row);
       created.push({
         wise_id: legId,
         date,
@@ -737,6 +738,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         description: desc,
         status: "would_create",
         source_row: row,
+        ...(counterpartDecision?.counterpartBasis !== undefined && counterpartDecision.targetDimensionId !== undefined
+          ? { counterpart_dimension_id: counterpartDecision.targetDimensionId, counterpart_basis: counterpartDecision.counterpartBasis }
+          : {}),
       });
       // Deliberately NOT feeding this row's signature back into the stored-row
       // set: within one statement the Wise ID is the identity, and seenWiseIds
@@ -1430,6 +1434,34 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       approval_required: false,
       ledger_transaction_ids: matches.map(tx => tx.id!),
     });
+  }
+
+  // --- Hold pass: every eligible hinted row that still has a command. A held
+  // row loses all of its commands (main, fee, inter-account) and its created
+  // entries, is skipped as "Held for review (<code>): not imported", and
+  // carries exactly one review.
+  const holdRow = (row: WiseRow, review: WiseTransferReview) => {
+    const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
+    const heldIds = new Set([row.id, ...rowCommands.map(command => command.wise_id)]);
+    for (const command of rowCommands) commands.splice(commands.indexOf(command), 1);
+    for (const entry of [...created]) {
+      if (entry.source_row === row || heldIds.has(entry.wise_id)) created.splice(created.indexOf(entry), 1);
+    }
+    mainCommandKeysByRow.delete(row.rowIndex);
+    for (const other of [...ownershipReviews]) {
+      if (heldIds.has(other.wise_id)) ownershipReviews.splice(ownershipReviews.indexOf(other), 1);
+    }
+    skipped.push({ wise_id: row.id, reason: `Held for review (${review.code}): not imported` });
+    ownershipReviews.push(review);
+  };
+  for (const row of eligible) {
+    const decision = transferDecisions.get(row);
+    if (decision === undefined || !commands.some(command => command.row_index === row.rowIndex)) continue;
+    // 1. Counterpart hold: hard, not releasable, its review is the only one.
+    if (decision.counterpartHold !== undefined) {
+      holdRow(row, decision.counterpartHold);
+      continue;
+    }
   }
 
   // --- Post-import: scan eligible payment rows for unpaid purchase invoices

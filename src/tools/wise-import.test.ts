@@ -14,6 +14,7 @@ import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import { approvalDigest } from "../wise/projection.js";
+import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -1759,7 +1760,7 @@ describe("wise import tool", () => {
         target_verified: false,
         approval_required: true,
       }]);
-      expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
+      expect(api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
       expect(api.clients.findByName).not.toHaveBeenCalled();
       expect(api.transactions.update).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2096,11 +2097,35 @@ describe("wise import tool", () => {
       "Wise posting dimension deleted",
       "Wise posting dimension has an active malformed duplicate",
     ]);
+    // Rows whose counterpart cannot be determined are held (Step 2 per-row hold).
+    const counterpartHeld = new Set([
+      "explicit target is missing",
+      "explicit target equals Wise",
+      "explicit target is not a configured bank account",
+      "explicit target is zero",
+      "explicit target is negative",
+      "explicit target is fractional",
+      "explicit target is runtime non-number",
+    ]);
+    const expectCounterpartHold = (item: { label: string; id: string; expectedSourceVerified: boolean; expectedTargetVerified: boolean }, outcome: any) =>
+      expect(outcome.payload?.execution.needs_review, item.label).toEqual([{
+        wise_id: item.id,
+        code: M03_DIMENSIONS_CODE,
+        reason: expect.stringContaining("The row is not imported."),
+        source_verified: item.expectedSourceVerified,
+        target_verified: item.expectedTargetVerified,
+        approval_required: false,
+        counterpart_candidate_dimension_ids: [20],
+      }]);
     for (const { item, outcome, api } of outcomes) {
       expect(outcome.error, item.label).toBeUndefined();
       if (wiseDimensionRefused.has(item.label)) {
         expect(outcome.payload, item.label).toMatchObject({ code: "wise_dimension_not_bank_account", mutation_occurred: false });
         for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
+        continue;
+      }
+      if (counterpartHeld.has(item.label)) {
+        expectCounterpartHold(item, outcome);
         continue;
       }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([
@@ -2113,7 +2138,7 @@ describe("wise import tool", () => {
           approval_required: item.expectedCode === M03_OWNERSHIP_CODE,
         }),
       ]);
-      expect(api.journals.listAllWithPostings, item.label).not.toHaveBeenCalled();
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2125,6 +2150,10 @@ describe("wise import tool", () => {
         for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
         continue;
       }
+      if (counterpartHeld.has(item.label)) {
+        expectCounterpartHold(item, outcome);
+        continue;
+      }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([{
         wise_id: item.id,
         code: M03_DIMENSIONS_CODE,
@@ -2133,7 +2162,7 @@ describe("wise import tool", () => {
         target_verified: item.expectedTargetVerified,
         approval_required: false,
       }]);
-      expect(api.journals.listAllWithPostings, item.label).not.toHaveBeenCalled();
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2148,7 +2177,7 @@ describe("wise import tool", () => {
         target_verified: true,
         approval_required: true,
       }]);
-      expect(api.journals.listAllWithPostings, item.label).not.toHaveBeenCalled();
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2163,30 +2192,22 @@ describe("wise import tool", () => {
       expect(api.transactions.create, item.read).not.toHaveBeenCalled();
       expect(api.transactions.update, item.read).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.read).not.toHaveBeenCalled();
-      expect(api.journals.listAllWithPostings, item.read).not.toHaveBeenCalled();
+      // Journals are read with the transactions, before the company identity.
+      if (item.read === "invoice info") expect(api.journals.listAllWithPostings, item.read).toHaveBeenCalledTimes(1);
+      else expect(api.journals.listAllWithPostings, item.read).not.toHaveBeenCalled();
       expect(auditCalls, item.read).toBe(0);
     }
-    // An unresolvable counterpart with another configured bank account blocks
-    // the whole plan (no digest, no handle): nothing is created. Without a
-    // candidate (unconfigured Wise or counterpart posting dimension) the row is
-    // still created unconfirmed with its review, as before.
-    const counterpartBlocked = new Set([
-      "explicit target is missing",
-      "explicit target equals Wise",
-      "explicit target is not a configured bank account",
-      "explicit target is zero",
-      "explicit target is negative",
-      "explicit target is fractional",
-      "explicit target is runtime non-number",
-    ]);
+    // An invalid or unresolvable counterpart with another configured bank
+    // account holds the row on its own (not imported, one review). Without
+    // another configured bank account (unconfigured counterpart posting
+    // dimension) the row is still created unconfirmed with its review.
     for (const { item, outcome, api } of [...outcomes, ...structuralOutcomes]) {
       if (wiseDimensionRefused.has(item.label)) continue;
-      const blocked = counterpartBlocked.has(item.label);
-      expect(outcome.payload?.transfer_counterpart_required?.code, item.label)
-        .toBe(blocked ? "wise_transfer_counterpart_required" : undefined);
-      if (blocked) {
-        expect(outcome.payload?.approved_command_digest, item.label).toBeUndefined();
-        expect(outcome.payload?.plan_handle, item.label).toBeUndefined();
+      if (counterpartHeld.has(item.label)) {
+        expect(outcome.payload?.transfer_counterpart_unresolved, item.label).toMatchObject({ unresolved_row_count: 1, conflict_row_count: 0 });
+        expect(outcome.payload?.skipped_details, item.label).toEqual([
+          expect.objectContaining({ reason: expect.stringContaining("Held for review (wise_transfer_dimensions_unverified): not imported") }),
+        ]);
         expect(api.transactions.create, item.label).not.toHaveBeenCalled();
       } else {
         expect(api.transactions.create, item.label).toHaveBeenCalledTimes(1);
@@ -2342,11 +2363,8 @@ describe("wise import tool", () => {
       expect(api.transactions.create, item.id).not.toHaveBeenCalled();
       expect(api.transactions.update, item.id).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.id).not.toHaveBeenCalled();
-      if (item.approvals) {
-        expect(api.journals.listAllWithPostings, item.id).toHaveBeenCalledTimes(1);
-      } else {
-        expect(api.journals.listAllWithPostings, item.id).not.toHaveBeenCalled();
-      }
+      // Journals are read for every transfer CSV (counterpart evidence).
+      expect(api.journals.listAllWithPostings, item.id).toHaveBeenCalledTimes(1);
     }
   });
 
@@ -2470,6 +2488,25 @@ describe("wise import tool", () => {
         for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
         continue;
       }
+      // An invalid or undeterminable counterpart with another configured bank
+      // account holds the row (not imported); approval never overrides it.
+      const held: Record<string, number[]> = {
+        "target non-bank": [20],
+        "target identical": [20],
+        "target ambiguous": [20, 30],
+      };
+      if (held[item.label] !== undefined) {
+        expect(outcome.payload?.execution.needs_review, item.label).toEqual([
+          expect.objectContaining({
+            wise_id: item.id,
+            code: M03_DIMENSIONS_CODE,
+            reason: expect.stringContaining("The row is not imported."),
+            counterpart_candidate_dimension_ids: held[item.label],
+          }),
+        ]);
+        for (const spy of wiseMutationSpies(api)) expect(spy, item.label).not.toHaveBeenCalled();
+        continue;
+      }
       expect(outcome.payload?.execution.needs_review, item.label).toEqual([
         expect.objectContaining({
           wise_id: item.id,
@@ -2480,7 +2517,7 @@ describe("wise import tool", () => {
           target_verified: item.expectedTargetVerified,
         }),
       ]);
-      expect(api.journals.listAllWithPostings, item.label).not.toHaveBeenCalled();
+      expect(api.journals.listAllWithPostings, item.label).toHaveBeenCalledTimes(1);
       expect(api.clients.findByName, item.label).not.toHaveBeenCalled();
       expect(api.transactions.update, item.label).not.toHaveBeenCalled();
       expect(api.transactions.confirm, item.label).not.toHaveBeenCalled();
@@ -2623,7 +2660,7 @@ describe("wise import tool", () => {
     expect(duplicateSetup.api.transactions.create).not.toHaveBeenCalled();
     expect(duplicateSetup.api.transactions.update).not.toHaveBeenCalled();
     expect(duplicateSetup.api.transactions.confirm).not.toHaveBeenCalled();
-    expect(duplicateSetup.api.journals.listAllWithPostings).not.toHaveBeenCalled();
+    expect(duplicateSetup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
   });
 
   it("M04 previews exact IN and OUT inter-account actions", async () => {
@@ -4456,7 +4493,7 @@ describe("wise import tool", () => {
       target_verified: false,
       approval_required: true,
     }]);
-    expect(setup.api.journals.listAllWithPostings).not.toHaveBeenCalled();
+    expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(1);
     expect(structuralPayload.execution.needs_review).toEqual([{
       wise_id: "TRANSFER-M04-LEGACY-STRUCTURAL",
       code: M03_DIMENSIONS_CODE,
@@ -6822,7 +6859,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
   });
 });
 
-describe("Wise transfer counterpart required (unresolvable inter-account counterpart)", () => {
+describe("Wise transfer counterpart unresolved (per-row hold, no whole-plan block)", () => {
   beforeEach(() => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
     mockedReadFile.mockReset();
@@ -6852,30 +6889,40 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     });
   }
 
-  it("blocks the whole plan: no plan_handle, no digest, candidates listed neutrally and wrapped", async () => {
+  it("holds only the undeterminable transfer row: the card row still forms the plan, candidates listed neutrally and wrapped", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-1"), cardPaymentValues("2026-06-11")]));
     const setup = setupThreeBanks();
 
     const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
 
-    expect(dry.approved_command_digest).toBeUndefined();
-    expect(dry.plan_handle).toBeUndefined();
-    expect(dry.transfer_counterpart_required).toMatchObject({
-      code: "wise_transfer_counterpart_required",
-      transfer_row_count: 1,
-    });
-    expect(dry.transfer_counterpart_required.recommended_inter_account_dimension_id).toBeUndefined();
-    expect(dry.transfer_counterpart_required.candidates.map((c: any) => c.accounts_dimensions_id)).toEqual([20, 30]);
-    expect(dry.transfer_counterpart_required.candidates[0].label).toMatch(wrapped("LHV Own Account"));
-    expect(dry.transfer_counterpart_required.candidates[1].label).toMatch(wrapped("Lightyear Own Account"));
+    expect(dry.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(dry.plan_handle).toEqual(expect.any(String));
+    expect(dry.command_count).toBe(1);
+    expect(dry.execution.commands.map((command: any) => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+    expect(dry.transfer_counterpart_unresolved).toMatchObject({ unresolved_row_count: 1, conflict_row_count: 0 });
+    expect(dry.transfer_counterpart_unresolved.candidates.map((c: any) => c.accounts_dimensions_id)).toEqual([20, 30]);
+    expect(dry.transfer_counterpart_unresolved.candidates[0].label).toMatch(wrapped("LHV Own Account"));
+    expect(dry.transfer_counterpart_unresolved.candidates[1].label).toMatch(wrapped("Lightyear Own Account"));
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-CP-1",
+      code: M03_DIMENSIONS_CODE,
+      counterpart_candidate_dimension_ids: [20, 30],
+    })]);
+    // The held row's review blocks the standard approval preview, as reviews do.
     expect(dry.workflow.approval_previews).toEqual([]);
-    const blocked = dry.workflow.available_actions.find((action: any) => action.label === "Review blocked Wise dry run");
-    expect(blocked.args.preview.transfer_counterpart_required).toBe(1);
-    expect(blocked.why).toContain("1 transfer(s) need the counterpart bank account (inter_account_dimension_id)");
     expectNoWiseMutations(setup.api);
+
+    clearWiseCallHistory(setup.api);
+    const executed = parseWiseResponse(await setup.rawHandler({
+      ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    }));
+    expect(executed.summary.created).toBe(1);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0][0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
   });
 
-  it("refuses execute with a handle minted under a two-bank ledger once a third bank account appears", async () => {
+  it("a handle minted under a two-bank ledger is plan_drift once a third bank account appears", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-2")]));
     const setup = setupWiseTool([], undefined, {
       accountDimensions: configuredTransferDimensions(),
@@ -6895,24 +6942,19 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     const payload = parseWiseResponse(result);
 
     expect(result.isError).toBe(true);
-    expect(payload).toMatchObject({
-      category: "wise_transfer_counterpart_required",
-      code: "wise_transfer_counterpart_required",
-      retry: "never",
-      mutation_occurred: false,
-    });
+    expect(payload).toMatchObject({ code: "plan_drift", retry: "never", mutation_occurred: false });
     expectNoWiseMutations(setup.api);
   });
 
-  it("a re-preview carrying an old digest reports the counterpart blocker, not digest_mismatch", async () => {
+  it("a re-preview of a fully held CSV carrying an old digest has nothing to approve (digest mismatch)", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([transferValues("TRANSFER-CP-3")]));
     const setup = setupThreeBanks();
     const result = await setup.rawHandler({ ...baseArgs, execute: false, approved_command_digest: "a".repeat(64) }) as any;
     const payload = parseWiseResponse(result);
 
-    expect(result.isError).toBeFalsy();
-    expect(payload.transfer_counterpart_required.code).toBe("wise_transfer_counterpart_required");
-    expect(payload.plan_handle).toBeUndefined();
+    expect(result.isError).toBe(true);
+    expect(payload.code).toBe("approval_digest_mismatch");
+    expectNoWiseMutations(setup.api);
   });
 
   it("an explicit inter_account_dimension_id resolves the block and mints a plan", async () => {
@@ -6920,7 +6962,7 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     const setup = setupThreeBanks();
     const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, inter_account_dimension_id: 20, execute: false }));
 
-    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.transfer_counterpart_unresolved).toBeUndefined();
     expect(dry.plan_handle).toEqual(expect.any(String));
     expect(dry.approved_command_digest).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -6930,7 +6972,7 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     const setup = setupThreeBanks();
     const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
 
-    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.transfer_counterpart_unresolved).toBeUndefined();
     expect(dry.plan_handle).toEqual(expect.any(String));
   });
 
@@ -6941,7 +6983,7 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     ]);
     const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
 
-    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.transfer_counterpart_unresolved).toBeUndefined();
     expect(dry.summary.created).toBe(1);
     expect(dry.plan_handle).toEqual(expect.any(String));
   });
@@ -6955,7 +6997,7 @@ describe("Wise transfer counterpart required (unresolvable inter-account counter
     });
     const { dry, executed } = await runApprovedWiseImport(setup, baseArgs);
 
-    expect(dry.transfer_counterpart_required).toBeUndefined();
+    expect(dry.transfer_counterpart_unresolved).toBeUndefined();
     expect(dry.ownership_reviews).toEqual([expect.objectContaining({ code: M03_DIMENSIONS_CODE })]);
     expect(executed.summary.created).toBe(1);
     expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
@@ -7069,6 +7111,110 @@ describe("Wise dimension must be a configured bank account (wise_dimension_not_b
     expectRefusal(await setup.rawHandler({
       ...baseArgs, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
     }));
+    expectNoWiseMutations(setup.api);
+  });
+});
+
+describe("Wise per-row counterpart (own-account evidence on the other banks)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const WISE_IBAN = "BE08905767222113";
+  const COMPANY = "Seppo AI OÜ";
+  const dims = [
+    { id: 5, accounts_id: 1010, title_est: "Wise", is_deleted: false },
+    { id: 20, accounts_id: 1020, title_est: "LHV", is_deleted: false },
+    { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false },
+    { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+  ];
+  const banks = [
+    { accounts_dimensions_id: 5, iban_code: WISE_IBAN, beneficiary_name: COMPANY, account_name_est: "Wise" },
+    { accounts_dimensions_id: 20, iban_code: "EE637700771011212909", beneficiary_name: COMPANY, account_name_est: "LHV" },
+    { accounts_dimensions_id: 30, iban_code: "EE424200000000000001", beneficiary_name: COMPANY, account_name_est: "Coop" },
+  ];
+  const transfer = (id: string, date: string, amount: string) => buildM04Values({
+    id, direction: "IN", date, sourceName: COMPANY, targetName: COMPANY, sourceAmount: amount,
+  });
+  // T1: an LHV statement row already confirmed against Wise (its registration
+  // journal is the inter-account journal), counterparty IBAN = Wise.
+  const lhvT1 = {
+    id: 600, status: "CONFIRMED", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-06-01",
+    accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, description: "To Wise",
+  };
+  const lhvT1Journal = {
+    id: 700, registered: true, is_deleted: false, effective_date: "2026-06-01", operation_type: "TRANSACTION", operations_id: 600,
+    postings: [
+      { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "D", amount: 100, base_amount: 100 },
+      { is_deleted: false, accounts_id: 1020, accounts_dimensions_id: 20, type: "C", amount: 100, base_amount: 100 },
+    ],
+  };
+  // T2: a Coop CAMT row not yet booked (PROJECT, signed DBIT), the company's
+  // own name as counterparty.
+  const coopT2 = {
+    id: 601, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-06-05",
+    accounts_dimensions_id: 30, bank_account_name: COMPANY, bank_account_no: null, bank_ref_number: null,
+    description: buildCamtDescriptionWithMetadata("Own transfer", {
+      date: "2026-06-05", amount: 250, currency: "EUR", direction: "DBIT",
+      counterparty_name: COMPANY, counterparty_iban: "BE48967056780227", bank_reference: "COOP-REF-1", description: "Own transfer",
+    }),
+  };
+  const setupTwoBanks = () => setupWiseTool([lhvT1, coopT2], undefined, {
+    accountDimensions: dims,
+    bankAccounts: banks,
+    journals: [lhvT1Journal],
+    invoiceInfo: { invoice_company_name: COMPANY },
+  });
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 };
+
+  it("each transfer finds its own counterpart: T1 is already journalized on LHV, T2 is created and confirmed against Coop", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T1", "2026-06-01", "100"), transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const setup = setupTwoBanks();
+
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.transfer_counterpart_unresolved).toBeUndefined();
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T1", existing_journal_id: 700 })]);
+    expect(dry.results).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T2", counterpart_dimension_id: 30, counterpart_basis: "evidence" })]);
+    expect(dry.execution.commands.map((command: any) => [command.action, command.wise_id])).toEqual([
+      ["main_create", "TRANSFER-T2"],
+      ["inter_account", "TRANSFER-T2"],
+    ]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).toHaveBeenCalledWith(9001, [
+      { related_table: "accounts", related_id: 1030, related_sub_id: 30, amount: 250 },
+    ]);
+    expect(executed.inter_account_reconciliation.details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ wise_id: "TRANSFER-T2", status: "confirmed_inter_account" }),
+      expect.objectContaining({ wise_id: "TRANSFER-T1", status: "already_journalized", journal_id: 700 }),
+    ]));
+  });
+
+  it("explicit inter_account_dimension_id = LHV never overrides the Coop evidence: T2 is held, T1 unchanged", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T1", "2026-06-01", "100"), transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const setup = setupTwoBanks();
+
+    const dry = parseWiseResponse(await setup.rawHandler({ ...args, inter_account_dimension_id: 20, execute: false }));
+
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T1", existing_journal_id: 700 })]);
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.plan_handle).toBeUndefined();
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-T2",
+      code: "wise_transfer_counterpart_conflict",
+      counterpart_candidate_dimension_ids: [30],
+      evidence_transaction_ids: [601],
+    })]);
+    expect(dry.transfer_counterpart_unresolved).toMatchObject({ unresolved_row_count: 0, conflict_row_count: 1 });
+    expect(dry.skipped_details).toEqual(expect.arrayContaining([
+      expect.objectContaining({ reason: expect.stringContaining("Held for review (wise_transfer_counterpart_conflict): not imported") }),
+    ]));
     expectNoWiseMutations(setup.api);
   });
 });

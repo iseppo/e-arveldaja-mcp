@@ -50,7 +50,7 @@ If `autopilot.needs_one_decision` is non-empty:
 - ask them one at a time
 - always start with the recommended default
 - if the user answers, re-run `accounting_inbox` with `mode: "dry_run"`, mapping the answer onto the matching override argument (`bank_account_dimension_id`, `receipt_matching_dimension_id`, `wise_account_dimension_id`, or `wise_inter_account_dimension_id`), before continuing
-- the `wise_inter_account_dimension_id` question has no preferred candidate: ask the owner. It matters only when the Wise CSV has own-account transfers; until it is answered the Wise dry run reports one `wise_transfer_counterpart_required` review item and issues no plan
+- the `wise_inter_account_dimension_id` question has no preferred candidate: ask the owner. It matters only when the Wise CSV has own-account transfers; rows without own-account evidence on another bank are held (not imported) until it is answered, reported as one `wise_transfer_counterpart_unresolved` review item; the other rows are planned as usual
 
 Overlapping CAMT statements raise the same review item once per file. An item for the same statement leg (same bank reference, leg, review code, journals or transactions, and bank account) is listed once, with `seen_in_steps` naming the dry-run steps that raised it; items without a bank reference are never merged, so a repeat of one of those may still be listed per file.
 

@@ -35,6 +35,18 @@ export function isWiseTransferCandidate(row: WiseRow): boolean {
   return row.id.startsWith("TRANSFER-") || row.id.startsWith("BANK_DETAILS_PAYMENT_RETURN-");
 }
 
+/** The Wise client's own name in e-arveldaja ("Wise" / "TransferWise"). */
+export function isWiseClientName(value?: string | null): boolean {
+  const name = (value ?? "").trim().toUpperCase();
+  return name === "WISE" || name === "TRANSFERWISE";
+}
+
+/** A counterparty name that is Wise itself: the client name, or a name whose
+ * first token is "WISE" (e.g. "Wise Europe SA"). */
+export function isWiseCounterpartyName(value?: string | null): boolean {
+  return isWiseClientName(value) || /^WISE(?![\p{L}\p{N}])/u.test((value ?? "").trim().toUpperCase());
+}
+
 export function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
@@ -496,6 +508,7 @@ export function isNonErrorWiseSkipReason(reason: string): boolean {
     reason.startsWith("Fee already imported") ||
     reason.startsWith("Fee already journalized") ||
     reason.startsWith("Unsupported Wise direction") ||
+    reason.startsWith("Held for review") ||
     reason === "Skipped because main transaction was not created";
 }
 

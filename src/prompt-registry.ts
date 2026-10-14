@@ -349,7 +349,7 @@ const PROMPT_DEFINITIONS = [
       file_path: absolutePath("Absolute path to the regular Wise transaction-history.csv export"),
       accounts_dimensions_id: optionalPositiveId("Optional bank-account dimension ID of the Wise account (integer dimension id, not the account number); if omitted, a unique Wise account is resolved automatically or you are asked to confirm one"),
       fee_account_dimensions_id: optionalPositiveId("Optional dimension ID of the Wise fee expense account (normally an 8610 dimension); auto-detected when unique"),
-      inter_account_dimension_id: optionalPositiveId("Optional other own bank account dimension for Wise inter-account transfers; required when there are 3+ bank accounts (the preview is blocked with wise_transfer_counterpart_required until it is given)"),
+      inter_account_dimension_id: optionalPositiveId("Optional other own bank account dimension for Wise inter-account transfers; fallback for transfer rows without own-account evidence; with 3+ bank accounts such rows are held (not imported) until it is given"),
       date_from: optionalDate("Optional transaction-date lower bound (YYYY-MM-DD)"),
       date_to: optionalDate("Optional transaction-date upper bound (YYYY-MM-DD)"),
       skip_jar_transfers: parsedString(parseExactBoolean, "exactly true or false").optional()

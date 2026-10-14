@@ -744,9 +744,10 @@ export function buildRecommendedSteps(params: {
   }
 
   // Several other own bank accounts: the Wise transfer counterpart cannot be
-  // picked by count, so ask. The Wise step stays runnable — its dry run is
-  // fail-closed (wise_transfer_counterpart_required) when the CSV has
-  // transfers, and a CSV without transfers needs no answer.
+  // picked by count, so ask. The Wise step stays runnable — transfer rows
+  // without own-account evidence are held per row
+  // (wise_transfer_counterpart_unresolved), and a CSV without transfers needs
+  // no answer.
   if (
     wiseFiles.length > 0 &&
     defaults.suggested_wise_dimension_id !== undefined &&
@@ -757,7 +758,7 @@ export function buildRecommendedSteps(params: {
     questions.push({
       id: "wise_inter_account_dimension_id",
       question: "Which own bank account do the Wise transfers go to and from (the Wise inter-account counterpart)?",
-      recommendation: "Needed only if the Wise CSV has own-account transfers; the Wise dry run then blocks with wise_transfer_counterpart_required until it is known. Ask the owner; no candidate is preferred. Answer with wise_inter_account_dimension_id.",
+      recommendation: "Needed only if the Wise CSV has own-account transfers; transfer rows without own-account evidence on another bank are held (not imported) until it is known. Ask the owner; no candidate is preferred. Answer with wise_inter_account_dimension_id.",
       candidates: topCandidates,
     });
   }

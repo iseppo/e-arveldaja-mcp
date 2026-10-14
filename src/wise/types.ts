@@ -29,6 +29,11 @@ export interface WiseRow {
 
 export type WiseTransferOwnershipBasis = "verified_endpoints" | "operator_approved";
 
+/** How a transfer row's counterpart bank account was determined: own-account
+ * evidence on that bank, the explicit inter_account_dimension_id, or the
+ * company's only other bank account. */
+export type WiseCounterpartBasis = "evidence" | "explicit" | "only_other_bank";
+
 export interface WiseTransferReview {
   wise_id: string;
   code:
@@ -41,7 +46,8 @@ export interface WiseTransferReview {
     | "wise_legacy_leg_ambiguous"
     | "wise_transfer_mapping_rejected"
     | "unused_mapping"
-    | "wise_untagged_ledger_match";
+    | "wise_untagged_ledger_match"
+    | "wise_transfer_counterpart_conflict";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -58,6 +64,11 @@ export interface WiseTransferReview {
   fee_held_journal_ids?: number[];
   /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
   ledger_transaction_ids?: number[];
+  /** Counterpart holds: the own bank account dimensions the evidence points to
+   * (conflict), or every other configured bank account (unresolved). */
+  counterpart_candidate_dimension_ids?: number[];
+  /** Counterpart holds: the other banks' stored transactions behind the hold. */
+  evidence_transaction_ids?: number[];
 }
 
 /** One operator-reviewed journalized_transfer_ids entry. */
@@ -79,6 +90,11 @@ export interface WiseTransferJournalCandidate {
 
 export interface WiseTransferDecision {
   targetDimensionId?: number;
+  /** Set when targetDimensionId came from the per-row counterpart resolution. */
+  counterpartBasis?: WiseCounterpartBasis;
+  /** The row's counterpart cannot be determined, or evidence contradicts the
+   * selected one: a hard hold, its only review; the row is not imported. */
+  counterpartHold?: WiseTransferReview;
   sourceVerified: boolean;
   targetVerified: boolean;
   ownershipBasis?: WiseTransferOwnershipBasis;
@@ -197,6 +213,9 @@ export interface WiseCreatedEntry {
   status: string;
   api_id?: number;
   source_row?: WiseRow;
+  /** Transfer rows: the counterpart bank account dimension and how it was found. */
+  counterpart_dimension_id?: number;
+  counterpart_basis?: WiseCounterpartBasis;
   /** Currency this row is booked in, for entries that carry no `source_row`
    * (fee rows are synthesised, not lifted from a CSV line). Presentation only —
    * the amount is already the booked figure. */

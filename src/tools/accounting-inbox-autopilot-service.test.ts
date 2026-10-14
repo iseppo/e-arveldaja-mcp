@@ -708,10 +708,11 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(second.needs_accountant_review.map(item => item.id)).toEqual(ids);
   });
 
-  it("collapses a counterpart-blocked Wise preview's per-row dimension reviews into one file-scoped follow-up", async () => {
+  it("collapses a Wise preview's per-row counterpart holds into one file-scoped follow-up", async () => {
     const unverified = (id: string) => ({
       wise_id: id, code: "wise_transfer_dimensions_unverified", reason: "Dimensions unverified.",
       source_verified: false, target_verified: false, approval_required: false,
+      counterpart_candidate_dimension_ids: [20, 30],
     });
     const wisePreview = (digest: string) => ({
       created: [{}, {}, {}],
@@ -722,7 +723,8 @@ describe("runAccountingInboxDryRunPipeline", () => {
       accountsDimensionsId: 5,
       sourceIdentity: { digest_sha256: digest },
       transferCounterpart: {
-        transfer_row_count: 3,
+        unresolved_row_count: 3,
+        conflict_row_count: 0,
         candidates: [{ accounts_dimensions_id: 20, label: "LHV" }, { accounts_dimensions_id: 30, label: "Lightyear" }],
       },
     });
@@ -739,11 +741,11 @@ describe("runAccountingInboxDryRunPipeline", () => {
       operations: mockOperations({ prepareWiseImport }),
     });
 
-    expect(result.executed_steps[0]!.preview).toMatchObject({ needs_review: 3, transfer_counterpart_required: 3, command_count: 3 });
+    expect(result.executed_steps[0]!.preview).toMatchObject({ needs_review: 3, transfer_counterpart_unresolved: 3, command_count: 3 });
     // One per file (file-scoped ids never merge), none per row.
     expect(result.needs_accountant_review).toHaveLength(2);
     const [first, second] = result.needs_accountant_review;
-    expect(first!.summary).toContain("3 Wise transfer row(s) need the counterpart bank account (wise_transfer_counterpart_required)");
+    expect(first!.summary).toContain("3 Wise transfer row(s) are held for their counterpart bank account (wise_transfer_counterpart_unresolved: 3 unresolved, 0 contradicted by own-account evidence)");
     expect(first!.summary).toContain("LHV (20), Lightyear (30)");
     expect(first!.recommendation).toContain("wise_inter_account_dimension_id");
     expect(first!.id).not.toBe(second!.id);

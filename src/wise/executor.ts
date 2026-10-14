@@ -28,12 +28,15 @@ import { isMutationIndeterminate } from "../mutation-outcome.js";
 import { BookingGuard } from "../booking-guard.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBankDimensionCandidates } from "../resolution/bank-account-resolution.js";
+import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
+import { resolveWiseRowCounterparts, wiseCounterpartHoldReview } from "./counterpart.js";
 import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
   classifyWiseOwnTransfer,
   isJarTransfer,
   isPositiveSafeInteger,
+  isWiseClientName,
   isWiseTransferCandidate,
   normalizeWiseCompanyName,
   normalizeWiseDirection,
@@ -104,7 +107,6 @@ export type WiseFailure =
   | { kind: "plan_drift"; detail: string }
   | { kind: "ownership_reapproval_required" }
   | { kind: "wise_client_not_found" }
-  | { kind: "wise_transfer_counterpart_required" }
   | { kind: "wise_dimension_not_bank_account" };
 
 export type WiseRunResult =
@@ -274,62 +276,86 @@ async function runWiseImport(
     return { ok: false, failure: { kind: "wise_dimension_not_bank_account" } };
   }
 
+  // Journals are read for every transfer CSV (counterpart evidence, Lane B and
+  // the Wise-side holds), and when a confirmed untagged row on the Wise account
+  // shares a date with a statement row: its registration journal may prove its
+  // direction (wise_untagged_ledger_unique). The snapshot is digest-bound.
+  const eligibleDates = new Set(eligible.map(row => wiseDate(row.finishedOn || row.createdOn)));
+  const untaggedLookalikePossible = existingTx.some(tx =>
+    tx.status === "CONFIRMED" && tx.accounts_dimensions_id === accounts_dimensions_id &&
+    !tx.description?.startsWith("WISE:") && eligibleDates.has(tx.date));
+  const journalSnapshot: Journal[] = hintedRows.length > 0 || untaggedLookalikePossible
+    ? await api.journals.listAllWithPostings()
+    : [];
+
   let invoiceInfoSnapshot: Awaited<ReturnType<typeof api.readonly.getInvoiceInfo>> | undefined;
   let autoDetectedInterAccountDimId: number | undefined;
-  // Configured bank dimensions other than Wise that could be the transfer
-  // counterpart, populated only when the counterpart is unresolved or invalid.
-  let counterpartCandidateIds: number[] = [];
+  const otherDimensions = new Set([...configuredDimensions].filter(id => id !== accounts_dimensions_id));
+  const bankAccountLookups = buildBankAccountLookups(bankAccountsSnapshot, accountDimensionsSnapshot);
   const transferDecisions = new Map<WiseRow, WiseTransferDecision>();
   if (hintedRows.length > 0) {
     invoiceInfoSnapshot = await api.readonly.getInvoiceInfo();
     const wiseDimensionId = accounts_dimensions_id;
-    const otherDimensions = [...bankDimensionIds].filter(id => id !== wiseDimensionId);
-    autoDetectedInterAccountDimId = otherDimensions.length === 1 ? otherDimensions[0] : undefined;
-    const targetDimensionId = inter_account_dimension_id === undefined
+    const otherBankDimensions = [...bankDimensionIds].filter(id => id !== wiseDimensionId);
+    autoDetectedInterAccountDimId = otherBankDimensions.length === 1 ? otherBankDimensions[0] : undefined;
+    // Each transfer row finds its own counterpart from the other banks'
+    // stored transactions; the explicit inter_account_dimension_id (or the
+    // only other bank) is a fallback that never overrides evidence. A row
+    // without a determinable counterpart is held on its own (counterpartHold).
+    const counterparts = resolveWiseRowCounterparts({
+      rows: hintedRows,
+      allRows: rows,
+      wiseDim: wiseDimensionId,
+      otherDims: otherDimensions,
+      existingTx,
+      journals: journalSnapshot,
+      lookups: bankAccountLookups,
+      companyLegalName: invoiceInfoSnapshot.invoice_company_name ?? undefined,
+      explicit: inter_account_dimension_id,
+    });
+    const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
+    const approvedSet = new Set(approvedTransferIds);
+
+    // No other configured bank account (e.g. a Wise-only company): unchanged
+    // from before, the explicit / auto-detected value is classified as given
+    // and the row is created unconfirmed with its review.
+    const unresolvedTargetDimensionId = inter_account_dimension_id === undefined
       ? autoDetectedInterAccountDimId
       : isPositiveSafeInteger(inter_account_dimension_id)
         ? inter_account_dimension_id
         : undefined;
-    // The counterpart cannot be guessed when several own bank accounts exist:
-    // every TRANSFER row then classifies as dimensions_unverified and would be
-    // created as a plain PROJECT row, duplicating a transfer an inter-account
-    // journal may already book. Such a plan is blocked below (no handle, no
-    // digest) until inter_account_dimension_id names the counterpart.
-    if (targetDimensionId === undefined || targetDimensionId === wiseDimensionId || !configuredDimensions.has(targetDimensionId)) {
-      counterpartCandidateIds = [...configuredDimensions].filter(id => id !== wiseDimensionId).sort((a, b) => a - b);
-    }
-    const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
-    const approvedSet = new Set(approvedTransferIds);
 
     for (const row of hintedRows) {
+      const resolution = counterparts.get(row);
+      const resolvedDim = resolution === undefined
+        ? unresolvedTargetDimensionId
+        : "dim" in resolution ? resolution.dim : undefined;
       const decision = classifyWiseOwnTransfer(
         row,
         wiseDimensionId,
-        targetDimensionId,
+        resolvedDim,
         configuredDimensions,
         identityDimensions,
         ownCompanyIdentity,
         approvedSet.has(row.id),
       );
-      transferDecisions.set(row, decision);
+      if (resolution !== undefined && "hold" in resolution) {
+        transferDecisions.set(row, {
+          sourceVerified: decision.sourceVerified,
+          targetVerified: decision.targetVerified,
+          counterpartHold: wiseCounterpartHoldReview(row, resolution.hold, decision.sourceVerified, decision.targetVerified),
+        });
+        continue;
+      }
+      transferDecisions.set(row, resolution !== undefined ? { ...decision, counterpartBasis: resolution.basis } : decision);
     }
   }
 
-  // Resolve the conditional journal / own-company reads BEFORE the pure
-  // projection so the command build receives every ledger snapshot as data.
+  // Resolve the conditional own-company read BEFORE the pure projection so the
+  // command build receives every ledger snapshot as data.
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,
   );
-  // Journals are also read when a confirmed untagged row on the Wise account
-  // shares a date with a statement row: its registration journal may prove
-  // its direction (wise_untagged_ledger_unique).
-  const eligibleDates = new Set(eligible.map(row => wiseDate(row.finishedOn || row.createdOn)));
-  const untaggedLookalikePossible = existingTx.some(tx =>
-    tx.status === "CONFIRMED" && tx.accounts_dimensions_id === accounts_dimensions_id &&
-    !tx.description?.startsWith("WISE:") && eligibleDates.has(tx.date));
-  const journalSnapshot: Journal[] = approvedTransferDecisions.length > 0 || untaggedLookalikePossible
-    ? await api.journals.listAllWithPostings()
-    : [];
   let ownCompanyClientMatches: Awaited<ReturnType<typeof api.clients.findByName>> = [];
   if (approvedTransferDecisions.length > 0 && invoiceInfoSnapshot?.invoice_company_name) {
     ownCompanyClientMatches = await api.clients.findByName(invoiceInfoSnapshot.invoice_company_name);
@@ -373,9 +399,7 @@ async function runWiseImport(
   if (projected.feeResolutionRequired) {
     feeAccountDimensionsId = resolveWiseFeeAccountDimensionId(accountDimensionsSnapshot, fee_account_dimensions_id, fee_account_relation_id);
     allClientsSnapshot = await api.clients.listAll();
-    const wiseClient = allClientsSnapshot.find(c =>
-      c.name?.toUpperCase() === "WISE" || c.name?.toUpperCase() === "TRANSFERWISE"
-    );
+    const wiseClient = allClientsSnapshot.find(c => isWiseClientName(c.name));
     // Without a Wise client the fee rows can be created but never confirmed;
     // refuse the whole import up-front instead of leaving stray PROJECT rows.
     if (!wiseClient?.id) {
@@ -389,11 +413,9 @@ async function runWiseImport(
   const ownershipReviews = projected.ownershipReviews;
   const invoiceFixCandidates = projected.invoiceFixCandidates;
   const alreadyJournalized = projected.alreadyJournalized;
-  // Whole-plan block: some row that would be created is an unresolvable
-  // transfer and another configured bank account could be its counterpart.
-  // Single-Wise-account companies (no candidate) keep today's behaviour.
-  const transferCounterpartRequired = counterpartCandidateIds.length > 0 &&
-    ownershipReviews.some(review => review.code === "wise_transfer_dimensions_unverified");
+  // Rows held because their counterpart is unresolved or contradicted. Info
+  // only: the other rows proceed (no whole-plan block).
+  const counterpartHoldReviews = ownershipReviews.filter(review => review.counterpart_candidate_dimension_ids !== undefined);
 
   const canonicalPlanningArgs = {
     source_identity: inputSnapshot.identity,
@@ -417,7 +439,7 @@ async function runWiseImport(
     date_to,
     skip_jar_transfers: skipJars,
   };
-  const approvedCommandDigest = commands.length > 0 && !transferCounterpartRequired
+  const approvedCommandDigest = commands.length > 0
     ? approvalDigest({
         domain: WISE_APPROVAL_DOMAIN,
         version: WISE_COMMAND_VERSION,
@@ -497,11 +519,6 @@ async function runWiseImport(
   // EXECUTE gates (zero mutations on any failure), before the mutation loop.
   // Ownership re-preview is checked first so a mismatched approval yields a
   // clear ownership signal rather than a generic digest mismatch.
-  // Checked first: an old handle/digest minted before the counterpart became
-  // ambiguous (e.g. a bank account was added) must never execute.
-  if (executeRequested && transferCounterpartRequired) {
-    return { ok: false, failure: { kind: "wise_transfer_counterpart_required" } };
-  }
   if (executeRequested && storedWisePlan) {
     const storedPrivate = isRecord(storedWisePlan.privatePayload) ? storedWisePlan.privatePayload : undefined;
     const storedApprovedIds = Array.isArray(storedPrivate?.approved_transfer_ids)
@@ -544,9 +561,7 @@ async function runWiseImport(
   )) {
     return { ok: false, failure: { kind: "digest_mismatch" } };
   }
-  // A re-preview carrying an old digest reports the counterpart blocker, not a
-  // digest mismatch, so the operator learns what to supply.
-  if (!executeRequested && approved_command_digest !== undefined && approvedCommandDigest === undefined && !transferCounterpartRequired) {
+  if (!executeRequested && approved_command_digest !== undefined && approvedCommandDigest === undefined) {
     return { ok: false, failure: { kind: "digest_mismatch" } };
   }
 
@@ -896,14 +911,15 @@ async function runWiseImport(
     interAccountResults,
     ownershipReviews,
     invoiceFixCandidates,
-    ...(transferCounterpartRequired
+    ...(counterpartHoldReviews.length > 0
       ? (() => {
           const labels = new Map(buildBankDimensionCandidates(bankAccountsSnapshot, accountDimensionsSnapshot)
             .map(candidate => [candidate.accounts_dimensions_id, candidate.label]));
           return {
             transferCounterpart: {
-              transfer_row_count: ownershipReviews.filter(review => review.code === "wise_transfer_dimensions_unverified").length,
-              candidates: counterpartCandidateIds.map(id => ({
+              unresolved_row_count: counterpartHoldReviews.filter(review => review.code === "wise_transfer_dimensions_unverified").length,
+              conflict_row_count: counterpartHoldReviews.filter(review => review.code === "wise_transfer_counterpart_conflict").length,
+              candidates: [...otherDimensions].sort((left, right) => left - right).map(id => ({
                 accounts_dimensions_id: id,
                 label: labels.get(id) ?? `Dimension ${id}`,
               })),
