@@ -187,6 +187,7 @@ describe("process_accounting_document", () => {
     const camtRef = runtime.fileReferenceStore.issue({ canonicalPath: path, kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt });
     const rejected = await handler({ mode: "prepare", file_ref: camtRef });
     expect(rejected.isError).toBe(true);
+    expect(parse(rejected)).toMatchObject({ category: "file_input_reference_mismatch", retry: "never" });
   });
 
   it("wraps the ambiguous supplier question and choice labels at the façade boundary (F-RESOLVER-FACADE-WRAP)", async () => {

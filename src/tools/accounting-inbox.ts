@@ -1223,12 +1223,17 @@ function buildPreparedInboxPayload(
   const projected = projectPublicRecommendedSteps(prepared.steps, runtimeSafetyContext, exposure, prepared.camtDigestBindings);
   const steps = projected.steps;
   const questions = prepared.questions.map(publicQuestion);
+  // Guided profiles have only process_bank_input for statements, which reads
+  // refs under bank_input; a camt_input / wise_input ref would be refused.
+  // Like the standard refs, detected refs stay unbound (not sha-bound).
+  const profile = currentToolProfile();
+  const guided = profile === "guided" || profile === "guided-sales";
   return {
     workspace_path: sandboxExternalText(prepared.workspacePath),
     scan: prepared.scan,
     detected_inputs: {
-      camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, FILE_REFERENCE_OPERATIONS.camt)),
-      wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, FILE_REFERENCE_OPERATIONS.wise)),
+      camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, guided ? FILE_REFERENCE_OPERATIONS.bank : FILE_REFERENCE_OPERATIONS.camt)),
+      wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, guided ? FILE_REFERENCE_OPERATIONS.bank : FILE_REFERENCE_OPERATIONS.wise)),
       receipt_folders: prepared.receiptFolders.map(folder => publicReceiptFolder(folder, runtimeSafetyContext)),
     },
     camt_overlap: prepared.camtOverlap,

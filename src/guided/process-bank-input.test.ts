@@ -186,6 +186,7 @@ describe("process_bank_input", () => {
     const camtRef = runtime.fileReferenceStore.issue({ canonicalPath: xmlPath, kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt });
     const rejected = await handler({ mode: "prepare", file_ref: camtRef });
     expect(rejected.isError).toBe(true);
+    expect(parse(rejected)).toMatchObject({ category: "file_input_reference_mismatch", retry: "never" });
   });
 
   it("asks a compact, OCR-wrapped question when the bank dimension is ambiguous", async () => {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { extname, isAbsolute } from "node:path";
 import { readFileCapped } from "./bounded-read.js";
 import { resolveFileInput } from "./file-validation.js";
+import { FileReferenceStoreError } from "./file-reference-store.js";
 import { cloneAndFreezePlanData } from "./plan-store.js";
 import type { RuntimeSafetyContext } from "./runtime-safety-context.js";
 
@@ -20,21 +21,44 @@ export type FileInputSnapshotErrorCode =
   | "file_input_changed"
   | "file_input_identity_invalid"
   | "file_input_source_invalid"
-  | "file_input_unavailable";
+  | "file_input_unavailable"
+  | "file_input_reference_mismatch"
+  | "file_input_reference_expired";
 
 const SAFE_MESSAGES: Readonly<Record<FileInputSnapshotErrorCode, string>> = Object.freeze({
   file_input_changed: "The file input no longer matches the reviewed source bytes.",
   file_input_identity_invalid: "The stored file-input identity is invalid.",
   file_input_source_invalid: "Provide exactly one direct file path/input or opaque file reference.",
   file_input_unavailable: "The file input could not be safely resolved and read.",
+  file_input_reference_mismatch: "The file reference was issued for a different tool or input kind. Use the file_ref from the accounting_inbox recommended step for this tool (guided: process_bank_input), or pass file_path.",
+  file_input_reference_expired: "The file reference is unknown or expired, or the runtime scope changed. Re-run accounting_inbox for a fresh reference, or pass file_path.",
 });
+
+/** A file-reference store rejection, mapped before anything is read. Refs are
+ * random 256-bit handles, so naming "issued for another operation" separately
+ * from "unknown" reveals nothing enumerable. */
+function fileReferenceErrorCode(error: unknown): FileInputSnapshotErrorCode {
+  if (!(error instanceof FileReferenceStoreError)) return "file_input_unavailable";
+  switch (error.code) {
+    case "file_reference_operation_mismatch":
+    case "file_reference_kind_mismatch":
+      return "file_input_reference_mismatch";
+    case "file_reference_invalid":
+    case "file_reference_expired":
+    case "file_reference_scope_mismatch":
+      return "file_input_reference_expired";
+    default:
+      return "file_input_unavailable";
+  }
+}
 
 /**
  * Whether repeating the identical call could ever produce a different outcome.
  * Only `file_input_unavailable` can: the source was not readable this time and
- * may be next (a transient IO or permission condition). The other three name a
- * mismatch — changed bytes, a malformed identity, a bad source combination —
- * that the caller must fix first, so a bare retry is pointless.
+ * may be next (a transient IO or permission condition). The others name a
+ * mismatch — changed bytes, a malformed identity, a bad source combination, a
+ * file reference for another tool or an expired one — that the caller must fix
+ * first, so a bare retry is pointless.
  */
 export function fileInputSnapshotRetry(code: FileInputSnapshotErrorCode): "never" | "unknown" {
   return code === "file_input_unavailable" ? "unknown" : "never";
@@ -145,7 +169,7 @@ export async function captureFileInputSnapshot(
     resolvedSource = resolveSource(source, options);
   } catch (error) {
     if (error instanceof FileInputSnapshotError) throw error;
-    throw new FileInputSnapshotError("file_input_unavailable");
+    throw new FileInputSnapshotError(fileReferenceErrorCode(error));
   }
   const { input, inline, expectedCanonicalPath, expectedSha256 } = resolvedSource;
   const allowedExtensions = [...options.allowedExtensions];

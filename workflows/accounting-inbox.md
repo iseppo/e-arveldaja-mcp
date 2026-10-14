@@ -41,6 +41,8 @@ Present:
 
 Avoid raw internal field names unless they help the user make a concrete choice.
 
+On the guided profiles, the `file_ref`s under `detected_inputs.camt_files` / `wise_csv_files` are bank-input references for the guided bank tool. Like a raw `file_path`, they are not bound to the scanned bytes; only the recommended steps' references carry that binding (byte-identical copies).
+
 ### Step 3: Ask only the listed questions
 
 If `autopilot.needs_one_decision` is non-empty:

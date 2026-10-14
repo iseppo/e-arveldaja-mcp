@@ -31,7 +31,7 @@ User-facing phases:
 
 ## Arguments
 
-- `file_path` (or `file_ref`): the CAMT.053 XML file
+- `file_path` (or `file_ref`): the CAMT.053 XML file. A `file_ref` must come from `accounting_inbox` for this tool: a reference issued for another tool or input kind is refused with `file_input_reference_mismatch`, and an unknown or expired one (or one from another runtime scope) with `file_input_reference_expired`; both are `retry: never` and read nothing. Use the matching reference from a fresh `accounting_inbox` run, or pass `file_path`.
 - Optional `accounts_dimensions_id`: bank account dimension ID in e-arveldaja
 - Optional `date_from` / `date_to`: statement-entry filter in `YYYY-MM-DD`
 

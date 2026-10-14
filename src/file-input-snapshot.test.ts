@@ -14,6 +14,7 @@ import {
   assertFileInputSnapshotIdentity,
   assertMatchingFileInputSnapshot,
   captureFileInputSnapshot,
+  fileInputSnapshotRetry,
 } from "./file-input-snapshot.js";
 
 vi.mock("./bounded-read.js", async (importOriginal) => {
@@ -303,17 +304,48 @@ describe("captureFileInputSnapshot", () => {
       kind: "directory",
       operation: FILE_REFERENCE_OPERATIONS.receipt,
     });
-    for (const [source, options] of [
-      [{ file_ref: fileRef }, { ...csvOptions(context), operation: FILE_REFERENCE_OPERATIONS.camt }],
-      [{ file_ref: wrongKind }, csvOptions(context)],
-      [{ file_ref: "forged-hostile-ref" }, csvOptions(context)],
+    // Same operation, wrong kind: exercises the kind check itself.
+    const sameOperationDirectory = context.fileReferenceStore.issue({
+      canonicalPath: "/tmp/folder",
+      kind: "directory",
+      operation: FILE_REFERENCE_OPERATIONS.wise,
+    });
+    const rejection = async (source: { file_ref: string }, options: ReturnType<typeof csvOptions>) => {
+      try {
+        await captureFileInputSnapshot(source, options, { readFile: read });
+      } catch (error) {
+        return error;
+      }
+      throw new Error("expected a rejection");
+    };
+    for (const [source, options, code] of [
+      [{ file_ref: fileRef }, { ...csvOptions(context), operation: FILE_REFERENCE_OPERATIONS.camt }, "file_input_reference_mismatch"],
+      [{ file_ref: wrongKind }, csvOptions(context), "file_input_reference_mismatch"],
+      [{ file_ref: sameOperationDirectory }, csvOptions(context), "file_input_reference_mismatch"],
+      [{ file_ref: "forged-hostile-ref" }, csvOptions(context), "file_input_reference_expired"],
     ] as const) {
-      await expect(captureFileInputSnapshot(source, options, { readFile: read }))
-        .rejects.toThrowError(new FileInputSnapshotError("file_input_unavailable"));
+      const error = await rejection(source, options);
+      expect(error).toBeInstanceOf(FileInputSnapshotError);
+      expect((error as FileInputSnapshotError).code).toBe(code);
+      expect(fileInputSnapshotRetry(code)).toBe("never");
     }
     context.advanceTime(600_000);
+    const expired = await rejection({ file_ref: fileRef }, csvOptions(context));
+    expect((expired as FileInputSnapshotError).code).toBe("file_input_reference_expired");
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("maps a ref from another runtime scope to file_input_reference_expired before reading", async () => {
+    const context = runtime();
+    const read = vi.fn(async () => Buffer.from("secret"));
+    const fileRef = context.fileReferenceStore.issue({
+      canonicalPath: "/tmp/exact.csv",
+      kind: "file",
+      operation: FILE_REFERENCE_OPERATIONS.wise,
+    });
+    context.setScope({ profile: "guided" });
     await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context), { readFile: read }))
-      .rejects.toThrowError(new FileInputSnapshotError("file_input_unavailable"));
+      .rejects.toMatchObject({ code: "file_input_reference_expired" });
     expect(read).not.toHaveBeenCalled();
   });
 });

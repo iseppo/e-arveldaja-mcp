@@ -13,6 +13,7 @@ import { GUIDED_TOOL_NAMES, runWithToolProfile } from "../tool-profile.js";
 import * as toolProfileModule from "../tool-profile.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { registerWiseImportTools } from "./wise-import.js";
+import { registerProcessBankInputTool } from "../guided/process-bank-input.js";
 import { parseDocument } from "../document-parser.js";
 import {
   analyzeInboxCamtFiles,
@@ -127,13 +128,13 @@ it("routes a hostile Inbox filename through a clean opaque file_ref", async () =
   await expect(getRegisteredToolHandler(otherServer, "process_camt053")({
     mode: "parse",
     file_ref: step.suggested_args.file_ref,
-  })).rejects.toThrow("could not be safely resolved");
+  })).rejects.toThrow("unknown or expired");
 
   registerWiseImportTools(server, api, context);
   await expect(getRegisteredToolHandler(server, "import_wise_transactions")({
     file_ref: step.suggested_args.file_ref,
     accounts_dimensions_id: 1,
-  })).rejects.toThrow("could not be safely resolved");
+  })).rejects.toThrow("issued for a different tool or input kind");
 
   registerReceiptInboxTools(server, api, context, EXPOSE_GRANULAR);
   await expect(getRegisteredToolHandler(server, "receipt_batch")({
@@ -144,12 +145,12 @@ it("routes a hostile Inbox filename through a clean opaque file_ref", async () =
   await expect(getRegisteredToolHandler(server, "process_camt053")({
     mode: "parse",
     file_ref: "forged-hostile-ref",
-  })).rejects.toThrow("could not be safely resolved");
+  })).rejects.toThrow("unknown or expired");
   context.advanceTime(600_000);
   await expect(getRegisteredToolHandler(server, "process_camt053")({
     mode: "parse",
     file_ref: step.suggested_args.file_ref,
-  })).rejects.toThrow("could not be safely resolved");
+  })).rejects.toThrow("unknown or expired");
 });
 
 it("round-trips same-context Inbox Wise and receipt refs and rejects receipt wrong-kind refs", async () => {
@@ -4494,5 +4495,64 @@ describe("accounting_inbox Wise inter-account counterpart", () => {
     expect(payload.workflow.blockers).toEqual([
       expect.objectContaining({ item_id: "wise_inter_account_dimension_id", code: "needs_input" }),
     ]);
+  });
+});
+
+describe("accounting_inbox detected file_refs per profile", () => {
+  const exposure = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+  const banks = [
+    fixtureBankAccount(),
+    fixtureBankAccount({ accounts_dimensions_id: 202, account_name_est: "Wise konto", account_no: "BE62510007547061", iban_code: "BE62510007547061" }),
+  ];
+
+  it("guided detected camt and wise refs work in process_bank_input; a camt_input ref is refused as a mismatch", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(workspace);
+    // A regular Wise export, so process_bank_input recognises the CSV.
+    await writeFile(join(workspace, "wise", "transaction-history.csv"), [
+      "ID,Status,Direction,Created on,Finished on,Source fee amount,Source fee currency,Target fee amount,Target fee currency,Source name,Source amount (after fees),Source currency,Target name,Target amount (after fees),Target currency,Exchange rate,Reference,Batch,Created by,Category,Note",
+      "tx-1,COMPLETED,OUT,2026-06-01 10:00:00,2026-06-01 10:00:00,0,EUR,0,EUR,Wise,10,EUR,Vendor,10,EUR,1,INV-1,,,General,",
+    ].join("\n") + "\n");
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: banks, accountDimensions: [fixtureAccountDimension(), fixtureAccountDimension({ id: 202, title_est: "Wise" })] });
+    const runtime = createTestRuntimeSafetyContext({ scope: { profile: "guided" } });
+    registerAccountingInboxTools(server, runtime, api, exposure);
+    registerProcessBankInputTool(server, api, runtime, {});
+    const inbox = parseMcpResponse((await runWithToolProfile("guided", () =>
+      getRegisteredToolHandler(server, "accounting_inbox")({ mode: "scan", workspace_path: workspace }))).content[0]!.text) as any;
+    const camtRef = inbox.detected_inputs.camt_files[0].file_ref;
+    const wiseRef = inbox.detected_inputs.wise_csv_files[0].file_ref;
+    const bank = getRegisteredToolHandler(server, "process_bank_input");
+
+    for (const [fileRef, dimension] of [[camtRef, 101], [wiseRef, 202]] as const) {
+      const result = await runWithToolProfile("guided", () => bank({ mode: "prepare", file_ref: fileRef, accounts_dimensions_id: dimension }));
+      expect(result.isError, String(dimension)).toBeFalsy();
+      expect((parseMcpResponse(result.content[0]!.text) as any).summary, String(dimension)).toBeDefined();
+    }
+
+    const camtInputRef = runtime.fileReferenceStore.issue({
+      canonicalPath: join(workspace, "statement.xml"), kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt,
+    });
+    const refused = await runWithToolProfile("guided", () => bank({ mode: "prepare", file_ref: camtInputRef, accounts_dimensions_id: 101 }));
+    expect(refused.isError).toBe(true);
+    expect(parseMcpResponse(refused.content[0]!.text)).toMatchObject({ category: "file_input_reference_mismatch", retry: "never" });
+  });
+
+  it("standard detected refs stay camt_input / wise_input refs", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({ bankAccounts: banks, accountDimensions: [] });
+    const runtime = createTestRuntimeSafetyContext();
+    registerAccountingInboxTools(server, runtime, api, EXPOSE_GRANULAR);
+    const inbox = parseMcpResponse((await getRegisteredToolHandler(server, "accounting_inbox")({
+      mode: "scan", workspace_path: workspace,
+    })).content[0]!.text) as any;
+    const camtRef = inbox.detected_inputs.camt_files[0].file_ref;
+    const wiseRef = inbox.detected_inputs.wise_csv_files[0].file_ref;
+
+    expect(runtime.fileReferenceStore.resolve(camtRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt })).toBe(join(workspace, "statement.xml"));
+    expect(runtime.fileReferenceStore.resolve(wiseRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise })).toContain("transaction-history.csv");
+    expect(() => runtime.fileReferenceStore.resolve(camtRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank })).toThrow();
   });
 });

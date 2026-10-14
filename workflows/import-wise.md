@@ -10,7 +10,7 @@ User-facing phases:
 
 ## Arguments
 
-- `file_path` (or `file_ref`): the regular Wise `transaction-history.csv`
+- `file_path` (or `file_ref`): the regular Wise `transaction-history.csv`. A `file_ref` must come from `accounting_inbox` for this tool: a reference issued for another tool or input kind is refused with `file_input_reference_mismatch`, and an unknown or expired one (or one from another runtime scope) with `file_input_reference_expired`; both are `retry: never` and read nothing. Use the matching reference from a fresh `accounting_inbox` run, or pass `file_path`.
 - Optional `accounts_dimensions_id`: bank account dimension ID for the Wise account
 - Optional `fee_account_dimensions_id`: expense dimension used for Wise fees
 - Optional `inter_account_dimension_id`: other bank account dimension for Wise inter-account transfers. Auto-detected only when the company has exactly one other bank account. When the CSV has transfer rows and the counterpart cannot be determined (several other bank accounts, or the given id is not another configured bank account), the preview is blocked with `wise_transfer_counterpart_required`: it lists the candidate own bank accounts, issues no `plan_handle` or digest, and execute is refused before any write (also with an older handle). Ask the owner which account the Wise transfers go to and from, then re-run the preview with `inter_account_dimension_id`. A company whose only bank account is Wise is not blocked.
