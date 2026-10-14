@@ -9,6 +9,8 @@
 - **Supplier matching ignores a social handle printed next to the name.** An invoice header "Anthropic, PBC @anthropic" did not match the existing client "Anthropic", so the receipt was treated as a new supplier without history. The normalized supplier-name match now drops tokens that start with "@" (emails are unaffected). The shared company-name key used for saved auto-booking rules and legal-identity checks is unchanged.
 - **A letters-only word is no longer taken as a foreign VAT number.** "VAT Registration EU VAT: IE4276970QH" was read as VAT number "REGISTRATION" (which would also be stored on a newly created supplier). A non-EE VAT number must now contain a digit, in extraction and in `validate_invoice_data`.
 
+- **`import_wise_transactions` groups already-booked skips by reason.** `skipped_details` made one group per ledger record, because the record id was part of the reason text (35 groups on a live CSV). The id is now templated out of the group reason (`journal {record_id}` / `transaction {record_id}`), and each group lists every row's record in `records` (`wise_id`, `record_id`); on the live CSV that is 5 groups. Error reasons are grouped verbatim as before.
+
 ### Documentation
 
 - **`EARVELDAJA_ALLOWED_PATHS` replaces the default file roots** (working directory + OS temp directory, `$TMPDIR`), it does not add to them; `EARVELDAJA_ALLOW_HOME` is ignored while it is set. README, `.env.example` and `server.json` said otherwise.

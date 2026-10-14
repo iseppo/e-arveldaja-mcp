@@ -499,16 +499,33 @@ export function isNonErrorWiseSkipReason(reason: string): boolean {
     reason === "Skipped because main transaction was not created";
 }
 
-export function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; reason: string }>) {
-  const groups = new Map<string, { reason: string; count: number; sample_ids: string[] }>();
+// Already-booked reasons name the ledger record that books the row ("inter-account
+// journal 29443702 books this transfer"). Grouping on the raw text made one group
+// per record (35 groups, ~89 KB on a live CSV), so the id is templated out of the
+// group key and kept per row in `records`. Error reasons are grouped verbatim.
+const LEDGER_RECORD_ID_RE = /\b(journal|transaction) (\d+)\b/;
+
+export interface WiseSkippedGroup {
+  reason: string;
+  count: number;
+  sample_ids: string[];
+  records?: Array<{ wise_id: string; record_id: number }>;
+}
+
+export function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; reason: string }>): WiseSkippedGroup[] {
+  const groups = new Map<string, WiseSkippedGroup>();
   for (const entry of skipped) {
-    const existing = groups.get(entry.reason);
-    if (existing) {
-      existing.count++;
-      if (existing.sample_ids.length < 5) existing.sample_ids.push(entry.wise_id);
+    const record = isNonErrorWiseSkipReason(entry.reason) ? LEDGER_RECORD_ID_RE.exec(entry.reason) : null;
+    const key = record ? entry.reason.replace(LEDGER_RECORD_ID_RE, "$1 {record_id}") : entry.reason;
+    let group = groups.get(key);
+    if (group) {
+      group.count++;
+      if (group.sample_ids.length < 5) group.sample_ids.push(entry.wise_id);
     } else {
-      groups.set(entry.reason, { reason: entry.reason, count: 1, sample_ids: [entry.wise_id] });
+      group = { reason: key, count: 1, sample_ids: [entry.wise_id] };
+      groups.set(key, group);
     }
+    if (record) (group.records ??= []).push({ wise_id: entry.wise_id, record_id: Number(record[2]) });
   }
   return [...groups.values()];
 }
