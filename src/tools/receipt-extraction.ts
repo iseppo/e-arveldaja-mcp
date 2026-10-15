@@ -1523,13 +1523,6 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
       const merged = mergeLayoutTextItems(span);
       const columnIndex = columnByItem.get(span[0]!);
       if (columnIndex === undefined) continue;
-      // A span whose label lies wholly in its tail ("Kirjeldus Kogus Hind km-ga")
-      // would bind that label to the leading item's column; the tail's own,
-      // shorter span carries it instead.
-      if (span.length > 1) {
-        const field = classifyLayoutAmountLabel(merged.text);
-        if (field && classifyLayoutAmountLabel(mergeLayoutTextItems(span.slice(1)).text) === field) continue;
-      }
       cells.push({
         text: merged.text,
         item: merged,
@@ -1625,19 +1618,11 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
     )[0];
 }
 
-/** How many label-row heights below a column-header label its value may sit. */
-const BELOW_COLUMN_MAX_ROW_HEIGHTS = 5;
-
 function findBelowColumnLayoutAmount(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
-  // A header's value sits just under it. Without a distance bound a summary
-  // label whose own amount was dropped ("Jäänud tasuda 0,00") reached down the
-  // empty column to a footer token ("SWIFT LHVBEE22" → 22) and became the gross.
-  const maxDistance = BELOW_COLUMN_MAX_ROW_HEIGHTS * Math.max(label.row.maxHeight, 1);
   return amounts
     .filter(amount =>
       amount.row.pageNum === label.row.pageNum &&
       amount.row.y > label.row.y &&
-      amount.row.y - label.row.y <= maxDistance &&
       amount.columnIndex === label.columnIndex,
     )
     .sort((a, b) =>
