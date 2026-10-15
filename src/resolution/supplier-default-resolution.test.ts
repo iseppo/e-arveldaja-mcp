@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Client } from "../types/api.js";
+import { normalizeCompanyName } from "../company-name.js";
 import {
   matchSupplier,
   resolveSupplierDefault,
@@ -100,12 +101,39 @@ describe("matchSupplier — extracted pure match-decision core", () => {
     expect(outcome.kind).not.toBe("matched");
   });
 
-  it("a handle does not break a legal-form tie: still ambiguous", () => {
+  it("a handle neither breaks nor blocks a legal-form tie: the name decides as if printed bare (R-S7)", () => {
+    const clients = [makeClient({ id: 1, name: "Acme OÜ" }), makeClient({ id: 2, name: "Acme AS" })];
+    // The literal "Acme OÜ" breaks the tie, with or without the handle.
+    for (const supplier_name of ["Acme OÜ", "Acme OÜ @acme"]) {
+      const outcome = matchSupplier(clients, { supplier_name });
+      expect(outcome.kind, supplier_name).toBe("matched");
+      if (outcome.kind === "matched") expect(outcome.client.id, supplier_name).toBe(1);
+    }
+    // No literal match: still ambiguous.
+    expect(matchSupplier(clients, { supplier_name: "Acme @acme" }).kind).toBe("ambiguous");
+  });
+
+  it("strips the handle in the fuzzy tier too (R-S7)", () => {
     const outcome = matchSupplier(
-      [makeClient({ id: 1, name: "Acme OÜ" }), makeClient({ id: 2, name: "Acme AS" })],
-      { supplier_name: "Acme OÜ @acme" },
+      [makeClient({ id: 7, name: "Anthropic Labs EU", cl_code_country: "USA" })],
+      { supplier_name: "Anthropic Labs @anthropic" },
     );
-    expect(outcome.kind).toBe("ambiguous");
+    expect(outcome.kind).toBe("matched");
+    if (outcome.kind === "matched") {
+      expect(outcome.match_type).toBe("name_fuzzy");
+      expect(outcome.client.id).toBe(7);
+    }
+  });
+
+  it("a bare \"@\" is part of the name, and handle-only names match no tier", () => {
+    const outcome = matchSupplier([makeClient({ id: 8, name: "Foo @ Bar OÜ" })], { supplier_name: "Foo @ Bar OÜ" });
+    expect(outcome.kind).toBe("matched");
+    if (outcome.kind === "matched") expect(outcome.client.id).toBe(8);
+    expect(matchSupplier([makeClient({ id: 9, name: "Anthropic" })], { supplier_name: "@anthropic" }).kind).toBe("no_match");
+  });
+
+  it("the shared company-name key (auto-booking rule keys) keeps the handle: only matching strips it", () => {
+    expect(normalizeCompanyName("Anthropic, PBC @anthropic")).not.toBe(normalizeCompanyName("Anthropic, PBC"));
   });
 
   it("strips OCR sandbox markers before matching (write/match boundary)", () => {

@@ -149,7 +149,11 @@ export function matchSupplier(
   if (fields.supplier_name) {
     const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
 
-    const normalizedSupplierName = normalizeCompanyName(stripSocialHandles(fields.supplier_name));
+    // A social handle printed next to the name ("Anthropic, PBC @anthropic")
+    // is not part of it, in every name tier below (a handle-only name is
+    // empty and matches nothing).
+    const supplierName = stripSocialHandles(fields.supplier_name);
+    const normalizedSupplierName = normalizeCompanyName(supplierName);
     if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
       const normalizedExactMatches = activeClients.filter(
         client => normalizeCompanyName(client.name) === normalizedSupplierName,
@@ -163,7 +167,7 @@ export function matchSupplier(
       // Several clients normalize to the same name: only a single LITERAL name
       // match may break the tie (the fuzzy tier below then picks it at edit
       // distance 0); otherwise refuse rather than pick whichever comes first.
-      const literalSupplierName = fields.supplier_name.trim().toLowerCase();
+      const literalSupplierName = supplierName.trim().toLowerCase();
       const literalMatches = normalizedExactMatches.filter(client => client.name.trim().toLowerCase() === literalSupplierName);
       if (normalizedExactMatches.length > 1 && literalMatches.length !== 1) {
         return {
@@ -175,7 +179,6 @@ export function matchSupplier(
 
     const names = activeClients.map(client => client.name);
     if (names.length > 0) {
-      const supplierName = fields.supplier_name;
       const passesFuzzyGate = (candidateName: string): boolean => {
         const maxLen = Math.max(supplierName.length, candidateName.length);
         const similarity = maxLen > 0 ? 1 - distance(supplierName, candidateName) / maxLen : 0;
