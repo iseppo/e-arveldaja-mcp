@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PurchaseInvoicesApi } from "./purchase-invoices.api.js";
+import { PurchaseInvoicesApi, previewPurchaseInvoiceTotals } from "./purchase-invoices.api.js";
 import { cache } from "./base-resource.js";
 import { HttpError, type HttpClient } from "../http-client.js";
 
@@ -327,6 +327,9 @@ describe("PurchaseInvoicesApi.createAndSetTotals", () => {
         custom_title: "ChatGPT subscription",
         amount: 1,
         total_net_price: 100,
+        // The item states its rate, so the pre-create totals check predicts
+        // the same item VAT (24) the read-back returns.
+        vat_rate_dropdown: "24",
       }],
     }, 24, 124, true)).rejects.toThrow(
       "Purchase invoice 17 was created but follow-up failed and the draft was invalidated: patch failed"
@@ -440,7 +443,7 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
     }
   });
 
-  it("absorbs a per-item rounding residue but refuses a larger VAT mismatch (and invalidates the draft)", async () => {
+  it("absorbs a per-item rounding residue but refuses a larger VAT mismatch before create", async () => {
     const ok = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
     await ok.api.createAndSetTotals({
       ...baseData, cl_currencies_id: "EUR",
@@ -453,8 +456,9 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
       ...baseData, cl_currencies_id: "EUR",
       items: [{ custom_title: "A", amount: 1, total_net_price: 100, vat_rate_dropdown: "24" }],
     } as any, 30, 130, true)).rejects.toThrow(/totals mismatch/);
-    expect(totalsPatch(bad.patch)).toBeUndefined();
-    expect(bad.patch).toHaveBeenCalledWith("/purchase_invoices/21/invalidate", {});
+    // Refused on the predicted item VAT: no draft, so nothing to invalidate.
+    expect(bad.post).not.toHaveBeenCalled();
+    expect(bad.patch).not.toHaveBeenCalled();
   });
 
   it("distributes the invoice gross across non-VAT multi-item rows pro rata to net, cent-exact", async () => {
@@ -475,5 +479,264 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
     const grosses = created.items.map((item: any) => item.project_no_vat_gross_price);
     expect(grosses).toEqual([12.4, 24.8, 86.81]);
     expect(Math.round(grosses.reduce((a: number, b: number) => a + b, 0) * 100)).toBe(12401);
+  });
+});
+
+describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any write", () => {
+  beforeEach(() => cache.invalidate());
+
+  function makeCreateApi(apiItems: Array<Record<string, unknown>>) {
+    const post = vi.fn().mockResolvedValue({ code: 200, created_object_id: 31, messages: [] });
+    const get = vi.fn().mockResolvedValue({ id: 31, items: apiItems });
+    const patch = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const api = new PurchaseInvoicesApi({ cacheNamespace: "pv", post, get, patch } as any);
+    return { api, post, get, patch };
+  }
+
+  function totalsPatch(patch: ReturnType<typeof vi.fn>) {
+    const call = patch.mock.calls.find(([path]) => path === "/purchase_invoices/31");
+    return call?.[1] as Record<string, any>;
+  }
+
+  function invalidated(patch: ReturnType<typeof vi.fn>) {
+    return patch.mock.calls.some(([path]) => path === "/purchase_invoices/31/invalidate");
+  }
+
+  const baseData = {
+    clients_id: 10,
+    client_name: "Supplier OÜ",
+    number: "PI-31",
+    create_date: "2026-03-01",
+    journal_date: "2026-03-01",
+    term_days: 0,
+    liability_accounts_id: 2310,
+    cl_currencies_id: "EUR",
+  };
+
+  const item = (net: number, rate: string, extra: Record<string, unknown> = {}) =>
+    ({ custom_title: "Line", amount: 1, total_net_price: net, vat_rate_dropdown: rate, ...extra });
+
+  async function expectPasses(
+    data: Record<string, unknown>,
+    apiItems: Array<Record<string, unknown>>,
+    vat: number | undefined,
+    gross: number | undefined,
+    isVatRegistered: boolean,
+  ) {
+    const preview = previewPurchaseInvoiceTotals(data as any, vat, gross, isVatRegistered);
+    expect(preview.ok).toBe(true);
+    const harness = makeCreateApi(apiItems);
+    await harness.api.createAndSetTotals(data as any, vat, gross, isVatRegistered);
+    expect(harness.post).toHaveBeenCalledTimes(1);
+    expect(invalidated(harness.patch)).toBe(false);
+    return { preview, body: totalsPatch(harness.patch), post: harness.post };
+  }
+
+  async function expectRefusedBeforeCreate(
+    data: Record<string, unknown>,
+    vat: number | undefined,
+    gross: number | undefined,
+    isVatRegistered: boolean,
+    code: string,
+  ) {
+    const preview = previewPurchaseInvoiceTotals(data as any, vat, gross, isVatRegistered);
+    expect(preview).toMatchObject({ ok: false, code });
+    const harness = makeCreateApi([]);
+    await expect(harness.api.createAndSetTotals(data as any, vat, gross, isVatRegistered))
+      .rejects.toThrow(preview.ok ? "unreachable" : preview.message);
+    expect(harness.post).not.toHaveBeenCalled();
+    expect(harness.patch).not.toHaveBeenCalled();
+  }
+
+  describe("reverse charge", () => {
+    it("all items reverse charge: 100 at 24%, V 0, G 100 passes", async () => {
+      const { preview, body } = await expectPasses(
+        { ...baseData, items: [item(100, "24", { reversed_vat_id: 1 })] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+        0, 100, true,
+      );
+      expect(preview).toMatchObject({ ok: true, vat: 0, gross: 100 });
+      expect(body.vat_price).toBe(0);
+      expect(body.gross_price).toBe(100);
+    });
+
+    it("mixed ordinary and reverse-charge items pass (exempt from the residue check)", async () => {
+      const { body } = await expectPasses(
+        { ...baseData, items: [item(100, "24"), item(50, "24", { reversed_vat_id: 1 })] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }, { id: 2, total_net_price: 50, vat_amount: 12 }],
+        24, 174, true,
+      );
+      expect(body.vat_price).toBe(24);
+      expect(body.gross_price).toBe(174);
+    });
+
+    it("a reverse-charge credit note −100 / 0 / −100 passes", async () => {
+      const { body } = await expectPasses(
+        { ...baseData, items: [item(-100, "24", { reversed_vat_id: 1 })] },
+        [{ id: 1, total_net_price: -100, vat_amount: -24 }],
+        0, -100, true,
+      );
+      expect(body.vat_price).toBe(0);
+      expect(body.gross_price).toBe(-100);
+    });
+  });
+
+  describe("non-VAT company", () => {
+    it.each([
+      { label: "VAT supplied as 24.01", vat: 24.01 },
+      { label: "VAT supplied as 0", vat: 0 },
+      { label: "VAT omitted", vat: undefined },
+    ])("net 100, G 124.01, $label: passes with VAT 0 and the item gross 124.01", async ({ vat }) => {
+      const { preview, body, post } = await expectPasses(
+        { ...baseData, items: [item(100, "-")] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24.01 }],
+        vat, 124.01, false,
+      );
+      expect(preview).toMatchObject({ ok: true, vat: 0, gross: 124.01 });
+      expect(body.vat_price).toBe(0);
+      expect(body.gross_price).toBe(124.01);
+      expect((post.mock.calls[0]![1] as any).items[0].project_no_vat_gross_price).toBe(124.01);
+      expect(body.items[0].project_no_vat_gross_price).toBe(124.01);
+    });
+  });
+
+  describe("rounding", () => {
+    it("100 at 24% with V 24.02 / G 124.02 is refused before create", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, items: [item(100, "24")] }, 24.02, 124.02, true, "purchase_totals_mismatch",
+      );
+    });
+
+    it("V 24.01 / G 124.01 still passes and absorbs the residue on the last item", async () => {
+      const { preview, body } = await expectPasses(
+        { ...baseData, items: [item(100, "24")] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+        24.01, 124.01, true,
+      );
+      expect(preview).toMatchObject({ ok: true, lastItemGross: 124.01 });
+      expect(body.items[0].project_no_vat_gross_price).toBe(124.01);
+    });
+
+    it("refuses after create (and invalidates) when the API's item VAT differs from the prediction", async () => {
+      const data = { ...baseData, items: [item(100, "24")] };
+      expect(previewPurchaseInvoiceTotals(data as any, 24, 124, true).ok).toBe(true);
+      const harness = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 20 }]);
+      await expect(harness.api.createAndSetTotals(data as any, 24, 124, true)).rejects.toThrow(/totals mismatch/);
+      expect(harness.post).toHaveBeenCalledTimes(1);
+      expect(totalsPatch(harness.patch)).toBeUndefined();
+      expect(invalidated(harness.patch)).toBe(true);
+    });
+
+    it("after the read-back, a PATCH item count that differs from the request uses the API items for tolerance and the last-item adjustment", async () => {
+      // One requested item predicts VAT 24, so V 24.01 passes the pre-create
+      // check (tolerance 0.01). The API returns two items with VAT 23.99: the
+      // residue 0.02 is within the 2-item tolerance of the PATCH items and lands
+      // on the API's last item.
+      const { body } = await expectPasses(
+        { ...baseData, items: [item(100, "24")] },
+        [{ id: 1, total_net_price: 50, vat_amount: 12 }, { id: 2, total_net_price: 50, vat_amount: 11.99 }],
+        24.01, 124.01, true,
+      );
+      expect(body.items).toHaveLength(2);
+      expect(body.items[1].id).toBe(2);
+      expect(body.items[1].project_no_vat_gross_price).toBe(62.01);
+      expect(body.vat_price).toBe(24.01);
+    });
+  });
+
+  it("a credit note −100 at 24%, V −24, G −124 passes", async () => {
+    const { body } = await expectPasses(
+      { ...baseData, items: [item(-100, "24")] },
+      [{ id: 1, total_net_price: -100, vat_amount: -24 }],
+      -24, -124, true,
+    );
+    expect(body.vat_price).toBe(-24);
+    expect(body.gross_price).toBe(-124);
+  });
+
+  describe("canonicalisation", () => {
+    it("an omitted VAT and gross resolve to the item VAT and net + item VAT", async () => {
+      const { preview, body } = await expectPasses(
+        { ...baseData, items: [item(100, "24")] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+        undefined, undefined, true,
+      );
+      expect(preview).toMatchObject({ ok: true, vat: 24, gross: 124 });
+      expect(body.vat_price).toBe(24);
+      expect(body.gross_price).toBe(124);
+    });
+
+    it("a foreign currency without base_* gets the base trio from the rate", async () => {
+      const { preview } = await expectPasses(
+        { ...baseData, cl_currencies_id: "USD", currency_rate: 1.24, items: [item(100, "24")] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+        24, 124, true,
+      );
+      expect(preview).toMatchObject({ ok: true, base: { gross: 100, net: 80.65, vat: 19.35 } });
+    });
+
+    it("a base_gross_price-only override splits the base net pro rata with base VAT as the residual", async () => {
+      const { preview, body } = await expectPasses(
+        { ...baseData, cl_currencies_id: "USD", currency_rate: 1.111111, base_gross_price: 111.6, items: [item(100, "24")] },
+        [{ id: 1, total_net_price: 100, vat_amount: 24 }],
+        24, 124, true,
+      );
+      expect(preview).toMatchObject({ ok: true, base: { gross: 111.6, net: 90, vat: 21.6 } });
+      expect(body.base_net_price).toBe(90);
+      expect(body.base_vat_price).toBe(21.6);
+    });
+
+    it("a base gross of the opposite sign to the gross is refused before create", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, cl_currencies_id: "USD", currency_rate: 1.08, base_gross_price: -100, items: [item(108, "-")] },
+        0, 108, true, "purchase_base_sign_mismatch",
+      );
+    });
+
+    it("a credit note whose base gross is positive is refused before create", async () => {
+      await expectRefusedBeforeCreate(
+        { ...baseData, cl_currencies_id: "USD", currency_rate: 1.08, base_gross_price: 100, items: [item(-108, "-")] },
+        0, -108, true, "purchase_base_sign_mismatch",
+      );
+    });
+
+    it("a credit note with all-negative base amounts passes", async () => {
+      const { preview } = await expectPasses(
+        { ...baseData, cl_currencies_id: "USD", currency_rate: 1.08, items: [item(-108, "-")] },
+        [{ id: 1, total_net_price: -108, vat_amount: 0 }],
+        0, -108, true,
+      );
+      expect(preview).toMatchObject({ ok: true, base: { gross: -100, net: -100, vat: 0 } });
+    });
+
+    it.each([
+      { label: "an invoice", sign: 1 },
+      { label: "a credit note", sign: -1 },
+    ])("$label of a non-VAT company posting VAT 0 with a nonzero informational base VAT passes (zero is never a sign mismatch)", async ({ sign }) => {
+      const { preview, body } = await expectPasses(
+        {
+          ...baseData,
+          cl_currencies_id: "USD",
+          currency_rate: 1.08,
+          base_net_price: sign * 95,
+          base_gross_price: sign * 100,
+          items: [item(sign * 102.6, "-")],
+        },
+        [{ id: 1, total_net_price: sign * 102.6, vat_amount: sign * 5.4 }],
+        undefined, sign * 108, false,
+      );
+      expect(preview).toMatchObject({ ok: true, vat: 0, base: { vat: sign * 5 } });
+      expect(body.vat_price).toBe(0);
+      expect(body.base_vat_price).toBe(sign * 5);
+    });
+  });
+
+  it("a non-EUR invoice without currency_rate is refused before create with the same message", async () => {
+    await expectRefusedBeforeCreate(
+      { ...baseData, cl_currencies_id: "USD", items: [item(100, "-")] },
+      0, 100, true, "currency_rate_required",
+    );
+    expect(previewPurchaseInvoiceTotals({ ...baseData, cl_currencies_id: "USD", items: [] } as any, 0, 100, true))
+      .toMatchObject({ message: expect.stringContaining('currency_rate is required when cl_currencies_id="USD"') });
   });
 });

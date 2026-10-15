@@ -189,6 +189,182 @@ function normalizeItemsForNonVat(
   });
 }
 
+/** Net and VAT of one invoice item, predicted before create or read back after it. */
+export interface PurchaseItemAmounts {
+  net: number;
+  vat: number;
+}
+
+export type PurchaseInvoiceTotalsResolution =
+  | {
+      ok: true;
+      vat: number;
+      gross: number;
+      /** New project_no_vat_gross_price of the last item, absorbing a per-line VAT rounding residue. */
+      lastItemGross?: number;
+      /** EUR base trio, foreign-currency invoices only. */
+      base?: { net: number; vat: number; gross: number };
+    }
+  | {
+      ok: false;
+      code: "currency_rate_required" | "purchase_totals_mismatch" | "purchase_base_sign_mismatch";
+      message: string;
+    };
+
+/**
+ * The invoice-level totals rules of createAndSetTotals, as a pure function.
+ * Runs before create on predicted item amounts and after the read-back on the
+ * API's item amounts, so both stages refuse with the same rules.
+ *
+ * `items` are the items the PATCH would send (their count sets the rounding
+ * tolerance, a `reversed_vat_id` exempts the residue check, and the last one
+ * absorbs the residue); `itemAmounts` are the item net/VAT figures, indexed
+ * like the API items.
+ */
+export function resolvePurchaseInvoiceTotals(input: {
+  data: CreatePurchaseInvoiceData;
+  vatPrice?: number;
+  grossPrice?: number;
+  isVatRegistered: boolean;
+  items: readonly PurchaseInvoiceItem[] | undefined;
+  itemAmounts: readonly PurchaseItemAmounts[] | undefined;
+}): PurchaseInvoiceTotalsResolution {
+  const { data, vatPrice, grossPrice, isVatRegistered, items, itemAmounts } = input;
+  const currency = (data.cl_currencies_id ?? "EUR").toUpperCase();
+  const isForeignCurrency = currency !== "EUR";
+  if (isForeignCurrency && (data.currency_rate === undefined || data.currency_rate === null || !Number.isFinite(data.currency_rate) || data.currency_rate <= 0)) {
+    return {
+      ok: false,
+      code: "currency_rate_required",
+      message: `currency_rate is required when cl_currencies_id="${currency}". ` +
+        `Pass the ${currency}-per-1-EUR rate (for Wise card payments use Target amount / Source amount from the Wise CSV).`,
+    };
+  }
+
+  const itemVat = itemAmounts ? roundMoney(itemAmounts.reduce((s, i) => s + i.vat, 0)) : 0;
+  const itemNet = itemAmounts ? roundMoney(itemAmounts.reduce((s, i) => s + i.net, 0)) : 0;
+
+  // Invoice-level VAT: explicit value wins for VAT-registered companies.
+  // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
+  const vat = isVatRegistered
+    ? (vatPrice !== undefined ? vatPrice : itemVat)
+    : 0;
+
+  // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
+  const gross = grossPrice !== undefined
+    ? grossPrice
+    : roundMoney(itemNet + itemVat);
+
+  // When explicit VAT differs from item-computed VAT (rounding), adjust
+  // project_no_vat_gross_price on the last item so the API computes matching totals.
+  let lastItemGross: number | undefined;
+  if (items && items.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
+    const vatDiff = roundMoney(vatPrice - itemVat);
+    // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
+    // A larger gap means the explicit totals disagree with the items; the
+    // reverse-charge path (item VAT ≠ invoice VAT by design) keeps the
+    // pre-existing behaviour.
+    const isReverseCharge = items.some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null);
+    if (!isReverseCharge && Math.abs(vatDiff) > roundMoney(0.01 * items.length) + 1e-9) {
+      return {
+        ok: false,
+        code: "purchase_totals_mismatch",
+        message: `Purchase invoice totals mismatch: explicit vat_price ${vatPrice} differs from the item-computed VAT ${itemVat} ` +
+          `by ${vatDiff}, more than the ${roundMoney(0.01 * items.length)} rounding tolerance for ${items.length} item(s). ` +
+          "Fix the item net amounts / VAT rates or the invoice totals.",
+      };
+    }
+    const lastItem = items[items.length - 1]!;
+    const currentGross = lastItem.project_no_vat_gross_price
+      ?? roundMoney((lastItem.total_net_price ?? 0) + (itemAmounts?.[items.length - 1]?.vat ?? 0));
+    lastItemGross = roundMoney(currentGross + vatDiff);
+  }
+
+  if (!isForeignCurrency) return { ok: true, vat, gross, ...(lastItemGross !== undefined ? { lastItemGross } : {}) };
+
+  const rate = data.currency_rate!;
+  const net = roundMoney(itemNet);
+  // currency_rate is FOREIGN units per 1 EUR, so EUR = foreign / rate.
+  const baseGross = data.base_gross_price ?? roundMoney(gross / rate);
+  // With an explicit EUR gross (actual settlement), split it in the
+  // invoice's own net/gross proportion rather than re-deriving net from
+  // the nominal rate — otherwise a 0-VAT invoice gets a phantom base VAT.
+  const baseNet = data.base_net_price ?? (
+    data.base_gross_price !== undefined && gross !== 0
+      ? roundMoney(net * baseGross / gross)
+      : roundMoney(net / rate)
+  );
+  // Derive base_vat as the residual of base_gross − base_net so the trio
+  // reconciles exactly (base_net + base_vat === base_gross). Rounding net,
+  // vat, and gross independently against the rate can leave them off by a
+  // cent, which fails API sum validation or re-trips currency rounding.
+  const baseVat = data.base_vat_price ?? roundMoney(baseGross - baseNet);
+
+  // The EUR base of an amount cannot have the opposite sign of the amount.
+  // Only opposite NONZERO signs are refused: a non-VAT invoice posts VAT 0
+  // while its informational base VAT may be positive.
+  const oppositeSigns = (a: number, b: number) => a !== 0 && b !== 0 && Math.sign(a) !== Math.sign(b);
+  const mismatched = [
+    oppositeSigns(baseNet, net) ? `base_net_price ${baseNet} vs net ${net}` : undefined,
+    oppositeSigns(baseVat, vat) ? `base_vat_price ${baseVat} vs vat_price ${vat}` : undefined,
+    oppositeSigns(baseGross, gross) ? `base_gross_price ${baseGross} vs gross_price ${gross}` : undefined,
+  ].filter((entry): entry is string => entry !== undefined);
+  if (mismatched.length > 0) {
+    return {
+      ok: false,
+      code: "purchase_base_sign_mismatch",
+      message: `Purchase invoice base (EUR) amounts have the opposite sign of the document-currency amounts: ${mismatched.join(", ")}. ` +
+        "Fix the base_* amounts or the invoice totals.",
+    };
+  }
+
+  return {
+    ok: true,
+    vat,
+    gross,
+    ...(lastItemGross !== undefined ? { lastItemGross } : {}),
+    base: { net: baseNet, vat: baseVat, gross: baseGross },
+  };
+}
+
+/**
+ * Item net/VAT the API is expected to compute on create: net from
+ * total_net_price (else unit price × quantity), VAT from
+ * project_no_vat_gross_price when set, else net × the dropdown rate.
+ */
+export function predictPurchaseItemAmounts(items: readonly PurchaseInvoiceItem[]): PurchaseItemAmounts[] {
+  return items.map(item => {
+    const net = item.total_net_price
+      ?? (item.unit_net_price !== undefined ? roundMoney(item.unit_net_price * (item.amount ?? 1)) : 0);
+    const vat = item.project_no_vat_gross_price != null
+      ? roundMoney(item.project_no_vat_gross_price - net)
+      : roundMoney(net * parseVatRateDropdown(item.vat_rate_dropdown) / 100);
+    return { net, vat };
+  });
+}
+
+/**
+ * Pre-write check of createAndSetTotals' totals rules on predicted item
+ * amounts. Call it before any mutation (supplier creation, upload, create) so
+ * totals the API would refuse after create cause zero writes.
+ */
+export function previewPurchaseInvoiceTotals(
+  data: CreatePurchaseInvoiceData,
+  vatPrice: number | undefined,
+  grossPrice: number | undefined,
+  isVatRegistered: boolean,
+): PurchaseInvoiceTotalsResolution {
+  const normalizedItems = normalizeItemsForNonVat(data.items, isVatRegistered, grossPrice);
+  return resolvePurchaseInvoiceTotals({
+    data,
+    vatPrice,
+    grossPrice,
+    isVatRegistered,
+    items: normalizedItems,
+    itemAmounts: normalizedItems ? predictPurchaseItemAmounts(normalizedItems) : undefined,
+  });
+}
+
 export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   constructor(client: HttpClient) {
     super(client, "/purchase_invoices");
@@ -232,14 +408,10 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     grossPrice?: number,
     isVatRegistered = true,
   ): Promise<PurchaseInvoice> {
-    const currency = (data.cl_currencies_id ?? "EUR").toUpperCase();
-    const isForeignCurrency = currency !== "EUR";
-    if (isForeignCurrency && (data.currency_rate === undefined || data.currency_rate === null || !Number.isFinite(data.currency_rate) || data.currency_rate <= 0)) {
-      throw new Error(
-        `currency_rate is required when cl_currencies_id="${currency}". ` +
-        `Pass the ${currency}-per-1-EUR rate (for Wise card payments use Target amount / Source amount from the Wise CSV).`
-      );
-    }
+    // Same totals rules as after the read-back, on predicted item amounts:
+    // totals the API would refuse are refused before the draft exists.
+    const preview = previewPurchaseInvoiceTotals(data, vatPrice, grossPrice, isVatRegistered);
+    if (!preview.ok) throw new Error(preview.message);
     const normalizedItems = normalizeItemsForNonVat(
       data.items,
       isVatRegistered,
@@ -258,20 +430,6 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       const invoice = await this.get(id);
       const apiItems = invoice.items;
 
-      const itemVat = apiItems ? roundMoney(apiItems.reduce((s, i) => s + (i.vat_amount ?? 0), 0)) : 0;
-      const itemNet = apiItems ? roundMoney(apiItems.reduce((s, i) => s + (i.total_net_price ?? 0), 0)) : 0;
-
-      // Invoice-level VAT: explicit value wins for VAT-registered companies.
-      // Non-VAT companies must keep invoice-level vat_price at 0 even if item VAT is tracked.
-      const vat = isVatRegistered
-        ? (vatPrice !== undefined ? vatPrice : itemVat)
-        : 0;
-
-      // Invoice-level gross: explicit value wins, otherwise net + actual item VAT
-      const gross = grossPrice !== undefined
-        ? grossPrice
-        : roundMoney(itemNet + itemVat);
-
       // Merge API-returned item IDs back into our original items (preserving
       // cl_fringe_benefits_id and other fields the API GET doesn't return).
       // If the API items have different count (shouldn't happen), fall back to API items.
@@ -285,58 +443,33 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
           }))
         : apiItems)?.map(applyPurchaseItemStructuralDefaults);
 
-      // When explicit VAT differs from item-computed VAT (rounding), adjust
-      // project_no_vat_gross_price on items so the API computes matching totals.
-      if (patchItems && patchItems.length > 0 && vatPrice !== undefined && isVatRegistered && itemVat !== vatPrice) {
-        const vatDiff = roundMoney(vatPrice - itemVat);
-        // Only a per-line rounding residue (≤ 1 cent per item) may be absorbed.
-        // A larger gap means the explicit totals disagree with the items; the
-        // reverse-charge path (item VAT ≠ invoice VAT by design) keeps the
-        // pre-existing behaviour.
-        const isReverseCharge = patchItems.some(item => item.reversed_vat_id !== undefined && item.reversed_vat_id !== null);
-        if (!isReverseCharge && Math.abs(vatDiff) > roundMoney(0.01 * patchItems.length) + 1e-9) {
-          throw new Error(
-            `Purchase invoice totals mismatch: explicit vat_price ${vatPrice} differs from the item-computed VAT ${itemVat} ` +
-            `by ${vatDiff}, more than the ${roundMoney(0.01 * patchItems.length)} rounding tolerance for ${patchItems.length} item(s). ` +
-            "Fix the item net amounts / VAT rates or the invoice totals.",
-          );
-        }
-        // Apply the rounding difference to the last item's gross
-        const lastItem = patchItems[patchItems.length - 1]!;
-        const currentGross = lastItem.project_no_vat_gross_price
-          ?? roundMoney((lastItem.total_net_price ?? 0) + (apiItems?.[patchItems.length - 1]?.vat_amount ?? 0));
-        lastItem.project_no_vat_gross_price = roundMoney(currentGross + vatDiff);
+      const totals = resolvePurchaseInvoiceTotals({
+        data,
+        vatPrice,
+        grossPrice,
+        isVatRegistered,
+        items: patchItems,
+        itemAmounts: apiItems?.map(item => ({ net: item.total_net_price ?? 0, vat: item.vat_amount ?? 0 })),
+      });
+      if (!totals.ok) throw new Error(totals.message);
+
+      // Apply the rounding difference to the last item's gross
+      if (totals.lastItemGross !== undefined) {
+        patchItems![patchItems!.length - 1]!.project_no_vat_gross_price = totals.lastItemGross;
       }
 
       const patchPayload: Partial<PurchaseInvoice> = {
-        vat_price: vat,
-        gross_price: gross,
+        vat_price: totals.vat,
+        gross_price: totals.gross,
         items: patchItems,
       };
 
-      if (isForeignCurrency) {
-        const rate = data.currency_rate!;
-        const net = roundMoney(itemNet);
-        // currency_rate is FOREIGN units per 1 EUR, so EUR = foreign / rate.
-        const baseGross = data.base_gross_price ?? roundMoney(gross / rate);
-        // With an explicit EUR gross (actual settlement), split it in the
-        // invoice's own net/gross proportion rather than re-deriving net from
-        // the nominal rate — otherwise a 0-VAT invoice gets a phantom base VAT.
-        const baseNet = data.base_net_price ?? (
-          data.base_gross_price !== undefined && gross !== 0
-            ? roundMoney(net * baseGross / gross)
-            : roundMoney(net / rate)
-        );
-        // Derive base_vat as the residual of base_gross − base_net so the trio
-        // reconciles exactly (base_net + base_vat === base_gross). Rounding net,
-        // vat, and gross independently against the rate can leave them off by a
-        // cent, which fails API sum validation or re-trips currency rounding.
-        const baseVat = data.base_vat_price ?? roundMoney(baseGross - baseNet);
-        patchPayload.cl_currencies_id = currency;
-        patchPayload.currency_rate = rate;
-        patchPayload.base_net_price = baseNet;
-        patchPayload.base_vat_price = baseVat;
-        patchPayload.base_gross_price = baseGross;
+      if (totals.base) {
+        patchPayload.cl_currencies_id = (data.cl_currencies_id ?? "EUR").toUpperCase();
+        patchPayload.currency_rate = data.currency_rate!;
+        patchPayload.base_net_price = totals.base.net;
+        patchPayload.base_vat_price = totals.base.vat;
+        patchPayload.base_gross_price = totals.base.gross;
       }
 
       await this.update(id, patchPayload);
