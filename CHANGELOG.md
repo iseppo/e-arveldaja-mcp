@@ -50,7 +50,7 @@
 
 ### Internal
 
-- Internal simplification without behaviour change: dead Wise helpers and internal-only exports removed, shared Wise row date/amount and id-sorting helpers, one review-id hash, one blocked-projection payload builder, and shared receipt VAT-number helpers.
+- Internal simplification without behaviour change: dead Wise helpers and internal-only exports removed, shared Wise row date/amount and id-sorting helpers, Wise skips classified by a structured kind instead of reason prefixes, one guarded Wise create-leg helper, one review-id hash, one blocked-projection payload builder, one guided-profile check and file-reference operation rule, and shared receipt VAT-number helpers.
 
 ### Documentation
 
