@@ -8,7 +8,7 @@ import { type ApiContext, coerceId } from "./crud-tools.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSource } from "../file-input-snapshot.js";
 import type { OperationOutcome } from "../operation-outcome.js";
-import { currentToolProfile } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
 import { ISO_DATE_REGEX } from "../wise/preflight.js";
 import { SHA256_HEX } from "../wise/projection.js";
 import { WiseOperationFailedError, type WiseRunInput } from "../wise/executor.js";
@@ -47,10 +47,7 @@ export function registerWiseImportTools(
 
   // Guided profiles receive the token-lean compact Wise surface; standard/full
   // keep the byte-identical full envelope.
-  const useCompactWise = (): boolean => {
-    const profile = currentToolProfile();
-    return profile === "guided" || profile === "guided-sales";
-  };
+  const useCompactWise = (): boolean => isGuidedProfile(currentToolProfile());
 
   const compactResponse = (payload: { summary: unknown }) => ({
     content: [{ type: "text" as const, text: toMcpJson(payload) }],

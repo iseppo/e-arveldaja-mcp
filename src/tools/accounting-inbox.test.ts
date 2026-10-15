@@ -4622,4 +4622,26 @@ describe("accounting_inbox detected file_refs per profile", () => {
     expect(runtime.fileReferenceStore.resolve(wiseRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise })).toContain("transaction-history.csv");
     expect(() => runtime.fileReferenceStore.resolve(camtRef, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.bank })).toThrow();
   });
+
+  it("scan recommended-step statement refs: bank_input on guided, the import tool's own operation on standard", async () => {
+    const dims = [fixtureAccountDimension(), fixtureAccountDimension({ id: 202, title_est: "Wise" })];
+    for (const profile of ["guided", "standard"] as const) {
+      const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+      workspacesToClean.push(workspace);
+      const server = createMockToolServer();
+      const runtime = createTestRuntimeSafetyContext(profile === "guided" ? { scope: { profile } } : undefined);
+      registerAccountingInboxTools(server, runtime, createAccountingWorkflowApi({ bankAccounts: banks, accountDimensions: dims }), exposure);
+      const payload = parseMcpResponse((await runWithToolProfile(profile, () =>
+        getRegisteredToolHandler(server, "accounting_inbox")({ mode: "scan", workspace_path: workspace }))).content[0]!.text) as any;
+      const steps = (payload.recommended_steps as any[]).filter(step => typeof step.suggested_args?.file_ref === "string");
+      expect(steps.length, profile).toBeGreaterThan(0);
+      for (const step of steps) {
+        const operation = profile === "guided"
+          ? FILE_REFERENCE_OPERATIONS.bank
+          : step.tool === "import_wise_transactions" ? FILE_REFERENCE_OPERATIONS.wise : FILE_REFERENCE_OPERATIONS.camt;
+        if (profile === "guided") expect(step.tool).toBe("process_bank_input");
+        expect(() => runtime.fileReferenceStore.resolve(step.suggested_args.file_ref, { kind: "file", operation }), `${profile} ${step.tool}`).not.toThrow();
+      }
+    }
+  });
 });

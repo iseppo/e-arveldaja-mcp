@@ -9,7 +9,7 @@ import { readOnly, batch } from "../annotations.js";
 import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../workflow-response.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { createBankReconciliationOperations } from "../banking/reconciliation/operations.js";
-import { currentToolProfile } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
 import { BANK_RECONCILIATION_PLAN_DOMAIN } from "./bank-reconciliation-plan.js";
 import type { PlanExecutionReport } from "../plan-execution.js";
 import type { OperationResultStatus, PublicOperationResultDetail } from "../operation-result-store.js";
@@ -73,10 +73,7 @@ export function registerBankReconciliationTools(
 
   // Guided profiles receive the token-lean compact reconciliation surface;
   // standard/full keep the byte-identical full envelope.
-  const useCompactRecon = (): boolean => {
-    const profile = currentToolProfile();
-    return profile === "guided" || profile === "guided-sales";
-  };
+  const useCompactRecon = (): boolean => isGuidedProfile(currentToolProfile());
   const compactResponse = (payload: { summary: unknown }) => ({
     content: [{ type: "text" as const, text: toMcpJson(payload) }],
   });

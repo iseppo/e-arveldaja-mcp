@@ -122,8 +122,13 @@ export function remapGuidedInterAccount(
   return { tool: "reconcile_bank_transactions", args: mergedToolArgs(args.execute === true ? "execute_inter_account" : "inter_account_dry_run", args) };
 }
 
+/** The guided profiles (guided, guided-sales): the façade surface. */
+export function isGuidedProfile(profile: ToolProfile): boolean {
+  return profile === "guided" || profile === "guided-sales";
+}
+
 export function projectActionForProfile(action: Action, profile: ToolProfile): any {
-  if (profile !== "guided" && profile !== "guided-sales") return action;
+  if (!isGuidedProfile(profile)) return action;
   const args = action.args ?? {};
   const remapped = remapHiddenGranularTool(action.tool, args);
   const granularProjected = remapped ? { ...action, tool: remapped.tool, args: remapped.args } : action;

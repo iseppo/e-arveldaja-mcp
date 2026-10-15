@@ -14,7 +14,7 @@ import { readOnly, batch } from "../annotations.js";
 import { remapHiddenGranularWorkflowResult } from "../workflow-response.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { CamtPreflightRejectedError } from "../camt/executor.js";
-import { currentToolProfile } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
 import {
   importPreflightFailurePayload,
   issueCamtResultHandle,
@@ -59,10 +59,7 @@ export function registerCamtImportTools(
 
   // Guided profiles receive the token-lean compact CAMT surface; standard/full
   // keep the PR0-pinned full envelope byte-for-byte.
-  const useCompactCamt = (): boolean => {
-    const profile = currentToolProfile();
-    return profile === "guided" || profile === "guided-sales";
-  };
+  const useCompactCamt = (): boolean => isGuidedProfile(currentToolProfile());
 
   // parse_camt053 / import_camt053 are fully covered by the merged
   // process_camt053 modes (parse / dry_run / execute). They enter tools/list (a

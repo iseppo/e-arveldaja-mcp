@@ -84,7 +84,7 @@ import {
   renderClassificationAnalysisCompact,
   renderUnmatchedAnalysisFull,
 } from "../receipts/classification-presenter.js";
-import { currentToolProfile } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
 import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
@@ -1301,10 +1301,7 @@ export function registerReceiptInboxTools(
   // parseMcpResponse round-trip on the batch path anymore.
   // Guided profiles receive the token-lean compact receipt surface; standard/full
   // keep the byte-identical full envelope.
-  const useCompactReceipts = (): boolean => {
-    const profile = currentToolProfile();
-    return profile === "guided" || profile === "guided-sales";
-  };
+  const useCompactReceipts = (): boolean => isGuidedProfile(currentToolProfile());
   const activeConnectionName = (): string | undefined => {
     try {
       return runtimeSafetyContext.getActiveScope().connectionName;

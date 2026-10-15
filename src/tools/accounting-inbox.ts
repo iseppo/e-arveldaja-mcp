@@ -8,7 +8,7 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { currentToolProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
 import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -921,8 +921,7 @@ function projectPublicRecommendedSteps(
   let blocked: BlockedRecommendedAction | undefined;
   const blockedProposals: Array<Record<string, unknown>> = [];
   const safeActionContext: Array<Record<string, unknown>> = [];
-  const profile = currentToolProfile();
-  const guidedBankFacade = profile === "guided" || profile === "guided-sales";
+  const guidedBankFacade = isGuidedProfile(currentToolProfile());
   for (const rawStep of rawSteps) {
     const legacyRemap = exposure.exposeGranularTools
       ? undefined
@@ -939,7 +938,7 @@ function projectPublicRecommendedSteps(
     const normalizedStep = bankRemap
       ? { ...legacyStep, tool: bankRemap.tool, suggested_args: bankRemap.args }
       : legacyStep;
-    const publicStep = publicRecommendedStep(normalizedStep, runtimeSafetyContext, digestBindings);
+    const publicStep = publicRecommendedStep(normalizedStep, guidedBankFacade, runtimeSafetyContext, digestBindings);
     const projected = projectActionForCurrentProfile({
       kind: "tool_call",
       label: publicStep.purpose,
@@ -1048,10 +1047,11 @@ function publicReceiptFolder(
 
 function publicRecommendedStep(
   step: RecommendedStep,
+  guided: boolean,
   runtimeSafetyContext: RuntimeSafetyContext,
   digestBindings: ReadonlyMap<string, string>,
 ): RecommendedStep {
-  const suggestedArgs = publicSuggestedArgs(step.tool, step.suggested_args, runtimeSafetyContext, digestBindings);
+  const suggestedArgs = publicSuggestedArgs(step.tool, guided, step.suggested_args, runtimeSafetyContext, digestBindings);
   return {
     ...step,
     purpose: sandboxExternalText(step.purpose),
@@ -1060,8 +1060,22 @@ function publicRecommendedStep(
   };
 }
 
+/** The file-reference operation a statement file of `tool` is referenced
+ * under. Guided profiles have only process_bank_input for statements, which
+ * reads refs under bank_input (a camt_input / wise_input ref would be
+ * refused); elsewhere each import tool has its own operation. */
+function fileReferenceOperationFor(tool: string, guided: boolean): string {
+  const target = (guided ? remapGuidedBankFacade(tool, {})?.tool : undefined) ?? tool;
+  return target === "process_bank_input"
+    ? FILE_REFERENCE_OPERATIONS.bank
+    : target === "import_wise_transactions"
+      ? FILE_REFERENCE_OPERATIONS.wise
+      : FILE_REFERENCE_OPERATIONS.camt;
+}
+
 function publicSuggestedArgs(
   tool: string,
+  guided: boolean,
   args: Record<string, unknown>,
   runtimeSafetyContext: RuntimeSafetyContext,
   // Paths whose reference must be bound to the scanned bytes (a kept CAMT file
@@ -1072,11 +1086,7 @@ function publicSuggestedArgs(
   const directFilePath = typeof suggestedArgs.file_path === "string" ? suggestedArgs.file_path : undefined;
   const directFolderPath = typeof suggestedArgs.folder_path === "string" ? suggestedArgs.folder_path : undefined;
   if (directFilePath !== undefined) {
-    const operation = tool === "process_bank_input"
-      ? FILE_REFERENCE_OPERATIONS.bank
-      : tool === "import_wise_transactions"
-        ? FILE_REFERENCE_OPERATIONS.wise
-        : FILE_REFERENCE_OPERATIONS.camt;
+    const operation = fileReferenceOperationFor(tool, guided);
     delete suggestedArgs.file_path;
     const expectedSha256 = digestBindings.get(directFilePath);
     suggestedArgs.file_ref = runtimeSafetyContext.fileReferenceStore.issue({
@@ -1254,17 +1264,14 @@ function buildPreparedInboxPayload(
   const projected = projectPublicRecommendedSteps(prepared.steps, runtimeSafetyContext, exposure, prepared.camtDigestBindings);
   const steps = projected.steps;
   const questions = prepared.questions.map(publicQuestion);
-  // Guided profiles have only process_bank_input for statements, which reads
-  // refs under bank_input; a camt_input / wise_input ref would be refused.
   // Like the standard refs, detected refs stay unbound (not sha-bound).
-  const profile = currentToolProfile();
-  const guided = profile === "guided" || profile === "guided-sales";
+  const guided = isGuidedProfile(currentToolProfile());
   return {
     workspace_path: sandboxExternalText(prepared.workspacePath),
     scan: prepared.scan,
     detected_inputs: {
-      camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, guided ? FILE_REFERENCE_OPERATIONS.bank : FILE_REFERENCE_OPERATIONS.camt)),
-      wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, guided ? FILE_REFERENCE_OPERATIONS.bank : FILE_REFERENCE_OPERATIONS.wise)),
+      camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, fileReferenceOperationFor("process_camt053", guided))),
+      wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, fileReferenceOperationFor("import_wise_transactions", guided))),
       receipt_folders: prepared.receiptFolders.map(folder => publicReceiptFolder(folder, runtimeSafetyContext)),
     },
     camt_overlap: prepared.camtOverlap,
@@ -1943,8 +1950,7 @@ function emitWorkflowEnvelope(
   if (!isRecord(v1Workflow)) return v1Workflow;
   // Standard/full discard the v2 projection, so skip the detail-item reduction and
   // the store round-trip entirely for them — their output stays byte-identical v1.
-  const profile = currentToolProfile();
-  if (profile !== "guided" && profile !== "guided-sales") return v1Workflow;
+  if (!isGuidedProfile(currentToolProfile())) return v1Workflow;
   try {
     return projectWorkflowResponse(
       v1Workflow as unknown as WorkflowEnvelope,
@@ -1999,17 +2005,14 @@ async function buildAccountingInboxDryRunResponse(
   const prepared = await prepareAccountingInbox(api, runtimeSafetyContext, params);
   const operations = createAccountingOperations(api, runtimeSafetyContext);
   const autopilot = await runAccountingInboxDryRunPipeline({ prepared, operations });
-  // Guided profiles have only process_bank_input for statements: a step of a
-  // CAMT / Wise tool gets its file reference under bank_input there, as in
-  // detected_inputs (the step keeps naming the tool that ran).
-  const profile = currentToolProfile();
-  const guided = profile === "guided" || profile === "guided-sales";
-  const referenceTool = (tool: string) => (guided ? remapGuidedBankFacade(tool, {})?.tool : undefined) ?? tool;
+  // A step of a CAMT / Wise tool gets its file reference the way detected_inputs
+  // does (bank_input on guided profiles); the step keeps naming the tool that ran.
+  const guided = isGuidedProfile(currentToolProfile());
   const publicStepResult = (step: typeof autopilot.executed_steps[number]) => ({
     ...step,
     purpose: sandboxExternalText(step.purpose),
     summary: sandboxExternalText(step.summary),
-    suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
+    suggested_args: publicSuggestedArgs(step.tool, guided, step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
     source_documents: publicSourceDocuments(step.suggested_args),
   });
   const publicAutopilot: Record<string, unknown> = {

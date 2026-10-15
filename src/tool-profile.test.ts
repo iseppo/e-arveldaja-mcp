@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import { TOOL_CATALOG, TOOL_CATALOG_FINGERPRINT, toolMeta } from "./tool-catalog.js";
-import { GUIDED_TOOL_NAMES, isToolVisibleForProfile, parseToolProfile, projectActionForProfile, SETUP_PROFILE_CHOICES } from "./tool-profile.js";
+import { GUIDED_TOOL_NAMES, isGuidedProfile, isToolVisibleForProfile, parseToolProfile, projectActionForProfile, SETUP_PROFILE_CHOICES } from "./tool-profile.js";
 
 describe("tool profiles", () => {
+  it("isGuidedProfile is true for exactly guided and guided-sales", () => {
+    expect((["guided", "guided-sales", "standard", "full", "custom"] as const).filter(isGuidedProfile)).toEqual(["guided", "guided-sales"]);
+  });
+
   it("defaults to standard, validates opt-in profiles, and lets legacy flags force custom", () => {
     expect(parseToolProfile({} as NodeJS.ProcessEnv)).toBe("standard");
     expect(parseToolProfile({ EARVELDAJA_PROFILE: "guided-sales" } as NodeJS.ProcessEnv)).toBe("guided-sales");
