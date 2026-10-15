@@ -57,7 +57,7 @@ describe("simpleWiseFailureFromCode", () => {
 describe("operation-result handles", () => {
   const wiseData = (reasons: string[]) => ({
     created: [{ status: "created", date: "2026-01-01", amount: 5, api_id: 9 }],
-    skipped: reasons.map(reason => ({ reason })),
+    skipped: reasons.map(reason => ({ reason, kind: "error" })),
   }) as unknown as WiseImportRenderData;
 
   it("issues a Wise handle only with a plan handle, with status from the error skips", () => {

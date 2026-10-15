@@ -16,7 +16,7 @@ import type { CamtParseResult } from "../camt/types.js";
 import { journalReviewClause, type CamtImportPreview } from "../camt/presenter.js";
 import { isCamtJournalReviewRow } from "../camt/projection.js";
 import type { WiseImportPreview } from "../wise/presenter.js";
-import { isNonErrorWiseSkipReason } from "../wise/preflight.js";
+
 import type { ReceiptBatchResult } from "../receipts/types.js";
 import type { UnmatchedAnalysisResult } from "../receipts/classification-operations.js";
 import type { InterAccountPreview } from "../banking/reconciliation/types.js";
@@ -541,12 +541,12 @@ function summarizeAutopilotToolResult(
     case "import_wise_transactions": {
       const preview = value as WiseImportPreview;
       // The Wise presenter splits the `skipped` render rows into non-error
-      // skips vs errors by reason (isNonErrorWiseSkipReason). The summarizer must
+      // skips vs errors by kind. The summarizer must
       // reproduce that split so `error_count` / `skipped` match the former
       // decoded execution.summary exactly (M12 gating reads created/error counts).
       const created = preview.created.length;
-      const skipped = preview.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason)).length;
-      const errorCount = preview.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
+      const skipped = preview.skipped.filter(entry => entry.kind !== "error").length;
+      const errorCount = preview.skipped.filter(entry => entry.kind === "error").length;
       // Ownership/dimension reviews are the Wise preview's own needs_review rows:
       // an unverified own-account transfer must never read as approvable. One
       // follow-up per review, keyed by wise_id so the id is resume-stable.

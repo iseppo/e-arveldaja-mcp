@@ -53,6 +53,7 @@ function makeData(rows: number, mode: "DRY_RUN" | "EXECUTED" = "DRY_RUN", errorC
   const skipped: WiseSkippedEntry[] = Array.from({ length: errorCount }, (_, index) => ({
     wise_id: `TRANSFER-${index}`,
     reason: `Inter-account confirmation failed: upstream rejected ${index}`,
+    kind: "error",
   }));
   return {
     mode,
@@ -165,19 +166,25 @@ describe("renderWiseImportCompact — automatic matches", () => {
       ...Array.from({ length: 4 }, (_, index) => ({
         wise_id: `CARD_TRANSACTION-${index}`,
         reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${500 + index} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+        kind: "already_imported" as const,
+        record_id: 500 + index,
         auto_match: { code: "wise_untagged_ledger_unique" as const, transaction_id: 500 + index },
       })),
       {
         wise_id: "TRANSFER-9",
         reason: "Already journalized (wise_transfer_journal_unique_legacy): inter-account journal 7100 is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created",
+        kind: "already_journalized" as const,
+        record_id: 7100,
         auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 7100 },
       },
       {
         wise_id: "FEE-TRANSFER-9",
         reason: "Fee already journalized: inter-account journal 7100 books this transfer net of the fee",
+        kind: "already_journalized" as const,
+        record_id: 7100,
         auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 7100 },
       },
-      { wise_id: "TRANSFER-1", reason: "Already imported" },
+      { wise_id: "TRANSFER-1", reason: "Already imported", kind: "already_imported" },
     ];
     const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
     expect(summary.counts).toMatchObject({ skipped: 7, duplicates: 1, auto_matched: 6, errors: 0 });
@@ -201,6 +208,8 @@ describe("renderWiseImportCompact — automatic matches", () => {
     data.skipped = Array.from({ length: 4 }, (_, index) => ({
       wise_id: `CARD_TRANSACTION-${index}`,
       reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${500 + index} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+      kind: "already_imported" as const,
+      record_id: 500 + index,
       auto_match: { code: "wise_untagged_ledger_unique" as const, transaction_id: 500 + index },
     }));
     const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
@@ -288,11 +297,11 @@ describe("renderWiseImportFull — already-journalized rows", () => {
   function slimData(mode: "DRY_RUN" | "EXECUTED"): WiseImportRenderData {
     const data = makeData(0, mode);
     const skipped: WiseSkippedEntry[] = [
-      { wise_id: "TRANSFER-1", reason: "Already journalized: inter-account journal 501 books this transfer; no Wise bank row created" },
-      { wise_id: "TRANSFER-2", reason: "Already journalized: inter-account journal 502 books this transfer; no Wise bank row created" },
-      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
-      { wise_id: "ODD-1", reason: "Unsupported Wise direction \"NEUTRAL\"" },
-      { wise_id: "FEE:X", reason: "Skipped because main transaction was not created" },
+      { wise_id: "TRANSFER-1", reason: "Already journalized: inter-account journal 501 books this transfer; no Wise bank row created", kind: "already_journalized", record_id: 501 },
+      { wise_id: "TRANSFER-2", reason: "Already journalized: inter-account journal 502 books this transfer; no Wise bank row created", kind: "already_journalized", record_id: 502 },
+      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)", kind: "already_imported" },
+      { wise_id: "ODD-1", reason: "Unsupported Wise direction \"NEUTRAL\"", kind: "unsupported_direction" },
+      { wise_id: "FEE:X", reason: "Skipped because main transaction was not created", kind: "dependency" },
     ];
     return { ...data, commands: [], alreadyJournalized: [assertion(1, 501), assertion(2, 502)], skipped };
   }
@@ -345,9 +354,11 @@ describe("renderWiseImportCompact — zero-write preview", () => {
         ...Array.from({ length: autoMatches }, (_, index) => ({
           wise_id: `TRANSFER-${index}`,
           reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${700 + index} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+          kind: "already_journalized" as const,
+          record_id: 700 + index,
           auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 700 + index },
         })),
-        { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
+        { wise_id: "CARD-1", reason: "Already imported (Wise ID match)", kind: "already_imported" },
       ],
     };
   }
@@ -441,17 +452,21 @@ describe("renderWiseImportCompact — disjoint skip counts", () => {
     const legacy = (id: string, journalId: number): WiseSkippedEntry => ({
       wise_id: id,
       reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${journalId} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+      kind: "already_journalized",
+      record_id: journalId,
       auto_match: { code: "wise_transfer_journal_unique_legacy", journal_id: journalId },
     });
     const labelled = (id: string, journalId: number): WiseSkippedEntry => ({
       wise_id: id,
       reason: `Already journalized: inter-account journal ${journalId} books this transfer; no Wise bank row created`,
+      kind: "already_journalized",
+      record_id: journalId,
     });
     const assertion = (id: string, journalId: number) => ({ wise_id: id, existing_journal_id: journalId }) as unknown as WiseAlreadyJournalizedAssertion;
     data.skipped = [
       legacy("TRANSFER-L1", 701), legacy("TRANSFER-L2", 702),
       labelled("TRANSFER-J1", 801), labelled("TRANSFER-J2", 802),
-      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)" },
+      { wise_id: "CARD-1", reason: "Already imported (Wise ID match)", kind: "already_imported" },
     ];
     data.alreadyJournalized = mode === "DRY_RUN"
       ? [assertion("TRANSFER-L1", 701), assertion("TRANSFER-L2", 702), assertion("TRANSFER-J1", 801), assertion("TRANSFER-J2", 802)]
@@ -488,9 +503,11 @@ describe("already-journalized automatic matches: standard and guided labels", ()
         ? {
             wise_id: id,
             reason: `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${700 + index} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`,
+            kind: "already_journalized" as const,
+            record_id: 700 + index,
             auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: 700 + index },
           }
-        : { wise_id: id, reason: `Already journalized: inter-account journal ${700 + index} books this transfer; no Wise bank row created` }),
+        : { wise_id: id, reason: `Already journalized: inter-account journal ${700 + index} books this transfer; no Wise bank row created`, kind: "already_journalized" as const, record_id: 700 + index }),
       alreadyJournalized: ids.map((id, index) => ({ wise_id: id, existing_journal_id: 700 + index }) as unknown as WiseAlreadyJournalizedAssertion),
     };
   }

@@ -11,6 +11,7 @@ import type {
   ValidatedWiseFields,
   WisePreflightResult,
   WiseRow,
+  WiseSkippedEntry,
   WiseTransferDecision,
 } from "./types.js";
 
@@ -504,32 +505,11 @@ export function counterpartyNameForWiseRow(row: WiseRow): string | undefined {
 
 // --- Skip summarization -------------------------------------------------------
 
-export function isNonErrorWiseSkipReason(reason: string): boolean {
-  return reason.startsWith("Already imported") ||
-    reason.startsWith("Already journalized") ||
-    reason.startsWith("Fee already imported") ||
-    reason.startsWith("Fee already journalized") ||
-    reason.startsWith("Unsupported Wise direction") ||
-    reason.startsWith("Held for review") ||
-    reason === "Skipped because main transaction was not created";
-}
-
-/** A skip because the row (or its fee) is already in the ledger — nothing to
- * review or fix. Narrower than {@link isNonErrorWiseSkipReason}, which also
- * covers unsupported directions and dependency skips. */
-export function isAlreadyBookedWiseSkipReason(reason: string): boolean {
-  return reason.startsWith("Already imported") ||
-    reason.startsWith("Already journalized") ||
-    reason.startsWith("Fee already imported") ||
-    reason.startsWith("Fee already journalized");
-}
 
 // Already-booked reasons name the ledger record that books the row ("inter-account
 // journal 29443702 books this transfer"). Grouping on the raw text made one group
 // per record (35 groups, ~89 KB on a live CSV), so the id is templated out of the
 // group key and kept per row in `records`. Error reasons are grouped verbatim.
-const LEDGER_RECORD_ID_RE = /\b(journal|transaction) (\d+)(?![\d.\-])\b/;
-
 export interface WiseSkippedGroup {
   reason: string;
   count: number;
@@ -537,11 +517,14 @@ export interface WiseSkippedGroup {
   records?: Array<{ wise_id: string; record_id: number }>;
 }
 
-export function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; reason: string }>): WiseSkippedGroup[] {
+export function summarizeWiseSkippedEntries(
+  skipped: ReadonlyArray<Pick<WiseSkippedEntry, "wise_id" | "reason" | "kind" | "record_id">>,
+): WiseSkippedGroup[] {
   const groups = new Map<string, WiseSkippedGroup>();
   for (const entry of skipped) {
-    const record = isNonErrorWiseSkipReason(entry.reason) ? LEDGER_RECORD_ID_RE.exec(entry.reason) : null;
-    const key = record ? entry.reason.replace(LEDGER_RECORD_ID_RE, "$1 (see records)") : entry.reason;
+    const record = entry.kind === "error" ? undefined : entry.record_id;
+    const table = entry.kind === "already_imported" ? "transaction" : "journal";
+    const key = record !== undefined ? entry.reason.replace(`${table} ${record}`, `${table} (see records)`) : entry.reason;
     let group = groups.get(key);
     if (group) {
       group.count++;
@@ -550,7 +533,7 @@ export function summarizeWiseSkippedEntries(skipped: Array<{ wise_id: string; re
       group = { reason: key, count: 1, sample_ids: [entry.wise_id] };
       groups.set(key, group);
     }
-    if (record) (group.records ??= []).push({ wise_id: entry.wise_id, record_id: Number(record[2]) });
+    if (record !== undefined) (group.records ??= []).push({ wise_id: entry.wise_id, record_id: record });
   }
   return [...groups.values()];
 }

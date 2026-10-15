@@ -702,6 +702,7 @@ async function runWiseImport(
         skipped.push({
           wise_id: command.wise_id,
           reason: "Skipped because main transaction was not created",
+          kind: "dependency",
         });
         continue;
       }
@@ -709,6 +710,7 @@ async function runWiseImport(
         skipped.push({
           wise_id: command.wise_id,
           reason: "Skipped because an earlier Wise-side check of this transfer failed",
+          kind: "error",
         });
         continue;
       }
@@ -819,6 +821,7 @@ async function runWiseImport(
             skipped.push({
               wise_id: command.wise_id,
               reason: `Fee confirmation failed: ${errorMessage}`,
+              kind: "error",
             });
             created.push({
               wise_id: command.wise_id,
@@ -934,6 +937,7 @@ async function runWiseImport(
             skipped.push({
               wise_id: command.wise_id,
               reason: `Inter-account confirmation failed: ${errorMessage}`,
+              kind: "error",
             });
             interAccountResults.push({
               api_id: apiId,
@@ -958,11 +962,13 @@ async function runWiseImport(
             wise_id: command.wise_id,
             reason: `Outcome unknown (${command.action}): the API call for Wise row ${command.wise_id} may or may not have been applied. ` +
               "Import stopped; verify with list_transactions / list_journals before re-running.",
+            kind: "error",
           });
           for (const remaining of commands.slice(commands.indexOf(command) + 1)) {
             skipped.push({
               wise_id: remaining.wise_id,
               reason: "Not attempted: import stopped after an indeterminate mutation",
+              kind: "error",
             });
           }
           stoppedIndeterminate = true;
@@ -971,6 +977,7 @@ async function runWiseImport(
         skipped.push({
           wise_id: command.wise_id,
           reason: err instanceof Error ? err.message : String(err),
+          kind: "error",
         });
       }
     }
@@ -983,6 +990,7 @@ async function runWiseImport(
             skipped.push({
               wise_id: assertion.wise_id,
               reason: "Not attempted: import stopped after an indeterminate mutation",
+              kind: "error",
             });
           }
         } else {
@@ -999,13 +1007,14 @@ async function runWiseImport(
               skipped.push({
                 wise_id: assertion.wise_id,
                 reason: `Already-journalized re-check failed: journal ${assertion.existing_journal_id} could not be read (${readError})`,
+                kind: "error",
               });
               continue;
             }
             const expectedJournal = freshJournals.find(journal => journal.id === assertion.existing_journal_id);
             if (!expectedJournal || !exactStateMatches(expectedJournal, assertion.current_journal_state)) {
               const reason = `Stale already-journalized precondition: expected journal ${assertion.existing_journal_id} changed before acceptance`;
-              skipped.push({ wise_id: assertion.wise_id, reason });
+              skipped.push({ wise_id: assertion.wise_id, reason, kind: "error" });
               interAccountResults.push({
                 wise_id: assertion.wise_id,
                 amount: assertion.booked_amount,

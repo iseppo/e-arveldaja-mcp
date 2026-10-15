@@ -326,7 +326,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     const output = run([transferIn("TRANSFER-1001")], [labelledJournal(), secondCandidate()]);
     expect(actions(output)).toEqual(["held:TRANSFER-1001"]);
     expect(output.created).toEqual([]);
-    expect(output.skipped).toEqual([{ wise_id: "TRANSFER-1001", reason: "Held for review (wise_transfer_journal_ambiguous): not imported" }]);
+    expect(output.skipped).toEqual([{ wise_id: "TRANSFER-1001", reason: "Held for review (wise_transfer_journal_ambiguous): not imported", kind: "held" }]);
     expect(output.ownershipReviews).toEqual([expect.objectContaining({
       wise_id: "TRANSFER-1001",
       code: "wise_transfer_journal_ambiguous",
@@ -806,14 +806,14 @@ describe("Wise row next to an untagged stored row of the same movement (F2b)", (
       expect(created(output)).toEqual([]);
       expect(output.created).toEqual([]);
       expect(output.ownershipReviews).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), kind: "already_imported", record_id: 13875420, auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
     });
 
     it("is not created when, without a reference, its account name carries the Wise counterparty (live shape ii)", () => {
       const stored = manual({ ref_number: null, bank_account_name: "Booking.com / Hotel Y (Z OÜ)", description: "Majutus Tartus" });
       const output = unique(rowsOf([card(ID)]), [stored], [registration()]);
       expect(created(output)).toEqual([]);
-      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
+      expect(output.skipped).toEqual([{ wise_id: ID, reason: expect.stringContaining(UNIQUE), kind: "already_imported", record_id: 13875420, auto_match: { code: "wise_untagged_ledger_unique", transaction_id: 13875420 } }]);
     });
 
     it("keeps the row's fee, no longer depending on the skipped main row", () => {

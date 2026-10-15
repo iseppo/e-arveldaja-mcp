@@ -241,9 +241,23 @@ export interface WiseCreatedEntry {
   booked_currency?: string;
 }
 
+/** Why a row was skipped. Every kind but "error" is a planned, non-error skip;
+ * "already_imported" / "already_journalized" mean the ledger already books it. */
+export type WiseSkipKind =
+  | "already_imported"
+  | "already_journalized"
+  | "held"
+  | "unsupported_direction"
+  | "dependency"
+  | "error";
+
 export interface WiseSkippedEntry {
   wise_id: string;
   reason: string;
+  kind: WiseSkipKind;
+  /** The ledger record the reason names (a transaction for already_imported,
+   * else a journal): skipped_details groups the reason with it templated out. */
+  record_id?: number;
   /** Set when an automatic match (not the row's own WISE: tag) kept the row
    * out of the plan: names the stored transaction or journal it was matched
    * to, so a wrong match can be undone by correcting that record. */

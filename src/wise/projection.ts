@@ -834,7 +834,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const type = transactionTypeForWiseDirection(row.direction);
     const sourceDirection = sourceDirectionForWiseDirection(row.direction);
     if (!type || !sourceDirection) {
-      skipped.push({ wise_id: row.id, reason: `Unsupported Wise direction "${row.direction}"` });
+      skipped.push({ wise_id: row.id, reason: `Unsupported Wise direction "${row.direction}"`, kind: "unsupported_direction" });
       continue;
     }
     const amount = bookedAmountForWiseRow(row);
@@ -863,6 +863,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       skipped.push({
         wise_id: row.id,
         reason: `Wise ID is too long (${row.id.length} characters) for its WISE: identity tag and source-direction marker to fit the ${TRANSACTION_DESCRIPTION_MAX_LENGTH}-character transaction description; book this row manually.`,
+        kind: "error",
       });
       continue;
     }
@@ -894,6 +895,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       skipped.push({
         wise_id: legId,
         reason: "Already imported (Wise ID match)",
+        kind: "already_imported",
       });
       if (approvedTransferIds.has(row.id)) {
         const decision = transferDecisions.get(row);
@@ -973,6 +975,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         skipped.push({
           wise_id: `FEE:${legId}`,
           reason: "Fee already imported (Wise ID match)",
+          kind: "already_imported",
         });
         continue;
       }
@@ -1454,6 +1457,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           reason: uniqueLegacy
             ? `Already journalized (wise_transfer_journal_unique_legacy): inter-account journal ${existingJournalId} is the only same-amount journal within one day and books exactly this transfer; no Wise bank row created`
             : `Already journalized: inter-account journal ${existingJournalId} books this transfer; no Wise bank row created`,
+          kind: "already_journalized",
+          record_id: existingJournalId,
           ...(uniqueLegacy ? { auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: existingJournalId } } : {}),
         });
         dependsOn = null;
@@ -1465,6 +1470,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           skipped.push({
             wise_id: feeCommand.wise_id,
             reason: `Fee already journalized: inter-account journal ${existingJournalId} books this transfer net of the fee`,
+            kind: "already_journalized",
+            record_id: existingJournalId,
             ...(uniqueLegacy ? { auto_match: { code: "wise_transfer_journal_unique_legacy" as const, journal_id: existingJournalId } } : {}),
           });
         }
@@ -1608,6 +1615,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       skipped.push({
         wise_id: entry.wise_id,
         reason: `Already imported (wise_untagged_ledger_unique): confirmed transaction ${lookalikes[0]!.id} without a WISE: tag is the only stored row of this movement on this Wise account; no Wise bank row created`,
+        kind: "already_imported",
+        record_id: lookalikes[0]!.id!,
         auto_match: { code: "wise_untagged_ledger_unique", transaction_id: lookalikes[0]!.id! },
       });
       continue;
@@ -1659,8 +1668,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       reason: `${holdReview.reason} Only this transfer's fee leg (FEE:${legId}) is held: the transfer itself is already journalized by journal ${journalized.existing_journal_id}.`,
     };
     skipped.push(journalized === undefined
-      ? { wise_id: row.id, reason: `Held for review (${review.code}): not imported` }
-      : { wise_id: `FEE:${legId}`, reason: `Held for review (${review.code}): fee leg not imported; the transfer is already journalized by journal ${journalized.existing_journal_id}` });
+      ? { wise_id: row.id, reason: `Held for review (${review.code}): not imported`, kind: "held" }
+      : {
+          wise_id: `FEE:${legId}`,
+          reason: `Held for review (${review.code}): fee leg not imported; the transfer is already journalized by journal ${journalized.existing_journal_id}`,
+          kind: "held",
+          record_id: journalized.existing_journal_id,
+        });
     heldCodes.set(row, review.code);
     reviewRows.set(review, row.rowIndex);
     ownershipReviews.splice(at < 0 ? ownershipReviews.length : at, 0, review);

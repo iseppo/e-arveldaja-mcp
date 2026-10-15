@@ -17,8 +17,6 @@ import { echoableSourcePath, type FileInputSource, type FileInputIdentity } from
 import {
   bookedCurrencyForWiseRow,
   counterpartyNameForWiseRow,
-  isAlreadyBookedWiseSkipReason,
-  isNonErrorWiseSkipReason,
   summarizeWiseSkippedEntries,
 } from "./preflight.js";
 import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN } from "./projection.js";
@@ -274,8 +272,8 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
   const file_path = echoableSourcePath(source);
   const { feeAccountDimensionsId: fee_account_dimensions_id, feeAccountRelationId: fee_account_relation_id, interAccountDimensionId: inter_account_dimension_id, confirmOwnTransferIds: confirm_own_transfer_ids, dateFrom: date_from, dateTo: date_to, skipJarTransfers: skip_jar_transfers } = data.args;
 
-  const executionSkipped = skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
-  const executionErrors = skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
+  const executionSkipped = skipped.filter(entry => entry.kind !== "error");
+  const executionErrors = skipped.filter(entry => entry.kind === "error");
   const summary = {
     total_csv_rows: totalCsvRows,
     eligible: eligibleCount,
@@ -315,7 +313,8 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
   // `reason` is built from raw exception text (err.message) which can echo
   // upstream API content. Wrap at MCP output so any CSV-origin bytes echoed
   // through an error reach the LLM sandboxed.
-  const sanitizeReason = (entry: { wise_id: string; reason: string }) => ({
+  // kind / record_id are internal classification, not part of the envelope.
+  const sanitizeReason = ({ kind: _kind, record_id: _recordId, ...entry }: WiseSkippedEntry) => ({
     ...entry,
     reason: wrapUntrustedOcr(entry.reason) ?? entry.reason,
   });
@@ -329,7 +328,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
   // keeps the full per-row record.
   const dryRun = mode === "DRY_RUN";
   const displayedExecutionSkipped = dryRun
-    ? executionSkipped.filter(entry => !isAlreadyBookedWiseSkipReason(entry.reason))
+    ? executionSkipped.filter(entry => entry.kind !== "already_imported" && entry.kind !== "already_journalized")
     : executionSkipped;
   const sanitizedExecutionSkipped = displayedExecutionSkipped.map(sanitizeReason);
   // Dry run: transfers an existing journal already books are not commands;
@@ -477,8 +476,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
 // An automatic match (auto_match) is counted on its own, never as a plain
 // duplicate: it is a judgement the operator can object to.
 function isDuplicateSkip(entry: WiseSkippedEntry): boolean {
-  return entry.auto_match === undefined &&
-    (entry.reason.startsWith("Already imported") || entry.reason.startsWith("Fee already imported"));
+  return entry.auto_match === undefined && entry.kind === "already_imported";
 }
 
 function autoMatchWarning(entry: WiseSkippedEntry & { auto_match: NonNullable<WiseSkippedEntry["auto_match"]> }): CompactWarning {
@@ -526,7 +524,7 @@ export function issueWiseResultHandle(
 ): string | undefined {
   if (typeof planHandle !== "string" || planHandle.length === 0) return undefined;
   try {
-    const errorCount = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason)).length;
+    const errorCount = data.skipped.filter(entry => entry.kind === "error").length;
     const status: OperationResultStatus = errorCount === 0 ? "completed" : "partial";
     return store.issue({
       operation: WISE_PLAN_DOMAIN,
@@ -551,8 +549,8 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   // A dry run with no commands has nothing to approve and issues no plan.
   const zeroWrite = dryRun && data.commands.length === 0;
 
-  const executionSkipped = data.skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
-  const executionErrors = data.skipped.filter(entry => !isNonErrorWiseSkipReason(entry.reason));
+  const executionSkipped = data.skipped.filter(entry => entry.kind !== "error");
+  const executionErrors = data.skipped.filter(entry => entry.kind === "error");
   const duplicateCount = data.skipped.filter(isDuplicateSkip).length;
   const autoMatched = data.skipped.filter((entry): entry is WiseSkippedEntry & { auto_match: NonNullable<WiseSkippedEntry["auto_match"]> } =>
     entry.auto_match !== undefined);
@@ -701,10 +699,8 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
       : {}),
   }));
 
-  const journalizedSkips = data.skipped.filter(entry =>
-    entry.reason.startsWith("Already journalized") || entry.reason.startsWith("Fee already journalized")).length;
-  const importedSkips = data.skipped.filter(entry =>
-    entry.reason.startsWith("Already imported") || entry.reason.startsWith("Fee already imported")).length;
+  const journalizedSkips = data.skipped.filter(entry => entry.kind === "already_journalized").length;
+  const importedSkips = data.skipped.filter(entry => entry.kind === "already_imported").length;
   const baseMessage = zeroWrite
     ? `Nothing to approve: the Wise dry run found no rows to write (${journalizedSkips + importedSkips} already booked: ${journalizedSkips} already journalized, ${importedSkips} already imported); no plan handle was issued.`
     : dryRun
