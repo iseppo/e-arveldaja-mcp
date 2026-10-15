@@ -791,20 +791,34 @@ function moneyTokenValues(text: string): number[] {
     .filter((value): value is number => value !== undefined);
 }
 
+function isZeroTotalLabel(labelText: string): boolean {
+  return classifyLayoutAmountLabel(labelText) === "total_gross" &&
+    !BALANCE_LABEL_RE.test(labelText) &&
+    !RECEIPT_REFERENCE_LINE_RE.test(labelText);
+}
+
 /**
- * G5: a total label (not a remaining-balance label) whose own-row monetary
- * values are all zero ("Kogusumma (EUR) 0,00", "Arve kokku 0,00"). Zeros never
- * become amount candidates, so without this the stated zero total is lost and
- * a prepayment / credit layout can end up looking like a clean invoice.
+ * G5: a total label (not a remaining-balance label) stating a zero amount
+ * ("Kogusumma (EUR) 0,00", "Arve kokku 0,00"). Zeros never become amount
+ * candidates, so without this the stated zero total is lost and a prepayment /
+ * credit layout can end up looking like a clean invoice. The zero is bound to
+ * the label text right before it, so another amount on the same row
+ * ("Kogusumma 0.00    Ettemaks 100.00") does not hide it; a row of only
+ * zeros under a total label holds as well.
  */
-function statesZeroTotal(labelText: string, ownRowTexts: readonly string[]): boolean {
-  if (classifyLayoutAmountLabel(labelText) !== "total_gross" ||
-    BALANCE_LABEL_RE.test(labelText) ||
-    RECEIPT_REFERENCE_LINE_RE.test(labelText)) {
-    return false;
+function statesZeroTotal(text: string): boolean {
+  // Cheap pre-checks (a zero money token ends in "0.00" / "0,00"): long
+  // non-total lines never reach the money-token scan.
+  if (!/0[.,]00(?!\d)/.test(text) || (!RECEIPT_TOTAL_LABEL_RE.test(text) && !RECEIPT_GROSS_WITH_VAT_RE.test(text))) return false;
+  const values = moneyTokenValues(text);
+  if (values.length > 0 && values.every(value => value === 0) && isZeroTotalLabel(text)) return true;
+  let labelStart = 0;
+  for (const match of text.matchAll(MONEY_TOKEN_RE)) {
+    const labelText = text.slice(labelStart, match.index);
+    labelStart = (match.index ?? 0) + match[0].length;
+    if (parseAmount(match[0]) === 0 && isZeroTotalLabel(labelText)) return true;
   }
-  const values = ownRowTexts.flatMap(moneyTokenValues);
-  return values.length > 0 && values.every(value => value === 0);
+  return false;
 }
 
 function isLikelyYearAmount(amount: number, line: string): boolean {
@@ -1981,7 +1995,7 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   // text, so a word-split balance label ("Jäänud" | "tasuda") is recognised.
   const zeroTotalStated = rows.some(row => {
     const rowText = row.items.map(item => clampTextLine(item.text)).join(" ");
-    return statesZeroTotal(rowText, [rowText]);
+    return statesZeroTotal(rowText);
   });
   const holdFlags = {
     ...(labelledAmountOverMax ? { labelled_amount_over_max: true } : {}),
@@ -2209,7 +2223,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     !RECEIPT_NET_LABEL_RE.test(classified.inspectionLine),
   );
   // G5: read before the amount loop, which skips zero-only lines.
-  const zeroTotalStated = lines.some(line => statesZeroTotal(line, [line]));
+  const zeroTotalStated = lines.some(line => statesZeroTotal(line));
   // G4: a labelled line's candidate above the fallback maximum is recorded
   // whether it is picked or filtered out; it is never silently accepted or
   // dropped. Candidates are the value the line's label would take (the picked

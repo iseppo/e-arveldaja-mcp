@@ -3726,6 +3726,33 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       expect(result.zero_total_stated).toBeUndefined();
     });
 
+    // Codex review: an adjacent other amount must not hide the stated zero.
+    it("a zero total beside another amount on the same line holds", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 24% 24.00", "Kokku 124.00", "Kogusumma 0.00    Ettemaks 100.00"].join("\n"),
+        "arve.pdf",
+      );
+      expect(result.zero_total_stated).toBe(true);
+    });
+
+    it("a zero total beside another amount on the same layout row holds", () => {
+      const layout = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Summa km-ta", 52, 100, 60), item("100.00", 400, 100, 30),
+        item("Käibemaks 24%", 52, 116, 70), item("24.00", 400, 116, 30),
+        item("Kokku", 52, 132, 30), item("124.00", 400, 132, 30),
+        item("Kogusumma", 52, 200, 60), item("0.00", 150, 200, 20), item("Ettemaks", 250, 200, 50), item("100.00", 400, 200, 30),
+      ]);
+      expect(layout?.zero_total_stated).toBe(true);
+    });
+
+    it("a zero bound to a remaining-balance label or to no label on a total line does not", () => {
+      expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 124,00    Jäänud tasuda 0,00"].join("\n"), "arve.pdf").zero_total_stated)
+        .toBeUndefined();
+      expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 124,00 0,00"].join("\n"), "arve.pdf").zero_total_stated)
+        .toBeUndefined();
+    });
+
     it("a zero total row in the layout holds", () => {
       const items = [item("Näidis OÜ", 52, 40, 60), item("Kogusumma (EUR)", 300, 200, 80), item("0,00", 420, 200, 20)];
       const result = extractReceiptFieldsFromText("Näidis OÜ\nKogusumma (EUR)\n0,00", "arve.pdf", { textItems: items });
