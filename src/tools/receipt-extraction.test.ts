@@ -3388,3 +3388,89 @@ describe("receipt fields — invoice number, supplier and document type misreads
     expect(classifyReceiptDocument([heading, "Kokku 10,00 EUR"].join("\n"), "doc.pdf")).toBe("unclassifiable");
   });
 });
+
+describe("disagreeing layout candidates keep the receipt held (live smoke f8818bd, Codex review)", () => {
+  // False holds are acceptable, false creates are not: none of these layouts may
+  // be "cleaned up" by dropping a disagreeing candidate. The first is the real
+  // geometry of a consistent 93.19 / 12.11 / 105.30 cash invoice that stays held
+  // (its layout pass reads the footer BIC and the quantity column); do not
+  // "fix" it by discarding candidates.
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum: 1,
+  });
+  const isHeld = (result: ReturnType<typeof extractReceiptFieldsFromText>) =>
+    result.total_gross_conflict === true || (result.amount_consistency_issues ?? []).length > 0;
+  const trioItems = [
+    item("Summa km-ta", 52, 100, 60),
+    item("100,00", 300, 100, 30),
+    item("Käibemaks 20%", 52, 116, 70),
+    item("20,00", 300, 116, 30),
+    item("Tasuda", 52, 132, 40),
+    item("120,00", 300, 132, 30),
+  ];
+  const trioText = ["Summa km-ta 100,00", "Käibemaks 20% 20,00", "Tasuda 120,00"];
+
+  it("a consistent cash invoice whose layout misreads its table stays held", () => {
+    const items = [
+      item("Sularahaarve 1633", 432, 106, 83),
+      item("Kuupäev", 385, 129, 37),
+      item("02.08.2026", 517, 129, 46),
+      item("Rg-kood 17487472", 485, 275, 78),
+      item("KMKR nr EE102809963", 443, 287, 120),
+      item("Kirjeldus", 52, 314, 36),
+      item("Kogus Ühik", 301, 314, 49),
+      item("Hind km-ga", 392, 314, 48),
+      item("Hind km-ta Summa km-ta", 451, 314, 112),
+      item("Majutus 02-04.08.26", 54, 330, 85),
+      item("1", 322, 330, 5),
+      item("105,30", 412, 330, 28),
+      item("93,19", 475, 330, 23),
+      item("93,19", 540, 330, 23),
+      item("Summa km-ta 13% 93,19", 451, 362, 112),
+      item("Käibemaks 13%", 464, 379, 66),
+      item("12,11", 540, 379, 23),
+      item("Arve kokku (EUR) 105,30", 450, 395, 113),
+      item("Tasutud 105,30", 496, 411, 67),
+      item("Jäänud tasuda", 464, 427, 65),
+      item("0,00", 545, 427, 18),
+      item("IBAN EE231700017001234567", 430, 774, 134),
+      item("SWIFT LHVBEE22", 498, 785, 65),
+    ];
+    const text = [
+      "Sularahaarve 1633",
+      "Kuupäev 02.08.2026",
+      "Rg-kood 17487472",
+      "KMKR nr EE102809963",
+      "Kirjeldus Kogus Ühik Hind km-ga Hind km-ta Summa km-ta",
+      "Majutus 02-04.08.26 1 105,30 93,19 93,19",
+      "Summa km-ta 13% 93,19",
+      "Käibemaks 13% 12,11",
+      "Arve kokku (EUR) 105,30",
+      "Tasutud 105,30",
+      "Jäänud tasuda 0,00",
+      "IBAN EE231700017001234567",
+      "SWIFT LHVBEE22",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "invoice-1633.pdf", { textItems: items });
+    expect(result).toMatchObject({ total_net: 93.19, total_vat: 12.11, total_gross: 105.3 });
+    expect(result.total_gross_conflict).toBe(true);
+  });
+
+  it("a plausible total far below its own label column holds", () => {
+    const items = [...trioItems, item("Kokku", 450, 150, 30), item("124,00", 450, 230, 30)];
+    const result = extractReceiptFieldsFromText([...trioText, "Kokku", "124,00"].join("\n"), "far.pdf", { textItems: items });
+    expect(isHeld(result)).toBe(true);
+  });
+
+  it("a total glued to its label (\"Kokku124\") holds", () => {
+    const items = [...trioItems, item("Kokku124", 52, 148, 50)];
+    const result = extractReceiptFieldsFromText([...trioText, "Kokku124"].join("\n"), "glued.pdf", { textItems: items });
+    expect(isHeld(result)).toBe(true);
+  });
+
+  it("a total under a header split across columns (\"Summa\" | \"koos KM\") holds", () => {
+    const items = [...trioItems, item("Summa", 400, 150, 35), item("koos KM", 470, 150, 45), item("124,00", 400, 166, 30)];
+    const result = extractReceiptFieldsFromText([...trioText, "Summa koos KM", "124,00"].join("\n"), "split.pdf", { textItems: items });
+    expect(isHeld(result)).toBe(true);
+  });
+});
