@@ -80,12 +80,14 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 
 Review:
 - Treat `result.execution` as the canonical batch payload when present: `result.execution.summary`, `result.execution.results`, `result.execution.skipped`, `result.execution.needs_review`, `result.execution.errors`, and `result.execution.audit_reference`. Fall back to `result.summary`, `result.skipped`, and `result.results` only if `result.execution` is absent.
+- The `result.execution.*` entries are references: file, classification, status, totals, confidence signals, error, and duplicate/journal ids. The full per-file row (extracted fields, supplier resolution, booking suggestion, notes, `review_guidance`) is in `result.results`, matched by `file.file_ref` (or `file.display_name`); `result.workflow.needs_review` also carries `review_guidance` and `notes`.
+- `result.results` is compact by default: it omits the OCR `raw_text` and `field_provenance` (`raw_text_available` says whether OCR text exists). When you need them for one file, call `extract_pdf_invoice` on that file, or rerun the dry run with `detail: "full"`.
 - Keep the two execution artifacts the dry run returns: `result.approved_manifest` (the exact reviewed files and their hashes) and `result.plan_handles` — one consume-once handle per effect: `result.plan_handles.create` for `mode: "create"` and `result.plan_handles.create_and_confirm` for `mode: "create_and_confirm"`.
 
 Group the preview by status:
 - `result.execution.results` entries with `status="dry_run_preview"`: show extracted supplier, invoice number, amounts, booking suggestion, and bank match. The purchase invoice has NOT been created yet. The document has NOT been uploaded yet. The invoice has NOT been confirmed yet.
 - `result.execution.skipped` entries with `status="skipped_duplicate"`: show the duplicate match and reason
-- `result.execution.needs_review`: show the file, classification, missing fields, `llm_fallback`, notes, and `review_guidance` when present. Start with `review_guidance.recommendation`, summarize `review_guidance.compliance_basis` in plain language, and ask only `review_guidance.follow_up_questions` that are still unresolved.
+- `result.execution.needs_review`: show the file, classification, missing fields, `llm_fallback`, notes, and `review_guidance` when present. A row with `possible_duplicate_journal_ids` is held because the same cash outflow may already be booked by those journals: do not create it in this batch; if it is a separate payment, book that one document through the book-invoice flow (`extract_pdf_invoice`, then `create_purchase_invoice_from_pdf`). Start with `review_guidance.recommendation`, summarize `review_guidance.compliance_basis` in plain language, and ask only `review_guidance.follow_up_questions` that are still unresolved.
 - `result.execution.errors`: show the file and exact error
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->

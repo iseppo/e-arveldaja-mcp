@@ -566,6 +566,9 @@ describe("runAccountingInboxDryRunPipeline", () => {
       status: "needs_review",
       possible_duplicate_journal_ids: [journalId],
       notes: [],
+      ...(journalId === 28427570
+        ? { review_guidance: { recommendation: `Recommendation: do not create this invoice yet. The same cash outflow may already be booked by journal(s) ${journalId}.` } }
+        : {}),
     });
     const prepareReceiptBatch = vi.fn().mockResolvedValue(ok({
       mode: "DRY_RUN",
@@ -606,6 +609,11 @@ describe("runAccountingInboxDryRunPipeline", () => {
       "delfi-june.pdf was left for review in the dry run (purchase_invoice): the payment may already be booked by journal(s) 28427570.",
       "ohtuleht-june.pdf was left for review in the dry run (purchase_invoice): the payment may already be booked by journal(s) 28427571.",
     ]));
+    // The resolver reads the raw review row: file and review_guidance travel with it.
+    const guided = followUps.find(f => f.summary.startsWith("delfi-june.pdf"));
+    expect(guided?.recommendation).toContain("journal(s) 28427570");
+    expect((guided?.resolver_input as any)?.item?.file?.path).toBe("/tmp/accounting-inbox/receipts/delfi-june.pdf");
+    expect((guided?.resolver_input as any)?.item?.review_guidance?.recommendation).toContain("28427570");
     const failed = followUps.find(f => f.summary.includes("failed the dry run"));
     expect(failed?.recommendation).toMatch(/^Check the exact extraction or booking error first/);
     // No Estonian left in the receipt follow-up texts.

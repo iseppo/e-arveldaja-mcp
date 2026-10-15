@@ -300,7 +300,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   const holdPossibleDuplicate = (journalIds: number[]) => {
     notes.push(
       `Held: this cash outflow may already be booked by journal(s) ${journalIds.join(", ")}. ` +
-      "If it is a separate payment, book this one document with process_accounting_document.",
+      "If it is a separate payment, book this one document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
     );
     return { notes, status: "needs_review" as const, possible_duplicate_journal_ids: journalIds };
   };

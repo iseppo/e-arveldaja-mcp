@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 35021,
+    "toolsListBytes": 35193,
     "descriptionsBytes": 5064,
-    "inputSchemasBytes": 25087,
+    "inputSchemasBytes": 25259,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5105
@@ -282,6 +282,14 @@
           },
           "date_to": {
             "description": "Optional receipt file modified-date upper bound (YYYY-MM-DD). Filters which receipt FILES are scanned; does not affect bank transactions.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Per-file results detail. Default compact omits the OCR raw_text and field_provenance; full keeps them.",
+            "enum": [
+              "compact",
+              "full"
+            ],
             "type": "string"
           },
           "file_ref": {

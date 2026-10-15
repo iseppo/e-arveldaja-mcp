@@ -217,7 +217,7 @@ export function buildReceiptReviewGuidance(params: {
     const ids = params.possibleDuplicateJournalIds.join(", ");
     return {
       recommendation: `Recommendation: do not create this invoice yet. The same cash outflow may already be booked by journal(s) ${ids}. ` +
-        "If that journal is this payment, attach the document to it instead; if this is a separate payment, book this one document with process_accounting_document.",
+        "If that journal is this payment, attach the document to it instead; if this is a separate payment, book this one document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
       compliance_basis: [BASIS_RPS_DOCUMENT],
       follow_up_questions: [
         `Is journal ${ids} the payment for this document, or a separate payment of the same amount?`,

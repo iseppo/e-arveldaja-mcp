@@ -74,6 +74,7 @@ import {
   renderReceiptBatchCompact,
   renderReceiptBatchFull,
   type ReceiptBatchCompactInput,
+  type ReceiptBatchDetail,
   type ReceiptBatchFileRefProjection,
 } from "../receipts/presenter.js";
 import { createClassificationOperations } from "../receipts/classification-operations.js";
@@ -1219,21 +1220,20 @@ export function registerReceiptInboxTools(
     };
   }
 
+  function publicReceiptFile(file: ReceiptFileInfo): Record<string, unknown> {
+    const { name, path, ...metadata } = file;
+    const ref = issueReceiptFileRef(path);
+    return {
+      ...metadata,
+      display_name: sandboxExternalText(name),
+      display_path: sandboxExternalText(path),
+      ...(ref !== undefined ? { file_ref: ref } : {}),
+    };
+  }
+
   function publicReceiptResult(result: ReceiptBatchFileResult): Record<string, unknown> & { status: ReceiptBatchFileResult["status"] } {
     const sanitized = sanitizeReceiptResultForOutput(result);
-    const { name, path, ...metadata } = sanitized.file;
-    return {
-      ...sanitized,
-      file: {
-        ...metadata,
-        display_name: sandboxExternalText(name),
-        display_path: sandboxExternalText(path),
-        ...(() => {
-          const ref = issueReceiptFileRef(path);
-          return ref !== undefined ? { file_ref: ref } : {};
-        })(),
-      },
-    };
+    return { ...sanitized, file: publicReceiptFile(sanitized.file) };
   }
 
   function publicReceiptManifest(files: ReadonlyArray<{ file: ReceiptFileInfo; sha256: string }>) {
@@ -1330,6 +1330,7 @@ export function registerReceiptInboxTools(
     transaction_date_to?: string;
     approved_manifest?: ReceiptManifestInputEntry[];
     plan_handle?: string;
+    detail: ReceiptBatchDetail;
   }): Promise<{ ok: true; fullObj: Record<string, unknown>; compactInput: ReceiptBatchCompactInput } | { ok: false; error: CallToolResult }> {
     const receiptFolder = await resolveReceiptFolder(args.folder_path, args.file_ref);
     const workflowFolderPath = receiptFolder.path;
@@ -1395,6 +1396,8 @@ export function registerReceiptInboxTools(
       ...(args.transaction_date_from !== undefined ? { transactionDateFrom: args.transaction_date_from } : {}),
       ...(args.transaction_date_to !== undefined ? { transactionDateTo: args.transaction_date_to } : {}),
       ...(fileRefProjection !== undefined ? { fileRefProjection } : {}),
+      publicFile: publicReceiptFile,
+      detail: args.detail,
     });
     const compactInput: ReceiptBatchCompactInput = {
       result,
@@ -1483,6 +1486,7 @@ export function registerReceiptInboxTools(
         ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
         ...(approved_manifest !== undefined ? { approved_manifest: approved_manifest as ReceiptManifestInputEntry[] } : {}),
         ...(plan_handle !== undefined ? { plan_handle } : {}),
+        detail: "full",
       });
       if (!outcome.ok) return outcome.error;
       return {
@@ -1509,9 +1513,10 @@ export function registerReceiptInboxTools(
       file_types: z.array(z.enum(["pdf", "jpg", "png"])).optional().describe("Optional file type filter for scan mode"),
       approved_manifest: manifestSchema.optional().describe("Exact manifest returned by dry_run; required for create/create_and_confirm."),
       plan_handle: z.string().optional().describe("Consume-once handle from dry_run (plan_handles.create / .create_and_confirm). REQUIRED for create/create_and_confirm."),
+      detail: z.enum(["compact", "full"]).optional().describe("Per-file results detail. Default compact omits the OCR raw_text and field_provenance; full keeps them."),
     },
     { ...batch, openWorldHint: true, title: "Receipt Batch" },
-    async ({ mode, folder_path, file_ref, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest, plan_handle }) => {
+    async ({ mode, folder_path, file_ref, accounts_dimensions_id, date_from, date_to, transaction_date_from, transaction_date_to, file_types, approved_manifest, plan_handle, detail }) => {
       const selectedMode = mode ?? "scan";
       let delegatedTool: string;
       let delegatedArgs: Record<string, unknown>;
@@ -1577,6 +1582,7 @@ export function registerReceiptInboxTools(
           ...(transaction_date_to !== undefined ? { transaction_date_to } : {}),
           ...(approved_manifest !== undefined ? { approved_manifest: approved_manifest as ReceiptManifestInputEntry[] } : {}),
           ...(plan_handle !== undefined ? { plan_handle } : {}),
+          detail: detail ?? "compact",
         });
         if (!batch.ok) return batch.error;
         // Guided profiles get the token-lean compact summary as the delegated

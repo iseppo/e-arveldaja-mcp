@@ -120,6 +120,11 @@ export function hasConfidentInvoiceNumber(value?: string): boolean {
   return Boolean(normalized) && !normalized!.startsWith(AUTO_INVOICE_NUMBER_PREFIX);
 }
 
+/** Guidance for a low-confidence extraction, naming where the OCR text lives. */
+export function rawTextFallbackGuidance(rawTextField: string): string {
+  return `Use ${rawTextField} as the source of truth. Extract the missing required fields manually with the model, then validate totals before booking. If the document still does not contain them, keep the result in review instead of guessing.`;
+}
+
 export function summarizeInvoiceExtraction(
   snapshot: InvoiceExtractionSnapshot,
   signals?: ExtractionConfidenceSignals,
@@ -233,7 +238,7 @@ export function summarizeInvoiceExtraction(
   const guidance = !rawTextAvailable
     ? "Keep the document in review. Without raw_text, the model cannot safely recover the missing fields."
     : recommended
-      ? `Use ${rawTextField} as the source of truth. Extract the missing required fields manually with the model, then validate totals before booking. If the document still does not contain them, keep the result in review instead of guessing.`
+      ? rawTextFallbackGuidance(rawTextField)
       : "Raw OCR text is available for verification. Use it to confirm ambiguous fields before executing any booking."
   ;
 

@@ -5,6 +5,7 @@ import { roundMoney } from "../money.js";
 import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
+import { rawTextFallbackGuidance } from "../invoice-extraction-fallback.js";
 import {
   buildReceiptBatchExecution,
   buildReceiptBatchWorkflow,
@@ -15,6 +16,7 @@ import type {
   ReceiptBatchExecutionMode,
   ReceiptBatchFileResult,
   ReceiptBatchResult,
+  ReceiptFileInfo,
 } from "./types.js";
 
 // OUTPUT layer for the receipt batch. The only receipt-batch module that shapes
@@ -74,6 +76,109 @@ interface ReceiptBatchFullInput {
   readonly transactionDateFrom?: string;
   readonly transactionDateTo?: string;
   readonly fileRefProjection?: ReceiptBatchFileRefProjection;
+  /** Public (sandboxed, file_ref-carrying) file object used by the compact rows
+   * and the reference projections — never a raw name/path. */
+  readonly publicFile: (file: ReceiptFileInfo) => Record<string, unknown>;
+  /** "compact" (default) drops the OCR blob and provenance from `results[]`;
+   * "full" keeps today's full rows. */
+  readonly detail?: ReceiptBatchDetail;
+}
+
+export type ReceiptBatchDetail = "compact" | "full";
+
+type PublicReceiptRow = Record<string, unknown> & { status: ReceiptBatchFileResult["status"] };
+
+export const RECEIPT_DETAIL_HINT =
+  "rerun with detail='full', or call extract_pdf_invoice on that one file, for the OCR text and field provenance";
+
+const COMPACT_CLIENT_KEYS = ["id", "name", "code", "invoice_vat_no", "cl_code_country", "is_supplier"] as const;
+const FULL_RAW_TEXT_GUIDANCE = rawTextFallbackGuidance("extracted.raw_text");
+const COMPACT_RAW_TEXT_GUIDANCE = rawTextFallbackGuidance("extracted.raw_text (receipt_batch detail='full', or extract_pdf_invoice on this file)");
+
+function pickKeys(value: unknown, keys: readonly string[]): unknown {
+  if (value === null || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(keys.filter(key => key in record).map(key => [key, record[key]]));
+}
+
+function withPublicFile(row: SanitizedReceiptResult, file: Record<string, unknown>): PublicReceiptRow {
+  return { ...(row as PublicReceiptRow), file };
+}
+
+/**
+ * Compact row: a DENY-list projection of the sanitized row. Everything is kept
+ * except the OCR blob, the field provenance and the bulky client/account
+ * records, so review information is never lost by omission.
+ */
+export function compactReceiptRow(row: PublicReceiptRow, source: ReceiptBatchFileResult): PublicReceiptRow {
+  const next: PublicReceiptRow = { ...row };
+  const extracted = next.extracted as Record<string, unknown> | undefined;
+  if (extracted !== undefined) {
+    const { raw_text: _rawText, field_provenance: _provenance, ...rest } = extracted;
+    next.extracted = rest;
+  }
+  const supplierResolution = next.supplier_resolution as Record<string, unknown> | undefined;
+  if (supplierResolution !== undefined) {
+    next.supplier_resolution = {
+      ...supplierResolution,
+      ...("client" in supplierResolution ? { client: pickKeys(supplierResolution.client, COMPACT_CLIENT_KEYS) } : {}),
+      ...("preview_client" in supplierResolution ? { preview_client: pickKeys(supplierResolution.preview_client, COMPACT_CLIENT_KEYS) } : {}),
+    };
+  }
+  const bookingSuggestion = next.booking_suggestion as Record<string, unknown> | undefined;
+  if (bookingSuggestion !== undefined) {
+    next.booking_suggestion = {
+      ...bookingSuggestion,
+      ...("suggested_account" in bookingSuggestion ? { suggested_account: pickKeys(bookingSuggestion.suggested_account, ["id", "name_est"]) } : {}),
+      ...("suggested_purchase_article" in bookingSuggestion ? { suggested_purchase_article: pickKeys(bookingSuggestion.suggested_purchase_article, ["id", "name"]) } : {}),
+    };
+  }
+  const llmFallback = next.llm_fallback as Record<string, unknown> | undefined;
+  if (llmFallback?.guidance === FULL_RAW_TEXT_GUIDANCE) {
+    next.llm_fallback = { ...llmFallback, guidance: COMPACT_RAW_TEXT_GUIDANCE };
+  }
+  const rawTextAvailable = typeof source.extracted?.raw_text === "string" && source.extracted.raw_text.trim() !== "";
+  next.raw_text_available = rawTextAvailable;
+  if (rawTextAvailable) next.detail_hint = RECEIPT_DETAIL_HINT;
+  return next;
+}
+
+/** Reference projection used by `execution.*`: identifies the row and carries
+ * what a consumer acts on, never the whole row. */
+export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
+  const extracted = row.extracted as Record<string, unknown> | undefined;
+  const llmFallback = row.llm_fallback as Record<string, unknown> | undefined;
+  const duplicateMatch = row.duplicate_match as Record<string, unknown> | undefined;
+  const duplicateCandidates = row.duplicate_candidates as Array<Record<string, unknown>> | undefined;
+  const createdInvoice = row.created_invoice as Record<string, unknown> | undefined;
+  const totals = extracted !== undefined
+    ? pickKeys(extracted, ["total_net", "total_vat", "total_gross", "currency"]) as Record<string, unknown>
+    : undefined;
+  return {
+    file: row.file,
+    classification: row.classification,
+    status: row.status,
+    ...(llmFallback !== undefined ? { llm_fallback: { confidence_signals: llmFallback.confidence_signals ?? [] } } : {}),
+    ...(row.error !== undefined ? { error: row.error } : {}),
+    ...(row.referenced_invoice !== undefined ? { referenced_invoice: row.referenced_invoice } : {}),
+    ...(duplicateMatch !== undefined ? { duplicate_match: { invoice_id: duplicateMatch.invoice_id } } : {}),
+    ...(duplicateCandidates !== undefined && duplicateCandidates.length > 0
+      ? { duplicate_candidates: duplicateCandidates.map(candidate => ({ invoice_id: candidate.invoice_id })) }
+      : {}),
+    ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
+    ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "confirmed"]) } : {}),
+    ...(totals !== undefined && Object.keys(totals).length > 0 ? { extracted: totals } : {}),
+  };
+}
+
+/** `workflow.needs_review` reference: the review list consumers act on, so it
+ * also keeps the guidance and notes. */
+export function receiptReviewReference(row: PublicReceiptRow): PublicReceiptRow {
+  return {
+    ...receiptReference(row),
+    ...(row.review_guidance !== undefined ? { review_guidance: row.review_guidance } : {}),
+    ...(row.notes !== undefined ? { notes: row.notes } : {}),
+  };
 }
 
 /**
@@ -91,6 +196,11 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
   const sanitizedResults: SanitizedReceiptResult[] = projection !== undefined
     ? result.results.map(projection.projectResult)
     : result.results.map(sanitizeReceiptResultForOutput);
+  const publicRows = sanitizedResults.map((row, index) =>
+    withPublicFile(row, input.publicFile(result.results[index]!.file)));
+  const outputResults = (input.detail ?? "compact") === "full"
+    ? sanitizedResults
+    : publicRows.map((row, index) => compactReceiptRow(row, result.results[index]!));
   const responseManifest: Array<ReceiptApprovedManifestEntry | Record<string, unknown>> = projection !== undefined
     ? projection.manifest
     : result.manifest;
@@ -112,7 +222,7 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
   const workflow = buildReceiptBatchWorkflow({
     summary,
     workflowSummary,
-    sanitizedResults,
+    sanitizedResults: publicRows.map(receiptReviewReference),
     workflowArgs,
   });
 
@@ -134,11 +244,11 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
     // longer the sole approval artifact.
     ...(result.planHandles !== undefined ? { plan_handles: result.planHandles } : {}),
     skipped: projection !== undefined ? projection.skipped : scan.skipped,
-    results: sanitizedResults,
+    results: outputResults,
     execution: buildReceiptBatchExecution({
       mode,
       summary,
-      sanitizedResults,
+      sanitizedResults: publicRows.map(receiptReference),
     }),
   };
 }

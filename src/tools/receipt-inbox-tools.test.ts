@@ -768,6 +768,92 @@ describe("receipt inbox file-reference capacity", () => {
   });
 });
 
+describe("receipt_batch compact output file shape", () => {
+  function collectFileShapes(payload: any): Array<Record<string, unknown>> {
+    const result = payload.result;
+    return [
+      ...result.results,
+      ...result.execution.results,
+      ...result.execution.skipped,
+      ...result.execution.needs_review,
+      ...result.execution.errors,
+      ...result.workflow.needs_review,
+    ].map((row: any) => row.file);
+  }
+
+  async function dryRun(locator: "folder_path" | "file_ref", maxActive?: number) {
+    const folder = createReceiptFolder({ "a.pdf": "%PDF-1.4\n", "b.pdf": "%PDF-1.4\n" });
+    const runtimeSafetyContext = createTestRuntimeSafetyContext(
+      maxActive !== undefined ? { fileReferenceStore: { maxActive } } : {},
+    );
+    const locatorArgs = locator === "folder_path"
+      ? { folder_path: folder }
+      : {
+          file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+            canonicalPath: folder,
+            kind: "directory",
+            operation: FILE_REFERENCE_OPERATIONS.receipt,
+          }),
+        };
+    const { handler } = setupReceiptTool("receipt_batch", runtimeSafetyContext);
+    try {
+      const result = await handler({ mode: "dry_run", ...locatorArgs, accounts_dimensions_id: 100 });
+      return parseMcpResponse(result.content[0]!.text) as any;
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }
+
+  it.each(["folder_path", "file_ref"] as const)("every row and reference carries display_name/display_path/file_ref, never raw name/path (%s)", async (locator) => {
+    const payload = await dryRun(locator);
+    expect(payload.result.results).toHaveLength(2);
+    const files = collectFileShapes(payload);
+    expect(files.length).toBeGreaterThanOrEqual(4);
+    for (const file of files) {
+      expect(file.display_name).toEqual(expect.stringContaining("UNTRUSTED"));
+      expect(file.display_path).toEqual(expect.stringContaining("UNTRUSTED"));
+      expect(file.file_ref).toEqual(expect.any(String));
+      expect(file.name).toBeUndefined();
+      expect(file.path).toBeUndefined();
+    }
+    for (const row of payload.result.results) {
+      expect(row.extracted?.raw_text).toBeUndefined();
+      expect(typeof row.raw_text_available).toBe("boolean");
+    }
+  });
+
+  it("stays well-formed without file_ref when the reference store is at capacity", async () => {
+    // Capacity 1: the directory reference consumes it, leaving none for files.
+    const payload = await dryRun("file_ref", 1);
+    const files = collectFileShapes(payload);
+    expect(files.length).toBeGreaterThanOrEqual(4);
+    for (const file of files) {
+      expect(file.display_name).toEqual(expect.stringContaining("UNTRUSTED"));
+      expect(file.display_path).toEqual(expect.stringContaining("UNTRUSTED"));
+      expect(file.file_ref).toBeUndefined();
+      expect(file.name).toBeUndefined();
+      expect(file.path).toBeUndefined();
+    }
+  });
+
+  it("detail=full keeps the folder_path rows unchanged (raw file name, OCR fields)", async () => {
+    const folder = createReceiptFolder({ "a.pdf": "%PDF-1.4\n" });
+    const { handler } = setupReceiptTool("receipt_batch", createTestRuntimeSafetyContext());
+    try {
+      const result = await handler({ mode: "dry_run", folder_path: folder, accounts_dimensions_id: 100, detail: "full" });
+      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      expect(payload.result.results[0].file.name).toBe("a.pdf");
+      expect(payload.result.results[0].raw_text_available).toBeUndefined();
+      // The execution block is a reference projection in both modes.
+      const reference = [...payload.result.execution.results, ...payload.result.execution.needs_review, ...payload.result.execution.errors][0];
+      expect(reference.file.name).toBeUndefined();
+      expect(reference.file.display_name).toEqual(expect.stringContaining("UNTRUSTED"));
+    } finally {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("receipt inbox tool status handling", () => {
   it("receipt_batch scans receipt folders through the merged entry point", async () => {
     const tempDir = createReceiptFolder();
