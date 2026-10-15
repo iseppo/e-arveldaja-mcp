@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-15
+
 ### Fixed
 
 - **Receipt amounts: a printed total wins over a VAT guess, and inconsistent amounts are held.** Receipt extraction took a VAT amount from a line labelled only by the NEXT line, even when a later line printed its own VAT label, and did not know "Brutosumma", "Arve summa", "Tasumiseks" or "Tasumisele kuulub" as gross labels (seen live: Õhtuleht receipts read as net −3.11 / VAT 13.10 / gross 9.99, the VAT taken from a street address; a Postimees invoice's gross read as 80 from a street number). A VAT line with its own label now wins, those labels are gross labels, a VAT below 0 or above the gross no longer yields a negative net, and a receipt whose net + VAT is more than 0.02 EUR off its gross, whose amounts have the wrong sign, whose printed amount was overridden, or whose VAT / net is not a VAT rate in force on the invoice date (for example a mixed-rate receipt) gets the new `amounts_inconsistent` / `vat_rate_implausible` signals and is held as `needs_review` by `receipt_batch` (nothing created). `extract_pdf_invoice` and `process_accounting_document` show the same warnings. The VAT rate booked for a receipt now snaps to a rate in force on its date.
