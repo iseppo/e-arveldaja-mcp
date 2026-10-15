@@ -147,7 +147,10 @@ export interface ValidatedWiseFields {
 
 // --- Compiled commands -------------------------------------------------------
 
-export const WISE_COMMAND_VERSION = "wise_import_command_v3";
+// v4 dropped the constant/always-null command fields (mutation_mode, and the
+// inter-account existing_journal_id / current_journal_state /
+// current_client_state): a v3 plan's digest never matches a v4 rebuild.
+export const WISE_COMMAND_VERSION = "wise_import_command_v4";
 
 export type TransactionCreatePayload = Parameters<ApiContext["transactions"]["create"]>[0];
 export type TransactionConfirmPayload = Parameters<ApiContext["transactions"]["confirm"]>[1];
@@ -175,13 +178,11 @@ export interface WiseCommandBase {
 
 export interface MainCreateCommand extends WiseCommandBase {
   action: "main_create";
-  mutation_mode: "create";
   create_payload: TransactionCreatePayload;
 }
 
 export interface FeeCreateCommand extends WiseCommandBase {
   action: "fee_create_and_confirm";
-  mutation_mode: "create_then_confirm";
   posting_account_id: number;
   posting_dimension_id: number;
   create_payload: TransactionCreatePayload;
@@ -191,18 +192,14 @@ export interface FeeCreateCommand extends WiseCommandBase {
 
 export interface InterAccountCommand extends WiseCommandBase {
   action: "inter_account";
-  mutation_mode: "create_then_confirm";
   counterpart_dimension_id: number;
   flow_source_dimension_id: number;
   flow_target_dimension_id: number;
   posting_account_id: number;
   posting_dimension_id: number;
   ownership_basis: WiseTransferOwnershipBasis;
-  existing_journal_id: number | null;
   client_update: { clients_id: number } | null;
   confirmation_distribution: TransactionConfirmPayload | null;
-  current_journal_state: unknown;
-  current_client_state: unknown;
 }
 
 export type WiseImportCommand = MainCreateCommand | FeeCreateCommand | InterAccountCommand;

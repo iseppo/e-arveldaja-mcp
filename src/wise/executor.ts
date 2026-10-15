@@ -409,7 +409,6 @@ async function runWiseImport(
     journalizedTransferIds: journalized_transfer_ids,
     acknowledgedJournalHolds: canonicalAcknowledgements,
     ownCompanyClientId,
-    ownCompanyClientMatches,
     allPurchaseInvoices,
   };
   let projected = projectWiseCommands(projectionInput);

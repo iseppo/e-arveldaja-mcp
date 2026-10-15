@@ -310,7 +310,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
   };
   const actions = (output: ReturnType<typeof project>) =>
     [
-      ...output.commands.map(command => `${command.action}:${command.wise_id}${command.action === "inter_account" ? `:${command.mutation_mode}:${command.existing_journal_id}` : ""}`),
+      ...output.commands.map(command => `${command.action}:${command.wise_id}`),
       ...output.alreadyJournalized.map(assertion => `already_journalized:${assertion.wise_id}:${assertion.existing_journal_id}`),
       ...output.skipped.filter(entry => entry.reason.startsWith("Held for review")).map(entry => `held:${entry.wise_id}`),
     ];
@@ -469,7 +469,7 @@ describe("Wise transfer next to a journal labelled with the counterpart bank ref
     it("is never taken from an unregistered journal", () => {
       const output = run([transferIn("TRANSFER-1001")], [labelledJournal({ registered: false })]);
       expect(output.alreadyJournalized).toEqual([]);
-      expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "inter_account:TRANSFER-1001:create_then_confirm:null"]);
+      expect(actions(output)).toEqual(["main_create:TRANSFER-1001", "inter_account:TRANSFER-1001"]);
     });
   });
 
@@ -1230,8 +1230,6 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
       expect(output.ownershipReviews).toEqual([]);
       expect(output.alreadyJournalized).toEqual([]);
       expect(output.commands[2]).toMatchObject({
-        mutation_mode: "create_then_confirm",
-        existing_journal_id: null,
         counterpart_dimension_id: LHV,
         confirmation_distribution: [{ related_table: "accounts", related_id: 1021, related_sub_id: LHV, amount: 100.5 }],
       });

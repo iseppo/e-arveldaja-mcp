@@ -178,7 +178,6 @@ function projectTransactionCreatePayload(command: MainCreateCommand | FeeCreateC
 export function projectWiseCommand(command: WiseImportCommand): Record<string, unknown> {
   const common = {
     action: command.action,
-    mutation_mode: command.mutation_mode,
     date: command.date,
     row_key: command.row_key,
     identity_hash: command.identity_hash,
@@ -222,7 +221,6 @@ export function projectWiseCommand(command: WiseImportCommand): Record<string, u
         posting_account_id: command.posting_account_id,
         posting_dimension_id: command.posting_dimension_id,
         ownership_basis: command.ownership_basis,
-        existing_journal_id: command.existing_journal_id,
         client_update: command.client_update,
         confirmation_distribution: command.confirmation_distribution,
       };
@@ -305,7 +303,6 @@ export interface WiseProjectionInput {
    * covers the row's full evidence. */
   readonly acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
   readonly ownCompanyClientId: number | undefined;
-  readonly ownCompanyClientMatches: unknown;
   readonly allPurchaseInvoices: PurchaseInvoice[];
 }
 
@@ -703,7 +700,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     journalizedTransferIds = [],
     acknowledgedJournalHolds = [],
     ownCompanyClientId,
-    ownCompanyClientMatches,
     allPurchaseInvoices,
   } = input;
   const accounts_dimensions_id = accountsDimensionsId;
@@ -924,7 +920,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       commands.push({
         version: WISE_COMMAND_VERSION,
         action: "main_create",
-        mutation_mode: "create",
         row_index: row.rowIndex,
         row_key: `row:${row.rowIndex}:main`,
         identity_hash: commandIdentity(row, "main"),
@@ -996,7 +991,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       commands.push({
         version: WISE_COMMAND_VERSION,
         action: "fee_create_and_confirm",
-        mutation_mode: "create_then_confirm",
         row_index: row.rowIndex,
         row_key: `row:${row.rowIndex}:fee`,
         identity_hash: commandIdentity(row, "fee"),
@@ -1498,7 +1492,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       commands.push({
         version: WISE_COMMAND_VERSION,
         action: "inter_account",
-        mutation_mode: "create_then_confirm",
         row_index: row.rowIndex,
         row_key: `row:${row.rowIndex}:inter_account`,
         identity_hash: commandIdentity(row, "inter_account"),
@@ -1522,7 +1515,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         posting_account_id: targetDim.accounts_id,
         posting_dimension_id: targetDim.id,
         ownership_basis: ownershipBasis,
-        existing_journal_id: null,
         client_update: ownCompanyClientId !== undefined
           ? { clients_id: ownCompanyClientId }
           : null,
@@ -1532,8 +1524,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           related_sub_id: targetDim.id,
           amount: entry.amount,
         }],
-        current_journal_state: null,
-        current_client_state: ownCompanyClientMatches,
       });
     }
   }

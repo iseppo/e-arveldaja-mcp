@@ -2700,7 +2700,13 @@ describe("wise import tool", () => {
         execute: false,
       }));
       outcomes.push({ item, payload, api: setup.api });
-      expect(payload.command_version).toBe("wise_import_command_v3");
+      expect(payload.command_version).toBe("wise_import_command_v4");
+      // v4: no mutation_mode (implied by action) and no always-null journal/state fields.
+      for (const command of payload.execution.commands) {
+        for (const field of ["mutation_mode", "existing_journal_id", "current_journal_state", "current_client_state"]) {
+          expect(command).not.toHaveProperty(field);
+        }
+      }
     }
 
     mockedReadFile.mockResolvedValue(buildCsvRows([buildM04Values({
@@ -2752,7 +2758,6 @@ describe("wise import tool", () => {
           action: "inter_account",
           row_key: "row:0:inter_account",
           depends_on: "row:0:main",
-          mutation_mode: "create_then_confirm",
           transaction_type: item.type,
           source_direction: item.direction,
           wise_dimension_id: 5,
@@ -2902,8 +2907,6 @@ describe("wise import tool", () => {
         action: "inter_account",
         row_key: "row:0:inter_account",
         depends_on: "row:0:main",
-        mutation_mode: "create_then_confirm",
-        existing_journal_id: null,
         client_update: { clients_id: 55 },
         confirmation_distribution: [{
           related_table: "accounts",
@@ -2938,13 +2941,9 @@ describe("wise import tool", () => {
     expect(repeatedPayload.execution.commands.filter((command: any) => command.action === "inter_account")).toEqual([
       expect.objectContaining({
         row_key: "row:0:inter_account",
-        mutation_mode: "create_then_confirm",
-        existing_journal_id: null,
       }),
       expect.objectContaining({
         row_key: "row:1:inter_account",
-        mutation_mode: "create_then_confirm",
-        existing_journal_id: null,
       }),
     ]);
     expect(repeatedPayload.execution.skipped).toEqual([]);
@@ -3040,7 +3039,6 @@ describe("wise import tool", () => {
       expect.objectContaining({
         action: "main_create",
         row_key: "row:0:main",
-        mutation_mode: "create",
         date: "2026-06-10",
         wise_id: "M04-FX-FEE",
         create_payload: {
@@ -3057,7 +3055,6 @@ describe("wise import tool", () => {
         action: "fee_create_and_confirm",
         row_key: "row:0:fee",
         depends_on: "row:0:main",
-        mutation_mode: "create_then_confirm",
         posting_account_id: 8610,
         posting_dimension_id: 9,
         wise_client_id: 77,
@@ -3083,13 +3080,11 @@ describe("wise import tool", () => {
       expect.objectContaining({
         action: "main_create",
         row_key: "row:1:main",
-        mutation_mode: "create",
       }),
       expect.objectContaining({
         action: "inter_account",
         row_key: "row:1:inter_account",
         depends_on: "row:1:main",
-        mutation_mode: "create_then_confirm",
         ownership_basis: "verified_endpoints",
       }),
     ]));
@@ -6458,7 +6453,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
     const staleRun = await runApprovedWiseImport(stale, transferArgs);
 
     expect(staleRun.dry.execution.commands).toEqual(expect.arrayContaining([expect.objectContaining({
-      action: "inter_account", mutation_mode: "create_then_confirm",
+      action: "inter_account",
     })]));
     expect(stale.api.transactions.confirm).not.toHaveBeenCalled();
     expect(staleRun.executed.execution.errors).toEqual([expect.objectContaining({
@@ -6848,7 +6843,7 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       // The exact snapshot the executor digested for this plan.
       const productionInput = vi.mocked(approvalDigest).mock.calls
         .map(([snapshot]) => snapshot as Record<string, unknown>)
-        .filter(snapshot => snapshot?.version === "wise_import_command_v3")
+        .filter(snapshot => snapshot?.version === "wise_import_command_v4")
         .at(-1)!;
       expect(productionInput).toBeDefined();
       expect(approvalDigest(productionInput)).toBe(dry.approved_command_digest);
@@ -6862,6 +6857,54 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
         ...transferArgs, execute: true, approved_command_digest: v2Digest, plan_handle: dry.plan_handle,
       }));
       expect(replay.code).toBe("approval_digest_mismatch");
+      expectNoWiseMutations(setup.api);
+    });
+
+    it("(k) a v3-era plan (pre-v4 command fields) fails closed: neither its digest nor its stored plan executes", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...journalizedRows(), cardPaymentValues("2026-02-25")]));
+      const context = createTestRuntimeSafetyContext();
+      const setup = setupWiseTool([], undefined, { ...transferOptions(journalizedJournals()), runtimeSafetyContext: context });
+      vi.mocked(approvalDigest).mockClear();
+      const dry = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+      const productionInput = vi.mocked(approvalDigest).mock.calls
+        .map(([snapshot]) => snapshot as Record<string, unknown>)
+        .filter(snapshot => snapshot?.version === "wise_import_command_v4")
+        .at(-1)!;
+      expect(productionInput).toBeDefined();
+      // The same plan in the v3 command shape: every command carried
+      // mutation_mode, inter-account ones the always-null journal/state fields.
+      const v3Commands = (productionInput.commands as Array<Record<string, unknown>>).map(command => ({
+        ...command,
+        mutation_mode: command.action === "main_create" ? "create" : "create_then_confirm",
+        ...(command.action === "inter_account"
+          ? { existing_journal_id: null, current_journal_state: null, current_client_state: [] }
+          : {}),
+      }));
+      expect(v3Commands.length).toBeGreaterThan(0);
+      const v3Digest = approvalDigest({ ...productionInput, version: "wise_import_command_v3", commands: v3Commands });
+      expect(v3Digest).toMatch(/^[0-9a-f]{64}$/);
+      expect(v3Digest).not.toBe(dry.approved_command_digest);
+
+      // A v3 digest with a live handle is refused.
+      clearWiseCallHistory(setup.api);
+      const digestReplay = parseWiseResponse(await setup.rawHandler({
+        ...transferArgs, execute: true, approved_command_digest: v3Digest, plan_handle: dry.plan_handle,
+      }));
+      expect(digestReplay.code).toBe("approval_digest_mismatch");
+      expectNoWiseMutations(setup.api);
+
+      // A v3 plan handle (its stored plan binds the v3 digest) is refused too.
+      const dry2 = parseWiseResponse(await setup.handler({ ...transferArgs, execute: false }));
+      const consume = context.planStore.consume.bind(context.planStore);
+      vi.spyOn(context.planStore, "consume").mockImplementation((handle, domain) => {
+        const plan = consume(handle, domain);
+        return { ...plan, privatePayload: { ...(plan.privatePayload as Record<string, unknown>), digest: v3Digest } as typeof plan.privatePayload };
+      });
+      clearWiseCallHistory(setup.api);
+      const handleReplay = parseWiseResponse(await setup.rawHandler({
+        ...transferArgs, execute: true, approved_command_digest: v3Digest, plan_handle: dry2.plan_handle,
+      }));
+      expect(handleReplay.code).toBe("plan_drift");
       expectNoWiseMutations(setup.api);
     });
   });

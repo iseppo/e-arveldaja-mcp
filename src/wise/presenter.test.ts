@@ -523,7 +523,7 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
     })]));
 
     const command = {
-      version: 2, action: "main_create", mutation_mode: "create", row_index: 0, row_key: "row:0:main", identity_hash: "h", wise_id: "WISE-0",
+      version: 2, action: "main_create", row_index: 0, row_key: "row:0:main", identity_hash: "h", wise_id: "WISE-0",
       date: "2026-02-01", transaction_type: "C", source_direction: "OUT", booked_amount: 10, booked_currency: "EUR",
       source_amount: 10, source_currency: "EUR", target_amount: 10, target_currency: "EUR", exchange_rate: 1,
       exchange_rate_orientation: "source_to_target", wise_dimension_id: 5, depends_on: null,
