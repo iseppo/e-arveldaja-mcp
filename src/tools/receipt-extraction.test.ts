@@ -3652,3 +3652,119 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
     });
   });
 });
+
+describe("row triples and layout amount tokens (WP2)", () => {
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum: 1,
+  });
+  const extractLayout = (items: LayoutTextItem[]) =>
+    extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+
+  describe("R4 / R6 total row triple", () => {
+    it("a merged three-amount total row splits and binds its sum as the gross", () => {
+      expect(extractAmountsFromLine("Kokku € 483.07 115.93 599.00")).toEqual([483.07, 115.93, 599]);
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku € 483.07 115.93 599.00"].join("\n"), "arve.pdf");
+      expect(result.total_gross).toBe(599);
+      expect(result.labelled_amount_over_max).toBeUndefined();
+    });
+
+    it("a total row's gross is the triple's sum wherever it is printed", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 599.00 483.07 115.93"].join("\n"), "arve.pdf");
+      expect(result.total_gross).toBe(599);
+    });
+
+    it("a layout total label with three amount cells binds the sum, not the nearest", () => {
+      const result = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Kokku €", 52, 200, 40),
+        item("483.07", 300, 200, 30), item("115.93", 360, 200, 30), item("599.00", 420, 200, 30),
+      ]);
+      expect(result?.total_gross).toBe(599);
+    });
+
+    it("a fourth token keeps the run merged and held", () => {
+      expect(extractAmountsFromLine("Kokku € 483.07 115.93 599.00 12.00")).toHaveLength(1);
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku € 483.07 115.93 599.00 12.00"].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("three tokens without a sum stay merged", () => {
+      expect(extractAmountsFromLine("Kokku 483.07 115.93 600.00")).toHaveLength(1);
+    });
+
+    it("two valid triples on one row stay merged and held", () => {
+      expect(extractAmountsFromLine("Kokku 5.00 10.00 15.00 / 5.00 10.00 15.00")).not.toContain(15);
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 5.00 10.00 15.00 / 5.00 10.00 15.00"].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+  });
+
+  describe("R5 VAT-rate row triple", () => {
+    it("binds the part equal to the stated rate × the other part", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Arve nr 5", "Kuupäev 01.08.2026", "Käibemaks 24% 350.00 84.00 434.00", "Arve kokku: 350.00 84.00 434.00"].join("\n"),
+        "arve.pdf",
+      );
+      expect(result).toMatchObject({ total_net: 350, total_vat: 84, total_gross: 434 });
+      const layout = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Käibemaks 24%", 52, 200, 70),
+        item("350.00", 300, 200, 30), item("84.00", 360, 200, 30), item("434.00", 420, 200, 30),
+        item("Kokku", 52, 216, 40), item("434.00", 420, 216, 30),
+      ]);
+      expect(layout).toMatchObject({ total_net: 350, total_vat: 84, total_gross: 434 });
+    });
+
+    it("a triple whose ratio mismatches the stated rate stays held", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Arve nr 5", "Kuupäev 01.08.2026", "Käibemaks 24% 350.00 80.00 430.00"].join("\n"),
+        "arve.pdf",
+      );
+      expect(result.total_vat).not.toBe(80);
+      expect((result.amount_consistency_issues ?? []).length).toBeGreaterThan(0);
+    });
+
+    it("two components with identical 24.00 VAT are not cleaned to 100 / 24 / 124", () => {
+      const result = extractLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Teenus A", 52, 100, 60), item("100,00", 300, 100, 30),
+        item("Käibemaks 24%", 52, 116, 70), item("24,00", 300, 116, 30),
+        item("Teenus B", 52, 132, 60), item("100,00", 300, 132, 30),
+        item("Käibemaks 24%", 52, 148, 70), item("24,00", 300, 148, 30),
+        item("Kokku", 52, 164, 40), item("248,00", 300, 164, 30),
+      ]);
+      expect(result).toMatchObject({ total_net: 200, total_vat: 48, total_gross: 248 });
+    });
+  });
+
+  describe("R8 layout percent sign", () => {
+    const rateRow = (gap: number) => [
+      item("Näidis OÜ", 52, 40, 60),
+      item("Summa km-ta", 52, 100, 60), item("50,00", 300, 100, 30),
+      item("Käibemaks", 52, 116, 60), item("24,0", 200, 116, 20), item("%", 220 + gap, 116, 8), item("12,00", 300, 116, 30),
+      item("Kokku", 52, 132, 40), item("62,00", 300, 132, 30),
+    ];
+
+    it("a number followed by an adjacent \"%\" item is a rate, not an amount", () => {
+      expect(extractLayout(rateRow(0))).toMatchObject({ total_net: 50, total_vat: 12, total_gross: 62 });
+    });
+
+    it("a \"%\" item beyond the gap threshold leaves the number counted (held)", () => {
+      const result = extractLayout(rateRow(30));
+      expect(result.total_vat).toBe(24);
+      expect((result.amount_consistency_issues ?? []).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("R9 footnote marker", () => {
+    it("a complete standalone \"[1]\" is not an amount", () => {
+      expect(extractAmountsFromLine("Tax [1] 0.00")).toEqual([]);
+      expect(extractAmountsFromLine("[12] Tax 3.00")).toEqual([3]);
+    });
+
+    it("\"[123]\" and \"x[1]\" are not skipped", () => {
+      expect(extractAmountsFromLine("Tax [123] 0.00")).toEqual([123]);
+      expect(extractAmountsFromLine("Tax x[1] 0.00")).toEqual([1]);
+    });
+  });
+});

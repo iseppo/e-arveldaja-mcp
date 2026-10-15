@@ -676,15 +676,86 @@ export function extractAmountsFromLine(
   documentContext?: string,
   options: { includeZero?: boolean } = {},
 ): number[] {
+  return [...new Set(extractAmountTokensFromLine(line, documentContext, options))];
+}
+
+/**
+ * The unique a + b = c assignment of exactly three amounts (±0.01), if there
+ * is exactly one. Extra amounts or competing assignments yield nothing.
+ */
+function uniqueAmountTriple(values: readonly number[]): { sum: number; parts: [number, number] } | undefined {
+  if (values.length !== 3) return undefined;
+  const hits = [0, 1, 2].flatMap(sumIndex => {
+    const [a, b] = values.filter((_value, index) => index !== sumIndex) as [number, number];
+    const sum = values[sumIndex]!;
+    return sum > 0 && Math.abs(roundMoney(a + b) - sum) <= 0.01 ? [{ sum, parts: [a, b] as [number, number] }] : [];
+  });
+  return hits.length === 1 ? hits[0] : undefined;
+}
+
+/**
+ * R5: on a VAT-rate row whose three amounts form a unique triple, the VAT is
+ * the part equal to the stated rate × the other part. No stated rate, or no
+ * part matching it, yields nothing (today's pick stays).
+ */
+function vatOfAmountTriple(values: readonly number[], line: string): number | undefined {
+  const triple = uniqueAmountTriple(values);
+  if (!triple) return undefined;
+  const rates = [...line.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
+    .map(match => parseAmount(match[1] ?? ""))
+    .filter((rate): rate is number => rate !== undefined && rate > 0);
+  if (rates.length !== 1) return undefined;
+  const [a, b] = triple.parts;
+  const matches = [
+    Math.abs(roundMoney(b * rates[0]! / 100) - a) <= 0.01 ? a : undefined,
+    Math.abs(roundMoney(a * rates[0]! / 100) - b) <= 0.01 ? b : undefined,
+  ].filter((value): value is number => value !== undefined);
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// R4: a space-separated run of exactly three two-decimal amounts
+// ("483.07 115.93 599.00") that form a unique triple is three amounts, not one
+// merged number. Any other run stays merged (and is held as over the maximum),
+// and so does every run of a line holding two such triples.
+const TWO_DECIMAL_TOKEN_RE = /^-?\d+[.,]\d{2}$/;
+
+function splitAmountTripleRun(match: RegExpMatchArray, line: string, documentContext?: string): RegExpMatchArray[] {
+  const raw = match[0] ?? "";
+  if (!/\s/.test(raw)) return [match];
+  const parts = [...raw.matchAll(/\S+/g)];
+  if (parts.length !== 3 || !parts.every(part => TWO_DECIMAL_TOKEN_RE.test(part[0]))) return [match];
+  const values = parts.map(part => parseAmount(part[0], line, documentContext));
+  if (values.some(value => value === undefined) || !uniqueAmountTriple(values as number[])) return [match];
+  return parts.map(part => {
+    const split = [part[0]] as RegExpMatchArray;
+    split.index = (match.index ?? 0) + (part.index ?? 0);
+    return split;
+  });
+}
+
+/** extractAmountsFromLine before de-duplication: one value per amount token. */
+function extractAmountTokensFromLine(
+  line: string,
+  documentContext?: string,
+  options: { includeZero?: boolean } = {},
+): number[] {
   // Only honor a leading minus at start-of-line or after whitespace, and only
   // start a number when it is not immediately preceded by another digit. This
   // stops date/range fragments like "2024-01-15" (→ -1, -15) or "10-20" (→ -20)
   // from manufacturing spurious negative pseudo-amounts.
-  const matches = [...line.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)];
-  const amounts = matches
+  const runs = [...line.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)];
+  const splitRuns = runs.map(match => splitAmountTripleRun(match, line, documentContext));
+  const matches = splitRuns.filter(split => split.length > 1).length === 1 ? splitRuns.flat() : runs;
+  return matches
     .filter(match => {
       const raw = match[0] ?? "";
-      const next = line.slice((match.index ?? 0) + raw.length).trimStart();
+      const start = match.index ?? 0;
+      // R9: a complete standalone footnote marker ("[1]") is not an amount.
+      if (/^\d{1,2}$/.test(raw) && line[start - 1] === "[" && line[start + raw.length] === "]" &&
+        (start < 2 || /\s/.test(line[start - 2]!))) {
+        return false;
+      }
+      const next = line.slice(start + raw.length).trimStart();
       return !next.startsWith("%");
     })
     .map(match => {
@@ -702,8 +773,6 @@ export function extractAmountsFromLine(
     })
     .filter((value): value is number =>
       value !== undefined && (options.includeZero === true || value !== 0));
-
-  return [...new Set(amounts)];
 }
 
 /** The two-decimal monetary values in `text` (see MONEY_TOKEN_RE). */
@@ -1365,9 +1434,10 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // number cannot become an amount candidate.
   // Exchange-rate figures are blanked the same way (F-GROSSPICKER): a rate is
   // never the gross, and on a DCC slip its currency mark made it win.
-  const amounts = extractAmountsFromLine(blankExchangeRateNumbers(line.replace(TEXTUAL_DATE_IN_LINE_RE, " ")), documentContext, {
+  const amountTokens = extractAmountTokensFromLine(blankExchangeRateNumbers(line.replace(TEXTUAL_DATE_IN_LINE_RE, " ")), documentContext, {
     includeZero: isExplicitVatTotalLine(line),
   });
+  const amounts = [...new Set(amountTokens)];
   const deDatedAmounts = amounts.filter(amount => !isLikelyYearAmount(amount, line));
   const filteredAmounts = (deDatedAmounts.length > 0 ? deDatedAmounts : amounts).filter(amount =>
     !(Number.isInteger(amount) && amount >= 1000 && !hasCurrencyKeyword && !hasTotalLikeLabel),
@@ -1389,9 +1459,15 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
     };
   }
 
-  const pickedGross = filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(inspectionLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(inspectionLine))
-    ? Math.max(...filteredAmounts)
-    : filteredAmounts[filteredAmounts.length - 1];
+  // R5/R6: a row of exactly three amount tokens forming a unique a + b = c.
+  const rowTriple = amountTokens.length === 3 && filteredAmounts.length === 3 ? uniqueAmountTriple(filteredAmounts) : undefined;
+  // R6: a total-labelled (not net-labelled) row's gross is the triple's sum,
+  // not its last or nearest amount ("Kokku € 483.07 115.93 599.00").
+  const pickedGross = rowTriple && hasTotalLikeLabel && !hasNetLikeLabel
+    ? rowTriple.sum
+    : filteredAmounts.length > 1 && (RECEIPT_VAT_LABEL_RE.test(inspectionLower) || /\b(?:sisaldab|including|incl\.?)\b/i.test(inspectionLine))
+      ? Math.max(...filteredAmounts)
+      : filteredAmounts[filteredAmounts.length - 1];
   const vatCandidates = filteredAmounts.filter(amount => ![...inspectionLine.matchAll(/(\d{1,2}(?:[.,]\d+)?)\s*%/g)]
     .map(match => parseAmount(match[1] ?? ""))
     .some(rate => rate !== undefined && Math.abs(rate - amount) < 0.001));
@@ -1400,7 +1476,8 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // certainly the gross total (e.g. "Kokku 100 EUR KM 20%" → 20 excluded as rate, leaving 100).
   // Keep lastVatCandidate in that case so totalVat falls through to the later gross − net
   // reconciliation. Lines without a %-rate exclusion (e.g. "Tax 1 €3.96 €3.96") are unaffected.
-  const lastVatCandidate = vatCandidates[vatCandidates.length - 1];
+  const tripleVat = rowTriple && isVatAmountLine(line) ? vatOfAmountTriple(filteredAmounts, line) : undefined;
+  const lastVatCandidate = tripleVat ?? vatCandidates[vatCandidates.length - 1];
   const filteredByPercentRate = vatCandidates.length < filteredAmounts.length;
   const pickedVat = lastVatCandidate !== undefined &&
     (!filteredByPercentRate || filteredAmounts.length <= 1 || lastVatCandidate < Math.max(...filteredAmounts))
@@ -1605,6 +1682,9 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
       const text = clampTextLine(item.text);
       const columnIndex = columnByItem.get(item);
       if (columnIndex === undefined) continue;
+      // R8: a number whose adjacent next item is a "%" sign ("24,0" | "%") is a rate.
+      const nextItem = row.items.filter(other => other.x > item.x).sort((a, b) => a.x - b.x)[0];
+      if (nextItem && /^\s*%/.test(nextItem.text) && nextItem.x - (item.x + item.width) <= Math.max(6, item.height)) continue;
 
       for (const amount of extractAmountsFromLine(text, documentContext)) {
         if (isLikelyYearAmount(amount, text)) continue;
@@ -1654,6 +1734,19 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
   // right-side binding, which selects their own VAT column rather than the
   // following gross-total column.
   const candidates = rightSideAmounts.length > 0 ? rightSideAmounts : sameRowAmounts;
+
+  // R5/R6: exactly three amount tokens on the row forming a unique triple bind
+  // a total label to the sum and a VAT-rate label to the part matching its
+  // stated rate. Anything else keeps the binding below.
+  const candidateItems = [...new Set(candidates.map(candidate => candidate.item))];
+  const tokenCount = candidateItems.reduce((count, item) => count + extractAmountTokensFromLine(clampTextLine(item.text)).length, 0);
+  if (candidates.length === 3 && tokenCount === 3) {
+    const values = candidates.map(candidate => candidate.amount);
+    const bound = label.field === "total_gross"
+      ? uniqueAmountTriple(values)?.sum
+      : label.field === "total_vat" ? vatOfAmountTriple(values, label.item.text) : undefined;
+    if (bound !== undefined) return candidates.find(candidate => candidate.amount === bound);
+  }
 
   // #3: on a multi-rate breakdown row "KM 24% | 10.00 | 2.40" the taxable base
   // is printed before the VAT amount, so the VAT column is the RIGHTMOST amount,
