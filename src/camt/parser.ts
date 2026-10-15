@@ -302,6 +302,19 @@ export function summarizeEntries(entries: ParsedCamtEntry[]): CamtParseResult["s
   return summary;
 }
 
+/**
+ * Number of CAMT.053 `<Stmt>` statements in the XML, read with the same parser
+ * and path the import uses; undefined when the XML cannot be parsed at all.
+ */
+export function countCamtStatements(xml: string): number | undefined {
+  if (XML_DTD_PATTERN.test(xml)) return undefined;
+  try {
+    return asArray(valueAt(xmlParser.parse(xml), ["Document", "BkToCstmrStmt", "Stmt"])).length;
+  } catch {
+    return undefined;
+  }
+}
+
 function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParseResult {
   if (XML_DTD_PATTERN.test(xml)) {
     throw new Error("CAMT.053 files must not contain DOCTYPE or ENTITY declarations");
@@ -309,6 +322,12 @@ function buildStatement(xml: string, rejected: ImportRejectedField[]): CamtParse
   const parsed = xmlParser.parse(xml);
   const statements = asArray(valueAt(parsed, ["Document", "BkToCstmrStmt", "Stmt"]));
 
+  if (statements.length === 0) {
+    throw new Error(
+      "No CAMT.053 <Stmt> statement found: this XML is not a bank statement export (for example a single <Ntry> entry). " +
+      "Export the full statement from the bank.",
+    );
+  }
   if (statements.length !== 1) {
     throw new Error(
       `Expected exactly one <Stmt> in CAMT.053 file, found ${statements.length}. ` +

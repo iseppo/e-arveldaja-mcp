@@ -997,9 +997,10 @@ export async function runAccountingInboxDryRunPipeline({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       // Import-step errors (Wise/CAMT parsing) can embed raw counterparty-
-      // controlled CSV cell/header bytes in their message. Cap and sandbox-wrap
-      // it before it reaches MCP output so it cannot smuggle instructions.
-      const safeMessage = wrapUntrustedOcr(capUntrustedText(message).text) ?? message;
+      // controlled CSV cell/header bytes in their message. Cap it here; the MCP
+      // output boundary (accounting_inbox's publicStepResult / publicFollowUp)
+      // sandbox-wraps executed-step and review summaries exactly once.
+      const safeMessage = capUntrustedText(message).text ?? message;
       executedSteps.push({
         step: step.step,
         tool: step.tool,

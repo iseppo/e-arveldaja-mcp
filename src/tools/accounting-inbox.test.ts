@@ -2538,7 +2538,8 @@ ${entryXml}
     const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
     workspacesToClean.push(workspace);
     const { join: pathJoin } = await import("path");
-    await writeFile(pathJoin(workspace, "statement.xml"), "NOT VALID XML AT ALL");
+    // A statement (one <Stmt>) that fails the parse: no account IBAN.
+    await writeFile(pathJoin(workspace, "statement.xml"), "<Document><BkToCstmrStmt><Stmt><Id>S1</Id><Acct></Acct></Stmt></BkToCstmrStmt></Document>");
 
     const setupError = Object.assign(new Error("setup"), { mode: "setup" });
     const server = { registerTool: vi.fn() } as any;
@@ -4643,5 +4644,65 @@ describe("accounting_inbox detected file_refs per profile", () => {
         expect(() => runtime.fileReferenceStore.resolve(step.suggested_args.file_ref, { kind: "file", operation }), `${profile} ${step.tool}`).not.toThrow();
       }
     }
+  });
+});
+
+describe("accounting_inbox: XML without a CAMT statement and failed-step wrapping", () => {
+  const INBOX_EXPOSURE = { enableLightyear: true, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true };
+  const NTRY_ONLY_XML = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<ns0:Ntry xmlns:ns0="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">' +
+    '<ns0:Amt Ccy="EUR">25.00</ns0:Amt><ns0:CdtDbtInd>CRDT</ns0:CdtDbtInd><ns0:BookgDt><ns0:Dt>2026-09-01</ns0:Dt></ns0:BookgDt>' +
+    "</ns0:Ntry>";
+
+  function inboxHandler() {
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    });
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), api, INBOX_EXPOSURE);
+    return getRegisteredToolHandler(server, "accounting_inbox");
+  }
+
+  it("reports a bare <Ntry> XML as not_a_statement with no steps, and keeps a real statement's steps", async () => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    await writeFile(join(workspace, "donation_source_bank_entry.xml"), NTRY_ONLY_XML);
+
+    const payload = parseMcpResponse((await inboxHandler()({ mode: "scan", workspace_path: workspace })).content[0]!.text) as any;
+
+    const camtFiles = payload.detected_inputs.camt_files as any[];
+    expect(camtFiles).toHaveLength(2);
+    const entry = camtFiles.find(file => desandboxText(file.display_name) === "donation_source_bank_entry.xml");
+    const statement = camtFiles.find(file => desandboxText(file.display_name) === "statement.xml");
+    expect(entry.analysis).toBe("not_a_statement");
+    expect(statement.analysis).not.toBe("not_a_statement");
+    const camtSteps = (payload.recommended_steps as any[]).filter(step => step.tool === "process_camt053" || step.tool === "parse_camt053" || step.tool === "import_camt053");
+    expect(camtSteps.length).toBeGreaterThan(0);
+    expect(JSON.stringify(camtSteps)).not.toContain("donation_source_bank_entry");
+    expect(camtSteps.every(step => step.suggested_args.file_ref === statement.file_ref)).toBe(true);
+    expect(payload.user_summary).toContain("1 XML file(s) contain no CAMT statement and are not importable.");
+  });
+
+  it.each(["standard", "guided"] as const)("a failed step's summary is sandbox-wrapped exactly once on the %s dry run", async (profile) => {
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    // One <Stmt> that fails the parse (no account IBAN): it keeps its steps.
+    await writeFile(join(workspace, "statement.xml"), "<Document><BkToCstmrStmt><Stmt><Id>S1</Id><Acct></Acct></Stmt></BkToCstmrStmt></Document>");
+    const handler = inboxHandler();
+
+    const result = await runWithToolProfile(profile, () => handler({ mode: "dry_run", workspace_path: workspace }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+
+    const failed = (payload.autopilot.executed_steps as any[]).filter(step => step.status === "failed");
+    expect(failed.length).toBeGreaterThan(0);
+    const wrapCount = (text: string) => text.match(/<<UNTRUSTED_OCR_START:/g)?.length ?? 0;
+    for (const step of failed) {
+      expect(wrapCount(step.summary)).toBe(1);
+      expect(desandboxText(step.summary)).toContain("missing statement account IBAN");
+    }
+    const reviews = (payload.autopilot.needs_accountant_review as any[]).filter(item => String(item.summary).includes("failed during autopilot dry run"));
+    expect(reviews.length).toBeGreaterThan(0);
+    for (const review of reviews) expect(wrapCount(review.summary)).toBe(1);
   });
 });

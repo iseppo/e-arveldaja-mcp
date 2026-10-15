@@ -44,7 +44,7 @@ import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtim
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-snapshot.js";
 import { CAMT_MAX_FILE_SIZE, normalizeAccountIdentity } from "../camt/executor.js";
-import { camtDateDay, preflightCamt053Xml } from "../camt/parser.js";
+import { camtDateDay, countCamtStatements, preflightCamt053Xml } from "../camt/parser.js";
 import { groupCamtStatementFiles, type CamtStatementFingerprint } from "../camt/statement-duplicates.js";
 import {
   buildBankDimensionCandidates,
@@ -106,7 +106,7 @@ interface InboxFileCandidate {
   detected_iban?: string;
   /** CAMT only: "analyzed" (hashed, statement read), "hash_only" (hashed, the
    * statement period/account could not be analyzed), "not_analyzed". */
-  analysis?: "analyzed" | "hash_only" | "not_analyzed";
+  analysis?: "analyzed" | "hash_only" | "not_analyzed" | "not_a_statement";
   sha256?: string;
   /** CAMT only: a byte-identical copy of camt_files[duplicate_of]; no steps. */
   coverage?: "duplicate";
@@ -382,7 +382,11 @@ export async function analyzeInboxCamtFiles(
 ): Promise<{ files: InboxFileCandidate[]; summary: CamtOverlapSummary; bindings: Map<string, string> }> {
   // The analyzed files by camt_files index: the fingerprint, and the statement
   // when its account and period could be read.
-  const analyzed = new Map<number, { fingerprint: CamtStatementFingerprint; statement?: { from: string; to: string; currency: string } }>();
+  const analyzed = new Map<number, {
+    fingerprint: CamtStatementFingerprint;
+    statement?: { from: string; to: string; currency: string };
+    notAStatement?: boolean;
+  }>();
   let bytesRead = 0;
   let budgetExceeded = camtFiles.length > budget.maxFiles;
   for (const [index, file] of camtFiles.entries()) {
@@ -411,6 +415,7 @@ export async function analyzeInboxCamtFiles(
     let accountKey: string | undefined;
     let period: { from: string; to: string } | undefined;
     let statement: { from: string; to: string; currency: string } | undefined;
+    let notAStatement = false;
     try {
       const preflight = preflightCamt053Xml(snapshot.text());
       if (preflight.ok) {
@@ -428,6 +433,9 @@ export async function analyzeInboxCamtFiles(
       }
     } catch {
       // Structural parse failure: overlap is not analyzed; bytes still dedupe.
+      // Only an XML with no <Stmt> at all is "not a statement"; every other
+      // failure keeps its import steps.
+      notAStatement = countCamtStatements(snapshot.text()) === 0;
     }
     analyzed.set(index, {
       fingerprint: {
@@ -439,6 +447,7 @@ export async function analyzeInboxCamtFiles(
         ...(period !== undefined ? { period } : {}),
       },
       ...(statement !== undefined ? { statement } : {}),
+      ...(notAStatement ? { notAStatement } : {}),
     });
   }
 
@@ -464,7 +473,7 @@ export async function analyzeInboxCamtFiles(
     overlapPairs += info.overlaps_with?.filter(other => other.index > index).length ?? 0;
     return {
       ...file,
-      analysis: statement !== undefined ? "analyzed" : "hash_only",
+      analysis: statement !== undefined ? "analyzed" : entry.notAStatement ? "not_a_statement" : "hash_only",
       sha256,
       ...(info.duplicate_of !== undefined ? { coverage: "duplicate" as const, duplicate_of: info.duplicate_of } : {}),
       ...(info.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
@@ -674,7 +683,7 @@ export function buildRecommendedSteps(params: {
   // A byte-identical copy of another detected statement gets no steps (never a
   // recommended:false step, which the dry-run autopilot would treat as a
   // skipped prerequisite and defer classification on).
-  const steppedCamtFiles = camtFiles.filter(file => file.duplicate_of === undefined);
+  const steppedCamtFiles = camtFiles.filter(file => file.duplicate_of === undefined && file.analysis !== "not_a_statement");
   for (const file of steppedCamtFiles) {
     const standInNote = file.stands_in_for !== undefined
       ? ` This file stands in for byte-identical file(s) at camt_files index ${file.stands_in_for.join(", ")}; if it was changed or removed, re-run accounting_inbox so the duplicates are reconsidered.`
@@ -860,6 +869,10 @@ function buildUserSummary(params: {
   );
   if (params.camtDuplicateCount > 0) {
     parts.push(`${params.camtDuplicateCount} CAMT file(s) are byte-identical copies of another and are left out of the steps.`);
+  }
+  const notAStatementCount = params.camtFiles.filter(file => file.analysis === "not_a_statement").length;
+  if (notAStatementCount > 0) {
+    parts.push(`${notAStatementCount} XML file(s) contain no CAMT statement and are not importable.`);
   }
 
   const readySteps = params.steps.filter(step => step.recommended && step.missing_inputs.length === 0);

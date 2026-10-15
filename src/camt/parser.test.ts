@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCamt053Xml, preflightCamt053Xml } from "./parser.js";
+import { countCamtStatements, parseCamt053Xml, preflightCamt053Xml } from "./parser.js";
 
 const sampleXml = `<?xml version="1.0" encoding="UTF-8"?>
 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
@@ -789,5 +789,29 @@ ${m05Entry({})}`,
       "ee63 7700 7710 1121 2909",
     ));
     expect(h08.statement_metadata.iban).toBe("ee63 7700 7710 1121 2909");
+  });
+});
+
+describe("CAMT statement count", () => {
+  const ntryOnly = '<ns0:Ntry xmlns:ns0="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02"><ns0:Amt Ccy="EUR">25.00</ns0:Amt></ns0:Ntry>';
+  const twoStatements = "<Document><BkToCstmrStmt><Stmt><Id>A</Id></Stmt><Stmt><Id>B</Id></Stmt></BkToCstmrStmt></Document>";
+
+  it("counts <Stmt> elements with the import's own parser path", () => {
+    expect(countCamtStatements(ntryOnly)).toBe(0);
+    expect(countCamtStatements(twoStatements)).toBe(2);
+    expect(countCamtStatements("<Document><BkToCstmrStmt><Stmt><Id>A</Id></Stmt></BkToCstmrStmt></Document>")).toBe(1);
+    expect(countCamtStatements('<!DOCTYPE x [<!ENTITY a "b">]><Document/>')).toBeUndefined();
+  });
+
+  it("explains a 0-statement XML as not a bank statement export", () => {
+    expect(() => parseCamt053Xml(ntryOnly)).toThrow(
+      "No CAMT.053 <Stmt> statement found: this XML is not a bank statement export (for example a single <Ntry> entry). Export the full statement from the bank.",
+    );
+  });
+
+  it("keeps the split advice for a multi-statement XML", () => {
+    expect(() => parseCamt053Xml(twoStatements)).toThrow(
+      "Expected exactly one <Stmt> in CAMT.053 file, found 2. Split multi-statement CAMT exports into separate XML files and import them one statement at a time.",
+    );
   });
 });
