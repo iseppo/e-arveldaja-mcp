@@ -634,21 +634,6 @@ function parseAmount(raw: string, context?: string, documentContext?: string): n
   return Number.isFinite(parsed) ? roundMoney(parsed) : undefined;
 }
 
-/**
- * Digits glued to letters with no decimal part ("LHVBEE22", "KMKREE102617582",
- * "EE107700771005782542") are part of a code — SWIFT, VAT number, IBAN — not
- * an amount. A glued currency code ("EUR22") still reads as an amount, and so
- * does any token with a decimal part ("Kokku124,00"), so no OCR-glued total is
- * lost.
- */
-function isLetterGluedInteger(line: string, start: number, raw: string): boolean {
-  if (/[.,]/.test(raw)) return false;
-  const before = line.slice(0, start).match(/\p{L}+$/u)?.[0];
-  const after = line.slice(start + raw.length).match(/^\p{L}+/u)?.[0];
-  const isCode = (run: string | undefined) => run !== undefined && detectCurrenciesOnLine(run).length === 0;
-  return isCode(before) || isCode(after);
-}
-
 // Exported for unit tests.
 /**
  * `includeZero` retains an explicit 0 as a real amount. It is opt-in, and the
@@ -675,7 +660,7 @@ export function extractAmountsFromLine(
     .filter(match => {
       const raw = match[0] ?? "";
       const next = line.slice((match.index ?? 0) + raw.length).trimStart();
-      return !next.startsWith("%") && !isLetterGluedInteger(line, match.index ?? 0, raw);
+      return !next.startsWith("%");
     })
     .map(match => {
       const raw = match[0] ?? "";
@@ -1538,12 +1523,10 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
       const merged = mergeLayoutTextItems(span);
       const columnIndex = columnByItem.get(span[0]!);
       if (columnIndex === undefined) continue;
-      // A label lying wholly in the span's tail ("Kogus Ühik | Hind km-ga") is
-      // the tail's own header: binding it in the leading item's different
-      // column would read that column's data (a quantity "1") as the total.
-      // The tail's own span still carries the label, and a leading item that
-      // is itself a label keeps its own span.
-      if (span.length > 1 && columnByItem.get(span[1]!) !== columnIndex) {
+      // A span whose label lies wholly in its tail ("Kirjeldus Kogus Hind km-ga")
+      // would bind that label to the leading item's column; the tail's own,
+      // shorter span carries it instead.
+      if (span.length > 1) {
         const field = classifyLayoutAmountLabel(merged.text);
         if (field && classifyLayoutAmountLabel(mergeLayoutTextItems(span.slice(1)).text) === field) continue;
       }
@@ -1642,11 +1625,19 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
     )[0];
 }
 
+/** How many label-row heights below a column-header label its value may sit. */
+const BELOW_COLUMN_MAX_ROW_HEIGHTS = 5;
+
 function findBelowColumnLayoutAmount(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
+  // A header's value sits just under it. Without a distance bound a summary
+  // label whose own amount was dropped ("Jäänud tasuda 0,00") reached down the
+  // empty column to a footer token ("SWIFT LHVBEE22" → 22) and became the gross.
+  const maxDistance = BELOW_COLUMN_MAX_ROW_HEIGHTS * Math.max(label.row.maxHeight, 1);
   return amounts
     .filter(amount =>
       amount.row.pageNum === label.row.pageNum &&
       amount.row.y > label.row.y &&
+      amount.row.y - label.row.y <= maxDistance &&
       amount.columnIndex === label.columnIndex,
     )
     .sort((a, b) =>

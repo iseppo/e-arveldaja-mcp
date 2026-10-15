@@ -3457,49 +3457,13 @@ describe("layout labels bind only their own column values (live smoke f8818bd)",
     expect(result.amount_consistency_issues ?? []).toEqual([]);
   });
 
-  it("a summary label does not bind a footer SWIFT code below it", () => {
+  it("a summary label does not reach down an empty column to a far footer token", () => {
     const layout = extractAmountsFromLayout([
       item("Kokku", 400, 100, 40),
       item("124,00", 540, 100, 30),
       item("Jäänud tasuda", 400, 120, 65),
       item("0,00", 540, 120, 20),
       item("SWIFT HABAEE22", 400, 500, 70),
-    ]);
-    expect(layout?.total_gross).toBe(124);
-  });
-
-  it("a plausible total far below its label is still read, so a conflicting column holds", () => {
-    const conflictItems = [
-      item("Summa km-ta", 52, 100, 60),
-      item("100,00", 300, 100, 30),
-      item("Käibemaks 20%", 52, 116, 70),
-      item("20,00", 300, 116, 30),
-      item("Tasuda", 52, 132, 40),
-      item("120,00", 300, 132, 30),
-      item("Kokku", 450, 150, 30),
-      item("124,00", 450, 230, 30),
-    ];
-    const conflictText = ["Summa km-ta 100,00", "Käibemaks 20% 20,00", "Tasuda 120,00", "Kokku", "124,00"].join("\n");
-    expect(extractAmountsFromLayout(conflictItems)?.total_gross).toBe(124);
-    const result = extractReceiptFieldsFromText(conflictText, "conflict.pdf", { textItems: conflictItems });
-    expect(result.total_gross_conflict).toBe(true);
-  });
-
-  it("digits glued to a code are not amounts; a glued currency or decimal total still is", () => {
-    expect(extractAmountsFromLine("SWIFT LHVBEE22")).toEqual([]);
-    expect(extractAmountsFromLine("IBAN EE231700017001234567")).toEqual([]);
-    expect(extractAmountsFromLine("KMKR nr KMKREE102809963")).toEqual([]);
-    expect(extractAmountsFromLine("Total EUR22")).toEqual([22]);
-    expect(extractAmountsFromLine("Kokku124,00")).toEqual([124]);
-    expect(extractAmountsFromLine("Kokku 22")).toEqual([22]);
-  });
-
-  it("a label in a span's tail binds in its own column, not the leading header's", () => {
-    const layout = extractAmountsFromLayout([
-      item("Kogus", 300, 100, 30),
-      item("Summa km-ga", 400, 100, 60),
-      item("3", 310, 116, 5),
-      item("124,00", 420, 116, 30),
     ]);
     expect(layout?.total_gross).toBe(124);
   });
