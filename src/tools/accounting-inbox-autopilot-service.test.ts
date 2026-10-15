@@ -559,6 +559,63 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(result.next_recommended_action).toBeUndefined();
   });
 
+  it("receipt possible-duplicate holds become English follow-ups naming the journal ids", async () => {
+    const holdRow = (name: string, journalId: number) => ({
+      file: { name, path: `/tmp/accounting-inbox/receipts/${name}` },
+      classification: "purchase_invoice",
+      status: "needs_review",
+      possible_duplicate_journal_ids: [journalId],
+      notes: [],
+    });
+    const prepareReceiptBatch = vi.fn().mockResolvedValue(ok({
+      mode: "DRY_RUN",
+      results: [holdRow("delfi-june.pdf", 28427570), holdRow("ohtuleht-june.pdf", 28427571)],
+      summary: {
+        created: 0,
+        dry_run_preview: 0,
+        matched: 0,
+        skipped_duplicate: 0,
+        needs_review: 2,
+        possible_duplicate_review: 2,
+        failed: 1,
+      },
+    }));
+
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1,
+          tool: "process_receipt_batch",
+          purpose: "Preview receipts",
+          recommended: true,
+          suggested_args: { folder_path: "/tmp/accounting-inbox/receipts", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [],
+          reason: "Receipts found",
+        }],
+      }),
+      operations: mockOperations({ prepareReceiptBatch }),
+    });
+
+    const step = result.executed_steps.find(s => s.tool === "process_receipt_batch");
+    expect(step?.summary).toBe(
+      "Receipt dry run would create 0 invoice(s), match 0, skip 0 duplicate(s), leave 2 in review (2 possible duplicate(s) of booked payments), and fail 1.",
+    );
+    const followUps = [...result.needs_one_decision, ...result.needs_accountant_review]
+      .filter(f => f.source === "process_receipt_batch");
+    expect(followUps.map(f => f.summary)).toEqual(expect.arrayContaining([
+      "delfi-june.pdf was left for review in the dry run (purchase_invoice): the payment may already be booked by journal(s) 28427570.",
+      "ohtuleht-june.pdf was left for review in the dry run (purchase_invoice): the payment may already be booked by journal(s) 28427571.",
+    ]));
+    const failed = followUps.find(f => f.summary.includes("failed the dry run"));
+    expect(failed?.recommendation).toMatch(/^Check the exact extraction or booking error first/);
+    // No Estonian left in the receipt follow-up texts.
+    for (const followUp of followUps) {
+      const text = `${followUp.summary} ${followUp.recommendation}`;
+      expect(text).not.toMatch(/[õäöüšž]/i);
+      expect(text).not.toMatch(/\b(jäi|ülevaatuseks|kviitung|kinnita|Kontrolli)\b/i);
+    }
+  });
+
   it("sandbox-wraps a failed import step's error message (raw CSV bytes must not reach output unwrapped)", async () => {
     // wise-import throws with attacker-controlled cell/header text embedded in
     // the message. The autopilot must cap+wrap it before it lands in MCP output.

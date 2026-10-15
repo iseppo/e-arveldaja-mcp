@@ -388,10 +388,12 @@ describe("receipt batch typed operation", () => {
     }
     expect(a.clients!.listAll.mock.invocationCallOrder[listCallsBeforeExecute]!)
       .toBeGreaterThan(a.clients!.invalidateListCache.mock.invocationCallOrder[0]!);
-    expect(a.journals!.invalidateListCache).toHaveBeenCalledTimes(1);
+    // Once before the execute projection, then once more right before the
+    // intake duplicate scan that precedes each create (one created receipt).
+    expect(a.journals!.invalidateListCache).toHaveBeenCalledTimes(2);
   });
 
-  it("execute runs the intake cash-duplicate scan (advisory) against the live journals before creating", async () => {
+  it("a possible duplicate booked after the dry run drifts the plan; nothing is created", async () => {
     const { api, spies } = makeApi();
     const mocked = api as unknown as {
       readonly: Record<string, ReturnType<typeof vi.fn>>;
@@ -399,9 +401,11 @@ describe("receipt batch typed operation", () => {
     };
     mocked.readonly.getBankAccounts!.mockResolvedValue([{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }]);
     mocked.readonly.getAccountDimensions = vi.fn().mockResolvedValue([{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }]);
+    mocked.journals.listAllWithPostings = vi.fn().mockResolvedValue([]);
     const ops = makeOperations(api);
     const { manifest, planHandles } = await dryRunPlan(ops);
-    // A matching bank posting booked elsewhere AFTER the reviewed dry run.
+    // A matching bank posting booked elsewhere AFTER the reviewed dry run: the
+    // execute projection now holds the row, so the plan fingerprint drifts.
     mocked.journals.listAllWithPostings = vi.fn().mockResolvedValue([{
       id: 555, title: "Manual booking", effective_date: "2026-03-20", registered: true, is_deleted: false,
       postings: [{ accounts_id: 1020, type: "C", amount: 124, accounts_dimensions_id: 5001, is_deleted: false }],
@@ -409,17 +413,58 @@ describe("receipt batch typed operation", () => {
     const outcome = await ops.runBatch({
       ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
     });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected plan_drift");
+    expect(outcome.error.code).toBe("plan_drift");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a possible duplicate booked after the execute projection is caught by the uncached pre-create scan", async () => {
+    const { api, spies } = makeApi();
+    const mocked = api as unknown as {
+      readonly: Record<string, ReturnType<typeof vi.fn>>;
+      journals: Record<string, ReturnType<typeof vi.fn>>;
+    };
+    mocked.readonly.getBankAccounts!.mockResolvedValue([{ account_name_est: "LHV", account_no: "1", accounts_dimensions_id: 5001 }]);
+    mocked.readonly.getAccountDimensions = vi.fn().mockResolvedValue([{ id: 5001, accounts_id: 1020, title_est: "LHV EUR" }]);
+    const suspect = {
+      id: 556, title: "Tasumine", effective_date: "2026-03-20", registered: true, is_deleted: false,
+      postings: [{ accounts_id: 1020, type: "C", amount: 124, accounts_dimensions_id: 5001, is_deleted: false }],
+    };
+    // Emulate the journals list cache: a read is served from the cache until
+    // invalidateListCache drops it. The suspect is booked right after the second
+    // live read (the execute projection's), so only an uncached scan sees it.
+    let cached: unknown[] | undefined;
+    let liveReads = 0;
+    let live: unknown[] = [];
+    mocked.journals.invalidateListCache = vi.fn(() => { cached = undefined; });
+    mocked.journals.listAllWithPostings = vi.fn(async () => {
+      if (cached) return cached;
+      cached = live;
+      liveReads += 1;
+      if (liveReads === 2) live = [suspect];
+      return cached;
+    });
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
     expect(outcome.ok).toBe(true);
     if (!outcome.ok) throw new Error("runBatch failed");
     const result = outcome.value.results[0]!;
-    // Advisory, same as the dry run: the invoice is still created.
-    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("created");
-    expect(result.notes.some(note => note.includes("POSSIBLE duplicate") && note.includes("555"))).toBe(true);
-    const invalidateOrder = mocked.journals.invalidateListCache!.mock.invocationCallOrder;
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(result.status).toBe("needs_review");
+    expect(result.possible_duplicate_journal_ids).toEqual([556]);
+    expect(result.review_guidance?.recommendation).toContain("556");
+    expect(outcome.value.summary.possible_duplicate_review).toBe(1);
+    // Invalidation order: projection drop, projection scan, pre-create drop, pre-create scan.
+    const invalidateOrder = mocked.journals.invalidateListCache.mock.invocationCallOrder;
     const scanOrder = mocked.journals.listAllWithPostings.mock.invocationCallOrder;
-    expect(invalidateOrder[0]!).toBeLessThan(scanOrder[0]!);
-    expect(scanOrder.at(-1)!).toBeLessThan(spies.createAndSetTotals.mock.invocationCallOrder[0]!);
+    expect(invalidateOrder).toHaveLength(2);
+    const projectionScan = scanOrder.find(order => order > invalidateOrder[0]!)!;
+    expect(projectionScan).toBeLessThan(invalidateOrder[1]!);
+    expect(invalidateOrder[1]!).toBeLessThan(scanOrder.at(-1)!);
   });
 
   it("rolls back (invalidates) the created invoice when the document upload fails", async () => {

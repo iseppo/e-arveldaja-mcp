@@ -122,6 +122,8 @@ export interface ReceiptBatchFileResult {
   booking_suggestion?: BookingSuggestion;
   duplicate_match?: InvoiceDuplicateMatch;
   duplicate_candidates?: InvoiceNumberCandidate[];
+  /** Journals that may already book this receipt's cash outflow; the row is held as needs_review. */
+  possible_duplicate_journal_ids?: number[];
   created_invoice?: {
     id?: number;
     number: string;
@@ -156,5 +158,7 @@ export interface ReceiptBatchSummary {
   skipped_duplicate: number;
   failed: number;
   needs_review: number;
+  /** needs_review rows held because the cash outflow may already be booked by a journal. */
+  possible_duplicate_review: number;
   dry_run_preview: number;
 }

@@ -260,6 +260,19 @@ describe("renderReceiptBatchCompact — dry_run", () => {
     expect(warning?.message).not.toContain("Anthropic");
     expect(String(warning?.item_id)).toMatch(OCR);
   });
+
+  it("names the journal ids for a possible duplicate of a booked payment", () => {
+    const batch = makeBatch(0, {
+      extraRows: [
+        fileResult(904, "needs_review", { possible_duplicate_journal_ids: [28427570, 28427571] }),
+      ],
+    });
+    const { summary } = renderReceiptBatchCompact(compactInput(batch));
+    const warning = summary.warnings?.find(w => w.code === "possible_duplicate_posting");
+    expect(warning?.message).toContain("28427570, 28427571");
+    expect(String(warning?.item_id)).toMatch(OCR);
+    expect(summary.warnings?.some(w => w.code === "needs_review")).toBe(false);
+  });
 });
 
 describe("renderReceiptBatchCompact — executed", () => {

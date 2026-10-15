@@ -304,6 +304,14 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
     results.filter(candidate => candidate.status === "needs_review").map(row => {
       const duplicateIds = (row.duplicate_candidates ?? []).map(candidate => candidate.invoice_id);
       const itemId = wrapUntrustedOcr(row.file.name) ?? "";
+      const postingIds = row.possible_duplicate_journal_ids ?? [];
+      if (postingIds.length > 0) {
+        return {
+          item_id: itemId,
+          code: "possible_duplicate_posting",
+          message: `The payment may already be booked by journal(s) ${postingIds.join(", ")}; book this document separately only if it is a different payment.`,
+        };
+      }
       return duplicateIds.length > 0
         ? {
           item_id: itemId,

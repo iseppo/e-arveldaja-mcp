@@ -7,7 +7,7 @@ import type {
   ReceiptBatchSummary,
 } from "./receipt-inbox-types.js";
 
-type ResultWithStatus = Pick<ReceiptBatchFileResult, "status">;
+type ResultWithStatus = Pick<ReceiptBatchFileResult, "status" | "possible_duplicate_journal_ids">;
 type WorkflowReceiptResult = Pick<ReceiptBatchFileResult, "status" | "llm_fallback"> & object;
 
 function countStatus(results: ResultWithStatus[], status: ReceiptBatchStatus): number {
@@ -33,14 +33,22 @@ export function buildReceiptBatchSummary(options: {
     skipped_duplicate: countStatus(options.results, "skipped_duplicate"),
     failed: countStatus(options.results, "failed"),
     needs_review: countStatus(options.results, "needs_review"),
+    possible_duplicate_review: options.results.filter(result =>
+      result.status === "needs_review" && (result.possible_duplicate_journal_ids?.length ?? 0) > 0
+    ).length,
     dry_run_preview: countStatus(options.results, "dry_run_preview"),
   };
 }
 
+export function possibleDuplicateReviewSuffix(count: number): string {
+  return count > 0 ? ` (${count} possible duplicate(s) of booked payments)` : "";
+}
+
 export function buildReceiptBatchWorkflowSummary(summary: ReceiptBatchSummary): string {
+  const review = `${summary.needs_review} in review${possibleDuplicateReviewSuffix(summary.possible_duplicate_review)}`;
   return summary.dry_run
-    ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${summary.needs_review} in review, and fail ${summary.failed}.`
-    : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${summary.needs_review} in review, and failed ${summary.failed}.`;
+    ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${review}, and fail ${summary.failed}.`
+    : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${review}, and failed ${summary.failed}.`;
 }
 
 export function buildReceiptBatchWorkflow(options: {

@@ -213,7 +213,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   executionMode: ReceiptBatchExecutionMode,
   legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error">> {
+): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids">> {
   const file = snapshot.file;
   // The inbox dir-entry name is untrusted (control chars, odd bytes): upload and
   // audit it only in sanitized form.
@@ -275,12 +275,13 @@ export async function createAndMaybeMatchPurchaseInvoice(
   // again at execute right before the create. Currency is guaranteed EUR here
   // (a non-EUR receipt already returned needs_review above), so the extracted
   // gross total IS the EUR figure — no conversion, never a guessed rate.
-  // Advisory-only in both modes: folded into `notes` (the result carries no
-  // separate warnings field), never blocks. The batch caller invalidates the
-  // journal cache once before an execute run, so the execute scan is live.
+  // A batch has no person looking at each row, so a suspect HOLDS the row as
+  // needs_review in both modes (unlike the advisory single-document tools);
+  // an unavailable scan keeps its note and never holds. Returns the suspect
+  // journal ids.
   const grossTotal = prepared.grossTotal;
   const invoiceDate = extracted.invoice_date;
-  const appendIntakeDuplicateNotes = async (): Promise<void> => {
+  const appendIntakeDuplicateNotes = async (): Promise<number[]> => {
     const duplicateScan = await checkIntakeCashDuplicates(api, {
       grossAmountEur: grossTotal,
       invoiceDate,
@@ -294,7 +295,20 @@ export async function createAndMaybeMatchPurchaseInvoice(
     } else if (!duplicateScan.scan_available && duplicateScan.scan_note) {
       notes.push(duplicateScan.scan_note);
     }
+    return [...new Set(duplicateScan.suspects.map(suspect => suspect.journal_id))];
   };
+  const holdPossibleDuplicate = (journalIds: number[]) => {
+    notes.push(
+      `Held: this cash outflow may already be booked by journal(s) ${journalIds.join(", ")}. ` +
+      "If it is a separate payment, book this one document with process_accounting_document.",
+    );
+    return { notes, status: "needs_review" as const, possible_duplicate_journal_ids: journalIds };
+  };
+
+  // The dry run scans before reserving a bank candidate, so a held row does
+  // not take a transaction another row could preview.
+  const dryRunSuspects = dryRun ? await appendIntakeDuplicateNotes() : [];
+  if (dryRunSuspects.length > 0) return holdPossibleDuplicate(dryRunSuspects);
 
   const dryRunMatch = dryRun
     ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
@@ -321,8 +335,6 @@ export async function createAndMaybeMatchPurchaseInvoice(
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
 
-    await appendIntakeDuplicateNotes();
-
     return {
       notes,
       status: "dry_run_preview",
@@ -336,7 +348,11 @@ export async function createAndMaybeMatchPurchaseInvoice(
     return { notes, status: "needs_review" };
   }
 
-  await appendIntakeDuplicateNotes();
+  // Uncached, right before the create: the execute projection pass refilled
+  // the journal list cache, and a payment booked since then must be seen.
+  api.journals.invalidateListCache();
+  const suspects = await appendIntakeDuplicateNotes();
+  if (suspects.length > 0) return holdPossibleDuplicate(suspects);
 
   if (legacyExecuteCreate) {
     notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');

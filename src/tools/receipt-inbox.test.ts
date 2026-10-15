@@ -32,7 +32,7 @@ import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import { sanitizeReceiptResultForOutput } from "./receipt-inbox-output.js";
 import { MAX_UNTRUSTED_TEXT_CHARS } from "../mcp-json.js";
-import { buildReceiptBatchSummary, buildReceiptBatchWorkflow } from "./receipt-inbox-summary.js";
+import { buildReceiptBatchSummary, buildReceiptBatchWorkflow, buildReceiptBatchWorkflowSummary } from "./receipt-inbox-summary.js";
 import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 
 vi.mock("../file-validation.js", async (importOriginal) => ({
@@ -412,11 +412,45 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       [], "dry_run", false, new Set(),
     );
 
-    expect(result.status).toBe("dry_run_preview");
+    // Held, not previewed as a create: a batch has no person reading each advisory note.
+    expect(result.status).toBe("needs_review");
+    expect(result.possible_duplicate_journal_ids).toEqual([321]);
     expect(result.notes).toEqual(expect.arrayContaining([
       expect.stringContaining("POSSIBLE duplicate"),
+      expect.stringContaining("Held: this cash outflow may already be booked by journal(s) 321."),
     ]));
-    expect(result.notes.join(" ")).toContain("321");
+  });
+
+  it("dry-run preview: an unavailable intake duplicate scan keeps its note and does not hold", async () => {
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]) },
+      readonly: {
+        getBankAccounts: vi.fn().mockRejectedValue(new Error("bank accounts unavailable")),
+        getAccountDimensions: vi.fn().mockResolvedValue([]),
+      },
+    } as any;
+    const context = { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true } as any;
+    const supplierResolution = {
+      found: true, created: false, match_type: "exact_name",
+      client: { id: 7, name: "Supplier OÜ", is_supplier: true, is_client: false, cl_code_country: "EE", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+    } as any;
+    const bookingSuggestion = { source: "supplier_history", item: { custom_title: "Subscription", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230, vat_rate_dropdown: "-" } } as any;
+    const extracted = {
+      supplier_name: "Supplier OÜ", invoice_number: "INV-DUP", invoice_date: "2026-03-22",
+      total_net: 100, total_vat: 0, total_gross: 100, currency: "EUR", description: "Subscription",
+    } as any;
+    const file = { name: "dup.pdf", path: "/tmp/dup.pdf", extension: ".pdf", file_type: "pdf", size_bytes: 123, modified_at: "2026-03-22T00:00:00.000Z" } as any;
+
+    const result = await createAndMaybeMatchPurchaseInvoice(
+      api, context, toSnapshot(file), extracted, supplierResolution, bookingSuggestion,
+      [], "dry_run", false, new Set(),
+    );
+
+    expect(result.status).toBe("dry_run_preview");
+    expect(result.possible_duplicate_journal_ids).toBeUndefined();
+    expect(result.notes).toEqual(expect.arrayContaining([
+      expect.stringContaining("Duplicate scan unavailable"),
+    ]));
   });
 
   function buildCreateConfirmArgs(bankTransactions: any[]) {
@@ -439,6 +473,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
         invalidate: vi.fn(),
       },
+      journals: { invalidateListCache: vi.fn() },
       transactions: {
         get: vi.fn().mockImplementation((id: number) =>
           Promise.resolve(bankTransactions.find(t => t.id === id) ?? { id, status: "PROJECT" })),
@@ -549,6 +584,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
         invalidate: vi.fn(),
       },
+      journals: { invalidateListCache: vi.fn() },
     } as any;
     const result = await createAndMaybeMatchPurchaseInvoice(
       api,
@@ -598,6 +634,7 @@ describe("buildReceiptBatchSummary", () => {
         { status: "matched" },
         { status: "skipped_duplicate" },
         { status: "needs_review" },
+        { status: "needs_review", possible_duplicate_journal_ids: [321] },
         { status: "failed" },
       ],
     });
@@ -612,9 +649,14 @@ describe("buildReceiptBatchSummary", () => {
       matched: 1,
       skipped_duplicate: 1,
       failed: 1,
-      needs_review: 1,
+      needs_review: 2,
+      possible_duplicate_review: 1,
       dry_run_preview: 1,
     });
+    expect(buildReceiptBatchWorkflowSummary(summary)).toBe(
+      "Receipt dry run would create 1 purchase invoice(s), match 1, skip 1 duplicate(s), leave 2 in review (1 possible duplicate(s) of booked payments), and fail 1.",
+    );
+    expect(buildReceiptBatchWorkflowSummary({ ...summary, possible_duplicate_review: 0 })).toContain("leave 2 in review, and fail 1.");
   });
 });
 

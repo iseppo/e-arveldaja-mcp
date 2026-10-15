@@ -695,6 +695,17 @@ async function processSingleReceipt(
       booking_suggestion: bookingSuggestion,
       created_invoice: created.created_invoice,
       bank_match: created.bank_match,
+      ...(created.possible_duplicate_journal_ids
+        ? {
+            possible_duplicate_journal_ids: created.possible_duplicate_journal_ids,
+            review_guidance: buildReceiptReviewGuidance({
+              classification,
+              notes: created.notes,
+              extracted,
+              possibleDuplicateJournalIds: created.possible_duplicate_journal_ids,
+            }),
+          }
+        : {}),
       notes: created.notes,
       error: created.error,
     };

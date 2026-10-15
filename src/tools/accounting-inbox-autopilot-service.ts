@@ -622,11 +622,16 @@ function summarizeAutopilotToolResult(
           const file = recordAt(item, "file");
           const fileName = stringAt(file ?? {}, "name") ?? "receipt";
           const classification = stringAt(item, "classification") ?? "needs review";
+          const duplicateJournalIds = (arrayAt(item, "possible_duplicate_journal_ids") ?? [])
+            .filter((id): id is number => typeof id === "number");
+          const duplicateSuffix = duplicateJournalIds.length > 0
+            ? `: the payment may already be booked by journal(s) ${duplicateJournalIds.join(", ")}`
+            : "";
           return toAutopilotFollowUp(
             tool,
-            `${fileName} jäi dry-runis ülevaatuseks (${classification}).`,
+            `${fileName} was left for review in the dry run (${classification})${duplicateSuffix}.`,
             reviewGuidanceFromRecord(item) ?? {
-              recommendation: "Vaata üle ainult see märgitud kviitung ning kinnita puudu olevad andmed või korrektne maksukäsitlus enne teostust.",
+              recommendation: "Review only this flagged receipt and confirm the missing data or the correct tax treatment before execute.",
             },
             {
               review_type: "receipt_review",
@@ -640,7 +645,7 @@ function summarizeAutopilotToolResult(
           tool,
           `${preview.failed} receipt(s) failed the dry run completely.`,
           {
-            recommendation: "Kontrolli esmalt täpset extraction- või booking-viga; ilma piisava alusdokumendi või korrektse käsitluseta ei tohiks neid automaatselt läbi lasta.",
+            recommendation: "Check the exact extraction or booking error first; do not let these through automatically without a sufficient source document or the correct treatment.",
           },
         ));
       }
@@ -718,9 +723,9 @@ function summarizeAutopilotToolResult(
           const category = stringAt(record, "category") ?? "review_only";
           return toAutopilotFollowUp(
             tool,
-            `${displayCounterparty} jäi ülevaatuseks kategoorias ${category}.`,
+            `${displayCounterparty} was left for review in category ${category}.`,
             reviewGuidanceFromRecord(record) ?? {
-              recommendation: "Ära auto-booki seda gruppi ostuarvena enne, kui tehingu sisu ja alusdokumendid on kinnitatud.",
+              recommendation: "Do not auto-book this group as a purchase invoice until the transaction content and source documents are confirmed.",
             },
             {
               review_type: "classification_group",

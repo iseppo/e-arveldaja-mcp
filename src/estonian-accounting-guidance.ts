@@ -203,6 +203,8 @@ export function buildReceiptReviewGuidance(params: {
   notes: string[];
   extracted?: Partial<ExtractedReceiptFields>;
   llmFallback?: InvoiceExtractionFallback;
+  /** Journals that may already book this receipt's cash outflow (receipt_batch hold). */
+  possibleDuplicateJournalIds?: readonly number[];
 }): ReviewGuidance | undefined {
   const text = normalizedText(
     params.extracted?.supplier_name,
@@ -210,6 +212,18 @@ export function buildReceiptReviewGuidance(params: {
     params.notes.join(" "),
   );
   const missingFields = params.llmFallback?.missing_required_fields ?? [];
+
+  if (params.possibleDuplicateJournalIds && params.possibleDuplicateJournalIds.length > 0) {
+    const ids = params.possibleDuplicateJournalIds.join(", ");
+    return {
+      recommendation: `Recommendation: do not create this invoice yet. The same cash outflow may already be booked by journal(s) ${ids}. ` +
+        "If that journal is this payment, attach the document to it instead; if this is a separate payment, book this one document with process_accounting_document.",
+      compliance_basis: [BASIS_RPS_DOCUMENT],
+      follow_up_questions: [
+        `Is journal ${ids} the payment for this document, or a separate payment of the same amount?`,
+      ],
+    };
+  }
 
   if (params.classification === "owner_paid_expense_reimbursement") {
     const ownerExpenseGuidance = buildOwnerExpenseVatReviewGuidance({
