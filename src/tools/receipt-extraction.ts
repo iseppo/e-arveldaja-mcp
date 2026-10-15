@@ -1683,6 +1683,34 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
   return cells;
 }
 
+// G4: a label naming an identifier, ending right before its value ("Reg. nr",
+// "Telefon:", "Viitenumber", "Postiindeks").
+const LAYOUT_IDENTIFIER_LABEL_RE =
+  /(?<![\p{L}\d])(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry\s*code|(?:company|registration)\s*(?:number|nr|no)|kmkr|vat\s*(?:nr|number|no|id)|tax\s*id|viite\p{L}*|viitenr|reference|ref|konto|account|a\/a|iban|swift|bic|tel\p{L}*|phone|mob\p{L}*|fax|nr|no|number|kood|code|id|\p{L}*indeks|zip|postal\s*code)\.?[\s:#-]*$/iu;
+
+/**
+ * G4: positive evidence that an over-maximum integer cell is an identifier,
+ * not an amount: a date, an IBAN, a phone number, digits inside words or
+ * glued to letters ("Tartu 51013", "MA2600009"), or an identifier label left
+ * of it on its row or heading its column.
+ */
+function isLayoutIdentifierCell(item: LayoutTextItem, row: LayoutRow, rows: readonly LayoutRow[]): boolean {
+  const text = clampTextLine(item.text);
+  if (/\d{1,4}[./-]\d{1,2}[./-]\d{1,4}/.test(text) || isValidIban(text.replace(/\s+/g, "")) || /^\s*\+|\(\d+\)/.test(text)) return true;
+  const words = text.replace(/\b[A-Z]{3}\b/g, code => ISO_4217_CURRENCY_CODE_SET.has(code) ? " " : code).replace(/\beur\p{L}*/giu, " ");
+  if (/\p{L}/u.test(words)) return true;
+  const left = row.items.filter(other => other.x + other.width <= item.x + 1).sort((a, b) => b.x - a.x)[0];
+  if (left && LAYOUT_IDENTIFIER_LABEL_RE.test(clampTextLine(left.text))) return true;
+  // The column's heading: the nearest worded item above it ("Kood" over a
+  // table's code column, "Reg. nr" over a footer value).
+  const heading = rows
+    .filter(other => other.pageNum === row.pageNum && other.y < row.y)
+    .flatMap(other => other.items)
+    .filter(other => other.x < item.x + item.width && item.x < other.x + other.width && /\p{L}/u.test(other.text))
+    .sort((a, b) => b.y - a.y)[0];
+  return heading !== undefined && LAYOUT_IDENTIFIER_LABEL_RE.test(clampTextLine(heading.text));
+}
+
 function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {
   labels: LayoutLabelCell[];
   amounts: LayoutAmountCell[];
@@ -1712,9 +1740,10 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
         if (isLikelyYearAmount(amount, text)) continue;
         const cell = { amount, item, row, columnIndex, centerX: layoutCenterX(item) };
         if (amount > MAX_RECEIPT_FALLBACK_AMOUNT) {
-          // Only a money-shaped cell is amount evidence; identifiers, dates,
-          // IBANs and phone numbers stay ineligible as before.
-          if (moneyTokenValues(text).length > 0) overMaxAmounts.push(cell);
+          // A money-shaped cell is always amount evidence; an integer cell
+          // ("Grand total" over "60000") is too unless positively identified
+          // as an identifier.
+          if (moneyTokenValues(text).length > 0 || !isLayoutIdentifierCell(item, row, rows)) overMaxAmounts.push(cell);
           continue;
         }
         amounts.push(cell);

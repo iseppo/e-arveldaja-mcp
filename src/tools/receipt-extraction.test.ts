@@ -3644,6 +3644,39 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       const result = extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
       expect(result.labelled_amount_over_max).toBeUndefined();
     });
+
+    // Codex review: a label-bound integer over the maximum is evidence too;
+    // only a positively identified identifier is not.
+    describe("an integer cell a layout label binds", () => {
+      const cleanTrio = [
+        item("Näidis OÜ", 52, 40, 60),
+        item("Summa km-ta", 52, 100, 60), item("100.00", 400, 100, 30),
+        item("Käibemaks 0%", 52, 116, 70), item("0.00", 400, 116, 30),
+        item("Kokku", 52, 132, 30), item("100.00", 400, 132, 30),
+        item("Grand total", 400, 200, 60),
+      ];
+      const extractWith = (below: LayoutTextItem[]) => {
+        const items = [...cleanTrio, ...below];
+        return extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+      };
+
+      it.each([
+        ["a bare integer", [item("60000", 400, 216, 30)]],
+        ["an integer with a currency code", [item("60000 EUR", 400, 216, 50)]],
+      ])("%s over the maximum holds", (_name, below) => {
+        expect(extractWith(below).labelled_amount_over_max).toBe(true);
+      });
+
+      it.each([
+        ["under a registry-code heading", [item("Registrikood", 400, 216, 60), item("12345678", 400, 232, 40)]],
+        ["beside a number label", [item("Nr:", 340, 216, 20), item("12345678", 400, 216, 40)]],
+        ["inside an address", [item("Tartu 51013", 400, 216, 60)]],
+        ["as a phone number", [item("+37251234567", 400, 216, 60)]],
+        ["as an IBAN", [item("EE107700771005782542", 400, 216, 100)]],
+      ])("an identifier %s is not evidence", (_name, below) => {
+        expect(extractWith(below).labelled_amount_over_max).toBeUndefined();
+      });
+    });
   });
 
   describe("G5 zero_total_stated", () => {
