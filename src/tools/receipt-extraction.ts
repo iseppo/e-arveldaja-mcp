@@ -745,20 +745,26 @@ function extractAmountTokensFromLine(
   // stops date/range fragments like "2024-01-15" (→ -1, -15) or "10-20" (→ -20)
   // from manufacturing spurious negative pseudo-amounts.
   const runs = [...line.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)];
+  const isAmountToken = (match: RegExpMatchArray) => {
+    const raw = match[0] ?? "";
+    const start = match.index ?? 0;
+    // R9: a complete standalone footnote marker ("[1]") is not an amount.
+    if (/^\d{1,2}$/.test(raw) && line[start - 1] === "[" && line[start + raw.length] === "]" &&
+      (start < 2 || /\s/.test(line[start - 2]!))) {
+      return false;
+    }
+    const next = line.slice(start + raw.length).trimStart();
+    return !next.startsWith("%");
+  };
   const splitRuns = runs.map(match => splitAmountTripleRun(match, line, documentContext));
-  const matches = splitRuns.filter(split => split.length > 1).length === 1 ? splitRuns.flat() : runs;
+  const splitTokens = splitRuns.filter(split => split.length > 1).length === 1 ? splitRuns.flat().filter(isAmountToken) : [];
+  // The triple is split only when it is the line's whole amount content: any
+  // other amount on the line ("Kokku 248.00 / 100.00 24.00 124.00") keeps the
+  // run merged, so the line stays held instead of binding the triple. Digits
+  // glued to a letter ("Arve nr MA2600009") are an identifier, not an amount.
+  const splitAmountCount = splitTokens.filter(match => !/\p{L}/u.test(line[(match.index ?? 0) - 1] ?? "")).length;
+  const matches = splitTokens.length > 0 && splitAmountCount === 3 ? splitTokens : runs.filter(isAmountToken);
   return matches
-    .filter(match => {
-      const raw = match[0] ?? "";
-      const start = match.index ?? 0;
-      // R9: a complete standalone footnote marker ("[1]") is not an amount.
-      if (/^\d{1,2}$/.test(raw) && line[start - 1] === "[" && line[start + raw.length] === "]" &&
-        (start < 2 || /\s/.test(line[start - 2]!))) {
-        return false;
-      }
-      const next = line.slice(start + raw.length).trimStart();
-      return !next.startsWith("%");
-    })
     .map(match => {
       const raw = match[0] ?? "";
       const parsed = parseAmount(raw, line, documentContext);
@@ -1752,9 +1758,12 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
   // R5/R6: exactly three amount tokens on the row forming a unique triple bind
   // a total label to the sum and a VAT-rate label to the part matching its
   // stated rate. Anything else keeps the binding below.
-  const candidateItems = [...new Set(candidates.map(candidate => candidate.item))];
-  const tokenCount = candidateItems.reduce((count, item) => count + extractAmountTokensFromLine(clampTextLine(item.text)).length, 0);
-  if (candidates.length === 3 && tokenCount === 3) {
+  // The whole row counts, including amounts left of the label and in the
+  // label text: a fourth amount anywhere on the row is disagreeing evidence.
+  // Digits glued to a letter ("Arve nr MA2600009") are an identifier.
+  const rowTokenCount = label.row.items.reduce((count, item) =>
+    count + extractAmountTokensFromLine(clampTextLine(item.text).replace(/(?<=\p{L})\d+/gu, "")).length, 0);
+  if (candidates.length === 3 && rowTokenCount === 3) {
     const values = candidates.map(candidate => candidate.amount);
     const bound = label.field === "total_gross"
       ? uniqueAmountTriple(values)?.sum
