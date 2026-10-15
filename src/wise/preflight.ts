@@ -213,7 +213,7 @@ function parseWiseNonNegativeMoney(value: unknown, row: string, field: string, d
  * `allowBlank` marks a timestamp Wise legitimately leaves empty. Only
  * "Finished on" qualifies: Wise blanks it for every transfer that never
  * completed, and callers already fall back to the creation date
- * (`wiseDate(row.finishedOn || row.createdOn)`), so a blank still books a real
+ * (`wiseRowDate`: `finishedOn || createdOn`), so a blank still books a real
  * date. Rejecting it would fail the whole file — preflight runs before the
  * status filter — turning one cancelled transfer into a blocked import.
  * "Created on" is the terminal operand of that `||`, so validating it strictly
@@ -443,12 +443,17 @@ export function preflightWiseCsv(csv: string): WisePreflightResult {
 
 // --- Date / direction helpers ------------------------------------------------
 
-export function wiseDate(dateStr: string): string {
+function wiseDate(dateStr: string): string {
   // "2026-01-19 17:59:56" or "2026-01-19T17:59:56" → "2026-01-19".
   // Both separators are accepted by WISE_TIMESTAMP_REGEX, so splitting on space
   // alone would hand the whole "…T…" string back as a booking date and skew the
   // date_from/date_to string comparisons.
   return dateStr.split(/[ T]/)[0] ?? dateStr;
+}
+
+/** A row's booking date: the finish date, else the creation date. */
+export function wiseRowDate(row: WiseRow): string {
+  return wiseDate(row.finishedOn || row.createdOn);
 }
 
 function assertIsoDate(value: string | undefined, fieldName: "date_from" | "date_to"): void {
@@ -601,6 +606,29 @@ export function bookedFeeCurrencyForWiseRow(row: WiseRow, fallbackCurrency: stri
   return ownAccountSideForWiseRow(row) === "target"
     ? normalizeWiseCurrency(row.targetFeeCurrency, fallbackCurrency)
     : normalizeWiseCurrency(row.sourceFeeCurrency, fallbackCurrency);
+}
+
+/**
+ * The Wise bank leg's amount when a journal books this row's transfer net of
+ * the row's separate fee row (IN: gross − fee; OUT: gross + fee), or
+ * `undefined` when the row has no same-currency fee. Read from the row itself,
+ * so a fee row already stored by an interrupted import (whose fee command is
+ * deduplicated away) still counts.
+ */
+export function wiseLegAmountNetOfFee(row: WiseRow, amount: number): number | undefined {
+  const direction = sourceDirectionForWiseDirection(row.direction);
+  const fee = bookedFeeAmountForWiseRow(row);
+  const bookedCurrency = bookedCurrencyForWiseRow(row);
+  if (!direction || !(fee > 0) || bookedFeeCurrencyForWiseRow(row, bookedCurrency) !== bookedCurrency) return undefined;
+  return roundMoney(direction === "IN" ? amount - fee : amount + fee);
+}
+
+/** A row's booked (gross) amount and, with a same-currency fee, its
+ * net-of-fee amount: the amounts a journal booking the row may move. */
+export function wiseRowAmounts(row: WiseRow): number[] {
+  const gross = bookedAmountForWiseRow(row);
+  const net = wiseLegAmountNetOfFee(row, gross);
+  return net === undefined ? [gross] : [gross, net];
 }
 
 export function oppositeSideForWiseRow(row: WiseRow): { amount: number; currency: string } {

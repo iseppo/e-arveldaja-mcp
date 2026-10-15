@@ -1,7 +1,7 @@
 import { plainFailureOutcome as fail, plainSuccessOutcome as ok, type OperationOutcome } from "../operation-outcome.js";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
-import type { FileInputSource, FileInputSnapshot } from "../file-input-snapshot.js";
+import { echoableSourcePath, type FileInputSource, type FileInputSnapshot } from "../file-input-snapshot.js";
 import {
   assertStatementAccountMatchesDimension,
   buildImportProjection,
@@ -120,13 +120,11 @@ class CamtOperationsImpl implements CamtOperations {
     const possibleDuplicates = projection.descriptors
       .filter(descriptor => descriptor.possibleDuplicateMatches.length > 0)
       .map(descriptor => camtPossibleDuplicateRow(descriptor));
-    const filePath = source.file_path;
+    const filePath = echoableSourcePath(source);
     const fileRef = source.file_ref;
     const workflowArgs = {
       ...(fileRef !== undefined ? { file_ref: fileRef } : {}),
-      ...(fileRef === undefined && filePath !== undefined && !filePath.toLowerCase().startsWith("base64:")
-        ? { file_path: filePath }
-        : {}),
+      ...(fileRef === undefined && filePath !== undefined ? { file_path: filePath } : {}),
       accounts_dimensions_id: accountsDimensionsId,
       ...(dateFrom ? { date_from: dateFrom } : {}),
       ...(dateTo ? { date_to: dateTo } : {}),

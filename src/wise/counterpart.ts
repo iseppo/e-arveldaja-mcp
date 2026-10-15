@@ -7,12 +7,12 @@ import { sameAmountToTheCent } from "../banking/reconciliation/match-score.js";
 import { journalBankDirection, provenBankDirection } from "../bank-transaction-journal-direction.js";
 import { findRegistrationJournal } from "../banking/receipt-ledger-check.js";
 import {
-  bookedAmountForWiseRow,
   bookedCurrencyForWiseRow,
   isPositiveSafeInteger,
   isWiseCounterpartyName,
   sourceDirectionForWiseDirection,
-  wiseDate,
+  wiseRowAmounts,
+  wiseRowDate,
 } from "./preflight.js";
 import {
   dimensionNetEurCents,
@@ -20,7 +20,7 @@ import {
   knownWiseLabelsFor,
   labelledWithOtherWiseId,
   matchWiseLegTag,
-  wiseLegAmountNetOfFee,
+  sortedUniqueIds,
   withinOneDay,
 } from "./projection.js";
 import type { WiseCounterpartBasis, WiseRow, WiseTransferReview } from "./types.js";
@@ -120,18 +120,6 @@ export function wiseCounterpartHoldReview(
   };
 }
 
-function rowDate(row: WiseRow): string {
-  return wiseDate(row.finishedOn || row.createdOn);
-}
-
-/** Gross and, with a same-currency fee, net-of-fee amounts of a row. */
-function rowAmounts(row: WiseRow): number[] {
-  const gross = bookedAmountForWiseRow(row);
-  const net = wiseLegAmountNetOfFee(row, gross);
-  return net === undefined ? [gross] : [gross, net];
-}
-
-const sortedIds = (ids: Iterable<number>): number[] => [...new Set(ids)].sort((left, right) => left - right);
 
 export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<WiseRow, WiseCounterpartResolution> {
   const { rows, allRows, wiseDim, otherDims, existingTx, journals, lookups, companyLegalName, explicit } = input;
@@ -153,28 +141,30 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
   const touchesWise = (journal: Journal) =>
     (journal.postings ?? []).some(posting => !posting.is_deleted && posting.accounts_dimensions_id === wiseDim);
 
-  const classify = (row: WiseRow, tx: Transaction): CandidateClass | undefined => {
+  // The candidate class of `tx` for `row`, with the registration journals of
+  // `tx` it was judged on.
+  const classify = (row: WiseRow, tx: Transaction): { cls: CandidateClass; registration: Journal[] } | undefined => {
     const dim = tx.accounts_dimensions_id;
     if (typeof dim !== "number" || !otherDims.has(dim) || tx.id === undefined || typeof tx.amount !== "number") return undefined;
-    if (!withinOneDay(tx.date, rowDate(row))) return undefined;
+    if (!withinOneDay(tx.date, wiseRowDate(row))) return undefined;
     // A bank row already attributed to another Wise transfer (its own WISE:
     // tag, or a registration journal labelled with another Wise ID) is that
     // transfer's evidence, never this row's.
     const tag = tx.description?.split(" ")[0] ?? "";
     if (tag.startsWith("WISE:") && !ownLeg(row, tag)) return undefined;
-    if (findRegistrationJournal(journals, tx.id).some(journal => labelledWithOtherWiseId(journal, row, wiseLabels))) return undefined;
+    const registration = findRegistrationJournal(journals, tx.id);
+    if (registration.some(journal => labelledWithOtherWiseId(journal, row, wiseLabels))) return undefined;
     // A transfer to (or from) another own account is not this Wise movement.
     const iban = counterpartyIbanOf(tx);
     const ibanDims = iban === "" ? undefined : lookups.ownIbanToDimension.get(iban);
     if (ibanDims !== undefined && !ibanDims.has(wiseDim)) return undefined;
     // A confirmed row whose registration journal does not touch the Wise
     // account books another movement.
-    const registration = findRegistrationJournal(journals, tx.id);
     if (tx.status === "CONFIRMED" && registration.length > 0 && !registration.some(touchesWise)) return undefined;
 
     // Amount: usable only in EUR or with a numeric base amount; a foreign
     // amount without a base is never compared with EUR (uncertain at most).
-    const amounts = rowAmounts(row);
+    const amounts = wiseRowAmounts(row);
     // A confirmed row's registration journal shows what it booked on Wise:
     // a Wise side moving another amount is a different movement (no
     // evidence); one that cannot be compared (foreign row, no EUR value, no
@@ -221,11 +211,11 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     if (direction !== undefined && direction !== opposite) return undefined;
 
     const dateReadable = /^\d{4}-\d{2}-\d{2}/.test(tx.date ?? "");
-    if (!usableAmount || direction === undefined || !dateReadable || !wiseSideProven) return "uncertain";
+    if (!usableAmount || direction === undefined || !dateReadable || !wiseSideProven) return { cls: "uncertain", registration };
     const indicator = ibanDims?.has(wiseDim) === true ||
       sameCompanyIdentity(tx.bank_account_name, companyLegalName) ||
       isWiseCounterpartyName(tx.bank_account_name);
-    return indicator ? "strong" : "weak";
+    return { cls: indicator ? "strong" : "weak", registration };
   };
 
   // One-to-one attribution: a strong candidate that another Wise movement
@@ -240,8 +230,8 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     if (allRows.some(other => other.rowIndex !== row.rowIndex &&
       bookedCurrencyForWiseRow(other) === "EUR" &&
       sourceDirectionForWiseDirection(other.direction) === rowDirection &&
-      withinOneDay(rowDate(other), tx.date) &&
-      rowAmounts(other).some(amount => sameAmountToTheCent(amount, eur)))) return true;
+      withinOneDay(wiseRowDate(other), tx.date) &&
+      wiseRowAmounts(other).some(amount => sameAmountToTheCent(amount, eur)))) return true;
     return existingTx.some(stored => {
       if (stored.accounts_dimensions_id !== wiseDim || typeof stored.amount !== "number") return false;
       if (ownLeg(row, stored.description?.split(" ")[0] ?? "")) return false;
@@ -252,27 +242,28 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
       return storedDirection === "unknown" || storedDirection === (rowDirection === "IN" ? "incoming" : "outgoing");
     });
   };
-  const authoritative = (row: WiseRow, tx: Transaction): boolean =>
-    findRegistrationJournal(journals, tx.id!).some(journal => journalLabelledWithWiseId(journal, row.id));
+  const authoritative = (row: WiseRow, registration: readonly Journal[]): boolean =>
+    registration.some(journal => journalLabelledWithWiseId(journal, row.id));
 
   for (const row of rows) {
     const candidates: Candidate[] = existingTx.flatMap((tx): Candidate[] => {
-      const cls = classify(row, tx);
-      if (cls === undefined) return [];
-      if (cls === "strong" && !authoritative(row, tx) && contested(row, tx)) {
+      const classified = classify(row, tx);
+      if (classified === undefined) return [];
+      const { cls, registration } = classified;
+      if (cls === "strong" && !authoritative(row, registration) && contested(row, tx)) {
         return [{ tx, dim: tx.accounts_dimensions_id!, cls: "uncertain", contested: true }];
       }
       return [{ tx, dim: tx.accounts_dimensions_id!, cls }];
     });
     const strong = candidates.filter(candidate => candidate.cls === "strong");
     const others = candidates.filter(candidate => candidate.cls !== "strong");
-    const strongDims = sortedIds(strong.map(candidate => candidate.dim));
-    const otherEvidenceDims = sortedIds(others.map(candidate => candidate.dim));
+    const strongDims = sortedUniqueIds(strong.map(candidate => candidate.dim));
+    const otherEvidenceDims = sortedUniqueIds(others.map(candidate => candidate.dim));
     const hold = (code: WiseCounterpartHoldCode, dims: number[], evidence: Candidate[], selected?: number): WiseCounterpartResolution => ({
       hold: {
         code,
         candidate_dimension_ids: dims,
-        evidence_transaction_ids: sortedIds(evidence.map(candidate => candidate.tx.id!)),
+        evidence_transaction_ids: sortedUniqueIds(evidence.map(candidate => candidate.tx.id!)),
         ...(selected !== undefined ? { selected_dimension_id: selected } : {}),
         ...(evidence.some(candidate => candidate.contested) ? { contested: true as const } : {}),
       },
@@ -288,9 +279,9 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     } else if (fallback !== undefined) {
       result.set(row, otherEvidenceDims.every(dim => dim === fallback)
         ? { dim: fallback, basis: fallbackBasis }
-        : hold("wise_transfer_counterpart_conflict", sortedIds([...otherEvidenceDims, fallback]), others, fallback));
+        : hold("wise_transfer_counterpart_conflict", sortedUniqueIds(otherEvidenceDims, [fallback]), others, fallback));
     } else {
-      result.set(row, hold("wise_transfer_dimensions_unverified", sortedIds(otherDims), others));
+      result.set(row, hold("wise_transfer_dimensions_unverified", sortedUniqueIds(otherDims), others));
     }
   }
   return result;

@@ -368,9 +368,9 @@ export function registerProcessBankInputTool(
         ? await wiseOperations.execute({ ...runInput, planHandle: args.plan_handle })
         : await wiseOperations.prepare(runInput);
       if (!outcome.ok) return renderWiseFailure(simpleWiseFailureFromCode(outcome.error.code));
-      if (mode !== "execute") return emit(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
+      if (mode !== "execute") return emit(renderWiseImportCompact({ data: outcome.value }));
       const operationHandle = issueWiseResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, args.plan_handle);
-      return emit(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
+      return emit(renderWiseImportCompact({ data: outcome.value, operationHandle }));
     } catch (error) {
       if (error instanceof WiseOperationFailedError) return renderWiseFailure(error.failure);
       throw error;

@@ -2,7 +2,7 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { canonicalRefNumber } from "../ref-number.js";
-import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, compactImportStatus, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import {
   createPublicOperationResultDetail,
@@ -425,11 +425,15 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     ? `CAMT dry run would create ${data.createdCount} bank transaction(s), skip ${data.projection.skipped.length}, flag ${possibleDuplicateCount} possible duplicate(s), and report ${data.errorCount} error(s).`
     : `CAMT import created ${data.createdCount} bank transaction(s), skipped ${data.projection.skipped.length}, flagged ${possibleDuplicateCount} possible duplicate(s), and reported ${data.errorCount} error(s).`;
 
-  const status = zeroWrite
-    ? (journalReviews.length + partialLegacy.length + data.errorCount > 0 ? "needs_review" as const : "completed" as const)
-    : dryRun
-    ? "ready_for_approval" as const
-    : (data.errorCount > 0 ? "partial" as const : "completed" as const);
+  // Journal reviews are skipped rows: they do not block approving the rows a
+  // preview creates.
+  const status = compactImportStatus({
+    dryRun,
+    zeroWrite,
+    reviews: journalReviews.length + partialLegacy.length > 0,
+    reviewsBlockApproval: false,
+    failed: data.errorCount > 0,
+  });
 
   // Statement identity: IBAN identifies the account (validated at the
   // statement-binding gate, safe raw); statement_id identifies the statement and

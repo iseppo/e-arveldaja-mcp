@@ -31,7 +31,9 @@ import {
   oppositeSideForWiseRow,
   sourceDirectionForWiseDirection,
   transactionTypeForWiseDirection,
-  wiseDate,
+  wiseLegAmountNetOfFee,
+  wiseRowAmounts,
+  wiseRowDate,
   withWiseSourceDirection,
 } from "./preflight.js";
 import {
@@ -370,20 +372,12 @@ const WISE_TRANSFER_JOURNAL_EXISTING_ELSEWHERE_REASON =
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   `This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. If the existing bank transaction is already CONFIRMED, nothing is left to do; if it is still unconfirmed (PROJECT), ${WISE_INTER_ACCOUNT_ROUTE}.`;
 
-/**
- * The Wise bank leg's amount when a journal books this row's transfer net of
- * the row's separate fee row (IN: gross − fee; OUT: gross + fee), or
- * `undefined` when the row has no same-currency fee. Read from the row itself,
- * so a fee row already stored by an interrupted import (whose fee command is
- * deduplicated away) still counts.
- */
-export function wiseLegAmountNetOfFee(row: WiseRow, amount: number): number | undefined {
-  const direction = sourceDirectionForWiseDirection(row.direction);
-  const fee = bookedFeeAmountForWiseRow(row);
-  const bookedCurrency = bookedCurrencyForWiseRow(row);
-  if (!direction || !(fee > 0) || bookedFeeCurrencyForWiseRow(row, bookedCurrency) !== bookedCurrency) return undefined;
-  return roundMoney(direction === "IN" ? amount - fee : amount + fee);
+/** The distinct ids of `lists`, ascending. */
+export function sortedUniqueIds(...lists: readonly Iterable<number>[]): number[] {
+  return [...new Set(lists.flatMap(list => [...list]))].sort((left, right) => left - right);
 }
+
+const cents = (value: number): number => Math.round(value * 100);
 
 /**
  * Whether `journal` is labelled with this Wise transfer's ID (bare or as
@@ -529,13 +523,11 @@ export interface WiseLeg {
 function wiseMainLeg(row: WiseRow): WiseLeg | undefined {
   const direction = sourceDirectionForWiseDirection(row.direction);
   if (!direction) return undefined;
-  const amount = bookedAmountForWiseRow(row);
-  const net = wiseLegAmountNetOfFee(row, amount);
   return {
-    date: wiseDate(row.finishedOn || row.createdOn),
+    date: wiseRowDate(row),
     direction,
     currency: bookedCurrencyForWiseRow(row),
-    amounts: net === undefined ? [amount] : [amount, net],
+    amounts: wiseRowAmounts(row),
   };
 }
 
@@ -543,7 +535,7 @@ function wiseFeeLeg(row: WiseRow): WiseLeg | undefined {
   const fee = bookedFeeAmountForWiseRow(row);
   if (!(fee > 0)) return undefined;
   return {
-    date: wiseDate(row.finishedOn || row.createdOn),
+    date: wiseRowDate(row),
     direction: "OUT",
     currency: bookedFeeCurrencyForWiseRow(row, bookedCurrencyForWiseRow(row)),
     amounts: [fee],
@@ -608,8 +600,7 @@ export function wiseLegEvidence(
       uncertain.add(journal.id!);
     }
   }
-  const sorted = (ids: Set<number>) => [...ids].sort((left, right) => left - right);
-  return { certain: sorted(certain), uncertain: sorted(uncertain) };
+  return { certain: sortedUniqueIds(certain), uncertain: sortedUniqueIds(uncertain) };
 }
 
 /** Lower-case letter/digit tokens of a free-text field. */
@@ -787,6 +778,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       legSuffix.set(leg, sameCurrency.length > 1 ? `${currency}-${sameCurrency.indexOf(leg) + 1}` : currency);
     }
   }
+  const legIdOf = (row: WiseRow): string => legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
   // Each stored row accounts for at most one exported leg of its ID, matched by
   // booked currency and amount whatever its tag form, so a one-leg export, a
   // reordered export and a ledger written by releases before split-leg tags
@@ -842,7 +834,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
 
   for (let i = 0; i < eligible.length; i++) {
     const row = eligible[i]!;
-    const date = wiseDate(row.finishedOn || row.createdOn);
+    const date = wiseRowDate(row);
     const type = transactionTypeForWiseDirection(row.direction);
     const sourceDirection = sourceDirectionForWiseDirection(row.direction);
     if (!type || !sourceDirection) {
@@ -852,7 +844,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const amount = bookedAmountForWiseRow(row);
     const fee = bookedFeeAmountForWiseRow(row);
     const transactionCurrency = bookedCurrencyForWiseRow(row);
-    const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
+    const legId = legIdOf(row);
     const wiseIdTag = `WISE:${legId}`;
     if (ambiguousLegacyIds.has(row.id) && (!claimedMainLegs.has(row) || (fee > 0 && !claimedFeeLegs.has(row)))) {
       legacyLegReviews.push(forRow(row, {
@@ -1135,7 +1127,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         (laneBIndex.get(`${accounts_dimensions_id}|${targetDim}|${roundMoney(amount)}|${candidateDate}`) ?? [])
           .map(entry => entry.journal_id))));
       ids.delete(UNKNOWN_JOURNAL_ID);
-      return [...ids].sort((left, right) => left - right);
+      return sortedUniqueIds(ids);
     };
     const describeCandidate = (journalId: number): WiseTransferJournalCandidate => {
       const journal = journalSnapshot.find(candidate => candidate.id === journalId);
@@ -1158,7 +1150,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     // Whether the journal's Wise-dimension postings net to `amount` in the
     // row's direction (IN debits the Wise account), in base EUR.
     const wiseLegMoves = (journal: Journal | undefined, row: WiseRow, amount: number): boolean => {
-      const cents = (value: number) => Math.round(value * 100);
       const signedWiseCents = (journal?.postings ?? [])
         .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
         .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
@@ -1188,7 +1179,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         return "the journal has foreign-currency postings without an EUR base amount";
       }
       const amount = bookedAmountForWiseRow(row);
-      const candidateIds = laneBCandidateIds(targetDimensionId, [amount], wiseDate(row.finishedOn || row.createdOn));
+      const candidateIds = laneBCandidateIds(targetDimensionId, [amount], wiseRowDate(row));
       if (!candidateIds.includes(journalId)) {
         return "the journal is not a same-amount transfer between this Wise account and the counterpart account within one day";
       }
@@ -1203,9 +1194,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         return "the journal is labelled with another Wise transfer of this statement, which owns it by exact reference";
       }
       // The guard also looks the row up net of its fee, so reserve there too.
-      const netAmount = wiseLegAmountNetOfFee(row, amount);
-      const identityIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [amount] : [amount, netAmount],
-        wiseDate(row.finishedOn || row.createdOn));
+      const identityIds = laneBCandidateIds(targetDimensionId, wiseRowAmounts(row), wiseRowDate(row));
       if (identityIds.some(id => id !== journalId &&
         normalizeReference(journalSnapshot.find(candidate => candidate.id === id)?.document_number) === normalizeReference(row.id))) {
         return "another journal already books this Wise transfer by exact reference";
@@ -1234,11 +1223,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     // still sees that journal as unique and both are recorded as booked by it.
     // Only an import whose CSV holds both, or a ledger holding a stored row of
     // the other, is protected.
-    const statementKeys = allRows.map(row => {
-      const amount = bookedAmountForWiseRow(row);
-      const net = wiseLegAmountNetOfFee(row, amount);
-      return { row, amounts: net === undefined ? [amount] : [amount, net], date: wiseDate(row.finishedOn || row.createdOn) };
-    });
+    const statementKeys = allRows.map(row => ({ row, amounts: wiseRowAmounts(row), date: wiseRowDate(row) }));
     const storedWiseKeys = existingTx.flatMap(tx => {
       if (!isNonVoidTransaction(tx) || tx.accounts_dimensions_id !== accounts_dimensions_id || typeof tx.amount !== "number") return [];
       const tag = tx.description?.startsWith("WISE:") && !tx.description.startsWith("WISE:FEE:") ? tx.description.split(" ")[0]! : undefined;
@@ -1289,7 +1274,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         reference: row.id,
       };
       const feeKey = `row:${row.rowIndex}:fee`;
-      const cents = (value: number) => Math.round(value * 100);
       const baseCents = (posting: { amount: number; base_amount?: number }) => cents(posting.base_amount ?? posting.amount);
       const signedCents = (posting: { type?: string; amount: number; base_amount?: number }) =>
         (posting.type === "D" ? 1 : -1) * baseCents(posting);
@@ -1429,7 +1413,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           !(wiseLegMoves(matchedJournal, row, entry.amount) || journalBooksNetOfFee(matchedJournal))
         );
         if (resolution.status === "ambiguous_refless" || otherLabelled || matchUncovered) {
-          const candidateIds = laneBCandidateIds(targetDimensionId, netAmount === undefined ? [entry.amount] : [entry.amount, netAmount], entry.date);
+          const candidateIds = laneBCandidateIds(targetDimensionId, wiseRowAmounts(row), entry.date);
           existingJournalId = uniqueLegacyJournalId(candidateIds);
           if (existingJournalId === undefined) {
             // Released only by an acknowledgement (the hold pass decides);
@@ -1588,7 +1572,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   const lookalikeContested = (row: WiseRow, tx: Transaction): boolean => {
     const txCents = Math.round(tx.amount * 100);
     return allRows.some(other => other.rowIndex !== row.rowIndex &&
-        withinOneDay(wiseDate(other.finishedOn || other.createdOn), tx.date) &&
+        withinOneDay(wiseRowDate(other), tx.date) &&
         [bookedAmountForWiseRow(other), bookedFeeAmountForWiseRow(other)].some(amount => Math.round(amount * 100) === txCents)) ||
       existingTx.some(other => other !== tx && other.id !== tx.id && isNonVoidTransaction(other) &&
         other.accounts_dimensions_id === accounts_dimensions_id && typeof other.amount === "number" &&
@@ -1679,7 +1663,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       }
     }
     const journalized = alreadyJournalized.find(assertion => assertion.row_index === row.rowIndex);
-    const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
+    const legId = legIdOf(row);
     const review = journalized === undefined ? holdReview : {
       ...holdReview,
       reason: `${holdReview.reason} Only this transfer's fee leg (FEE:${legId}) is held: the transfer itself is already journalized by journal ${journalized.existing_journal_id}.`,
@@ -1705,7 +1689,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       holdRow(row, decision.counterpartHold);
       continue;
     }
-    const legId = legSuffix.has(row) ? `${row.id}:${legSuffix.get(row)}` : row.id;
+    const legId = legIdOf(row);
     const pendingMain = rowCommands.some(command => command.action === "main_create");
     const pendingFee = rowCommands.some(command => command.action === "fee_create_and_confirm");
     // Proven coverage, per leg: the row's own already-journalized assertion,
@@ -1770,9 +1754,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const feeEvidence = evidenceFor(feeLeg, feeCoverage);
     const ambiguous = ownershipReviews.find(review => reviewRows.get(review) === row.rowIndex && review.code === "wise_transfer_journal_ambiguous") ??
       pendingReleaseReviews.get(row);
-    const sortedUnion = (...lists: readonly (readonly number[])[]) =>
-      [...new Set(lists.flat())].sort((left, right) => left - right);
-    const evidenceIds = sortedUnion(
+    const evidenceIds = sortedUniqueIds(
       mainEvidence.certain, mainEvidence.uncertain, feeEvidence.certain, feeEvidence.uncertain,
       ambiguous?.candidate_journal_ids ?? [],
     );
@@ -1786,16 +1768,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         row_index: row.rowIndex,
         wise_id: row.id,
         legs: {
-          ...(mainLeg ? { main: { leg: mainLeg, coverage: [...mainCoverage].sort((l, r) => l - r) } } : {}),
-          ...(feeLeg ? { fee: { leg: feeLeg, coverage: [...feeCoverage].sort((l, r) => l - r) } } : {}),
+          ...(mainLeg ? { main: { leg: mainLeg, coverage: sortedUniqueIds(mainCoverage) } } : {}),
+          ...(feeLeg ? { fee: { leg: feeLeg, coverage: sortedUniqueIds(feeCoverage) } } : {}),
         },
         ...(evidenceIds.length > 0 ? { acknowledged_ids: evidenceIds } : {}),
       });
       continue;
     }
     // 6. Hold, with the full union to acknowledge from the first response.
-    const uncertainIds = sortedUnion(mainEvidence.uncertain, feeEvidence.uncertain);
-    const feeLegIds = sortedUnion(feeEvidence.certain, feeEvidence.uncertain);
+    const uncertainIds = sortedUniqueIds(mainEvidence.uncertain, feeEvidence.uncertain);
+    const feeLegIds = sortedUniqueIds(feeEvidence.certain, feeEvidence.uncertain);
     const base: WiseTransferReview = ambiguous ?? {
       wise_id: row.id,
       code: "wise_transfer_journal_existing_elsewhere",
@@ -1859,7 +1841,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     if (!counterparty) continue;
     const counterpartyKey = normalizeWiseCompanyName(counterparty);
     if (!counterpartyKey) continue;
-    const date = wiseDate(row.finishedOn || row.createdOn);
+    const date = wiseRowDate(row);
     const targetCurrency = normalizeWiseCurrency(row.targetCurrency);
     const sourceCurrency = normalizeWiseCurrency(row.sourceCurrency);
     const targetAmount = row.targetAmount;
@@ -1958,13 +1940,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     candidatesByWiseId.set(fix.wise_id, (candidatesByWiseId.get(fix.wise_id) ?? 0) + 1);
   }
   for (const fix of invoiceFixCandidates) {
-    if ((candidatesByWiseId.get(fix.wise_id) ?? 0) > 1) {
-      fix.result = "ambiguous_skipped";
-    }
-  }
-
-  for (const fix of invoiceFixCandidates) {
-    if (fix.result !== "ambiguous_skipped") fix.result = "advisory";
+    fix.result = (candidatesByWiseId.get(fix.wise_id) ?? 0) > 1 ? "ambiguous_skipped" : "advisory";
   }
 
   return {

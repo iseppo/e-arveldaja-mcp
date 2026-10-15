@@ -190,6 +190,24 @@ export function createOperationSummary(
 }
 
 /**
+ * The compact status of an import preview or execute. A preview that writes
+ * nothing completes unless something needs review or failed; a preview with
+ * writes is ready for approval unless its reviews block approval; an execute
+ * is partial when a command failed.
+ */
+export function compactImportStatus(input: {
+  readonly dryRun: boolean;
+  readonly zeroWrite: boolean;
+  readonly reviews: boolean;
+  readonly reviewsBlockApproval: boolean;
+  readonly failed: boolean;
+}): "needs_review" | "completed" | "ready_for_approval" | "partial" {
+  if (input.zeroWrite) return input.reviews || input.failed ? "needs_review" : "completed";
+  if (input.dryRun) return input.reviews && input.reviewsBlockApproval ? "needs_review" : "ready_for_approval";
+  return input.failed ? "partial" : "completed";
+}
+
+/**
  * At most `cap` warnings of one category, followed by one `<code>_more` warning
  * that counts the rest and says where they are listed, so a compact summary
  * never silently drops items past the cap.

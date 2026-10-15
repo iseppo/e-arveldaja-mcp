@@ -46,7 +46,8 @@ import {
   sourceDirectionForWiseDirection,
   uniqueActivePostingDimensions,
   validateWiseDateRange,
-  wiseDate,
+  wiseRowAmounts,
+  wiseRowDate,
 } from "./preflight.js";
 import {
   approvalDigest,
@@ -59,10 +60,10 @@ import {
   labelledWithOtherWiseId,
   orderedIdsEqual,
   projectWiseCommands,
+  sortedUniqueIds,
   transactionCommandExists,
   wisePlanCommandId,
   wisePlanReviewProjection,
-  wiseLegAmountNetOfFee,
   wiseLegEvidence,
   WISE_APPROVAL_DOMAIN,
   WISE_COMMAND_VERSION,
@@ -247,11 +248,11 @@ async function runWiseImport(
         wise_id: r.id,
         reason: "Jar / self-transfer detected (pass skip_jar_transfers=false to include)",
         amount: r.sourceAmount !== 0 ? r.sourceAmount : r.targetAmount,
-        date: wiseDate(r.finishedOn || r.createdOn),
+        date: wiseRowDate(r),
       });
       return false;
     }
-    const date = wiseDate(r.finishedOn || r.createdOn);
+    const date = wiseRowDate(r);
     if (date_from && date < date_from) return false;
     if (date_to && date > date_to) return false;
     return true;
@@ -268,7 +269,7 @@ async function runWiseImport(
   }
   // Sorted and de-duplicated: the order the operator lists them in is not a decision.
   const canonicalAcknowledgements: WiseAcknowledgedJournalHold[] = acknowledgements
-    .map(({ wise_id, journal_ids }) => ({ wise_id, journal_ids: [...new Set(journal_ids)].sort((left, right) => left - right) }))
+    .map(({ wise_id, journal_ids }) => ({ wise_id, journal_ids: sortedUniqueIds(journal_ids) }))
     .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : 0);
   const eligibleHintIds = new Set(hintedRows.map(row => row.id));
   if (approvedTransferIds.some(id => !eligibleHintIds.has(id))) {
@@ -300,7 +301,7 @@ async function runWiseImport(
   // the Wise-side holds), and when a confirmed untagged row on the Wise account
   // shares a date with a statement row: its registration journal may prove its
   // direction (wise_untagged_ledger_unique). The snapshot is digest-bound.
-  const eligibleDates = new Set(eligible.map(row => wiseDate(row.finishedOn || row.createdOn)));
+  const eligibleDates = new Set(eligible.map(wiseRowDate));
   const untaggedLookalikePossible = existingTx.some(tx =>
     tx.status === "CONFIRMED" && tx.accounts_dimensions_id === accounts_dimensions_id &&
     !tx.description?.startsWith("WISE:") && eligibleDates.has(tx.date));
@@ -614,13 +615,14 @@ async function runWiseImport(
       // that row; other rows proceed. Card rows are not transfer rows: they
       // never re-read journals.
       const holdCheckByRow = new Map(projected.holdCheckRows.map(check => [check.row_index, check]));
+      const rowsByIndex = new Map(eligible.map(row => [row.rowIndex, row]));
       const wiseLabels = knownWiseLabelsFor(rows, existingTx);
       const snapshotJournals = new Map(journalSnapshot.filter(journal => journal.id !== undefined).map(journal => [journal.id!, journal]));
       const blockedRows = new Set<number>();
       const wiseSideBlock = (command: WiseImportCommand, legKind: "main" | "fee", freshJournals: Journal[]): string | undefined => {
         const check = holdCheckByRow.get(command.row_index);
         const leg = check?.legs[legKind];
-        const row = eligible.find(candidate => candidate.rowIndex === command.row_index);
+        const row = rowsByIndex.get(command.row_index);
         if (check === undefined || leg === undefined || row === undefined) return undefined;
         const createdHere = new Set(runtimeIds.values());
         const exempt = (journal: Journal | undefined, coverage: ReadonlySet<number>) => journal?.id !== undefined && (
@@ -638,9 +640,8 @@ async function runWiseImport(
           journal => labelledWithOtherWiseId(journal, row, wiseLabels));
         const byId = new Map(freshJournals.map(journal => [journal.id, journal]));
         const legCoverage = new Set(leg.coverage);
-        const blocking = [...new Set([...evidence.certain, ...evidence.uncertain])]
-          .filter(id => !exempt(byId.get(id), legCoverage))
-          .sort((left, right) => left - right);
+        const blocking = sortedUniqueIds(evidence.certain, evidence.uncertain)
+          .filter(id => !exempt(byId.get(id), legCoverage));
         return blocking.length > 0
           ? `journal ${blocking.join(", ")} on the Wise account may already book this transfer's ${legKind} leg (appeared or changed since the reviewed plan)`
           : undefined;
@@ -688,7 +689,7 @@ async function runWiseImport(
           blockedRows.add(command.row_index);
           throw new Error(`Stale Wise-side precondition: ${block}`);
         }
-        const row = eligible.find(candidate => candidate.rowIndex === command.row_index);
+        const row = rowsByIndex.get(command.row_index);
         const drift = interAccount === undefined || row === undefined
           ? undefined
           : counterpartDrift(row, interAccount, freshTransactions, freshJournals);
@@ -739,7 +740,7 @@ async function runWiseImport(
               command_version: WISE_COMMAND_VERSION,
             },
           });
-          const sourceRow = eligible.find(row => row.rowIndex === command.row_index);
+          const sourceRow = rowsByIndex.get(command.row_index);
           created.push({
             wise_id: command.wise_id,
             date: command.date,
@@ -865,10 +866,9 @@ async function runWiseImport(
             // Journals the owner acknowledged as not this transfer
             // (acknowledged_journal_holds) are exempt only while unchanged
             // since the reviewed snapshot; the exact-label check below never is.
-            const acknowledgedIds = new Set(projected.holdCheckRows
-              .find(row => row.row_index === command.row_index)?.acknowledged_ids ?? []);
+            const acknowledgedIds = new Set(holdCheckByRow.get(command.row_index)?.acknowledged_ids ?? []);
             const pairJournals = priorJournals.filter(journal => !(journal.id !== undefined && acknowledgedIds.has(journal.id) &&
-              exactStateMatches(journal, journalSnapshot.find(snapshot => snapshot.id === journal.id))));
+              exactStateMatches(journal, snapshotJournals.get(journal.id))));
             const freshGuard = BookingGuard.fromSnapshot(
               api,
               pairJournals,
@@ -882,11 +882,10 @@ async function runWiseImport(
               maxGapDays: 1,
               reference: command.wise_id,
             };
-            const sourceRow = eligible.find(row => row.rowIndex === command.row_index);
-            const netAmount = sourceRow === undefined ? undefined : wiseLegAmountNetOfFee(sourceRow, command.booked_amount);
-            const journalQueries = netAmount === undefined
-              ? [journalQuery]
-              : [journalQuery, { ...journalQuery, amount: netAmount }];
+            const sourceRow = rowsByIndex.get(command.row_index);
+            // The booked amount and, with a same-currency fee, the net of it.
+            const journalQueries = (sourceRow === undefined ? [command.booked_amount] : wiseRowAmounts(sourceRow))
+              .map(amount => ({ ...journalQuery, amount }));
             if (journalQueries.some(query =>
               freshGuard.resolveInterAccount(query, { consume: false }).status !== "none" ||
               freshGuard.hasOtherLabelledInterAccount(query)
@@ -1062,7 +1061,7 @@ async function runWiseImport(
             transferCounterpart: {
               unresolved_row_count: counterpartHoldReviews.filter(review => review.code === "wise_transfer_dimensions_unverified").length,
               conflict_row_count: counterpartHoldReviews.filter(review => review.code === "wise_transfer_counterpart_conflict").length,
-              candidates: [...otherDimensions].sort((left, right) => left - right).map(id => ({
+              candidates: sortedUniqueIds(otherDimensions).map(id => ({
                 accounts_dimensions_id: id,
                 label: labels.get(id) ?? `Dimension ${id}`,
               })),

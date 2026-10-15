@@ -64,10 +64,10 @@ export function registerWiseImportTools(
     if (!outcome.ok) return renderWiseFailure(simpleWiseFailureFromCode(outcome.error.code));
     if (!useCompactWise()) return renderWiseImportFull(outcome.value);
     if (!executeRequested) {
-      return compactResponse(renderWiseImportCompact({ mode: "DRY_RUN", data: outcome.value }));
+      return compactResponse(renderWiseImportCompact({ data: outcome.value }));
     }
     const operationHandle = issueWiseResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, planHandle);
-    return compactResponse(renderWiseImportCompact({ mode: "EXECUTED", data: outcome.value, operationHandle }));
+    return compactResponse(renderWiseImportCompact({ data: outcome.value, operationHandle }));
   }
 
   registerTool(server, "import_wise_transactions",

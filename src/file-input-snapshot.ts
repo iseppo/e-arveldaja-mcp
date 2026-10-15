@@ -84,6 +84,14 @@ export interface FileInputSource {
   readonly file_ref?: string;
 }
 
+/** The source's file_path when it may be echoed back to the caller: a path,
+ * not an inline `base64:` payload. */
+export function echoableSourcePath(source: FileInputSource): string | undefined {
+  return source.file_path !== undefined && !source.file_path.toLowerCase().startsWith("base64:")
+    ? source.file_path
+    : undefined;
+}
+
 export interface CaptureFileInputOptions {
   readonly runtimeSafetyContext: RuntimeSafetyContext;
   readonly operation: string;

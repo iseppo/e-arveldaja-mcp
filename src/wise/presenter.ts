@@ -3,7 +3,7 @@ import { buildBatchExecutionContract } from "../batch-execution.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
-import { cappedWarnings, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
+import { cappedWarnings, compactImportStatus, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
 import {
   createPublicOperationResultDetail,
@@ -13,7 +13,7 @@ import {
 } from "../operation-result-store.js";
 import { importPreflightFailurePayload } from "../camt/presenter.js";
 import type { PlanStoreError } from "../plan-store.js";
-import type { FileInputSource, FileInputIdentity } from "../file-input-snapshot.js";
+import { echoableSourcePath, type FileInputSource, type FileInputIdentity } from "../file-input-snapshot.js";
 import {
   bookedCurrencyForWiseRow,
   counterpartyNameForWiseRow,
@@ -54,8 +54,11 @@ export function wisePreflightFailure(rejected: ImportRejectedField[]) {
   return toolError(importPreflightFailurePayload("wise", rejected));
 }
 
-export function digestMismatch() {
-  return toolError({
+type SimpleWiseFailureKind = Exclude<WiseFailure["kind"], "preflight" | "plan_store_error" | "plan_drift">;
+
+/** The fixed non-mutating envelope payload of each data-less failure kind. */
+const SIMPLE_WISE_FAILURES: Readonly<Record<SimpleWiseFailureKind, Record<string, unknown>>> = {
+  digest_mismatch: {
     error: "The Wise command approval digest does not match the current mutation plan.",
     category: "digest_mismatch",
     code: "approval_digest_mismatch",
@@ -64,7 +67,50 @@ export function digestMismatch() {
     known_object_ids: [],
     affected_cache_names: [],
     next_action: "Run a new Wise dry run, review its complete command plan, and approve that exact digest.",
-  });
+  },
+  // A required-but-missing plan handle blocks execute before any work.
+  plan_handle_required: {
+    error: "A reviewed execution-plan handle from the Wise dry run is required to execute. The digest alone cannot execute; re-run the dry run and pass its plan_handle.",
+    category: "plan_handle_required",
+    code: "plan_handle_required",
+    retry: "never",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  },
+  // The operator's ownership approvals must equal the previewed unverified
+  // transfer IDs exactly, in the presented order (extra/missing/reordered all
+  // invalidate). This is a distinct, clearer signal than a digest mismatch.
+  ownership_reapproval_required: {
+    error: "Wise ownership approvals must match the previewed unverified transfer IDs exactly, in the order presented. Extra, missing, or reordered approvals invalidate the plan — re-run the dry run, approve the enumerated IDs only, and use the new plan handle and digest.",
+    category: "wise_transfer_ownership_reapproval_required",
+    code: "wise_transfer_ownership_reapproval_required",
+    retry: "never",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  },
+  wise_client_not_found: {
+    error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
+    retry: "never",
+    mutation_occurred: false,
+  },
+  // The Wise accounts_dimensions_id is not the dimension of a configured bank
+  // account (unlinked, deleted or duplicated): refused before any write, on dry
+  // run and execute alike. The id is not echoed (simple kind).
+  wise_dimension_not_bank_account: {
+    error: "The Wise accounts_dimensions_id is not the dimension of a bank account in e-arveldaja. Nothing was created. Link the Wise account as a bank account in e-arveldaja (bank account → account dimension), or pass the accounts_dimensions_id of the Wise bank account.",
+    category: "wise_dimension_not_bank_account",
+    code: "wise_dimension_not_bank_account",
+    retry: "never",
+    mutation_occurred: false,
+    known_object_ids: [],
+    affected_cache_names: [],
+  },
+};
+
+export function digestMismatch() {
+  return toolError(SIMPLE_WISE_FAILURES.digest_mismatch);
 }
 
 /** A PlanStoreError (invalid/consumed/expired/domain/scope) surfaced as a
@@ -81,18 +127,6 @@ function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "message">) {
   });
 }
 
-/** A required-but-missing plan handle blocks execute before any work. */
-function planHandleRequiredResult() {
-  return toolError({
-    error: "A reviewed execution-plan handle from the Wise dry run is required to execute. The digest alone cannot execute; re-run the dry run and pass its plan_handle.",
-    category: "plan_handle_required",
-    code: "plan_handle_required",
-    retry: "never",
-    mutation_occurred: false,
-    known_object_ids: [],
-    affected_cache_names: [],
-  });
-}
 
 /** Any source/argument/live/command drift between the reviewed plan and the
  * re-derived plan stops execution with zero mutations. */
@@ -109,43 +143,6 @@ function planDriftResult(detail: string) {
   });
 }
 
-/** The operator's ownership approvals must equal the previewed unverified
- * transfer IDs exactly, in the presented order (extra/missing/reordered all
- * invalidate). This is a distinct, clearer signal than a digest mismatch. */
-function ownershipReapprovalRequiredResult() {
-  return toolError({
-    error: "Wise ownership approvals must match the previewed unverified transfer IDs exactly, in the order presented. Extra, missing, or reordered approvals invalidate the plan — re-run the dry run, approve the enumerated IDs only, and use the new plan handle and digest.",
-    category: "wise_transfer_ownership_reapproval_required",
-    code: "wise_transfer_ownership_reapproval_required",
-    retry: "never",
-    mutation_occurred: false,
-    known_object_ids: [],
-    affected_cache_names: [],
-  });
-}
-
-/** The Wise accounts_dimensions_id is not the dimension of a configured bank
- * account (unlinked, deleted or duplicated): refused before any write, on dry
- * run and execute alike. The id is not echoed (simple kind). */
-function wiseDimensionNotBankAccountResult() {
-  return toolError({
-    error: "The Wise accounts_dimensions_id is not the dimension of a bank account in e-arveldaja. Nothing was created. Link the Wise account as a bank account in e-arveldaja (bank account → account dimension), or pass the accounts_dimensions_id of the Wise bank account.",
-    category: "wise_dimension_not_bank_account",
-    code: "wise_dimension_not_bank_account",
-    retry: "never",
-    mutation_occurred: false,
-    known_object_ids: [],
-    affected_cache_names: [],
-  });
-}
-
-function wiseClientNotFoundResult() {
-  return toolError({
-    error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
-    retry: "never",
-    mutation_occurred: false,
-  });
-}
 
 /** Digest input-format gate, checked by the Wise entry points before any file
  * read, ledger read, cache flush, plan consume, or mutation. Returns the
@@ -167,14 +164,8 @@ export function wiseDigestInputRejection(approvedCommandDigest: unknown, execute
  * exact same envelope as before. The rich kinds never travel this path — they
  * are thrown as WiseOperationFailedError and rendered in the handler's catch. */
 export function simpleWiseFailureFromCode(code: string): WiseFailure {
-  switch (code) {
-    case "plan_handle_required": return { kind: "plan_handle_required" };
-    case "digest_mismatch": return { kind: "digest_mismatch" };
-    case "ownership_reapproval_required": return { kind: "ownership_reapproval_required" };
-    case "wise_client_not_found": return { kind: "wise_client_not_found" };
-    case "wise_dimension_not_bank_account": return { kind: "wise_dimension_not_bank_account" };
-    default: throw new Error(`Unexpected Wise operation error code: ${code}`);
-  }
+  if (Object.hasOwn(SIMPLE_WISE_FAILURES, code)) return { kind: code as SimpleWiseFailureKind };
+  throw new Error(`Unexpected Wise operation error code: ${code}`);
 }
 
 /** Map a structured executor failure to the exact non-mutating MCP envelope it
@@ -183,12 +174,8 @@ export function renderWiseFailure(failure: WiseFailure) {
   switch (failure.kind) {
     case "preflight": return wisePreflightFailure(failure.rejected);
     case "plan_store_error": return planStoreErrorResult({ code: failure.code, message: failure.message } as Pick<PlanStoreError, "code" | "message">);
-    case "plan_handle_required": return planHandleRequiredResult();
-    case "digest_mismatch": return digestMismatch();
     case "plan_drift": return planDriftResult(failure.detail);
-    case "ownership_reapproval_required": return ownershipReapprovalRequiredResult();
-    case "wise_client_not_found": return wiseClientNotFoundResult();
-    case "wise_dimension_not_bank_account": return wiseDimensionNotBankAccountResult();
+    default: return toolError(SIMPLE_WISE_FAILURES[failure.kind]);
   }
 }
 
@@ -284,7 +271,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     transferCounterpart,
   } = data;
   const file_ref = source.file_ref;
-  const file_path = source.file_path;
+  const file_path = echoableSourcePath(source);
   const { feeAccountDimensionsId: fee_account_dimensions_id, feeAccountRelationId: fee_account_relation_id, interAccountDimensionId: inter_account_dimension_id, confirmOwnTransferIds: confirm_own_transfer_ids, dateFrom: date_from, dateTo: date_to, skipJarTransfers: skip_jar_transfers } = data.args;
 
   const executionSkipped = skipped.filter(entry => isNonErrorWiseSkipReason(entry.reason));
@@ -354,9 +341,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
   const sanitizedExecutionErrors = executionErrors.map(sanitizeReason);
   const workflowArgs = {
     ...(file_ref !== undefined ? { file_ref } : {}),
-    ...(file_ref === undefined && file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
-      ? { file_path }
-      : {}),
+    ...(file_ref === undefined && file_path !== undefined ? { file_path } : {}),
     accounts_dimensions_id,
     ...(fee_account_dimensions_id !== undefined ? { fee_account_dimensions_id } : {}),
     ...(fee_account_relation_id !== undefined ? { fee_account_relation_id } : {}),
@@ -399,7 +384,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
         mode,
         ...(file_ref !== undefined
           ? { source_file_ref: file_ref }
-          : file_path !== undefined && !file_path.toLowerCase().startsWith("base64:")
+          : file_path !== undefined
             ? { source_file: wrapUntrustedOcr(file_path) }
             : { source_identity: sourceIdentity, source_resubmission_required: true }),
         summary,
@@ -555,15 +540,14 @@ export function issueWiseResultHandle(
 }
 
 interface WiseCompactInput {
-  readonly mode: "DRY_RUN" | "EXECUTED";
   readonly data: WiseImportRenderData;
   /** Execute only: an operation-result handle bound to the consumed Wise plan. */
   readonly operationHandle?: string;
 }
 
 export function renderWiseImportCompact(input: WiseCompactInput): { summary: OperationSummaryV1 } {
-  const { mode, data } = input;
-  const dryRun = mode === "DRY_RUN";
+  const { data } = input;
+  const dryRun = data.mode === "DRY_RUN";
   // A dry run with no commands has nothing to approve and issues no plan.
   const zeroWrite = dryRun && data.commands.length === 0;
 
@@ -730,20 +714,23 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   // Dry-run ladder: open reviews (including held rows) mirror the standard
   // surface's canApprove (reviews block approval) while the plan handle and
   // next_action stay available, as the standard digest/handle do.
-  const status = zeroWrite
-    ? (executionErrors.length > 0 || data.ownershipReviews.length > 0 ? "needs_review" as const : "completed" as const)
-    : dryRun
-      ? (data.ownershipReviews.length > 0 ? "needs_review" as const : "ready_for_approval" as const)
-      : (executionErrors.length > 0 ? "partial" as const : "completed" as const);
+  const status = compactImportStatus({
+    dryRun,
+    zeroWrite,
+    reviews: data.ownershipReviews.length > 0,
+    reviewsBlockApproval: true,
+    failed: executionErrors.length > 0,
+  });
 
   // Statement identity: the Wise bank dimension identifies the account; the
   // source-file identity (opaque file_ref, otherwise the content digest, and an
   // OCR-wrapped file_path) identifies the statement. A raw base64 upload is
   // represented by its digest only.
+  const echoPath = echoableSourcePath(data.source);
   const fileId = data.source.file_ref !== undefined
     ? data.source.file_ref
-    : (data.source.file_path !== undefined && !data.source.file_path.toLowerCase().startsWith("base64:"))
-      ? wrapUntrustedOcr(data.source.file_path)
+    : echoPath !== undefined
+      ? wrapUntrustedOcr(echoPath)
       : data.sourceIdentity.digest_sha256;
   const scope = {
     account: String(data.accountsDimensionsId),
@@ -776,8 +763,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
   // very dead end this fix exists to close. Emit it, and say plainly in the
   // message that the caller must add the statement bytes back. args has no room
   // for the marker: the input schema rejects unknown keys.
-  const sourceResubmissionRequired = data.source.file_ref === undefined
-    && !(data.source.file_path !== undefined && !data.source.file_path.toLowerCase().startsWith("base64:"));
+  const sourceResubmissionRequired = data.source.file_ref === undefined && echoPath === undefined;
   const nextAction = dryRun && data.planHandle !== undefined && data.approvedCommandDigest !== undefined
     ? {
         tool: "process_bank_input",
@@ -785,8 +771,8 @@ export function renderWiseImportCompact(input: WiseCompactInput): { summary: Ope
           mode: "execute",
           ...(data.source.file_ref !== undefined
             ? { file_ref: data.source.file_ref }
-            : data.source.file_path !== undefined && !data.source.file_path.toLowerCase().startsWith("base64:")
-              ? { file_path: data.source.file_path }
+            : echoPath !== undefined
+              ? { file_path: echoPath }
               : {}),
           accounts_dimensions_id: data.accountsDimensionsId,
           ...(data.args.dateFrom ? { date_from: data.args.dateFrom } : {}),
