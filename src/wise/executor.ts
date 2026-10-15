@@ -71,9 +71,11 @@ import {
   WISE_PLAN_DOMAIN,
 } from "./projection.js";
 import type {
+  FeeCreateCommand,
   ImportRejectedField,
   InterAccountCommand,
   MainCreateCommand,
+  WiseCreatedEntry,
   WiseImportCommand,
   WiseInterAccountResult,
   WiseAcknowledgedJournalHold,
@@ -697,6 +699,32 @@ async function runWiseImport(
           throw new Error(drift);
         }
       };
+      // Creates one main or fee leg, guarded in this order: fresh transactions,
+      // the identity re-check, the Wise-side (and, for a main leg, the
+      // counterpart) guard, then the create; returns the created id.
+      const createLeg = async (command: MainCreateCommand | FeeCreateCommand, legKind: "main" | "fee"): Promise<number> => {
+        clearRuntimeCaches();
+        const freshTransactions = await api.transactions.listAll();
+        if (transactionCommandExists(command, freshTransactions)) {
+          throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
+        }
+        await guardWiseLeg(command, legKind, freshTransactions);
+        const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
+        const apiId = result.created_object_id;
+        if (apiId === undefined) throw new Error(`Wise ${legKind === "main" ? "transaction" : "fee"} creation returned no object ID`);
+        runtimeIds.set(command.row_key, apiId);
+        return apiId;
+      };
+      const createdEntryFor = (command: MainCreateCommand | FeeCreateCommand, apiId: number, status: string): WiseCreatedEntry => ({
+        wise_id: command.wise_id,
+        date: command.date,
+        type: command.transaction_type,
+        source_direction: command.source_direction,
+        amount: command.booked_amount,
+        description: command.create_payload.description ?? "",
+        status,
+        api_id: apiId,
+      });
       for (const command of commands) {
       if (command.depends_on && !successfulCommands.has(command.depends_on)) {
         skipped.push({
@@ -716,16 +744,7 @@ async function runWiseImport(
       }
       try {
         if (command.action === "main_create") {
-          clearRuntimeCaches();
-          const freshTransactions = await api.transactions.listAll();
-          if (transactionCommandExists(command, freshTransactions)) {
-            throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
-          }
-          await guardWiseLeg(command, "main", freshTransactions);
-          const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
-          const apiId = result.created_object_id;
-          if (apiId === undefined) throw new Error("Wise transaction creation returned no object ID");
-          runtimeIds.set(command.row_key, apiId);
+          const apiId = await createLeg(command, "main");
           successfulCommands.add(command.row_key);
           logAudit({
             tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
@@ -741,32 +760,12 @@ async function runWiseImport(
               command_version: WISE_COMMAND_VERSION,
             },
           });
-          const sourceRow = rowsByIndex.get(command.row_index);
-          created.push({
-            wise_id: command.wise_id,
-            date: command.date,
-            type: command.transaction_type,
-            source_direction: command.source_direction,
-            amount: command.booked_amount,
-            description: command.create_payload.description ?? "",
-            status: "created",
-            api_id: apiId,
-            source_row: sourceRow,
-          });
+          created.push({ ...createdEntryFor(command, apiId, "created"), source_row: rowsByIndex.get(command.row_index) });
           continue;
         }
 
         if (command.action === "fee_create_and_confirm") {
-          clearRuntimeCaches();
-          const freshTransactions = await api.transactions.listAll();
-          if (transactionCommandExists(command, freshTransactions)) {
-            throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
-          }
-          await guardWiseLeg(command, "fee", freshTransactions);
-          const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
-          const apiId = result.created_object_id;
-          if (apiId === undefined) throw new Error("Wise fee creation returned no object ID");
-          runtimeIds.set(command.row_key, apiId);
+          const apiId = await createLeg(command, "fee");
           logAudit({
             tool: "import_wise_transactions", action: "IMPORTED", entity_type: "transaction",
             entity_id: apiId,
@@ -803,14 +802,7 @@ async function runWiseImport(
               },
             });
             created.push({
-              wise_id: command.wise_id,
-              date: command.date,
-              type: command.transaction_type,
-              source_direction: command.source_direction,
-              amount: command.booked_amount,
-              description: command.create_payload.description ?? "",
-              status: "created_and_confirmed",
-              api_id: apiId,
+              ...createdEntryFor(command, apiId, "created_and_confirmed"),
               // Fee rows carry no source_row, so this is the only way the
               // presenter can tell what currency the row was booked in.
               booked_currency: command.booked_currency,
@@ -824,14 +816,7 @@ async function runWiseImport(
               kind: "error",
             });
             created.push({
-              wise_id: command.wise_id,
-              date: command.date,
-              type: command.transaction_type,
-              source_direction: command.source_direction,
-              amount: command.booked_amount,
-              description: command.create_payload.description ?? "",
-              status: `created (confirm failed: ${wrapUntrustedOcr(errorMessage)})`,
-              api_id: apiId,
+              ...createdEntryFor(command, apiId, `created (confirm failed: ${wrapUntrustedOcr(errorMessage)})`),
               booked_currency: command.booked_currency,
             });
           }
