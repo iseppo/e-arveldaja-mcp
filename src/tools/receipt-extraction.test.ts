@@ -32,6 +32,7 @@ import {
   categorizeTransactionGroup,
   classifyReceiptDocument,
   detectReceiptCurrency,
+  amountConsistencyIssues,
 } from "./receipt-extraction.js";
 import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
@@ -3060,5 +3061,218 @@ describe("receipt OCR text with planted sandbox delimiters (F-IMPORT-SOURCE-MARK
     );
     expect(JSON.stringify(planted)).not.toContain("UNTRUSTED_OCR");
     expect(planted).toEqual(clean);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// VAT label precedence, label vocabulary and amount consistency (live smoke
+// on 1d50fd5). Synthetic fixtures that copy real layouts.
+// ---------------------------------------------------------------------------
+
+describe("receipt amounts — VAT own-line priority and gross labels", () => {
+  const labelValueItems = (rows: Array<[string, string?]>): LayoutTextItem[] =>
+    rows.flatMap(([label, value], index) => [
+      { text: label, x: 50, y: 100 + index * 20, width: 150, height: 10, pageNum: 1 },
+      ...(value !== undefined
+        ? [{ text: value, x: 277, y: 100 + index * 20, width: 60, height: 10, pageNum: 1 }]
+        : []),
+    ]);
+
+  const kirjastusLines = [
+    "Saatja nimi Näidis Kirjastus AS",
+    "Reg nr 17487472",
+    "KMKR EE102809963",
+    "Narva mnt 13, 10151 Tallinn",
+    "Kuupäev 05.08.2026",
+    "Arve nr KR-2026-0815",
+    "Summa 9,99 € sisaldab KM 0,82 €",
+    "Brutosumma 9,99 €",
+    "Netosumma 9,17 €",
+    "Käibemaks 9% 0,82 €",
+  ];
+
+  it("Kirjastus-like e-subscription: the next line's 'sisaldab KM' does not make the address a VAT line", () => {
+    const result = extractReceiptFieldsFromText(kirjastusLines.join("\n"), "kirjastus.pdf");
+    expect(result.total_net).toBe(9.17);
+    expect(result.total_vat).toBe(0.82);
+    expect(result.total_gross).toBe(9.99);
+    expect(result.amount_consistency_issues).toBeUndefined();
+    expect(summarizeInvoiceExtraction(result).confidence).toBe("high");
+  });
+
+  it("Kirjastus-like layout with labels and values in two columns gives the same totals", () => {
+    const items = labelValueItems([
+      ["Saatja nimi Näidis Kirjastus AS"],
+      ["Reg nr 17487472"],
+      ["KMKR EE102809963"],
+      ["Narva mnt 13, 10151 Tallinn"],
+      ["Kuupäev 05.08.2026"],
+      ["Arve nr KR-2026-0815"],
+      ["Summa 9,99 € sisaldab KM 0,82 €"],
+      ["Brutosumma", "9,99 €"],
+      ["Netosumma", "9,17 €"],
+      ["Käibemaks 9%", "0,82 €"],
+    ]);
+    const result = extractReceiptFieldsFromText(kirjastusLines.join("\n"), "kirjastus.pdf", { textItems: items });
+    expect(result.total_net).toBe(9.17);
+    expect(result.total_vat).toBe(0.82);
+    expect(result.total_gross).toBe(9.99);
+    expect(result.amount_consistency_issues).toBeUndefined();
+  });
+
+  it("without the Brutosumma block the VAT still comes from the 'sisaldab KM' line, not the address", () => {
+    const text = [
+      "Saatja nimi Näidis Kirjastus AS",
+      "Narva mnt 13, 10151 Tallinn",
+      "Summa 9,99 € sisaldab KM 0,82 €",
+    ].join("\n");
+    const amounts = extractAmounts(text);
+    expect(amounts.total_vat).toBe(0.82);
+    expect(amounts.total_gross).toBe(9.99);
+    expect(amounts.total_net).toBe(9.17);
+  });
+
+  it.each([
+    {
+      name: "Delfi-like",
+      lines: ["13, 10151 Tallinn", "Käibemaksuta: 11,92 €", "Käibemaks 9%: 1,07 €", "Summa kokku 12,99 €"],
+      expected: { total_net: 11.92, total_vat: 1.07, total_gross: 12.99 },
+    },
+    {
+      name: "Elron-like",
+      lines: ["Hind kokku 13.10 €", "Hind käibemaksuta 10.56 €", "Käibemaks 24% 2.54 €"],
+      expected: { total_net: 10.56, total_vat: 2.54, total_gross: 13.1 },
+    },
+    {
+      name: "MK Trade-like",
+      lines: ["Summa km-ta: 122,42", "KM 24% : 29,38", "Kokku käibemaksuga: 151,80"],
+      expected: { total_net: 122.42, total_vat: 29.38, total_gross: 151.8 },
+    },
+    {
+      name: "Messenger-like",
+      lines: ["Summa KM-ta: EUR 125,00", "Kaibemaks (24.00%): EUR 30,00", "Arve kokku (EUR): EUR 155,00"],
+      expected: { total_net: 125, total_vat: 30, total_gross: 155 },
+    },
+  ])("keeps the totals of the $name layout", ({ lines, expected }) => {
+    const amounts = extractAmounts(lines.join("\n"));
+    expect({
+      total_net: amounts.total_net,
+      total_vat: amounts.total_vat,
+      total_gross: amounts.total_gross,
+    }).toEqual(expected);
+  });
+
+  it("Postimees-like offer: 'Tasumiseks' labels the gross, not the 80 of the street address", () => {
+    const text = ["Tartu mnt 80", "Käibemaksuta: 54,99", "Käibemaks (9%): 4,95", "Tasumiseks: 59,94"].join("\n");
+    const amounts = extractAmounts(text);
+    expect(amounts.total_gross).toBe(59.94);
+    expect(amounts.total_net).toBe(54.99);
+    expect(amounts.total_vat).toBe(4.95);
+  });
+
+  it("KÜ-like mixed-rate invoice: 'Arve summa' is the gross and the mixed rate is held", () => {
+    const text = [
+      "Arve nr 2026/09",
+      "Kuupäev 01.09.2026",
+      "Käibemaksuta € 28,88",
+      "Käibemaksuga 24% € 131,93",
+      "Käibemaks € 31,66",
+      "Arve summa € 192,47",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "ku-arve.pdf");
+    expect(result.total_gross).toBe(192.47);
+    expect(result.amount_consistency_issues).toContain("vat_rate_implausible");
+  });
+});
+
+describe("amountConsistencyIssues", () => {
+  it.each([
+    { name: "a consistent 24% receipt", amounts: { total_net: 100, total_vat: 24, total_gross: 124, invoice_date: "2026-03-01" }, codes: [] },
+    { name: "9% press VAT in 2026", amounts: { total_net: 9.17, total_vat: 0.82, total_gross: 9.99, invoice_date: "2026-08-05" }, codes: [] },
+    { name: "no VAT", amounts: { total_net: 50, total_vat: 0, total_gross: 50, invoice_date: "2026-03-01" }, codes: [] },
+    { name: "negative net", amounts: { total_net: -3.11, total_vat: 13.1, total_gross: 9.99, invoice_date: "2026-08-05" }, codes: ["net_negative", "vat_exceeds_gross", "net_nonpositive_with_vat"] },
+    { name: "negative VAT", amounts: { total_net: 105, total_vat: -5, total_gross: 100, invoice_date: "2026-03-01" }, codes: ["vat_negative"] },
+    { name: "VAT above gross", amounts: { total_net: 0, total_vat: 120, total_gross: 100, invoice_date: "2026-03-01" }, codes: ["vat_exceeds_gross", "net_nonpositive_with_vat", "trio_mismatch"] },
+    { name: "0 / 100 / 100", amounts: { total_net: 0, total_vat: 100, total_gross: 100, invoice_date: "2026-03-01" }, codes: ["net_nonpositive_with_vat"] },
+    { name: "a trio off by more than 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.05, invoice_date: "2026-03-01" }, codes: ["trio_mismatch"] },
+    { name: "a trio off by 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.02, invoice_date: "2026-03-01" }, codes: [] },
+    { name: "an implausible rate", amounts: { total_net: 100, total_vat: 17, total_gross: 117, invoice_date: "2026-03-01" }, codes: ["vat_rate_implausible"] },
+    { name: "13% accommodation dated 2024 (no reduced-rate history)", amounts: { total_net: 100, total_vat: 13, total_gross: 113, invoice_date: "2024-05-01" }, codes: ["vat_rate_implausible"] },
+    { name: "a rate without a valid invoice date", amounts: { total_net: 100, total_vat: 17, total_gross: 117 }, codes: [] },
+  ])("$name", ({ amounts, codes }) => {
+    expect(amountConsistencyIssues(amounts)).toEqual(codes);
+  });
+});
+
+describe("explicit amount conflicts survive reconciliation", () => {
+  const makeItem = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 10, pageNum: 1,
+  });
+  const trioLines = ["Arve nr 77", "Kuupäev 01.03.2026", "Vahesumma 180,00", "Käibemaks 24% 48,00", "Kokku 248,00"];
+  const trioItems = [
+    makeItem("Arve nr 77", 0, 10, 100),
+    makeItem("Kuupäev 01.03.2026", 0, 25, 150),
+    makeItem("Vahesumma", 0, 40, 100),
+    makeItem("180,00", 200, 40, 50),
+    makeItem("Käibemaks 24%", 0, 60, 110),
+    makeItem("48,00", 200, 60, 50),
+    makeItem("Kokku", 0, 80, 60),
+    makeItem("248,00", 200, 80, 55),
+  ];
+
+  it("text path: 180 / 48 / 248 is flagged although the final 200 / 48 / 248 passes the 24% check", () => {
+    const result = extractReceiptFieldsFromText(trioLines.join("\n"), "trio.pdf");
+    expect(result.total_net).toBe(200);
+    expect(result.amount_consistency_issues).toEqual(
+      expect.arrayContaining(["explicit_trio_mismatch", "explicit_net_overridden"]),
+    );
+    expect(result.amount_consistency_issues).not.toContain("vat_rate_implausible");
+  });
+
+  it("layout path: the same codes come from reconcileLayoutAmounts and survive the merge", () => {
+    const layout = extractAmountsFromLayout(trioItems);
+    expect(layout?.explicit_amount_conflicts).toEqual(
+      expect.arrayContaining(["explicit_trio_mismatch", "explicit_net_overridden"]),
+    );
+    const result = extractReceiptFieldsFromText(trioLines.join("\n"), "trio.pdf", { textItems: trioItems });
+    expect(result.amount_consistency_issues).toEqual(
+      expect.arrayContaining(["explicit_trio_mismatch", "explicit_net_overridden"]),
+    );
+  });
+
+  it("the merge keeps the layout conflict when it keeps the text values", () => {
+    const layout: ExtractedAmountsWithMetadata = {
+      total_net: 200, total_vat: 48, total_gross: 248, provenance: [],
+      explicit_amount_conflicts: ["explicit_trio_mismatch"],
+    };
+    const text: ExtractedAmountsWithMetadata = {
+      total_net: 100, total_vat: 24, total_gross: 124, vat_explicit: true, provenance: [],
+    };
+    const merged = mergeLayoutAmounts(layout, text);
+    expect(merged.total_gross).toBe(124);
+    expect(merged.explicit_amount_conflicts).toEqual(["explicit_trio_mismatch"]);
+  });
+
+  it("a VAT labelled only by the next line is discarded without a conflict", () => {
+    const text = [
+      "Narva mnt 13, 10151 Tallinn",
+      "Summa 9,99 € sisaldab KM 0,82 €",
+      "Brutosumma 9,99 €",
+      "Netosumma 9,17 €",
+    ].join("\n");
+    const amounts = extractAmountsWithMetadata(text);
+    expect(amounts.total_vat).toBe(0.82);
+    expect(amounts.explicit_amount_conflicts).toBeUndefined();
+  });
+
+  it("H11: an explicit VAT 0.00 contradicted by explicit net and gross keeps today's values and holds", () => {
+    const text = ["Subtotal 100.00", "VAT 0.00", "Total 124.00"].join("\n");
+    const amounts = extractAmountsWithMetadata(text);
+    expect(amounts.total_net).toBe(100);
+    expect(amounts.total_vat).toBe(24);
+    expect(amounts.total_gross).toBe(124);
+    expect(amounts.explicit_amount_conflicts).toEqual(
+      expect.arrayContaining(["explicit_vat_overridden"]),
+    );
   });
 });

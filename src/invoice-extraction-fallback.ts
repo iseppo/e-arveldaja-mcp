@@ -80,6 +80,19 @@ export interface ExtractionConfidenceSignals {
    * from automatic creation in every mode.
    */
   currency_equivalent_ambiguity?: boolean;
+  /**
+   * The extracted amounts are internally inconsistent (any
+   * `amount_consistency_issues` code except `vat_rate_implausible`): labelled
+   * amounts contradict each other, a negative / oversized VAT, or a net that
+   * does not carry the VAT. Low signal.
+   */
+  amounts_inconsistent?: boolean;
+  /**
+   * The extracted VAT / net matches no VAT rate in force on the invoice date
+   * (mixed-rate documents included). Medium signal, gated from automatic
+   * creation in every mode.
+   */
+  vat_rate_implausible?: boolean;
 }
 
 export interface InvoiceExtractionFallback {
@@ -167,6 +180,7 @@ export function summarizeInvoiceExtraction(
   if (signals?.self_reg_code_detected) lowSignals.push("self_reg_code_detected");
   if (signals?.duplicate_invoice_in_batch) lowSignals.push("duplicate_invoice_in_batch");
   if (signals?.reverse_charge_phrase_unhandled) lowSignals.push("reverse_charge_phrase_unhandled");
+  if (signals?.amounts_inconsistent) lowSignals.push("amounts_inconsistent");
 
   if (signals?.supplier_resolution_failed) mediumSignals.push("supplier_resolution_failed");
   if (signals?.improbable_fixed_asset) mediumSignals.push("improbable_fixed_asset");
@@ -177,6 +191,7 @@ export function summarizeInvoiceExtraction(
   if (signals?.supplier_identifier_echo_unconfirmed) mediumSignals.push("supplier_identifier_echo_unconfirmed");
   if (signals?.total_gross_conflict) mediumSignals.push("total_gross_conflict");
   if (signals?.currency_equivalent_ambiguity) mediumSignals.push("currency_equivalent_ambiguity");
+  if (signals?.vat_rate_implausible) mediumSignals.push("vat_rate_implausible");
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.

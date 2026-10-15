@@ -4,14 +4,14 @@ import { sanitizeUploadFileName } from "../file-validation.js";
 import { checkIntakeCashDuplicates, formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
-import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn } from "../estonian-tax-rules.js";
+import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn, vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import type { PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
-import { computeTermDays } from "./receipt-extraction.js";
+import { computeTermDays, snapVatRate } from "./receipt-extraction.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import type {
@@ -120,17 +120,8 @@ export function resolveReceiptVatRateDropdown(
         `${standardRate}% nor a reduced rate in force on the invoice date; confirm the self-assessed rate.`,
     };
   }
-  const invoiceDate = extracted.invoice_date ?? "";
-  const candidates = [
-    ...(standardRate !== null ? [standardRate] : []),
-    ...REDUCED_VAT_RATES
-      .filter(reduced => reduced.rate > 0 && (reduced.from === null || invoiceDate >= reduced.from))
-      .map(reduced => reduced.rate),
-  ];
-  const tolerance = Math.max(0.02, netAmount * 0.0005);
-  const snapped = netAmount > 0
-    ? candidates.find(rate => Math.abs(netAmount * rate / 100 - extracted.total_vat!) <= tolerance)
-    : undefined;
+  const candidates = vatRatesInForceOn(extracted.invoice_date).filter(rate => rate > 0);
+  const snapped = snapVatRate(netAmount, extracted.total_vat, candidates);
   if (snapped === undefined) {
     const implied = netAmount > 0 ? roundMoney(extracted.total_vat / netAmount * 100) : undefined;
     return {

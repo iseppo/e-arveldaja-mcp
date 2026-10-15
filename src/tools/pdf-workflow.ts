@@ -482,6 +482,12 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
 
         const warnings: string[] = [];
         if (currencyWarning) warnings.push(`${currencyWarning.code}: ${currencyWarning.message}`);
+        if (signals.amounts_inconsistent) {
+          warnings.push("amounts_inconsistent: the extracted net, VAT and gross do not reconcile; verify the totals before booking.");
+        }
+        if (signals.vat_rate_implausible) {
+          warnings.push("vat_rate_implausible: the extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking.");
+        }
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
         // else — the OCR-derived `extracted.currency` could otherwise smuggle
         // attacker text into the warning string (which is not OCR-wrapped).

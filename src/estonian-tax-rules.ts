@@ -160,6 +160,24 @@ export function standardVatRateOn(dateISO: string | undefined | null): number | 
 export const REDUCED_VAT_RATES: readonly ReducedVatRate[] =
   ESTONIAN_VAT_METADATA.rates.reduced;
 
+/**
+ * Every VAT rate (%) in force on the given ISO date: the standard rate plus each
+ * reduced rate whose `from` is on or before the date. Empty for an invalid date.
+ * Reduced-rate history before 2025-01-01 is not in the table, so an older
+ * reduced-rate document finds only the standard rate and 0.
+ */
+export function vatRatesInForceOn(dateISO: string | undefined | null): number[] {
+  const standardRate = standardVatRateOn(dateISO);
+  if (standardRate === null) return [];
+  const d = dateISO!.slice(0, 10);
+  return [
+    standardRate,
+    ...REDUCED_VAT_RATES
+      .filter(reduced => reduced.from === null || d >= reduced.from)
+      .map(reduced => reduced.rate),
+  ];
+}
+
 export interface RepresentationMonthlyLimitPeriod {
   /** Inclusive start date (YYYY-MM-DD). */
   from: string;

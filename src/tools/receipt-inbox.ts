@@ -234,6 +234,10 @@ export function shouldGateCreation(
   // a two-currency document (F-CURRENCY-EQUIVALENT): never book either currency
   // automatically.
   const currencyEquivalentAmbiguity = summary.confidence_signals.includes("currency_equivalent_ambiguity");
+  // The extracted VAT matches no rate in force on the invoice date (a misread,
+  // or a mixed-rate document a single synthetic item cannot book): gate in every
+  // mode, like total_gross_conflict.
+  const vatRateImplausible = summary.confidence_signals.includes("vat_rate_implausible");
   const confirmModeNeedsHighConfidence =
     executionMode === "create_and_confirm" && summary.confidence !== "high";
   const gate = summary.confidence === "low" ||
@@ -241,6 +245,7 @@ export function shouldGateCreation(
     supplierIdentifierEchoUnconfirmed ||
     totalGrossConflict ||
     currencyEquivalentAmbiguity ||
+    vatRateImplausible ||
     confirmModeNeedsHighConfidence;
   return {
     gate,
@@ -744,6 +749,9 @@ export function buildExtractionConfidenceSignals(
   if (detectSelfVatOnly(extracted, quality.ownCompanyVat)) signals.self_vat_detected = true;
   if (detectSelfRegCodeOnly(extracted, quality.ownCompanyRegistryCode)) signals.self_reg_code_detected = true;
   if (extracted.total_gross_conflict) signals.total_gross_conflict = true;
+  const amountIssues = extracted.amount_consistency_issues ?? [];
+  if (amountIssues.some(code => code !== "vat_rate_implausible")) signals.amounts_inconsistent = true;
+  if (amountIssues.includes("vat_rate_implausible")) signals.vat_rate_implausible = true;
   if (
     extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
     extracted.vat_no_rationale === "coordinate_confirmed_echo"

@@ -17,6 +17,7 @@ import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { isStrictDate } from "../strict-date.js";
+import { vatRatesInForceOn } from "../estonian-tax-rules.js";
 import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { normalizeVatRate } from "./purchase-vat-defaults.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
@@ -36,7 +37,10 @@ const DATE_VALUE_SOURCE =
   String.raw`\s+\d{1,2},?\s+\d{4})`;
 
 // "kokku" must not match "kokkuvõte" (summary / billing-period heading).
-const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku(?!võt)|kogusumma|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due)/i;
+// "Brutosumma", "Arve summa", "Tasumiseks" and "Tasumisele kuulub" label the
+// gross on Estonian e-invoices; without them the gross came from a fallback
+// pick (an address number, a year).
+const RECEIPT_TOTAL_LABEL_RE =/(tasuda|maksta|kokku(?!võt)|kogusumma|\btotal\b|grand total|summa kokku|summa eurodes\s*\(km-ga\)|summa\s*\(km-ga\)|maksmisele kuulub|to pay|payable|amount due|\bbruto(?:summa)?\b|arve summa|tasumiseks|tasumisele kuulub)/i;
 const RECEIPT_VAT_LABEL_RE = /(käibemaks|km\b|vat\b|tax\b)/i;
 // Net (pre-VAT) total labels. A net-labelled line is never a gross candidate,
 // even when it also carries a TOTAL word ("Kokku km-ta 50,00", "Total excl. VAT").
@@ -278,6 +282,8 @@ export interface ExtractedReceiptFields {
   extraction_notes?: string[];
   /** Layout and text extraction disagreed on the gross total; creation is gated to review. */
   total_gross_conflict?: boolean;
+  /** Explicit-label conflicts plus amountConsistencyIssues of the final totals; any code holds automatic booking. */
+  amount_consistency_issues?: string[];
 }
 
 interface TransactionGroupClassificationInput {
@@ -436,6 +442,49 @@ export interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   extraction_notes?: string[];
   /** Layout and text extraction produced different gross totals — the gross is not trustworthy for auto-booking. */
   total_gross_conflict?: boolean;
+  /** Codes from explicitAmountConflictCodes: the document's labelled amounts contradict each other or were overridden. */
+  explicit_amount_conflicts?: string[];
+}
+
+/** Amounts read from explicitly labelled lines / layout cells, before any reconciliation. */
+interface ExplicitAmountSnapshot {
+  net?: number;
+  vat?: number;
+  gross?: number;
+}
+
+/** Tolerance for net + VAT = gross, shared with the reconcilers (D3). */
+const AMOUNT_TRIO_TOLERANCE = 0.02;
+
+/** A VAT of the wrong sign, or larger than the gross, cannot belong to that gross. */
+function isVatImplausibleAgainstGross(vat: number, gross: number): boolean {
+  return gross >= 0 ? (vat < 0 || vat > gross) : (vat > 0 || vat < gross);
+}
+
+/**
+ * Conflicts among the explicitly labelled amounts, and labelled amounts that a
+ * reconciliation replaced. Computed from the pre-reconciliation snapshot, so a
+ * contradiction survives even when the derived final trio reconciles.
+ */
+function explicitAmountConflictCodes(explicit: ExplicitAmountSnapshot, final: ExplicitAmountSnapshot): string[] {
+  const codes: string[] = [];
+  const { net, vat, gross } = explicit;
+  if (net !== undefined && vat !== undefined && gross !== undefined &&
+    Math.abs(roundMoney(net + vat) - gross) > AMOUNT_TRIO_TOLERANCE) {
+    codes.push("explicit_trio_mismatch");
+  }
+  if (net !== undefined && net < 0) codes.push("explicit_net_negative");
+  if (vat !== undefined && vat < 0) codes.push("explicit_vat_negative");
+  if (vat !== undefined && gross !== undefined && Math.abs(vat) > Math.abs(gross)) codes.push("explicit_vat_exceeds_gross");
+  for (const field of ["net", "vat", "gross"] as const) {
+    const explicitValue = explicit[field];
+    const finalValue = final[field];
+    if (explicitValue === undefined) continue;
+    if (finalValue === undefined || Math.abs(finalValue - explicitValue) > AMOUNT_TRIO_TOLERANCE) {
+      codes.push(`explicit_${field}_overridden`);
+    }
+  }
+  return codes;
 }
 
 interface LayoutRow {
@@ -1231,6 +1280,8 @@ interface ClassifiedAmountLine {
   hasTotalLikeLabel: boolean;
   hasNetLikeLabel: boolean;
   hasVatAmountLabel: boolean;
+  /** The VAT label is on the amount's OWN line, not only on the next line of the inspection window. */
+  hasOwnLineVatLabel: boolean;
   score: number;
 }
 
@@ -1248,6 +1299,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
   const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
   const hasVatAmountLabel = isVatAmountLine(inspectionLine);
+  const hasOwnLineVatLabel = isVatAmountLine(line);
   // Resolved BEFORE the amounts so a VAT-total line can retain an explicit zero
   // (H11). Scoped to isExplicitVatTotalLine — NOT hasVatAmountLabel, which is
   // both wider (its "incl. VAT" branch matches component lines) and computed
@@ -1278,6 +1330,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
       hasTotalLikeLabel,
       hasNetLikeLabel,
       hasVatAmountLabel,
+      hasOwnLineVatLabel,
       score: 0,
     };
   }
@@ -1315,6 +1368,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
     hasTotalLikeLabel,
     hasNetLikeLabel,
     hasVatAmountLabel,
+    hasOwnLineVatLabel,
     score,
   };
 }
@@ -1597,6 +1651,13 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
 
   const netBinding = bindings.get("total_net");
   const vatBinding = bindings.get("total_vat");
+  // Snapshot the label-bound amounts before reconciliation rewrites them (see
+  // explicitAmountConflictCodes).
+  const explicitAmounts: ExplicitAmountSnapshot = {
+    net: netBinding?.amount,
+    vat: vatBinding?.amount,
+    gross: grossBinding.amount,
+  };
   let totalGross = grossBinding.amount;
   let totalNet = netBinding?.amount;
   let totalVat = vatBinding?.amount;
@@ -1643,6 +1704,11 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
 
   const provenance = [netMetadata, vatMetadata, grossMetadata]
     .filter((entry): entry is AmountProvenanceMetadata => entry !== undefined);
+  const explicitAmountConflicts = explicitAmountConflictCodes(explicitAmounts, {
+    net: totalNet,
+    vat: totalVat,
+    gross: totalGross,
+  });
 
   return {
     total_net: totalNet,
@@ -1650,6 +1716,7 @@ function reconcileLayoutAmounts(bindings: ReadonlyMap<AmountField, LayoutAmountC
     total_gross: totalGross,
     vat_explicit: totalVat !== undefined && (vatBinding !== undefined || netBinding !== undefined),
     provenance,
+    ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
   };
 }
 
@@ -1725,6 +1792,10 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     Math.abs(textAmounts.total_gross) <= MAX_RECEIPT_FALLBACK_AMOUNT &&
     (layoutAmounts.total_gross === 0 || textAmounts.total_gross === 0 || Math.sign(layoutAmounts.total_gross) === Math.sign(textAmounts.total_gross));
   const preferTextGross = grossValuesDisagree && textGrossIsPlausible;
+  const explicitAmountConflicts = [...new Set([
+    ...(layoutAmounts.explicit_amount_conflicts ?? []),
+    ...(textAmounts.explicit_amount_conflicts ?? []),
+  ])];
   const mergedProvenance = preferTextGross
     ? layoutAmounts.provenance.filter(entry => entry.field !== "total_gross")
     : [...layoutAmounts.provenance];
@@ -1824,6 +1895,9 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     provenance: mergedProvenance,
     ...(extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
     ...(grossValuesDisagree ? { total_gross_conflict: true } : {}),
+    // The UNION of both paths' conflicts, whichever values were kept: a
+    // conflict in the discarded path's labelled amounts must still hold the row.
+    ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
   };
 }
 
@@ -1837,6 +1911,10 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   let totalVat: number | undefined;
   let totalNet: number | undefined;
   let vatFromExplicitLine = false;
+  // The VAT came from a line whose label is only on the NEXT line (the
+  // inspection window). It is a fallback: a later line with its OWN VAT label
+  // replaces it, and it never counts as explicit evidence.
+  let vatFromNextLineOnly = false;
   let netFromExplicitLine = false;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
@@ -1890,8 +1968,9 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     // assigned from pickedVat here, and a zero pickedVat was unreachable while
     // extractAmountsFromLine filtered every zero, so this state is new to H11.
     const vatIsUpgradableZero = totalVat === 0 && classified.pickedVat !== 0;
+    const replacesNextLineVat = vatFromNextLineOnly && classified.hasOwnLineVatLabel;
     if (
-      (totalVat === undefined || vatIsUpgradableZero) &&
+      (totalVat === undefined || vatIsUpgradableZero || replacesNextLineVat) &&
       classified.pickedVat !== undefined &&
       !classified.blockedAsReference &&
       classified.hasVatAmountLabel &&
@@ -1899,6 +1978,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     ) {
       totalVat = classified.pickedVat;
       vatFromExplicitLine = true;
+      vatFromNextLineOnly = !classified.hasOwnLineVatLabel;
       vatMetadata = {
         field: "total_vat",
         value: totalVat,
@@ -1932,6 +2012,16 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       componentAmounts.push(classified.pickedGross);
     }
   }
+
+  // Snapshot the explicitly labelled amounts BEFORE any reconciliation below
+  // rewrites them: the final trio can be self-consistent while the document's
+  // own labelled figures contradict each other (180 / 48 / 248 becomes
+  // 200 / 48 / 248).
+  const explicitAmounts: ExplicitAmountSnapshot = {
+    net: netFromExplicitLine ? totalNet : undefined,
+    vat: vatFromExplicitLine && !vatFromNextLineOnly ? totalVat : undefined,
+    gross: bestExplicitGrossCandidate?.amount,
+  };
 
   if (bestExplicitGrossCandidate) {
     totalGross = bestExplicitGrossCandidate.amount;
@@ -1997,6 +2087,16 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     }
   }
 
+  // Same rule as the layout reconciler (#5): a VAT of the wrong sign or larger
+  // than the gross cannot derive a net (gross 9.99 - VAT 13.10 = net -3.11).
+  // Drop it; the gross - net derivation below supplies the VAT from an
+  // explicit net instead.
+  if (totalGross !== undefined && totalVat !== undefined && isVatImplausibleAgainstGross(totalVat, totalGross)) {
+    totalVat = undefined;
+    vatMetadata = undefined;
+    vatFromExplicitLine = false;
+  }
+
   if (totalGross !== undefined && totalVat !== undefined) {
     const derivedNet = roundMoney(totalGross - totalVat);
     if (
@@ -2053,6 +2153,11 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
 
   const provenance = [netMetadata, vatMetadata, grossMetadata]
     .filter((entry): entry is AmountProvenanceMetadata => entry !== undefined);
+  const explicitAmountConflicts = explicitAmountConflictCodes(explicitAmounts, {
+    net: totalNet,
+    vat: totalVat,
+    gross: totalGross,
+  });
 
   return {
     total_net: totalNet,
@@ -2060,6 +2165,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     total_gross: totalGross,
     vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
     provenance,
+    ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
   };
 }
 
@@ -2929,6 +3035,40 @@ export function hasAutoBookableReceiptFields(
   );
 }
 
+/** Snap the VAT to one of `rates` with the receipt rate tolerance max(0.02, net * 0.0005). */
+export function snapVatRate(netAmount: number, vatAmount: number, rates: readonly number[]): number | undefined {
+  if (!(netAmount > 0)) return undefined;
+  const tolerance = Math.max(0.02, netAmount * 0.0005);
+  return rates.find(rate => Math.abs(netAmount * rate / 100 - vatAmount) <= tolerance);
+}
+
+/**
+ * Plausibility of the FINAL extracted totals (a receipt SOURCE check, never
+ * applied to operator-reviewed booking totals). Codes:
+ * net_negative, vat_negative, vat_exceeds_gross, net_nonpositive_with_vat,
+ * trio_mismatch (|net + vat - gross| > 0.02) and vat_rate_implausible (vat/net
+ * matches no rate in force on invoice_date; skipped without a valid date).
+ */
+export function amountConsistencyIssues(
+  extracted: Pick<ExtractedReceiptFields, "total_net" | "total_vat" | "total_gross" | "invoice_date">,
+): string[] {
+  const { total_net: net, total_vat: vat, total_gross: gross } = extracted;
+  const issues: string[] = [];
+  if (net !== undefined && net < 0) issues.push("net_negative");
+  if (vat !== undefined && vat < 0) issues.push("vat_negative");
+  if (vat !== undefined && gross !== undefined && vat > gross) issues.push("vat_exceeds_gross");
+  if (net !== undefined && vat !== undefined && net <= 0 && vat > 0) issues.push("net_nonpositive_with_vat");
+  if (net !== undefined && vat !== undefined && gross !== undefined &&
+    Math.abs(roundMoney(net + vat) - gross) > AMOUNT_TRIO_TOLERANCE) {
+    issues.push("trio_mismatch");
+  }
+  if (net !== undefined && vat !== undefined && net > 0 && vat > 0) {
+    const rates = vatRatesInForceOn(extracted.invoice_date).filter(rate => rate > 0);
+    if (rates.length > 0 && snapVatRate(net, vat, rates) === undefined) issues.push("vat_rate_implausible");
+  }
+  return issues;
+}
+
 /** The text of the line (or layout cell) an amount field was picked from, when known. */
 function amountSourceLine(
   text: string,
@@ -3047,7 +3187,16 @@ export function extractReceiptFieldsFromText(
     supplierResult.layoutSupplierNameItem,
     supplierResult.layoutSupplierNameRationale,
   );
-  const { provenance: _amountProvenance, extraction_notes: amountNotes, ...amountFields } = amounts;
+  const {
+    provenance: _amountProvenance,
+    extraction_notes: amountNotes,
+    explicit_amount_conflicts: explicitAmountConflicts,
+    ...amountFields
+  } = amounts;
+  const amountIssues = [...new Set([
+    ...(explicitAmountConflicts ?? []),
+    ...amountConsistencyIssues({ ...amountFields, invoice_date }),
+  ])];
   const extractionNotes = [
     ...(amountNotes ?? []),
     ...(supplierResult.extraction_notes ?? []),
@@ -3073,6 +3222,7 @@ export function extractReceiptFieldsFromText(
     ...(options?.partialOcrFailure ? { partial_ocr_failure: true } : {}),
     ...(fieldProvenance.length > 0 ? { field_provenance: fieldProvenance } : {}),
     ...(extractionNotes && extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
+    ...(amountIssues.length > 0 ? { amount_consistency_issues: amountIssues } : {}),
   };
 }
 

@@ -432,6 +432,12 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       if (signals.total_gross_conflict) {
         warnings.push({ code: "total_gross_conflict", message: "Layout and text extraction disagree on the gross total; verify the payable amount before booking." });
       }
+      if (signals.amounts_inconsistent) {
+        warnings.push({ code: "amounts_inconsistent", message: "The extracted net, VAT and gross do not reconcile; verify the totals before booking." });
+      }
+      if (signals.vat_rate_implausible) {
+        warnings.push({ code: "vat_rate_implausible", message: "The extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking." });
+      }
       if (currencyWarning) {
         warnings.push({ code: currencyWarning.code, message: currencyWarning.message });
       }

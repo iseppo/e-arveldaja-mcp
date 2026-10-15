@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   standardVatRateOn,
+  vatRatesInForceOn,
   detectVatDeductionNotes,
   classifyExpenseForVat,
   buildTaxRulesReference,
@@ -21,6 +22,19 @@ import {
 } from "./estonian-tax-rules.js";
 
 const VAT_TEMPLATE_ERROR_RE = /Invalid canonical VAT template token/;
+
+describe("vatRatesInForceOn", () => {
+  it("lists the standard rate plus the reduced rates in force on the date", () => {
+    expect(vatRatesInForceOn("2024-06-30").sort((a, b) => a - b)).toEqual([0, 22]);
+    expect(vatRatesInForceOn("2025-01-01").sort((a, b) => a - b)).toEqual([0, 9, 13, 22]);
+    expect(vatRatesInForceOn("2025-07-01").sort((a, b) => a - b)).toEqual([0, 9, 13, 24]);
+  });
+
+  it("returns no rate for an invalid date", () => {
+    expect(vatRatesInForceOn(undefined)).toEqual([]);
+    expect(vatRatesInForceOn("2025-02-30")).toEqual([]);
+  });
+});
 
 describe("standardVatRateOn", () => {
   it("returns the rate in force on the given date", () => {

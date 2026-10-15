@@ -22,6 +22,7 @@ import {
   resolveSupplierFromTransaction,
   selectBatchBankTransactions,
   shouldGateCreation,
+  buildExtractionConfidenceSignals,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
@@ -1781,6 +1782,44 @@ describe("shouldGateCreation — layout/text gross conflict (finding 1)", () => 
     const gate = shouldGateCreation(summary, "create");
     expect(gate.gate).toBe(true);
     expect(gate.reason).toContain("total_gross_conflict");
+  });
+});
+
+describe("shouldGateCreation — amount consistency signals", () => {
+  const snapshot = {
+    supplier_name: "Acme OÜ",
+    invoice_number: "INV-1",
+    invoice_date: "2026-01-15",
+    total_gross: 124,
+    currency: "EUR",
+    raw_text: "Invoice content",
+  };
+
+  it("maps amount_consistency_issues to amounts_inconsistent / vat_rate_implausible signals", () => {
+    expect(buildExtractionConfidenceSignals(
+      { amount_consistency_issues: ["explicit_trio_mismatch", "vat_rate_implausible"] },
+      {},
+    )).toMatchObject({ amounts_inconsistent: true, vat_rate_implausible: true });
+    const onlyRate = buildExtractionConfidenceSignals({ amount_consistency_issues: ["vat_rate_implausible"] }, {});
+    expect(onlyRate.vat_rate_implausible).toBe(true);
+    expect(onlyRate.amounts_inconsistent).toBeUndefined();
+    expect(buildExtractionConfidenceSignals({}, {})).toEqual({});
+  });
+
+  it("gates amounts_inconsistent (low) in plain 'create' mode", () => {
+    const summary = summarizeInvoiceExtraction(snapshot, { amounts_inconsistent: true });
+    expect(summary.confidence).toBe("low");
+    const gate = shouldGateCreation(summary, "create");
+    expect(gate.gate).toBe(true);
+    expect(gate.reason).toContain("amounts_inconsistent");
+  });
+
+  it("gates vat_rate_implausible (medium) in plain 'create' mode", () => {
+    const summary = summarizeInvoiceExtraction(snapshot, { vat_rate_implausible: true });
+    expect(summary.confidence).toBe("medium");
+    const gate = shouldGateCreation(summary, "create");
+    expect(gate.gate).toBe(true);
+    expect(gate.reason).toContain("vat_rate_implausible");
   });
 });
 
