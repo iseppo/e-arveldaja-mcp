@@ -601,19 +601,17 @@ async function runWiseImport(
       const runtimeIds = new Map<string, number>();
       const successfulCommands = new Set<string>();
       let stoppedIndeterminate = false;
-      // Per-transfer-leg Wise-side guard: before each write of a transfer row
-      // (main create, fee create, fee confirm, inter-account confirm) the
-      // plan's identity and evidence checks re-run on fresh journals. The
-      // journals are read once per row, just before its first write; the row's
-      // later creates reuse that read, since the only writes in between are
-      // this row's own creates (no journal). The fee confirm and the
-      // inter-account confirm read again: the lock is per process, so another
-      // process may have confirmed the same fee meanwhile. Exempt: the leg's proven coverage,
-      // this run's own registration journals, and journals unchanged since
-      // the reviewed snapshot (so execute is never stricter than the preview,
-      // and an acknowledgement holds only while its journals are unchanged).
-      // A block or a failed read skips the rest of that row; other rows
-      // proceed. Card rows are not transfer rows: they never re-read journals.
+      // Per-transfer-leg Wise-side guard: immediately before each write of a
+      // transfer row (main create, fee create, fee confirm, inter-account
+      // confirm) the journals are read again and the plan's identity and
+      // evidence checks re-run. Every write reads fresh: the execution lock is
+      // per process, so another process may write between two legs. Exempt:
+      // the leg's proven coverage, this run's own registration journals, and
+      // journals unchanged since the reviewed snapshot (so execute is never
+      // stricter than the preview, and an acknowledgement holds only while its
+      // journals are unchanged). A block or a failed read skips the rest of
+      // that row; other rows proceed. Card rows are not transfer rows: they
+      // never re-read journals.
       const holdCheckByRow = new Map(projected.holdCheckRows.map(check => [check.row_index, check]));
       const wiseLabels = knownWiseLabelsFor(rows, existingTx);
       const snapshotJournals = new Map(journalSnapshot.filter(journal => journal.id !== undefined).map(journal => [journal.id!, journal]));
@@ -666,27 +664,23 @@ async function runWiseImport(
           ? undefined
           : `Stale counterpart precondition: the transfer's counterpart bank account is no longer ${command.counterpart_dimension_id} (${resolution !== undefined && "hold" in resolution ? resolution.hold.code : "changed"})`;
       };
-      const rowJournals = new Map<number, Journal[]>();
-      // Runs the guard for one leg on the row's journal read (taken on its
-      // first write); a failed read skips the row. Before the main create of a
-      // row the plan confirms against another bank, the counterpart is
-      // re-resolved too, so a changed counterpart writes nothing for the row.
+      // Reads the journals and runs the guard for one leg; a failed read skips
+      // the row. Before the main create of a row the plan confirms against
+      // another bank, the counterpart is re-resolved too (on the same fresh
+      // read), so a changed counterpart writes nothing for the row.
       const guardWiseLeg = async (command: WiseImportCommand, legKind: "main" | "fee", freshTransactions: Transaction[]): Promise<void> => {
         const interAccount = legKind === "main"
           ? commands.find((candidate): candidate is InterAccountCommand =>
             candidate.action === "inter_account" && candidate.row_index === command.row_index)
           : undefined;
         if (holdCheckByRow.get(command.row_index)?.legs[legKind] === undefined && interAccount === undefined) return;
-        let freshJournals = rowJournals.get(command.row_index);
-        if (freshJournals === undefined) {
-          try {
-            clearRuntimeCaches();
-            freshJournals = await api.journals.listAllWithPostings();
-          } catch (error) {
-            blockedRows.add(command.row_index);
-            throw new Error(`Wise-side journal re-check failed before the ${legKind} leg was written: ${error instanceof Error ? error.message : String(error)}`);
-          }
-          rowJournals.set(command.row_index, freshJournals);
+        let freshJournals: Journal[];
+        try {
+          clearRuntimeCaches();
+          freshJournals = await api.journals.listAllWithPostings();
+        } catch (error) {
+          blockedRows.add(command.row_index);
+          throw new Error(`Wise-side journal re-check failed before the ${legKind} leg was written: ${error instanceof Error ? error.message : String(error)}`);
         }
         const block = wiseSideBlock(command, legKind, freshJournals);
         if (block !== undefined) {
@@ -789,8 +783,6 @@ async function runWiseImport(
             if (!createdTransactionMatchesApprovedPayload(createdTransaction, apiId, command.create_payload)) {
               throw new Error(`Stale created transaction precondition: fee transaction ${apiId} is missing or changed before confirmation`);
             }
-            // A confirm never uses the row's cached read.
-            rowJournals.delete(command.row_index);
             await guardWiseLeg(command, "fee", freshTransactions);
             await api.transactions.confirm(apiId, command.confirmation_distribution);
             successfulCommands.add(command.row_key);

@@ -6963,12 +6963,11 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       ]));
     });
 
-    it("a fee-leg journal appearing before the row's first write stops the fee and the confirm of that transfer", async () => {
+    it("a fee-leg journal appearing before the fee create stops the fee and the confirm of that transfer", async () => {
       mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-FEE")]));
       const setup = setupWiseTool([], undefined, feeOptions());
-      // Reads 1-2: preview and execute re-plan; read 3: the row's guard read.
-      let reads = 0;
-      setup.api.journals.listAllWithPostings.mockImplementation(async () => ++reads > 2 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal(990, "2026-02-02", 1, "C")] : []);
       const { dry, executed } = await runApprovedWiseImport(setup, feeArgs);
       expect(dry.execution.commands.map((command: any) => command.action)).toEqual(["main_create", "fee_create_and_confirm", "inter_account"]);
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
@@ -6997,9 +6996,48 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       expect(JSON.stringify(executed.execution)).toContain("Skipped because an earlier Wise-side check of this transfer failed");
     });
 
-    it("M7: the journals are read once per row before its first write and shared by its creates; each confirm reads again", async () => {
-      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-ONE-READ-1"), buildM04Values({
-        id: "TRANSFER-ONE-READ-2", direction: "OUT", date: "2026-02-04", sourceName: "Wise Own Account", targetName: "LHV Own Account",
+    it("cross-process alternate-tag race: another process's confirmed fee appearing after the main create blocks the fee create", async () => {
+      // Process B imported the split export (WISE:FEE:TRANSFER-RACE-ALT:EUR) and
+      // confirmed its fee after this run's main create; this run's fee tag
+      // (WISE:FEE:TRANSFER-RACE-ALT) differs, so only the fresh journal read
+      // before the fee create can see it.
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-RACE-ALT")]));
+      const setup = setupWiseTool([], undefined, feeOptions());
+      const otherFee = {
+        id: 8800, status: "CONFIRMED", is_deleted: false, type: "C", amount: 1, cl_currencies_id: "EUR", date: "2026-02-02",
+        accounts_dimensions_id: 5, description: "WISE:FEE:TRANSFER-RACE-ALT:EUR Wise teenustasu [source_direction=OUT]",
+      };
+      const otherFeeJournal = {
+        id: 993, is_deleted: false, registered: true, effective_date: "2026-02-02", document_number: "", operation_type: "TRANSACTION", operations_id: 8800,
+        postings: [
+          { is_deleted: false, accounts_dimensions_id: 5, accounts_id: 1010, type: "C", amount: 1, base_amount: 1 },
+          { is_deleted: false, accounts_dimensions_id: 9, accounts_id: 8610, type: "D", amount: 1, base_amount: 1 },
+        ],
+      };
+      const listed = setup.api.transactions.listAll.getMockImplementation()!;
+      setup.api.transactions.listAll.mockImplementation(async () => [
+        ...await listed(), ...(setup.api.transactions.create.mock.calls.length > 0 ? [otherFee] : []),
+      ]);
+      setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+        setup.api.transactions.create.mock.calls.length > 0 ? [otherFeeJournal] : []);
+
+      const { executed } = await runApprovedWiseImport(setup, feeArgs);
+
+      // Only the main row was created: zero fee creates, nothing confirmed.
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0]![0].description).toMatch(/^WISE:TRANSFER-RACE-ALT /);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          wise_id: "FEE:TRANSFER-RACE-ALT",
+          reason: expect.stringMatching(wrapped("Stale Wise-side precondition: journal 993 on the Wise account may already book this transfer's fee leg (appeared or changed since the reviewed plan)")),
+        }),
+      ]));
+    });
+
+    it("every guarded transfer-leg write reads the journals fresh", async () => {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOutWithFee("TRANSFER-FRESH-1"), buildM04Values({
+        id: "TRANSFER-FRESH-2", direction: "OUT", date: "2026-02-04", sourceName: "Wise Own Account", targetName: "LHV Own Account",
         sourceAmount: "200", targetAmount: "200", sourceFeeAmount: "1",
       })]));
       const setup = setupWiseTool([], undefined, feeOptions());
@@ -7010,10 +7048,9 @@ describe("wise import review fixes (M1/M2/m1-m6)", () => {
       expect(setup.api.transactions.create).toHaveBeenCalledTimes(4);
       expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(4);
       expect(executed.execution.errors).toEqual([]);
-      // Re-plan 1 + per row one read before its first write and one before the
-      // fee confirm (4) + one per inter-account confirm (2); per-leg reads
-      // were 1 + 3 per row + 1 per confirm = 9.
-      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(7);
+      // Re-plan 1 + per row main create, fee create, fee confirm (3 x 2) +
+      // one per inter-account confirm (2).
+      expect(setup.api.journals.listAllWithPostings).toHaveBeenCalledTimes(9);
     });
 
     it("a journal outside the pair appearing before the inter-account confirm stops the confirm; the row stays PROJECT", async () => {
