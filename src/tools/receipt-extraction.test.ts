@@ -3453,7 +3453,7 @@ describe("disagreeing layout candidates keep the receipt held (live smoke f8818b
     ].join("\n");
     const result = extractReceiptFieldsFromText(text, "invoice-1633.pdf", { textItems: items });
     expect(result).toMatchObject({ total_net: 93.19, total_vat: 12.11, total_gross: 105.3 });
-    expect(result.total_gross_conflict).toBe(true);
+    expect(isHeld(result)).toBe(true);
   });
 
   it("a plausible total far below its own label column holds", () => {
@@ -3825,5 +3825,83 @@ describe("header spans led by a non-amount column (WP3)", () => {
       item("Summa km-ta 100,00", 52, 260, 100), item("Käibemaks 24,00", 52, 276, 90), item("Kokku 124,00", 52, 292, 80),
     ]);
     expect(result.total_gross_conflict === true || (result.amount_consistency_issues ?? []).length > 0).toBe(true);
+  });
+});
+
+describe("a label's own-row value stops the below-column search (WP4)", () => {
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum: 1,
+  });
+  const extractLayout = (items: LayoutTextItem[]) =>
+    extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+  const isHeld = (result: ReturnType<typeof extractReceiptFieldsFromText>) =>
+    result.total_gross_conflict === true || (result.amount_consistency_issues ?? []).length > 0 ||
+    result.zero_total_stated === true || result.labelled_amount_over_max === true;
+  const trio = [
+    item("Summa km-ta", 52, 100, 60), item("100,00", 300, 100, 30),
+    item("Käibemaks 24%", 52, 116, 70), item("24,00", 300, 116, 30),
+    item("Kokku", 52, 132, 40), item("124,00", 300, 132, 30),
+  ];
+
+  it("a zero remaining balance does not bind a footer bank code below it", () => {
+    const result = extractLayout([
+      item("Näidis OÜ", 52, 40, 60),
+      ...trio,
+      item("Jäänud tasuda", 400, 148, 65), item("0,00", 480, 148, 18),
+      item("SWIFT LHVBEE22", 400, 700, 65),
+    ]);
+    expect(result).toMatchObject({ total_net: 100, total_vat: 24, total_gross: 124 });
+    expect(isHeld(result)).toBe(false);
+  });
+
+  it("a zero invoice total keeps searching and is held", () => {
+    const result = extractLayout([
+      item("Näidis OÜ", 52, 40, 60),
+      ...trio,
+      item("Arve kokku", 400, 148, 50), item("0,00", 480, 148, 18),
+      item("SWIFT LHVBEE22", 400, 700, 65),
+    ]);
+    expect(result.zero_total_stated).toBe(true);
+    expect(isHeld(result)).toBe(true);
+  });
+
+  it("a zero total label still searches the column below it", () => {
+    const items = [
+      item("Näidis OÜ", 52, 40, 60),
+      item("Kogusumma (EUR)", 300, 100, 80), item("0,00", 400, 100, 20),
+      item("11,94", 300, 300, 30),
+    ];
+    expect(extractAmountsFromLayout(items)).toMatchObject({ total_gross: 11.94, zero_total_stated: true });
+  });
+
+  it("a percentage beside \"Tasuda\" is no own value: a conflicting value below holds", () => {
+    const items = [
+      item("Näidis OÜ", 52, 40, 60),
+      ...trio,
+      item("Tasuda (24%)", 400, 148, 60),
+      item("150,00", 400, 700, 30),
+    ];
+    // The layout still searches below the label and binds the conflicting value.
+    expect(extractAmountsFromLayout(items)?.total_gross).toBe(150);
+    expect(isHeld(extractLayout(items))).toBe(true);
+  });
+
+  it("an own value over the maximum stops the search and holds", () => {
+    const items = [
+      item("Näidis OÜ", 52, 40, 60),
+      item("Kokku", 52, 132, 40), item("60 000,00", 300, 132, 50),
+      item("124,00", 52, 700, 30),
+    ];
+    expect(extractAmountsFromLayout(items)).toMatchObject({ labelled_amount_over_max: true });
+    expect(extractAmountsFromLayout(items)?.total_gross).toBeUndefined();
+    expect(extractLayout(items).labelled_amount_over_max).toBe(true);
+  });
+
+  it("an own-row value over the maximum holds even when a nearer value binds", () => {
+    const items = [
+      item("Näidis OÜ", 52, 40, 60),
+      item("Kokku", 52, 132, 40), item("124,00", 200, 132, 30), item("60 000,00", 300, 132, 50),
+    ];
+    expect(extractAmountsFromLayout(items)).toMatchObject({ total_gross: 124, labelled_amount_over_max: true });
   });
 });

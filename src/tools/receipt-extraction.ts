@@ -1789,6 +1789,34 @@ function findBelowColumnLayoutAmount(label: LayoutLabelCell, amounts: readonly L
     )[0];
 }
 
+/**
+ * R2: the monetary values printed on a label's own row — in the label text or
+ * an item to its right — as two-decimal money tokens (percentages, dates,
+ * identifiers and footnotes are not money tokens).
+ */
+function labelOwnRowMoneyValues(label: LayoutLabelCell): number[] {
+  const labelRightEdge = label.item.x + label.item.width;
+  return [label.item, ...label.row.items.filter(item => item.x >= labelRightEdge - 1)]
+    .flatMap(item => moneyTokenValues(clampTextLine(item.text)));
+}
+
+/**
+ * R2: a label whose own row already states its value does not search the
+ * column below it (which would reach a footer BIC or bank code). A zero
+ * suppresses only on a remaining-balance label: a zero total keeps searching
+ * and is held as zero_total_stated.
+ */
+function hasOwnRowValue(label: LayoutLabelCell): boolean {
+  const values = labelOwnRowMoneyValues(label);
+  if (values.length === 0) return false;
+  return values.some(value => value !== 0) || BALANCE_LABEL_RE.test(label.item.text);
+}
+
+function findLayoutAmountForLabel(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
+  return findSameRowLayoutAmount(label, amounts) ??
+    (hasOwnRowValue(label) ? undefined : findBelowColumnLayoutAmount(label, amounts));
+}
+
 function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell): boolean {
   if (!current) return true;
   // Prefer the bottom-most binding for every field, not just total_gross. A
@@ -1897,8 +1925,9 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   // is an over-max cell, the label's evidence is recorded instead of lost.
   const overMaxCells = new Set(overMaxAmounts);
   const allAmountCells = [...amounts, ...overMaxAmounts];
-  const labelledAmountOverMax = overMaxAmounts.length > 0 && labels.some(label => {
-    const wouldBind = findSameRowLayoutAmount(label, allAmountCells) ?? findBelowColumnLayoutAmount(label, allAmountCells);
+  const labelledAmountOverMax = labels.some(label => {
+    if (labelOwnRowMoneyValues(label).some(value => Math.abs(value) > MAX_RECEIPT_FALLBACK_AMOUNT)) return true;
+    const wouldBind = findLayoutAmountForLabel(label, allAmountCells);
     return wouldBind !== undefined && overMaxCells.has(wouldBind);
   });
   // G5: a total row stating only zero amounts. The whole row is the label
@@ -1913,7 +1942,7 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   };
 
   for (const label of labels) {
-    const cell = findSameRowLayoutAmount(label, amounts) ?? findBelowColumnLayoutAmount(label, amounts);
+    const cell = findLayoutAmountForLabel(label, amounts);
     if (!cell) continue;
     if (label.field === "total_vat" && !vatRowBindings.has(label.row)) {
       vatRowBindings.set(label.row, { label, cell });
