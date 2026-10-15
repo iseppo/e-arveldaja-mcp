@@ -299,6 +299,8 @@ export interface ExtractedReceiptFields {
   buyer_not_active_company?: boolean;
   /** The buyer block names the active company AND another legal entity. */
   buyer_ambiguous?: boolean;
+  /** The buyer block names a legal entity, but no own-company identifier is known to verify it. */
+  buyer_ownership_unverified?: boolean;
   /** The gross is the largest unlabelled amount, not corroborated by a labelled net + labelled VAT. */
   gross_unlabelled?: boolean;
   /** A labelled net / VAT / gross amount exceeds MAX_RECEIPT_FALLBACK_AMOUNT (kept or dropped). */
@@ -2852,6 +2854,28 @@ function buyerBlockLegalEntity(line: string): string | undefined {
   return /\p{L}/u.test(head.slice(head.lastIndexOf(":") + 1)) ? name : undefined;
 }
 
+const BUYER_BLOCK_LEGAL_SUFFIX_GLOBAL_RE = new RegExp(BUYER_BLOCK_LEGAL_SUFFIX_RE.source, "gu");
+
+/**
+ * Every legal entity on a buyer-block line, in order: "Testfirma OÜ / Other OÜ"
+ * names two. Each legal-form suffix ends one entity; a prefix-form name
+ * ("Osaühing Näidis") after the last suffix is one more.
+ */
+function buyerBlockLegalEntities(line: string): string[] {
+  const entities: string[] = [];
+  let start = 0;
+  for (const match of line.matchAll(BUYER_BLOCK_LEGAL_SUFFIX_GLOBAL_RE)) {
+    const end = (match.index ?? 0) + match[0].length;
+    const entity = buyerBlockLegalEntity(line.slice(start, end));
+    if (!entity) continue;
+    entities.push(entity);
+    start = end;
+  }
+  const rest = buyerBlockLegalEntity(line.slice(start));
+  if (rest) entities.push(rest);
+  return entities.map(entity => entity.replace(/^[^\p{L}\d]+/u, "")).filter(Boolean);
+}
+
 function sameLayoutRowItems(a: LayoutTextItem, b: LayoutTextItem): boolean {
   return (a.pageNum ?? 1) === (b.pageNum ?? 1) &&
     Math.abs(a.y - b.y) <= Math.max(4, Math.max(a.height, b.height) * 0.7);
@@ -2913,15 +2937,16 @@ function buyerBlockLines(
  * own identifiers → buyer_not_active_company; the company AND another legal
  * entity → buyer_ambiguous. A mention of the company outside the block never
  * clears either; a block without any legal entity (a person, or no block)
- * raises nothing. Without any known own identifier nothing can be decided.
+ * raises nothing. Every entity on a line counts ("Testfirma OÜ / Other OÜ").
+ * Without any known own identifier a legal-entity buyer cannot be verified as
+ * the company: buyer_ownership_unverified.
  */
 function classifyBuyerBlock(
   textItems: readonly LayoutTextItem[],
   own: OwnCompanyIdentity,
-): "buyer_not_active_company" | "buyer_ambiguous" | undefined {
+): "buyer_not_active_company" | "buyer_ambiguous" | "buyer_ownership_unverified" | undefined {
   const ownRegistryCode = own.registryCode?.trim();
   const ownVat = own.vatNo?.replace(/\s+/g, "").toUpperCase();
-  if (!own.name && !ownRegistryCode && !ownVat) return undefined;
   const markers = buildIdentifierMarkers(textItems);
   let ownSeen = false;
   let otherSeen = false;
@@ -2935,13 +2960,14 @@ function classifyBuyerBlock(
       const compact = line.replace(/\s+/g, "").toUpperCase();
       if (ownRegistryCode && /^\d+$/.test(ownRegistryCode) && new RegExp(`(?<!\\d)${ownRegistryCode}(?!\\d)`).test(compact)) ownSeen = true;
       if (ownVat && compact.includes(ownVat)) ownSeen = true;
-      const entity = buyerBlockLegalEntity(line);
-      if (!entity) continue;
-      if (own.name && (sameCompanyIdentity(entity, own.name) || sameCompanyIdentity(line, own.name))) ownSeen = true;
-      else otherSeen = true;
+      for (const entity of buyerBlockLegalEntities(line)) {
+        if (own.name && (sameCompanyIdentity(entity, own.name) || sameCompanyIdentity(line, own.name))) ownSeen = true;
+        else otherSeen = true;
+      }
     }
   }
   if (!otherSeen) return undefined;
+  if (!own.name && !ownRegistryCode && !ownVat) return "buyer_ownership_unverified";
   return ownSeen ? "buyer_ambiguous" : "buyer_not_active_company";
 }
 

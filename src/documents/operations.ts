@@ -80,8 +80,9 @@ export const ACCOUNTING_DOCUMENT_PLAN_DOMAIN = "accounting_document";
 export const ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN = "accounting_document_confirm";
 
 // Extraction signals that withhold the create plan: the document is addressed
-// to another company (or to this one AND another).
-const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous"] as const;
+// to another company (or to this one AND another), or to a company that cannot
+// be verified as this one.
+const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous", "buyer_ownership_unverified"] as const;
 
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB

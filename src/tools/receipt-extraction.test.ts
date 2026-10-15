@@ -3547,8 +3547,29 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       expect(result.buyer_ambiguous).toBeUndefined();
     });
 
-    it("without any known own identifier nothing is decided", () => {
-      expect(extractWithBuyerBlock(["Näidis Kaubandus OÜ"], {}).buyer_not_active_company).toBeUndefined();
+    // Codex review: an unknown own identity must not disable the check.
+    it("a legal-entity buyer with no known own identifier holds as ownership unverified", () => {
+      const result = extractWithBuyerBlock(["Näidis Kaubandus OÜ"], {});
+      expect(result.buyer_ownership_unverified).toBe(true);
+      expect(result.buyer_not_active_company).toBeUndefined();
+    });
+
+    it("a person as buyer with no known own identifier raises nothing", () => {
+      expect(extractWithBuyerBlock(["Mari Maasikas"], {}).buyer_ownership_unverified).toBeUndefined();
+    });
+
+    // Codex review: every entity on a buyer line counts, not only the first.
+    it("the active company and another legal entity on one line hold as ambiguous", () => {
+      const result = extractWithBuyerBlock(["Testfirma OÜ / Other OÜ"], { ownCompanyName: "Testfirma OÜ" });
+      expect(result.buyer_ambiguous).toBe(true);
+      expect(extractWithBuyerBlock(["Other OÜ / Testfirma OÜ"], { ownCompanyName: "Testfirma OÜ" }).buyer_ambiguous).toBe(true);
+      expect(extractWithBuyerBlock(["Testfirma OÜ / Osaühing Näidis"], { ownCompanyName: "Testfirma OÜ" }).buyer_ambiguous).toBe(true);
+    });
+
+    it("the active company alone on a line with its address raises nothing", () => {
+      const result = extractWithBuyerBlock(["Testfirma OÜ, Tartu mnt 1"], { ownCompanyName: "Testfirma OÜ" });
+      expect(result.buyer_ambiguous).toBeUndefined();
+      expect(result.buyer_not_active_company).toBeUndefined();
     });
   });
 

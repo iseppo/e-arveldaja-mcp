@@ -255,6 +255,24 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     expect(outcome.value.warnings.some(w => w.code === signal)).toBe(false);
     expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
   });
+
+  it("a company buyer is a buyer_ownership_unverified blocker when the active company's identity is unknown", async () => {
+    mockedParseDocument.mockResolvedValue(layoutDoc([
+      { text: "Näidis Kauplus AS", x: 52, y: 40 },
+      { text: "Arve saaja:", x: 52, y: 100 },
+      { text: "Seppo AI OÜ", x: 52, y: 114 },
+      { text: "Kokku 124,00 EUR", x: 400, y: 300 },
+    ]));
+    const { path } = writeTempPdf();
+    const { api, ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    api.readonly.getInvoiceInfo.mockRejectedValue(new Error("offline"));
+    api.readonly.getVatInfo.mockRejectedValue(new Error("offline"));
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers.map(b => b.code)).toContain("buyer_ownership_unverified");
+    expect(outcome.value.planHandle).toBeUndefined();
+  });
 });
 
 describe("AccountingDocumentOperations snapshot materialization", () => {
