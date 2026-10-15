@@ -80,7 +80,7 @@ export function normalizeVatValue(value: string | null | undefined): string | un
   return normalized || undefined;
 }
 
-function normalizeVatForCompare(value: string | readonly string[] | undefined): Set<string> {
+function normalizedVatSet(value: string | readonly string[] | undefined): Set<string> {
   if (!value) return new Set();
   const list = typeof value === "string" ? [value] : value;
   const set = new Set<string>();
@@ -192,7 +192,19 @@ const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*
 // A foreign VAT number must contain a digit: without that, the case-insensitive
 // shape accepts any 8+ letter word, e.g. "Registration" in
 // "VAT Registration EU VAT: IE4276970QH" (Anthropic invoice).
-const VAT_LABEL_RE = /(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}))/gi;
+const FOREIGN_VAT_SHAPE = String.raw`[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}`;
+const FOREIGN_VAT_SHAPE_RE = new RegExp(`^${FOREIGN_VAT_SHAPE}$`);
+const VAT_LABEL_RE = new RegExp(
+  String.raw`(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:${FOREIGN_VAT_SHAPE}))`,
+  "gi",
+);
+
+/** The permissive (checksum-free) foreign VAT number shape — two letters, then
+ * 6+ letters/digits with at least one digit — on a normalized (whitespace-free,
+ * upper-case) value. */
+export function isForeignVatShape(normalized: string): boolean {
+  return FOREIGN_VAT_SHAPE_RE.test(normalized);
+}
 
 function normalizeVatCandidate(value: string): string {
   return value.replace(/\s+/g, "").toUpperCase();
@@ -652,7 +664,7 @@ function resolveVatNo(
   text: string,
   options: ExtractIdentifiersOptions | undefined,
 ): IdentifierResolutionResult<VatNoRationale> {
-  const excludeVat = normalizeVatForCompare(options?.excludeVat);
+  const excludeVat = normalizedVatSet(options?.excludeVat);
   const rejected: RejectedCandidate[] = [];
   const candidates: string[] = [];
   const candidateSet = new Set<string>();
@@ -885,7 +897,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
  * and keep their existing signatures for backwards compatibility.
  */
 export function extractIdentifiers(text: string, options?: ExtractIdentifiersOptions): ExtractedIdentifiers {
-  const excludeVat = normalizeVatForCompare(options?.excludeVat);
+  const excludeVat = normalizedVatSet(options?.excludeVat);
   const excludeReg = normalizeRegCode(options?.excludeRegCode);
   const iban = extractIban(text, { exclude: options?.excludeIban });
   const ref_number = extractReferenceNumber(text);

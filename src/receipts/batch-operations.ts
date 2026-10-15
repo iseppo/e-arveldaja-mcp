@@ -7,6 +7,7 @@ import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js"
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
 import {
@@ -62,7 +63,6 @@ import {
   buildReferencedInvoiceForPaymentReceipt,
   buildExtractionConfidenceSignals,
   deriveOwnCompanyRegistryCode,
-  normalizeVatForCompare,
   resolveAutoBookingRuleTargets,
   resolveMergedPurchaseAccountDimension,
   selectBatchBankTransactions,
@@ -529,13 +529,13 @@ async function processSingleReceipt(
     if (extracted.invoice_number) {
       const myInvoice = normalizeInvoiceNumberForComparison(extracted.invoice_number);
       const myRegCode = extracted.supplier_reg_code?.trim();
-      const myVat = normalizeVatForCompare(extracted.supplier_vat_no);
+      const myVat = normalizeVatValue(extracted.supplier_vat_no);
       const myNameKey = extracted.supplier_name ? normalizeCompanyName(extracted.supplier_name) : "";
       const earlier = options.previousResults.find(prev => {
         if (!myInvoice || normalizeInvoiceNumberForComparison(prev.extracted?.invoice_number) !== myInvoice) return false;
         if (resolvedClientId && prev.supplier_resolution?.client?.id === resolvedClientId) return true;
         if (myRegCode && prev.extracted?.supplier_reg_code?.trim() === myRegCode) return true;
-        if (myVat && normalizeVatForCompare(prev.extracted?.supplier_vat_no) === myVat) return true;
+        if (myVat && normalizeVatValue(prev.extracted?.supplier_vat_no) === myVat) return true;
         if (myNameKey.length >= 4 && prev.extracted?.supplier_name &&
             normalizeCompanyName(prev.extracted.supplier_name) === myNameKey) return true;
         return false;

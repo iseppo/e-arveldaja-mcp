@@ -3372,14 +3372,19 @@ export function findPurchaseArticleByKeywords(
     });
 }
 
+// The generic "other expense" keywords: used when no category matches, and as
+// the last resort after a category's own keywords find nothing.
+const FALLBACK_ARTICLE_KEYWORDS = ["muu", "other", "general"];
+const FALLBACK_ACCOUNT_KEYWORDS = ["muu", "general", "kulud"];
+
 export function buildKeywordSuggestion(
   purchaseArticles: Array<{ id: number; name_est: string; name_eng: string; accounts_id?: number; is_disabled?: boolean; priority?: number }>,
   accounts: Account[],
   hints: string,
 ): BookingSuggestion | undefined {
   const normalizedHints = hints.toLowerCase();
-  let articleKeywords = ["muu", "other", "general"];
-  let accountKeywords = ["muu", "general", "kulud"];
+  let articleKeywords = FALLBACK_ARTICLE_KEYWORDS;
+  let accountKeywords = FALLBACK_ACCOUNT_KEYWORDS;
 
   // Merchant-specific card_purchases patterns (bolt/uber/taxi/parking/wolt/…)
   // must be tested before the generic bank_fees pattern. Otherwise a hint like
@@ -3407,8 +3412,8 @@ export function buildKeywordSuggestion(
     const bound = accounts.find(acc => acc.id === candidate.accounts_id);
     return !bound || isExpenseBookableAccount(bound);
   });
-  const fallbackArticle = findPurchaseArticleByKeywords(expenseBoundArticles, ["muu", "other", "general"])
-    ?? findPurchaseArticleByKeywords(purchaseArticles, ["muu", "other", "general"]);
+  const fallbackArticle = findPurchaseArticleByKeywords(expenseBoundArticles, FALLBACK_ARTICLE_KEYWORDS)
+    ?? findPurchaseArticleByKeywords(purchaseArticles, FALLBACK_ARTICLE_KEYWORDS);
   const article = findPurchaseArticleByKeywords(expenseBoundArticles, articleKeywords)
     ?? findPurchaseArticleByKeywords(purchaseArticles, articleKeywords)
     ?? fallbackArticle;
@@ -3426,7 +3431,7 @@ export function buildKeywordSuggestion(
   const account = articleAccountUsable
     ? articleAccount
     : findAccountByKeywords(expenseAccounts, accountKeywords)
-      ?? findAccountByKeywords(expenseAccounts, ["muu", "general", "kulud"]);
+      ?? findAccountByKeywords(expenseAccounts, FALLBACK_ACCOUNT_KEYWORDS);
 
   if (!article) return undefined;
   // No expense account resolved: refuse to emit a suggestion rather than

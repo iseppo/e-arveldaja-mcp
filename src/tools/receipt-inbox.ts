@@ -672,11 +672,6 @@ export async function resolveClassificationSuggestion(
   return { applyMode: classification.apply_mode, suggestion: defaultSuggestion };
 }
 
-// Exported for the batch operation's per-file loop (../receipts/batch-operations.js)
-// and the classification/self-match guards below.
-export function normalizeVatForCompare(value: string | null | undefined): string {
-  return normalizeVatValue(value) ?? "";
-}
 
 /**
  * True when the document text contains the active company's own VAT and the
@@ -693,7 +688,7 @@ export function normalizeVatForCompare(value: string | null | undefined): string
 export function detectSelfVatOnly(extracted: ExtractedReceiptFields, ownCompanyVat: string | undefined): boolean {
   if (!ownCompanyVat || !extracted.raw_text) return false;
   if (extracted.supplier_vat_no) return false;
-  const ownNormalized = normalizeVatForCompare(ownCompanyVat);
+  const ownNormalized = normalizeVatValue(ownCompanyVat);
   if (!ownNormalized) return false;
   const normalizedText = extracted.raw_text.replace(/\s+/g, "").toUpperCase();
   return normalizedText.includes(ownNormalized);
@@ -780,10 +775,10 @@ export function deriveOwnCompanyRegistryCode(
   ownCompanyVat: string | undefined,
   ownCompanyName: string | undefined,
 ): string | undefined {
-  const ownVatN = normalizeVatForCompare(ownCompanyVat);
+  const ownVatN = normalizeVatValue(ownCompanyVat);
   if (ownVatN) {
     const byVat = clients.find(
-      client => !client.is_deleted && normalizeVatForCompare(client.invoice_vat_no) === ownVatN,
+      client => !client.is_deleted && normalizeVatValue(client.invoice_vat_no) === ownVatN,
     );
     if (byVat?.code?.trim()) return byVat.code.trim();
   }

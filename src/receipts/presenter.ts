@@ -303,14 +303,15 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
     "needs_review",
     results.filter(candidate => candidate.status === "needs_review").map(row => {
       const duplicateIds = (row.duplicate_candidates ?? []).map(candidate => candidate.invoice_id);
+      const itemId = wrapUntrustedOcr(row.file.name) ?? "";
       return duplicateIds.length > 0
         ? {
-          item_id: wrapUntrustedOcr(row.file.name) ?? "",
+          item_id: itemId,
           code: "possible_duplicate_invoice",
           message: `Invoice number already exists as purchase invoice ${duplicateIds.join(", ")} under another client; do not book it again if it is the same supplier.`,
         }
         : {
-          item_id: wrapUntrustedOcr(row.file.name) ?? "",
+          item_id: itemId,
           code: "needs_review",
           message: "Receipt needs manual review before booking.",
         };

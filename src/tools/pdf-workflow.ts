@@ -21,7 +21,7 @@ import { readOnly, create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
-import { isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
+import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
@@ -312,7 +312,7 @@ export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<s
         } else {
           warnings.push(`vat_no "${wrapUntrustedOcr(normalized.slice(0, 20))}" is not a valid EE+9-digit VAT number. Verify manually.`);
         }
-      } else if (/^[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}$/.test(normalized)) {
+      } else if (isForeignVatShape(normalized)) {
         // Foreign VAT — permissive shape check only, soft warning.
         warnings.push(`vat_no "${wrapUntrustedOcr(normalized)}" is a foreign VAT number; structural checksum not implemented for non-EE VATs. Verify manually if uncertain.`);
       } else {
