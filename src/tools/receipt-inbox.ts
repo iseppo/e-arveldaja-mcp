@@ -20,7 +20,7 @@ import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import { type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import {
   type BookingSuggestion,
   type ClassificationApplyMode,
@@ -239,6 +239,10 @@ export function shouldGateCreation(
   // or a mixed-rate document a single synthetic item cannot book): gate in every
   // mode, like total_gross_conflict.
   const vatRateImplausible = summary.confidence_signals.includes("vat_rate_implausible");
+  // Several documents in one file, a document addressed to another company, or
+  // an amount without positive label evidence (unlabelled / over-max / stated
+  // zero total): gate in every mode.
+  const extractionHold = CREATION_GATING_EXTRACTION_SIGNALS.some(signal => summary.confidence_signals.includes(signal));
   const confirmModeNeedsHighConfidence =
     executionMode === "create_and_confirm" && summary.confidence !== "high";
   const gate = summary.confidence === "low" ||
@@ -247,6 +251,7 @@ export function shouldGateCreation(
     totalGrossConflict ||
     currencyEquivalentAmbiguity ||
     vatRateImplausible ||
+    extractionHold ||
     confirmModeNeedsHighConfidence;
   return {
     gate,
@@ -730,8 +735,10 @@ export function detectSelfRegCodeOnly(extracted: ExtractedReceiptFields, ownComp
  * The extraction-quality confidence signals shared by every document intake
  * flow (extract_pdf_invoice, process_accounting_document, receipt batch):
  * parser OCR quality, buyer-own identifiers as the only ones on the page, a
- * layout/text gross-total conflict, and an unconfirmed echo-only supplier
- * identifier (#1). Callers add their flow-specific signals afterwards.
+ * layout/text gross-total conflict, an unconfirmed echo-only supplier
+ * identifier (#1), and the extraction holds (several documents in one file,
+ * buyer block, unlabelled / over-max / zero-total amounts). Callers add their
+ * flow-specific signals afterwards.
  */
 export function buildExtractionConfidenceSignals(
   extracted: ExtractedReceiptFields,
@@ -753,6 +760,9 @@ export function buildExtractionConfidenceSignals(
   const amountIssues = extracted.amount_consistency_issues ?? [];
   if (amountIssues.some(code => code !== "vat_rate_implausible")) signals.amounts_inconsistent = true;
   if (amountIssues.includes("vat_rate_implausible")) signals.vat_rate_implausible = true;
+  for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
+    if (extracted[signal]) signals[signal] = true;
+  }
   if (
     extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
     extracted.vat_no_rationale === "coordinate_confirmed_echo"

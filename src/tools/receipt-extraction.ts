@@ -5,6 +5,7 @@ import {
   type LayoutTextItem,
   type MarkerPosition,
   type RejectedCandidate,
+  BUYER_MARKER_RE,
   buildIdentifierMarkers,
   classifyByPosition,
   extractIban,
@@ -61,6 +62,12 @@ const RECEIPT_COMPONENT_LABEL_RE = /(shipping|transport|delivery|postage|service
 // original amount.
 const RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE =
   /\b(?:card\s?holder\s+(?:amount|currency|total|billing)|kaardiomaniku\s+summa)\b/i;
+// Remaining-balance labels: a zero there says the invoice is settled, not that
+// the invoice total is zero.
+const BALANCE_LABEL_RE = /\b(?:jäänud\s+tasuda|jääb\s+tasuda|tasumisele\s+kuulub|maksmisele\s+kuulub|balance\s+due|amount\s+due)\b/i;
+// A monetary value with two decimals ("0,00", "1 234.56", "-11,94"). Not a
+// percentage, and not a slice of a date, an IBAN or a longer digit run.
+const MONEY_TOKEN_RE = /(?<![\p{L}\d.,])-?\d{1,3}(?:[  .]?\d{3})*[.,]\d{2}(?![\d%]|[.,]\d|\s*%)/gu;
 const SUPPLIER_LABEL_RE =
   /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
 const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
@@ -285,6 +292,18 @@ export interface ExtractedReceiptFields {
   total_gross_conflict?: boolean;
   /** Explicit-label conflicts plus amountConsistencyIssues of the final totals; any code holds automatic booking. */
   amount_consistency_issues?: string[];
+  /** Two or more distinct ticket numbers: the file holds several documents, one gross cannot book them. */
+  multiple_documents_in_file?: boolean;
+  /** The buyer block names another legal entity and none of the active company's identifiers. */
+  buyer_not_active_company?: boolean;
+  /** The buyer block names the active company AND another legal entity. */
+  buyer_ambiguous?: boolean;
+  /** The gross is the largest unlabelled amount, not corroborated by a labelled net + labelled VAT. */
+  gross_unlabelled?: boolean;
+  /** A labelled net / VAT / gross amount exceeds MAX_RECEIPT_FALLBACK_AMOUNT (kept or dropped). */
+  labelled_amount_over_max?: boolean;
+  /** A total (not a remaining-balance) label states a zero amount. */
+  zero_total_stated?: boolean;
 }
 
 interface TransactionGroupClassificationInput {
@@ -445,6 +464,12 @@ export interface ExtractedAmountsWithMetadata extends ExtractedAmounts {
   total_gross_conflict?: boolean;
   /** Codes from explicitAmountConflictCodes: the document's labelled amounts contradict each other or were overridden. */
   explicit_amount_conflicts?: string[];
+  /** See ExtractedReceiptFields.gross_unlabelled. */
+  gross_unlabelled?: boolean;
+  /** See ExtractedReceiptFields.labelled_amount_over_max. */
+  labelled_amount_over_max?: boolean;
+  /** See ExtractedReceiptFields.zero_total_stated. */
+  zero_total_stated?: boolean;
 }
 
 /** Amounts read from explicitly labelled lines / layout cells, before any reconciliation. */
@@ -679,6 +704,29 @@ export function extractAmountsFromLine(
       value !== undefined && (options.includeZero === true || value !== 0));
 
   return [...new Set(amounts)];
+}
+
+/** The two-decimal monetary values in `text` (see MONEY_TOKEN_RE). */
+function moneyTokenValues(text: string): number[] {
+  return [...text.matchAll(MONEY_TOKEN_RE)]
+    .map(match => parseAmount(match[0]))
+    .filter((value): value is number => value !== undefined);
+}
+
+/**
+ * G5: a total label (not a remaining-balance label) whose own-row monetary
+ * values are all zero ("Kogusumma (EUR) 0,00", "Arve kokku 0,00"). Zeros never
+ * become amount candidates, so without this the stated zero total is lost and
+ * a prepayment / credit layout can end up looking like a clean invoice.
+ */
+function statesZeroTotal(labelText: string, ownRowTexts: readonly string[]): boolean {
+  if (classifyLayoutAmountLabel(labelText) !== "total_gross" ||
+    BALANCE_LABEL_RE.test(labelText) ||
+    RECEIPT_REFERENCE_LINE_RE.test(labelText)) {
+    return false;
+  }
+  const values = ownRowTexts.flatMap(moneyTokenValues);
+  return values.length > 0 && values.every(value => value === 0);
 }
 
 function isLikelyYearAmount(amount: number, line: string): boolean {
@@ -1539,9 +1587,12 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
 function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {
   labels: LayoutLabelCell[];
   amounts: LayoutAmountCell[];
+  /** Cells above MAX_RECEIPT_FALLBACK_AMOUNT: never bound, kept only as G4 evidence. */
+  overMaxAmounts: LayoutAmountCell[];
 } {
   const labels: LayoutLabelCell[] = [];
   const amounts: LayoutAmountCell[] = [];
+  const overMaxAmounts: LayoutAmountCell[] = [];
   // Whole-document locale context so a bare "1,234" amount cell is disambiguated
   // by dot-/comma-decimal siblings elsewhere on the document, not just its own
   // cell (#2).
@@ -1556,8 +1607,15 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
       if (columnIndex === undefined) continue;
 
       for (const amount of extractAmountsFromLine(text, documentContext)) {
-        if (amount > MAX_RECEIPT_FALLBACK_AMOUNT || isLikelyYearAmount(amount, text)) continue;
-        amounts.push({ amount, item, row, columnIndex, centerX: layoutCenterX(item) });
+        if (isLikelyYearAmount(amount, text)) continue;
+        const cell = { amount, item, row, columnIndex, centerX: layoutCenterX(item) };
+        if (amount > MAX_RECEIPT_FALLBACK_AMOUNT) {
+          // Only a money-shaped cell is amount evidence; identifiers, dates,
+          // IBANs and phone numbers stay ineligible as before.
+          if (moneyTokenValues(text).length > 0) overMaxAmounts.push(cell);
+          continue;
+        }
+        amounts.push(cell);
       }
     }
 
@@ -1575,7 +1633,7 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
     }
   }
 
-  return { labels, amounts };
+  return { labels, amounts, overMaxAmounts };
 }
 
 function horizontalGap(left: LayoutTextItem, right: LayoutTextItem): number {
@@ -1732,9 +1790,27 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   if (rows.length === 0) return undefined;
 
   const columnByItem = assignLayoutColumns(rows);
-  const { labels, amounts } = buildLayoutCells(rows, columnByItem);
+  const { labels, amounts, overMaxAmounts } = buildLayoutCells(rows, columnByItem);
   const bindings = new Map<AmountField, LayoutAmountCell>();
   const vatRowBindings = new Map<LayoutRow, { label: LayoutLabelCell; cell: LayoutAmountCell }>();
+  // G4: the cell a label would bind if over-max cells were eligible. When that
+  // is an over-max cell, the label's evidence is recorded instead of lost.
+  const overMaxCells = new Set(overMaxAmounts);
+  const allAmountCells = [...amounts, ...overMaxAmounts];
+  const labelledAmountOverMax = overMaxAmounts.length > 0 && labels.some(label => {
+    const wouldBind = findSameRowLayoutAmount(label, allAmountCells) ?? findBelowColumnLayoutAmount(label, allAmountCells);
+    return wouldBind !== undefined && overMaxCells.has(wouldBind);
+  });
+  // G5: a total row stating only zero amounts. The whole row is the label
+  // text, so a word-split balance label ("Jäänud" | "tasuda") is recognised.
+  const zeroTotalStated = rows.some(row => {
+    const rowText = row.items.map(item => clampTextLine(item.text)).join(" ");
+    return statesZeroTotal(rowText, [rowText]);
+  });
+  const holdFlags = {
+    ...(labelledAmountOverMax ? { labelled_amount_over_max: true } : {}),
+    ...(zeroTotalStated ? { zero_total_stated: true } : {}),
+  };
 
   for (const label of labels) {
     const cell = findSameRowLayoutAmount(label, amounts) ?? findBelowColumnLayoutAmount(label, amounts);
@@ -1785,7 +1861,11 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
     }
   }
 
-  return reconcileLayoutAmounts(bindings);
+  const reconciled = reconcileLayoutAmounts(bindings);
+  // Without a gross binding the hold flags still travel (merged into the text
+  // result by extractAmountsWithMetadata).
+  if (!reconciled) return Object.keys(holdFlags).length > 0 ? { provenance: [], ...holdFlags } : undefined;
+  return { ...reconciled, ...holdFlags };
 }
 
 // Exported for unit tests.
@@ -1904,6 +1984,20 @@ export function mergeLayoutAmounts(layoutAmounts: ExtractedAmountsWithMetadata, 
     // The UNION of both paths' conflicts, whichever values were kept: a
     // conflict in the discarded path's labelled amounts must still hold the row.
     ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
+    // Only the kept gross can be unlabelled; the layout gross is label-bound.
+    ...(preferTextGross && textAmounts.gross_unlabelled ? { gross_unlabelled: true } : {}),
+    ...mergedHoldFlags(layoutAmounts, textAmounts),
+  };
+}
+
+/** G4 / G5 evidence from either path holds the row, whichever values were kept. */
+function mergedHoldFlags(
+  layoutAmounts: ExtractedAmountsWithMetadata,
+  textAmounts: ExtractedAmountsWithMetadata,
+): Pick<ExtractedAmountsWithMetadata, "labelled_amount_over_max" | "zero_total_stated"> {
+  return {
+    ...(layoutAmounts.labelled_amount_over_max || textAmounts.labelled_amount_over_max ? { labelled_amount_over_max: true } : {}),
+    ...(layoutAmounts.zero_total_stated || textAmounts.zero_total_stated ? { zero_total_stated: true } : {}),
   };
 }
 
@@ -1922,6 +2016,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   // replaces it, and it never counts as explicit evidence.
   let vatFromNextLineOnly = false;
   let netFromExplicitLine = false;
+  let grossUnlabelled = false;
   const fallbackCandidates: ReceiptAmountCandidate[] = [];
   const componentAmounts: number[] = [];
   let bestExplicitGrossCandidate: { amount: number; score: number; lineIndex: number } | undefined;
@@ -1929,6 +2024,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   let netMetadata: AmountProvenanceMetadata | undefined;
   let grossMetadata: AmountProvenanceMetadata | undefined;
   const classifiedLines = lines.map((_line, index) => classifyLine(lines, index));
+  const documentContext = lines.join("\n");
   const documentCurrency = detectReceiptCurrency(text);
   const cardholderCurrency = detectCardholderCurrency(lines);
   const hasExplicitVatLine = classifiedLines.some(classified =>
@@ -1936,6 +2032,23 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     !classified.blockedAsReferenceInInspection &&
     !RECEIPT_NET_LABEL_RE.test(classified.inspectionLine),
   );
+  // G5: read before the amount loop, which skips zero-only lines.
+  const zeroTotalStated = lines.some(line => statesZeroTotal(line, [line]));
+  // G4: a labelled line's candidate above the fallback maximum is recorded
+  // whether it is picked or filtered out; it is never silently accepted or
+  // dropped. Candidates are the value the line's label would take (the picked
+  // gross of a total line, the picked VAT of a VAT line, the net of a net
+  // line) and the line's own two-decimal money tokens, which catch a value
+  // the line filter discarded ("Summa km-ta 60 000,00").
+  const overMax = (amount: number | undefined) => amount !== undefined && Math.abs(amount) > MAX_RECEIPT_FALLBACK_AMOUNT;
+  const labelledAmountOverMax = classifiedLines.some(classified => {
+    if (classified.blockedAsReference) return false;
+    if (!classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && !classified.hasOwnLineVatLabel) return false;
+    return moneyTokenValues(classified.line).some(overMax) ||
+      (classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && overMax(classified.pickedGross)) ||
+      (classified.hasOwnLineVatLabel && !classified.hasNetLikeLabel && overMax(classified.pickedVat)) ||
+      (classified.hasNetLikeLabel && classified.amounts.length > 0 && overMax(Math.max(...classified.amounts)));
+  });
 
   for (const [lineIndex, classified] of classifiedLines.entries()) {
     if (classified.amounts.length === 0 || classified.pickedGross === undefined) {
@@ -1947,7 +2060,10 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       amount,
       lineIndex,
       blocked_as_reference: classified.blockedAsReference,
-      has_currency_keyword: classified.hasCurrencyKeyword,
+      // G3: only a currency mark next to THIS amount ranks it ("50,000 credits
+      // 1 US$50.00": the mark belongs to 50.00, not to 50,000).
+      has_currency_keyword: classified.hasCurrencyKeyword &&
+        adjacentCurrenciesOfAmount(classified.line, amount, documentContext).size > 0,
       has_total_like_label: classified.hasTotalLikeLabel,
       likely_year_amount: isLikelyYearAmount(amount, classified.line),
       cardholder_currency_mismatch: cardholderCurrencyMismatch,
@@ -2052,6 +2168,13 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
       )[0];
     totalGross = fallbackCandidate?.amount;
     if (fallbackCandidate) {
+      // G3: an unlabelled gross is evidence only when a labelled net and a
+      // labelled VAT of the document itself add up to it (never derived values).
+      grossUnlabelled = !(
+        explicitAmounts.net !== undefined &&
+        explicitAmounts.vat !== undefined &&
+        Math.abs(roundMoney(explicitAmounts.net + explicitAmounts.vat) - fallbackCandidate.amount) <= AMOUNT_TRIO_TOLERANCE
+      );
       grossMetadata = {
         field: "total_gross",
         value: fallbackCandidate.amount,
@@ -2172,6 +2295,9 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
     vat_explicit: totalVat !== undefined && (vatFromExplicitLine || netFromExplicitLine),
     provenance,
     ...(explicitAmountConflicts.length > 0 ? { explicit_amount_conflicts: explicitAmountConflicts } : {}),
+    ...(grossUnlabelled ? { gross_unlabelled: true } : {}),
+    ...(labelledAmountOverMax ? { labelled_amount_over_max: true } : {}),
+    ...(zeroTotalStated ? { zero_total_stated: true } : {}),
   };
 }
 
@@ -2179,7 +2305,8 @@ export function extractAmountsWithMetadata(text: string, textItems?: readonly La
   const textAmounts = extractAmountsFromTextWithMetadata(text);
   if (!textItems || textItems.length === 0) return textAmounts;
   const layoutAmounts = extractAmountsFromLayout(textItems);
-  if (!layoutAmounts || layoutAmounts.total_gross === undefined) return textAmounts;
+  if (!layoutAmounts) return textAmounts;
+  if (layoutAmounts.total_gross === undefined) return { ...textAmounts, ...mergedHoldFlags(layoutAmounts, textAmounts) };
   return mergeLayoutAmounts(layoutAmounts, textAmounts);
 }
 
@@ -2490,6 +2617,154 @@ export function extractSupplierNameWithNotes(
     layoutSupplierNameRationale: "layout_marker",
     extraction_notes: [`Supplier name conflict: layout="${wrappedLayoutName}" text="${wrappedTextName}" — using layout result`],
   };
+}
+
+// ---------------------------------------------------------------------------
+// G1 / G2: what the file holds and whom it is addressed to
+// ---------------------------------------------------------------------------
+
+// "Pileti nr 260730783843", "Ticket no. A12345": one number per travel document.
+const TICKET_NUMBER_RE = /(?<![\p{L}])(?:pileti?[ \t]*(?:nr|number)|ticket[ \t]*(?:no|nr|number))\.?[:#\t .-]*([A-Z0-9][A-Z0-9/_-]*)/giu;
+
+/**
+ * G1: two or more distinct ticket numbers mean the file holds several
+ * documents, and the one extracted gross cannot book them. Invoice-number
+ * multiplicity is deliberately not used: an invoice may cite another invoice
+ * ("ettemaksuarve Nr.: …").
+ */
+function hasMultipleTicketNumbers(text: string): boolean {
+  const numbers = new Set<string>();
+  for (const match of text.matchAll(TICKET_NUMBER_RE)) {
+    const token = match[1]?.toUpperCase();
+    if (token && token.length >= 3 && /\d/.test(token)) numbers.add(token);
+  }
+  return numbers.size >= 2;
+}
+
+// A legal form makes a buyer-block line a legal entity. Case-sensitive (English
+// "as" or "co" is no company), except OÜ / OU, which OCR also prints as "ou".
+const BUYER_BLOCK_LEGAL_SUFFIX_RE =
+  /(?<![\p{L}\d])(?:[Oo][ÜüUu]|AS|MTÜ|MTU|FIE|TÜ|UAB|SIA|LLC|LTD|Ltd|INC|Inc|GmbH|GMBH|OY|Oy|AB|AG|PLC|Plc|PBC|BV|NV|SRL|Limited|LIMITED|Corp|CORP|Corporation)(?![\p{L}\d])/u;
+const BUYER_BLOCK_LEGAL_PREFIX_RE = /(?<![\p{L}\d])(?:osaühing|aktsiaselts|mittetulundusühing)(?![\p{L}\d])/iu;
+// The buyer block continues while the next line starts within this many line
+// heights of the previous one; a wider gap ends it.
+const BUYER_BLOCK_LINE_GAP_FACTOR = 2.5;
+
+interface OwnCompanyIdentity {
+  name?: string;
+  vatNo?: string;
+  registryCode?: string;
+}
+
+/**
+ * The entity name on a buyer-block line ("Näidis OÜ", "Osaühing Näidis"), if
+ * the line names a legal entity. A "label:" before the name is not part of it
+ * ("Saaja: Näidis OÜ").
+ */
+function buyerBlockLegalEntity(line: string): string | undefined {
+  const prefix = line.match(BUYER_BLOCK_LEGAL_PREFIX_RE);
+  if (prefix) {
+    const name = line.slice(prefix.index).trim();
+    return /\p{L}/u.test(name.slice(prefix[0].length)) ? name : undefined;
+  }
+  const suffix = line.match(BUYER_BLOCK_LEGAL_SUFFIX_RE);
+  if (!suffix) return undefined;
+  const head = line.slice(0, suffix.index);
+  const name = line.slice(head.lastIndexOf(":") + 1, (suffix.index ?? 0) + suffix[0].length).trim();
+  return /\p{L}/u.test(head.slice(head.lastIndexOf(":") + 1)) ? name : undefined;
+}
+
+function sameLayoutRowItems(a: LayoutTextItem, b: LayoutTextItem): boolean {
+  return (a.pageNum ?? 1) === (b.pageNum ?? 1) &&
+    Math.abs(a.y - b.y) <= Math.max(4, Math.max(a.height, b.height) * 0.7);
+}
+
+/** The text lines of the block under (and beside) one buyer label, label words removed. */
+function buyerBlockLines(
+  label: MarkerPosition,
+  labelItem: LayoutTextItem,
+  textItems: readonly LayoutTextItem[],
+  markers: readonly MarkerPosition[],
+): string[] {
+  // Below the label, in its column, and with no nearer supplier marker above
+  // (the classifyByPosition walk); the block ends at the first wide line gap.
+  const below = textItems
+    .filter(item =>
+      item !== labelItem &&
+      (item.pageNum ?? 1) === (label.pageNum ?? 1) &&
+      item.y > label.y + 1 &&
+      classifyByPosition(item, [label]) === "buyer" &&
+      classifyByPosition(item, markers) === "buyer")
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+  const block: LayoutTextItem[] = [labelItem];
+  let previous = labelItem;
+  for (const item of below) {
+    if (item.y - previous.y > BUYER_BLOCK_LINE_GAP_FACTOR * Math.max(previous.height, item.height)) break;
+    block.push(item);
+    previous = item;
+  }
+  // A line continues to the right: a name split into several items ("Seppo" |
+  // "ou"), or the value of a "label:" item one tab stop away ("Ostja:" |
+  // "Näidis OÜ").
+  for (let index = 0; index < block.length; index++) {
+    const item = block[index]!;
+    const right = item.x + item.width;
+    const maxGap = /:\s*$/.test(item.text) ? item.height * 6 : Math.max(10, item.height * 1.5);
+    const next = textItems
+      .filter(other => !block.includes(other) && sameLayoutRowItems(item, other) && other.x >= right - 1)
+      .sort((a, b) => a.x - b.x)[0];
+    if (next && next.x - right <= maxGap) block.push(next);
+  }
+  const rows: LayoutTextItem[][] = [];
+  for (const item of block) {
+    const row = rows.find(candidate => sameLayoutRowItems(candidate[0]!, item));
+    if (row) row.push(item);
+    else rows.push([item]);
+  }
+  return rows.map(row => {
+    const text = row.sort((a, b) => a.x - b.x).map(item => clampTextLine(item.text)).join(" ");
+    return row.includes(labelItem)
+      ? text.replace(BUYER_MARKER_RE, " ").replace(/^[\s:.,;-]+/, "").trim()
+      : text;
+  }).filter(Boolean);
+}
+
+/**
+ * G2: decide from the buyer block alone whether the document is addressed to
+ * the active company. Another legal entity there with none of the company's
+ * own identifiers → buyer_not_active_company; the company AND another legal
+ * entity → buyer_ambiguous. A mention of the company outside the block never
+ * clears either; a block without any legal entity (a person, or no block)
+ * raises nothing. Without any known own identifier nothing can be decided.
+ */
+function classifyBuyerBlock(
+  textItems: readonly LayoutTextItem[],
+  own: OwnCompanyIdentity,
+): "buyer_not_active_company" | "buyer_ambiguous" | undefined {
+  const ownRegistryCode = own.registryCode?.trim();
+  const ownVat = own.vatNo?.replace(/\s+/g, "").toUpperCase();
+  if (!own.name && !ownRegistryCode && !ownVat) return undefined;
+  const markers = buildIdentifierMarkers(textItems);
+  let ownSeen = false;
+  let otherSeen = false;
+  // Label-shaped markers only: the item STARTS with the buyer label ("Arve
+  // saaja", "Ostja:"), not prose that contains one ("Hea klient!").
+  for (const label of markers.filter(marker => marker.side === "buyer" && BUYER_MARKER_RE.exec(marker.text.trim())?.index === 0)) {
+    const labelItem = textItems.find(item =>
+      item.text === label.text && item.x === label.x && item.y === label.y && (item.pageNum ?? 1) === (label.pageNum ?? 1));
+    if (!labelItem) continue;
+    for (const line of buyerBlockLines(label, labelItem, textItems, markers)) {
+      const compact = line.replace(/\s+/g, "").toUpperCase();
+      if (ownRegistryCode && /^\d+$/.test(ownRegistryCode) && new RegExp(`(?<!\\d)${ownRegistryCode}(?!\\d)`).test(compact)) ownSeen = true;
+      if (ownVat && compact.includes(ownVat)) ownSeen = true;
+      const entity = buyerBlockLegalEntity(line);
+      if (!entity) continue;
+      if (own.name && (sameCompanyIdentity(entity, own.name) || sameCompanyIdentity(line, own.name))) ownSeen = true;
+      else otherSeen = true;
+    }
+  }
+  if (!otherSeen) return undefined;
+  return ownSeen ? "buyer_ambiguous" : "buyer_not_active_company";
 }
 
 // Invoice-number candidates must carry a digit and must not be a real
@@ -3159,14 +3434,8 @@ function amountSourceLine(
   return entry?.textItem?.text;
 }
 
-/**
- * The currency a picked amount carries on its source line: the mark directly
- * before or after that number ("Total USD 100.00 / EUR 90.00" → 90 is EUR);
- * without an adjacent mark, the line's only mark. Several different marks and
- * none adjacent (or an ambiguous adjacency) give undefined. Exchange-rate
- * expressions are ignored.
- */
-function currencyOfAmountOnLine(line: string, value: number, documentContext: string): string | undefined {
+/** The currency marks directly before or after the number `value` on `line` (exchange-rate expressions ignored). */
+function adjacentCurrenciesOfAmount(line: string, value: number, documentContext: string): Set<string> {
   const clean = removeExchangeRateExpressions(line);
   const adjacent = new Set<string>();
   for (const match of clean.matchAll(/(?<!\d)-?\d[\d\s.,]*\d|(?<!\d)-?\d/g)) {
@@ -3180,7 +3449,20 @@ function currencyOfAmountOnLine(line: string, value: number, documentContext: st
       adjacent.add(code);
     }
   }
+  return adjacent;
+}
+
+/**
+ * The currency a picked amount carries on its source line: the mark directly
+ * before or after that number ("Total USD 100.00 / EUR 90.00" → 90 is EUR);
+ * without an adjacent mark, the line's only mark. Several different marks and
+ * none adjacent (or an ambiguous adjacency) give undefined. Exchange-rate
+ * expressions are ignored.
+ */
+function currencyOfAmountOnLine(line: string, value: number, documentContext: string): string | undefined {
+  const adjacent = adjacentCurrenciesOfAmount(line, value, documentContext);
   if (adjacent.size > 0) return adjacent.size === 1 ? [...adjacent][0] : undefined;
+  const clean = removeExchangeRateExpressions(line);
   const lineCurrencies = detectCurrenciesOnLine(clean);
   return lineCurrencies.length === 1 ? lineCurrencies[0] : undefined;
 }
@@ -3269,6 +3551,13 @@ export function extractReceiptFieldsFromText(
     explicit_amount_conflicts: explicitAmountConflicts,
     ...amountFields
   } = amounts;
+  const buyerBlockSignal = options?.textItems && options.textItems.length > 0
+    ? classifyBuyerBlock(options.textItems, {
+      name: options.ownCompanyName,
+      vatNo: options.ownCompanyVat,
+      registryCode: options.ownCompanyRegistryCode,
+    })
+    : undefined;
   const amountIssues = [...new Set([
     ...(explicitAmountConflicts ?? []),
     ...amountConsistencyIssues({ ...amountFields, invoice_date }),
@@ -3299,6 +3588,8 @@ export function extractReceiptFieldsFromText(
     ...(fieldProvenance.length > 0 ? { field_provenance: fieldProvenance } : {}),
     ...(extractionNotes && extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
     ...(amountIssues.length > 0 ? { amount_consistency_issues: amountIssues } : {}),
+    ...(hasMultipleTicketNumbers(text) ? { multiple_documents_in_file: true } : {}),
+    ...(buyerBlockSignal ? { [buyerBlockSignal]: true } : {}),
   };
 }
 

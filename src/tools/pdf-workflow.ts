@@ -22,7 +22,7 @@ import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
-import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
@@ -489,6 +489,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
         if (signals.vat_rate_implausible) {
           warnings.push("vat_rate_implausible: the extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking.");
+        }
+        for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
+          if (signals[signal]) warnings.push(`${signal}: ${CREATION_GATING_SIGNAL_WARNINGS[signal]}`);
         }
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
         // else — the OCR-derived `extracted.currency` could otherwise smuggle

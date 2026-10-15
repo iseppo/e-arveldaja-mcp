@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Receipts whose amount or ownership is unverified are held in every mode (behaviour change).** Six new extraction signals now hold a receipt in `receipt_batch` dry run, `create` and `create_and_confirm` (never created), and appear as review warnings in `process_accounting_document` and `extract_pdf_invoice`: `multiple_documents_in_file` (two or more distinct ticket numbers in one file), `buyer_not_active_company` / `buyer_ambiguous` (the buyer block under "Arve saaja" / "Ostja" names another legal entity, or that entity and the active company; a mention of the company elsewhere on the page does not count), `gross_unlabelled` (the gross is the largest unlabelled amount, not confirmed by a labelled net and labelled VAT adding up to it), `labelled_amount_over_max` (a labelled amount above the 50 000 receipt maximum, kept or dropped; seen offline: "Kokku 100.00 24.00 124.00 248.00" became a gross of 1.0e18 with no hold) and `zero_total_stated` (a total, not a remaining-balance, label states 0,00: a prepaid or credit document). A currency mark now ranks only the amount it is printed next to, so "50,000 tokens 1 US$50.00" reads 50 USD, not 50 000.
+
 ## [0.30.0] - 2026-10-15
 
 ### Fixed

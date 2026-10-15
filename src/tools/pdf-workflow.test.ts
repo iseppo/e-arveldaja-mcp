@@ -362,6 +362,22 @@ describe("pdf workflow tools", () => {
     expect(payload.extracted.warnings).toBeUndefined();
   });
 
+  it("surfaces a multi-document file as a review warning and llm_fallback signal (WP1)", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("tickets.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue({
+      text: "Näidis Reisid AS\nPileti nr 900000000001\nPileti nr 900000000002\nKokku 25,00 EUR",
+      pageCount: 1,
+      result: { text: "", pages: [] } as any,
+    });
+
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice");
+    const response = await handler({ file_path: "/tmp/tickets.pdf" });
+    const payload = parseMcpResponse(response.content[0]!.text);
+
+    expect(payload.extracted.warnings).toEqual([expect.stringMatching(/^multiple_documents_in_file: /)]);
+    expect(payload.llm_fallback.confidence_signals).toContain("multiple_documents_in_file");
+  });
+
   it("prefers supplier-side tax id before the bill-to block", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("invoice.pdf", "%PDF-1.4") });
     mockedParseDocument.mockResolvedValue({

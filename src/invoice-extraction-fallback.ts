@@ -93,7 +93,64 @@ export interface ExtractionConfidenceSignals {
    * creation in every mode.
    */
   vat_rate_implausible?: boolean;
+  /**
+   * The file holds several documents (two or more distinct ticket numbers);
+   * one extracted gross cannot book them. Medium signal, gated from automatic
+   * creation in every mode.
+   */
+  multiple_documents_in_file?: boolean;
+  /**
+   * The document's buyer block names another legal entity and none of the
+   * active company's identifiers: the document belongs to another company.
+   * Medium signal, gated from automatic creation in every mode.
+   */
+  buyer_not_active_company?: boolean;
+  /**
+   * The buyer block names the active company AND another legal entity. Medium
+   * signal, gated from automatic creation in every mode.
+   */
+  buyer_ambiguous?: boolean;
+  /**
+   * The gross is the largest unlabelled amount, not corroborated by a labelled
+   * net + labelled VAT. Medium signal, gated from automatic creation in every mode.
+   */
+  gross_unlabelled?: boolean;
+  /**
+   * A labelled net / VAT / gross amount exceeds the receipt amount maximum,
+   * whether it was kept or dropped. Medium signal, gated from automatic
+   * creation in every mode.
+   */
+  labelled_amount_over_max?: boolean;
+  /**
+   * A total (not a remaining-balance) label states a zero amount (credit note,
+   * fully prepaid or zero invoice). Medium signal, gated from automatic
+   * creation in every mode.
+   */
+  zero_total_stated?: boolean;
 }
+
+/**
+ * Extraction signals that gate automatic creation in every mode, not only in
+ * create_and_confirm: the amount or the document's ownership is unverified.
+ */
+export const CREATION_GATING_EXTRACTION_SIGNALS = [
+  "multiple_documents_in_file",
+  "buyer_not_active_company",
+  "buyer_ambiguous",
+  "gross_unlabelled",
+  "labelled_amount_over_max",
+  "zero_total_stated",
+] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
+
+/** Operator-facing review warning per creation-gating extraction signal. */
+export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTRACTION_SIGNALS[number], string> = {
+  multiple_documents_in_file: "The file holds several documents (distinct ticket numbers); book each document separately.",
+  buyer_not_active_company: "The buyer block names another legal entity, not the active company; verify the document belongs to this company.",
+  buyer_ambiguous: "The buyer block names the active company and another legal entity; verify the buyer before booking.",
+  gross_unlabelled: "The gross is the largest unlabelled amount; verify the payable amount before booking.",
+  labelled_amount_over_max: "A labelled amount exceeds the receipt amount maximum; verify the totals before booking.",
+  zero_total_stated: "The document states a zero total (credit note, prepaid or zero invoice); verify before booking.",
+};
 
 export interface InvoiceExtractionFallback {
   raw_text_available: boolean;
@@ -197,6 +254,9 @@ export function summarizeInvoiceExtraction(
   if (signals?.total_gross_conflict) mediumSignals.push("total_gross_conflict");
   if (signals?.currency_equivalent_ambiguity) mediumSignals.push("currency_equivalent_ambiguity");
   if (signals?.vat_rate_implausible) mediumSignals.push("vat_rate_implausible");
+  for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
+    if (signals?.[signal]) mediumSignals.push(signal);
+  }
   // Auto-derive the EST-missing-VAT signal when the caller passes supplierCountry
   // but did not set the signal explicitly. Non-VAT-registered Estonian suppliers
   // legitimately have no KMKR, so this is a medium (review) signal, not low.

@@ -21,7 +21,7 @@ import {
   inferSupplierCountry,
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
-import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
@@ -445,6 +445,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (signals.vat_rate_implausible) {
         warnings.push({ code: "vat_rate_implausible", message: "The extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking." });
+      }
+      for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
+        if (signals[signal]) warnings.push({ code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal] });
       }
       if (currencyWarning) {
         warnings.push({ code: currencyWarning.code, message: currencyWarning.message });

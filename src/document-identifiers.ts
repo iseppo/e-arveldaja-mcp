@@ -352,7 +352,7 @@ export function extractReferenceNumber(text: string): string | undefined {
 const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
 // `saaja` alone is buyer-side (e.g. "arve saaja"), but `makse saaja` (payee)
 // is supplier-side. Use a negative lookbehind to exclude `makse saaja`.
-const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
+export const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
 
 const COLUMN_PROXIMITY_THRESHOLD = 50;
 

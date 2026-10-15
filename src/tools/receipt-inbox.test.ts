@@ -25,7 +25,7 @@ import {
   buildExtractionConfidenceSignals,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
-import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
@@ -1863,6 +1863,32 @@ describe("shouldGateCreation — amount consistency signals", () => {
     expect(gate.gate).toBe(true);
     expect(gate.reason).toContain("vat_rate_implausible");
   });
+});
+
+describe("shouldGateCreation — document-scope and amount-evidence holds (WP1)", () => {
+  const snapshot = {
+    supplier_name: "Acme OÜ",
+    invoice_number: "INV-1",
+    invoice_date: "2026-01-15",
+    total_gross: 124,
+    currency: "EUR",
+    raw_text: "Invoice content",
+  };
+
+  it.each(CREATION_GATING_EXTRACTION_SIGNALS)("maps the extracted %s flag to its signal", signal => {
+    expect(buildExtractionConfidenceSignals({ [signal]: true }, {})).toEqual({ [signal]: true });
+  });
+
+  it.each(CREATION_GATING_EXTRACTION_SIGNALS.flatMap(signal =>
+    (["create", "create_and_confirm"] as const).map(mode => [signal, mode] as const)))(
+    "gates %s in %s mode", (signal, mode) => {
+      const summary = summarizeInvoiceExtraction(snapshot, { [signal]: true });
+      expect(summary.confidence).toBe("medium");
+      expect(summary.confidence_signals).toContain(signal);
+      const gate = shouldGateCreation(summary, mode);
+      expect(gate.gate).toBe(true);
+      expect(gate.reason).toContain(signal);
+    });
 });
 
 describe("invalidated-status + invoice-number normalization in receipt duplicate checks", () => {

@@ -205,6 +205,44 @@ describe("AccountingDocumentOperations.prepare currency-equivalent cross-check (
   });
 });
 
+describe("AccountingDocumentOperations.prepare document-scope and amount-evidence warnings (WP1)", () => {
+  const textDoc = (lines: string[]) => ({
+    text: lines.join("\n"),
+    pageCount: 1,
+    ocrPartialFailure: false,
+    result: { pages: [{ pageNum: 1, textItems: [] }] },
+  } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+  const layoutDoc = (items: Array<{ text: string; x: number; y: number }>) => ({
+    text: items.map(entry => entry.text).join("\n"),
+    pageCount: 1,
+    ocrPartialFailure: false,
+    result: { pages: [{ pageNum: 1, textItems: items.map(entry => ({ ...entry, width: 120, height: 12, confidence: 0.95 })) }] },
+  } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+
+  it.each([
+    ["multiple_documents_in_file", textDoc(["Näidis Reisid AS", "Pileti nr 900000000001", "Pileti nr 900000000002", "Kokku 25,00 EUR"])],
+    ["gross_unlabelled", textDoc(["Näidis OÜ", "Arve nr 7", "50,000 tokens 1 US$50.00"])],
+    ["labelled_amount_over_max", textDoc(["Näidis OÜ", "Arve nr 7", "Kokku 100.00 24.00 124.00 248.00"])],
+    ["zero_total_stated", textDoc(["Näidis OÜ", "Arve nr 7", "Teenus 120,00", "Ettemaks −120,00", "Arve kokku 0,00"])],
+    ["buyer_not_active_company", layoutDoc([
+      { text: "Näidis Kauplus AS", x: 52, y: 40 },
+      { text: "Arve saaja:", x: 52, y: 100 },
+      { text: "Teine Ettevõte OÜ", x: 52, y: 114 },
+      { text: "Kokku 124,00 EUR", x: 400, y: 300 },
+    ])],
+  ] as const)("%s surfaces as a review warning and an llm_fallback signal", async (signal, doc) => {
+    mockedParseDocument.mockResolvedValue(doc);
+    const { path } = writeTempPdf();
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.warnings.some(w => w.code === signal)).toBe(true);
+    expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
+    expect(outcome.value.extraction.llm_fallback.recommended).toBe(true);
+  });
+});
+
 describe("AccountingDocumentOperations snapshot materialization", () => {
   it("removes its temp dir when writing the snapshot fails", async () => {
     const { path } = writeTempPdf();

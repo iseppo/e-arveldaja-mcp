@@ -912,3 +912,103 @@ describe("receipt batch — receipt source amount gate (live smoke 1d50fd5)", ()
     }
   });
 });
+
+describe("receipt batch — document-scope and amount-evidence holds, extraction to execution (WP1)", () => {
+  // Real extraction + real summary over crafted documents: each signal must hold
+  // the receipt in every creation mode with zero writes, while its clean twin
+  // creates (so the signal, not the fixture, is what blocks).
+  type Item = { text: string; x: number; y: number };
+  const head = ["Supplier OÜ", "Arve nr INV-1", "Kuupäev 20.03.2026"];
+  const labelledTrio = ["Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR"];
+  const textDocument = (lines: string[]) => ({ text: lines.join("\n"), pageCount: 1 });
+  const layoutDocument = (items: Item[]) => ({
+    text: items.map(entry => entry.text).join("\n"),
+    pageCount: 1,
+    result: { pages: [{ pageNum: 1, textItems: items.map(entry => ({ ...entry, width: 120, height: 12 })) }] },
+  });
+  const buyerBlockDocument = (buyerLines: string[]) => layoutDocument([
+    ...head.map((text, index) => ({ text, x: 52, y: 20 + index * 14 })),
+    { text: "Arve saaja:", x: 52, y: 100 },
+    ...buyerLines.map((text, index) => ({ text, x: 52, y: 114 + index * 14 })),
+    ...labelledTrio.map((text, index) => ({ text, x: 400, y: 300 + index * 16 })),
+  ]);
+
+  const cases = [
+    {
+      signal: "multiple_documents_in_file",
+      held: textDocument([...head, "Pileti nr 900000000001", "Pileti nr 900000000002", ...labelledTrio]),
+      clean: textDocument([...head, "Pileti nr 900000000001", "Pileti nr 900000000001", ...labelledTrio]),
+    },
+    {
+      signal: "gross_unlabelled",
+      // "Käibemaks 24%" is not read as a labelled VAT, so nothing corroborates the gross.
+      held: textDocument([...head, "Summa km-ta 100,00", "Käibemaks 24% 24,00", "124,00 EUR"]),
+      // A labelled net and labelled VAT adding up to the unlabelled gross.
+      clean: textDocument([...head, "Summa km-ta 100,00", "Käibemaks 24,00", "124,00 EUR"]),
+    },
+    {
+      signal: "labelled_amount_over_max",
+      held: textDocument([...head, ...labelledTrio, "Summa km-ta 60 000,00"]),
+      clean: textDocument([...head, ...labelledTrio]),
+    },
+    {
+      signal: "zero_total_stated",
+      held: textDocument([...head, ...labelledTrio, "Ettemaks −124,00", "Arve kokku 0,00"]),
+      clean: textDocument([...head, ...labelledTrio, "Tasutud 124,00", "Jäänud tasuda 0,00"]),
+    },
+    {
+      signal: "buyer_not_active_company",
+      held: buyerBlockDocument(["Teine Ettevõte OÜ"]),
+      clean: buyerBlockDocument(["Proovi OÜ"]),
+    },
+    {
+      signal: "buyer_ambiguous",
+      held: buyerBlockDocument(["Teine Ettevõte OÜ", "Proovi OÜ"]),
+      clean: buyerBlockDocument(["Proovi OÜ"]),
+    },
+  ] as const;
+
+  beforeEach(async () => {
+    const extraction = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    const fallback = await vi.importActual<typeof import("../invoice-extraction-fallback.js")>("../invoice-extraction-fallback.js");
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation(extraction.extractReceiptFieldsFromText);
+    vi.mocked(summarizeInvoiceExtraction).mockImplementation(fallback.summarizeInvoiceExtraction);
+  });
+
+  async function runMode(api: never, mode: "dry_run" | "create" | "create_and_confirm") {
+    const ops = makeOperations(api);
+    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    if (mode === "dry_run") return dryRun.value.results[0]!;
+    const outcome = await ops.runBatch({
+      ...run, executionMode: mode, dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.[mode],
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    return outcome.value.results[0]!;
+  }
+
+  for (const { signal, held, clean } of cases) {
+    for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+      it(`${signal} × ${mode} → needs_review, zero writes`, async () => {
+        vi.mocked(parseDocument).mockResolvedValue(held as never);
+        const { api, spies } = makeApi();
+        const result = await runMode(api, mode);
+        expect(result.status).toBe("needs_review");
+        // The signal is the only reason to hold: nothing else would block.
+        expect(result.llm_fallback?.confidence_signals.filter(code => code !== "booking_not_from_history")).toEqual([signal]);
+        expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+        expect(spies.uploadDocument).not.toHaveBeenCalled();
+        expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+      });
+    }
+
+    it(`${signal}: the clean twin creates`, async () => {
+      vi.mocked(parseDocument).mockResolvedValue(clean as never);
+      const { api, spies } = makeApi();
+      const result = await runMode(api, "create");
+      expect(result.status).toBe("created");
+      expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    });
+  }
+});

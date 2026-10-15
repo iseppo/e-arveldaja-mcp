@@ -3474,3 +3474,181 @@ describe("disagreeing layout candidates keep the receipt held (live smoke f8818b
     expect(isHeld(result)).toBe(true);
   });
 });
+
+describe("document-scope and amount-evidence holds (WP1)", () => {
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum: 1,
+  });
+
+  describe("G1 multiple_documents_in_file", () => {
+    it("two distinct ticket numbers in one file hold", () => {
+      const text = [
+        "Lux Express Estonia AS",
+        "Pileti nr 900000000001", "Hind 12,50 EUR",
+        "Pileti nr 900000000002", "Hind 12,50 EUR",
+        "Kokku 25,00 EUR",
+      ].join("\n");
+      expect(extractReceiptFieldsFromText(text, "tickets.pdf").multiple_documents_in_file).toBe(true);
+    });
+
+    it("one ticket number printed twice does not", () => {
+      const text = ["Lux Express Estonia AS", "Pileti nr 900000000001", "Pileti nr 900000000001", "Kokku 12,50 EUR"].join("\n");
+      expect(extractReceiptFieldsFromText(text, "ticket.pdf").multiple_documents_in_file).toBeUndefined();
+    });
+
+    it("an invoice citing another invoice number is one document", () => {
+      const text = [
+        "Näidis OÜ",
+        "Arve Nr.: TEST0002",
+        "Tasaarveldatud ettemaksuarve Nr.: TEST0001 kuupäevaga 01.08.2026",
+        "Kokku 155,00 EUR",
+      ].join("\n");
+      expect(extractReceiptFieldsFromText(text, "arve.pdf").multiple_documents_in_file).toBeUndefined();
+    });
+  });
+
+  describe("G2 buyer block", () => {
+    const own = { ownCompanyName: "Testfirma OÜ", ownCompanyRegistryCode: "87654321", ownCompanyVat: "EE100000001" };
+    const extractWithBuyerBlock = (block: string[], options: Parameters<typeof extractReceiptFieldsFromText>[2] = own) => {
+      const items = [
+        item("Kauplus Näide AS", 52, 40, 90),
+        item("Arve nr 2026-15", 400, 40, 90),
+        item("Arve saaja:", 52, 100, 60),
+        ...block.map((line, index) => item(line, 52, 114 + index * 14, 120)),
+        item("Summa km-ta 100,00", 400, 300, 110),
+        item("Käibemaks 24,00", 400, 316, 90),
+        item("Kokku 124,00", 400, 332, 80),
+        // The active company named outside the buyer block never clears it.
+        item("Täname, et valisite Testfirma OÜ partneri", 52, 700, 220),
+      ];
+      return extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { ...options, textItems: items });
+    };
+
+    it("another legal entity as buyer, the active company only in the footer, holds", () => {
+      const result = extractWithBuyerBlock(["Näidis Kaubandus OÜ", "Reg nr 12345678"]);
+      expect(result.buyer_not_active_company).toBe(true);
+      expect(result.buyer_ambiguous).toBeUndefined();
+    });
+
+    it("the active company and another legal entity in the block hold as ambiguous", () => {
+      expect(extractWithBuyerBlock(["Näidis Kaubandus OÜ", "Testfirma OÜ"]).buyer_ambiguous).toBe(true);
+      expect(extractWithBuyerBlock(["Näidis Kaubandus OÜ", "Reg nr 87654321"]).buyer_ambiguous).toBe(true);
+    });
+
+    it("the active company as buyer raises nothing", () => {
+      const result = extractWithBuyerBlock(["Testfirma OÜ", "Reg nr 87654321"]);
+      expect(result.buyer_not_active_company).toBeUndefined();
+      expect(result.buyer_ambiguous).toBeUndefined();
+    });
+
+    it("a person as buyer raises nothing", () => {
+      const result = extractWithBuyerBlock(["Mari Maasikas", "Tartu mnt 1"]);
+      expect(result.buyer_not_active_company).toBeUndefined();
+      expect(result.buyer_ambiguous).toBeUndefined();
+    });
+
+    it("without any known own identifier nothing is decided", () => {
+      expect(extractWithBuyerBlock(["Näidis Kaubandus OÜ"], {}).buyer_not_active_company).toBeUndefined();
+    });
+  });
+
+  describe("G3 gross_unlabelled", () => {
+    it("a gross picked as the largest unlabelled amount holds, and the currency mark binds to its own amount", () => {
+      const result = extractReceiptFieldsFromText(["Paddle.com", "Your order", "50,000 tokens 1 US$50.00"].join("\n"), "order.pdf");
+      expect(result.total_gross).toBe(50);
+      expect(result.gross_unlabelled).toBe(true);
+    });
+
+    it("a labelled total does not", () => {
+      const result = extractReceiptFieldsFromText(["Paddle.com", "Your order", "50,000 tokens 1", "Total US$50.00"].join("\n"), "order.pdf");
+      expect(result.total_gross).toBe(50);
+      expect(result.gross_unlabelled).toBeUndefined();
+    });
+
+    it("EUR \"Teenus 1 200,00\" with \"VAT €0.00\" holds", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Teenus 1 200,00", "VAT €0.00"].join("\n"), "arve.pdf");
+      expect(result.gross_unlabelled).toBe(true);
+    });
+
+    it("a labelled net and a labelled VAT adding up to the unlabelled gross corroborate it", () => {
+      const corroborated = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100,00", "Käibemaks 24,00", "124,00"].join("\n"), "arve.pdf");
+      expect(corroborated).toMatchObject({ total_net: 100, total_vat: 24, total_gross: 124 });
+      expect(corroborated.gross_unlabelled).toBeUndefined();
+      const contradicted = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100,00", "Käibemaks 20,00", "124,00"].join("\n"), "arve.pdf");
+      expect(contradicted.gross_unlabelled).toBe(true);
+    });
+  });
+
+  describe("G4 labelled_amount_over_max", () => {
+    it("a four-token Kokku run merged past the maximum holds", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 100.00 24.00 124.00 248.00"].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("a labelled total above the maximum holds", () => {
+      expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku 60 000,00 EUR"].join("\n"), "arve.pdf").labelled_amount_over_max).toBe(true);
+    });
+
+    it("an over-maximum value a total label picks without a money format holds", () => {
+      // The labelled gross pick has no maximum check, so the flag must survive.
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Kokku tellimus 123456789"].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("a net label whose over-maximum value the line filter drops holds", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR", "Summa km-ta 60 000,00"].join("\n"),
+        "arve.pdf",
+      );
+      expect(result.total_gross).toBe(124);
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("a layout label whose only candidate is over the maximum holds", () => {
+      const items = [item("Näidis OÜ", 52, 40, 60), item("Kokku", 52, 200, 40), item("60 000,00", 300, 200, 50)];
+      const result = extractReceiptFieldsFromText("Näidis OÜ\nKokku\n60 000,00", "arve.pdf", { textItems: items });
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("identifiers on or below a labelled line are not amount evidence", () => {
+      expect(extractReceiptFieldsFromText(["Näidis OÜ", "Viitenumber 123456789012", "Kokku 10,00 EUR"].join("\n"), "arve.pdf").labelled_amount_over_max)
+        .toBeUndefined();
+      const items = [
+        item("Näidis OÜ", 52, 40, 60),
+        item("Kokku", 300, 200, 40), item("10,00", 400, 200, 30),
+        item("Jäänud tasuda", 300, 220, 70),
+        item("IBAN EE107700771005782542", 300, 260, 140),
+        item("Reg nr: 80305937", 300, 280, 90),
+      ];
+      const result = extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+      expect(result.labelled_amount_over_max).toBeUndefined();
+    });
+  });
+
+  describe("G5 zero_total_stated", () => {
+    it("a zero net / VAT / total trio holds", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 0,00", "Käibemaks 24% 0,00", "Kogusumma 0,00"].join("\n"), "arve.pdf");
+      expect(result.zero_total_stated).toBe(true);
+    });
+
+    it("a prepaid invoice stating \"Arve kokku 0,00\" holds", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Teenus 120,00", "Ettemaks −120,00", "Arve kokku 0,00"].join("\n"), "arve.pdf");
+      expect(result.zero_total_stated).toBe(true);
+    });
+
+    it("a zero remaining balance under a stated total does not", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Summa km-ta 100,00", "Käibemaks 24% 24,00", "Kokku 124,00", "Tasutud 124,00", "Jäänud tasuda 0,00"].join("\n"),
+        "arve.pdf",
+      );
+      expect(result.zero_total_stated).toBeUndefined();
+      expect(result.total_gross).toBe(124);
+    });
+
+    it("a zero total row in the layout holds", () => {
+      const items = [item("Näidis OÜ", 52, 40, 60), item("Kogusumma (EUR)", 300, 200, 80), item("0,00", 420, 200, 20)];
+      const result = extractReceiptFieldsFromText("Näidis OÜ\nKogusumma (EUR)\n0,00", "arve.pdf", { textItems: items });
+      expect(result.zero_total_stated).toBe(true);
+    });
+  });
+});
