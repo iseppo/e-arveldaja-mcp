@@ -19,10 +19,10 @@ export interface CamtStatementFingerprint {
 interface CamtStatementDuplicateInfo {
   readonly index: number;
   /** Set on a byte-identical copy of the kept file `duplicate_of`. */
-  readonly duplicate_of?: number;
+  duplicate_of?: number;
   /** Set on a kept file: the indices of its byte-identical copies. */
-  readonly stands_in_for?: number[];
-  readonly overlaps_with?: Array<{ index: number; from: string; to: string }>;
+  stands_in_for?: number[];
+  overlaps_with?: Array<{ index: number; from: string; to: string }>;
 }
 
 function keptFirst(left: CamtStatementFingerprint, right: CamtStatementFingerprint): number {
@@ -32,9 +32,7 @@ function keptFirst(left: CamtStatementFingerprint, right: CamtStatementFingerpri
 }
 
 export function groupCamtStatementFiles(files: readonly CamtStatementFingerprint[]): CamtStatementDuplicateInfo[] {
-  const info = new Map<number, { duplicate_of?: number; stands_in_for?: number[]; overlaps_with?: Array<{ index: number; from: string; to: string }> }>(
-    files.map(file => [file.index, {}]),
-  );
+  const info = new Map<number, Omit<CamtStatementDuplicateInfo, "index">>(files.map(file => [file.index, {}]));
 
   const byDigest = new Map<string, CamtStatementFingerprint[]>();
   for (const file of files) {
@@ -53,11 +51,13 @@ export function groupCamtStatementFiles(files: readonly CamtStatementFingerprint
   // file's statement.
   const candidates = files.filter(file =>
     info.get(file.index)!.duplicate_of === undefined && file.accountKey !== undefined && file.period !== undefined);
-  for (const file of candidates) {
-    for (const other of candidates) {
-      if (other.index === file.index || other.accountKey !== file.accountKey) continue;
+  // Each overlapping pair once; both files list the other (in file order).
+  for (const [i, file] of candidates.entries()) {
+    for (const other of candidates.slice(i + 1)) {
+      if (other.accountKey !== file.accountKey) continue;
       if (file.period!.from <= other.period!.to && other.period!.from <= file.period!.to) {
         (info.get(file.index)!.overlaps_with ??= []).push({ index: other.index, from: other.period!.from, to: other.period!.to });
+        (info.get(other.index)!.overlaps_with ??= []).push({ index: file.index, from: file.period!.from, to: file.period!.to });
       }
     }
   }

@@ -380,8 +380,9 @@ export async function analyzeInboxCamtFiles(
   // Test seam: production callers always use the default budget.
   budget: { maxFiles: number; maxBytes: number } = CAMT_ANALYSIS_BUDGET,
 ): Promise<{ files: InboxFileCandidate[]; summary: CamtOverlapSummary; bindings: Map<string, string> }> {
-  const fingerprints: CamtStatementFingerprint[] = [];
-  const statements = new Map<number, { from: string; to: string; currency: string }>();
+  // The analyzed files by camt_files index: the fingerprint, and the statement
+  // when its account and period could be read.
+  const analyzed = new Map<number, { fingerprint: CamtStatementFingerprint; statement?: { from: string; to: string; currency: string } }>();
   let bytesRead = 0;
   let budgetExceeded = camtFiles.length > budget.maxFiles;
   for (const [index, file] of camtFiles.entries()) {
@@ -409,6 +410,7 @@ export async function analyzeInboxCamtFiles(
     }
     let accountKey: string | undefined;
     let period: { from: string; to: string } | undefined;
+    let statement: { from: string; to: string; currency: string } | undefined;
     try {
       const preflight = preflightCamt053Xml(snapshot.text());
       if (preflight.ok) {
@@ -421,19 +423,22 @@ export async function analyzeInboxCamtFiles(
         if (identity !== undefined && from !== undefined && to !== undefined && from <= to) {
           accountKey = `${identity}:${currency}`;
           period = { from, to };
-          statements.set(index, { from, to, currency });
+          statement = { from, to, currency };
         }
       }
     } catch {
       // Structural parse failure: overlap is not analyzed; bytes still dedupe.
     }
-    fingerprints.push({
-      index,
-      path: file.path,
-      modifiedAt: file.modified_at,
-      digest: snapshot.identity.digest_sha256,
-      ...(accountKey !== undefined ? { accountKey } : {}),
-      ...(period !== undefined ? { period } : {}),
+    analyzed.set(index, {
+      fingerprint: {
+        index,
+        path: file.path,
+        modifiedAt: file.modified_at,
+        digest: snapshot.identity.digest_sha256,
+        ...(accountKey !== undefined ? { accountKey } : {}),
+        ...(period !== undefined ? { period } : {}),
+      },
+      ...(statement !== undefined ? { statement } : {}),
     });
   }
 
@@ -445,17 +450,18 @@ export async function analyzeInboxCamtFiles(
     };
   }
 
-  const grouped = new Map(groupCamtStatementFiles(fingerprints).map(info => [info.index, info]));
-  const digests = new Map(fingerprints.map(fingerprint => [fingerprint.index, fingerprint.digest]));
+  const grouped = new Map(groupCamtStatementFiles([...analyzed.values()].map(entry => entry.fingerprint)).map(info => [info.index, info]));
   const bindings = new Map<string, string>();
-  let overlapLinks = 0;
+  let overlapPairs = 0;
   const files = camtFiles.map((file, index): InboxFileCandidate => {
-    const sha256 = digests.get(index);
-    if (sha256 === undefined) return { ...file, analysis: "not_analyzed" };
+    const entry = analyzed.get(index);
+    if (entry === undefined) return { ...file, analysis: "not_analyzed" };
+    const sha256 = entry.fingerprint.digest;
     const info = grouped.get(index)!;
-    const statement = statements.get(index);
+    const statement = entry.statement;
     if (info.stands_in_for !== undefined) bindings.set(file.path, sha256);
-    overlapLinks += info.overlaps_with?.length ?? 0;
+    // Each overlapping pair is listed on both files: count it on the first.
+    overlapPairs += info.overlaps_with?.filter(other => other.index > index).length ?? 0;
     return {
       ...file,
       analysis: statement !== undefined ? "analyzed" : "hash_only",
@@ -469,9 +475,9 @@ export async function analyzeInboxCamtFiles(
   return {
     files,
     summary: {
-      analyzed: fingerprints.length,
+      analyzed: analyzed.size,
       duplicate_count: files.filter(file => file.duplicate_of !== undefined).length,
-      overlap_pair_count: overlapLinks / 2,
+      overlap_pair_count: overlapPairs,
     },
     bindings,
   };
@@ -984,6 +990,19 @@ function projectPublicRecommendedSteps(
   };
 }
 
+/** The payload fields of a recommended action the profile does not expose. */
+function blockedProjectionFields(blocked: BlockedRecommendedAction): Record<string, unknown> {
+  return {
+    status: "needs_review",
+    blocker: blocked.blocker,
+    accounting_proposal: blocked.proposals[0],
+    accounting_proposals: blocked.proposals,
+    safe_action_context: blocked.safeActionContext,
+    suggested_tools: ["get_setup_instructions"],
+    next_actions: blocked.next_actions,
+  };
+}
+
 function publicInboxFile(
   file: InboxFileCandidate,
   runtimeSafetyContext: RuntimeSafetyContext,
@@ -1261,17 +1280,7 @@ function buildPreparedInboxPayload(
     questions,
     next_question: questions[0],
     next_recommended_action: pickNextRecommendedAction(steps),
-    ...(projected.blocked
-      ? {
-          status: "needs_review",
-          blocker: projected.blocked.blocker,
-          accounting_proposal: projected.blocked.proposals[0],
-          accounting_proposals: projected.blocked.proposals,
-          safe_action_context: projected.blocked.safeActionContext,
-          suggested_tools: ["get_setup_instructions"],
-          next_actions: projected.blocked.next_actions,
-        }
-      : {}),
+    ...(projected.blocked ? blockedProjectionFields(projected.blocked) : {}),
     assistant_guidance: [
       "Ask only the questions listed under questions, and always start with the recommendation.",
       "Run dry-run steps before any execute=true mutation.",
@@ -1996,22 +2005,17 @@ async function buildAccountingInboxDryRunResponse(
   const profile = currentToolProfile();
   const guided = profile === "guided" || profile === "guided-sales";
   const referenceTool = (tool: string) => (guided ? remapGuidedBankFacade(tool, {})?.tool : undefined) ?? tool;
+  const publicStepResult = (step: typeof autopilot.executed_steps[number]) => ({
+    ...step,
+    purpose: sandboxExternalText(step.purpose),
+    summary: sandboxExternalText(step.summary),
+    suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
+    source_documents: publicSourceDocuments(step.suggested_args),
+  });
   const publicAutopilot: Record<string, unknown> = {
     ...autopilot,
-    executed_steps: autopilot.executed_steps.map(step => ({
-      ...step,
-      purpose: sandboxExternalText(step.purpose),
-      summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
-      source_documents: publicSourceDocuments(step.suggested_args),
-    })),
-    skipped_steps: autopilot.skipped_steps.map(step => ({
-      ...step,
-      purpose: sandboxExternalText(step.purpose),
-      summary: sandboxExternalText(step.summary),
-      suggested_args: publicSuggestedArgs(referenceTool(step.tool), step.suggested_args, runtimeSafetyContext, prepared.camtDigestBindings),
-      source_documents: publicSourceDocuments(step.suggested_args),
-    })),
+    executed_steps: autopilot.executed_steps.map(publicStepResult),
+    skipped_steps: autopilot.skipped_steps.map(publicStepResult),
     needs_one_decision: autopilot.needs_one_decision.map(item => publicFollowUp(item, runtimeSafetyContext)),
     needs_accountant_review: autopilot.needs_accountant_review.map(item => publicFollowUp(item, runtimeSafetyContext)),
   };
@@ -2026,13 +2030,7 @@ async function buildAccountingInboxDryRunResponse(
   if (!isRecord(preparedPayload.blocker)) {
     preparedPayload.next_recommended_action = nextRecommendedAction;
     if (nextProjection.blocked) {
-      preparedPayload.status = "needs_review";
-      preparedPayload.blocker = nextProjection.blocked.blocker;
-      preparedPayload.accounting_proposal = nextProjection.blocked.proposals[0];
-      preparedPayload.accounting_proposals = nextProjection.blocked.proposals;
-      preparedPayload.safe_action_context = nextProjection.blocked.safeActionContext;
-      preparedPayload.suggested_tools = ["get_setup_instructions"];
-      preparedPayload.next_actions = nextProjection.blocked.next_actions;
+      Object.assign(preparedPayload, blockedProjectionFields(nextProjection.blocked));
       preparedPayload.recommended_steps = nextProjection.steps;
     }
   }

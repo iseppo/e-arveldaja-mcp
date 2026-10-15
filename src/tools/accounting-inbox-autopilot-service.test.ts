@@ -3,6 +3,7 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import {
   runAccountingInboxDryRunPipeline,
+  shortReviewId,
   stableReviewId,
   type AutopilotPreparedInboxData,
 } from "./accounting-inbox-autopilot-service.js";
@@ -401,6 +402,18 @@ describe("runAccountingInboxDryRunPipeline", () => {
 
     expect(first.needs_accountant_review[0]!.id).toBeTruthy();
     expect(first.needs_accountant_review[0]!.id).toBe(second.needs_accountant_review[0]!.id);
+  });
+
+  it("review ids are byte-identical resume keys (pinned)", () => {
+    expect(stableReviewId("classify_unmatched_transactions", { category: "x", normalized_counterparty: "acme", transactions: [{ id: 2 }, { id: 1 }] }))
+      .toBe("classify_unmatched_transactions:935636ed77f6190a");
+    expect(stableReviewId("process_camt053", { category: "camt_journal_review", date: "2026-09-01", amount: 12.5, bank_reference: "REF-1", existing_transactions: [{ id: 7 }, { id: 3 }] }))
+      .toBe("process_camt053:14f41df57ef49421");
+    expect(stableReviewId("receipt_batch", { file: { path: "/r/a.pdf" }, amount: 5, currency: "EUR", type: "C" }))
+      .toBe("receipt_batch:44541551dd6bfecd");
+    // The Wise follow-up id shape (wise_transfer_review, wise_id, code).
+    expect(shortReviewId("import_wise_transactions", ["wise_transfer_review", "TRANSFER-1", "wise_transfer_journal_ambiguous"]))
+      .toBe("import_wise_transactions:e10afc970e5798d1");
   });
 
   it("stableReviewId distinguishes distinct items and is deterministic (M11)", () => {

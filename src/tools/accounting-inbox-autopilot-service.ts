@@ -167,6 +167,12 @@ interface AccountingInboxDryRunPipelineResult {
  * counterparty with a fresh nonce still yields the same id — that stability is
  * what makes a review item resumable by id across dry-runs.
  */
+/** `<tool>:` and the first 16 hex digits of SHA-256 over JSON `[tool, ...keyParts]`:
+ * the shared shape of every resume-stable review id. */
+export function shortReviewId(tool: string, keyParts: readonly unknown[]): string {
+  return `${tool}:${createHash("sha256").update(JSON.stringify([tool, ...keyParts])).digest("hex").slice(0, 16)}`;
+}
+
 export function stableReviewId(sourceTool: string, item: Record<string, unknown>): string {
   const file = recordAt(item, "file");
   // Filesystem path is a trusted, per-item-unique key (two receipts can share a
@@ -200,8 +206,7 @@ export function stableReviewId(sourceTool: string, item: Record<string, unknown>
     .map((member) => (isRecord(member) ? numberAt(member, "id") : undefined))
     .filter((id): id is number => id !== undefined)
     .sort((left, right) => left - right);
-  const identity = JSON.stringify([
-    sourceTool,
+  return shortReviewId(sourceTool, [
     item.transaction_id ?? null,
     item.new_transaction_api_id ?? null,
     filePath || null,
@@ -217,7 +222,6 @@ export function stableReviewId(sourceTool: string, item: Record<string, unknown>
     // and category (split by direction or history) must not share an id.
     ...(memberIds.length > 0 ? [memberIds] : []),
   ]);
-  return `${sourceTool}:${createHash("sha256").update(identity).digest("hex").slice(0, 16)}`;
 }
 
 function toAutopilotFollowUp(
@@ -225,6 +229,7 @@ function toAutopilotFollowUp(
   summary: string,
   guidance?: Partial<ReviewGuidance> & { recommendation?: string },
   resolverInput?: Record<string, unknown>,
+  mergeKey?: string,
 ): AutopilotFollowUp {
   // The resolver_input's `item`/`group` is the raw review record; derive the
   // resume-stable id from it and thread it back into resolver_input so the id
@@ -245,6 +250,7 @@ function toAutopilotFollowUp(
     follow_up_questions: guidance?.follow_up_questions,
     policy_hint: guidance?.policy_hint,
     resolver_input,
+    ...(mergeKey !== undefined ? { merge_key: mergeKey } : {}),
   };
 }
 
@@ -483,19 +489,17 @@ function summarizeAutopilotToolResult(
             movement_identity: item.movement_identity,
             transaction_ids: existingIds,
           });
-          return {
-            ...toAutopilotFollowUp(
-              tool,
-              `CAMT row ${dateLabel} ${amountLabel}${counterpartyLabel} looks like a possible duplicate${existingLabel}.`,
-              duplicateGuidance,
-              {
-                review_type: "camt_possible_duplicate",
-                source_tool: tool,
-                item,
-              },
-            ),
-            ...(mergeKey !== undefined ? { merge_key: mergeKey } : {}),
-          };
+          return toAutopilotFollowUp(
+            tool,
+            `CAMT row ${dateLabel} ${amountLabel}${counterpartyLabel} looks like a possible duplicate${existingLabel}.`,
+            duplicateGuidance,
+            {
+              review_type: "camt_possible_duplicate",
+              source_tool: tool,
+              item,
+            },
+            mergeKey,
+          );
         }),
         // Rows not created because an existing journal may already book them,
         // or because a previous release imported their entry only in part.
@@ -512,7 +516,6 @@ function summarizeAutopilotToolResult(
           // A direct action, not a continuation: no resolver handles these rows,
           // so there is no resolver_input; the id still makes the item resumable.
           return {
-            ...(mergeKey !== undefined ? { merge_key: mergeKey } : {}),
             id: stableReviewId(tool, {
               category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
               date: row.date,
@@ -528,6 +531,8 @@ function summarizeAutopilotToolResult(
                   ? `an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (${row.review_code})`
                   : `an existing journal may already book it (${row.review_code})`}.`,
               { recommendation: row.review_note ?? row.reason },
+              undefined,
+              mergeKey,
             ),
           };
         })],
@@ -545,8 +550,7 @@ function summarizeAutopilotToolResult(
       // Ownership/dimension reviews are the Wise preview's own needs_review rows:
       // an unverified own-account transfer must never read as approvable. One
       // follow-up per review, keyed by wise_id so the id is resume-stable.
-      const wiseReviewId = (...key: string[]) =>
-        `${tool}:${createHash("sha256").update(JSON.stringify([tool, ...key])).digest("hex").slice(0, 16)}`;
+      const wiseReviewId = (...key: string[]) => shortReviewId(tool, key);
       // Rows held for their counterpart collapse into ONE follow-up, scoped to
       // this file and Wise account; the other rows are unaffected.
       const counterpart = preview.transferCounterpart;
