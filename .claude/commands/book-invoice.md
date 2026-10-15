@@ -51,6 +51,10 @@ This whole flow runs through ONE tool, `process_accounting_document`, in four se
 4. **Confirm (separate approval).** Show the created draft and ask for explicit approval to register (confirm) it. Only then call `process_accounting_document` with `mode: "confirm"`, `invoice_id`: `confirm_plan.invoice_id`, and `plan_handle`: `confirm_plan.plan_handle`. Report the read-back supplier and gross from the confirm result.
 
 Never recalculate `vat_price` / `gross_price`, and do not put the source filename into `notes`.
+
+Totals are checked before anything is written. `purchase_totals_mismatch`: the explicit `vat_price` differs from the VAT the items compute (item net × VAT rate) by more than 1 cent per item; correct the item net amounts or VAT rates, or the totals, to match the document. `purchase_base_sign_mismatch`: a `base_*` EUR amount has the opposite sign of the document-currency amount (for example a positive EUR total on a credit note); fix the `base_*` values. Then rerun step 2.
+
+A receipt that `receipt_batch` held as a possible duplicate (`possible_duplicate_journal_ids`) may be booked here on purpose only after the user confirms it is a different payment from those journals; name the journal ids on the approval card.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `extract_pdf_invoice`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -123,6 +127,7 @@ Inspect the result:
 - Check `candidate_invoice_number_matches` and `candidate_same_amount_date_matches` first.
 - Review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
 - If a candidate looks like the same invoice, stop and report it before creating anything.
+- A receipt that `receipt_batch` held as a possible duplicate (`possible_duplicate_journal_ids`) may be booked through this workflow on purpose only after the user confirms it is a different payment from those journals; name the journal ids on the approval card.
 
 ## Step 6: Prepare the supplier client decision
 
@@ -246,6 +251,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `source_sha256`: the exact `source_sha256` value returned by `extract_pdf_invoice` in step 2. This binds the booking to the reviewed bytes; if the file changed since extraction the call is rejected before anything is created. Do not recompute or omit it.
 
 Use the exact `vat_price` and `gross_price` from the invoice; do not recalculate them. Omit them only when they are genuinely unknown.
+The totals are checked before anything is created. `purchase_totals_mismatch`: the explicit `vat_price` differs from the VAT the items compute (item net × VAT rate) by more than 1 cent per item; correct the item net amounts or VAT rates, or the totals, to match the document. `purchase_base_sign_mismatch`: a `base_*` EUR amount has the opposite sign of the document-currency amount (for example a positive EUR total on a credit note); fix the `base_*` values.
 If source document upload fails after invoice creation, the draft invoice is invalidated.
 
 ## Step 12: Confirm and report

@@ -108,6 +108,16 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 
 through the **Book Invoice** workflow (`process_accounting_document`)
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->. Only fall back to manual UI work if the user cannot supply a rate.
+- "Held: this cash outflow may already be booked by journal(s) N" (`possible_duplicate_journal_ids`; guided warning `possible_duplicate_posting`): a registered journal already moves the same amount out of a bank account within 7 days, usually the bank payment of this very receipt. The batch never creates such a receipt, in dry run or execute. Ask whether that journal is this payment; if the user confirms it is a different payment, book this one document on its own through the **Book Invoice** workflow<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+ (`extract_pdf_invoice`, then `create_purchase_invoice_from_pdf`)
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `receipt_batch`, and none of these is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+ (`process_accounting_document`)
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->. When the duplicate scan itself was unavailable, the note says so and the receipt is not held.
+- "Held: the extracted amounts are inconsistent" or the confidence signal `amounts_inconsistent` / `vat_rate_implausible`: the receipt's net + VAT does not add up to the gross, a printed amount was overridden, or VAT / net is not a VAT rate in force on the invoice date (for example a mixed-rate receipt). Nothing is created for it. Check the totals on the document and book it as a single document with the verified amounts.
 - "N bank transactions tied at confidence X; no candidate auto-selected": the booking flow found multiple equally-good bank transaction matches and refused to auto-pick. The invoice will still be created (in `mode: "create"` / `mode: "create_and_confirm"`) but without a bank link. Show the tied transactions to the user and ask which one is correct<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 

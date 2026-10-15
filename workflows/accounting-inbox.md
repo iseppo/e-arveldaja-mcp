@@ -38,6 +38,8 @@ Present:
 - what still needs one small decision
 - whether anything already looks like accountant-review territory
 - CAMT files that are byte-identical copies of another (`coverage: "duplicate"`, `duplicate_of`): they have no steps; importing one is harmless but unnecessary, and the user may still import one explicitly. The kept file's step references are bound to the scanned bytes: if that file was changed or removed, its step is refused (parse/dry run: `file_input_changed` or `file_input_unavailable`; an execute with a plan reports `plan_drift`), so re-run `accounting_inbox` and the duplicates are reconsidered. Passing a raw `file_path` instead of the step's `file_ref` bypasses this binding. Statements listed in `overlaps_with` (same account and currency, intersecting periods) are information only: both keep their steps, rows in the overlap are deduplicated on import, and reference-less rows there may come back as possible-duplicate review.
+- XML files with `analysis: "not_a_statement"` contain no CAMT.053 statement (for example a single exported `<Ntry>` entry): they get no steps and cannot be imported. Ask the user to export the full statement from the bank instead.
+- Lightyear CSV exports under `detected_inputs.lightyear_files` (`kind`: `account_statement` or `capital_gains`) are reported only; the inbox builds no steps for them. When they carry a `file_ref`, offer the **Lightyear Booking** workflow (it needs the owner's account choices). Without a `file_ref` the Lightyear tools are not enabled on this profile: say so instead of offering to book them.
 
 Avoid raw internal field names unless they help the user make a concrete choice.
 
@@ -53,6 +55,8 @@ If `autopilot.needs_one_decision` is non-empty:
 - the `wise_inter_account_dimension_id` question has no preferred candidate: ask the owner. It matters only when the Wise CSV has own-account transfers; rows without own-account evidence on another bank are held (not imported) until it is answered, reported as one `wise_transfer_counterpart_unresolved` review item; the other rows are planned as usual
 
 Overlapping CAMT statements raise the same review item once per file. An item for the same statement leg (same bank reference, leg, review code, journals or transactions, and bank account) is listed once, with `seen_in_steps` naming the dry-run steps that raised it; items without a bank reference are never merged, so a repeat of one of those may still be listed per file.
+
+A receipt follow-up that names journal ids ("the payment may already be booked by journal(s) N") is a receipt `receipt_batch` held as a possible duplicate: ask whether that journal is this receipt's payment before booking anything.
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row

@@ -329,6 +329,13 @@ legitimate identical payments are possible).
   opt-in `block_on_duplicate` (default `false`) that REFUSES creation **only**
   when the scan is available AND actually found a suspect; an unavailable scan
   never blocks.
+- **Exception: `receipt_batch` holds.** A batch has no person reading each
+  advisory, so a receipt whose intake scan finds a suspect is `needs_review`
+  with `possible_duplicate_journal_ids` in dry run AND execute (never created).
+  Execute drops the journals list cache right before each pre-create scan, so a
+  payment booked after the projection is still seen. An unavailable scan never
+  holds. A legitimate second identical payment is booked through the
+  single-document tools, which stay advisory.
 - **Match key:** account + dimension + amount (±0.01 EUR) + direction (`D`/`C`)
   + effective date within ±7 days (`DUPLICATE_SCAN_WINDOW_DAYS`). Intake mode
   scans every bank dimension (the invoice's settling account isn't known yet)
