@@ -274,7 +274,7 @@ function buildNeedsReviewResult(
   extracted: ExtractedReceiptFields,
   fallback: InvoiceExtractionFallback,
   notes: string[],
-  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice" | "duplicate_candidates">,
+  extras?: Pick<ReceiptBatchFileResult, "supplier_resolution" | "booking_suggestion" | "referenced_invoice" | "duplicate_candidates" | "duplicate_match">,
 ): ReceiptBatchFileResult {
   return {
     file,
@@ -565,6 +565,19 @@ async function processSingleReceipt(
         extracted.invoice_date,
         extracted.total_gross,
       );
+      // An ambiguous invoice number may match the wrong existing invoice: a
+      // real, unbooked invoice must not be skipped on it, so it is reviewed.
+      if (duplicate && extracted.invoice_number_ambiguous) {
+        notes.push(
+          `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the document labels ` +
+          "several different invoice numbers; verify which is this invoice's number before skipping or booking it.",
+        );
+        return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
+          supplier_resolution: supplierResolution,
+          booking_suggestion: bookingSuggestion,
+          duplicate_match: duplicate,
+        });
+      }
       if (duplicate) {
         return {
           file,

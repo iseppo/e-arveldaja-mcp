@@ -793,6 +793,29 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(outcome.value.results[0]!.status).toBe("skipped_duplicate");
     expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
   });
+
+  // Codex review: an ambiguous number may match the wrong existing invoice, so
+  // a real invoice must not be skipped as its duplicate.
+  it.each(["dry_run", "create"] as const)("an ambiguous invoice number matching an existing invoice is reviewed, not skipped (%s)", async (mode) => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-03-20", due_date: "2026-03-20",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service", raw_text: "ignored",
+      invoice_number_ambiguous: true,
+    } as never);
+    const { api, spies } = apiWithInvoices([{ ...booked, id: 900, number: "INV-1", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-20", gross_price: 124 }]);
+    const ops = makeOperations(api);
+    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("runBatch failed");
+    const outcome = mode === "dry_run" ? dryRun : await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.duplicate_match?.invoice_id).toBe(900);
+    expect(result.notes.join(" ")).toContain("purchase invoice 900");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
 });
 
 describe("receipt batch — own company name reaches extraction", () => {
