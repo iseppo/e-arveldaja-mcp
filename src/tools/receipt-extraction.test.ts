@@ -3905,3 +3905,74 @@ describe("a label's own-row value stops the below-column search (WP4)", () => {
     expect(extractAmountsFromLayout(items)).toMatchObject({ total_gross: 124, labelled_amount_over_max: true });
   });
 });
+
+describe("supplier names and invoice numbers (WP5)", () => {
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum: 1,
+  });
+
+  describe("A1 label-shaped supplier markers", () => {
+    it("warranty prose \"Müüja vastutus 24 kuud\" is not the supplier name", () => {
+      expect(extractSupplierName(["Arve nr 5", "Garantii", "Müüja vastutus 24 kuud", "Näidis Side AS      Reg. nr 10000001"].join("\n"), "doc.pdf"))
+        .toBe("Näidis Side AS");
+      const items = [
+        item("Arve nr 5", 52, 40, 60),
+        item("Müüja vastutus 24 kuud", 300, 200, 120), item("Kauba garantii kehtib", 300, 214, 100),
+        item("Näidis Side AS", 52, 700, 80), item("Registrikood 10000001", 52, 714, 100),
+      ];
+      expect(extractSupplierName(items.map(entry => entry.text).join("\n"), "doc.pdf", items)).toBe("Näidis Side AS");
+    });
+
+    it("\"Müüja:\" and \"Müüja <legal entity>\" stay labels", () => {
+      expect(extractSupplierName(["Müüja: Näidis Side AS", "Arve nr 5"].join("\n"), "doc.pdf")).toBe("Näidis Side AS");
+      expect(extractSupplierName(["Arveldus: Näidispank AS", "Müüja Näidis Side AS"].join("\n"), "doc.pdf")).toBe("Näidis Side AS");
+      const items = [
+        item("Müüja:", 52, 100, 40), item("Näidis Side AS", 52, 114, 80),
+        item("Arve saaja:", 300, 100, 60), item("Testfirma OÜ", 300, 114, 80),
+      ];
+      expect(extractSupplierName(items.map(entry => entry.text).join("\n"), "doc.pdf", items)).toBe("Näidis Side AS");
+    });
+  });
+
+  describe("A2 column bleed", () => {
+    it("a line spanning two columns is trimmed to the column holding the legal form", () => {
+      expect(extractSupplierName(["Näidis    Näidis Pilv Limited", "Arve nr 5"].join("\n"), "doc.pdf")).toBe("Näidis Pilv Limited");
+      expect(extractSupplierName(["Arve nr 5", "Näidis Meedia OÜ            Klienditeenindus           Arveldus"].join("\n"), "doc.pdf"))
+        .toBe("Näidis Meedia OÜ");
+    });
+
+    it("a column holding only the legal form keeps the whole name", () => {
+      const text = ["Arve", "Saatja:     Saaja:", "    Näidis Grupp     OÜ            Testfirma ou", "Arve nr 5"].join("\n");
+      expect(extractSupplierNameWithNotes(text, "doc.pdf", undefined, "Testfirma OÜ").name).toBe("Näidis Grupp OÜ");
+    });
+  });
+
+  describe("A3 left of a bare buyer label", () => {
+    it("\"Näidis    Arve saaja\" names the supplier", () => {
+      expect(extractSupplierName(["Arve", "Näidis                Arve saaja", "Tänav 1               Testfirma OÜ"].join("\n"), "doc.pdf"))
+        .toBe("Näidis");
+    });
+
+    it("a supplier label left of the buyer label is not a name", () => {
+      expect(extractSupplierName(["Arve", "Saatja:                Saaja:", "Näidis Grupp OÜ        Testfirma OÜ"].join("\n"), "doc.pdf"))
+        .toBe("Näidis Grupp OÜ");
+    });
+  });
+
+  it("A4 \"Teenuse pakkuja:\" is a supplier label", () => {
+    expect(extractSupplierName(["Arve nr 5", "Teenuse pakkuja: Mari Maasikas", "Kokku 10,00"].join("\n"), "doc.pdf")).toBe("Mari Maasikas");
+  });
+
+  describe("A6 invoice numbers", () => {
+    it("\"Company Number: 01234567\" is not an invoice number", () => {
+      expect(extractInvoiceNumber(["Näidis Ltd", "Company Number: 01234567", "Total 10.00"].join("\n"), "x.pdf")).toMatch(/^AUTO-/);
+    });
+
+    it("\"Invoice: #…\" and \"Arve: …\" with at least five digits are invoice numbers", () => {
+      expect(extractInvoiceNumber(["Näidis Ltd", "Company Number: 01234567", "Order Number / Invoice: #12345678-123456789"].join("\n"), "x.pdf"))
+        .toBe("12345678-123456789");
+      expect(extractInvoiceNumber(["Restoran", "Arve:    10000479"].join("\n"), "x.pdf")).toBe("10000479");
+      expect(extractInvoiceNumber(["Restoran", "Arve:    1234"].join("\n"), "x.pdf")).toMatch(/^AUTO-/);
+    });
+  });
+});

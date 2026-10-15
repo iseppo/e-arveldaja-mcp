@@ -350,6 +350,23 @@ export function extractReferenceNumber(text: string): string | undefined {
 // ---------------------------------------------------------------------------
 
 const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
+// A capitalized legal-entity name ("Näidis OÜ", "AS Näidis", "Acme Ltd").
+const LABELLED_LEGAL_ENTITY_RE =
+  /^(?:\p{Lu}[^:;]*?(?<![\p{L}\d])(?:OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|Ltd|INC|Inc|GmbH|GMBH|OY|Oy|AB|AG|PLC|Plc|PBC|BV|NV|SRL|Limited|LIMITED|Corp|Corporation)(?![\p{L}\d])|(?:AS|OÜ|MTÜ|Osaühing|Aktsiaselts|Mittetulundusühing)\s+\p{Lu})/u;
+
+/**
+ * A supplier marker counts only when it is shaped like a label: it ends the
+ * text, is followed by ":", or is followed by a capitalized legal-entity name
+ * ("Müüja: …", "Seller Acme Ltd"). Prose that merely contains the word
+ * ("Müüja vastutus 24 kuud") is not a label.
+ */
+export function isLabelShapedSupplierMarker(text: string, match: RegExpExecArray | RegExpMatchArray): boolean {
+  if (/:/.test(match[0])) return true;
+  const rest = text.slice((match.index ?? 0) + match[0].length);
+  if (/^\s*:/.test(rest)) return true;
+  const value = rest.replace(/^[\s\-–—]+/, "");
+  return value === "" || LABELLED_LEGAL_ENTITY_RE.test(value);
+}
 // `saaja` alone is buyer-side (e.g. "arve saaja"), but `makse saaja` (payee)
 // is supplier-side. Use a negative lookbehind to exclude `makse saaja`.
 export const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
@@ -809,6 +826,11 @@ function precedingSameRowItemIsMakse(textItems: readonly LayoutTextItem[], item:
   return horizontalGap <= Math.max(nearest.width, item.width);
 }
 
+function isSupplierMarkerItem(text: string): boolean {
+  const match = SUPPLIER_MARKER_RE.exec(text);
+  return match !== null && isLabelShapedSupplierMarker(text, match);
+}
+
 export function buildIdentifierMarkers(textItems: readonly LayoutTextItem[]): MarkerPosition[] {
   const markers: MarkerPosition[] = [];
   for (const item of textItems) {
@@ -820,7 +842,7 @@ export function buildIdentifierMarkers(textItems: readonly LayoutTextItem[]): Ma
     }
     if (BUYER_MARKER_RE.test(item.text)) {
       markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, pageNum: item.pageNum, side: "buyer" });
-    } else if (SUPPLIER_MARKER_RE.test(item.text)) {
+    } else if (isSupplierMarkerItem(item.text)) {
       markers.push({ text: item.text, x: item.x, y: item.y, width: item.width, pageNum: item.pageNum, side: "supplier" });
     }
   }

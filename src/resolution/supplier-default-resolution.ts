@@ -17,7 +17,7 @@
  */
 import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
-import { normalizeCompanyName, stripSocialHandles } from "../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity, stripSocialHandles } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { desandboxText } from "../external-text-renderer.js";
 import { ambiguous, notFound, resolved, type Resolution } from "./types.js";
@@ -153,6 +153,24 @@ export function matchSupplier(
     // is not part of it, in every name tier below (a handle-only name is
     // empty and matches nothing).
     const supplierName = stripSocialHandles(fields.supplier_name);
+
+    // Strict tier first: the same legal person by name and legal form, with
+    // spelled-out forms folded ("MTÜ Näidis" = "Mittetulundusühing Näidis").
+    // One hit matches; several are terminal — the relaxed tiers never run.
+    const identityMatches = activeClients.filter(client => sameCompanyIdentity(supplierName, client.name));
+    if (identityMatches.length === 1) {
+      const candidate = identityMatches[0]!;
+      const conflict = strongIdentifierConflict(candidate);
+      if (conflict) return { kind: "conflict", reason: conflict };
+      return { kind: "matched", match_type: "name_normalized", client: candidate };
+    }
+    if (identityMatches.length > 1) {
+      return {
+        kind: "ambiguous",
+        reason: `${identityMatches.length} active clients are the same legal person by name — resolve the supplier manually (by registry code or VAT number).`,
+      };
+    }
+
     const normalizedSupplierName = normalizeCompanyName(supplierName);
     if (normalizedSupplierName && normalizedSupplierName.length >= 4) {
       const normalizedExactMatches = activeClients.filter(

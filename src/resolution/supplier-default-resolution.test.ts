@@ -216,3 +216,46 @@ describe("supplier name ties are ambiguous, never first-wins (finding 9)", () =>
     expect(outcome).toMatchObject({ kind: "matched", match_type: "registry_code" });
   });
 });
+
+describe("matchSupplier — strict legal-identity tier (WP5 A5)", () => {
+  it("matches a spelled-out legal form to its abbreviation", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 11, name: "Mittetulundusühing Näidisselts" })],
+      { supplier_name: "MTÜ Näidisselts" },
+    );
+    expect(outcome).toMatchObject({ kind: "matched", client: { id: 11 } });
+  });
+
+  it("two clients of the same legal identity are terminal: the relaxed tiers are not reached", () => {
+    const outcome = matchSupplier(
+      [
+        makeClient({ id: 11, name: "Mittetulundusühing Näidisselts" }),
+        makeClient({ id: 12, name: "MTÜ Näidisselts" }),
+      ],
+      { supplier_name: "MTÜ Näidisselts" },
+    );
+    // The literal-name tie-break of the relaxed tiers would have picked id 12.
+    expect(outcome.kind).toBe("ambiguous");
+  });
+
+  it("a deleted or own-company twin is ignored", () => {
+    const outcome = matchSupplier(
+      [
+        makeClient({ id: 11, name: "Mittetulundusühing Näidisselts" }),
+        makeClient({ id: 12, name: "MTÜ Näidisselts", is_deleted: true }),
+        makeClient({ id: 13, name: "Näidisselts MTÜ", code: "80000001" }),
+      ],
+      { supplier_name: "MTÜ Näidisselts" },
+      { ownCompanyRegistryCode: "80000001" },
+    );
+    expect(outcome).toMatchObject({ kind: "matched", client: { id: 11 } });
+  });
+
+  it("a strict match whose registry code contradicts the invoice's is a conflict", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 11, name: "Mittetulundusühing Näidisselts", code: "80000002" })],
+      { supplier_name: "MTÜ Näidisselts", supplier_reg_code: "80000003" },
+    );
+    expect(outcome.kind).toBe("conflict");
+  });
+});

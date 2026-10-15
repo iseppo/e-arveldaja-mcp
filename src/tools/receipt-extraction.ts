@@ -13,6 +13,7 @@ import {
   extractReferenceNumber,
   extractRegistryCode,
   extractVatNumber,
+  isLabelShapedSupplierMarker,
   isValidIban,
 } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
@@ -69,7 +70,7 @@ const BALANCE_LABEL_RE = /\b(?:jäänud\s+tasuda|jääb\s+tasuda|tasumisele\s+ku
 // percentage, and not a slice of a date, an IBAN or a longer digit run.
 const MONEY_TOKEN_RE = /(?<![\p{L}\d.,])-?\d{1,3}(?:[  .]?\d{3})*[.,]\d{2}(?![\d%]|[.,]\d|\s*%)/gu;
 const SUPPLIER_LABEL_RE =
-  /^(?:saatja nimi|müüja|seller|supplier|teenusepakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
+  /^(?:saatja nimi|müüja|seller|supplier|teenuse\s*pakkuja|arve esitaja|makse saaja|vedaja\/teenuse pakkuja)\b[:\s-]*/i;
 const BUYER_SECTION_RE = /\b(bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
 const BUYER_OR_RECIPIENT_SECTION_RE = /\b(recipient|buyer|ostja|bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i;
 const PURE_BUYER_LABEL_RE = /^(?:recipient|buyer|ostja|bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)[:\s]*$/i;
@@ -950,6 +951,12 @@ export function toIsoDate(year: number, month: number, day: number): string | un
   if (year < 1900) return undefined;
   const iso = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
   return isStrictDate(iso) ? iso : undefined;
+}
+
+/** A supplier label line or segment ("Müüja:", "Seller Acme Ltd"), not prose. */
+function isSupplierLabel(text: string): boolean {
+  const match = SUPPLIER_LABEL_RE.exec(text);
+  return match !== null && isLabelShapedSupplierMarker(text, match);
 }
 
 function cleanSupplierCandidate(raw: string): string | undefined {
@@ -2652,6 +2659,20 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
       if (rightmostColumnCandidate) return rightmostColumnCandidate;
     }
 
+    // A3: "Näidis    Arve saaja": the column left of a bare buyer label is the
+    // supplier block, even without a legal form — unless it is a label itself
+    // ("Saatja:    Saaja:").
+    const labelledColumns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine).filter(Boolean);
+    if (
+      labelledColumns.length === 2 &&
+      PURE_BUYER_LABEL_RE.test(labelledColumns[1]!) &&
+      !/:\s*$/.test(labelledColumns[0]!) &&
+      !SUPPLIER_LABEL_RE.test(labelledColumns[0]!)
+    ) {
+      const leftColumnCandidate = clean(labelledColumns[0]!);
+      if (leftColumnCandidate) return leftColumnCandidate;
+    }
+
     const dualNameMatch = line.match(/^Nimi:\s*(.+?)\s+Nimi:\s*(.+)$/i);
     const sellerFromDualName = clean(dualNameMatch?.[2] ?? "");
     if (sellerFromDualName) return sellerFromDualName;
@@ -2660,14 +2681,14 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
     // saaja:"): the supplier is the same column of the next line.
     const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
     const labelColumn = columns.findIndex((segment, column) =>
-      column > 0 && SUPPLIER_LABEL_RE.test(segment) && clean(segment) === undefined);
+      column > 0 && isSupplierLabel(segment) && clean(segment) === undefined);
     if (labelColumn > 0) {
       const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
       const columnCandidate = clean(nextColumns[labelColumn] ?? "");
       if (columnCandidate) return columnCandidate;
     }
 
-    if (SUPPLIER_LABEL_RE.test(line)) {
+    if (isSupplierLabel(line)) {
       const labelledCandidate = clean(line);
       if (labelledCandidate) return labelledCandidate;
 
@@ -2685,23 +2706,42 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
   // A trailing \b never matches after "Ü" (a non-word character to the regex
   // engine), so "Näidis OÜ" at the end of a line needs a letter look-ahead.
   const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
+  // A2: a line bleeding over several whitespace columns ("Google    Google
+  // Cloud EMEA Limited") is trimmed to the column holding the legal form the
+  // pattern matched — the same entity, never a different one.
+  const trimToLegalFormColumn = (raw: string, candidate: string): string => {
+    const form = companyPattern.exec(candidate);
+    if (!form) return candidate;
+    let searchFrom = 0;
+    for (const segment of raw.split(/\s{2,}/)) {
+      const cleaned = clean(segment);
+      if (!cleaned) continue;
+      const start = candidate.indexOf(cleaned, searchFrom);
+      if (start < 0) continue;
+      searchFrom = start + cleaned.length;
+      if (form.index < start || form.index >= start + cleaned.length) continue;
+      // A column holding only the legal form ("ETR1 Group" | "OÜ") keeps the line.
+      return companyPattern.test(cleaned) && /\p{L}{2,}/u.test(cleaned.replace(companyPattern, "")) ? cleaned : candidate;
+    }
+    return candidate;
+  };
   const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
-  const searchLines = lines.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(lines.length, 12));
-  for (const line of searchLines) {
-    const candidate = clean(line);
+  const searchRows = rows.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(rows.length, 12));
+  for (const row of searchRows) {
+    const candidate = clean(row.line);
     if (
       candidate &&
       candidate.length <= 80 &&
       (companyPattern.test(candidate) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
     ) {
-      return candidate;
+      return trimToLegalFormColumn(row.raw, candidate);
     }
   }
 
-  for (const line of lines) {
-    const candidate = clean(line);
+  for (const row of rows) {
+    const candidate = clean(row.line);
     if (candidate && companyPattern.test(candidate)) {
-      return candidate;
+      return trimToLegalFormColumn(row.raw, candidate);
     }
   }
 
@@ -2921,7 +2961,7 @@ function isCalendarDateToken(token: string): boolean {
 // Lines whose "nr"/"no" label names something other than the invoice:
 // registry/VAT ids, payment references, bank accounts, phone numbers.
 const NON_INVOICE_NUMBER_LINE_RE =
-  /\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|viite(?:number|nr)?|viitenr|reference|ref\.?\s*(?:nr|no)|konto|account|a\/a|iban|swift|bic|tel|telefon|phone|mob(?:iil)?|fax)\b/i;
+  /\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|(?:company|registration)\s*(?:number|nr|no\.?)|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|viite(?:number|nr)?|viitenr|reference|ref\.?\s*(?:nr|no)|konto|account|a\/a|iban|swift|bic|tel|telefon|phone|mob(?:iil)?|fax)\b/i;
 
 function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefined {
   const candidate = raw?.trim();
@@ -2945,6 +2985,9 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
       // bank account); only the cash/sales/purchase invoice compounds qualify.
       /(?:(?<![A-Za-zÀ-ž])(?:sularaha|kassa|müügi|ostu)?arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*([A-Z0-9/_-]{3,})/i,
       /\b(?:invoice|(?:sularaha|kassa)?arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
+      // "Invoice: #80832991-167194467", "Arve: 10000479": a colon label with a
+      // token of at least five digits.
+      /(?<![A-Za-zÀ-ž])(?:invoice|arve):[ \t]*#?((?=(?:[A-Z0-9/_-]*?\d){5})[A-Z0-9][A-Z0-9/_-]*)/i,
     ],
     [
       /(?:tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\t .-]*([A-Z0-9/_-]{3,})/i,
