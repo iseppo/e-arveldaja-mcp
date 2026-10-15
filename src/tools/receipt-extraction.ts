@@ -65,7 +65,7 @@ const RECEIPT_CARDHOLDER_AMOUNT_LABEL_RE =
   /\b(?:card\s?holder\s+(?:amount|currency|total|billing)|kaardiomaniku\s+summa)\b/i;
 // Remaining-balance labels: a zero there says the invoice is settled, not that
 // the invoice total is zero.
-const BALANCE_LABEL_RE = /\b(?:jäänud\s+tasuda|jääb\s+tasuda|tasumisele\s+kuulub|maksmisele\s+kuulub|balance\s+due|amount\s+due)\b/i;
+const BALANCE_LABEL_RE = /\b(?:jäänud\s+tasuda|jääb\s+tasuda|tasumisele\s+kuulub|maksmisele\s+kuulub|balance\s+due|amount\s+due|payable\s+amount)\b/i;
 // A monetary value with two decimals ("0,00", "1 234.56", "-11,94"). Not a
 // percentage, and not a slice of a date, an IBAN or a longer digit run.
 const MONEY_TOKEN_RE = /(?<![\p{L}\d.,])-?\d{1,3}(?:[  .]?\d{3})*[.,]\d{2}(?![\d%]|[.,]\d|\s*%)/gu;

@@ -3645,6 +3645,33 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       expect(result.total_gross).toBe(124);
     });
 
+    it("a zero \"PAYABLE AMOUNT\" under a stated total does not", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Example Ltd", "Subtotal 100.00 EUR", "VAT 24% 24.00 EUR", "Total 124.00 EUR", "Paid 124.00 EUR", "PAYABLE AMOUNT 0.00 EUR"].join("\n"),
+        "invoice.pdf",
+      );
+      expect(result.zero_total_stated).toBeUndefined();
+      expect(result.total_gross).toBe(124);
+    });
+
+    it("a zero invoice total still holds beside a zero \"PAYABLE AMOUNT\"", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Example Ltd", "Service 120.00 EUR", "Prepayment -120.00 EUR", "Invoice total 0.00 EUR", "PAYABLE AMOUNT 0.00 EUR"].join("\n"),
+        "invoice.pdf",
+      );
+      expect(result.zero_total_stated).toBe(true);
+    });
+
+    it("a zero \"Payable amount\" row in the layout under a stated total does not", () => {
+      const items = [
+        item("Example Ltd", 52, 40, 60),
+        item("Total", 300, 180, 40), item("124.00", 420, 180, 30),
+        item("Payable amount", 300, 200, 80), item("0.00", 420, 200, 20),
+      ];
+      const result = extractReceiptFieldsFromText("Example Ltd\nTotal\n124.00\nPayable amount\n0.00", "invoice.pdf", { textItems: items });
+      expect(result.zero_total_stated).toBeUndefined();
+    });
+
     it("a zero total row in the layout holds", () => {
       const items = [item("Näidis OÜ", 52, 40, 60), item("Kogusumma (EUR)", 300, 200, 80), item("0,00", 420, 200, 20)];
       const result = extractReceiptFieldsFromText("Näidis OÜ\nKogusumma (EUR)\n0,00", "arve.pdf", { textItems: items });

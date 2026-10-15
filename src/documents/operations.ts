@@ -76,7 +76,12 @@ function exactLiveSupplierNumberMatches(
 // its create. Distinct from the confirm-plan domain minted AFTER create for the
 // SEPARATE confirm/link step (Step 3 — the op NEVER confirms/registers).
 export const ACCOUNTING_DOCUMENT_PLAN_DOMAIN = "accounting_document";
+
 export const ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN = "accounting_document_confirm";
+
+// Extraction signals that withhold the create plan: the document is addressed
+// to another company (or to this one AND another).
+const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous"] as const;
 
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -447,7 +452,14 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         warnings.push({ code: "vat_rate_implausible", message: "The extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking." });
       }
       for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
-        if (signals[signal]) warnings.push({ code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal] });
+        if (!signals[signal]) continue;
+        // A document addressed to another company would be booked whole into
+        // the wrong books — no reviewed amounts fix that, so no plan handle.
+        if ((WRONG_COMPANY_SIGNALS as readonly string[]).includes(signal)) {
+          blockers.push({ item_id: signal, code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal], severity: "blocker" });
+        } else {
+          warnings.push({ code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal] });
+        }
       }
       if (currencyWarning) {
         warnings.push({ code: currencyWarning.code, message: currencyWarning.message });
@@ -573,6 +585,26 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     }
   }
 
+  /** The wrong-company signal the document raises for the active company, if any. */
+  private async wrongCompanySignal(path: string, fileName: string): Promise<typeof WRONG_COMPANY_SIGNALS[number] | undefined> {
+    const parsedDocument = await parseDocument(path);
+    const allClients = await this.api.clients.listAll().catch(() => []);
+    let own: Awaited<ReturnType<typeof resolveOwnCompanyIdentifiers>> | undefined;
+    try {
+      own = await resolveOwnCompanyIdentifiers(this.api, allClients);
+    } catch {
+      // Offline / unconfigured — nothing known to compare the buyer against.
+    }
+    const extracted = extractReceiptFieldsFromText(parsedDocument.text, fileName, {
+      textItems: textItemsWithPageNums(parsedDocument.result?.pages),
+      ownCompanyVat: own?.ownCompanyVat,
+      ownCompanyRegistryCode: own?.ownCompanyRegistryCode,
+      ownIbans: own?.ownIbans,
+      ownCompanyName: own?.ownCompanyName,
+    });
+    return WRONG_COMPANY_SIGNALS.find(signal => extracted[signal] === true);
+  }
+
   async create(input: ExecuteAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentExecution>> {
     if (!/^[0-9a-f]{64}$/.test(input.sourceSha256 ?? "")) {
       return fail("source_sha256_required", "source_sha256 from the reviewed preview is required", "never");
@@ -627,6 +659,13 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       if (!effective.ok) return effective;
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint)) {
         return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");
+      }
+      // Re-check the document's addressee before any write: a handle issued
+      // earlier (other own-company identity, older extraction) must not book
+      // another company's document.
+      const wrongCompany = await this.wrongCompanySignal(material.path, material.fileName);
+      if (wrongCompany !== undefined) {
+        return fail(wrongCompany, CREATION_GATING_SIGNAL_WARNINGS[wrongCompany], "never");
       }
       const { invoiceData, isVatReg, blockOnDuplicate, allowDuplicateInvoiceNumber, grossAmountEur } = effective.value;
       const supplierName = effective.value.supplierName;

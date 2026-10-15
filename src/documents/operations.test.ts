@@ -224,12 +224,6 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     ["gross_unlabelled", textDoc(["Näidis OÜ", "Arve nr 7", "50,000 tokens 1 US$50.00"])],
     ["labelled_amount_over_max", textDoc(["Näidis OÜ", "Arve nr 7", "Kokku 100.00 24.00 124.00 248.00"])],
     ["zero_total_stated", textDoc(["Näidis OÜ", "Arve nr 7", "Teenus 120,00", "Ettemaks −120,00", "Arve kokku 0,00"])],
-    ["buyer_not_active_company", layoutDoc([
-      { text: "Näidis Kauplus AS", x: 52, y: 40 },
-      { text: "Arve saaja:", x: 52, y: 100 },
-      { text: "Teine Ettevõte OÜ", x: 52, y: 114 },
-      { text: "Kokku 124,00 EUR", x: 400, y: 300 },
-    ])],
   ] as const)("%s surfaces as a review warning and an llm_fallback signal", async (signal, doc) => {
     mockedParseDocument.mockResolvedValue(doc);
     const { path } = writeTempPdf();
@@ -240,6 +234,26 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     expect(outcome.value.warnings.some(w => w.code === signal)).toBe(true);
     expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
     expect(outcome.value.extraction.llm_fallback.recommended).toBe(true);
+  });
+
+  it.each([
+    ["buyer_not_active_company", ["Teine Ettevõte OÜ"]],
+    ["buyer_ambiguous", ["Teine Ettevõte OÜ", "Seppo AI OÜ"]],
+  ] as const)("%s is a blocker, not a warning", async (signal, buyerLines) => {
+    mockedParseDocument.mockResolvedValue(layoutDoc([
+      { text: "Näidis Kauplus AS", x: 52, y: 40 },
+      { text: "Arve saaja:", x: 52, y: 100 },
+      ...buyerLines.map((text, index) => ({ text, x: 52, y: 114 + index * 14 })),
+      { text: "Kokku 124,00 EUR", x: 400, y: 300 },
+    ]));
+    const { path } = writeTempPdf();
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers.some(b => b.code === signal)).toBe(true);
+    expect(outcome.value.warnings.some(w => w.code === signal)).toBe(false);
+    expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
   });
 });
 
@@ -326,6 +340,59 @@ describe("AccountingDocumentOperations.create", () => {
     expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
   }
+
+  // A document addressed to another company would be booked whole into the
+  // wrong books: prepare issues no handle, and create re-checks the document.
+  const docWithBuyer = (buyer: string): Awaited<ReturnType<typeof parseDocument>> => {
+    const items = [
+      { text: "ACME OÜ", x: 10, y: 10 },
+      { text: "Reg. nr 17487472", x: 10, y: 30 },
+      { text: "Arve INV-1", x: 300, y: 10 },
+      { text: "Arve saaja:", x: 10, y: 100 },
+      { text: buyer, x: 10, y: 114 },
+      { text: "Summa 12.00 EUR", x: 300, y: 300 },
+    ];
+    return {
+      text: items.map(entry => entry.text).join("\n"),
+      pageCount: 1,
+      ocrPartialFailure: false,
+      result: { pages: [{ pageNum: 1, textItems: items.map(entry => ({ ...entry, width: 90, height: 10, confidence: 0.95 })) }] },
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>;
+  };
+
+  it("withholds the plan handle for a document addressed to another company", async () => {
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Teine Ettevõte OÜ"));
+    const { path, api, ops } = createSetup();
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.planHandle).toBeUndefined();
+    expect(outcome.value.blockers.map(b => b.code)).toContain("buyer_not_active_company");
+    expectNoWrites(api);
+  });
+
+  it("the same document addressed to the active company still gets a handle and creates", async () => {
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Seppo AI OÜ"));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("create with a previously issued handle re-checks the document and refuses a wrong-company one (zero writes)", async () => {
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Seppo AI OÜ"));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    // Same bytes, but the extraction now reads another company's buyer block
+    // (an older extraction, or a changed own-company identity).
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Teine Ettevõte OÜ"));
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("buyer_not_active_company");
+    expectNoWrites(api);
+  });
 
   it("creates a DRAFT invoice via the real prepare→create sequence, uploads the document, and mints a SECOND confirm plan (never auto-confirmed)", async () => {
     const { path, sha256, api, ops } = createSetup();
