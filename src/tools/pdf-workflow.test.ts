@@ -374,7 +374,11 @@ describe("pdf workflow tools", () => {
     const response = await handler({ file_path: "/tmp/tickets.pdf" });
     const payload = parseMcpResponse(response.content[0]!.text);
 
-    expect(payload.extracted.warnings).toEqual([expect.stringMatching(/^multiple_documents_in_file: /)]);
+    // Two different ticket numbers are also two invoice-number candidates.
+    expect(payload.extracted.warnings).toEqual([
+      expect.stringMatching(/^multiple_documents_in_file: /),
+      expect.stringMatching(/^invoice_number_ambiguous: /),
+    ]);
     expect(payload.llm_fallback.confidence_signals).toContain("multiple_documents_in_file");
   });
 

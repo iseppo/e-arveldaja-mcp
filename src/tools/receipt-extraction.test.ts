@@ -4116,5 +4116,29 @@ describe("supplier names and invoice numbers (WP5)", () => {
       expect(extractInvoiceNumber(["Restoran", "Arve:    10000479"].join("\n"), "x.pdf")).toBe("10000479");
       expect(extractInvoiceNumber(["Restoran", "Arve:    1234"].join("\n"), "x.pdf")).toMatch(/^AUTO-/);
     });
+
+    // Codex review: a colon label citing another document is not this
+    // document's number, and conflicting numbers are held, not guessed.
+    it.each([
+      ["before", ["Näidis Ltd", "Previous invoice: #12345", "Invoice: #67890", "Total 10.00"]],
+      ["after", ["Näidis Ltd", "Invoice: #67890", "Previous invoice: #12345", "Total 10.00"]],
+      ["Estonian", ["Näidis OÜ", "Viide arvele: 12345", "Arve: 67890", "Kokku 10,00"]],
+    ])("a colon label citing another invoice %s the current one is skipped", (_name, lines) => {
+      expect(extractInvoiceNumber(lines.join("\n"), "x.pdf")).toBe("67890");
+      expect(extractReceiptFieldsFromText(lines.join("\n"), "x.pdf").invoice_number_ambiguous).toBeUndefined();
+    });
+
+    it("two different invoice numbers hold as ambiguous", () => {
+      const result = extractReceiptFieldsFromText(["Näidis Ltd", "Invoice no. 11111", "Invoice no. 22222", "Total 10.00"].join("\n"), "x.pdf");
+      expect(result.invoice_number_ambiguous).toBe(true);
+      const cited = extractReceiptFieldsFromText(["Näidis Ltd", "Previous invoice no. 12345", "Invoice: #67890", "Total 10.00"].join("\n"), "x.pdf");
+      expect(cited.invoice_number_ambiguous).toBe(true);
+    });
+
+    it("the same invoice number printed twice is not ambiguous", () => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Arve nr 2026-15", "Kokku 10,00", "Palume tasuda arve nr 2026-15"].join("\n"), "x.pdf");
+      expect(result.invoice_number).toBe("2026-15");
+      expect(result.invoice_number_ambiguous).toBeUndefined();
+    });
   });
 });

@@ -966,6 +966,19 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
       held: buyerBlockDocument(["Teine Ettevõte OÜ", "Proovi OÜ"]),
       clean: buyerBlockDocument(["Proovi OÜ"]),
     },
+    {
+      // No own-company identifier is known, so a company buyer is unverified;
+      // a person as buyer needs no verification.
+      signal: "buyer_ownership_unverified",
+      held: buyerBlockDocument(["Proovi OÜ"]),
+      clean: buyerBlockDocument(["Mari Maasikas"]),
+      anonymous: true,
+    },
+    {
+      signal: "invoice_number_ambiguous",
+      held: textDocument([...head, "Arve nr INV-2", ...labelledTrio]),
+      clean: textDocument([...head, "Arve nr INV-1", ...labelledTrio]),
+    },
   ] as const;
 
   beforeEach(async () => {
@@ -975,9 +988,12 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
     vi.mocked(summarizeInvoiceExtraction).mockImplementation(fallback.summarizeInvoiceExtraction);
   });
 
-  async function runMode(api: never, mode: "dry_run" | "create" | "create_and_confirm") {
+  async function runMode(api: never, mode: "dry_run" | "create" | "create_and_confirm", anonymous = false) {
     const ops = makeOperations(api);
-    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    if (anonymous) {
+      (api as unknown as { readonly: Record<string, ReturnType<typeof vi.fn>> }).readonly.getVatInfo!.mockResolvedValue({});
+    }
+    const run = { ...baseRun, ownCompanyName: anonymous ? undefined : "Proovi OÜ" };
     const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
     if (!dryRun.ok) throw new Error("dry run failed");
     if (mode === "dry_run") return dryRun.value.results[0]!;
@@ -988,12 +1004,14 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
     return outcome.value.results[0]!;
   }
 
-  for (const { signal, held, clean } of cases) {
+  for (const testCase of cases) {
+    const { signal, held, clean } = testCase;
+    const anonymous = "anonymous" in testCase && testCase.anonymous;
     for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
       it(`${signal} × ${mode} → needs_review, zero writes`, async () => {
         vi.mocked(parseDocument).mockResolvedValue(held as never);
         const { api, spies } = makeApi();
-        const result = await runMode(api, mode);
+        const result = await runMode(api, mode, anonymous);
         expect(result.status).toBe("needs_review");
         // The signal is the only reason to hold: nothing else would block.
         expect(result.llm_fallback?.confidence_signals.filter(code => code !== "booking_not_from_history")).toEqual([signal]);
@@ -1006,7 +1024,7 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
     it(`${signal}: the clean twin creates`, async () => {
       vi.mocked(parseDocument).mockResolvedValue(clean as never);
       const { api, spies } = makeApi();
-      const result = await runMode(api, "create");
+      const result = await runMode(api, "create", anonymous);
       expect(result.status).toBe("created");
       expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
     });

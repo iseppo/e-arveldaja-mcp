@@ -301,6 +301,8 @@ export interface ExtractedReceiptFields {
   buyer_ambiguous?: boolean;
   /** The buyer block names a legal entity, but no own-company identifier is known to verify it. */
   buyer_ownership_unverified?: boolean;
+  /** The invoice-number labels offer two or more different numbers. */
+  invoice_number_ambiguous?: boolean;
   /** The gross is the largest unlabelled amount, not corroborated by a labelled net + labelled VAT. */
   gross_unlabelled?: boolean;
   /** A labelled net / VAT / gross amount exceeds MAX_RECEIPT_FALLBACK_AMOUNT (kept or dropped). */
@@ -3049,7 +3051,21 @@ function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefin
   return candidate;
 }
 
+// A line citing another document ("Previous invoice: #12345", "Viide arvele:
+// 4411"): its colon-labelled number is not this document's.
+const OTHER_DOCUMENT_INVOICE_LINE_RE =
+  /(?<![\p{L}\d])(?:previous|prior|earlier|original|related|eelmi\p{L}*|varasema\p{L}*|algse\p{L}*|viide|viita\p{L}*|viitab|reference|ref|ettemaksuarve\p{L}*|prepayment|proforma|credit\s*note\s*(?:for|to)|correct\p{L}*|korrigee\p{L}*|replac\p{L}*|asenda\p{L}*|cancel\p{L}*|tühista\p{L}*)(?![\p{L}\d])/iu;
+
 export function extractInvoiceNumber(text: string, fileName: string): string {
+  return extractInvoiceNumberCandidates(text, fileName).invoiceNumber;
+}
+
+/**
+ * The invoice number and whether the winning label tier offers another,
+ * different number: a wrong number can skip a real invoice as a duplicate, so
+ * a conflict is held for review instead of guessed.
+ */
+function extractInvoiceNumberCandidates(text: string, fileName: string): { invoiceNumber: string; ambiguous: boolean } {
   const lines = text
     .split(/\r?\n/)
     .map(clampTextLine)
@@ -3072,11 +3088,14 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
     ],
   ];
 
+  const colonPattern = invoiceNumberTiers[0]![2]!;
   for (const [tierIndex, tier] of invoiceNumberTiers.entries()) {
+    const candidates: string[] = [];
     for (const [lineIndex, line] of lines.entries()) {
       for (const pattern of tier) {
+        if (pattern === colonPattern && OTHER_DOCUMENT_INVOICE_LINE_RE.test(line)) continue;
         const candidate = acceptInvoiceNumberCandidate(line.match(pattern)?.[1]);
-        if (candidate) return candidate;
+        if (candidate) candidates.push(candidate);
       }
       // The one cross-line case: a bare "Arve" / "Invoice" header line with
       // the number on the next line ("Nr. EE1966453").
@@ -3084,8 +3103,14 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
         const candidate = acceptInvoiceNumberCandidate(
           lines[lineIndex + 1]?.match(/^(?:nr|no|number)\.?[:#\t ]*([A-Z0-9][A-Z0-9/_-]{2,})$/i)?.[1],
         );
-        if (candidate) return candidate;
+        if (candidate) candidates.push(candidate);
       }
+    }
+    if (candidates.length > 0) {
+      return {
+        invoiceNumber: candidates[0]!,
+        ambiguous: new Set(candidates.map(candidate => candidate.toUpperCase())).size > 1,
+      };
     }
   }
 
@@ -3094,11 +3119,11 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
       continue;
     }
     const candidate = acceptInvoiceNumberCandidate(line.match(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/i)?.[1]);
-    if (candidate) return candidate;
+    if (candidate) return { invoiceNumber: candidate, ambiguous: false };
   }
 
   const todayToken = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  return `AUTO-${todayToken}-${normalizeFilenameToken(fileName) || "RECEIPT"}`;
+  return { invoiceNumber: `AUTO-${todayToken}-${normalizeFilenameToken(fileName) || "RECEIPT"}`, ambiguous: false };
 }
 
 export function extractDates(text: string): { invoice_date?: string; due_date?: string } {
@@ -3778,7 +3803,7 @@ export function extractReceiptFieldsFromText(
     ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossLine)
     : undefined;
   const currency = unsupportedCurrency || componentConflict ? undefined : detectedCurrency;
-  const invoiceNumber = extractInvoiceNumber(text, fileName);
+  const { invoiceNumber, ambiguous: invoiceNumberAmbiguous } = extractInvoiceNumberCandidates(text, fileName);
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
   const fieldProvenance = buildFieldProvenance(
     text,
@@ -3840,6 +3865,7 @@ export function extractReceiptFieldsFromText(
     ...(amountIssues.length > 0 ? { amount_consistency_issues: amountIssues } : {}),
     ...(hasMultipleTicketNumbers(text) ? { multiple_documents_in_file: true } : {}),
     ...(buyerBlockSignal ? { [buyerBlockSignal]: true } : {}),
+    ...(invoiceNumberAmbiguous ? { invoice_number_ambiguous: true } : {}),
   };
 }
 
