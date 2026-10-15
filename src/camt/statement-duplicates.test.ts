@@ -92,14 +92,6 @@ describe("groupCamtStatementFiles", () => {
       { index: 2 },
     ]);
   });
-
-  it("leaves an unread file (no digest) alone", () => {
-    const result = groupCamtStatementFiles([file(0, { digest: undefined }), file(1, { digest: undefined })]);
-    expect(result).toEqual([
-      { index: 0, overlaps_with: [{ index: 1, from: "2026-09-01", to: "2026-09-30" }] },
-      { index: 1, overlaps_with: [{ index: 0, from: "2026-09-01", to: "2026-09-30" }] },
-    ]);
-  });
 });
 
 describe("statement inputs to the grouping", () => {

@@ -283,7 +283,6 @@ export const sha256Hex = (bytes: Uint8Array): string =>
   createHash("sha256").update(bytes).digest("hex");
 
 async function readBoundReceiptFile(
-  binding: BoundReceiptDirectory,
   file: ReceiptFileInfo,
   candidatePath: string,
   accessOptions: ReceiptDirectoryAccessOptions,
@@ -363,7 +362,7 @@ export async function prepareReceiptBatchSnapshot(
       for (const file of scan.files) {
         const descriptorPath = boundScan.descriptorPaths.get(file.name);
         if (!descriptorPath) throw receiptDirectoryChanged();
-        const bytes = await readBoundReceiptFile(binding, file, descriptorPath, accessOptions);
+        const bytes = await readBoundReceiptFile(file, descriptorPath, accessOptions);
         readBytes += bytes.length;
         if (readBytes > MAX_RECEIPT_BATCH_TOTAL_SIZE) {
           throw Object.assign(

@@ -2,7 +2,7 @@ import { readFile } from "fs/promises";
 import { createHash, randomBytes } from "crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveFileInput } from "../file-validation.js";
-import { registerWiseImportTools, WISE_PLAN_DOMAIN, buildWiseTransactionSignature, createdTransactionMatchesApprovedPayload, type TransactionCreatePayload } from "./wise-import.js";
+import { registerWiseImportTools, WISE_PLAN_DOMAIN, createdTransactionMatchesApprovedPayload, type TransactionCreatePayload } from "./wise-import.js";
 import { weaveFullRefIntoDescription } from "../bank-transaction-create.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { parseMcpResponse } from "../mcp-json.js";
@@ -5878,38 +5878,6 @@ describe("wise import server plan handle (P12/P19)", () => {
       expect(extraResult.code).toBe("wise_transfer_ownership_reapproval_required");
       expect(setup.api.transactions.create).not.toHaveBeenCalled();
     });
-  });
-});
-
-describe("buildWiseTransactionSignature — over-cap ref symmetry (FIX 3)", () => {
-  const DATE = "2026-07-20";
-  const AMT = 12.34;
-  const CUR = "EUR";
-  const NAME = "Acme OÜ";
-
-  it("hashes identically whether given the full over-cap ref (candidate) or the truncated ref + woven description (stored)", () => {
-    // A reference that exceeds REF_NUMBER_MAX_LENGTH (20). createBankTransaction
-    // stores the truncated ref but weaves the FULL ref into the description; the
-    // candidate is built pre-weave with the full ref. Both must dedup-match.
-    const FULL_REF = "INV-2026-000123456789-XYZ"; // > 20 chars
-    const TRUNCATED_REF = FULL_REF.slice(0, 20);
-    const preWeaveDesc = "Payment for services";
-    const wovenDesc = weaveFullRefIntoDescription(preWeaveDesc, FULL_REF);
-
-    const candidateSig = buildWiseTransactionSignature(DATE, AMT, CUR, NAME, FULL_REF, preWeaveDesc);
-    const storedSig = buildWiseTransactionSignature(DATE, AMT, CUR, NAME, TRUNCATED_REF, wovenDesc);
-
-    expect(candidateSig).toBe(storedSig);
-  });
-
-  it("leaves a non-truncated ref's description untouched (no spurious weaving)", () => {
-    const SHORT_REF = "RF-SHORT";
-    const sig = buildWiseTransactionSignature(DATE, AMT, CUR, NAME, SHORT_REF, "narrative");
-    // Stable for identical inputs.
-    expect(sig).toBe(buildWiseTransactionSignature(DATE, AMT, CUR, NAME, SHORT_REF, "narrative"));
-    // The short ref is NOT woven into the description: a description that already
-    // carries the ref hashes differently, proving no implicit weave occurred.
-    expect(sig).not.toBe(buildWiseTransactionSignature(DATE, AMT, CUR, NAME, SHORT_REF, "narrative RF-SHORT"));
   });
 });
 

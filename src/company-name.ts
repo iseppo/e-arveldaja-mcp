@@ -12,7 +12,7 @@
 // match when standalone, never when embedded in a longer word.
 const LEGAL_SUFFIXES = /\b(ou|o(?:̈|ü)u|as|mtu|mt(?:̈|ü)u|fie|tu|tmi|pank|uab|sia|llc|ltd|inc|corp|corporation|co|lp|llp|plc|pbc|pllc|gmbh|oy|ab|ag|sa|sas|sarl|srl|spa|nv|bv)\b/gu;
 
-export interface NormalizeCompanyNameOptions {
+interface NormalizeCompanyNameOptions {
   /** Strip punctuation before suffix removal as well (for grouping/deduplication). */
   stripNonAlphanumeric?: boolean;
 }

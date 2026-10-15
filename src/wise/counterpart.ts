@@ -35,9 +35,9 @@ import type { WiseCounterpartBasis, WiseRow, WiseTransferReview } from "./types.
 // holds. No MCP/HTTP/fs/audit/env.
 
 export type { WiseCounterpartBasis };
-export type WiseCounterpartHoldCode = "wise_transfer_counterpart_conflict" | "wise_transfer_dimensions_unverified";
+type WiseCounterpartHoldCode = "wise_transfer_counterpart_conflict" | "wise_transfer_dimensions_unverified";
 
-export interface WiseCounterpartHold {
+interface WiseCounterpartHold {
   readonly code: WiseCounterpartHoldCode;
   readonly candidate_dimension_ids: number[];
   readonly evidence_transaction_ids: number[];
@@ -48,7 +48,7 @@ export interface WiseCounterpartHold {
   readonly contested?: true;
 }
 
-export type WiseCounterpartResolution =
+type WiseCounterpartResolution =
   | { readonly dim: number; readonly basis: WiseCounterpartBasis }
   | { readonly hold: WiseCounterpartHold };
 

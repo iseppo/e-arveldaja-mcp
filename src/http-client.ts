@@ -238,7 +238,6 @@ export class HttpClient {
 
   private static buildRecoveryAdvice(
     status: number,
-    method: HttpMethod,
     path: string,
   ): { recovery_hint?: string; next_actions?: Array<{ tool: string; args?: Record<string, unknown>; why: string }> } {
     switch (status) {
@@ -443,7 +442,7 @@ export class HttpClient {
           throw new HttpError(errorMessage, response.status, method, path, {
             upstream_detail: upstreamDetail,
             ...(upstreamNotFound ? { upstream_not_found: true } : {}),
-            ...HttpClient.buildRecoveryAdvice(upstreamNotFound ? 404 : response.status, method, path),
+            ...HttpClient.buildRecoveryAdvice(upstreamNotFound ? 404 : response.status, path),
           });
         }
 

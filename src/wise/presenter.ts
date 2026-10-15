@@ -69,7 +69,7 @@ export function digestMismatch() {
 
 /** A PlanStoreError (invalid/consumed/expired/domain/scope) surfaced as a
  * structured, non-mutating tool error carrying the exact store code. */
-export function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "message">) {
+function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "message">) {
   return toolError({
     error: error.message,
     category: error.code,
@@ -82,7 +82,7 @@ export function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "messa
 }
 
 /** A required-but-missing plan handle blocks execute before any work. */
-export function planHandleRequiredResult() {
+function planHandleRequiredResult() {
   return toolError({
     error: "A reviewed execution-plan handle from the Wise dry run is required to execute. The digest alone cannot execute; re-run the dry run and pass its plan_handle.",
     category: "plan_handle_required",
@@ -96,7 +96,7 @@ export function planHandleRequiredResult() {
 
 /** Any source/argument/live/command drift between the reviewed plan and the
  * re-derived plan stops execution with zero mutations. */
-export function planDriftResult(detail: string) {
+function planDriftResult(detail: string) {
   return toolError({
     error: `The reviewed Wise plan no longer matches the re-read source and current ledger: ${detail}`,
     category: "plan_drift",
@@ -112,7 +112,7 @@ export function planDriftResult(detail: string) {
 /** The operator's ownership approvals must equal the previewed unverified
  * transfer IDs exactly, in the presented order (extra/missing/reordered all
  * invalidate). This is a distinct, clearer signal than a digest mismatch. */
-export function ownershipReapprovalRequiredResult() {
+function ownershipReapprovalRequiredResult() {
   return toolError({
     error: "Wise ownership approvals must match the previewed unverified transfer IDs exactly, in the order presented. Extra, missing, or reordered approvals invalidate the plan — re-run the dry run, approve the enumerated IDs only, and use the new plan handle and digest.",
     category: "wise_transfer_ownership_reapproval_required",
@@ -127,7 +127,7 @@ export function ownershipReapprovalRequiredResult() {
 /** The Wise accounts_dimensions_id is not the dimension of a configured bank
  * account (unlinked, deleted or duplicated): refused before any write, on dry
  * run and execute alike. The id is not echoed (simple kind). */
-export function wiseDimensionNotBankAccountResult() {
+function wiseDimensionNotBankAccountResult() {
   return toolError({
     error: "The Wise accounts_dimensions_id is not the dimension of a bank account in e-arveldaja. Nothing was created. Link the Wise account as a bank account in e-arveldaja (bank account → account dimension), or pass the accounts_dimensions_id of the Wise bank account.",
     category: "wise_dimension_not_bank_account",
@@ -139,7 +139,7 @@ export function wiseDimensionNotBankAccountResult() {
   });
 }
 
-export function wiseClientNotFoundResult() {
+function wiseClientNotFoundResult() {
   return toolError({
     error: "Wise client not found — create a client named 'Wise' (or 'TransferWise') before importing with fee rows, otherwise every fee transaction is left unconfirmed and must be cleaned up manually.",
     retry: "never",
@@ -216,13 +216,13 @@ export interface WiseImportRenderData {
   interAccountResults: WiseInterAccountResult[];
   ownershipReviews: WiseTransferReview[];
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
+  /** Rows released by acknowledged_journal_holds (info only, not a review). */
+  acknowledgedHolds?: WiseAcknowledgedJournalHold[];
   /** Set when some transfer rows are held because their counterpart bank
    * account could not be determined (unresolved) or own-account evidence
    * contradicts the selected one (conflict). Info only: the other rows still
    * form the plan. Candidates are the other configured bank accounts, listed
    * neutrally; labels are raw upstream text. */
-  /** Rows released by acknowledged_journal_holds (info only, not a review). */
-  acknowledgedHolds?: WiseAcknowledgedJournalHold[];
   transferCounterpart?: {
     unresolved_row_count: number;
     conflict_row_count: number;
@@ -246,7 +246,7 @@ export type WiseImportExecution = WiseImportRenderData;
 
 /** Operator-facing text for transfer rows held for their counterpart.
  * Candidate labels are upstream bank-account names, so they are sandbox-wrapped here. */
-export function wiseTransferCounterpartMessage(info: NonNullable<WiseImportRenderData["transferCounterpart"]>): string {
+function wiseTransferCounterpartMessage(info: NonNullable<WiseImportRenderData["transferCounterpart"]>): string {
   const candidates = info.candidates
     .map(candidate => `${wrapUntrustedOcr(candidate.label) ?? candidate.label} (${candidate.accounts_dimensions_id})`)
     .join(", ");
@@ -518,7 +518,7 @@ function autoMatchWarning(entry: WiseSkippedEntry & { auto_match: NonNullable<Wi
  * omitted — the store forbids/does not sandbox them; the compact samples carry
  * the wrapped counterparty/reference instead.
  */
-export function buildWiseResultDetailItems(data: WiseImportRenderData): PublicOperationResultDetail[] {
+function buildWiseResultDetailItems(data: WiseImportRenderData): PublicOperationResultDetail[] {
   return data.created.map((row, index) => createPublicOperationResultDetail({
     i: index,
     status: row.status,
@@ -554,7 +554,7 @@ export function issueWiseResultHandle(
   }
 }
 
-export interface WiseCompactInput {
+interface WiseCompactInput {
   readonly mode: "DRY_RUN" | "EXECUTED";
   readonly data: WiseImportRenderData;
   /** Execute only: an operation-result handle bound to the consumed Wise plan. */

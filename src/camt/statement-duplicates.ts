@@ -8,15 +8,15 @@ export interface CamtStatementFingerprint {
   readonly index: number;
   readonly path: string;
   readonly modifiedAt: string;
-  /** Hex SHA-256 of the file bytes; undefined when the file was not read. */
-  readonly digest?: string;
+  /** Hex SHA-256 of the file bytes. */
+  readonly digest: string;
   /** The import's strict account identity plus statement currency; undefined
    * when the statement could not be analyzed for overlap. Never emitted. */
   readonly accountKey?: string;
   readonly period?: { readonly from: string; readonly to: string };
 }
 
-export interface CamtStatementDuplicateInfo {
+interface CamtStatementDuplicateInfo {
   readonly index: number;
   /** Set on a byte-identical copy of the kept file `duplicate_of`. */
   readonly duplicate_of?: number;
@@ -38,7 +38,6 @@ export function groupCamtStatementFiles(files: readonly CamtStatementFingerprint
 
   const byDigest = new Map<string, CamtStatementFingerprint[]>();
   for (const file of files) {
-    if (file.digest === undefined) continue;
     const group = byDigest.get(file.digest);
     if (group) group.push(file);
     else byDigest.set(file.digest, [file]);
@@ -57,7 +56,6 @@ export function groupCamtStatementFiles(files: readonly CamtStatementFingerprint
   for (const file of candidates) {
     for (const other of candidates) {
       if (other.index === file.index || other.accountKey !== file.accountKey) continue;
-      if (file.digest !== undefined && other.digest === file.digest) continue;
       if (file.period!.from <= other.period!.to && other.period!.from <= file.period!.to) {
         (info.get(file.index)!.overlaps_with ??= []).push({ index: other.index, from: other.period!.from, to: other.period!.to });
       }

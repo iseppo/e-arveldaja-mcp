@@ -96,7 +96,7 @@ import type {
 // bank dimension, receipt+transaction date filters, execution effect
 // (create vs create_and_confirm), every file's final supplier/booking
 // projection, and the live bank-transaction state the plan intended to link.
-export const RECEIPT_BATCH_PLAN_DOMAIN = "receipt_batch";
+const RECEIPT_BATCH_PLAN_DOMAIN = "receipt_batch";
 
 // ---------------------------------------------------------------------------
 // Mode resolution

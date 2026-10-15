@@ -21,7 +21,7 @@ import type { ReceiptBatchResult } from "../receipts/types.js";
 import type { UnmatchedAnalysisResult } from "../receipts/classification-operations.js";
 import type { InterAccountPreview } from "../banking/reconciliation/types.js";
 
-export interface AutopilotRecommendedStep {
+interface AutopilotRecommendedStep {
   step: number;
   tool: string;
   purpose: string;
@@ -62,9 +62,9 @@ export interface AutopilotPreparedInboxData {
  * - `pending_input`: an earlier import/receipt step was skipped (missing input,
  *   prerequisite, or credentials), so the ledger is incomplete until it runs.
  */
-export type AutopilotMaterializationState = "current" | "pending_imports" | "failed" | "pending_input";
+type AutopilotMaterializationState = "current" | "pending_imports" | "failed" | "pending_input";
 
-export interface AutopilotStepResult {
+interface AutopilotStepResult {
   step: number;
   tool: string;
   status: "completed" | "skipped" | "failed" | "deferred";
@@ -80,7 +80,7 @@ export interface AutopilotStepResult {
   materialization_state?: AutopilotMaterializationState;
 }
 
-export interface AutopilotFollowUp {
+interface AutopilotFollowUp {
   /**
    * Deterministic, resume-stable identifier for a resolvable review item (see
    * stableReviewId). Present on every follow-up that carries a resolver_input
@@ -126,7 +126,7 @@ function camtReviewMergeKey(fields: {
   });
 }
 
-export interface AutopilotReviewPage {
+interface AutopilotReviewPage {
   /**
    * Number of review items on this page (i.e. `needs_accountant_review.length`).
    * Each resolvable item carries an `id`; a few aggregate notices (e.g. a
@@ -142,7 +142,7 @@ export interface AutopilotReviewPage {
   complete: boolean;
 }
 
-export interface AccountingInboxDryRunPipelineResult {
+interface AccountingInboxDryRunPipelineResult {
   executed_step_count: number;
   skipped_step_count: number;
   executed_steps: AutopilotStepResult[];

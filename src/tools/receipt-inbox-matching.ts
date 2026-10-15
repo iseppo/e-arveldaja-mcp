@@ -7,7 +7,7 @@ import type { InvoiceDuplicateMatch, InvoiceNumberCandidate, TransactionMatchCan
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
 
-export interface TransactionMatchResult {
+interface TransactionMatchResult {
   candidate?: TransactionMatchCandidate;
   ambiguous: boolean;
   topConfidence?: number;

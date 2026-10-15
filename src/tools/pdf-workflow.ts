@@ -113,7 +113,7 @@ function parseVatRate(rateValue?: string): number | undefined {
   return Number.isFinite(rate) ? rate : undefined;
 }
 
-export interface ValidateInvoiceDataParams {
+interface ValidateInvoiceDataParams {
   total_net: number;
   total_vat: number;
   total_gross: number;
@@ -729,13 +729,13 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
   registerCreatePurchaseInvoiceFromPdfTool(server, api);
 }
 
-export interface BookingSuggestionParams {
+interface BookingSuggestionParams {
   clients_id: number;
   description?: string;
   limit?: number;
 }
 
-export interface BookingSuggestionPastInvoiceItem {
+interface BookingSuggestionPastInvoiceItem {
   custom_title?: string | null;
   cl_purchase_articles_id?: number | null;
   purchase_accounts_id?: number | null;
@@ -748,7 +748,7 @@ export interface BookingSuggestionPastInvoiceItem {
   reversed_vat_id?: number | null;
 }
 
-export interface BookingSuggestionPastInvoice {
+interface BookingSuggestionPastInvoice {
   id?: number;
   number?: string;
   date?: string;

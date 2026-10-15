@@ -139,7 +139,7 @@ function commandIdentity(row: WiseRow, action: string): string {
   return sha256(`${row.rowIndex}\0${action}\0${row.id}`);
 }
 
-export function projectUntrustedCommandText(
+function projectUntrustedCommandText(
   command: WiseImportCommand,
   field: string,
   text: string | null | undefined,
@@ -338,7 +338,6 @@ export interface WiseHoldCheckRow {
   readonly wise_id: string;
   readonly legs: { readonly main?: WiseHoldCheckLeg; readonly fee?: WiseHoldCheckLeg };
   readonly acknowledged_ids?: number[];
-  readonly counterpart_dimension_id?: number;
 }
 
 // Transactions.bank_account_name maxLength in the e-arveldaja API.
@@ -527,7 +526,7 @@ export interface WiseLeg {
   readonly amounts: readonly number[];
 }
 
-export function wiseMainLeg(row: WiseRow): WiseLeg | undefined {
+function wiseMainLeg(row: WiseRow): WiseLeg | undefined {
   const direction = sourceDirectionForWiseDirection(row.direction);
   if (!direction) return undefined;
   const amount = bookedAmountForWiseRow(row);
@@ -540,7 +539,7 @@ export function wiseMainLeg(row: WiseRow): WiseLeg | undefined {
   };
 }
 
-export function wiseFeeLeg(row: WiseRow): WiseLeg | undefined {
+function wiseFeeLeg(row: WiseRow): WiseLeg | undefined {
   const fee = bookedFeeAmountForWiseRow(row);
   if (!(fee > 0)) return undefined;
   return {
@@ -899,11 +898,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       : narrative;
     const desc = withWiseSourceDirection(cappedNarrative ? `${wiseIdTag} ${cappedNarrative}` : wiseIdTag, sourceDirection);
     const bankAccountName = counterpartyName?.slice(0, WISE_BANK_ACCOUNT_NAME_MAX_LENGTH);
-    const mainTagImported = seenWiseIds.has(wiseIdTag) || claimedMainLegs.has(row);
     // Only a WISE: identity proves the row is stored: an untagged lookalike
     // gets the wise_untagged_ledger_match advisory below, never a silent skip.
-    const mainAlreadyImported = mainTagImported;
-    let mainAvailableForFee = false;
+    const mainAlreadyImported = seenWiseIds.has(wiseIdTag) || claimedMainLegs.has(row);
 
     if (mainAlreadyImported) {
       skipped.push({
@@ -921,7 +918,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           approval_required: false,
         }));
       }
-      mainAvailableForFee = true;
     } else {
       const createPayload: TransactionCreatePayload = {
         accounts_dimensions_id,
@@ -979,18 +975,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       // planned rows into the duplicate set silently dropped the second one and
       // under-booked the account.
       seenWiseIds.add(wiseIdTag);
-      mainAvailableForFee = true;
     }
 
     if (fee > 0) {
-      if (!mainAvailableForFee) {
-        skipped.push({
-          wise_id: `FEE:${legId}`,
-          reason: "Skipped because main transaction was not created",
-        });
-        continue;
-      }
-
       const feeWiseIdTag = `WISE:FEE:${legId}`;
       const feeDesc = withWiseSourceDirection(`${feeWiseIdTag} Wise teenustasu`, "OUT");
       const feeCurrency = bookedFeeCurrencyForWiseRow(row, transactionCurrency);
@@ -1803,7 +1790,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ...(feeLeg ? { fee: { leg: feeLeg, coverage: [...feeCoverage].sort((l, r) => l - r) } } : {}),
         },
         ...(evidenceIds.length > 0 ? { acknowledged_ids: evidenceIds } : {}),
-        ...(decision.targetDimensionId !== undefined ? { counterpart_dimension_id: decision.targetDimensionId } : {}),
       });
       continue;
     }

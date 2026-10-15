@@ -62,7 +62,7 @@ export interface ReceiptBatchFileRefProjection {
   readonly folderPathOut: unknown;
 }
 
-export interface ReceiptBatchFullInput {
+interface ReceiptBatchFullInput {
   readonly result: ReceiptBatchResult;
   readonly accountsDimensionsId: number;
   readonly fileRef?: string;

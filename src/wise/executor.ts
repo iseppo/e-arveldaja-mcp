@@ -78,6 +78,7 @@ import type {
   WiseAcknowledgedJournalHold,
   WiseJournalizedTransferMapping,
   WiseRow,
+  WiseSkippedJarRow,
   WiseTransferDecision,
 } from "./types.js";
 import type { WiseImportRenderData } from "./presenter.js";
@@ -235,7 +236,7 @@ async function runWiseImport(
 
   // Filter rows
   let skippedJarCount = 0;
-  const skippedJarRows: Array<{ wise_id: string; reason: string; amount: number; date: string }> = [];
+  const skippedJarRows: WiseSkippedJarRow[] = [];
   const eligible = rows.filter(r => {
     if (r.status !== "COMPLETED") return false;
     if (normalizeWiseDirection(r.direction) === "NEUTRAL") return false;
@@ -588,9 +589,9 @@ async function runWiseImport(
     return { ok: false, failure: { kind: "digest_mismatch" } };
   }
 
-  for (let i = 0; i < eligible.length; i++) {
-    await reportProgress(i, eligible.length);
-  }
+  // Throttled: only the first in-window notification of a tight loop is ever
+  // emitted, so one call reports the same progress.
+  await reportProgress(0, eligible.length);
 
   const interAccountResults: WiseInterAccountResult[] = [];
 

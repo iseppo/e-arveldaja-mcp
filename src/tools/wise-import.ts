@@ -34,7 +34,6 @@ import {
 // Re-exported for the identity-only consumers that still import through this
 // module (e.g. wise-import.test). The definitions now live in the pure
 // ../wise/* modules.
-export { buildWiseTransactionSignature } from "../wise/preflight.js";
 export { createdTransactionMatchesApprovedPayload, WISE_PLAN_DOMAIN } from "../wise/projection.js";
 export type { TransactionCreatePayload } from "../wise/types.js";
 

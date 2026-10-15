@@ -39,7 +39,7 @@ import type {
 // operation/adapter layer, never here. No MCP, HTTP, filesystem, audit, or
 // environment module is imported.
 
-export function enrichWithDuplicates(
+function enrichWithDuplicates(
   parsed: CamtParseResult,
   ledgerTransactions: Transaction[],
   selectedDimensionId: number,
@@ -118,7 +118,7 @@ export function isCamtJournalReviewRow(row: CamtSkippedRow): boolean {
   return row.review_code !== undefined;
 }
 
-export interface CamtProjectionInput {
+interface CamtProjectionInput {
   readonly loaded: CamtParseResult;
   readonly accountsDimensionsId: number;
   readonly dateFrom: string | undefined;

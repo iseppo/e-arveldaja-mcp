@@ -124,7 +124,7 @@ interface CamtOverlapSummary {
 }
 
 /** Bounds the inbox CAMT hash/parse pass (actual bytes read). */
-export const CAMT_ANALYSIS_BUDGET = Object.freeze({ maxFiles: 40, maxBytes: 32 * 1024 * 1024 });
+const CAMT_ANALYSIS_BUDGET = Object.freeze({ maxFiles: 40, maxBytes: 32 * 1024 * 1024 });
 
 interface ReceiptFolderCandidate {
   path: string;
@@ -257,7 +257,7 @@ async function readFileSnippet(filePath: string, maxBytes = 4096): Promise<strin
   }
 }
 
-export interface WorkspaceScanResult {
+interface WorkspaceScanResult {
   files: ScannedFileInfo[];
   scanned_directories: number;
   inspected_entries: number;
@@ -446,7 +446,7 @@ export async function analyzeInboxCamtFiles(
   }
 
   const grouped = new Map(groupCamtStatementFiles(fingerprints).map(info => [info.index, info]));
-  const digests = new Map(fingerprints.map(fingerprint => [fingerprint.index, fingerprint.digest!]));
+  const digests = new Map(fingerprints.map(fingerprint => [fingerprint.index, fingerprint.digest]));
   const bindings = new Map<string, string>();
   let overlapLinks = 0;
   const files = camtFiles.map((file, index): InboxFileCandidate => {
@@ -1148,7 +1148,9 @@ function isReviewMachineEnum(key: string, value: string): boolean {
   }
 }
 
-function sandboxReviewFields(value: unknown, key?: string): unknown {
+// Exported for focused trust-boundary tests; public MCP responses call the
+// same projector.
+export function sandboxReviewFields(value: unknown, key?: string): unknown {
   if (typeof value === "string") {
     // Review payloads originate with a caller/import. Treat every string as
     // external text, not a perpetually incomplete field-name allowlist. The
@@ -1166,10 +1168,6 @@ function sandboxReviewFields(value: unknown, key?: string): unknown {
     sandboxReviewFields(child, childKey),
   ]));
 }
-
-// Exported for focused trust-boundary tests; public MCP responses call the
-// same projector below.
-export const sandboxReviewFieldsForOutput = sandboxReviewFields;
 
 function projectResolverInput(
   resolverInput: Record<string, unknown>,
@@ -1439,7 +1437,7 @@ const CAMT_DUPLICATE_PATCH_FIELDS = [
  * reference the kept row lacks. `cleanup_camt_possible_duplicate` is therefore
  * surfaced as an approval-required action, never auto-executed.
  */
-export function compareCamtDuplicateIdentity(
+function compareCamtDuplicateIdentity(
   kept: Transaction,
   candidate: Transaction,
   options?: { keptDirection: "incoming" | "outgoing" | undefined },

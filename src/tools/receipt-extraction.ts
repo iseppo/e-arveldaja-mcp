@@ -25,10 +25,10 @@ import { bankTransactionDirection } from "../bank-transaction-direction.js";
 // Regex constants
 // ---------------------------------------------------------------------------
 
-export const WEEKDAY_PREFIX_SOURCE =
+const WEEKDAY_PREFIX_SOURCE =
   String.raw`(?:(?:esmaspäev|teisipäev|kolmapäev|neljapäev|reede|laupäev|pühapäev|monday|tuesday|wednesday|thursday|friday|saturday|sunday),\s*)?`;
-export const TEXTUAL_MONTH_SOURCE = String.raw`[A-Za-zÀ-ž]{3,12}`;
-export const DATE_VALUE_SOURCE =
+const TEXTUAL_MONTH_SOURCE = String.raw`[A-Za-zÀ-ž]{3,12}`;
+const DATE_VALUE_SOURCE =
   String.raw`(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4}|\d{1,2}\.?\s+` +
   TEXTUAL_MONTH_SOURCE +
   String.raw`\s+\d{4}|` +
@@ -280,7 +280,7 @@ export interface ExtractedReceiptFields {
   total_gross_conflict?: boolean;
 }
 
-export interface TransactionGroupClassificationInput {
+interface TransactionGroupClassificationInput {
   normalized_counterparty: string;
   display_counterparty?: string;
   transactions: Array<Pick<Transaction, "type" | "amount" | "description" | "date" | "bank_subtype">>;
@@ -2063,7 +2063,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   };
 }
 
-function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata {
+export function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata {
   const textAmounts = extractAmountsFromTextWithMetadata(text);
   if (!textItems || textItems.length === 0) return textAmounts;
   const layoutAmounts = extractAmountsFromLayout(textItems);
@@ -2071,12 +2071,7 @@ function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTex
   return mergeLayoutAmounts(layoutAmounts, textAmounts);
 }
 
-export function extractAmounts(text: string): { total_net?: number; total_vat?: number; total_gross?: number; vat_explicit?: boolean } {
-  const { provenance: _provenance, ...amounts } = extractAmountsWithMetadata(text);
-  return amounts;
-}
-
-export interface ExtractReceiptFieldsOptions {
+interface ExtractReceiptFieldsOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
   /** The active company's own bank-account IBANs, excluded from supplier_iban. */
@@ -2310,7 +2305,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string): st
   return fileToken;
 }
 
-export interface SupplierNameExtractionResult {
+interface SupplierNameExtractionResult {
   name?: string;
   extraction_notes?: string[];
   layoutSupplierNameItem?: LayoutTextItem;
@@ -2343,14 +2338,6 @@ export function extractSupplierNameWithNotes(
     layoutSupplierNameRationale: "layout_marker",
     extraction_notes: [`Supplier name conflict: layout="${wrappedLayoutName}" text="${wrappedTextName}" — using layout result`],
   };
-}
-
-export function extractSupplierName(
-  text: string,
-  fallbackFileName: string,
-  textItems?: readonly LayoutTextItem[],
-): string | undefined {
-  return extractSupplierNameWithNotes(text, fallbackFileName, textItems).name;
 }
 
 // Invoice-number candidates must carry a digit and must not be a real
@@ -2672,13 +2659,6 @@ export function getAutoBookedVatConfig(
   return { vat_rate_dropdown: "-" };
 }
 
-export function getAutoBookedVatRateDropdown(
-  _category?: TransactionClassificationCategory,
-  _supplierCountry?: string | null,
-): string {
-  return getAutoBookedVatConfig().vat_rate_dropdown ?? "-";
-}
-
 export function getBookingSuggestionVatConfig(
   bookingSuggestion?: Pick<BookingSuggestion, "item"> | null,
 ): Pick<PurchaseInvoiceItem, "vat_rate_dropdown" | "reversed_vat_id"> | undefined {
@@ -2929,7 +2909,7 @@ const PAYMENT_RECEIPT_HEADER_RE = /^[\s]*(?:receipt|kviitung|quittung|reçu|recu
  * invoice number. Mere appearance of the word "Receipt" anywhere in body
  * text is not enough — many invoices say "this serves as a receipt of …".
  */
-export function looksLikePaymentReceiptForInvoice(text: string, fileName: string): boolean {
+function looksLikePaymentReceiptForInvoice(text: string, fileName: string): boolean {
   const hasIndicators = PAYMENT_RECEIPT_INDICATORS_RE.test(text);
   const hasInvoiceReference = PAYMENT_RECEIPT_INVOICE_REFERENCE_RE.test(text);
   if (!hasIndicators || !hasInvoiceReference) return false;

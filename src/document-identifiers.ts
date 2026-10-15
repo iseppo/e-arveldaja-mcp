@@ -113,10 +113,10 @@ export interface RejectedCandidate {
   reason: string;
 }
 
-export type RegCodeRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
-export type VatNoRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+type RegCodeRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+type VatNoRationale = "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
 
-export interface ExtractedIdentifiers {
+interface ExtractedIdentifiers {
   reg_code?: string;
   vat_no?: string;
   iban?: string;
@@ -132,7 +132,7 @@ export interface ExtractedIdentifiers {
   rejected_candidates: RejectedCandidate[];
 }
 
-export interface ExtractIdentifiersOptions {
+interface ExtractIdentifiersOptions {
   excludeVat?: string | readonly string[];
   excludeRegCode?: string | readonly string[];
   /** The active company's own IBANs (bank accounts), never the supplier IBAN. */
@@ -164,7 +164,7 @@ export interface LayoutTextItem {
 // Single-value extractors (kept for backwards compatibility)
 // ---------------------------------------------------------------------------
 
-export interface ExtractVatNumberOptions {
+interface ExtractVatNumberOptions {
   /**
    * VAT number(s) that must NOT be returned. Used to keep the company's own
    * VAT from being resolved as a supplier when an invoice prints only the
@@ -272,7 +272,7 @@ function normalizeIbanForCompare(value: string): string {
   return value.replace(/\s+/g, "").toUpperCase();
 }
 
-export interface ExtractIbanOptions {
+interface ExtractIbanOptions {
   /** The active company's own IBANs — never returned as the supplier IBAN. */
   exclude?: string | readonly string[];
 }
@@ -337,10 +337,10 @@ export function extractReferenceNumber(text: string): string | undefined {
 // Coordinate-based layout classification (Option C hybrid)
 // ---------------------------------------------------------------------------
 
-export const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
+const SUPPLIER_MARKER_RE = /\b(tarnija|m[üu][üu]ja|seller|müüja)\b/i;
 // `saaja` alone is buyer-side (e.g. "arve saaja"), but `makse saaja` (payee)
 // is supplier-side. Use a negative lookbehind to exclude `makse saaja`.
-export const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
+const BUYER_MARKER_RE = /(?<!makse\s)\b(saaja|maksja|arve\s*saaja|bill\s*to|invoice\s*to|ostja|klient|client|buyer|recipient|vastuv[õo]tja|receiver)\b/i;
 
 const COLUMN_PROXIMITY_THRESHOLD = 50;
 
@@ -489,7 +489,6 @@ interface CandidateOccurrenceClassification {
 function classifyCandidateOccurrence(
   textItems: readonly LayoutTextItem[],
   value: string,
-  kind: CandidatePosition["kind"],
   markers: MarkerPosition[],
   selectedOccurrenceIndex?: number,
 ): CandidateOccurrenceClassification {
@@ -513,7 +512,6 @@ function classifyCandidateOccurrence(
 function hasUnambiguousSupplierOccurrence(
   textItems: readonly LayoutTextItem[],
   value: string,
-  kind: CandidatePosition["kind"],
   markers: MarkerPosition[],
 ): boolean {
   const sides = findAllItemsForCandidate(textItems, value).map(item =>
@@ -833,13 +831,13 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
   const rejected = "coordinate_rejected" as Rationale;
 
   if (value) {
-    const { side, item } = classifyCandidateOccurrence(textItems, value, kind, markers, selectedOccurrenceIndex);
+    const { side, item } = classifyCandidateOccurrence(textItems, value, markers, selectedOccurrenceIndex);
     if (side === "buyer") {
       const supplierAlt = candidates.find(candidate => {
         if (candidate === value) return false;
         if (exclude.has(candidate)) return false;
         if (!isValid(candidate)) return false;
-        return hasUnambiguousSupplierOccurrence(textItems, candidate, kind, markers);
+        return hasUnambiguousSupplierOccurrence(textItems, candidate, markers);
       });
       if (supplierAlt) {
         return { value: supplierAlt, rationale: confirmed };
@@ -869,7 +867,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
     const supplierCandidate = candidates.find(candidate => {
       if (exclude.has(candidate)) return false;
       if (!isValid(candidate)) return false;
-      return hasUnambiguousSupplierOccurrence(textItems, candidate, kind, markers);
+      return hasUnambiguousSupplierOccurrence(textItems, candidate, markers);
     });
     if (supplierCandidate) {
       return { value: supplierCandidate, rationale: confirmed };

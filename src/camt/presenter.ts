@@ -111,7 +111,7 @@ export function camtPossibleDuplicateRow(descriptor: CamtCreateDescriptor, newAp
   };
 }
 
-export interface CamtImportRenderInput {
+interface CamtImportRenderInput {
   mode: "DRY_RUN" | "EXECUTED";
   projection: CamtImportProjection;
   results: ReturnType<typeof camtResultRow>[];
@@ -285,7 +285,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
  * store forbids/does not sandbox them; the compact samples carry the wrapped
  * counterparty instead.
  */
-export function buildCamtResultDetailItems(data: CamtImportRenderData): PublicOperationResultDetail[] {
+function buildCamtResultDetailItems(data: CamtImportRenderData): PublicOperationResultDetail[] {
   return data.results.map((row, index) => createPublicOperationResultDetail({
     i: index,
     status: row.status,
@@ -324,7 +324,7 @@ export function issueCamtResultHandle(
   }
 }
 
-export interface CamtCompactInput {
+interface CamtCompactInput {
   readonly mode: "DRY_RUN" | "EXECUTED";
   readonly data: CamtImportRenderData;
   /** Execute only: an operation-result handle bound to the consumed CAMT plan. */

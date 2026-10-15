@@ -6,7 +6,7 @@ import {
   extractDates,
   extractInvoiceNumber,
   toIsoDate,
-  extractAmounts,
+  extractAmountsWithMetadata,
   buildKeywordSuggestion,
   computeMinOcrConfidence,
   computeTermDays,
@@ -21,10 +21,9 @@ import {
   deriveAutoBookedNetAmount,
   deriveAutoBookedVatPrice,
   getAutoBookedVatConfig,
-  getAutoBookedVatRateDropdown,
   extractReceiptFieldsFromText,
   inferSupplierCountry,
-  extractSupplierName,
+  extractSupplierNameWithNotes,
   classifyLayoutAmountLabel,
   extractAmountsFromLine,
   extractAmountsFromLayout,
@@ -36,6 +35,15 @@ import {
 } from "./receipt-extraction.js";
 import type { ExtractedAmountsWithMetadata } from "./receipt-extraction.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+
+function extractAmounts(text: string): Omit<ExtractedAmountsWithMetadata, "provenance"> {
+  const { provenance: _provenance, ...amounts } = extractAmountsWithMetadata(text);
+  return amounts;
+}
+
+function extractSupplierName(text: string, fallbackFileName: string, textItems?: readonly LayoutTextItem[]): string | undefined {
+  return extractSupplierNameWithNotes(text, fallbackFileName, textItems).name;
+}
 
 describe("bank transaction source direction classification", () => {
   it("classifies API type C with signed incoming metadata as revenue, not an expense", () => {
@@ -976,7 +984,6 @@ describe("automatic VAT fallback default", () => {
   it("defaults unmatched auto-bookings to no VAT and keeps gross as net", () => {
     const vatConfig = getAutoBookedVatConfig();
     expect(vatConfig).toEqual({ vat_rate_dropdown: "-" });
-    expect(getAutoBookedVatRateDropdown()).toBe("-");
     expect(deriveAutoBookedNetAmount(100, vatConfig)).toBe(100);
     expect(deriveAutoBookedVatPrice(100, vatConfig)).toBe(0);
   });

@@ -351,9 +351,10 @@ legitimate identical payments are possible).
   **before** any trailing `[source_direction=…]` / `[e-arveldaja-mcp:camt …]`
   marker so the end-anchored direction/metadata regexes still match (a
   marker-only description gets the ref on its own line to preserve the camt
-  `(?:^|\n)` anchor). Wise dedup canonicalizes the ref *inside*
-  `buildWiseTransactionSignature`, so an over-cap Wise row still matches its
-  previously-stored truncated transaction (no double import).
+  `(?:^|\n)` anchor). Wise dedup keys on the `WISE:{id}` description tag, not
+  the reference, and the execute-time `createdTransactionMatchesApprovedPayload`
+  mirrors the canonicalization, so an over-cap Wise row neither double-imports
+  nor fails its stored-row precondition.
 - **`create_journal` document_number advisory:** when `document_number` is set,
   the tool scans existing live journals for the same reference and warns
   "source reference already used by journal N" (creation still proceeds; a

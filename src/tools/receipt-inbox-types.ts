@@ -145,9 +145,6 @@ export interface ReceiptBatchFileResult {
   review_guidance?: ReviewGuidance;
 }
 
-export type ReceiptInboxToolResult = Promise<{ content: Array<{ text: string }> }>;
-export type ReceiptInboxToolHandler = (args: Record<string, unknown>) => ReceiptInboxToolResult;
-
 export interface ReceiptBatchSummary {
   execution_mode: ReceiptBatchExecutionMode;
   legacy_execute_create: boolean;

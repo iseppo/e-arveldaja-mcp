@@ -560,7 +560,7 @@ export interface CamtExecuteInput {
   readonly snapshot?: FileInputSnapshot;
 }
 
-export type CamtExecuteResult =
+type CamtExecuteResult =
   | { readonly ok: true; readonly execution: CamtImportExecution }
   | { readonly ok: false; readonly code: string; readonly message: string };
 
