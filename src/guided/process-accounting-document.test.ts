@@ -73,7 +73,7 @@ describe("process_accounting_document", () => {
     invoice_date: "2026-06-15",
     journal_date: "2026-06-15",
     term_days: 14,
-    items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
+    items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10, vat_rate_dropdown: "20" }],
     vat_price: 2,
     gross_price: 12,
   });
@@ -122,6 +122,30 @@ describe("process_accounting_document", () => {
     expect(text).not.toContain("resolve_supplier");
     expect(text).not.toContain("create_purchase_invoice_from_pdf");
     expect(text).not.toContain("parseMcpResponse");
+  });
+
+  it("booking-binding prepare refuses totals createAndSetTotals would refuse (purchase_totals_mismatch, no handle)", async () => {
+    const { path } = writeTempPdf();
+    const { handler, api } = setup({
+      clientRows: [supplier()],
+      purchaseInvoiceRows: [],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+    });
+    const result = await handler({
+      mode: "prepare",
+      file_path: path,
+      ...bookingArgs(),
+      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 180, vat_rate_dropdown: "24" }],
+      vat_price: 48,
+      gross_price: 248,
+    });
+    expect(result.isError).toBe(true);
+    const payload = parse(result);
+    expect(payload.category).toBe("purchase_totals_mismatch");
+    expect(payload.mutation_occurred).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain("plan_handle");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("booking-binding prepare returns ready_for_approval with a plan handle and the bound booking_review model", async () => {

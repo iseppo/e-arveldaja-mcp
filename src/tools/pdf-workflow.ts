@@ -10,7 +10,7 @@ import { toMcpJson, wrapUntrustedOcr, capUntrustedText } from "../mcp-json.js";
 import { desandboxAllStrings, desandboxText, renderExternalEntity, sandboxExternalText } from "../external-text-renderer.js";
 import { type ApiContext, isCompanyVatRegistered, parseJsonObjectArray, parsePurchaseInvoiceItems, jsonObjectArrayInput, coerceId, tagNotes } from "./crud-tools.js";
 import type { Client, PurchaseInvoice, CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../types/api.js";
-import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
+import { InvoiceCreationError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { contentMatchesExtension, resolveFileInput, sanitizeUploadFileName } from "../file-validation.js";
 import { applyPurchaseVatDefaultsAndValidateDimensions, getPurchaseArticlesWithVat, refuseNonVatItemsWithVatFields } from "./purchase-vat-defaults.js";
 import { detectDuplicatePurchaseInvoice } from "./document-audit.js";
@@ -1063,6 +1063,33 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         });
       }
 
+      const invoiceData: CreatePurchaseInvoiceData = {
+        clients_id: params.supplier_client_id,
+        client_name: supplierName,
+        number: params.invoice_number,
+        create_date: params.invoice_date,
+        journal_date: params.journal_date,
+        term_days: params.term_days,
+        cl_currencies_id: currencyCode,
+        currency_rate: params.currency_rate,
+        base_net_price: params.base_net_price,
+        base_vat_price: params.base_vat_price,
+        base_gross_price: params.base_gross_price,
+        liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
+        bank_ref_number: params.ref_number,
+        bank_account_no: params.bank_account_no,
+        notes: tagNotes(params.notes),
+        items,
+      };
+
+      // createAndSetTotals' own totals rules, on predicted item amounts, before
+      // the duplicate scans and any write: totals the API would refuse after
+      // create are refused here with zero writes.
+      const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, params.vat_price, params.gross_price, isVatReg);
+      if (!totalsPreview.ok) {
+        return toolError({ error: totalsPreview.message, category: totalsPreview.code, retry: "never" });
+      }
+
       // Exact live supplier + invoice-number duplicate → refuse before any write.
       // Uncached: the 120 s list cache does not see invoices booked elsewhere.
       api.purchaseInvoices.invalidateListCache();
@@ -1115,25 +1142,6 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
           next_action: `Verify journal(s) ${journalIds.join(", ")} before creating this purchase invoice, or retry without block_on_duplicate to proceed with an advisory warning.`,
         });
       }
-
-      const invoiceData: CreatePurchaseInvoiceData = {
-        clients_id: params.supplier_client_id,
-        client_name: supplierName,
-        number: params.invoice_number,
-        create_date: params.invoice_date,
-        journal_date: params.journal_date,
-        term_days: params.term_days,
-        cl_currencies_id: currencyCode,
-        currency_rate: params.currency_rate,
-        base_net_price: params.base_net_price,
-        base_vat_price: params.base_vat_price,
-        base_gross_price: params.base_gross_price,
-        liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
-        bank_ref_number: params.ref_number,
-        bank_account_no: params.bank_account_no,
-        notes: tagNotes(params.notes),
-        items,
-      };
 
       let result;
       try {

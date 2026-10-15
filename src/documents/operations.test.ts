@@ -234,7 +234,9 @@ describe("AccountingDocumentOperations.create", () => {
     invoiceDate: "2026-06-15",
     journalDate: "2026-06-15",
     termDays: 14,
-    items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
+    // The item states its rate so the pre-create totals check
+    // (previewPurchaseInvoiceTotals) predicts the reviewed VAT 2.
+    items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10, vat_rate_dropdown: "20" }],
     vatPrice: 2,
     grossPrice: 12,
   });
@@ -303,10 +305,52 @@ describe("AccountingDocumentOperations.create", () => {
     expectNoWrites(api);
   });
 
+  it.each([
+    { label: "item 0 at 24% with V 100 / G 100", net: 0, vatPrice: 100, grossPrice: 100 },
+    { label: "item 180 at 24% with V 48 / G 248", net: 180, vatPrice: 48, grossPrice: 248 },
+  ])("prepare refuses $label (createAndSetTotals' totals rules) with no plan handle and zero writes", async ({ net, vatPrice, grossPrice }) => {
+    const { path, api, ops } = createSetup();
+    const outcome = await ops.prepare({
+      source: { file_path: path },
+      booking: {
+        ...bookingFields(),
+        items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: net, vat_rate_dropdown: "24" }],
+        vatPrice,
+        grossPrice,
+      },
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("purchase_totals_mismatch");
+    expect(outcome.error.retry).toBe("never");
+    expectNoWrites(api);
+  });
+
+  it("create refuses out-of-rule totals inside the recomputed model, before the drift compare, with zero writes", async () => {
+    // The check does not depend on the stored plan, so a plan minted before
+    // the check existed cannot carry such totals into a create either.
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const outcome = await ops.create({
+      ...baseCreateInput(path, sha256),
+      planHandle: handle,
+      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 0, vat_rate_dropdown: "24" }],
+      vatPrice: 100,
+      grossPrice: 100,
+    });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("purchase_totals_mismatch");
+    expectNoWrites(api);
+    expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
+  });
+
   it("accepts a non-VAT company's item without VAT fields", async () => {
     const { path, api, ops } = createSetup();
     api.readonly.getVatInfo = vi.fn().mockResolvedValue({ vat_number: null });
-    await prepareBookingHandle(ops, path);
+    await prepareBookingHandle(ops, path, {
+      items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10 }],
+    });
   });
 
   it("blocks prepare (no plan handle) when the reviewed supplier+number already exists as a live invoice (finding 7)", async () => {
@@ -537,9 +581,12 @@ describe("AccountingDocumentOperations.create", () => {
     ["invoice_number", { invoiceNumber: "INV-EVIL" }],
     ["invoice_date", { invoiceDate: "2026-06-20" }],
     ["journal_date", { journalDate: "2026-06-20" }],
-    ["item account", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5900, total_net_price: 10 }] }],
-    ["item amount", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 999 }] }],
-    ["vat_price", { vatPrice: 0 }],
+    // Drifted values stay within the totals rounding rules so the create
+    // reaches the drift compare (an out-of-rule total is refused earlier,
+    // also with zero mutation).
+    ["item account", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5900, total_net_price: 10, vat_rate_dropdown: "20" }] }],
+    ["item amount", { items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 10.01, vat_rate_dropdown: "20" }] }],
+    ["vat_price", { vatPrice: 2.01 }],
     ["gross_price", { grossPrice: 999 }],
     ["base_gross_price", { baseGrossPrice: 55 }],
     ["liability account", { liabilityAccountsId: 2210 }],

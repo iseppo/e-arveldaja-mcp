@@ -155,3 +155,47 @@ describe("receipt inbox booking — due date before invoice date (MINOR)", () =>
     expect(result.notes.join(" ")).toMatch(/precedes invoice date/);
   });
 });
+
+describe("receipt inbox booking — receipt source amount gate (live smoke 1d50fd5)", () => {
+  const sources = [
+    { label: "0 / 100 / 100", amounts: { total_net: 0, total_vat: 100, total_gross: 100 }, code: "net_nonpositive_with_vat" },
+    { label: "-3.11 / 13.1 / 9.99", amounts: { total_net: -3.11, total_vat: 13.1, total_gross: 9.99 }, code: "net_negative" },
+  ];
+  for (const source of sources) {
+    for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+      for (const isVatRegistered of [true, false]) {
+        it(`${source.label} × ${mode} × ${isVatRegistered ? "VAT-registered" : "not VAT-registered"} → needs_review, no create`, async () => {
+          const { api, createAndSetTotals } = makeApi();
+          const result = await createAndMaybeMatchPurchaseInvoice(
+            api, { ...context, isVatRegistered }, snapshot(), extracted(source.amounts), supplierResolution,
+            { source: "keyword_match", item: { cl_purchase_articles_id: 1, purchase_accounts_id: 5230, custom_title: "x", amount: 1 } } as any,
+            [], mode, false, new Set(),
+          );
+          expect(result.status).toBe("needs_review");
+          expect(result.notes.join(" ")).toContain(source.code);
+          expect(createAndSetTotals).not.toHaveBeenCalled();
+          expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+        });
+      }
+    }
+  }
+
+  it("holds a row whose extraction recorded explicit amount conflicts even when the final totals reconcile", async () => {
+    const { result, createAndSetTotals } = await run(
+      extracted({ total_net: 200, total_vat: 48, total_gross: 248, amount_consistency_issues: ["explicit_trio_mismatch"] }),
+      {},
+    );
+    expect(result.status).toBe("needs_review");
+    expect(result.notes.join(" ")).toContain("explicit_trio_mismatch");
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("clean source totals whose synthetic item fails the totals preview are held, in the dry run too", async () => {
+    for (const mode of ["dry_run", "create"] as const) {
+      const { result, createAndSetTotals } = await run(extracted({ total_vat: 24.02, total_gross: 124.02 }), {}, mode);
+      expect(result.status).toBe("needs_review");
+      expect(result.notes.join(" ")).toContain("purchase_totals_mismatch");
+      expect(createAndSetTotals).not.toHaveBeenCalled();
+    }
+  });
+});

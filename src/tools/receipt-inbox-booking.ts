@@ -7,11 +7,12 @@ import { roundMoney } from "../money.js";
 import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn, vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
 import { bankTransactionDirection } from "../bank-transaction-direction.js";
-import type { PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
+import type { CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
-import { computeTermDays, snapVatRate } from "./receipt-extraction.js";
+import { amountConsistencyIssues, computeTermDays, snapVatRate } from "./receipt-extraction.js";
+import { previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import type {
@@ -132,6 +133,75 @@ export function resolveReceiptVatRateDropdown(
   return { rate: String(snapped) };
 }
 
+/**
+ * The pure amount checks of an automatic receipt booking, run before ANY write
+ * (the batch flow calls it before materializing a supplier as well):
+ * - the receipt SOURCE gate: extracted amount_consistency_issues, or
+ *   amountConsistencyIssues of the final totals, hold the row in every mode and
+ *   for both VAT-registration states;
+ * - the VAT-rate review for a VAT-registered company;
+ * - createAndSetTotals' own totals rules on the synthetic item
+ *   (previewPurchaseInvoiceTotals).
+ * Notes carry codes and numbers only (no untrusted text).
+ */
+export function prepareReceiptInvoiceItem(
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+  extracted: ExtractedReceiptFields,
+  bookingSuggestion: BookingSuggestion,
+  description: string,
+): { ok: true; item: PurchaseInvoiceItem; grossTotal: number } | { ok: false; notes: string[] } {
+  const itemNetAmount = extracted.total_net
+    ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
+      ? roundMoney(extracted.total_gross - extracted.total_vat)
+      : undefined);
+  if (itemNetAmount === undefined || extracted.total_gross === undefined) {
+    return { ok: false, notes: ["Could not derive reliable net/gross totals for invoice creation."] };
+  }
+
+  const vatRate = resolveReceiptVatRateDropdown(extracted, itemNetAmount, bookingSuggestion.item);
+  const sourceIssues = [...new Set([
+    ...(extracted.amount_consistency_issues ?? []),
+    ...amountConsistencyIssues({ ...extracted, total_net: itemNetAmount }),
+  ])];
+  if (sourceIssues.length > 0) {
+    return {
+      ok: false,
+      notes: [
+        `Held: the extracted amounts are inconsistent (${sourceIssues.join(", ")}; net ${itemNetAmount}, ` +
+        `VAT ${extracted.total_vat ?? "none"}, gross ${extracted.total_gross}). Verify the totals and book this document ` +
+        "with process_accounting_document.",
+        ...(vatRate.review ? [vatRate.review] : []),
+      ],
+    };
+  }
+
+  if (vatRate.review && context.isVatRegistered) {
+    return { ok: false, notes: [vatRate.review] };
+  }
+
+  const item = buildSyntheticItem(
+    bookingSuggestion,
+    description,
+    itemNetAmount,
+    context.purchaseArticlesWithVat,
+    context.isVatRegistered,
+    vatRate.rate,
+  );
+
+  // Only an EUR receipt reaches createAndSetTotals (a non-EUR one is held
+  // before create), so the preview is for EUR.
+  const totalsPreview = previewPurchaseInvoiceTotals(
+    { items: [item], cl_currencies_id: "EUR" } as CreatePurchaseInvoiceData,
+    extracted.total_vat,
+    extracted.total_gross,
+    context.isVatRegistered,
+  );
+  if (!totalsPreview.ok) {
+    return { ok: false, notes: [`Held (${totalsPreview.code}): ${totalsPreview.message}`] };
+  }
+  return { ok: true, item, grossTotal: extracted.total_gross };
+}
+
 export async function createAndMaybeMatchPurchaseInvoice(
   api: ApiContext,
   context: ReceiptProcessingContext,
@@ -174,33 +244,21 @@ export async function createAndMaybeMatchPurchaseInvoice(
     return { notes, status: "needs_review" };
   }
 
-  const itemNetAmount = extracted.total_net
-    ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
-      ? roundMoney(extracted.total_gross - extracted.total_vat)
-      : undefined);
-  if (itemNetAmount === undefined || extracted.total_gross === undefined) {
-    notes.push("Could not derive reliable net/gross totals for invoice creation.");
-    return { notes, status: "needs_review" };
-  }
-
   if (extracted.due_date && extracted.due_date < extracted.invoice_date) {
     notes.push(`Due date ${extracted.due_date} precedes invoice date ${extracted.invoice_date}; payment term set to 0 days — verify the dates.`);
   }
 
-  const vatRate = resolveReceiptVatRateDropdown(extracted, itemNetAmount, bookingSuggestion.item);
-  if (vatRate.review && context.isVatRegistered) {
-    notes.push(vatRate.review);
-    return { notes, status: "needs_review" };
-  }
-
-  const item = buildSyntheticItem(
+  const prepared = prepareReceiptInvoiceItem(
+    context,
+    extracted,
     bookingSuggestion,
     extracted.description ?? `Expense from ${supplierName}`,
-    itemNetAmount,
-    context.purchaseArticlesWithVat,
-    context.isVatRegistered,
-    vatRate.rate,
   );
+  if (!prepared.ok) {
+    notes.push(...prepared.notes);
+    return { notes, status: "needs_review" };
+  }
+  const item = prepared.item;
 
   const invoiceDraft: InvoiceSummaryForMatching = {
     clients_id: supplierId,
@@ -220,7 +278,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   // Advisory-only in both modes: folded into `notes` (the result carries no
   // separate warnings field), never blocks. The batch caller invalidates the
   // journal cache once before an execute run, so the execute scan is live.
-  const grossTotal = extracted.total_gross;
+  const grossTotal = prepared.grossTotal;
   const invoiceDate = extracted.invoice_date;
   const appendIntakeDuplicateNotes = async (): Promise<void> => {
     const duplicateScan = await checkIntakeCashDuplicates(api, {

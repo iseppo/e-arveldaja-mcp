@@ -40,7 +40,7 @@ import {
 } from "../bank-posting-duplicate-guard.js";
 import { applyPurchaseVatDefaultsAndValidateDimensions, collectNonVatItemErrors, getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
 import { isCompanyVatRegistered, parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
-import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
+import { InvoiceCreationError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
@@ -240,6 +240,12 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       notes: tagNotes(notes),
       items,
     };
+
+    // createAndSetTotals' own totals rules, on predicted item amounts, before
+    // the fingerprint: prepare refuses, and so does a create whose stored plan
+    // predates this check (create recomputes this model before any write).
+    const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg);
+    if (!totalsPreview.ok) return fail(totalsPreview.code, totalsPreview.message, "never");
 
     // Every material write value is bound: source identity, supplier id +
     // canonical name, number, dates, term, EFFECTIVE items (accounts,

@@ -50,7 +50,7 @@ import {
 } from "../tools/receipt-inbox-files.js";
 import { findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
-import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
+import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
@@ -596,6 +596,24 @@ async function processSingleReceipt(
       notes.push(
         `Auto-create ${tense}: confidence is ${preCreateSummary.confidence} (${creationGate.reason}). Manual review required before booking or confirming (#19).`,
       );
+      return buildNeedsReviewResult(file, classification, extracted, preCreateSummary, notes, {
+        supplier_resolution: supplierResolution,
+        booking_suggestion: bookingSuggestion,
+      });
+    }
+
+    // The pure amount checks of the booking (source gate, VAT-rate review,
+    // createAndSetTotals' totals rules) run BEFORE the supplier is
+    // materialized, so a receipt they hold causes no write of any kind.
+    // createAndMaybeMatchPurchaseInvoice repeats them before its own create.
+    const preparedAmounts = prepareReceiptInvoiceItem(
+      context,
+      extracted,
+      bookingSuggestion,
+      extracted.description ?? "Receipt expense",
+    );
+    if (!preparedAmounts.ok) {
+      notes.push(...preparedAmounts.notes);
       return buildNeedsReviewResult(file, classification, extracted, preCreateSummary, notes, {
         supplier_resolution: supplierResolution,
         booking_suggestion: bookingSuggestion,

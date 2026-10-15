@@ -3,6 +3,7 @@ import { readFile, readdir, realpath, stat } from "fs/promises";
 import { getAllowedRoots, resolveFilePath, validateFilePath } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import {
+  buildKeywordSuggestion,
   classifyReceiptDocument,
   extractReceiptFieldsFromText,
   hasAutoBookableReceiptFields,
@@ -70,13 +71,17 @@ vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
 }));
 
-vi.mock("../tools/receipt-extraction.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../tools/receipt-extraction.js")>()),
+vi.mock("../tools/receipt-extraction.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/receipt-extraction.js")>();
+  return {
+  ...actual,
+  buildKeywordSuggestion: vi.fn(actual.buildKeywordSuggestion),
   classifyReceiptDocument: vi.fn(),
   extractReceiptFieldsFromText: vi.fn(),
   hasAutoBookableReceiptFields: vi.fn(),
   suggestBookingInternal: vi.fn(),
-}));
+  };
+});
 
 vi.mock("../tools/supplier-resolution.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../tools/supplier-resolution.js")>()),
@@ -742,5 +747,100 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     if (!outcome.ok) throw new Error("runBatch failed");
     expect(outcome.value.results[0]!.status).toBe("skipped_duplicate");
     expect(outcome.value.results[0]!.duplicate_candidates).toBeUndefined();
+  });
+});
+
+describe("receipt batch — receipt source amount gate (live smoke 1d50fd5)", () => {
+  function primeAmounts(amounts: { total_net: number; total_vat: number; total_gross: number }): void {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Supplier OÜ",
+      invoice_number: "INV-1",
+      invoice_date: "2026-03-20",
+      due_date: "2026-03-20",
+      ...amounts,
+      currency: "EUR",
+      description: "Service",
+      raw_text: "ignored",
+    } as never);
+  }
+
+  async function runMode(api: never, mode: "dry_run" | "create" | "create_and_confirm") {
+    const ops = makeOperations(api);
+    if (mode === "dry_run") {
+      const outcome = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+      if (!outcome.ok) throw new Error("runBatch failed");
+      return outcome.value.results[0]!;
+    }
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    return outcome.value.results[0]!;
+  }
+
+  const sources = [
+    { label: "0 / 100 / 100", amounts: { total_net: 0, total_vat: 100, total_gross: 100 }, code: "net_nonpositive_with_vat" },
+    { label: "-3.11 / 13.1 / 9.99", amounts: { total_net: -3.11, total_vat: 13.1, total_gross: 9.99 }, code: "net_negative" },
+  ];
+  for (const source of sources) {
+    for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+      for (const vatRegistered of [true, false]) {
+        it(`${source.label} × ${mode} × ${vatRegistered ? "VAT-registered" : "not VAT-registered"} → needs_review, no create`, async () => {
+          primeAmounts(source.amounts);
+          const { api, spies } = makeApi();
+          if (!vatRegistered) {
+            (api as unknown as { readonly: Record<string, ReturnType<typeof vi.fn>> }).readonly.getVatInfo!
+              .mockResolvedValue({ vat_number: null });
+          }
+          const result = await runMode(api, mode);
+          expect(result.status).toBe("needs_review");
+          expect(result.notes.join(" ")).toContain(source.code);
+          expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+          expect(spies.uploadDocument).not.toHaveBeenCalled();
+        });
+      }
+    }
+  }
+
+  it("clean source totals whose synthetic item fails the totals preview are held in the dry run too", async () => {
+    // 100 at 24% with VAT 24.02 snaps to 24% (tolerance 0.05) and reconciles,
+    // but the residue 0.02 exceeds createAndSetTotals' 0.01 per-item tolerance.
+    primeAmounts({ total_net: 100, total_vat: 24.02, total_gross: 124.02 });
+    const { api, spies } = makeApi();
+    const result = await runMode(api, "dry_run");
+    expect(result.status).toBe("needs_review");
+    expect(result.notes.join(" ")).toContain("purchase_totals_mismatch");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("an inconsistent receipt from a new supplier creates no supplier either (zero writes)", async () => {
+    primeAmounts({ total_net: 0, total_vat: 100, total_gross: 100 });
+    vi.mocked(resolveSupplierInternal).mockResolvedValue({
+      found: false,
+      created: false,
+      preview_client: {
+        name: "New Supplier OÜ", code: "17487472", is_client: false, is_supplier: true, cl_code_country: "EST",
+        is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+      },
+    } as never);
+    // An unresolved supplier books through the keyword suggestion.
+    const actual = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    vi.mocked(buildKeywordSuggestion).mockReturnValue({
+      item: { custom_title: "Service", amount: 1, total_net_price: 0, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+      source: "keyword_match",
+    } as never);
+    try {
+      const { api, spies } = makeApi();
+      const result = await runMode(api, "create");
+      expect(result.status).toBe("needs_review");
+      expect(result.notes.join(" ")).toContain("net_nonpositive_with_vat");
+      // resolveSupplierInternal(..., allowCreate=true) is the supplier materialization.
+      expect(vi.mocked(resolveSupplierInternal).mock.calls.some(call => call[3] === true)).toBe(false);
+      expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+      expect(spies.uploadDocument).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(buildKeywordSuggestion).mockImplementation(actual.buildKeywordSuggestion);
+    }
   });
 });
