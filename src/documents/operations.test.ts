@@ -412,6 +412,32 @@ describe("AccountingDocumentOperations.create", () => {
     expectNoWrites(api);
   });
 
+  it("create holds (zero writes) when the clients and invoice-info reads fail and the buyer cannot be matched", async () => {
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Seppo AI OÜ"));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    // The re-check falls back to no clients and no company name; only the VAT
+    // number is left, and the buyer block does not carry it.
+    api.clients.listAll.mockRejectedValue(new Error("offline"));
+    api.readonly.getInvoiceInfo.mockRejectedValue(new Error("offline"));
+    const outcome = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) return;
+    expect(outcome.error.code).toBe("buyer_not_active_company");
+    expectNoWrites(api);
+  });
+
+  it("create with every own-company identity read failing writes nothing", async () => {
+    mockedParseDocument.mockResolvedValue(docWithBuyer("Seppo AI OÜ"));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    api.clients.listAll.mockRejectedValue(new Error("offline"));
+    api.readonly.getInvoiceInfo.mockRejectedValue(new Error("offline"));
+    api.readonly.getVatInfo.mockRejectedValue(new Error("offline"));
+    await expect(ops.create({ ...baseCreateInput(path, sha256), planHandle: handle })).rejects.toThrow("offline");
+    expectNoWrites(api);
+  });
+
   it("creates a DRAFT invoice via the real prepare→create sequence, uploads the document, and mints a SECOND confirm plan (never auto-confirmed)", async () => {
     const { path, sha256, api, ops } = createSetup();
     const handle = await prepareBookingHandle(ops, path);
