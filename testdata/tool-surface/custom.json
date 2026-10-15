@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 86,
-    "toolsListBytes": 87985,
+    "toolsListBytes": 88110,
     "descriptionsBytes": 12304,
-    "inputSchemasBytes": 55028,
+    "inputSchemasBytes": 55153,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 4361
@@ -2376,7 +2376,7 @@
                 "type": "string"
               }
             ],
-            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
+            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch)."
           },
           "journal_date": {
             "description": "Turnover/booking date (YYYY-MM-DD)",

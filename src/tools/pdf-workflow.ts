@@ -995,7 +995,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term days"),
       items: jsonObjectArrayInput.describe(
-        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
+        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch)."
       ),
       vat_price: z.number().optional().describe("EXACT total VAT from the original invoice; never recalculate. Omit only if truly absent from the document."),
       gross_price: z.number().optional().describe("EXACT total gross from the original invoice; never recalculate. Omit only if truly absent from the document."),

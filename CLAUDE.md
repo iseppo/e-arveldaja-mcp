@@ -296,6 +296,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - Do **not** pass item-level `gross_price` for non-VAT companies — the API computes it from `total_net_price`
 - `client_name` is required on creation (API field `client_name2`)
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`
+- **VAT-registered items with VAT need `vat_rate_dropdown`**: `createAndSetTotals` predicts item VAT as net × rate before the create; without a rate the item VAT is 0, so an explicit `vat_price` is refused pre-create (`purchase_totals_mismatch`, nothing written)
 - The API will compute `vat_amount` on the item but invoice-level `vat_price` stays 0 for non-VAT companies
 - **PATCH requires `items`** — updating invoice fields without including items fails with "Products/services are missing"
 - **Accounts with dimensions**: If an expense account (e.g. 5120) has dimensions (sub-accounts), you MUST pass both `purchase_accounts_id` (the account ID) AND `purchase_accounts_dimensions_id` (the dimension ID) on each item. Passing only one fails with "Entry must be made to account's dimension." Use `list_account_dimensions` to find dimension IDs for an account.

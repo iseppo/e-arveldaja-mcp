@@ -548,6 +548,17 @@ describe("previewPurchaseInvoiceTotals — createAndSetTotals rules before any w
     expect(harness.patch).not.toHaveBeenCalled();
   }
 
+  describe("VAT-registered item without vat_rate_dropdown", () => {
+    it("net 100 with explicit V 24 / G 124 and no rate is refused before create (zero writes)", async () => {
+      const { vat_rate_dropdown: _rate, ...itemWithoutRate } = item(100, "24");
+      await expectRefusedBeforeCreate(
+        { ...baseData, items: [itemWithoutRate] },
+        24, 124, true,
+        "purchase_totals_mismatch",
+      );
+    });
+  });
+
   describe("reverse charge", () => {
     it("all items reverse charge: 100 at 24%, V 0, G 100 passes", async () => {
       const { preview, body } = await expectPasses(

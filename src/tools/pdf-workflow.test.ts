@@ -1005,6 +1005,31 @@ describe("pdf workflow tools", () => {
       expect(api.journals.listAllWithPostings).not.toHaveBeenCalled();
     });
 
+    it("refuses a VAT-registered item with VAT but no vat_rate_dropdown before any read or write", async () => {
+      const filePath = createTempInvoiceFile("norate.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        clients: { create: vi.fn(), update: vi.fn() },
+      });
+      const response = await handler(args(filePath, {
+        items: JSON.stringify([{
+          cl_purchase_articles_id: 45, custom_title: "Internet subscription", purchase_accounts_id: 5230,
+          total_net_price: 100, vat_accounts_id: 1510, cl_vat_articles_id: 1,
+        }]),
+        vat_price: 24,
+        gross_price: 124,
+      }));
+      expect(response.isError).toBe(true);
+      const payload = parseMcpResponse(response.content[0]!.text) as any;
+      expect(payload.category).toBe("purchase_totals_mismatch");
+      expect(payload.retry).toBe("never");
+      expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.listAll).not.toHaveBeenCalled();
+      expect(api.clients.create).not.toHaveBeenCalled();
+      expect(api.clients.update).not.toHaveBeenCalled();
+    });
+
     it("refuses deductible VAT fields on a non-VAT company (same guard as create_purchase_invoice)", async () => {
       const filePath = createTempInvoiceFile("nonvat.pdf", "%PDF-pdf-bytes");
       mockedResolveFileInput.mockResolvedValue({ path: filePath });
