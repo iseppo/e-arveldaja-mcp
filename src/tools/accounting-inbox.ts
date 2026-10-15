@@ -8,7 +8,9 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { currentToolProfile, isGuidedProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile, isToolVisibleForProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
+import { parseCSV } from "../csv.js";
+import { EXPECTED_STATEMENT_HEADERS, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
 import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -175,6 +177,7 @@ interface PreparedInboxData {
    * Their step file references are bound to these bytes. */
   camtDigestBindings: Map<string, string>;
   wiseFiles: InboxFileCandidate[];
+  lightyearFiles: LightyearFileCandidate[];
   receiptFolders: ReceiptFolderCandidate[];
   defaults: ReturnType<typeof buildBankDefaults>;
   steps: RecommendedStep[];
@@ -523,6 +526,71 @@ async function detectWiseCsvFiles(files: ScannedFileInfo[]): Promise<InboxFileCa
   return candidates.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
 }
 
+interface LightyearFileCandidate {
+  kind: "account_statement" | "capital_gains";
+  name: string;
+  path: string;
+  modified_at: string;
+  size_bytes: number;
+}
+
+/**
+ * Lightyear CSV exports, recognised by the header row the Lightyear parsers
+ * themselves require (not by file name). Files already taken as Wise CSVs are
+ * never reported again. Report-only: no inbox steps are built from them.
+ */
+async function detectLightyearCsvFiles(
+  files: ScannedFileInfo[],
+  wiseFiles: InboxFileCandidate[],
+): Promise<LightyearFileCandidate[]> {
+  const wisePaths = new Set(wiseFiles.map(file => file.path));
+  const candidates: LightyearFileCandidate[] = [];
+  for (const file of files.filter(candidate => candidate.extension === ".csv" && !wisePaths.has(candidate.path))) {
+    const firstRow = parseCSV((await readFileSnippet(file.path, 2048)).replace(/^\uFEFF/, ""))[0]?.map(header => header.trim()) ?? [];
+    const kind = EXPECTED_STATEMENT_HEADERS.every((header, index) => firstRow[index] === header)
+      ? "account_statement" as const
+      : REQUIRED_GAINS_HEADERS.every(header => firstRow.includes(header))
+        ? "capital_gains" as const
+        : undefined;
+    if (kind === undefined) continue;
+    candidates.push({ kind, name: file.name, path: file.path, modified_at: file.modified_at, size_bytes: file.size_bytes });
+  }
+  return candidates.sort((a, b) => b.modified_at.localeCompare(a.modified_at));
+}
+
+/** The Lightyear tools are registered AND visible on this session's surface. */
+function lightyearToolsVisible(exposure: ToolExposureConfig): boolean {
+  const profile = currentToolProfile();
+  return exposure.enableLightyear &&
+    isToolVisibleForProfile("parse_lightyear_statement", profile) &&
+    isToolVisibleForProfile("book_lightyear_trades", profile);
+}
+
+function publicLightyearFile(
+  file: LightyearFileCandidate,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  toolsVisible: boolean,
+): Record<string, unknown> {
+  return {
+    kind: file.kind,
+    display_path: sandboxExternalText(file.path),
+    display_name: sandboxExternalText(file.name),
+    ...(toolsVisible
+      ? {
+          file_ref: runtimeSafetyContext.fileReferenceStore.issue({
+            canonicalPath: file.path,
+            kind: "file",
+            operation: file.kind === "account_statement"
+              ? FILE_REFERENCE_OPERATIONS.lightyearStatement
+              : FILE_REFERENCE_OPERATIONS.lightyearGains,
+          }),
+        }
+      : {}),
+    modified_at: file.modified_at,
+    size_bytes: file.size_bytes,
+  };
+}
+
 function detectReceiptFolders(files: ScannedFileInfo[]): ReceiptFolderCandidate[] {
   const folders = new Map<string, ReceiptFolderCandidate>();
   for (const file of files) {
@@ -849,18 +917,32 @@ export function buildRecommendedSteps(params: {
   return { steps, questions };
 }
 
+function lightyearSummarySentence(files: LightyearFileCandidate[], toolsVisible: boolean): string | undefined {
+  if (files.length === 0) return undefined;
+  const statements = files.filter(file => file.kind === "account_statement").length;
+  const gains = files.length - statements;
+  const found = `Found ${files.length} Lightyear export(s) (${statements} account statement(s), ${gains} capital-gains file(s))`;
+  return toolsVisible
+    ? `${found}; book them with the lightyear-booking workflow (parse_lightyear_statement, then book_lightyear_trades / book_lightyear_distributions dry run). Overlapping statement periods are de-duplicated by the LY: reference.`
+    : `${found}. Lightyear tools are not enabled in this profile (EARVELDAJA_DISABLE_LIGHTYEAR or a guided profile).`;
+}
+
 function buildUserSummary(params: {
   camtFiles: InboxFileCandidate[];
   camtDuplicateCount: number;
   wiseFiles: InboxFileCandidate[];
+  lightyearFiles: LightyearFileCandidate[];
+  lightyearToolsVisible: boolean;
   receiptFolders: ReceiptFolderCandidate[];
   questions: InboxQuestion[];
   steps: RecommendedStep[];
   liveApiDefaultsAvailable: boolean;
 }): string {
   const parts: string[] = [];
+  const lightyearSentence = lightyearSummarySentence(params.lightyearFiles, params.lightyearToolsVisible);
   if (params.camtFiles.length === 0 && params.wiseFiles.length === 0 && params.receiptFolders.length === 0) {
-    return "I did not find any likely CAMT statements, Wise CSV files, or receipt folders in the scanned workspace.";
+    const nothing = "I did not find any likely CAMT statements, Wise CSV files, or receipt folders in the scanned workspace.";
+    return lightyearSentence === undefined ? nothing : `${nothing} ${lightyearSentence}`;
   }
 
   parts.push(
@@ -874,6 +956,7 @@ function buildUserSummary(params: {
   if (notAStatementCount > 0) {
     parts.push(`${notAStatementCount} XML file(s) contain no CAMT statement and are not importable.`);
   }
+  if (lightyearSentence !== undefined) parts.push(lightyearSentence);
 
   const readySteps = params.steps.filter(step => step.recommended && step.missing_inputs.length === 0);
   if (readySteps.length > 0) {
@@ -1279,6 +1362,7 @@ function buildPreparedInboxPayload(
   const questions = prepared.questions.map(publicQuestion);
   // Like the standard refs, detected refs stay unbound (not sha-bound).
   const guided = isGuidedProfile(currentToolProfile());
+  const lightyearVisible = lightyearToolsVisible(exposure);
   return {
     workspace_path: sandboxExternalText(prepared.workspacePath),
     scan: prepared.scan,
@@ -1286,6 +1370,7 @@ function buildPreparedInboxPayload(
       camt_files: prepared.camtFiles.map(file => publicInboxFile(file, runtimeSafetyContext, fileReferenceOperationFor("process_camt053", guided))),
       wise_csv_files: prepared.wiseFiles.map(file => publicInboxFile(file, runtimeSafetyContext, fileReferenceOperationFor("import_wise_transactions", guided))),
       receipt_folders: prepared.receiptFolders.map(folder => publicReceiptFolder(folder, runtimeSafetyContext)),
+      lightyear_files: prepared.lightyearFiles.map(file => publicLightyearFile(file, runtimeSafetyContext, lightyearVisible)),
     },
     camt_overlap: prepared.camtOverlap,
     defaults: {
@@ -1316,6 +1401,8 @@ function buildPreparedInboxPayload(
       camtFiles: prepared.camtFiles,
       camtDuplicateCount: prepared.camtOverlap.duplicate_count,
       wiseFiles: prepared.wiseFiles,
+      lightyearFiles: prepared.lightyearFiles,
+      lightyearToolsVisible: lightyearVisible,
       receiptFolders: prepared.receiptFolders,
       questions: prepared.questions,
       steps: prepared.steps,
@@ -1357,6 +1444,7 @@ async function prepareAccountingInbox(
     detectCamtFiles(files),
     detectWiseCsvFiles(files),
   ]);
+  const lightyearFiles = await detectLightyearCsvFiles(files, wiseFiles);
   const camtAnalysis = await analyzeInboxCamtFiles(detectedCamtFiles, runtimeSafetyContext);
   const camtFiles = camtAnalysis.files;
   const receiptFolders = detectReceiptFolders(files);
@@ -1388,6 +1476,7 @@ async function prepareAccountingInbox(
     camtOverlap: camtAnalysis.summary,
     camtDigestBindings: camtAnalysis.bindings,
     wiseFiles,
+    lightyearFiles,
     receiptFolders,
     defaults,
     steps,

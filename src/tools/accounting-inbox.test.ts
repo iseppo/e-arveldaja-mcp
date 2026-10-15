@@ -4706,3 +4706,90 @@ describe("accounting_inbox: XML without a CAMT statement and failed-step wrappin
     for (const review of reviews) expect(wrapCount(review.summary)).toBe(1);
   });
 });
+
+describe("accounting_inbox: Lightyear CSV exports", () => {
+  const LIGHTYEAR_STATEMENT_CSV =
+    "Date,Reference,Ticker,ISIN,Type,Quantity,CCY,Price/share,Gross Amount,FX Rate,Fee,Net Amt.,Tax Amt.\n" +
+    "01/09/2026 10:00:00,OR-FIXTURE1,FIXT,IE0000000001,Buy,1,EUR,10.00,10.00,,0.00,10.00,\n";
+  const LIGHTYEAR_GAINS_CSV =
+    "Date,Ticker,Name,ISIN,Country,Fees (EUR),Quantity,Cost Basis (EUR),Proceeds (EUR),Capital Gains (EUR)\n" +
+    "02/09/2026,FIXT,Fixture Fund,IE0000000001,IE,0.00,1,10.00,11.00,1.00\n";
+  const exposure = (enableLightyear: boolean) => ({
+    enableLightyear, exposeGranularTools: false, exposeSetupTools: false, enableTaxTools: true,
+    enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true,
+  });
+
+  async function lightyearWorkspace(): Promise<string> {
+    const workspace = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(workspace);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
+    await writeFile(join(workspace, "LightyearCapitalGainsStatement-LY-FIXTURE.csv"), LIGHTYEAR_GAINS_CSV);
+    // Header-based, not name-based: a Lightyear-looking name with another header is ignored.
+    await writeFile(join(workspace, "AccountStatement-LY-OTHER.csv"), "Date,Amount,Description\n2026-09-01,1.00,x\n");
+    return workspace;
+  }
+
+  async function scan(workspace: string, options: { enableLightyear?: boolean; profile?: "standard" | "full" | "guided" | "guided-sales"; mode?: "scan" | "dry_run" } = {}) {
+    const server = createMockToolServer();
+    const api = createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    });
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), api, exposure(options.enableLightyear ?? true));
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const result = await runWithToolProfile(options.profile ?? "standard", () =>
+      handler({ mode: options.mode ?? "scan", workspace_path: workspace }));
+    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    return { payload, prepared: options.mode === "dry_run" ? payload.prepared_inbox : payload };
+  }
+
+  function stepTools(prepared: any): string[] {
+    return (prepared.recommended_steps as any[]).map(step => step.tool);
+  }
+
+  it.each(["standard", "full"] as const)("reports header-detected statement and gains files with file_refs on %s", async (profile) => {
+    const workspace = await lightyearWorkspace();
+    const { prepared } = await scan(workspace, { profile });
+    const files = prepared.detected_inputs.lightyear_files as any[];
+    expect(files.map(file => [desandboxText(file.display_name), file.kind]).sort()).toEqual([
+      ["AccountStatement-LY-FIXTURE.csv", "account_statement"],
+      ["LightyearCapitalGainsStatement-LY-FIXTURE.csv", "capital_gains"],
+    ]);
+    expect(files.every(file => typeof file.file_ref === "string")).toBe(true);
+    // The Wise CSV is reported as Wise only.
+    expect(prepared.detected_inputs.wise_csv_files).toHaveLength(1);
+    expect(prepared.user_summary).toContain("Found 2 Lightyear export(s) (1 account statement(s), 1 capital-gains file(s)); book them with the lightyear-booking workflow");
+    expect(stepTools(prepared).some(tool => tool.includes("lightyear"))).toBe(false);
+  });
+
+  it("with Lightyear disabled: reported without file_ref, the not-enabled sentence, no steps", async () => {
+    const workspace = await lightyearWorkspace();
+    const { prepared } = await scan(workspace, { enableLightyear: false });
+    const files = prepared.detected_inputs.lightyear_files as any[];
+    expect(files).toHaveLength(2);
+    expect(files.every(file => file.file_ref === undefined)).toBe(true);
+    expect(prepared.user_summary).toContain("Lightyear tools are not enabled in this profile");
+    expect(stepTools(prepared).some(tool => tool.includes("lightyear"))).toBe(false);
+  });
+
+  it.each([
+    ["guided", "scan"], ["guided", "dry_run"], ["guided-sales", "scan"], ["guided-sales", "dry_run"],
+  ] as const)("on %s (%s) with enableLightyear: no file_ref, not-enabled sentence, no Lightyear tool named", async (profile, mode) => {
+    const workspace = await lightyearWorkspace();
+    const { payload, prepared } = await scan(workspace, { profile, mode });
+    const files = prepared.detected_inputs.lightyear_files as any[];
+    expect(files).toHaveLength(2);
+    expect(files.every(file => file.file_ref === undefined)).toBe(true);
+    expect(prepared.user_summary).toContain("Lightyear tools are not enabled in this profile");
+    expect(desandboxText(JSON.stringify(payload))).not.toMatch(/(parse|book)_lightyear_|lightyear_portfolio_summary/);
+  });
+
+  it("does not change the steps of an existing CAMT/Wise workspace", async () => {
+    const plain = await createAccountingWorkflowWorkspace({ includeReceipts: false });
+    workspacesToClean.push(plain);
+    const withLightyear = await lightyearWorkspace();
+    const before = await scan(plain);
+    const after = await scan(withLightyear);
+    expect(stepTools(after.prepared)).toEqual(stepTools(before.prepared));
+  });
+});
