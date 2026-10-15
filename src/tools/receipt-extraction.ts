@@ -1,5 +1,5 @@
 import { basename, extname } from "path";
-import { normalizeCompanyName as normalizeCompanyNameShared } from "../company-name.js";
+import { normalizeCompanyName as normalizeCompanyNameShared, sameCompanyIdentity } from "../company-name.js";
 import { roundMoney } from "../money.js";
 import {
   type LayoutTextItem,
@@ -12,6 +12,7 @@ import {
   extractReferenceNumber,
   extractRegistryCode,
   extractVatNumber,
+  isValidIban,
 } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -859,6 +860,11 @@ function cleanSupplierCandidate(raw: string): string | undefined {
   }
   if (/^(?:bill to|invoice to|arve saaja|saaja|vastuvõtja|receiver|klient|client)\b/i.test(candidate)) return undefined;
   if (/^(?:invoice|arve|receipt|müügiarve|order details|search|thank you)\b/i.test(candidate)) return undefined;
+  // Document-type and field labels (+ an optional number) are never a supplier:
+  // "Sularahaarve 1633", "Dokumendi number".
+  if (/^(?:sularahaarve|kassaarve|kreeditarve|ettemaksuarve|arve-saateleht|saateleht|kviitung|tšekk|tsekk|dokumendi\s+(?:number|nr)|tellimuse\s+(?:number|nr))(?:\s*[:.#]?\s*[A-Z0-9/_-]*\d[A-Z0-9/_-]*)?$/iu.test(candidate)) {
+    return undefined;
+  }
   if (SUPPLIER_INVALID_LINE_RE.test(candidate) && !/\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i.test(candidate)) {
     return undefined;
   }
@@ -2180,6 +2186,8 @@ export function extractAmountsWithMetadata(text: string, textItems?: readonly La
 interface ExtractReceiptFieldsOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
+  /** The active company's own name: a supplier candidate with its legal identity is the buyer, never the supplier. */
+  ownCompanyName?: string;
   /** The active company's own bank-account IBANs, excluded from supplier_iban. */
   ownIbans?: readonly string[];
   /** Layout text items from the PDF parser for coordinate-based column classification. */
@@ -2305,7 +2313,29 @@ function scoreSupplierLayoutCandidate(
   return fontScore + proximityScore + columnScore + beforeBuyerScore;
 }
 
-function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): SupplierNameLayoutCandidate | undefined {
+/**
+ * Blank every whitespace-column segment (2+ spaces apart) that is the active
+ * company itself — the buyer in a two-column "Saatja | Saaja" header — keeping
+ * the column positions of the other segments.
+ */
+function blankOwnCompanySegments(rawLine: string, ownCompanyName: string | undefined): string {
+  if (!ownCompanyName) return rawLine;
+  return rawLine
+    .split(/(\s{2,})/)
+    .map(part => /^\s*$/.test(part) || !sameCompanyIdentity(clampTextLine(part), ownCompanyName) ? part : "")
+    .join("");
+}
+
+/** cleanSupplierCandidate, rejecting a candidate that IS the active company. */
+function cleanSupplierCandidateExcludingOwn(raw: string, ownCompanyName: string | undefined): string | undefined {
+  const candidate = cleanSupplierCandidate(blankOwnCompanySegments(raw, ownCompanyName));
+  return candidate && !(ownCompanyName && sameCompanyIdentity(candidate, ownCompanyName)) ? candidate : undefined;
+}
+
+function extractSupplierNameFromLayout(
+  textItems: readonly LayoutTextItem[],
+  ownCompanyName?: string,
+): SupplierNameLayoutCandidate | undefined {
   const markers = buildIdentifierMarkers(textItems);
   const supplierMarkers = markers.filter(marker => marker.side === "supplier");
   if (supplierMarkers.length === 0) return undefined;
@@ -2316,7 +2346,7 @@ function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): Su
   for (const marker of supplierMarkers) {
     for (const item of textItems) {
       if (!isLayoutItemInSupplierRegion(item, marker, markers)) continue;
-      const candidate = cleanSupplierCandidate(item.text);
+      const candidate = cleanSupplierCandidateExcludingOwn(item.text, ownCompanyName);
       if (!candidate) continue;
       candidates.push({
         name: candidate,
@@ -2335,9 +2365,11 @@ function extractSupplierNameFromLayout(textItems: readonly LayoutTextItem[]): Su
     )[0];
 }
 
-function extractSupplierNameFromText(text: string, fallbackFileName: string): string | undefined {
+function extractSupplierNameFromText(text: string, fallbackFileName: string, ownCompanyName?: string): string | undefined {
+  const clean = (raw: string) => cleanSupplierCandidateExcludingOwn(raw, ownCompanyName);
   const rows = text
     .split(/\r?\n/)
+    .map(raw => blankOwnCompanySegments(raw, ownCompanyName))
     .map(raw => ({ raw, line: clampTextLine(raw) }))
     .filter(row => row.line);
   const lines = rows.map(row => row.line);
@@ -2349,7 +2381,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string): st
       .filter(Boolean);
     if (segments.length < 2) return undefined;
     for (let index = segments.length - 1; index >= 1; index--) {
-      const candidate = cleanSupplierCandidate(segments[index] ?? "");
+      const candidate = clean(segments[index] ?? "");
       if (candidate) return candidate;
     }
     return undefined;
@@ -2365,29 +2397,42 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string): st
     }
 
     const dualNameMatch = line.match(/^Nimi:\s*(.+?)\s+Nimi:\s*(.+)$/i);
-    const sellerFromDualName = cleanSupplierCandidate(dualNameMatch?.[2] ?? "");
+    const sellerFromDualName = clean(dualNameMatch?.[2] ?? "");
     if (sellerFromDualName) return sellerFromDualName;
 
+    // A supplier label in a RIGHT column with no value ("Buyer OÜ    Makse
+    // saaja:"): the supplier is the same column of the next line.
+    const columns = rows[index]!.raw.split(/\s{2,}/).map(clampTextLine);
+    const labelColumn = columns.findIndex((segment, column) =>
+      column > 0 && SUPPLIER_LABEL_RE.test(segment) && clean(segment) === undefined);
+    if (labelColumn > 0) {
+      const nextColumns = rows[index + 1]?.raw.split(/\s{2,}/).map(clampTextLine) ?? [];
+      const columnCandidate = clean(nextColumns[labelColumn] ?? "");
+      if (columnCandidate) return columnCandidate;
+    }
+
     if (SUPPLIER_LABEL_RE.test(line)) {
-      const labelledCandidate = cleanSupplierCandidate(line);
+      const labelledCandidate = clean(line);
       if (labelledCandidate) return labelledCandidate;
 
-      const nextLineCandidate = cleanSupplierCandidate(lines[index + 1] ?? "");
+      const nextLineCandidate = clean(lines[index + 1] ?? "");
       if (nextLineCandidate) return nextLineCandidate;
     }
   }
 
   for (const line of lines) {
     const buyerMatch = line.match(/^(.*?)\b(?:bill to|invoice to)\b/i);
-    const beforeBuyer = cleanSupplierCandidate(buyerMatch?.[1] ?? "");
+    const beforeBuyer = clean(buyerMatch?.[1] ?? "");
     if (beforeBuyer) return beforeBuyer;
   }
 
-  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)\b/i;
+  // A trailing \b never matches after "Ü" (a non-word character to the regex
+  // engine), so "Näidis OÜ" at the end of a line needs a letter look-ahead.
+  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
   const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
   const searchLines = lines.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(lines.length, 12));
   for (const line of searchLines) {
-    const candidate = cleanSupplierCandidate(line);
+    const candidate = clean(line);
     if (
       candidate &&
       candidate.length <= 80 &&
@@ -2398,7 +2443,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string): st
   }
 
   for (const line of lines) {
-    const candidate = cleanSupplierCandidate(line);
+    const candidate = clean(line);
     if (candidate && companyPattern.test(candidate)) {
       return candidate;
     }
@@ -2422,13 +2467,14 @@ export function extractSupplierNameWithNotes(
   text: string,
   fallbackFileName: string,
   textItems?: readonly LayoutTextItem[],
+  ownCompanyName?: string,
 ): SupplierNameExtractionResult {
-  const textName = extractSupplierNameFromText(text, fallbackFileName);
+  const textName = extractSupplierNameFromText(text, fallbackFileName, ownCompanyName);
   if (!textItems || textItems.length === 0) {
     return textName !== undefined ? { name: textName } : {};
   }
 
-  const layoutCandidate = extractSupplierNameFromLayout(textItems);
+  const layoutCandidate = extractSupplierNameFromLayout(textItems, ownCompanyName);
   if (!layoutCandidate) {
     return textName !== undefined ? { name: textName } : {};
   }
@@ -2476,6 +2522,8 @@ const NON_INVOICE_NUMBER_LINE_RE =
 function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefined {
   const candidate = raw?.trim();
   if (!candidate || !/\d/.test(candidate) || isCalendarDateToken(candidate)) return undefined;
+  // A bank account behind "Arveldusarve nr:" is never the invoice number.
+  if (isValidIban(candidate.replace(/\s+/g, ""))) return undefined;
   return candidate;
 }
 
@@ -2489,18 +2537,28 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
   // appear in the document.
   const invoiceNumberTiers: RegExp[][] = [
     [
-      /(?:arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*([A-Z0-9/_-]{3,})/i,
-      /\b(?:invoice|arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
+      // "arve" must not be the tail of another word ("Arveldusarve nr" is a
+      // bank account); only the cash/sales/purchase invoice compounds qualify.
+      /(?:(?<![A-Za-zÀ-ž])(?:sularaha|kassa|müügi|ostu)?arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*([A-Z0-9/_-]{3,})/i,
+      /\b(?:invoice|(?:sularaha|kassa)?arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
     ],
     [
       /(?:tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\t .-]*([A-Z0-9/_-]{3,})/i,
     ],
   ];
 
-  for (const tier of invoiceNumberTiers) {
-    for (const line of lines) {
+  for (const [tierIndex, tier] of invoiceNumberTiers.entries()) {
+    for (const [lineIndex, line] of lines.entries()) {
       for (const pattern of tier) {
         const candidate = acceptInvoiceNumberCandidate(line.match(pattern)?.[1]);
+        if (candidate) return candidate;
+      }
+      // The one cross-line case: a bare "Arve" / "Invoice" header line with
+      // the number on the next line ("Nr. EE1966453").
+      if (tierIndex === 0 && /^(?:arve|invoice)$/i.test(line)) {
+        const candidate = acceptInvoiceNumberCandidate(
+          lines[lineIndex + 1]?.match(/^(?:nr|no|number)\.?[:#\t ]*([A-Z0-9][A-Z0-9/_-]{2,})$/i)?.[1],
+        );
         if (candidate) return candidate;
       }
     }
@@ -2952,6 +3010,24 @@ function categorizeTransactionGroupByPattern(input: TransactionGroupClassificati
   };
 }
 
+const OFFER_HEADING_RE =
+  /^\s*(?:meeldetuletus\s*\/\s*)?(?:müügipakkumine|hinnapakkumine|pakkumine|quotation|quote|price\s+quote|pro\s?-?forma(?:\s+invoice)?|proforma-arve)(?:\s+(?:nr\.?|no\.?|#)\s*\S+)?\s*:?\s*$/iu;
+const INVOICE_HEADING_RE =
+  /^\s*(?:arve|invoice|ostuarve|sularahaarve)\b(?:\s+(?:nr\.?|no\.?)\s*\S+)?\s*$/iu;
+
+/**
+ * The document's title is a sales offer / quote / proforma heading — a WHOLE
+ * line, not a mention ("vastavalt hinnapakkumisele nr 5") — and no invoice
+ * heading comes before it.
+ */
+export function looksLikeOfferDocument(text: string): boolean {
+  const lines = text.split(/\r?\n/);
+  const offerIndex = lines.findIndex(line => OFFER_HEADING_RE.test(line));
+  if (offerIndex < 0) return false;
+  const invoiceIndex = lines.findIndex(line => INVOICE_HEADING_RE.test(line));
+  return invoiceIndex < 0 || offerIndex < invoiceIndex;
+}
+
 export function classifyReceiptDocument(text: string, fileName: string): ReceiptClassification {
   const combined = `${text}\n${fileName}`;
   const hasSalesInvoiceKeywords = /\b(müügiarve|sale invoice)\b/i.test(combined);
@@ -2964,7 +3040,7 @@ export function classifyReceiptDocument(text: string, fileName: string): Receipt
     /\b(see ei ole arve|this is not an invoice|tehingu kinnitus|order summary|sinu tellimuse kokkuvõte)\b/i.test(combined);
   const hasCardTerminalReceiptKeywords = /\b(kaarditerminal|card terminal|maksemeetod|makseviis)\b/i.test(combined);
 
-  if (hasSalesInvoiceKeywords) {
+  if (hasSalesInvoiceKeywords || looksLikeOfferDocument(text)) {
     return "unclassifiable";
   }
 
@@ -3131,7 +3207,7 @@ export function extractReceiptFieldsFromText(
     : sourceOptions;
   const identifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
-  const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems);
+  const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
   const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
   // The booked currency follows the picked gross: on "Paid EUR 90.00 (1 EUR =

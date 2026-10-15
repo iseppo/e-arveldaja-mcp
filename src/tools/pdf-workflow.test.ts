@@ -215,6 +215,21 @@ describe("pdf workflow tools", () => {
     expect(metadata).not.toContain("base64 payload");
   });
 
+  it("extract_pdf_invoice strips the own company (invoice_company_name) from a two-column supplier line", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("seller-buyer.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue({
+      text: "NÄIDIS KAUBANDUS OÜ   PROOVI OÜ\nArve nr 5\nKokku: 10.00 EUR",
+      pageCount: 1,
+    } as any);
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", {
+      clients: { listAll: vi.fn().mockResolvedValue([]) },
+      readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Proovi OÜ" }) },
+    });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/seller-buyer.pdf" })).content[0]!.text) as any;
+    expect(String(payload.extracted.supplier_name)).toContain("NÄIDIS KAUBANDUS OÜ");
+    expect(String(payload.extracted.supplier_name)).not.toContain("PROOVI");
+  });
+
   it("extract_pdf_invoice uses LiteParse output for raw text and page count", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("invoice.pdf", "%PDF-1.4") });
     mockedParseDocument.mockResolvedValue({

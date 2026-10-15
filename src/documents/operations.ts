@@ -308,9 +308,10 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       let ownCompanyVat: string | undefined;
       let ownCompanyRegistryCode: string | undefined;
       let ownIbans: string[] | undefined;
+      let ownCompanyName: string | undefined;
       const allClients = await this.api.clients.listAll().catch(() => []);
       try {
-        ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(this.api, allClients));
+        ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans, ownCompanyName } = await resolveOwnCompanyIdentifiers(this.api, allClients));
       } catch {
         // Offline / unconfigured — extract without self-exclusions.
       }
@@ -320,6 +321,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ownCompanyVat,
         ownCompanyRegistryCode,
         ownIbans,
+        ownCompanyName,
       });
 
       const signals = buildExtractionConfidenceSignals(extracted, {

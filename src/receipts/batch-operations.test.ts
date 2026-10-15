@@ -750,6 +750,29 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
   });
 });
 
+describe("receipt batch — own company name reaches extraction", () => {
+  it("passes ownCompanyName to extractReceiptFieldsFromText", async () => {
+    const { api } = makeApi();
+    const outcome = await makeOperations(api).runBatch({
+      ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ",
+    });
+    expect(outcome.ok).toBe(true);
+    expect(vi.mocked(extractReceiptFieldsFromText).mock.calls[0]![2]).toMatchObject({ ownCompanyName: "Proovi OÜ" });
+  });
+  it("names a sales offer / quote in the needs_review note", async () => {
+    vi.mocked(classifyReceiptDocument).mockReturnValue("unclassifiable");
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Näidis Meedia AS",
+      raw_text: "Meeldetuletus/müügipakkumine nr. 82045101\nTasumiseks: 59,94",
+    } as never);
+    const { api } = makeApi();
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("needs_review");
+    expect(outcome.value.results[0]!.notes).toContain("Document is a sales offer/quote, not an invoice.");
+  });
+});
+
 describe("receipt batch — receipt source amount gate (live smoke 1d50fd5)", () => {
   function primeAmounts(amounts: { total_net: number; total_vat: number; total_gross: number }): void {
     vi.mocked(extractReceiptFieldsFromText).mockReturnValue({

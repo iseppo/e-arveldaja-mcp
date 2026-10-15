@@ -19,6 +19,8 @@ export interface OwnCompanyIdentifiers {
   ownCompanyRegistryCode?: string;
   /** IBANs of the company's own bank accounts — never a supplier's IBAN. */
   ownIbans?: string[];
+  /** The company's own name (`invoice_info.invoice_company_name`) — the buyer, never the supplier. */
+  ownCompanyName?: string;
 }
 
 /**
@@ -73,11 +75,17 @@ export async function resolveOwnCompanyIdentifiers(
     ownCompanyVat = undefined;
   }
   const invoiceInfo = await safeGetInvoiceInfo(api);
+  const ownCompanyName = invoiceInfo.invoice_company_name?.trim() || undefined;
   const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
     clients,
     ownCompanyVat,
-    invoiceInfo.invoice_company_name?.trim() || undefined,
+    ownCompanyName,
   );
   const ownIbans = await loadOwnIbans(api);
-  return { ownCompanyVat, ownCompanyRegistryCode, ...(ownIbans ? { ownIbans } : {}) };
+  return {
+    ownCompanyVat,
+    ownCompanyRegistryCode,
+    ...(ownIbans ? { ownIbans } : {}),
+    ...(ownCompanyName ? { ownCompanyName } : {}),
+  };
 }

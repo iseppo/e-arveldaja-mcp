@@ -27,6 +27,7 @@ import {
   extractReceiptFieldsFromText,
   hasAutoBookableReceiptFields,
   inferSupplierCountry,
+  looksLikeOfferDocument,
   normalizeCounterpartyName,
   suggestBookingInternal,
 } from "../tools/receipt-extraction.js";
@@ -301,6 +302,7 @@ async function extractReceiptFields(
   ownCompanyVat?: string,
   ownCompanyRegistryCode?: string,
   ownIbans?: string[],
+  ownCompanyName?: string,
 ): Promise<ExtractedReceiptFields> {
   // Parse the immutable snapshot bytes (snapshot_path), never the live folder
   // file, so the parser and the later uploader observe byte-identical content.
@@ -315,6 +317,7 @@ async function extractReceiptFields(
     ownCompanyVat,
     ownCompanyRegistryCode,
     ownIbans,
+    ownCompanyName,
     textItems: allTextItems,
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
@@ -325,6 +328,7 @@ interface ProcessSingleReceiptOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
   ownIbans?: string[];
+  ownCompanyName?: string;
   bankTransactions: Transaction[];
   executionMode: ReceiptBatchExecutionMode;
   legacyExecuteCreate: boolean;
@@ -343,7 +347,13 @@ async function processSingleReceipt(
   const notes: string[] = [];
 
   try {
-    const extracted = await extractReceiptFields(snapshot, options.ownCompanyVat, options.ownCompanyRegistryCode, options.ownIbans);
+    const extracted = await extractReceiptFields(
+      snapshot,
+      options.ownCompanyVat,
+      options.ownCompanyRegistryCode,
+      options.ownIbans,
+      options.ownCompanyName,
+    );
     const classification = classifyReceiptDocument(extracted.raw_text ?? file.name, file.name);
     const signals = buildExtractionConfidenceSignals(extracted, {
       partialOcrFailure: extracted.partial_ocr_failure,
@@ -400,7 +410,9 @@ async function processSingleReceipt(
                   ? ` for invoice ${wrapUntrustedOcr(referencedInvoice.invoice_number) ?? referencedInvoice.invoice_number}`
                   : ""
               }, not a separate purchase invoice. Booking it would duplicate the underlying invoice — attach to the existing invoice document instead (#15).`
-            : "Document could not be classified as a supplier purchase invoice.",
+            : looksLikeOfferDocument(extracted.raw_text ?? "")
+              ? "Document is a sales offer/quote, not an invoice."
+              : "Document could not be classified as a supplier purchase invoice.",
       );
       maybeAddLlmFallbackNote(notes, llmFallback);
       return buildNeedsReviewResult(file, classification, extracted, llmFallback, notes, {
@@ -785,6 +797,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             ownCompanyVat,
             ownCompanyRegistryCode,
             ownIbans,
+            ownCompanyName: input.ownCompanyName,
             bankTransactions,
             executionMode,
             legacyExecuteCreate,

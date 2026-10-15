@@ -3276,3 +3276,115 @@ describe("explicit amount conflicts survive reconciliation", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Field misreads from the live smoke on 1d50fd5 (synthetic fixtures).
+// ---------------------------------------------------------------------------
+
+describe("receipt fields — invoice number, supplier and document type misreads", () => {
+  const FIXTURE_IBAN = "EE231700017001234567";
+
+  it("Messenger-like: the two-line Arve / Nr. header wins over the bank account and the order number", () => {
+    const text = [
+      "Saatja:    Saaja:",
+      "Näidis Kuller Group OÜ    Proovi OÜ",
+      "Arve",
+      "Nr. NX2026001",
+      "Tellimuse number: 7777123",
+      `Arveldusarve nr: ${FIXTURE_IBAN}`,
+      "Kuupäev 01.09.2026",
+      "Summa KM-ta: EUR 125,00",
+      "Kaibemaks (24.00%): EUR 30,00",
+      "Arve kokku (EUR): EUR 155,00",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "messenger.jpeg", { ownCompanyName: "Proovi OÜ" });
+    expect(result.invoice_number).toBe("NX2026001");
+    expect(result.supplier_name).toBe("Näidis Kuller Group OÜ");
+  });
+
+  it("never takes a valid IBAN behind 'Arveldusarve nr' as the invoice number", () => {
+    const number = extractInvoiceNumber([`Arveldusarve nr: ${FIXTURE_IBAN}`, "Kuupäev 01.09.2026"].join("\n"), "x.pdf");
+    expect(number).not.toBe(FIXTURE_IBAN);
+    expect(number.startsWith("AUTO-")).toBe(true);
+  });
+
+  it("keeps compound invoice labels (Müügiarve nr / Sularahaarve nr)", () => {
+    expect(extractInvoiceNumber("Müügiarve nr 2026-117", "x.pdf")).toBe("2026-117");
+    expect(extractInvoiceNumber("Sularahaarve nr 1633", "x.pdf")).toBe("1633");
+  });
+
+  it("cash-invoice-like: 'Sularahaarve 1633' is the invoice number, never the supplier or the buyer", () => {
+    const text = [
+      "R9 Näidisstuudio OÜ",
+      "Arve saaja",
+      "Proovi OÜ        Sularahaarve 1633",
+      "Kuupäev 05.09.2026",
+      "Kokku 50,00 EUR",
+    ].join("\n");
+    const result = extractReceiptFieldsFromText(text, "duo_r9_1633.pdf", { ownCompanyName: "Proovi OÜ" });
+    expect(result.invoice_number).toBe("1633");
+    expect(result.supplier_name).not.toBe("Sularahaarve 1633");
+    expect(result.supplier_name).not.toBe("Proovi OÜ");
+    expect(result.supplier_name).toBe("R9 Näidisstuudio OÜ");
+  });
+
+  it("RDE-like layout: a 'Dokumendi number' label is never the supplier", () => {
+    const text = [
+      "Müüja",
+      "Dokumendi number",
+      "OÜ Näidis Trade Baltic",
+      "Reg. nr 17487472",
+      "Kokku käibemaksuga: 151,80",
+    ].join("\n");
+    const textItems: LayoutTextItem[] = [
+      { text: "Müüja", x: 50, y: 25, width: 50, height: 10, pageNum: 1 },
+      { text: "Dokumendi number", x: 50, y: 40, width: 120, height: 14, pageNum: 1 },
+      { text: "OÜ Näidis Trade Baltic", x: 50, y: 60, width: 160, height: 10, pageNum: 1 },
+      { text: "Reg. nr 17487472", x: 50, y: 80, width: 120, height: 10, pageNum: 1 },
+      { text: "Kokku käibemaksuga: 151,80", x: 50, y: 200, width: 200, height: 10, pageNum: 1 },
+    ];
+    const result = extractReceiptFieldsFromText(text, "RDE.EE-1.pdf", { textItems });
+    expect(result.supplier_name).not.toBe("Dokumendi number");
+    expect(result.supplier_name).toBe("OÜ Näidis Trade Baltic");
+  });
+
+  it("MTU-like: a supplier label in the right column takes the same column of the next line", () => {
+    const text = [
+      "Proovi OÜ        Makse saaja:",
+      "Pärnu mnt 1, Tallinn        MTÜ NÄIDIS",
+      "Arve nr MA2600091",
+      "Kuupäev 01.02.2026",
+      "liikmemaks 350.00",
+      "Tasumisele kuulub 350.00",
+    ].join("\n");
+    expect(extractReceiptFieldsFromText(text, "MTU_NAIDIS_PROOVI_OU_MA2600091.pdf").supplier_name).toBe("MTÜ NÄIDIS");
+    expect(extractReceiptFieldsFromText(text, "MTU_NAIDIS_PROOVI_OU_MA2600091.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name)
+      .toBe("MTÜ NÄIDIS");
+  });
+
+  it("a top line 'Seller OÜ   Buyer OÜ' gives the seller when the buyer is the own company", () => {
+    const text = ["Näidis Kaubandus OÜ   Proovi OÜ", "Arve nr 5", "Kokku 10,00 EUR"].join("\n");
+    expect(extractReceiptFieldsFromText(text, "x.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name).toBe("Näidis Kaubandus OÜ");
+    expect(extractReceiptFieldsFromText("Proovi OÜ\nArve nr 5\nKokku 10,00 EUR", "x.pdf", { ownCompanyName: "Proovi OÜ" }).supplier_name)
+      .not.toBe("Proovi OÜ");
+  });
+
+  it("offer-like: a sales-offer heading is unclassifiable", () => {
+    const text = ["Meeldetuletus/müügipakkumine nr. 82045101", "Tartu mnt 80", "Käibemaksuta: 54,99", "Tasumiseks: 59,94"].join("\n");
+    expect(classifyReceiptDocument(text, "ARVE425.pdf")).toBe("unclassifiable");
+  });
+
+  it("an invoice that mentions its prepayment invoice stays a purchase invoice", () => {
+    const text = ["Arve nr 55", "Ettemaksuarve nr 54 on tasutud", "Kokku 155,00 EUR"].join("\n");
+    expect(classifyReceiptDocument(text, "arve.pdf")).toBe("purchase_invoice");
+  });
+
+  it("an invoice that references a quotation in its body stays a purchase invoice", () => {
+    const text = ["Arve nr 123", "Vastavalt hinnapakkumisele nr 5", "Quotation ref Q-7", "Kokku 10,00 EUR"].join("\n");
+    expect(classifyReceiptDocument(text, "arve.pdf")).toBe("purchase_invoice");
+  });
+
+  it.each(["PROFORMA INVOICE", "Proforma-arve nr 7"])("a proforma heading (%s) is unclassifiable", heading => {
+    expect(classifyReceiptDocument([heading, "Kokku 10,00 EUR"].join("\n"), "doc.pdf")).toBe("unclassifiable");
+  });
+});

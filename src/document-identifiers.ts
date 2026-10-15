@@ -53,7 +53,7 @@ export function isValidEeVatNumber(value: string | null | undefined): boolean {
 // IBAN validation (structural, ISO 7064 mod-97)
 // ---------------------------------------------------------------------------
 
-function isValidIban(value: string): boolean {
+export function isValidIban(value: string): boolean {
   const compact = value.replace(/\s+/g, "").toUpperCase();
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) return false;
 

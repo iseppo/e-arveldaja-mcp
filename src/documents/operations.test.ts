@@ -99,6 +99,22 @@ describe("AccountingDocumentOperations.prepare", () => {
     expect(outcome.value.proposedBooking).toBeDefined();
   });
 
+  it("strips the own company (invoice_company_name) from a two-column supplier line", async () => {
+    mockedParseDocument.mockResolvedValue({
+      text: "NÄIDIS KAUBANDUS OÜ   SEPPO AI OÜ\nArve nr 5\nKokku 10.00 EUR",
+      pageCount: 1,
+      ocrPartialFailure: false,
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+    const { path } = writeTempPdf();
+    // The fixture api's invoice_info names the active company "Seppo AI OÜ".
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(String(outcome.value.extraction.fields.supplier_name)).toContain("NÄIDIS KAUBANDUS OÜ");
+    expect(String(outcome.value.extraction.fields.supplier_name)).not.toContain("SEPPO");
+  });
+
   it("surfaces a tied supplier name as ambiguous, never guessing a match", async () => {
     mockedParseDocument.mockResolvedValue(docPlain());
     const { path } = writeTempPdf();

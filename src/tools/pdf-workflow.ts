@@ -423,10 +423,11 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         let ownCompanyVat: string | undefined;
         let ownCompanyRegistryCode: string | undefined;
         let ownIbans: string[] | undefined;
+        let ownCompanyName: string | undefined;
         let clients: Client[] = [];
         try {
           clients = await api.clients.listAll();
-          ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans } = await resolveOwnCompanyIdentifiers(api, clients));
+          ({ ownCompanyVat, ownCompanyRegistryCode, ownIbans, ownCompanyName } = await resolveOwnCompanyIdentifiers(api, clients));
         } catch {
           // Offline / unconfigured connection — extract without self-exclusions.
         }
@@ -435,6 +436,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           ownCompanyVat,
           ownCompanyRegistryCode,
           ownIbans,
+          ownCompanyName,
         });
         // `extractReceiptFieldsFromText` already ran `extractIdentifiers` on the
         // same text + textItems and spread the result onto `extracted`; reuse
