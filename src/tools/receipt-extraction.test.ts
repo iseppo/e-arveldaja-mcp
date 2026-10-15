@@ -3768,3 +3768,62 @@ describe("row triples and layout amount tokens (WP2)", () => {
     });
   });
 });
+
+describe("header spans led by a non-amount column (WP3)", () => {
+  const item = (text: string, x: number, y: number, width: number, pageNum = 1): LayoutTextItem => ({
+    text, x, y, width, height: 12, pageNum,
+  });
+  const extractLayout = (items: LayoutTextItem[]) =>
+    extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+
+  it("a \"Kirjeldus Periood Kokku\" header does not read the description column's footer as the total", () => {
+    const result = extractLayout([
+      item("Näidis Meedia OÜ", 52, 40, 80),
+      item("Kirjeldus", 52, 200, 50), item("Periood", 200, 200, 40), item("Kokku", 400, 200, 30),
+      item("Domeeni teenus", 52, 216, 60), item("1 aasta", 200, 216, 40), item("6,00", 400, 216, 20),
+      item("Summa km-ta", 300, 260, 60), item("6,00", 400, 260, 20),
+      item("Käibemaks 24%", 300, 276, 70), item("1,44", 400, 276, 20),
+      item("Kokku", 300, 292, 30), item("7,44", 400, 292, 20),
+      item("Lõõtsa 5", 52, 700, 40),
+    ]);
+    expect(result).toMatchObject({ total_net: 6, total_vat: 1.44, total_gross: 7.44 });
+    expect(result.total_gross_conflict).toBeUndefined();
+    expect(result.amount_consistency_issues).toBeUndefined();
+  });
+
+  it("pin: a three-page zero-total invoice stays held", () => {
+    const result = extractLayout([
+      item("Näidis Pilv Ltd", 52, 40, 80), item("Arve nr 5713900000", 300, 40, 90),
+      item("Kogusumma (EUR)", 52, 200, 80), item("0,00", 400, 200, 20),
+      item("Teenus", 52, 100, 40, 2), item("11,94", 400, 100, 30, 2),
+      item("Kokku", 52, 116, 40, 2), item("11,94", 400, 116, 30, 2),
+      item("Ettemaks rakendatud", 52, 100, 90, 3), item("−11,94", 400, 100, 30, 3),
+    ]);
+    expect(result.zero_total_stated).toBe(true);
+  });
+
+  it.each([
+    ["Kogusumma", "total_gross"],
+    ["Summa kokku", "total_gross"],
+    ["Kokku KM-ta", "total_net"],
+  ] as const)("pin: a \"%s\" header span is still a label", (header, field) => {
+    const [first, ...rest] = header.split(" ");
+    const items = [
+      item("Näidis OÜ", 52, 40, 60),
+      item(first!, 300, 200, 40),
+      ...rest.map((word, index) => item(word, 345 + index * 45, 200, 40)),
+      item("50,00", 300, 216, 30),
+    ];
+    expect(extractAmountsFromLayout(items)?.provenance.some(entry => entry.field === field && entry.value === 50)).toBe(true);
+  });
+
+  it("pin: a split \"Kokku\" | \"KM-ta\" net header whose value disagrees with the labelled net holds", () => {
+    const result = extractLayout([
+      item("Näidis OÜ", 52, 40, 60),
+      item("Kokku", 300, 200, 30), item("KM-ta", 340, 200, 30),
+      item("90,00", 300, 216, 30),
+      item("Summa km-ta 100,00", 52, 260, 100), item("Käibemaks 24,00", 52, 276, 90), item("Kokku 124,00", 52, 292, 80),
+    ]);
+    expect(result.total_gross_conflict === true || (result.amount_consistency_issues ?? []).length > 0).toBe(true);
+  });
+});

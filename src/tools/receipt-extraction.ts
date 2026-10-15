@@ -1638,6 +1638,12 @@ function mergeLayoutTextItems(items: readonly LayoutTextItem[]): LayoutTextItem 
   };
 }
 
+// R1: a header span led by a word naming a non-amount column ("Kirjeldus",
+// "Kogus", "IMEI") is anchored at that column, not at the label's. Such a span
+// is no label source; the label words later in it keep their own cells.
+const NON_AMOUNT_COLUMN_HEADER_RE =
+  /^(?:kirjeldus|description|kood|code|nimetus|toode|toote\s+nimi|item|product|kogus|qty|quantity|ühik\p{L}*|unit|periood|period|kuupäevad|vahemik|ean|imei|serial|sku|tellimus)(?![\p{L}])/iu;
+
 function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTextItem, number>): LayoutTextCell[] {
   const cells: LayoutTextCell[] = [];
   const textItems = row.items.filter(item => extractAmountsFromLine(item.text).length === 0);
@@ -1648,6 +1654,7 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
       const merged = mergeLayoutTextItems(span);
       const columnIndex = columnByItem.get(span[0]!);
       if (columnIndex === undefined) continue;
+      if (NON_AMOUNT_COLUMN_HEADER_RE.test(clampTextLine(span[0]!.text).trim())) continue;
       cells.push({
         text: merged.text,
         item: merged,
