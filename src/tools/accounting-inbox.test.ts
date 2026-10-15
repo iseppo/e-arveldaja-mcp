@@ -4793,3 +4793,67 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     expect(stepTools(after.prepared)).toEqual(stepTools(before.prepared));
   });
 });
+
+describe("accounting_inbox dry_run: receipt review items are compact", () => {
+  async function receiptInboxDryRun(profile: "standard" | "guided", count: number) {
+    const workspace = await createAccountingWorkflowWorkspace({ includeCamt: false, includeWise: false, includeReceipts: false });
+    workspacesToClean.push(workspace);
+    const receiptsDir = join(workspace, "receipts");
+    await mkdir(receiptsDir, { recursive: true });
+    const padding = "Fixture receipt line with OCR noise 0123456789\n".repeat(110);
+    for (let index = 0; index < count; index += 1) {
+      await writeFile(join(receiptsDir, `receipt-${String(index).padStart(2, "0")}.pdf`), `fake pdf ${index}`);
+      // No invoice number or total: every receipt stays in review.
+      mockedParseDocument.mockResolvedValueOnce({
+        text: `Kviitung\nFixture Shop OÜ\n${padding}`,
+        pageCount: 1,
+        result: { text: "", pages: [] } as any,
+      });
+    }
+    const server = createMockToolServer();
+    registerAccountingInboxTools(server, createTestRuntimeSafetyContext(), createAccountingWorkflowApi({
+      bankAccounts: [fixtureBankAccount()],
+      accountDimensions: [fixtureAccountDimension()],
+    }), EXPOSE_GRANULAR);
+    const handler = getRegisteredToolHandler(server, "accounting_inbox");
+    const result = await runWithToolProfile(profile, () => handler({ mode: "dry_run", workspace_path: workspace, receipt_matching_dimension_id: 101 }));
+    return { text: result.content[0]!.text, payload: parseMcpResponse(result.content[0]!.text) as any };
+  }
+
+  it.each(["standard", "guided"] as const)("%s: review items carry no OCR text and stay within a size budget", async (profile) => {
+    const { text, payload } = await receiptInboxDryRun(profile, 20);
+    const reviews = (payload.autopilot.needs_accountant_review as any[]).filter(item => item.source === "process_receipt_batch");
+    expect(reviews).toHaveLength(20);
+    for (const review of reviews) {
+      const item = review.resolver_input.item;
+      expect(item.extracted?.raw_text).toBeUndefined();
+      expect(item.extracted?.field_provenance).toBeUndefined();
+      expect(item.raw_text_available).toBe(true);
+      expect(desandboxText(item.detail_hint)).toContain(profile === "guided" ? "process_accounting_document" : "detail='full'");
+      expect(item.file.file_ref).toEqual(expect.any(String));
+      expect(item.classification).toEqual(expect.any(String));
+      // Each untrusted string is wrapped exactly once.
+      const supplier = item.extracted?.supplier_name;
+      if (typeof supplier === "string") expect(supplier.match(/<<UNTRUSTED_OCR_START:/g)).toHaveLength(1);
+    }
+    expect(text).not.toContain("Fixture receipt line with OCR noise");
+    expect(text).not.toContain("all_vat_candidates");
+    // Without the projection each item also carried ~5 KB of OCR text plus
+    // candidates, and workflow.needs_review repeated every item in full.
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(profile === "guided" ? 150_000 : 180_000);
+    if (profile === "standard") {
+      // workflow.needs_review references the autopilot items instead of repeating them.
+      const workflowReviews = (payload.workflow.needs_review as any[]).filter(item => item.source === "process_receipt_batch");
+      expect(workflowReviews).toHaveLength(20);
+      for (const reference of workflowReviews) {
+        expect(Object.keys(reference).sort()).toEqual(["id", "see", "source", "summary"]);
+        expect(reviews.some(review => review.id === reference.id)).toBe(true);
+      }
+      // The review actions still carry the full resolver input.
+      expect((payload.workflow.available_actions as any[]).some(candidate =>
+        candidate.args?.review_item_json?.review_type === "receipt_review")).toBe(true);
+    }
+    // The review resolver still works on the compact item.
+    expect(resolveReviewItemPlan(reviews[0].resolver_input).review_type).toBe("receipt_review");
+  });
+});

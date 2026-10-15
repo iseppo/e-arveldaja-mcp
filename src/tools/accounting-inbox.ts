@@ -10,6 +10,7 @@ import { desandboxText, sandboxExternalText } from "../external-text-renderer.js
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { currentToolProfile, isGuidedProfile, isToolVisibleForProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
 import { parseCSV } from "../csv.js";
+import { receiptInboxReviewItem } from "../receipts/presenter.js";
 import { EXPECTED_STATEMENT_HEADERS, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
 import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
@@ -1255,7 +1256,15 @@ function isReviewMachineEnum(key: string, value: string): boolean {
       return value === "PROJECT" || value === "CONFIRMED" || value === "VOID" ||
         value === "UNKNOWN" || value === "ready_for_action" || value === "needs_answers" ||
         value === "unsupported_review_type" || value === "ready_for_approval" ||
-        value === "no_direct_action";
+        value === "no_direct_action" ||
+        // receipt_batch row statuses
+        value === "matched" || value === "created" || value === "skipped_duplicate" ||
+        value === "needs_review" || value === "failed" || value === "dry_run_preview";
+    case "classification":
+      return value === "purchase_invoice" || value === "payment_receipt" ||
+        value === "owner_paid_expense_reimbursement" || value === "unclassifiable";
+    case "confidence":
+      return value === "low" || value === "medium" || value === "high";
     case "type":
       return value === "C" || value === "D" || value === "tool_call" || value === "rule_save";
     case "apply_mode":
@@ -1294,10 +1303,24 @@ export function sandboxReviewFields(value: unknown, key?: string): unknown {
   ]));
 }
 
+// Where a reviewer gets the OCR text / provenance a compact receipt review item
+// omits, named with tools visible on the active profile.
+function receiptReviewDetailHint(): string {
+  return isGuidedProfile(currentToolProfile())
+    ? "call process_accounting_document mode='prepare' with this file_ref to re-extract this one receipt"
+    : "rerun receipt_batch with detail='full', or call extract_pdf_invoice on that one file, for the OCR text and field provenance";
+}
+
 function projectResolverInput(
   resolverInput: Record<string, unknown>,
   runtimeSafetyContext: RuntimeSafetyContext,
 ): { resolver_input: Record<string, unknown>; source_documents: string[] } {
+  // A receipt review carries the batch row; emit its compact review projection
+  // (no OCR text, provenance or candidate lists) instead of the whole row.
+  const receiptItem = stringAt(resolverInput, "review_type") === "receipt_review" ? recordAt(resolverInput, "item") : undefined;
+  if (receiptItem !== undefined) {
+    resolverInput = { ...resolverInput, item: receiptInboxReviewItem(receiptItem, receiptReviewDetailHint()) };
+  }
   const projected = sandboxReviewFields(resolverInput) as Record<string, unknown>;
   const item = recordAt(resolverInput, "item");
   const file = item ? recordAt(item, "file") : undefined;
@@ -2070,6 +2093,29 @@ function emitWorkflowEnvelope(
   }
 }
 
+/**
+ * The v1 workflow's needs_review repeats every autopilot.needs_accountant_review
+ * item verbatim. Keep each repeated item as a reference ({id, source, summary})
+ * to the autopilot entry; the envelope's actions were already built from the
+ * full items. Items without an id, and the guided v2 projection, are unchanged.
+ */
+function dedupeAutopilotReviewItems(workflow: unknown, publicAutopilot: Record<string, unknown>): unknown {
+  if (!isRecord(workflow) || !Array.isArray(workflow.needs_review)) return workflow;
+  const autopilotIds = new Set(arrayAt(publicAutopilot, "needs_accountant_review")
+    .map(item => (isRecord(item) ? stringAt(item, "id") : undefined))
+    .filter((id): id is string => id !== undefined));
+  if (autopilotIds.size === 0) return workflow;
+  return {
+    ...workflow,
+    needs_review: workflow.needs_review.map(item => {
+      const id = isRecord(item) ? stringAt(item, "id") : undefined;
+      return id !== undefined && autopilotIds.has(id)
+        ? { id, source: stringAt(item as Record<string, unknown>, "source"), summary: stringAt(item as Record<string, unknown>, "summary"), see: "autopilot.needs_accountant_review" }
+        : item;
+    }),
+  };
+}
+
 async function buildAccountingInboxScanResponse(
   api: ApiContext,
   params: AccountingInboxToolParams,
@@ -2156,11 +2202,11 @@ async function buildAccountingInboxDryRunResponse(
         }
       : {}),
   };
-  const workflow = emitWorkflowEnvelope(
+  const workflow = dedupeAutopilotReviewItems(emitWorkflowEnvelope(
     remapHiddenGranularWorkflowEnvelope(workflowFromAccountingInboxPayload(payload)),
     runtimeSafetyContext,
     { mode: "dry_run", ...params },
-  );
+  ), publicAutopilot);
 
   return {
     content: [{

@@ -171,6 +171,39 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
   };
 }
 
+const INBOX_REVIEW_EXTRACTED_KEYS = [
+  "supplier_name", "supplier_reg_code", "supplier_vat_no", "invoice_number", "invoice_date", "due_date",
+  "total_net", "total_vat", "total_gross", "currency", "partial_ocr_failure", "amount_consistency_issues",
+  "extraction_notes",
+] as const;
+
+/**
+ * A receipt row as an accounting-inbox review item: identifies the file and
+ * carries what the reviewer and the review resolver act on (classification,
+ * guidance, notes, signals, error, duplicate / journal ids, key extracted
+ * fields), never the OCR text, provenance or candidate lists. The file stays
+ * as given; the inbox output boundary projects and sandboxes it.
+ */
+export function receiptInboxReviewItem(row: Record<string, unknown>, detailHint: string): Record<string, unknown> {
+  const extracted = row.extracted as Record<string, unknown> | undefined;
+  const llmFallback = row.llm_fallback as Record<string, unknown> | undefined;
+  const rawText = extracted?.raw_text;
+  const rawTextAvailable = typeof rawText === "string" && rawText.trim() !== "";
+  const { extracted: _totals, ...reference } = receiptReviewReference(row as PublicReceiptRow);
+  const keptExtracted = extracted !== undefined
+    ? pickKeys(extracted, INBOX_REVIEW_EXTRACTED_KEYS) as Record<string, unknown>
+    : undefined;
+  return {
+    ...reference,
+    ...(keptExtracted !== undefined && Object.keys(keptExtracted).length > 0 ? { extracted: keptExtracted } : {}),
+    ...(llmFallback !== undefined
+      ? { llm_fallback: pickKeys(llmFallback, ["confidence", "confidence_signals", "missing_required_fields"]) }
+      : {}),
+    raw_text_available: rawTextAvailable,
+    ...(rawTextAvailable ? { detail_hint: detailHint } : {}),
+  };
+}
+
 /** `workflow.needs_review` reference: the review list consumers act on, so it
  * also keeps the guidance and notes. */
 export function receiptReviewReference(row: PublicReceiptRow): PublicReceiptRow {
