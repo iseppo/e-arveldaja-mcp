@@ -4305,8 +4305,8 @@ describe("supplier identity from a page-column identity block (Telia footer live
   });
   const footer = (lines: string[], y = 776): LayoutTextItem[] =>
     lines.map((line, index) => item(line, 28, y + index * 12, 90, 9));
-  const page = (footerItems: LayoutTextItem[]): LayoutTextItem[] => [
-    item("Näidis", 65, 38, 48, 18),
+  const page = (footerItems: LayoutTextItem[], letterhead = "Näidis"): LayoutTextItem[] => [
+    item(letterhead, 65, 38, 48, 18),
     item("Tänav 1, Tallinn 10111", 28, 70, 95, 9),
     item("Arve saaja", 28, 104, 52, 13),
     item("Testfirma OÜ", 28, 118, 53),
@@ -4365,8 +4365,8 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(ownBlock.supplier_name).toBe("ARVE NS0001234");
     expect(ownBlock.supplier_reg_code).toBeUndefined();
     // Each own identifier alone disqualifies the block, the name even when the
-    // buyer block does not print it.
-    const ownName = extract(page(footer(["Testfirma OÜ", "Registrikood 10000018"])).filter(entry => entry.y > 300 || entry.text !== "Testfirma OÜ"));
+    // buyer block does not print it and the letterhead names it.
+    const ownName = extract(page(footer(["Testfirma OÜ", "Registrikood 10000018"]), "Testfirma").filter(entry => entry.y > 300 || entry.text !== "Testfirma OÜ"));
     expect(ownName.supplier_reg_code).toBeUndefined();
     const ownRegistryCode = extract(page(footer(["Näidis Side AS", "Registrikood 12000005"])));
     expect(ownRegistryCode.supplier_reg_code).toBeUndefined();
@@ -4376,8 +4376,9 @@ describe("supplier identity from a page-column identity block (Telia footer live
   });
 
   it("a block inside the buyer block is not taken", () => {
-    // The name sits a line below the label, so only the buyer-block check stops it.
-    const items = page([]).filter(entry => entry.y !== 118 && entry.y !== 129);
+    // The name sits a line below the label and the letterhead names it, so only
+    // the buyer-block check stops it.
+    const items = page([], "Testfirma").filter(entry => entry.y !== 118 && entry.y !== 129);
     items.push(item("Testfirma OÜ", 28, 128, 53), item("Registrikood 10000024", 28, 140, 81));
     const result = extract(items, { ownCompanyVat: own.ownCompanyVat });
     expect(result.supplier_reg_code).toBeUndefined();
@@ -4479,7 +4480,8 @@ describe("supplier identity from a page-column identity block (Telia footer live
   });
 
   it("a role word glued into the name line disqualifies the block", () => {
-    const result = extract(page(footer(["Maksete vahendaja Maksekeskus AS", "Registrikood 10000018"])));
+    // The letterhead corroborates the name, so only the role-word check stops it.
+    const result = extract(page(footer(["Maksete vahendaja Maksekeskus AS", "Registrikood 10000018"]), "Maksete"));
     expect(result.supplier_reg_code).toBeUndefined();
   });
 
@@ -4520,6 +4522,59 @@ describe("supplier identity from a page-column identity block (Telia footer live
       item("EE162200001234567890 SWIFT: TESTEE2X", 276, 652, 145, 9),
     ]));
     expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  // Codex round 2: role-label placements the block geometry does not see. The
+  // agent's name is not corroborated by the letterhead, so nothing is taken.
+  const agentBlock = footer(["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"], 788);
+  const agentPlacements = [
+    { placement: "right of the name on its row, larger font", label: item("Maksete vahendaja", 125, 787, 80, 12) },
+    { placement: "same column 24 pt above", label: item("Maksete vahendaja", 28, 764, 80, 9) },
+    { placement: "previous row, offset column", label: item("Maksete vahendaja", 145, 776, 80, 9) },
+  ];
+
+  it.each(agentPlacements)("a payment agent's block with its label $placement is not taken", ({ label }) => {
+    const result = extract(page([...agentBlock, label]));
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+    expect(result.reg_code_rationale).not.toBe("identity_block");
+  });
+
+  it.each(agentPlacements)("a marker-named supplier never gets the agent's codes (label $placement)", ({ label }) => {
+    const items = page([...agentBlock, label]);
+    items.push(item("Müüja: Näidis Side AS", 316, 104, 120));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("a marker-named supplier gets the codes of its own block", () => {
+    const items = page(footer(["Näidis Side AS", "Registrikood 10000018", "KMKR number EE100000010"]), "Muu Logo");
+    items.push(item("Müüja: Näidis Side AS", 316, 104, 120));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBe("10000018");
+  });
+
+  it("a name found only by the legal-form line scan does not corroborate its block", () => {
+    const result = extract(page(footer(supplierFooter, 640), "Muu Logo"));
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("a document whose letterhead is the agent itself takes the agent's block", () => {
+    const result = extract(page([...agentBlock, agentPlacements[1]!.label], "Maksekeskus"));
+    expect(result.supplier_name).toBe("Maksekeskus AS");
+    expect(result.supplier_reg_code).toBe("10000018");
+  });
+
+  it("a footer block the letterhead does not name is not taken", () => {
+    const result = extract(page(footer(supplierFooter), "Muu Logo"));
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
   });
 
   it("a supplier already named as a different company keeps the current result", () => {

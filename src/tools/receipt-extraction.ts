@@ -3103,6 +3103,30 @@ interface ColumnIdentityBlock {
   vatNo?: string;
 }
 
+/**
+ * True when the first text line of the first page (the letterhead) and the
+ * entity's name without its legal form agree token for token, one a leading
+ * part of the other: letterhead "Telia" names "Telia Eesti AS".
+ */
+function letterheadNamesEntity(textItems: readonly LayoutTextItem[], name: string): boolean {
+  const lines = textItems.filter(item => clampTextLine(item.text));
+  const firstPage = Math.min(...lines.map(item => item.pageNum ?? 1));
+  const top = lines
+    .filter(item => (item.pageNum ?? 1) === firstPage)
+    .sort((a, b) => a.y - b.y || a.x - b.x)[0];
+  if (!top) return false;
+  const letterhead = lines
+    .filter(item => sameLayoutRowItems(item, top))
+    .sort((a, b) => a.x - b.x)
+    .map(item => item.text)
+    .join(" ");
+  const letterheadTokens = normalizeCompanyNameShared(letterhead, { stripNonAlphanumeric: true }).split(" ").filter(Boolean);
+  const nameTokens = normalizeCompanyNameShared(name, { stripNonAlphanumeric: true }).split(" ").filter(Boolean);
+  if (letterheadTokens.length === 0 || nameTokens.length === 0) return false;
+  const [shorter, longer] = letterheadTokens.length <= nameTokens.length ? [letterheadTokens, nameTokens] : [nameTokens, letterheadTokens];
+  return shorter.every((token, index) => longer[index] === token);
+}
+
 /** An allowed identity-block line: address, labelled reg code / VAT, contact or country. */
 function isIdentityBlockDetailLine(line: string): boolean {
   if (IDENTITY_BLOCK_REG_LINE_RE.test(line) || IDENTITY_BLOCK_VAT_LINE_RE.test(line)) return true;
@@ -4000,7 +4024,9 @@ export function extractReceiptFieldsFromText(
   const extractedSupplier = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
   // A page-column identity block (e.g. a footer) names the supplier only when
   // nothing else did: no supplier reg code or VAT, and the name is the file
-  // name stand-in or the block's own entity.
+  // name stand-in or the block's own entity. Its entity must also be named by
+  // a supplier label / marker or by the letterhead; geometry alone cannot
+  // rule out a third party's block (a payment agent's).
   const identityBlock = !pdfIdentifiers.supplier_reg_code && !pdfIdentifiers.supplier_vat_no && options?.textItems?.length
     ? findColumnIdentityBlock(options.textItems, {
       name: options.ownCompanyName,
@@ -4008,10 +4034,17 @@ export function extractReceiptFieldsFromText(
       registryCode: options.ownCompanyRegistryCode,
     })
     : undefined;
+  const extractedNameSource = extractedSupplier.layoutSupplierNameItem
+    ? undefined
+    : supplierNameSource(text, fileName, extractedSupplier.name);
+  const sameAsExtractedName = identityBlock !== undefined && sameCompanyIdentity(extractedSupplier.name, identityBlock.name);
   const useIdentityBlock = identityBlock !== undefined && (
     extractedSupplier.name === undefined ||
-    sameCompanyIdentity(extractedSupplier.name, identityBlock.name) ||
-    (!extractedSupplier.layoutSupplierNameItem && supplierNameSource(text, fileName, extractedSupplier.name).rationale === "filename_token")
+    sameAsExtractedName ||
+    extractedNameSource?.rationale === "filename_token"
+  ) && (
+    (sameAsExtractedName && (extractedSupplier.layoutSupplierNameItem !== undefined || extractedNameSource?.source === "label")) ||
+    letterheadNamesEntity(options?.textItems ?? [], identityBlock.name)
   );
   const identifiers = useIdentityBlock
     ? {

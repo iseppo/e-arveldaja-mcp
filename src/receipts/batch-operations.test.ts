@@ -912,6 +912,22 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       ),
       other: { ...client, id: 78, name: "Teine Firma OÜ", code: "10000024", invoice_vat_no: "EE100000036" },
     },
+    // Codex round 2: label placements the block geometry does not see; the
+    // letterhead does not name the agent. The bank columns share the name's row.
+    ...[
+      { placement: "right of the name on its row", label: { text: "Maksete vahendaja", x: 125, y: 787, width: 80, height: 12 } },
+      { placement: "24 pt above in its column", label: { text: "Maksete vahendaja", x: 28, y: 764, width: 80, height: 9 } },
+      { placement: "on the previous row, offset", label: { text: "Maksete vahendaja", x: 145, y: 776, width: 80, height: 9 } },
+    ].map(({ placement, label }) => ({
+      scenario: `a payment agent's block labelled ${placement}`,
+      document: documentWith([], [
+        ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
+          .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
+        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        label,
+      ]),
+      other: { ...client, name: "Maksekeskus AS" },
+    })),
   ])("$scenario is held, not skipped as the other entity's duplicate", async ({ document: held, other }) => {
     vi.mocked(parseDocument).mockResolvedValue(held as never);
     const { api, spies } = makeApi();
