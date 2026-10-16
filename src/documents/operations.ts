@@ -34,6 +34,7 @@ import {
   validateInvoiceData,
 } from "../tools/pdf-workflow.js";
 import { detectDuplicatePurchaseInvoice } from "../tools/document-audit.js";
+import { checkJournalReferences, formatJournalReferenceWarnings } from "../journal-reference-scan.js";
 import {
   checkIntakeCashDuplicates,
   type DuplicatePostingCandidate,
@@ -425,6 +426,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         grossAmountEur,
         invoiceDate: extracted.invoice_date ?? "",
       });
+      // Advisory only on a single-document tool: a live journal that already
+      // references this invoice number (receipt_batch holds on it).
+      const journalReferenceScan = await checkJournalReferences(this.api, [extracted.invoice_number]);
 
       // Proposed booking — ONLY when the supplier resolved uniquely.
       const proposedBooking = resolvedClientId !== undefined
@@ -467,6 +471,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (signals.self_vat_detected || signals.self_reg_code_detected) {
         warnings.push({ code: "self_supplier_signal", message: "An identifier matched the active company itself; verify the supplier." });
+      }
+      if (journalReferenceScan.hits.length > 0) {
+        warnings.push({ code: "invoice_referenced_by_journal", message: formatJournalReferenceWarnings(journalReferenceScan)[0]! });
       }
       if (supplierResolution.status === "ambiguous") {
         warnings.push({ code: "supplier_ambiguous", message: "The supplier is ambiguous; resolve it before booking." });
@@ -700,6 +707,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       ) {
         return fail("possible_duplicate_posting", `Possible duplicate bank posting: journal(s) ${duplicateScan.suspects.map(s => s.journal_id).join(", ")}.`, "never");
       }
+      // Advisory only (never blocks; block_on_duplicate stays scoped to bank
+      // postings): a live journal already referencing the reviewed number.
+      const journalReferenceScan = await checkJournalReferences(this.api, [invoiceNumber]);
 
       let result;
       try {
@@ -782,6 +792,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         duplicateScan,
         duplicateCandidate,
         ...(duplicateScan.suspects.length > 0 ? { possibleDuplicatePostings: duplicateScan.suspects } : {}),
+        journalReferenceScan,
         ...(confirmPlanHandle ? { confirmPlan: { planHandle: confirmPlanHandle, invoiceId: result.id } } : {}),
       };
       return ok(execution);

@@ -40,6 +40,7 @@ import {
   type DuplicatePostingCandidate,
   renderDuplicatePostingSuspects,
 } from "../bank-posting-duplicate-guard.js";
+import { checkJournalReferences, formatJournalReferenceWarnings } from "../journal-reference-scan.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"];
@@ -1126,6 +1127,9 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         grossAmountEur,
         invoiceDate: params.invoice_date,
       });
+      // Advisory only (never blocks; block_on_duplicate stays scoped to bank
+      // postings): a live journal already referencing this invoice number.
+      const journalReferenceScan = await checkJournalReferences(api, [params.invoice_number]);
 
       if (
         params.block_on_duplicate === true
@@ -1202,6 +1206,8 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const duplicateWarnings = duplicateScan.skipped_no_eur_amount
         ? [duplicateScan.scan_note ?? "Duplicate scan skipped: no EUR-equivalent gross amount available."]
         : formatDuplicatePostingWarnings(duplicateScan, duplicateCandidate, t => wrapUntrustedOcr(t) ?? "");
+      const warnings = [...duplicateWarnings, ...formatJournalReferenceWarnings(journalReferenceScan)];
+      const referencingJournalIds = journalReferenceScan.hits.map(hit => hit.journal_id);
 
       return {
         content: [{
@@ -1218,16 +1224,11 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
                   },
                 }
               : {}),
-            ...(duplicateWarnings.length > 0
-              ? {
-                  warnings: duplicateWarnings,
-                  ...(duplicateScan.suspects.length > 0
-                    ? {
-                        possible_duplicate_postings: renderDuplicatePostingSuspects(duplicateScan.suspects),
-                      }
-                    : {}),
-                }
+            ...(warnings.length > 0 ? { warnings } : {}),
+            ...(duplicateScan.suspects.length > 0
+              ? { possible_duplicate_postings: renderDuplicatePostingSuspects(duplicateScan.suspects) }
               : {}),
+            ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
           }),
         }],
       };

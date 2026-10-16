@@ -17,6 +17,7 @@ import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { createAccountingDocumentOperations } from "../documents/operations.js";
 import { failureResponsePayload } from "../operation-outcome.js";
 import { formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
+import { formatJournalReferenceWarnings } from "../journal-reference-scan.js";
 import type { AccountingDocumentPreview } from "../documents/types.js";
 import type { Resolution } from "../resolution/types.js";
 import type { SupplierRef } from "../resolution/supplier-default-resolution.js";
@@ -496,6 +497,8 @@ export function registerProcessAccountingDocumentTool(
       const warnings = execution.duplicateScan.skipped_no_eur_amount
         ? [execution.duplicateScan.scan_note ?? "Duplicate scan skipped: no EUR-equivalent gross amount available."]
         : formatDuplicatePostingWarnings(execution.duplicateScan, execution.duplicateCandidate, t => wrapUntrustedOcr(t) ?? "");
+      warnings.push(...formatJournalReferenceWarnings(execution.journalReferenceScan));
+      const referencingJournalIds = execution.journalReferenceScan.hits.map(hit => hit.journal_id);
       return textResult({
         result: {
           created_invoice_id: execution.createdInvoiceId,
@@ -513,6 +516,7 @@ export function registerProcessAccountingDocumentTool(
               })),
             }
           : {}),
+        ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
         note: "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Confirmation is a SEPARATE step — review, then confirm the invoice by calling process_accounting_document with mode='confirm', the invoice_id, and the confirm plan handle below.",
         ...(execution.confirmPlan
           ? { confirm_plan: { plan_handle: execution.confirmPlan.planHandle, invoice_id: execution.confirmPlan.invoiceId } }

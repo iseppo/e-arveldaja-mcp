@@ -22,6 +22,7 @@ export interface MockAccountingWorkflowApi {
     invalidateListCache: ReturnType<typeof vi.fn>;
   };
   journals: {
+    listAll: ReturnType<typeof vi.fn>;
     listAllWithPostings: ReturnType<typeof vi.fn>;
     invalidateListCache: ReturnType<typeof vi.fn>;
   };

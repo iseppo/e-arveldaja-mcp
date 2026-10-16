@@ -174,3 +174,17 @@ export async function checkJournalReferences(
     };
   }
 }
+
+/**
+ * Advisory lines for the single-document tools (they never hold on a hit):
+ * journal ids only, never journal text; the scan note when it was unavailable.
+ */
+export function formatJournalReferenceWarnings(result: JournalReferenceScanResult): string[] {
+  if (!result.scan_available) return result.scan_note ? [result.scan_note] : [];
+  if (result.hits.length === 0) return [];
+  const ids = result.hits.map(hit => hit.journal_id).join(", ");
+  return [
+    `POSSIBLE duplicate: journal(s) ${ids} already reference this document's invoice number, so it may already be booked. ` +
+    "Verify before proceeding; if it is the same document, attach it to that journal (attach_document entity_type=journal) instead.",
+  ];
+}

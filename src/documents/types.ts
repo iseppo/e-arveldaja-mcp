@@ -7,6 +7,7 @@ import type { ExtractionConfidenceSignals, InvoiceExtractionFallback } from "../
 import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.js";
 import type { BookingSuggestionCore } from "../tools/pdf-workflow.js";
 import type { DuplicatePostingCandidate, DuplicatePostingScanResult, DuplicatePostingSuspect } from "../bank-posting-duplicate-guard.js";
+import type { JournalReferenceScanResult } from "../journal-reference-scan.js";
 import type { ApiResponse, PurchaseInvoice } from "../types/api.js";
 
 // Typed accounting-document operations (Task 13, PR 8B). The interface
@@ -137,6 +138,8 @@ export interface AccountingDocumentExecution {
   readonly duplicateScan: DuplicatePostingScanResult & { skipped_no_eur_amount?: boolean };
   readonly duplicateCandidate: DuplicatePostingCandidate;
   readonly possibleDuplicatePostings?: readonly DuplicatePostingSuspect[];
+  /** Live journals already referencing the invoice number (advisory; hits carry raw journal text). */
+  readonly journalReferenceScan: JournalReferenceScanResult;
   /** SECOND plan minted for the SEPARATE confirm/link step — NEVER auto-run. */
   readonly confirmPlan?: {
     readonly planHandle: string;
