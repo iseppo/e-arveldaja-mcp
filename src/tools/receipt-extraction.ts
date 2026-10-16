@@ -14,7 +14,9 @@ import {
   extractRegistryCode,
   extractVatNumber,
   isLabelShapedSupplierMarker,
+  isValidEeVatNumber,
   isValidIban,
+  normalizeVatValue,
 } from "../document-identifiers.js";
 import { hasConfidentInvoiceNumber } from "../invoice-extraction-fallback.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
@@ -284,8 +286,8 @@ export interface ExtractedReceiptFields {
   /** Structured identifier candidates surfaced for reviewer visibility (#vat-reg-recovery). */
   all_vat_candidates?: string[];
   all_reg_code_candidates?: string[];
-  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
-  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected";
+  reg_code_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected" | "identity_block";
+  vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected" | "identity_block";
   rejected_candidates?: RejectedCandidate[];
   field_provenance?: FieldProvenance[];
   extraction_notes?: string[];
@@ -3078,6 +3080,85 @@ function classifyBuyerBlock(
   return ownSeen ? "buyer_ambiguous" : "buyer_not_active_company";
 }
 
+// An identity block carries its identifiers within this many lines below the name.
+const IDENTITY_BLOCK_MAX_LINES = 4;
+
+interface ColumnIdentityBlock {
+  name: string;
+  nameItem: LayoutTextItem;
+  regCode?: string;
+  vatNo?: string;
+}
+
+/**
+ * A page-column identity block with no supplier label, such as the footer
+ * "Näidis Side AS / Tänav 1, Tallinn / Registrikood 10000018 / KMKR number
+ * EE100000010": a line that is exactly a legal-entity name, followed in the
+ * same column within IDENTITY_BLOCK_MAX_LINES by a labelled, checksum-valid
+ * registry code and/or EE VAT number. A block that is the active company's or
+ * lies in a buyer block never counts, a block with a checksum-failed code
+ * never counts, and two different qualifying blocks return nothing.
+ */
+function findColumnIdentityBlock(
+  textItems: readonly LayoutTextItem[],
+  own: OwnCompanyIdentity,
+): ColumnIdentityBlock | undefined {
+  const ownRegistryCode = own.registryCode?.trim();
+  const ownVat = normalizeVatValue(own.vatNo);
+  const markers = buildIdentifierMarkers(textItems);
+  const buyerLines = markers
+    .filter(marker => marker.side === "buyer" && BUYER_MARKER_RE.exec(marker.text.trim())?.index === 0)
+    .flatMap(label => {
+      const labelItem = textItems.find(item =>
+        item.text === label.text && item.x === label.x && item.y === label.y && (item.pageNum ?? 1) === (label.pageNum ?? 1));
+      return labelItem ? buyerBlockLines(label, labelItem, textItems, markers) : [];
+    });
+  const blocks = new Map<string, ColumnIdentityBlock>();
+  for (const nameItem of textItems) {
+    const name = clampTextLine(nameItem.text);
+    if (!name || buyerBlockLegalEntity(name) !== name) continue;
+    // The name item acts as a column marker: classifyByPosition keeps the items
+    // below it in its column, as buyerBlockLines does for a buyer label.
+    const column: MarkerPosition = { ...nameItem, side: "supplier" };
+    const below = textItems
+      .filter(item =>
+        item !== nameItem &&
+        (item.pageNum ?? 1) === (nameItem.pageNum ?? 1) &&
+        item.y > nameItem.y + 1 &&
+        classifyByPosition(item, [column]) === "supplier")
+      .sort((a, b) => a.y - b.y || a.x - b.x);
+    const rows: LayoutTextItem[][] = [];
+    let previous = nameItem;
+    for (const item of below) {
+      const row = rows[rows.length - 1];
+      if (row && sameLayoutRowItems(row[0]!, item)) {
+        row.push(item);
+        continue;
+      }
+      if (rows.length === IDENTITY_BLOCK_MAX_LINES) break;
+      if (item.y - previous.y > BUYER_BLOCK_LINE_GAP_FACTOR * Math.max(previous.height, item.height)) break;
+      rows.push([item]);
+      previous = item;
+    }
+    const ids = extractIdentifiers(rows.map(row => row.map(item => clampTextLine(item.text)).join(" ")).join("\n"));
+    if (ids.rejected_candidates.length > 0) continue;
+    const regCode = ids.reg_code_rationale === "labeled" ? ids.reg_code : undefined;
+    const vatNo = ids.vat_no_rationale === "labeled" && isValidEeVatNumber(ids.vat_no) ? ids.vat_no : undefined;
+    if (!regCode && !vatNo) continue;
+    if (own.name && sameCompanyIdentity(name, own.name)) continue;
+    if ((regCode && regCode === ownRegistryCode) || (vatNo && vatNo === ownVat)) continue;
+    if (buyerLines.some(line => {
+      const compact = line.replace(/\s+/g, "").toUpperCase();
+      return sameCompanyIdentity(line, name) ||
+        (regCode !== undefined && compact.includes(regCode)) ||
+        (vatNo !== undefined && compact.includes(vatNo));
+    })) continue;
+    const key = [normalizeCompanyNameShared(name), regCode ?? "", vatNo ?? ""].join("|");
+    if (!blocks.has(key)) blocks.set(key, { name, nameItem, regCode, vatNo });
+  }
+  return blocks.size === 1 ? [...blocks.values()][0] : undefined;
+}
+
 // Invoice-number candidates must carry a digit and must not be a real
 // calendar date ("12.03.2024", "2024-03-12", "12/03/24") captured after a
 // "No." / "Nr" label. Date-shaped invoice numbers that are not valid dates in
@@ -3310,6 +3391,7 @@ function identifierSourceFromRationale(rationale?: ExtractedReceiptFields["reg_c
     case "coordinate_confirmed":
     case "coordinate_confirmed_echo":
     case "coordinate_rejected":
+    case "identity_block":
       return "coordinate";
     case "bare_structural":
       return "regex";
@@ -3868,9 +3950,36 @@ export function extractReceiptFieldsFromText(
       }),
     }
     : sourceOptions;
-  const identifiers = extractPdfIdentifiers(text, options);
+  const pdfIdentifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date } = extractDates(text);
-  const supplierResult = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
+  const extractedSupplier = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
+  // A page-column identity block (e.g. a footer) names the supplier only when
+  // nothing else did: no supplier reg code or VAT, and the name is the file
+  // name stand-in or the block's own entity.
+  const identityBlock = !pdfIdentifiers.supplier_reg_code && !pdfIdentifiers.supplier_vat_no && options?.textItems?.length
+    ? findColumnIdentityBlock(options.textItems, {
+      name: options.ownCompanyName,
+      vatNo: options.ownCompanyVat,
+      registryCode: options.ownCompanyRegistryCode,
+    })
+    : undefined;
+  const useIdentityBlock = identityBlock !== undefined && (
+    extractedSupplier.name === undefined ||
+    sameCompanyIdentity(extractedSupplier.name, identityBlock.name) ||
+    (!extractedSupplier.layoutSupplierNameItem && supplierNameSource(text, fileName, extractedSupplier.name).rationale === "filename_token")
+  );
+  const identifiers = useIdentityBlock
+    ? {
+      ...pdfIdentifiers,
+      supplier_reg_code: identityBlock.regCode,
+      supplier_vat_no: identityBlock.vatNo,
+      ...(identityBlock.regCode ? { reg_code_rationale: "identity_block" as const } : {}),
+      ...(identityBlock.vatNo ? { vat_no_rationale: "identity_block" as const } : {}),
+    }
+    : pdfIdentifiers;
+  const supplierResult: SupplierNameExtractionResult = useIdentityBlock
+    ? { ...extractedSupplier, name: identityBlock.name, layoutSupplierNameItem: identityBlock.nameItem, layoutSupplierNameRationale: "identity_block" }
+    : extractedSupplier;
   const supplierName = supplierResult.name;
   const amounts = extractAmountsWithMetadata(text, options?.textItems);
   // The booked currency follows the picked gross: on "Paid EUR 90.00 (1 EUR =

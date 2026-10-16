@@ -4294,3 +4294,159 @@ describe("supplier names and invoice numbers (WP5)", () => {
     });
   });
 });
+
+describe("supplier identity from a page-column identity block (Telia footer live miss)", () => {
+  // Synthetic mirror of a live invoice: logo text without a legal form, the
+  // buyer under "Arve saaja" / "Klient" with its own VAT, no supplier label,
+  // and the supplier's identity only in a multi-column page footer.
+  const own = { ownCompanyName: "Testfirma OÜ", ownCompanyVat: "EE100000023", ownCompanyRegistryCode: "12000005" };
+  const item = (text: string, x: number, y: number, width: number, height = 12): LayoutTextItem => ({
+    text, x, y, width, height, pageNum: 1,
+  });
+  const footer = (lines: string[], y = 776): LayoutTextItem[] =>
+    lines.map((line, index) => item(line, 28, y + index * 12, 90, 9));
+  const page = (footerItems: LayoutTextItem[]): LayoutTextItem[] => [
+    item("Näidis", 65, 38, 48, 18),
+    item("Tänav 1, Tallinn 10111", 28, 70, 95, 9),
+    item("Arve saaja", 28, 104, 52, 13),
+    item("Testfirma OÜ", 28, 118, 53),
+    item("Pikk tn 1", 28, 129, 81),
+    item("Klient", 28, 203, 29, 13),
+    item("Arve", 316, 201, 23, 13),
+    item("NS0001234", 499, 201, 63, 13),
+    item("Testfirma OÜ", 28, 217, 53),
+    item("Kuupäev", 316, 215, 36),
+    item("16.09.2026", 517, 215, 45),
+    item("Pikk tn 1", 28, 228, 81),
+    item("KMKR number: EE100000023", 28, 255, 121),
+    item("Maksumus käibemaksuta", 316, 524, 125, 13),
+    item("100,00", 529, 524, 33, 13),
+    item("24 % käibemaks", 316, 537, 66, 13),
+    item("24,00", 529, 537, 33, 13),
+    item("Arve summa", 316, 550, 61, 13),
+    item("124,00", 529, 550, 33, 13),
+    item("Pank", 206, 776, 40, 9),
+    item("EE162200001234567890 SWIFT: TESTEE2X", 276, 776, 145, 9),
+    ...footerItems,
+  ];
+  // Raw text as the parser lays it out: one line per row, columns spaced apart.
+  const extract = (items: LayoutTextItem[], options: Parameters<typeof extractReceiptFieldsFromText>[2] = own) => {
+    const rows = new Map<number, LayoutTextItem[]>();
+    for (const entry of items) rows.set(entry.y, [...(rows.get(entry.y) ?? []), entry]);
+    const text = [...rows.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, row]) => row.sort((a, b) => a.x - b.x).map(entry => entry.text).join("    "))
+      .join("\n");
+    return extractReceiptFieldsFromText(text, "Arve_NS0001234.pdf", { ...options, textItems: items });
+  };
+  const supplierFooter = ["Näidis Side AS", "Tänav 1, 10111 Tallinn", "Registrikood 10000018", "KMKR number EE100000010"];
+
+  it("takes the footer legal entity with its registry code and VAT", () => {
+    const result = extract(page(footer(supplierFooter)));
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_vat_no).toBe("EE100000010");
+    expect(result.reg_code_rationale).toBe("identity_block");
+    expect(result.vat_no_rationale).toBe("identity_block");
+    expect(result.field_provenance?.find(entry => entry.field === "supplier_name")).toMatchObject({
+      source: "coordinate", rationale: "identity_block", bbox: { x: 28, y: 776 },
+    });
+  });
+
+  it("without the footer block the supplier stays unresolved (the live miss)", () => {
+    const result = extract(page([]));
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("the active company's own block is not taken", () => {
+    const ownBlock = extract(page(footer(["Testfirma OÜ", "Pikk tn 1", "Registrikood 12000005", "KMKR number EE100000023"])));
+    expect(ownBlock.supplier_name).toBe("ARVE NS0001234");
+    expect(ownBlock.supplier_reg_code).toBeUndefined();
+    // Each own identifier alone disqualifies the block, the name even when the
+    // buyer block does not print it.
+    const ownName = extract(page(footer(["Testfirma OÜ", "Registrikood 10000018"])).filter(entry => entry.y > 300 || entry.text !== "Testfirma OÜ"));
+    expect(ownName.supplier_reg_code).toBeUndefined();
+    const ownRegistryCode = extract(page(footer(["Näidis Side AS", "Registrikood 12000005"])));
+    expect(ownRegistryCode.supplier_reg_code).toBeUndefined();
+    const ownVat = extract(page(footer(["Näidis Side AS", "KMKR number EE100000023"])).filter(entry => entry.y !== 255));
+    expect(ownVat.supplier_vat_no).toBeUndefined();
+    expect(ownVat.supplier_name).toBe("ARVE NS0001234");
+  });
+
+  it("a block inside the buyer block is not taken", () => {
+    const items = page([]).filter(entry => entry.y !== 129);
+    items.push(item("Registrikood 10000024", 28, 129, 81));
+    const result = extract(items, { ownCompanyVat: own.ownCompanyVat });
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.reg_code_rationale).not.toBe("identity_block");
+  });
+
+  it("two different qualifying blocks are not taken", () => {
+    const result = extract(page([
+      ...footer(supplierFooter),
+      ...footer(["Teine Firma OÜ", "Registrikood 10000024"], 650),
+      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 650, 145, 9),
+    ]));
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("the same block repeated on another page is one block", () => {
+    const secondPage = footer(supplierFooter).map(entry => ({ ...entry, pageNum: 2 }));
+    const result = extract([...page(footer(supplierFooter)), ...secondPage]);
+    expect(result.supplier_reg_code).toBe("10000018");
+  });
+
+  it("a registry code failing its checksum disqualifies the block", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Tänav 1, 10111 Tallinn", "Registrikood 10000019", "KMKR number EE100000010"])));
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("a name line without a legal form is not taken", () => {
+    const result = extract(page(footer(["Näidis Side", "Registrikood 10000018"])));
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("identifiers in another column than the name are not taken", () => {
+    const result = extract(page([
+      item("Näidis Side AS", 446, 776, 60, 9),
+      ...footer(["Registrikood 10000018", "KMKR number EE100000010"], 788),
+    ]));
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("a supplier identifier the extractor already found is kept", () => {
+    const items = page(footer(supplierFooter));
+    items.push(item("Registrikood 10000024", 446, 650, 90, 9));
+    const result = extract(items);
+    expect(result.supplier_reg_code).toBe("10000024");
+    expect(result.reg_code_rationale).not.toBe("identity_block");
+  });
+
+  it("identifiers more than four lines below the name are not taken", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Tänav 1", "10111 Tallinn", "Eesti", "info@example.com", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("an unlabelled code under the name is not taken", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Tänav 1, 10111 Tallinn", "10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_name).toBe("ARVE NS0001234");
+  });
+
+  it("a supplier already named as a different company keeps the current result", () => {
+    const items = page(footer(supplierFooter));
+    items.push(item("Müüja: Kolmas Firma OÜ", 316, 104, 120));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Kolmas Firma OÜ");
+    expect(result.reg_code_rationale).not.toBe("identity_block");
+    expect(result.vat_no_rationale).not.toBe("identity_block");
+  });
+});

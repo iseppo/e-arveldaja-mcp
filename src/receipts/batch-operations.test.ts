@@ -818,6 +818,73 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
   });
 });
 
+describe("receipt batch — supplier from a footer identity block (Telia live miss)", () => {
+  // Synthetic mirror of the live layout: no supplier label, the buyer's own VAT
+  // in the "Klient" column, the supplier only in a multi-column page footer.
+  const items = [
+    { text: "Näidis", x: 65, y: 38, width: 48, height: 18 },
+    { text: "Arve saaja", x: 28, y: 104, width: 52, height: 13 },
+    { text: "Proovi OÜ", x: 28, y: 118, width: 53, height: 12 },
+    { text: "Klient", x: 28, y: 203, width: 29, height: 13 },
+    { text: "Arve", x: 316, y: 201, width: 23, height: 13 },
+    { text: "NS0001234", x: 499, y: 201, width: 63, height: 13 },
+    { text: "Proovi OÜ", x: 28, y: 217, width: 53, height: 12 },
+    { text: "Kuupäev", x: 316, y: 215, width: 36, height: 12 },
+    { text: "20.03.2026", x: 517, y: 215, width: 45, height: 12 },
+    { text: "KMKR number: EE123456789", x: 28, y: 255, width: 121, height: 12 },
+    { text: "Maksumus käibemaksuta", x: 316, y: 524, width: 125, height: 13 },
+    { text: "100,00", x: 529, y: 524, width: 33, height: 13 },
+    { text: "24 % käibemaks", x: 316, y: 537, width: 66, height: 13 },
+    { text: "24,00", x: 529, y: 537, width: 33, height: 13 },
+    { text: "Arve summa", x: 316, y: 550, width: 61, height: 13 },
+    { text: "124,00", x: 529, y: 550, width: 33, height: 13 },
+    { text: "Näidis Side AS", x: 28, y: 776, width: 43, height: 9 },
+    { text: "Pank", x: 206, y: 776, width: 40, height: 9 },
+    { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
+    { text: "Tänav 1, 10111 Tallinn", x: 28, y: 788, width: 95, height: 9 },
+    { text: "Registrikood 10000018", x: 28, y: 800, width: 72, height: 9 },
+    { text: "KMKR number EE100000010", x: 28, y: 812, width: 92, height: 9 },
+  ];
+  const rows = new Map<number, typeof items>();
+  for (const entry of items) rows.set(entry.y, [...(rows.get(entry.y) ?? []), entry]);
+  const document = {
+    text: [...rows.values()].map(row => row.map(entry => entry.text).join("    ")).join("\n"),
+    pageCount: 1,
+    result: { pages: [{ pageNum: 1, textItems: items }] },
+  };
+  const client = {
+    id: 77, name: "Näidis Side AS", code: "10000018", invoice_vat_no: "EE100000010", is_supplier: true, is_client: false,
+    cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false,
+  };
+  const booked = {
+    id: 9001, number: "NS0001234", clients_id: 77, client_name: "Näidis Side AS", status: "CONFIRMED",
+    create_date: "2026-03-20", journal_date: "2026-03-20", gross_price: 124,
+  };
+
+  beforeEach(async () => {
+    const extraction = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    const resolution = await vi.importActual<typeof import("../tools/supplier-resolution.js")>("../tools/supplier-resolution.js");
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation(extraction.extractReceiptFieldsFromText);
+    vi.mocked(resolveSupplierInternal).mockImplementation(resolution.resolveSupplierInternal);
+    vi.mocked(parseDocument).mockResolvedValue(document as never);
+  });
+
+  it("resolves the existing client and skips the already-booked invoice as a duplicate", async () => {
+    const { api, spies } = makeApi();
+    const typed = api as unknown as { clients: { listAll: ReturnType<typeof vi.fn> }; purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } };
+    typed.clients.listAll.mockResolvedValue([client]);
+    typed.purchaseInvoices.listAll.mockResolvedValue([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ" });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.extracted?.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_resolution?.client?.id).toBe(77);
+    expect(result.status).toBe("skipped_duplicate");
+    expect(result.duplicate_match?.invoice_id).toBe(9001);
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
+
 describe("receipt batch — own company name reaches extraction", () => {
   it("passes ownCompanyName to extractReceiptFieldsFromText", async () => {
     const { api } = makeApi();
