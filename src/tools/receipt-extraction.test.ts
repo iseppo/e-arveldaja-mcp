@@ -3676,6 +3676,18 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       ])("an identifier %s is not evidence", (_name, below) => {
         expect(extractWith(below).labelled_amount_over_max).toBeUndefined();
       });
+
+      // Codex review round 2: a value an amount label binds on its own row is
+      // that label's amount, even under an identifier heading.
+      it.each(["Arve nr", "Konto"])("a value bound on the label's own row under a \"%s\" heading holds", (heading) => {
+        const items = [
+          ...cleanTrio.slice(0, -1),
+          item(heading, 400, 180, 40),
+          item("Grand total", 300, 200, 60), item("60000", 400, 200, 30),
+        ];
+        const result = extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+        expect(result.labelled_amount_over_max).toBe(true);
+      });
     });
   });
 

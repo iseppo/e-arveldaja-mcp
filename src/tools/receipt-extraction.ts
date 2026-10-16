@@ -1748,10 +1748,13 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
   amounts: LayoutAmountCell[];
   /** Cells above MAX_RECEIPT_FALLBACK_AMOUNT: never bound, kept only as G4 evidence. */
   overMaxAmounts: LayoutAmountCell[];
+  /** Over-maximum integer cells with identifier context: evidence only when a label binds them on its own row. */
+  identifierOverMaxAmounts: LayoutAmountCell[];
 } {
   const labels: LayoutLabelCell[] = [];
   const amounts: LayoutAmountCell[] = [];
   const overMaxAmounts: LayoutAmountCell[] = [];
+  const identifierOverMaxAmounts: LayoutAmountCell[] = [];
   // Whole-document locale context so a bare "1,234" amount cell is disambiguated
   // by dot-/comma-decimal siblings elsewhere on the document, not just its own
   // cell (#2).
@@ -1776,6 +1779,7 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
           // ("Grand total" over "60000") is too unless positively identified
           // as an identifier.
           if (moneyTokenValues(text).length > 0 || !isLayoutIdentifierCell(item, row, rows)) overMaxAmounts.push(cell);
+          else identifierOverMaxAmounts.push(cell);
           continue;
         }
         amounts.push(cell);
@@ -1796,7 +1800,7 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
     }
   }
 
-  return { labels, amounts, overMaxAmounts };
+  return { labels, amounts, overMaxAmounts, identifierOverMaxAmounts };
 }
 
 function horizontalGap(left: LayoutTextItem, right: LayoutTextItem): number {
@@ -1997,7 +2001,7 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   if (rows.length === 0) return undefined;
 
   const columnByItem = assignLayoutColumns(rows);
-  const { labels, amounts, overMaxAmounts } = buildLayoutCells(rows, columnByItem);
+  const { labels, amounts, overMaxAmounts, identifierOverMaxAmounts } = buildLayoutCells(rows, columnByItem);
   const bindings = new Map<AmountField, LayoutAmountCell>();
   const vatRowBindings = new Map<LayoutRow, { label: LayoutLabelCell; cell: LayoutAmountCell }>();
   // G4: the cell a label would bind if over-max cells were eligible. When that
@@ -2007,7 +2011,12 @@ export function extractAmountsFromLayout(textItems: readonly LayoutTextItem[]): 
   const labelledAmountOverMax = labels.some(label => {
     if (labelOwnRowMoneyValues(label).some(value => Math.abs(value) > MAX_RECEIPT_FALLBACK_AMOUNT)) return true;
     const wouldBind = findLayoutAmountForLabel(label, allAmountCells);
-    return wouldBind !== undefined && overMaxCells.has(wouldBind);
+    if (wouldBind !== undefined && overMaxCells.has(wouldBind)) return true;
+    // A value an amount label binds on its own row is that label's amount,
+    // whatever heading or label also marks it as an identifier: competing
+    // readings hold.
+    const direct = findSameRowLayoutAmount(label, [...allAmountCells, ...identifierOverMaxAmounts]);
+    return direct !== undefined && identifierOverMaxAmounts.includes(direct);
   });
   // G5: a total row stating only zero amounts. The whole row is the label
   // text, so a word-split balance label ("Jäänud" | "tasuda") is recognised.
