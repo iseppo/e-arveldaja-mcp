@@ -24,6 +24,20 @@ describe("estonian accounting guidance", () => {
     ]));
   });
 
+  it("recommends attaching a receipt to the journal that already references its invoice number", () => {
+    const guidance = buildReceiptReviewGuidance({
+      classification: "purchase_invoice",
+      notes: [],
+      referencingJournalIds: [29551084],
+      possibleDuplicateJournalIds: [28427570],
+    });
+
+    expect(guidance!.recommendation).toContain("Journal(s) 29551084 already reference");
+    expect(guidance!.recommendation).toContain("attach_document entity_type=journal");
+    expect(guidance!.recommendation).toContain("journal(s) 28427570");
+    expect(guidance!.follow_up_questions).toEqual(["Is journal 29551084 this document's booking?"]);
+  });
+
   it("asks for source-document fields before auto-booking an incomplete receipt", () => {
     const guidance = buildReceiptReviewGuidance({
       classification: "purchase_invoice",

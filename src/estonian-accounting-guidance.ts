@@ -205,6 +205,8 @@ export function buildReceiptReviewGuidance(params: {
   llmFallback?: InvoiceExtractionFallback;
   /** Journals that may already book this receipt's cash outflow (receipt_batch hold). */
   possibleDuplicateJournalIds?: readonly number[];
+  /** Live journals already referencing this receipt's invoice number (receipt_batch hold). */
+  referencingJournalIds?: readonly number[];
 }): ReviewGuidance | undefined {
   const text = normalizedText(
     params.extracted?.supplier_name,
@@ -212,6 +214,22 @@ export function buildReceiptReviewGuidance(params: {
     params.notes.join(" "),
   );
   const missingFields = params.llmFallback?.missing_required_fields ?? [];
+
+  if (params.referencingJournalIds && params.referencingJournalIds.length > 0) {
+    const ids = params.referencingJournalIds.join(", ");
+    const cashIds = params.possibleDuplicateJournalIds && params.possibleDuplicateJournalIds.length > 0
+      ? params.possibleDuplicateJournalIds.join(", ")
+      : undefined;
+    return {
+      recommendation: `Recommendation: do not create this invoice. Journal(s) ${ids} already reference this document's invoice number, so it may already be booked. ` +
+        "If so, attach the document to that journal (attach_document entity_type=journal) instead of creating an invoice." +
+        (cashIds !== undefined ? ` The same cash outflow may also be booked by journal(s) ${cashIds}.` : ""),
+      compliance_basis: [BASIS_RPS_DOCUMENT],
+      follow_up_questions: [
+        `Is journal ${ids} this document's booking?`,
+      ],
+    };
+  }
 
   if (params.possibleDuplicateJournalIds && params.possibleDuplicateJournalIds.length > 0) {
     const ids = params.possibleDuplicateJournalIds.join(", ");

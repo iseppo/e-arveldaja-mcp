@@ -2,6 +2,7 @@ import { logAudit } from "../audit-log.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { sanitizeUploadFileName } from "../file-validation.js";
 import { checkIntakeCashDuplicates, formatDuplicatePostingWarnings } from "../bank-posting-duplicate-guard.js";
+import { checkJournalReferences, type JournalReferenceHit } from "../journal-reference-scan.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn, vatRatesInForceOn } from "../estonian-tax-rules.js";
@@ -213,7 +214,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   executionMode: ReceiptBatchExecutionMode,
   legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids">> {
+): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "referencing_journals">> {
   const file = snapshot.file;
   // The inbox dir-entry name is untrusted (control chars, odd bytes): upload and
   // audit it only in sanitized form.
@@ -297,18 +298,58 @@ export async function createAndMaybeMatchPurchaseInvoice(
     }
     return [...new Set(duplicateScan.suspects.map(suspect => suspect.journal_id))];
   };
-  const holdPossibleDuplicate = (journalIds: number[]) => {
-    notes.push(
-      `Held: this cash outflow may already be booked by journal(s) ${journalIds.join(", ")}. ` +
-      "If it is a separate payment, book this one document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
-    );
-    return { notes, status: "needs_review" as const, possible_duplicate_journal_ids: journalIds };
+  // A live journal whose document_number or title carries this invoice number
+  // (e.g. a manual prepayment journal `ETR1:EE1966453`) may already book this
+  // document — the cash scan cannot see it (no bank posting in the window).
+  // Same policy: holds in both modes, an unavailable scan only adds its note.
+  const invoiceNumber = extracted.invoice_number;
+  const findReferencingJournals = async (): Promise<JournalReferenceHit[]> => {
+    const referenceScan = await checkJournalReferences(api, [invoiceNumber]);
+    if (!referenceScan.scan_available && referenceScan.scan_note) notes.push(referenceScan.scan_note);
+    return referenceScan.hits;
+  };
+  // Both scans run before any hold so a held row reports both id lists.
+  const holdIfAlreadyBooked = async () => {
+    const suspects = await appendIntakeDuplicateNotes();
+    const referencing = await findReferencingJournals();
+    if (suspects.length === 0 && referencing.length === 0) return undefined;
+    if (suspects.length > 0) {
+      notes.push(
+        `Held: this cash outflow may already be booked by journal(s) ${suspects.join(", ")}. ` +
+        "If it is a separate payment, book this one document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
+      );
+    }
+    const referencingIds = referencing.map(hit => hit.journal_id);
+    if (referencingIds.length > 0) {
+      notes.push(
+        `Held: journal(s) ${referencingIds.join(", ")} already reference invoice number ${wrapUntrustedOcr(invoiceNumber) ?? ""}; ` +
+        "this document may already be booked. Attach it to that journal (attach_document entity_type=journal) instead of creating an invoice.",
+      );
+    }
+    return {
+      notes,
+      status: "needs_review" as const,
+      ...(suspects.length > 0 ? { possible_duplicate_journal_ids: suspects } : {}),
+      ...(referencingIds.length > 0
+        ? {
+            referencing_journal_ids: referencingIds,
+            referencing_journals: referencing.map(hit => ({
+              journal_id: hit.journal_id,
+              matched_field: hit.matched_field,
+              document_number: hit.document_number,
+              title: hit.title,
+            })),
+          }
+        : {}),
+    };
   };
 
   // The dry run scans before reserving a bank candidate, so a held row does
   // not take a transaction another row could preview.
-  const dryRunSuspects = dryRun ? await appendIntakeDuplicateNotes() : [];
-  if (dryRunSuspects.length > 0) return holdPossibleDuplicate(dryRunSuspects);
+  if (dryRun) {
+    const held = await holdIfAlreadyBooked();
+    if (held) return held;
+  }
 
   const dryRunMatch = dryRun
     ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
@@ -351,8 +392,8 @@ export async function createAndMaybeMatchPurchaseInvoice(
   // Uncached, right before the create: the execute projection pass refilled
   // the journal list cache, and a payment booked since then must be seen.
   api.journals.invalidateListCache();
-  const suspects = await appendIntakeDuplicateNotes();
-  if (suspects.length > 0) return holdPossibleDuplicate(suspects);
+  const held = await holdIfAlreadyBooked();
+  if (held) return held;
 
   if (legacyExecuteCreate) {
     notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');

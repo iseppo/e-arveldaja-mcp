@@ -624,6 +624,54 @@ describe("runAccountingInboxDryRunPipeline", () => {
     }
   });
 
+  it("receipt journal-reference holds become follow-ups naming the referencing journal ids", async () => {
+    const prepareReceiptBatch = vi.fn().mockResolvedValue(ok({
+      mode: "DRY_RUN",
+      results: [{
+        file: { name: "messenger.jpeg", path: "/tmp/accounting-inbox/receipts/messenger.jpeg" },
+        classification: "purchase_invoice",
+        status: "needs_review",
+        referencing_journal_ids: [29551084],
+        notes: [],
+      }],
+      summary: {
+        created: 0,
+        dry_run_preview: 0,
+        matched: 0,
+        skipped_duplicate: 0,
+        needs_review: 1,
+        possible_duplicate_review: 0,
+        referenced_by_journal_review: 1,
+        failed: 0,
+      },
+    }));
+
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1,
+          tool: "process_receipt_batch",
+          purpose: "Preview receipts",
+          recommended: true,
+          suggested_args: { folder_path: "/tmp/accounting-inbox/receipts", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [],
+          reason: "Receipts found",
+        }],
+      }),
+      operations: mockOperations({ prepareReceiptBatch }),
+    });
+
+    const step = result.executed_steps.find(s => s.tool === "process_receipt_batch");
+    expect(step?.summary).toBe(
+      "Receipt dry run would create 0 invoice(s), match 0, skip 0 duplicate(s), leave 1 in review (1 already referenced by a journal), and fail 0.",
+    );
+    const followUps = [...result.needs_one_decision, ...result.needs_accountant_review]
+      .filter(f => f.source === "process_receipt_batch");
+    expect(followUps.map(f => f.summary)).toContain(
+      "messenger.jpeg was left for review in the dry run (purchase_invoice): journal(s) 29551084 already reference its invoice number.",
+    );
+  });
+
   it("caps a failed import step's error message and leaves the single sandbox wrap to the output boundary", async () => {
     // wise-import throws with attacker-controlled cell/header text embedded in
     // the message. The pipeline caps it; accounting_inbox's output boundary

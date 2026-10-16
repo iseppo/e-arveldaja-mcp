@@ -113,6 +113,18 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
     };
   }
 
+  // Journal titles and document numbers are upstream free text.
+  if (next.referencing_journals !== undefined && next.referencing_journals.length > 0) {
+    next = {
+      ...next,
+      referencing_journals: next.referencing_journals.map(journal => ({
+        ...journal,
+        document_number: journal.document_number !== null ? capThenWrap(journal.document_number) ?? null : null,
+        title: journal.title !== null ? capThenWrap(journal.title) ?? null : null,
+      })),
+    };
+  }
+
   if (next.error !== undefined) {
     next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
   }

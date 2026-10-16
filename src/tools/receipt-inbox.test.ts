@@ -626,7 +626,7 @@ describe("buildReceiptBatchSummary", () => {
       executionMode: "dry_run",
       legacyExecuteCreate: false,
       dryRun: true,
-      scannedFiles: 6,
+      scannedFiles: 7,
       skippedInvalidFiles: 1,
       results: [
         { status: "dry_run_preview" },
@@ -635,6 +635,7 @@ describe("buildReceiptBatchSummary", () => {
         { status: "skipped_duplicate" },
         { status: "needs_review" },
         { status: "needs_review", possible_duplicate_journal_ids: [321] },
+        { status: "needs_review", referencing_journal_ids: [29551084] },
         { status: "failed" },
       ],
     });
@@ -643,20 +644,22 @@ describe("buildReceiptBatchSummary", () => {
       execution_mode: "dry_run",
       legacy_execute_create: false,
       dry_run: true,
-      scanned_files: 6,
+      scanned_files: 7,
       skipped_invalid_files: 1,
       created: 1,
       matched: 1,
       skipped_duplicate: 1,
       failed: 1,
-      needs_review: 2,
+      needs_review: 3,
       possible_duplicate_review: 1,
+      referenced_by_journal_review: 1,
       dry_run_preview: 1,
     });
     expect(buildReceiptBatchWorkflowSummary(summary)).toBe(
-      "Receipt dry run would create 1 purchase invoice(s), match 1, skip 1 duplicate(s), leave 2 in review (1 possible duplicate(s) of booked payments), and fail 1.",
+      "Receipt dry run would create 1 purchase invoice(s), match 1, skip 1 duplicate(s), leave 3 in review (1 possible duplicate(s) of booked payments) (1 already referenced by a journal), and fail 1.",
     );
-    expect(buildReceiptBatchWorkflowSummary({ ...summary, possible_duplicate_review: 0 })).toContain("leave 2 in review, and fail 1.");
+    expect(buildReceiptBatchWorkflowSummary({ ...summary, possible_duplicate_review: 0, referenced_by_journal_review: 0 }))
+      .toContain("leave 3 in review, and fail 1.");
   });
 });
 

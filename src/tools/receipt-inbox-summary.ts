@@ -7,7 +7,7 @@ import type {
   ReceiptBatchSummary,
 } from "./receipt-inbox-types.js";
 
-type ResultWithStatus = Pick<ReceiptBatchFileResult, "status" | "possible_duplicate_journal_ids">;
+type ResultWithStatus = Pick<ReceiptBatchFileResult, "status" | "possible_duplicate_journal_ids" | "referencing_journal_ids">;
 type WorkflowReceiptResult = Pick<ReceiptBatchFileResult, "status" | "llm_fallback"> & object;
 
 function countStatus(results: ResultWithStatus[], status: ReceiptBatchStatus): number {
@@ -36,6 +36,9 @@ export function buildReceiptBatchSummary(options: {
     possible_duplicate_review: options.results.filter(result =>
       result.status === "needs_review" && (result.possible_duplicate_journal_ids?.length ?? 0) > 0
     ).length,
+    referenced_by_journal_review: options.results.filter(result =>
+      result.status === "needs_review" && (result.referencing_journal_ids?.length ?? 0) > 0
+    ).length,
     dry_run_preview: countStatus(options.results, "dry_run_preview"),
   };
 }
@@ -44,8 +47,13 @@ export function possibleDuplicateReviewSuffix(count: number): string {
   return count > 0 ? ` (${count} possible duplicate(s) of booked payments)` : "";
 }
 
+export function referencedByJournalReviewSuffix(count: number): string {
+  return count > 0 ? ` (${count} already referenced by a journal)` : "";
+}
+
 export function buildReceiptBatchWorkflowSummary(summary: ReceiptBatchSummary): string {
-  const review = `${summary.needs_review} in review${possibleDuplicateReviewSuffix(summary.possible_duplicate_review)}`;
+  const review = `${summary.needs_review} in review${possibleDuplicateReviewSuffix(summary.possible_duplicate_review)}` +
+    referencedByJournalReviewSuffix(summary.referenced_by_journal_review);
   return summary.dry_run
     ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${review}, and fail ${summary.failed}.`
     : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${review}, and failed ${summary.failed}.`;

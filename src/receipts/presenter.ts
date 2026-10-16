@@ -166,6 +166,7 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
       ? { duplicate_candidates: duplicateCandidates.map(candidate => ({ invoice_id: candidate.invoice_id })) }
       : {}),
     ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
+    ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
     ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "confirmed"]) } : {}),
     ...(totals !== undefined && Object.keys(totals).length > 0 ? { extracted: totals } : {}),
   };
@@ -448,6 +449,14 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
       const duplicateIds = (row.duplicate_candidates ?? []).map(candidate => candidate.invoice_id);
       const itemId = wrapUntrustedOcr(row.file.name) ?? "";
       const postingIds = row.possible_duplicate_journal_ids ?? [];
+      const referencingIds = row.referencing_journal_ids ?? [];
+      if (referencingIds.length > 0) {
+        return {
+          item_id: itemId,
+          code: "invoice_referenced_by_journal",
+          message: `Journal(s) ${referencingIds.join(", ")} already reference this invoice number; attach the document to that journal instead of booking it again.`,
+        };
+      }
       if (postingIds.length > 0) {
         return {
           item_id: itemId,

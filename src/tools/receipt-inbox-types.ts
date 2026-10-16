@@ -124,6 +124,15 @@ export interface ReceiptBatchFileResult {
   duplicate_candidates?: InvoiceNumberCandidate[];
   /** Journals that may already book this receipt's cash outflow; the row is held as needs_review. */
   possible_duplicate_journal_ids?: number[];
+  /** Live journals whose document_number or title already carries this invoice number; the row is held as needs_review. */
+  referencing_journal_ids?: number[];
+  /** Detail of `referencing_journal_ids`; document_number / title are raw journal text, wrapped at output. */
+  referencing_journals?: Array<{
+    journal_id: number;
+    matched_field: "document_number" | "title";
+    document_number: string | null;
+    title: string | null;
+  }>;
   created_invoice?: {
     id?: number;
     number: string;
@@ -160,5 +169,7 @@ export interface ReceiptBatchSummary {
   needs_review: number;
   /** needs_review rows held because the cash outflow may already be booked by a journal. */
   possible_duplicate_review: number;
+  /** needs_review rows held because a live journal already references the invoice number. */
+  referenced_by_journal_review: number;
   dry_run_preview: number;
 }

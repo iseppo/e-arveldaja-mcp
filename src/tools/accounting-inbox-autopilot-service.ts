@@ -624,9 +624,13 @@ function summarizeAutopilotToolResult(
           const classification = stringAt(item, "classification") ?? "needs review";
           const duplicateJournalIds = (arrayAt(item, "possible_duplicate_journal_ids") ?? [])
             .filter((id): id is number => typeof id === "number");
-          const duplicateSuffix = duplicateJournalIds.length > 0
-            ? `: the payment may already be booked by journal(s) ${duplicateJournalIds.join(", ")}`
-            : "";
+          const referencingJournalIds = (arrayAt(item, "referencing_journal_ids") ?? [])
+            .filter((id): id is number => typeof id === "number");
+          const duplicateSuffix = referencingJournalIds.length > 0
+            ? `: journal(s) ${referencingJournalIds.join(", ")} already reference its invoice number`
+            : duplicateJournalIds.length > 0
+              ? `: the payment may already be booked by journal(s) ${duplicateJournalIds.join(", ")}`
+              : "";
           return toAutopilotFollowUp(
             tool,
             `${fileName} was left for review in the dry run (${classification})${duplicateSuffix}.`,

@@ -1053,3 +1053,132 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
     });
   }
 });
+
+describe("receipt batch — journal already references the invoice number (Messenger live miss)", () => {
+  const prepaymentJournal = {
+    id: 29551083, document_number: "ETR1:EMSS70002960", title: "ETR1 Group ettemakse", effective_date: "2026-08-27",
+    registered: true, is_deleted: false, postings: [],
+  };
+  const settlementJournal = {
+    id: 29551084, document_number: "ETR1:EE1966453", title: "Madrats EE1966453, ettemakse tasaarveldus",
+    effective_date: "2026-09-23", registered: true, is_deleted: false, postings: [],
+  };
+
+  function primeMessengerReceipt(): void {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "ETR1 Group OÜ",
+      invoice_number: "EE1966453",
+      invoice_date: "2026-09-23",
+      due_date: "2026-09-23",
+      total_net: 125,
+      total_vat: 30,
+      total_gross: 155,
+      currency: "EUR",
+      description: "Madrats",
+      raw_text: "ignored",
+    } as never);
+  }
+
+  function apiWithJournals(journals: unknown[]) {
+    const made = makeApi();
+    (made.api as { journals: { listAll: ReturnType<typeof vi.fn> } }).journals.listAll.mockResolvedValue(journals);
+    return made;
+  }
+
+  function expectZeroWrites(spies: ApiSpies): void {
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    expect(spies.invalidate).not.toHaveBeenCalled();
+  }
+
+  beforeEach(() => primeMessengerReceipt());
+
+  it("dry_run holds the row with referencing_journal_ids and reserves nothing", async () => {
+    const { api, spies } = apiWithJournals([prepaymentJournal, settlementJournal]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551084]);
+    expect(result.referencing_journals?.[0]).toMatchObject({ journal_id: 29551084, matched_field: "document_number" });
+    expect(result.possible_duplicate_journal_ids).toBeUndefined();
+    expect(result.created_invoice).toBeUndefined();
+    expect(result.bank_match).toBeUndefined();
+    expect(result.notes.join(" ")).toContain("Held: journal(s) 29551084 already reference invoice number");
+    expect(result.review_guidance?.recommendation).toContain("attach_document entity_type=journal");
+    expect(result.review_guidance?.follow_up_questions).toEqual(["Is journal 29551084 this document's booking?"]);
+    expect(outcome.value.summary.referenced_by_journal_review).toBe(1);
+    expect(outcome.value.summary.dry_run_preview).toBe(0);
+    expectZeroWrites(spies);
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("%s holds the row with zero writes", async (mode) => {
+    const { api, spies } = apiWithJournals([prepaymentJournal, settlementJournal]);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551084]);
+    expect(outcome.value.summary.referenced_by_journal_review).toBe(1);
+    expectZeroWrites(spies);
+  });
+
+  it("a referencing journal booked after the execute projection is caught by the uncached pre-create scan", async () => {
+    const { api, spies } = makeApi();
+    const journals = (api as { journals: Record<string, ReturnType<typeof vi.fn>> }).journals;
+    // Emulate the journals list cache: reads are served from the cache until
+    // invalidateListCache drops it; the journal is booked right after the
+    // second live read (the execute projection's).
+    let cached: unknown[] | undefined;
+    let liveReads = 0;
+    let live: unknown[] = [prepaymentJournal];
+    journals.invalidateListCache = vi.fn(() => { cached = undefined; });
+    journals.listAll = vi.fn(async () => {
+      if (cached) return cached;
+      cached = live;
+      liveReads += 1;
+      if (liveReads === 2) live = [prepaymentJournal, settlementJournal];
+      return cached;
+    });
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551084]);
+    expectZeroWrites(spies);
+    expect(liveReads).toBe(3);
+  });
+
+  it("an unavailable journal list adds a note and does not hold", async () => {
+    const { api, spies } = makeApi();
+    (api as { journals: Record<string, ReturnType<typeof vi.fn>> }).journals.listAll!
+      .mockRejectedValue(new Error("page cap reached"));
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("dry_run_preview");
+    expect(result.notes.join(" ")).toContain("Journal reference scan unavailable");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a deleted referencing journal does not hold; create proceeds", async () => {
+    const { api, spies } = apiWithJournals([{ ...settlementJournal, is_deleted: true }]);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    expect(outcome.value.results[0]!.status).toBe("created");
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+});
