@@ -2,12 +2,12 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 132102,
-    "descriptionsBytes": 18409,
-    "inputSchemasBytes": 83115,
+    "toolsListBytes": 135954,
+    "descriptionsBytes": 18438,
+    "inputSchemasBytes": 86938,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 4361
+      "bytes": 4390
     },
     "serverInstructionsBytes": 964,
     "promptMetadataBytes": 11702,
@@ -28,6 +28,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -47,6 +48,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -66,6 +68,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -85,6 +88,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "index": {
             "description": "Connection index from list_connections",
@@ -114,6 +118,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "scope": {
             "description": "Cache scope to clear. Default: active_connection.",
@@ -142,6 +147,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "action": {
             "description": "Filter by action.",
@@ -216,6 +222,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -235,6 +242,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -254,6 +262,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "modified_since": {
             "description": "Return only objects modified since this timestamp (ISO 8601)",
@@ -290,6 +299,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -319,6 +329,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "address_text": {
             "description": "Address",
@@ -401,6 +412,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "allow_duplicate": {
             "description": "Allow a registry code another live client (or the company itself) already uses (default false).",
@@ -454,6 +466,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -483,6 +496,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -512,6 +526,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -541,6 +556,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "name": {
             "description": "Name to search for",
@@ -568,6 +584,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "code": {
             "description": "Business registry code or personal ID",
@@ -595,6 +612,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "modified_since": {
             "description": "Return only objects modified since this timestamp (ISO 8601)",
@@ -631,6 +649,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -660,6 +679,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cl_purchase_articles_id": {
             "description": "Purchase article ID",
@@ -742,6 +762,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "data": {
             "anyOf": [
@@ -787,6 +808,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -816,6 +838,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -845,6 +868,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -874,6 +898,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Filter by clients_id",
@@ -944,6 +969,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -973,6 +999,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "block_on_duplicate": {
             "description": "Refuse creation when a bank posting looks like an already-booked duplicate (default false: warn only).",
@@ -1040,6 +1067,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "data": {
             "anyOf": [
@@ -1085,6 +1113,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1114,6 +1143,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1143,6 +1173,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "ids": {
             "description": "Journal IDs (positive integers, 1-500 entries)",
@@ -1184,6 +1215,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1213,6 +1245,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Filter by bank account dimension ID (client-side)",
@@ -1310,6 +1343,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1339,6 +1373,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID",
@@ -1411,6 +1446,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "block_on_duplicate": {
             "description": "Refuse an inter-account confirm (distribution to another own bank account) when an existing transfer journal or a possible duplicate bank posting is found (default false: warn only).",
@@ -1472,6 +1508,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "data": {
             "anyOf": [
@@ -1517,6 +1554,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1546,6 +1584,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1575,6 +1614,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "ids": {
             "description": "Transaction IDs (positive integers, 1-500 entries)",
@@ -1616,6 +1656,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Filter by customer (clients_id, server-side).",
@@ -1685,6 +1726,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1714,6 +1756,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cl_countries_id": {
             "description": "Country (default EST)",
@@ -1810,6 +1853,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "data": {
             "anyOf": [
@@ -1855,6 +1899,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1884,6 +1929,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1913,6 +1959,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1942,6 +1989,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -1971,6 +2019,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "email_addresses": {
             "description": "Email addresses",
@@ -2020,6 +2069,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -2049,6 +2099,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -2078,6 +2129,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Filter by supplier (clients_id, server-side).",
@@ -2147,6 +2199,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -2176,6 +2229,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "bank_account_no": {
             "description": "Supplier bank account",
@@ -2298,6 +2352,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "data": {
             "anyOf": [
@@ -2343,6 +2398,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -2372,6 +2428,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "exclusiveMinimum": 0,
@@ -2400,6 +2457,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "approved_correction": {
             "additionalProperties": false,
@@ -2481,6 +2539,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Object ID",
@@ -2510,6 +2569,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2523,13 +2583,21 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get account dimensions (alamkontod)",
+      "description": "Get account dimensions (alamkontod), optionally for one account.",
       "execution": {
         "taskSupport": "forbidden"
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": {},
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "description": "Only dimensions of this account (e.g. 1020).",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "name": "list_account_dimensions",
@@ -2548,6 +2616,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2567,6 +2636,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2586,6 +2656,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2605,6 +2676,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2624,6 +2696,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2643,6 +2716,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2662,6 +2736,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "address": {
             "description": "Company address shown on invoices",
@@ -2733,6 +2808,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2752,6 +2828,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2771,6 +2848,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Invoice series ID",
@@ -2800,6 +2878,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "is_active": {
             "description": "Is active",
@@ -2851,6 +2930,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Invoice series ID",
@@ -2904,6 +2984,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Invoice series ID",
@@ -2933,6 +3014,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -2952,6 +3034,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Bank account ID",
@@ -2981,6 +3064,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "account_name_est": {
             "description": "Account name",
@@ -3025,6 +3109,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "account_name_est": {
             "description": "Account name",
@@ -3074,6 +3159,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "id": {
             "description": "Bank account ID",
@@ -3103,6 +3189,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "account_id": {
             "description": "Account id from list_accounts. In the RIK chart the id is the account number itself (e.g. 2110, 8900).",
@@ -3158,6 +3245,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "account_id": {
             "description": "Account id (e.g. 1020). Required. In the RIK chart the id is the account number.",
@@ -3199,6 +3287,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "account_ids": {
             "description": "Comma-separated account IDs to check (default: 2110,2310,1210)",
@@ -3236,6 +3325,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "file_path": {
             "description": "Absolute path to the invoice document (PDF/JPG/PNG).",
@@ -3263,6 +3353,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "base_net_price": {
             "description": "Planned EUR-equivalent net amount",
@@ -3348,6 +3439,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "auto_create": {
             "description": "Create client if not found (default false)",
@@ -3400,6 +3492,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Supplier client ID",
@@ -3437,6 +3530,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "allow_duplicate_invoice_number": {
             "description": "Explicit acknowledgement that the supplier reuses this invoice number (e.g. across years): an existing live invoice with the same supplier and number becomes a warning instead of a refusal (default false: refuse).",
@@ -3573,6 +3667,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "entity_type": {
             "description": "Which record the source document belongs to.",
@@ -3626,6 +3721,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "entity_type": {
             "description": "Which record the source document belongs to.",
@@ -3670,6 +3766,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "entity_type": {
             "description": "Which record the source document belongs to.",
@@ -3710,6 +3807,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "execute": {
             "description": "Apply the proposed fixes (default false = dry run)",
@@ -3758,6 +3856,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "execute": {
             "description": "Actually confirm matched pairs (default false = dry run)",
@@ -3796,6 +3895,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "block_on_duplicate": {
             "description": "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only.",
@@ -3851,6 +3951,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "date_from": {
             "description": "Period start (YYYY-MM-DD)",
@@ -3883,6 +3984,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "date_to": {
             "description": "Balance sheet date (YYYY-MM-DD, default: today)",
@@ -3911,6 +4013,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "date_from": {
             "description": "Period start (YYYY-MM-DD)",
@@ -3947,6 +4050,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "fresh": {
             "description": "Clear cached API/reference data before running the checklist (use after web UI changes).",
@@ -3979,6 +4083,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "as_of_date": {
             "description": "Aging date (YYYY-MM-DD, default today)",
@@ -4003,6 +4108,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "as_of_date": {
             "description": "Aging date (YYYY-MM-DD, default today)",
@@ -4027,6 +4133,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "auto_confirm": {
             "description": "Confirm created invoices (default false)",
@@ -4080,6 +4187,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "dividend_payable_account": {
             "description": "Dividend payable account (default: auto-detect 'Dividendivõlad', standard 2650)",
@@ -4156,6 +4264,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "deductible_vat_amount": {
             "description": "Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio.",
@@ -4239,6 +4348,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "exempt_social_turnover": {
             "description": "EUR social-type exempt turnover such as healthcare or education. Reported separately and not counted toward the 40 000 EUR threshold.",
@@ -4302,6 +4412,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "as_of_date": {
             "description": "Date the cumulative figures are taken as of (YYYY-MM-DD). Sets the 22/78 rate and the default months elapsed.",
@@ -4361,6 +4472,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "reserve_capital_account": {
             "description": "Reserve capital account override for reserve_capital_amount",
@@ -4401,6 +4513,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "year": {
             "description": "Fiscal year (YYYY)",
@@ -4430,6 +4543,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "allow_additional_transfer": {
             "description": "Acknowledge that a smaller same-direction 2970 → 2960 transfer for the year already exists on 1 January and book the proposed remainder anyway (transfers on other dates or ambiguous ones always need manual review)",
@@ -4479,6 +4593,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "date_from": {
             "description": "Start date (YYYY-MM-DD)",
@@ -4515,6 +4630,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Filter by supplier ID",
@@ -4559,6 +4675,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "dry_run": {
             "description": "Preview only, do not persist (default true).",
@@ -4590,6 +4707,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID used when matching bank transactions. Required except in scan mode.",
@@ -4719,6 +4837,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID. Required for mode='classify'.",
@@ -4791,6 +4910,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "date_from": {
             "description": "Only include entries from this date (YYYY-MM-DD)",
@@ -4831,6 +4951,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "file_path": {
             "description": "CapitalGainsStatement path/base64 input. Provide exactly one of file_path or file_ref.",
@@ -4859,6 +4980,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "broker_account": {
             "description": "Broker cash account (e.g. 1120 Lightyear konto)",
@@ -4939,6 +5061,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "broker_account": {
             "description": "Broker cash account (e.g. 1120 Lightyear konto)",
@@ -5011,6 +5134,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "file_path": {
             "description": "AccountStatement path/base64 input. Provide exactly one of file_path or file_ref.",
@@ -5039,6 +5163,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID for the Wise account in e-arveldaja. Must be the dimension of a configured bank account; otherwise refused with wise_dimension_not_bank_account before any write.",
@@ -5173,6 +5298,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID in e-arveldaja. Required for dry_run and execute modes.",
@@ -5230,6 +5356,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "bank_account_dimension_id": {
             "description": "Optional default bank account dimension to reuse for CAMT and receipt suggestions.",
@@ -5284,6 +5411,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "action": {
             "description": "next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle.",
@@ -5378,6 +5506,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "delete_transaction_id": {
             "description": "New duplicate PROJECT transaction ID to delete",
@@ -5435,6 +5564,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "category": {
             "description": "Optional classification category such as saas_subscriptions or bank_fees",
@@ -5515,6 +5645,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Filter to a specific bank account dimension ID",
@@ -5543,6 +5674,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "goal": {
             "description": "Natural-language goal, such as 'book this invoice PDF' or 'import bank statement'. Omit to list common workflows.",
@@ -5585,6 +5717,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "description": "Optional opaque cursor returned by the preceding page",
@@ -5627,6 +5760,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "description": "Optional opaque cursor returned by the preceding page",

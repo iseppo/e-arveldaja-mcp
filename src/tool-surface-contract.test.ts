@@ -7,6 +7,7 @@ import {
   type ToolSurfaceSnapshot,
 } from "./__fixtures__/tool-surface.js";
 import { isGranularTool, TOOL_CATALOG } from "./tool-catalog.js";
+import { remapGuidedBankFacade, remapHiddenGranularTool } from "./tool-profile.js";
 
 const fixtureUrl = (profile: ToolSurfaceProfileName): URL =>
   new URL(`../testdata/tool-surface/${profile}.json`, import.meta.url);
@@ -41,6 +42,40 @@ describe("MCP tool-surface contract", () => {
     const listed = (profile: ToolSurfaceProfileName) => new Set(snapshots.get(profile)!.tools.map((tool) => tool.name));
     expect(granular.filter((name) => listed("standard").has(name))).toEqual([]);
     expect(granular.filter((name) => !listed("full").has(name))).toEqual([]);
+  });
+
+  // Tool inputs are strict: a remapped call carrying a key the destination
+  // tool does not declare is refused. Feed each source tool every argument it
+  // accepts (plus each execute/execution_mode variant) and check the result
+  // only uses keys the destination advertises.
+  it("remaps hidden/guided tool calls only to arguments the destination tool declares", () => {
+    const props = new Map<string, Set<string>>();
+    for (const snapshot of snapshots.values()) {
+      for (const tool of snapshot.tools) {
+        const schema = tool.inputSchema as { properties?: Record<string, unknown> };
+        props.set(tool.name, new Set(Object.keys(schema.properties ?? {})));
+      }
+    }
+    const variants = [{}, { execute: true }, { execute: false }, { execution_mode: "create" }, { execution_mode: "create_and_confirm" }];
+    const problems: string[] = [];
+    let checked = 0;
+    for (const [source, sourceProps] of props) {
+      for (const variant of variants) {
+        if (Object.keys(variant).some((key) => !sourceProps.has(key))) continue;
+        const args = { ...Object.fromEntries([...sourceProps].map((key) => [key, "x"])), ...variant };
+        for (const remapped of [remapHiddenGranularTool(source, args), remapGuidedBankFacade(source, args)]) {
+          if (!remapped) continue;
+          checked++;
+          const allowed = props.get(remapped.tool);
+          if (!allowed) { problems.push(`${source} -> ${remapped.tool}: destination not registered`); continue; }
+          for (const key of Object.keys(remapped.args)) {
+            if (!allowed.has(key)) problems.push(`${source} -> ${remapped.tool}: undeclared "${key}"`);
+          }
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+    expect([...new Set(problems)]).toEqual([]);
   });
 
   it("keeps opt-in profile budgets", () => {

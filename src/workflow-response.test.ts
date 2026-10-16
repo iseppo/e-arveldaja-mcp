@@ -6,6 +6,7 @@ import {
   approvalPreviewFromDryRunStep,
   buildWorkflowEnvelope,
   projectWorkflowResponse,
+  remapGuidedBankFacade,
   remapHiddenGranularTool,
   remapHiddenGranularWorkflowEnvelope,
   workflowActionFromBlockedDryRunStep,
@@ -495,12 +496,26 @@ describe("hidden-granular → merged entry-point remap", () => {
     ["classify_unmatched_transactions", { accounts_dimensions_id: 9 }, "classify_bank_transactions", { mode: "classify", accounts_dimensions_id: 9 }],
     ["apply_transaction_classifications", { execute: true, classifications_json: "[]" }, "classify_bank_transactions", { mode: "execute_apply", classifications_json: "[]" }],
     ["apply_transaction_classifications", { execute: false }, "classify_bank_transactions", { mode: "dry_run_apply" }],
+    // continue_accounting_workflow selects its branch with `action`, not `mode`.
+    ["resolve_accounting_review_item", { review_item_json: "{}" }, "continue_accounting_workflow", { action: "resolve_review", review_item_json: "{}" }],
+    ["prepare_accounting_review_action", { review_item_json: "{}", save_as_rule: true }, "continue_accounting_workflow", { action: "prepare_action", review_item_json: "{}", save_as_rule: true }],
   ])("maps granular %s(%o) to the merged entry point", (granular, args, mergedTool, mergedArgs) => {
     const result = remapHiddenGranularTool(granular as string, args as Record<string, unknown>);
     expect(result).toEqual({ tool: mergedTool, args: mergedArgs });
     // The execute/execution_mode flag is never carried through — it is subsumed by mode.
     expect(result!.args).not.toHaveProperty("execute");
     expect(result!.args).not.toHaveProperty("execution_mode");
+  });
+
+  it("maps the deprecated Wise fee_account_relation_id alias onto process_bank_input's fee_account_dimensions_id", () => {
+    expect(remapGuidedBankFacade("import_wise_transactions", { execute: true, file_path: "/tmp/w.csv", fee_account_relation_id: 42 }))
+      .toEqual({ tool: "process_bank_input", args: { file_path: "/tmp/w.csv", fee_account_dimensions_id: 42 } });
+    expect(remapGuidedBankFacade("import_wise_transactions", { fee_account_relation_id: 42, fee_account_dimensions_id: 42 }))
+      .toEqual({ tool: "process_bank_input", args: { fee_account_dimensions_id: 42 } });
+    // A conflicting pair is never resolved by picking one: it is left for the
+    // strict input check to refuse, like the Wise import refuses it.
+    expect(remapGuidedBankFacade("import_wise_transactions", { fee_account_relation_id: 42, fee_account_dimensions_id: 7 }))
+      .toEqual({ tool: "process_bank_input", args: { fee_account_relation_id: 42, fee_account_dimensions_id: 7 } });
   });
 
   it.each([

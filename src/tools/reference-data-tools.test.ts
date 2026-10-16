@@ -1,3 +1,4 @@
+import { parseMcpResponse } from "../mcp-json.js";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -57,6 +58,21 @@ function register(readonly: ReturnType<typeof makeReadonly>): Record<string, (ar
   registerReferenceDataTools(server as never, { readonly } as never);
   return handlers;
 }
+
+describe("list_account_dimensions", () => {
+  it("filters by account_id and returns all dimensions without it", async () => {
+    const dims = [
+      { id: 11, accounts_id: 1020, title_est: "LHV" },
+      { id: 22, accounts_id: 1020, title_est: "Wise" },
+      { id: 33, accounts_id: 1360, title_est: "Isik" },
+    ];
+    const readonly = { ...makeReadonly(), getAccountDimensions: vi.fn().mockResolvedValue(dims) };
+    const handlers = register(readonly as never);
+    const ids = (r: { content: Array<{ text: string }> }) => (parseMcpResponse(r.content[0]!.text) as Array<{ id: number }>).map(d => d.id);
+    expect(ids(await handlers.list_account_dimensions({ account_id: 1020 }))).toEqual([11, 22]);
+    expect(ids(await handlers.list_account_dimensions({}))).toEqual([11, 22, 33]);
+  });
+});
 
 describe("reference-data edit tools", () => {
   beforeEach(() => vi.clearAllMocks());

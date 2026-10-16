@@ -47,8 +47,11 @@ export function registerReferenceDataTools(
     return { content: [{ type: "text", text: toMcpJson(compact) }] };
   });
 
-  registerTool(server, "list_account_dimensions", "Get account dimensions (alamkontod)", {}, { ...readOnly, title: "List Account Dimensions" }, async () => {
-    const result = await api.readonly.getAccountDimensions();
+  registerTool(server, "list_account_dimensions", "Get account dimensions (alamkontod), optionally for one account.", {
+    account_id: coerceId.optional().describe("Only dimensions of this account (e.g. 1020)."),
+  }, { ...readOnly, title: "List Account Dimensions" }, async ({ account_id }) => {
+    const dimensions = await api.readonly.getAccountDimensions();
+    const result = account_id === undefined ? dimensions : dimensions.filter(d => d.accounts_id === account_id);
     return { content: [{ type: "text", text: toMcpJson(result) }] };
   });
 

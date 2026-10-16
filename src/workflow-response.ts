@@ -2,7 +2,7 @@ import { arrayAt, isRecord, numberAt, recordAt, stringAt } from "./record-utils.
 import { currentToolProfile, projectActionForCurrentProfile, remapHiddenGranularTool } from "./tool-profile.js";
 import { buildWorkflowActionV2, type BuildWorkflowActionV2Options, type WorkflowActionV2 } from "./workflow-action-v2.js";
 import type { WorkflowStateStore } from "./workflow-state-store.js";
-export { remapHiddenGranularTool } from "./tool-profile.js";
+export { remapGuidedBankFacade, remapHiddenGranularTool } from "./tool-profile.js";
 
 export type WorkflowActionKind =
   | "tool_call"

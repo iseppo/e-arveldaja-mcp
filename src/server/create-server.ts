@@ -370,6 +370,12 @@ export async function createMcpServer(
               connection: CONNECTION_GUARD_SCHEMA,
             };
           }
+          // Refuse undeclared arguments instead of letting zod strip them: a
+          // dropped filter makes the tool silently answer another question.
+          // Runs after the `connection` augmentation so the guard stays declared.
+          if (toolSpec && isPlainRawShape(toolSpec.inputSchema)) {
+            toolSpec.inputSchema = z.object(toolSpec.inputSchema as z.ZodRawShape).strict();
+          }
           const lastIdx = toolArgs.length - 1;
           if (lastIdx >= 0 && typeof toolArgs[lastIdx] === "function") {
             toolArgs[lastIdx] = wrapToolHandler(toolName, isReadOnly, guardConnection, toolArgs[lastIdx] as any);

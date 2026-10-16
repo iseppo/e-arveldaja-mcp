@@ -2,12 +2,12 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 35193,
+    "toolsListBytes": 35773,
     "descriptionsBytes": 5064,
-    "inputSchemasBytes": 25259,
+    "inputSchemasBytes": 25839,
     "largestTool": {
       "name": "process_accounting_document",
-      "bytes": 5105
+      "bytes": 5134
     },
     "serverInstructionsBytes": 932,
     "promptMetadataBytes": 7942,
@@ -28,6 +28,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -47,6 +48,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {},
         "type": "object"
       },
@@ -66,6 +68,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "index": {
             "description": "Connection index from list_connections",
@@ -95,6 +98,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "action": {
             "description": "Filter by action.",
@@ -169,6 +173,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "block_on_duplicate": {
             "description": "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only.",
@@ -224,6 +229,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID used when matching bank transactions. Required except in scan mode.",
@@ -353,6 +359,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Bank account dimension ID. Required for mode='classify'.",
@@ -425,6 +432,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "accounts_dimensions_id": {
             "description": "Optional bank account dimension ID. Omit to let a unique bank account resolve automatically.",
@@ -573,6 +581,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "allow_duplicate_invoice_number": {
             "description": "Booking-binding prepare + mode='create': explicit acknowledgement that the supplier reuses this invoice number (e.g. across years) — an existing live invoice with the same supplier and number becomes a warning instead of a blocker (default false). Bound into the plan; pass the SAME value at create.",
@@ -717,6 +726,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "as_of_date": {
             "description": "aging only: cutoff date (YYYY-MM-DD, default today).",
@@ -777,6 +787,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "clients_id": {
             "description": "Filter by counterparty (invoices/transactions).",
@@ -852,6 +863,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "entity": {
             "description": "Which record set to read from.",
@@ -894,6 +906,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "action": {
             "description": "read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring.",
@@ -988,6 +1001,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "bank_account_dimension_id": {
             "description": "Optional default bank account dimension to reuse for CAMT and receipt suggestions.",
@@ -1042,6 +1056,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "action": {
             "description": "next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle.",
@@ -1136,6 +1151,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "delete_transaction_id": {
             "description": "New duplicate PROJECT transaction ID to delete",
@@ -1193,6 +1209,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "category": {
             "description": "Optional classification category such as saas_subscriptions or bank_fees",
@@ -1273,6 +1290,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "goal": {
             "description": "Natural-language goal, such as 'book this invoice PDF' or 'import bank statement'. Omit to list common workflows.",
@@ -1315,6 +1333,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "description": "Optional opaque cursor returned by the preceding page",
@@ -1371,6 +1390,7 @@
       },
       "inputSchema": {
         "$schema": "http://json-schema.org/draft-07/schema#",
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "description": "Optional opaque cursor returned by the preceding page",

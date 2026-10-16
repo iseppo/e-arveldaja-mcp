@@ -568,6 +568,14 @@ context.
   Concept reads are path-traversal-guarded (resolved/realpath must stay
   inside the bundle, `.md` only).
 
+**Tool inputs are strict.** The connection-scoping Proxy in
+`src/server/create-server.ts` wraps every raw-shape input schema in
+`z.object(shape).strict()` after adding the `connection` guard, so an argument a
+tool does not declare is refused (SDK input-validation error) instead of being
+silently dropped. A remapped action (`remapHiddenGranularTool`,
+`remapGuidedBankFacade`) must emit only keys its destination tool declares —
+pinned by `src/tool-surface-contract.test.ts`.
+
 **When adding a new tool:** if it emits text from OCR/CAMT/CSV, upstream API
 errors, or fields known to be populated by import flows (journal title
 originating from auto-booking, client/supplier names auto-created from
@@ -593,6 +601,15 @@ API data remains raw.
 - **No KMD/VAT return (käibedeklaratsioon)** — e-arveldaja generates it from the confirmed ledger and files it to EMTA. The tax-rules layer is advisory only.
 - **No EMTA prepayment-account tax-expense entries** — a bank transfer to EMTA is booked as a prepayment-account (ettemaksukonto, acct 1516) top-up; the draw-down tax entries come from e-arveldaja's EMTA prepayment-account statement.
 - **`update_transaction` is deliberately metadata-scoped** — bank-reference/description fields only; never amounts, postings, or distributions.
+
+## Changelog style
+
+Write `CHANGELOG.md` entries for a casual user first. Each bullet opens with a
+bold plain-language sentence saying what changes for them (no tool names, error
+codes or parameter names there), optionally a "Before, …" sentence describing
+the old problem, then "Details:" with the technical part (tools, parameters,
+codes, limits) in the same bullet. Applies to new entries; released sections
+are not rewritten.
 
 ## Development
 

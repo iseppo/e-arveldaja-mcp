@@ -73,9 +73,9 @@ export function isToolVisibleForProfile(name: string, profile: ToolProfile): boo
 }
 
 type Action = { tool: string; args?: Record<string, unknown>; approval_required?: boolean; [key: string]: unknown };
-function mergedToolArgs(mode: string, args: Record<string, unknown>): Record<string, unknown> {
+function mergedToolArgs(mode: string, args: Record<string, unknown>, key: "mode" | "action" = "mode"): Record<string, unknown> {
   const { execute: _execute, execution_mode: _executionMode, ...rest } = args;
-  return { mode, ...rest };
+  return { [key]: mode, ...rest };
 }
 export function remapHiddenGranularTool(tool: string, args: Record<string, unknown>): { tool: string; args: Record<string, unknown> } | undefined {
   switch (tool) {
@@ -87,8 +87,8 @@ export function remapHiddenGranularTool(tool: string, args: Record<string, unkno
     case "process_receipt_batch": return { tool: "receipt_batch", args: mergedToolArgs(args.execution_mode === "create" ? "create" : args.execution_mode === "create_and_confirm" ? "create_and_confirm" : "dry_run", args) };
     case "classify_unmatched_transactions": return { tool: "classify_bank_transactions", args: mergedToolArgs("classify", args) };
     case "apply_transaction_classifications": return { tool: "classify_bank_transactions", args: mergedToolArgs(args.execute === true ? "execute_apply" : "dry_run_apply", args) };
-    case "resolve_accounting_review_item": return { tool: "continue_accounting_workflow", args: mergedToolArgs("resolve_review", args) };
-    case "prepare_accounting_review_action": return { tool: "continue_accounting_workflow", args: mergedToolArgs("prepare_action", args) };
+    case "resolve_accounting_review_item": return { tool: "continue_accounting_workflow", args: mergedToolArgs("resolve_review", args, "action") };
+    case "prepare_accounting_review_action": return { tool: "continue_accounting_workflow", args: mergedToolArgs("prepare_action", args, "action") };
     default: return undefined;
   }
 }
@@ -106,6 +106,15 @@ export function remapGuidedBankFacade(
 ): { tool: string; args: Record<string, unknown> } | undefined {
   if (!BANK_FACADE_SOURCE_TOOLS.has(tool)) return undefined;
   const { execute: _execute, mode: _mode, ...rest } = args;
+  // process_bank_input has no deprecated fee_account_relation_id alias. Fold it
+  // in only when it agrees; a conflicting pair stays as is, so the strict input
+  // check refuses the call instead of picking one (as the Wise import would).
+  const legacyFeeDimension = rest.fee_account_relation_id;
+  if (legacyFeeDimension !== undefined
+    && (rest.fee_account_dimensions_id === undefined || rest.fee_account_dimensions_id === legacyFeeDimension)) {
+    delete rest.fee_account_relation_id;
+    rest.fee_account_dimensions_id = legacyFeeDimension;
+  }
   return { tool: "process_bank_input", args: rest };
 }
 
