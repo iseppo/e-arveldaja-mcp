@@ -3076,9 +3076,9 @@ function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefin
   return candidate;
 }
 
-// A line citing another document ("Previous invoice: #12345", "Viide arvele:
-// 4411"): its colon-labelled number is not this document's.
-const OTHER_DOCUMENT_INVOICE_LINE_RE =
+// A label span citing another document ("Previous invoice: #12345", "Viide
+// arvele: 4411", "Corrected invoice:"): its number may not be this document's.
+const OTHER_DOCUMENT_CITATION_RE =
   /(?<![\p{L}\d])(?:previous|prior|earlier|original|related|eelmi\p{L}*|varasema\p{L}*|algse\p{L}*|viide|viita\p{L}*|viitab|reference|ref|ettemaksuarve\p{L}*|prepayment|proforma|credit\s*note\s*(?:for|to)|correct\p{L}*|korrigee\p{L}*|replac\p{L}*|asenda\p{L}*|cancel\p{L}*|tühista\p{L}*)(?![\p{L}\d])/iu;
 
 export function extractInvoiceNumber(text: string, fileName: string): string {
@@ -3088,7 +3088,10 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
 /**
  * The invoice number and whether the winning label tier offers another,
  * different number: a wrong number can skip a real invoice as a duplicate, so
- * a conflict is held for review instead of guessed.
+ * a conflict is held for review instead of guessed. A candidate whose own
+ * label span (the text since the last column gap on its line) cites another
+ * document is chosen only when no other candidate exists, but still counts
+ * for the conflict.
  */
 function extractInvoiceNumberCandidates(text: string, fileName: string): { invoiceNumber: string; ambiguous: boolean } {
   const lines = text
@@ -3113,14 +3116,17 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     ],
   ];
 
-  const colonPattern = invoiceNumberTiers[0]![2]!;
   for (const [tierIndex, tier] of invoiceNumberTiers.entries()) {
-    const candidates: string[] = [];
+    const candidates: Array<{ value: string; cited: boolean }> = [];
+    const globalPatterns = tier.map(pattern => new RegExp(pattern.source, `${pattern.flags}g`));
     for (const [lineIndex, line] of lines.entries()) {
-      for (const pattern of tier) {
-        if (pattern === colonPattern && OTHER_DOCUMENT_INVOICE_LINE_RE.test(line)) continue;
-        const candidate = acceptInvoiceNumberCandidate(line.match(pattern)?.[1]);
-        if (candidate) candidates.push(candidate);
+      for (const pattern of globalPatterns) {
+        for (const match of line.matchAll(pattern)) {
+          const candidate = acceptInvoiceNumberCandidate(match[1]);
+          if (!candidate) continue;
+          const labelSpan = line.slice(0, match.index).split(/\s{2,}|\t|[;|]/).pop() ?? "";
+          candidates.push({ value: candidate, cited: OTHER_DOCUMENT_CITATION_RE.test(labelSpan) });
+        }
       }
       // The one cross-line case: a bare "Arve" / "Invoice" header line with
       // the number on the next line ("Nr. EE1966453").
@@ -3128,13 +3134,13 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
         const candidate = acceptInvoiceNumberCandidate(
           lines[lineIndex + 1]?.match(/^(?:nr|no|number)\.?[:#\t ]*([A-Z0-9][A-Z0-9/_-]{2,})$/i)?.[1],
         );
-        if (candidate) candidates.push(candidate);
+        if (candidate) candidates.push({ value: candidate, cited: false });
       }
     }
     if (candidates.length > 0) {
       return {
-        invoiceNumber: candidates[0]!,
-        ambiguous: new Set(candidates.map(candidate => candidate.toUpperCase())).size > 1,
+        invoiceNumber: (candidates.find(candidate => !candidate.cited) ?? candidates[0]!).value,
+        ambiguous: new Set(candidates.map(candidate => candidate.value.toUpperCase())).size > 1,
       };
     }
   }
