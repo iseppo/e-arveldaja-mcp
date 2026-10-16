@@ -3275,6 +3275,9 @@ function isCalendarDateToken(token: string): boolean {
 // registry/VAT ids, payment references, bank accounts, phone numbers.
 const NON_INVOICE_NUMBER_LINE_RE =
   /\b(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry code|(?:company|registration)\s*(?:number|nr|no\.?)|kmkr|vat(?:\s*(?:nr|number|no\.?))?|tax id|viite(?:number|nr)?|viitenr|reference|ref\.?\s*(?:nr|no)|konto|account|a\/a|iban|swift|bic|tel|telefon|phone|mob(?:iil)?|fax)\b/i;
+// The text right before a generic "number" / "nr" / "no" label that makes it a
+// tax / VAT id label ("Tax number", "KM nr", "KM-number", "KM reg nr").
+const TAX_ID_LABEL_TAIL_RE = /(?<![\p{L}\d])(?:tax\s*|km[-\s]*(?:reg\.?\s*)?)$/iu;
 
 function acceptInvoiceNumberCandidate(raw: string | undefined): string | undefined {
   const candidate = raw?.trim();
@@ -3370,7 +3373,11 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     if (NON_INVOICE_NUMBER_LINE_RE.test(line)) {
       continue;
     }
-    const match = line.match(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/i);
+    // A match whose own label names a tax / VAT id ("Tax number:", "KM nr",
+    // "KM-number") is not an invoice number; the line's other matches stay
+    // candidates (mixed columns keep their cut-short evidence).
+    const match = [...line.matchAll(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/gi)]
+      .find(entry => !TAX_ID_LABEL_TAIL_RE.test(line.slice(0, entry.index)));
     const candidate = acceptInvoiceNumberCandidate(match?.[1]);
     if (candidate) {
       fallbackCandidates.push({

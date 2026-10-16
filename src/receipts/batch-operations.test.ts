@@ -1232,6 +1232,14 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
       held: textDocument([...head, "Arve nr INV-2", ...labelledTrio]),
       clean: textDocument([...head, "Arve nr INV-1", ...labelledTrio]),
     },
+    {
+      // The tax-number column of a mixed line is skipped, not the whole line:
+      // its cut-short neighbour still holds (Codex P0 review).
+      signal: "invoice_number_ambiguous",
+      name: "invoice_number_ambiguous (mixed tax-number column)",
+      held: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1.234    Tax number: EE123456007", "Kuupäev 20.03.2026", ...labelledTrio]),
+      clean: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1    Tax number: EE123456007", "Kuupäev 20.03.2026", ...labelledTrio]),
+    },
   ] as const;
 
   beforeEach(async () => {
@@ -1260,8 +1268,9 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
   for (const testCase of cases) {
     const { signal, held, clean } = testCase;
     const anonymous = "anonymous" in testCase && testCase.anonymous;
+    const name = "name" in testCase ? testCase.name : signal;
     for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
-      it(`${signal} × ${mode} → needs_review, zero writes`, async () => {
+      it(`${name} × ${mode} → needs_review, zero writes`, async () => {
         vi.mocked(parseDocument).mockResolvedValue(held as never);
         const { api, spies } = makeApi();
         const result = await runMode(api, mode, anonymous);
@@ -1274,7 +1283,7 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
       });
     }
 
-    it(`${signal}: the clean twin creates`, async () => {
+    it(`${name}: the clean twin creates`, async () => {
       vi.mocked(parseDocument).mockResolvedValue(clean as never);
       const { api, spies } = makeApi();
       const result = await runMode(api, "create", anonymous);

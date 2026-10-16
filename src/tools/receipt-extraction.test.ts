@@ -2225,6 +2225,42 @@ describe("extractInvoiceNumber hardening (finding 10)", () => {
   it("uses a word boundary in the fallback (no 'no' inside another word)", () => {
     expect(extractInvoiceNumber("Casino 12345 Tallinn", "scan.pdf")).toMatch(/^AUTO-/);
   });
+
+  it("does not read a tax / VAT number label as the invoice number (corpus #25, Twilio)", () => {
+    const twilio = [
+      "Näidis Ireland Limited",
+      "VAT Registration Number: IE1234567AB",
+      "RECEIPT",
+      "Tax Number: EE123456007",
+      "Date 01 September - 06 September, 2026",
+      "Total Paid $20.00",
+    ].join("\n");
+    expect(extractInvoiceNumber(twilio, "receipt.pdf")).toMatch(/^AUTO-/);
+    for (const line of ["KM-number: EE123456007", "KM nr EE123456007", "Tax No. EE123456007", "KM reg nr EE123456007"]) {
+      expect(extractInvoiceNumber(line, "receipt.pdf")).toMatch(/^AUTO-/);
+    }
+    // Regression pins: Tax ID stays excluded, a plain "Number:" is still read.
+    expect(extractInvoiceNumber("Tax ID: EE123456007", "receipt.pdf")).toMatch(/^AUTO-/);
+    expect(extractInvoiceNumber("Number: 12345", "receipt.pdf")).toBe("12345");
+
+    const fields = extractReceiptFieldsFromText(twilio, "receipt.pdf");
+    expect(fields.invoice_number).toMatch(/^AUTO-/);
+    expect(summarizeInvoiceExtraction(fields).missing_required_fields).toContain("invoice_number");
+  });
+
+  it("skips only the tax-labelled match, so a mixed-column line keeps its cut-short evidence (Codex P0 review)", () => {
+    for (const text of [
+      "Invoice nr AB1\nNumber: AB1.234    Tax number: EE123456007",
+      "Invoice nr AB1\nTax number: EE123456007    Number: AB1.234",
+    ]) {
+      expect(extractInvoiceNumber(text, "x.pdf")).toBe("AB1");
+      const fields = extractReceiptFieldsFromText(text, "x.pdf");
+      expect(fields.invoice_number).toBe("AB1");
+      expect(fields.invoice_number_ambiguous).toBe(true);
+    }
+    // The non-tax column of a mixed line is still the fallback number.
+    expect(extractInvoiceNumber("Tax number: EE123456007    Number: 12345", "x.pdf")).toBe("12345");
+  });
 });
 
 describe("extractDates invoice-date label precedence (finding 11)", () => {
