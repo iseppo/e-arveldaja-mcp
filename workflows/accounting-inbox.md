@@ -57,6 +57,7 @@ If `autopilot.needs_one_decision` is non-empty:
 Overlapping CAMT statements raise the same review item once per file. An item for the same statement leg (same bank reference, leg, review code, journals or transactions, and bank account) is listed once, with `seen_in_steps` naming the dry-run steps that raised it; items without a bank reference are never merged, so a repeat of one of those may still be listed per file.
 
 A receipt follow-up that names journal ids ("the payment may already be booked by journal(s) N") is a receipt `receipt_batch` held as a possible duplicate: ask whether that journal is this receipt's payment before booking anything.
+A receipt follow-up saying "journal(s) N already reference its invoice number" is a receipt `receipt_batch` held because a live journal already carries its invoice number: ask whether that journal is this document's booking (then attach the document to it) before booking anything.
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row

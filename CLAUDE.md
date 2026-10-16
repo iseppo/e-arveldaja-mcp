@@ -337,6 +337,25 @@ legitimate identical payments are possible).
   payment booked after the projection is still seen. An unavailable scan never
   holds. A legitimate second identical payment is booked through the
   single-document tools, which stay advisory.
+- **`receipt_batch` also holds on a journal reference**
+  (`src/journal-reference-scan.ts`). A receipt whose invoice number a live
+  journal (`is_deleted !== true`, any type, drafts included) already carries
+  in its `document_number` or `title` is `needs_review` with
+  `referencing_journal_ids`, in dry run and execute (same cache drop before
+  each create). The cash scan misses these: a manual prepayment journal
+  `ETR1:EE1966453` has no bank posting in the ±7 day window. Matching is token
+  equality, never substring: tokens split on anything but letters, digits and
+  `-` `/` `.` `_`, then again on those internal delimiters, plus 2-3 adjacent
+  joins (`ETR1-EE1966453` hits `EE1966453`; `XEE1966453` and `EE19664531` do
+  not). A strong reference (6+ characters with a digit, not date-shaped)
+  matches any token of document_number or title; a weak one (4-5 characters,
+  or date-shaped) only the whole document_number or its remainder after one
+  `PREFIX:` (`LY:1234`), never a title, sub-token or join; shorter or
+  digit-less numbers are never matched. No date window. An unavailable scan
+  only adds a note. `process_accounting_document` and
+  `create_purchase_invoice_from_pdf` get the advisory
+  `invoice_referenced_by_journal` / `referencing_journal_ids` and still create
+  (also with `block_on_duplicate`).
 - **Match key:** account + dimension + amount (±0.01 EUR) + direction (`D`/`C`)
   + effective date within ±7 days (`DUPLICATE_SCAN_WINDOW_DAYS`). Intake mode
   scans every bank dimension (the invoice's settling account isn't known yet)

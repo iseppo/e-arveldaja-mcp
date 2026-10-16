@@ -33,6 +33,8 @@ Never recalculate `vat_price` / `gross_price`, and do not put the source filenam
 Totals are checked before anything is written. `purchase_totals_mismatch`: the explicit `vat_price` differs from the VAT the items compute (item net × VAT rate) by more than 1 cent per item; correct the item net amounts or VAT rates, or the totals, to match the document. `purchase_base_sign_mismatch`: a `base_*` EUR amount has the opposite sign of the document-currency amount (for example a positive EUR total on a credit note); fix the `base_*` values. Then rerun step 2.
 
 A receipt that `receipt_batch` held as a possible duplicate (`possible_duplicate_journal_ids`) may be booked here on purpose only after the user confirms it is a different payment from those journals; name the journal ids on the approval card.
+
+A warning `invoice_referenced_by_journal` (or a receipt `receipt_batch` held with `referencing_journal_ids`) means a live journal already carries this invoice number: the document may already be booked by that journal. It does not block creation; book it here only after the user confirms that journal is not this document's booking, and name the journal ids on the approval card.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
 ## Step 1: Check VAT registration
@@ -104,6 +106,7 @@ Inspect the result:
 - Review `exact_duplicates` and `suspicious_same_amount_date` as warning context.
 - If a candidate looks like the same invoice, stop and report it before creating anything.
 - A receipt that `receipt_batch` held as a possible duplicate (`possible_duplicate_journal_ids`) may be booked through this workflow on purpose only after the user confirms it is a different payment from those journals; name the journal ids on the approval card.
+- A `referencing_journal_ids` warning from `create_purchase_invoice_from_pdf` (or a receipt `receipt_batch` held with `referencing_journal_ids`) means a live journal already carries this invoice number, so the document may already be booked there. It does not block creation: book it only after the user confirms that journal is not this document's booking; otherwise attach the document to the journal (`attach_document` with `entity_type: "journal"`).
 
 ## Step 6: Prepare the supplier client decision
 
