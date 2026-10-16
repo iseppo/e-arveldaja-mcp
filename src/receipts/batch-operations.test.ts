@@ -1182,3 +1182,68 @@ describe("receipt batch — journal already references the invoice number (Messe
     expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("receipt batch — a delimiter-joined invoice number reaches the journal reference scan (Codex review)", () => {
+  // Real extraction: "Arve nr AB1.234" used to be read as "AB1", too short for
+  // the reference scan, so journal "ETR1:AB1.234" was never consulted.
+  const document = {
+    text: ["Supplier OÜ", "Arve nr AB1.234", "Kuupäev 20.03.2026", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR"].join("\n"),
+    pageCount: 1,
+  };
+  const journal = {
+    id: 29551090, document_number: "ETR1:AB1.234", title: "Ettemakse", effective_date: "2026-03-01",
+    registered: true, is_deleted: false, postings: [],
+  };
+
+  beforeEach(async () => {
+    const extraction = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    const fallback = await vi.importActual<typeof import("../invoice-extraction-fallback.js")>("../invoice-extraction-fallback.js");
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation(extraction.extractReceiptFieldsFromText);
+    vi.mocked(summarizeInvoiceExtraction).mockImplementation(fallback.summarizeInvoiceExtraction);
+    vi.mocked(parseDocument).mockResolvedValue(document as never);
+    // A history booking keeps the confidence high, so create_and_confirm
+    // reaches the booking step too.
+    vi.mocked(suggestBookingInternal).mockResolvedValue({
+      item: { custom_title: "Service", amount: 1, total_net_price: 100, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+      source: "supplier_history",
+      suggested_purchase_article: { id: 501, name: "Software" },
+    } as never);
+  });
+
+  function apiWithJournals(journals: unknown[]) {
+    const made = makeApi();
+    (made.api as { journals: { listAll: ReturnType<typeof vi.fn> } }).journals.listAll.mockResolvedValue(journals);
+    return made;
+  }
+
+  async function runMode(api: never, mode: "dry_run" | "create" | "create_and_confirm") {
+    const ops = makeOperations(api);
+    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    if (mode === "dry_run") return dryRun.value.results[0]!;
+    const outcome = await ops.runBatch({
+      ...run, executionMode: mode, dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    return outcome.value.results[0]!;
+  }
+
+  it.each(["dry_run", "create", "create_and_confirm"] as const)("%s → held by journal ETR1:AB1.234, zero writes", async (mode) => {
+    const { api, spies } = apiWithJournals([journal]);
+    const result = await runMode(api, mode);
+    expect(result.extracted?.invoice_number).toBe("AB1.234");
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551090]);
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("without the journal the same receipt is created (%s)", async (mode) => {
+    const { api, spies } = apiWithJournals([]);
+    const result = await runMode(api, mode);
+    expect(result.status).not.toBe("needs_review");
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+});
