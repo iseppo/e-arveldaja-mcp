@@ -4552,12 +4552,23 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(result.supplier_vat_no).toBeUndefined();
   });
 
-  it("a marker-named supplier gets the codes of its own block", () => {
+  it("a marker-named supplier gets the codes of its own block, not flagged as footer-derived", () => {
     const items = page(footer(["Näidis Side AS", "Registrikood 10000018", "KMKR number EE100000010"]), "Muu Logo");
     items.push(item("Müüja: Näidis Side AS", 316, 104, 120));
     const result = extract(items);
     expect(result.supplier_name).toBe("Näidis Side AS");
     expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_from_footer_block).toBeUndefined();
+  });
+
+  it("a letterhead-named supplier (Tech Tatami shape: \"Makse saaja:\" + own footer block) is not flagged", () => {
+    const items = page(footer(["Näidis Side AS", "Reg nr: 10000018", "KMKR nr: EE100000010", "Aadress: Tänav 1-2", "Eesti Vabariik"]), "Näidis Side AS");
+    items.push(item("Makse saaja:", 316, 104, 50), item("Näidis Side AS", 316, 118, 60));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_vat_no).toBe("EE100000010");
+    expect(result.supplier_from_footer_block).toBeUndefined();
   });
 
   it("a name found only by the legal-form line scan does not corroborate its block", () => {
@@ -4571,7 +4582,9 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page(agentBlock, "Maksekeskus"));
     expect(result.supplier_name).toBe("Maksekeskus AS");
     expect(result.supplier_reg_code).toBe("10000018");
-    expect(result.supplier_from_footer_block).toBe(true);
+    // The name line stands on its own row here, so the name was found before the
+    // block and the letterhead corroborates it: not footer-derived.
+    expect(result.supplier_from_footer_block).toBeUndefined();
   });
 
   // Codex round 3: a role label attached to the block excludes it even when the

@@ -4180,7 +4180,9 @@ export function extractReceiptFieldsFromText(
     ...(hasMultipleTicketNumbers(text) ? { multiple_documents_in_file: true } : {}),
     ...(buyerBlockSignal ? { [buyerBlockSignal]: true } : {}),
     ...(invoiceNumberAmbiguous ? { invoice_number_ambiguous: true } : {}),
-    ...(useIdentityBlock ? { supplier_from_footer_block: true } : {}),
+    // Only a supplier whose NAME came from the block is footer-derived; codes
+    // filled into a name a supplier label or the letterhead already gave are not.
+    ...(useIdentityBlock && !sameAsExtractedName ? { supplier_from_footer_block: true } : {}),
   };
 }
 

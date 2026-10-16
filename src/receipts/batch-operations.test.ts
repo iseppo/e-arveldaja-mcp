@@ -949,6 +949,34 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     expect(createClient).not.toHaveBeenCalled();
   });
 
+  it("a letterhead-named supplier with its own footer codes (Tech Tatami shape) is not held as footer-derived", async () => {
+    vi.mocked(parseDocument).mockResolvedValue(documentWith(
+      ["Näidis Side AS", "Reg nr: 10000018", "KMKR nr: EE100000010", "Aadress: Tänav 1-2", "Eesti Vabariik"],
+      [
+        { text: "Makse saaja:", x: 316, y: 104, width: 50, height: 12 },
+        { text: "Näidis Side AS", x: 316, y: 118, width: 60, height: 12 },
+        { text: "EUR", x: 566, y: 550, width: 20, height: 13 },
+      ],
+      "Näidis Side AS",
+    ) as never);
+    const { api, spies } = makeApi();
+    primeClients(api, []);
+    const ops = makeOperations(api);
+    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    const preview = dryRun.value.results[0]!;
+    expect(preview.extracted?.supplier_reg_code).toBe("10000018");
+    expect(preview.extracted?.supplier_from_footer_block).toBeUndefined();
+    expect(preview.supplier_resolution?.client?.id).toBe(77);
+    const outcome = await ops.runBatch({
+      ...run, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("created");
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
   // Codex review: another entity's identity in the footer must never resolve to
   // that entity's client and skip the receipt as its duplicate.
   it.each([
