@@ -1183,13 +1183,14 @@ describe("receipt batch — journal already references the invoice number (Messe
   });
 });
 
-describe("receipt batch — a delimiter-joined invoice number reaches the journal reference scan (Codex review)", () => {
-  // Real extraction: "Arve nr AB1.234" used to be read as "AB1", too short for
-  // the reference scan, so journal "ETR1:AB1.234" was never consulted.
-  const document = {
-    text: ["Supplier OÜ", "Arve nr AB1.234", "Kuupäev 20.03.2026", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR"].join("\n"),
+describe("receipt batch — a cut-short invoice number is held, never booked (Codex review)", () => {
+  // Real extraction: "Arve nr AB1.234" is read as "AB1" (unchanged, so an
+  // invoice booked earlier as "AB1" is still found), too short for the journal
+  // reference scan; the cut-short number is held as invoice_number_ambiguous.
+  const documentWith = (numberLine: string) => ({
+    text: ["Supplier OÜ", numberLine, "Kuupäev 20.03.2026", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR"].join("\n"),
     pageCount: 1,
-  };
+  });
   const journal = {
     id: 29551090, document_number: "ETR1:AB1.234", title: "Ettemakse", effective_date: "2026-03-01",
     registered: true, is_deleted: false, postings: [],
@@ -1200,7 +1201,6 @@ describe("receipt batch — a delimiter-joined invoice number reaches the journa
     const fallback = await vi.importActual<typeof import("../invoice-extraction-fallback.js")>("../invoice-extraction-fallback.js");
     vi.mocked(extractReceiptFieldsFromText).mockImplementation(extraction.extractReceiptFieldsFromText);
     vi.mocked(summarizeInvoiceExtraction).mockImplementation(fallback.summarizeInvoiceExtraction);
-    vi.mocked(parseDocument).mockResolvedValue(document as never);
     // A history booking keeps the confidence high, so create_and_confirm
     // reaches the booking step too.
     vi.mocked(suggestBookingInternal).mockResolvedValue({
@@ -1229,18 +1229,39 @@ describe("receipt batch — a delimiter-joined invoice number reaches the journa
     return outcome.value.results[0]!;
   }
 
-  it.each(["dry_run", "create", "create_and_confirm"] as const)("%s → held by journal ETR1:AB1.234, zero writes", async (mode) => {
-    const { api, spies } = apiWithJournals([journal]);
-    const result = await runMode(api, mode);
-    expect(result.extracted?.invoice_number).toBe("AB1.234");
-    expect(result.status).toBe("needs_review");
-    expect(result.referencing_journal_ids).toEqual([29551090]);
-    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
-    expect(spies.uploadDocument).not.toHaveBeenCalled();
-    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
-  });
+  for (const journals of [[journal], []]) {
+    it.each(["dry_run", "create", "create_and_confirm"] as const)(
+      `"Arve nr AB1.234" × %s → held as invoice_number_ambiguous, zero writes (${journals.length} journal(s))`,
+      async (mode) => {
+        vi.mocked(parseDocument).mockResolvedValue(documentWith("Arve nr AB1.234") as never);
+        const { api, spies } = apiWithJournals(journals);
+        const result = await runMode(api, mode);
+        expect(result.extracted?.invoice_number).toBe("AB1");
+        expect(result.extracted?.invoice_number_ambiguous).toBe(true);
+        expect(result.status).toBe("needs_review");
+        expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+        expect(spies.uploadDocument).not.toHaveBeenCalled();
+        expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+      },
+    );
+  }
 
-  it.each(["create", "create_and_confirm"] as const)("without the journal the same receipt is created (%s)", async (mode) => {
+  it.each(["dry_run", "create", "create_and_confirm"] as const)(
+    "an undelimited AB1234 is held by journal ETR1:AB1.234 (%s), zero writes",
+    async (mode) => {
+      vi.mocked(parseDocument).mockResolvedValue(documentWith("Arve nr AB1234") as never);
+      const { api, spies } = apiWithJournals([journal]);
+      const result = await runMode(api, mode);
+      expect(result.status).toBe("needs_review");
+      expect(result.referencing_journal_ids).toEqual([29551090]);
+      expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+      expect(spies.uploadDocument).not.toHaveBeenCalled();
+      expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["create", "create_and_confirm"] as const)("the clean twin AB1234 without the journal is created (%s)", async (mode) => {
+    vi.mocked(parseDocument).mockResolvedValue(documentWith("Arve nr AB1234") as never);
     const { api, spies } = apiWithJournals([]);
     const result = await runMode(api, mode);
     expect(result.status).not.toBe("needs_review");

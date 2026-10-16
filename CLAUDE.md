@@ -354,9 +354,10 @@ legitimate identical payments are possible).
   `PREFIX:` (`LY:1234`), never a title, sub-token or join; shorter or
   digit-less numbers are never matched. No date window. An unavailable scan
   only adds a note (a `journal_reference_scan_unavailable` warning at
-  `process_accounting_document` prepare). Receipt extraction keeps an invoice
-  number's internal `.` (`AB1.234`, not `AB1`), and a number the line
-  continues past through another delimiter (`AB1,234`) is held as
+  `process_accounting_document` prepare). Receipt extraction never changes the
+  captured invoice number (an invoice booked under it must still be found as
+  a duplicate), but a number the line continues past through a delimiter
+  (`AB1.234` read as `AB1`, `INV-0042.Date`) is held as
   `invoice_number_ambiguous`, so a cut-short number cannot slip under the
   strength gate. `process_accounting_document` and
   `create_purchase_invoice_from_pdf` get the advisory

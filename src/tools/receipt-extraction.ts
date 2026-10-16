@@ -3085,7 +3085,6 @@ function classifyBuyerBlock(
 const CALENDAR_DATE_TOKEN_LAYOUTS: ReadonlyArray<{ re: RegExp; order: "ymd" | "dmy" }> = [
   { re: /^(\d{4})-(\d{2})-(\d{2})$/, order: "ymd" },
   { re: /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/, order: "dmy" },
-  { re: /^(\d{1,2})\.(\d{1,2})\.(\d{2})$/, order: "dmy" },
   { re: /^(\d{1,2})-(\d{1,2})-(\d{4})$/, order: "dmy" },
   { re: /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/, order: "dmy" },
 ];
@@ -3120,7 +3119,9 @@ const OTHER_DOCUMENT_CITATION_RE =
   /(?<![\p{L}\d])(?:previous|prior|earlier|original|related|eelmi\p{L}*|varasema\p{L}*|algse\p{L}*|viide|viita\p{L}*|viitab|reference|ref|ettemaksuarve\p{L}*|prepayment|proforma|credit\s*note\s*(?:for|to)|correct\p{L}*|korrigee\p{L}*|replac\p{L}*|asenda\p{L}*|cancel\p{L}*|tühista\p{L}*)(?![\p{L}\d])/iu;
 
 // The text right after a captured number continues it through a delimiter the
-// capture does not take ("AB1,234"): the number may be cut short.
+// capture does not take ("AB1.234" read as "AB1", "AB1,234"): the number may
+// be cut short. The captured number itself is never changed (an existing
+// invoice booked under it must still be found as a duplicate).
 function continuesPastCapture(rest: string): boolean {
   return /^[^\s\p{L}\p{N}][\p{L}\p{N}]/u.test(rest);
 }
@@ -3151,14 +3152,14 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     [
       // "arve" must not be the tail of another word ("Arveldusarve nr" is a
       // bank account); only the cash/sales/purchase invoice compounds qualify.
-      /(?:(?<![A-Za-zÀ-ž])(?:sularaha|kassa|müügi|ostu)?arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*((?:[A-Z0-9/_-]|\.(?=[A-Z0-9])){3,})/i,
-      /\b(?:invoice|(?:sularaha|kassa)?arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9](?:[A-Z0-9/_-]|\.(?=[A-Z0-9]))*\d(?:[A-Z0-9/_-]|\.(?=[A-Z0-9]))*)\b/i,
+      /(?:(?<![A-Za-zÀ-ž])(?:sularaha|kassa|müügi|ostu)?arve(?:\/tehingu)?(?:-saateleht)?\s*(?:nr|number|no\.?)|invoice\s*(?:nr|number|no\.?)|dokumendi\s*nr|receipt\s*(?:nr|number|no\.?))[:#\t .-]*([A-Z0-9/_-]{3,})/i,
+      /\b(?:invoice|(?:sularaha|kassa)?arve(?:-saateleht)?|receipt)[ \t]+(?!date\b|number\b|nr\b|no\.?\b)([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)\b/i,
       // "Invoice: #80832991-167194467", "Arve: 10000479": a colon label with a
       // token of at least five digits.
-      /(?<![A-Za-zÀ-ž])(?:invoice|arve):[ \t]*#?((?=(?:(?:[A-Z0-9/_-]|\.(?=[A-Z0-9]))*?\d){5})[A-Z0-9](?:[A-Z0-9/_-]|\.(?=[A-Z0-9]))*)/i,
+      /(?<![A-Za-zÀ-ž])(?:invoice|arve):[ \t]*#?((?=(?:[A-Z0-9/_-]*?\d){5})[A-Z0-9][A-Z0-9/_-]*)/i,
     ],
     [
-      /(?:tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\t .-]*((?:[A-Z0-9/_-]|\.(?=[A-Z0-9])){3,})/i,
+      /(?:tellimuse\s*number|order\s*number|booking\s*(?:number|no\.?)|pileti\s*nr)[:#\t .-]*([A-Z0-9/_-]{3,})/i,
     ],
   ];
 
@@ -3182,7 +3183,7 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
       // the number on the next line ("Nr. EE1966453").
       if (tierIndex === 0 && /^(?:arve|invoice)$/i.test(line)) {
         const candidate = acceptInvoiceNumberCandidate(
-          lines[lineIndex + 1]?.match(/^(?:nr|no|number)\.?[:#\t ]*([A-Z0-9](?:[A-Z0-9/_-]|\.(?=[A-Z0-9])){2,})$/i)?.[1],
+          lines[lineIndex + 1]?.match(/^(?:nr|no|number)\.?[:#\t ]*([A-Z0-9][A-Z0-9/_-]{2,})$/i)?.[1],
         );
         if (candidate) candidates.push({ value: candidate, cited: false, truncated: false });
       }
@@ -3202,7 +3203,7 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     if (NON_INVOICE_NUMBER_LINE_RE.test(line)) {
       continue;
     }
-    const match = line.match(/\b(?:number|nr|no\.?)[:#\t -]*((?:[A-Z0-9/_-]|\.(?=[A-Z0-9])){3,})/i);
+    const match = line.match(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/i);
     const candidate = acceptInvoiceNumberCandidate(match?.[1]);
     if (candidate) {
       return { invoiceNumber: candidate, ambiguous: continuesPastCapture(line.slice((match!.index ?? 0) + match![0].length)) };

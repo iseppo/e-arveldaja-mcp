@@ -2185,29 +2185,27 @@ describe("extractInvoiceNumber hardening (finding 10)", () => {
     expect(extractInvoiceNumber("Invoice no: 2025-02-31", "scan.pdf")).toBe("2025-02-31");
   });
 
-  it("keeps a whole invoice number with internal delimiters (Codex review: AB1.234 read as AB1)", () => {
-    expect(extractInvoiceNumber("Arve nr AB1.234", "scan.pdf")).toBe("AB1.234");
-    expect(extractInvoiceNumber("Invoice no: 2024/001", "scan.pdf")).toBe("2024/001");
-    expect(extractInvoiceNumber("Arve nr INV-0042", "scan.pdf")).toBe("INV-0042");
-    expect(extractInvoiceNumber("Arve nr INV_2024.07", "scan.pdf")).toBe("INV_2024.07");
-    expect(extractInvoiceNumber("Invoice AB1.234", "scan.pdf")).toBe("AB1.234");
-    expect(extractInvoiceNumber("Dokument no. AB1.234", "scan.pdf")).toBe("AB1.234");
-    // A sentence-final dot is not part of the number; a dotted date still is no number.
-    expect(extractInvoiceNumber("Arve nr INV-0042.", "scan.pdf")).toBe("INV-0042");
-    expect(extractInvoiceNumber("Arve nr 12.03.2024", "scan.pdf")).toMatch(/^AUTO-/);
-    expect(extractInvoiceNumber("Arve nr 12.03.24", "scan.pdf")).toMatch(/^AUTO-/);
-  });
-
-  it("holds a number that looks cut short as invoice_number_ambiguous", () => {
-    const truncated = extractReceiptFieldsFromText(["Näidis OÜ", "Arve nr AB1,234", "Kokku 10.00"].join("\n"), "x.pdf");
-    expect(truncated.invoice_number).toBe("AB1");
-    expect(truncated.invoice_number_ambiguous).toBe(true);
-    const whole = extractReceiptFieldsFromText(["Näidis OÜ", "Arve nr AB1.234", "Kokku 10.00"].join("\n"), "x.pdf");
-    expect(whole.invoice_number).toBe("AB1.234");
-    expect(whole.invoice_number_ambiguous).toBeUndefined();
-    const sentence = extractReceiptFieldsFromText(["Näidis OÜ", "Arve nr AB1234, kuupäev 20.03.2026", "Kokku 10.00"].join("\n"), "x.pdf");
-    expect(sentence.invoice_number).toBe("AB1234");
-    expect(sentence.invoice_number_ambiguous).toBeUndefined();
+  it("never changes the captured number, but holds one that looks cut short as invoice_number_ambiguous (Codex review)", () => {
+    const fields = (line: string) => extractReceiptFieldsFromText(["Näidis OÜ", line, "Kokku 10.00"].join("\n"), "x.pdf");
+    for (const [line, number] of [
+      ["Arve nr AB1.234", "AB1"],
+      ["Arve nr AB1,234", "AB1"],
+      ["Arve nr INV-0042.Date: 20.03.2026", "INV-0042"],
+      ["Invoice AB1.234", "AB1"],
+      ["Dokument no. AB1.234", "AB1"],
+    ] as const) {
+      expect(fields(line).invoice_number).toBe(number);
+      expect(fields(line).invoice_number_ambiguous).toBe(true);
+    }
+    for (const [line, number] of [
+      ["Arve nr INV-0042", "INV-0042"],
+      ["Arve nr INV-0042.", "INV-0042"],
+      ["Invoice no: 2024/001", "2024/001"],
+      ["Arve nr AB1234, kuupäev 20.03.2026", "AB1234"],
+    ] as const) {
+      expect(fields(line).invoice_number).toBe(number);
+      expect(fields(line).invoice_number_ambiguous).toBeUndefined();
+    }
   });
 
   it("ranks an invoice/arve label over an earlier order/booking label", () => {
