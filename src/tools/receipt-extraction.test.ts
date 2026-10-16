@@ -3687,17 +3687,22 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
         "Grand total 60000    IBAN EE107700771005782542",
         "Grand total 60000 IBAN EE107700771005782542",
         "Viitenumber 123    Grand total 60000",
+        // Round 4: a column gap between the label and its value.
+        "Grand total    60000    Reference PO-555",
+        "Grand total\t60000\tReference PO-555",
+        "Grand total    60000    IBAN EE10 7700 7710 0578 2542",
+        "Viitenumber 123    Grand total    60000",
       ])("text: an amount-labelled value beside a reference span holds: %s", (line) => {
         const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 0% 0.00", "Kokku 100.00", line].join("\n"), "arve.pdf");
         expect(result.total_gross).toBe(100);
         expect(result.labelled_amount_over_max).toBe(true);
       });
 
-      it("text: a reference in its own span beside a normal total is not evidence", () => {
-        const result = extractReceiptFieldsFromText(
-          ["Näidis OÜ", "Viitenumber 123456789012    Tellimus 123456789    Kokku 10,00 EUR"].join("\n"),
-          "arve.pdf",
-        );
+      it.each([
+        "Viitenumber 123456789012    Tellimus 123456789    Kokku 10,00 EUR",
+        "Kokku 10,00 EUR    IBAN EE10 7700 7710 0578 2542",
+      ])("text: a reference beside a normal total is not evidence: %s", (line) => {
+        const result = extractReceiptFieldsFromText(["Näidis OÜ", line].join("\n"), "arve.pdf");
         expect(result.labelled_amount_over_max).toBeUndefined();
       });
 

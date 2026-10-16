@@ -2229,27 +2229,37 @@ function mergedHoldFlags(
   };
 }
 
+// A reference / IBAN label with the identifier it labels ("Reference PO-555",
+// "IBAN EE10 7700 7710 0578 2542", "Viitenumber 123").
+const REFERENCE_LABEL_WITH_VALUE_RE = new RegExp(
+  `(?:${RECEIPT_REFERENCE_LINE_RE.source})[\\s:.#-]*(?:[A-Z]{2}\\d{2}(?:\\s?[A-Z0-9]{4}){2,}(?:\\s?[A-Z0-9]{1,4})?|\\S+)?`,
+  "gi",
+);
+
 /**
- * G4: a reference / IBAN label excludes only its own span of the original
- * line (column gaps kept): on "Grand total 60000    Reference PO-555" the
- * total's 60000 is still labelled evidence. Each span is cut at its own
- * reference label; an amount-labelled remainder over the maximum holds.
+ * G4: a reference / IBAN label excludes only itself and the identifier it
+ * labels. The rest of the line is read as a whole, so a total label keeps its
+ * value across column gaps ("Grand total    60000    Reference PO-555"); a
+ * value counts only after the line's first amount label, so a number before
+ * it ("Tellimus 123456789    Kokku 10,00") is not that label's value.
  */
-function referenceLineSpanOverMax(rawLine: string, overMax: (amount: number | undefined) => boolean): boolean {
-  return rawLine.split(/[ \u00a0]{2,}|\t|[;|]/).some(rawSpan => {
-    const span = clampTextLine(rawSpan);
-    const reference = RECEIPT_REFERENCE_LINE_RE.exec(span);
-    const labelled = reference ? span.slice(0, reference.index) : span;
-    if (!classifyLayoutAmountLabel(labelled)) return false;
-    return extractAmountsFromLine(labelled).some(amount => overMax(amount) && !isLikelyYearAmount(amount, labelled));
-  });
+function referenceLineOverMax(line: string, overMax: (amount: number | undefined) => boolean): boolean {
+  const remainder = clampTextLine(line.replace(REFERENCE_LABEL_WITH_VALUE_RE, " "));
+  // The amount labels classifyLayoutAmountLabel reads; the first one's end.
+  const labelEnds = [RECEIPT_TOTAL_LABEL_RE, RECEIPT_NET_LABEL_RE, RECEIPT_VAT_LABEL_RE, RECEIPT_GROSS_WITH_VAT_RE]
+    .map(re => re.exec(remainder))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map(match => match.index + match[0].length);
+  if (labelEnds.length === 0) return false;
+  const valueText = remainder.slice(Math.min(...labelEnds));
+  return extractAmountsFromLine(valueText).some(amount => overMax(amount) && !isLikelyYearAmount(amount, valueText));
 }
 
 function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithMetadata {
-  const rawLines = text
+  const lines = text
     .split(/\r?\n/)
-    .filter(line => clampTextLine(line).length > 0);
-  const lines = rawLines.map(clampTextLine);
+    .map(clampTextLine)
+    .filter(Boolean);
 
   let totalGross: number | undefined;
   let totalVat: number | undefined;
@@ -2286,7 +2296,7 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   // the line filter discarded ("Summa km-ta 60 000,00").
   const overMax = (amount: number | undefined) => amount !== undefined && Math.abs(amount) > MAX_RECEIPT_FALLBACK_AMOUNT;
   const labelledAmountOverMax = classifiedLines.some((classified, index) => {
-    if (classified.blockedAsReference) return referenceLineSpanOverMax(rawLines[index]!, overMax);
+    if (classified.blockedAsReference) return referenceLineOverMax(lines[index]!, overMax);
     if (!classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && !classified.hasOwnLineVatLabel) return false;
     return moneyTokenValues(classified.line).some(overMax) ||
       (classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && overMax(classified.pickedGross)) ||
