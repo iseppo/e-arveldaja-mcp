@@ -2229,11 +2229,27 @@ function mergedHoldFlags(
   };
 }
 
+/**
+ * G4: a reference / IBAN label excludes only its own span of the original
+ * line (column gaps kept): on "Grand total 60000    Reference PO-555" the
+ * total's 60000 is still labelled evidence. Each span is cut at its own
+ * reference label; an amount-labelled remainder over the maximum holds.
+ */
+function referenceLineSpanOverMax(rawLine: string, overMax: (amount: number | undefined) => boolean): boolean {
+  return rawLine.split(/[ \u00a0]{2,}|\t|[;|]/).some(rawSpan => {
+    const span = clampTextLine(rawSpan);
+    const reference = RECEIPT_REFERENCE_LINE_RE.exec(span);
+    const labelled = reference ? span.slice(0, reference.index) : span;
+    if (!classifyLayoutAmountLabel(labelled)) return false;
+    return extractAmountsFromLine(labelled).some(amount => overMax(amount) && !isLikelyYearAmount(amount, labelled));
+  });
+}
+
 function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithMetadata {
-  const lines = text
+  const rawLines = text
     .split(/\r?\n/)
-    .map(clampTextLine)
-    .filter(Boolean);
+    .filter(line => clampTextLine(line).length > 0);
+  const lines = rawLines.map(clampTextLine);
 
   let totalGross: number | undefined;
   let totalVat: number | undefined;
@@ -2269,8 +2285,8 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   // line) and the line's own two-decimal money tokens, which catch a value
   // the line filter discarded ("Summa km-ta 60 000,00").
   const overMax = (amount: number | undefined) => amount !== undefined && Math.abs(amount) > MAX_RECEIPT_FALLBACK_AMOUNT;
-  const labelledAmountOverMax = classifiedLines.some(classified => {
-    if (classified.blockedAsReference) return false;
+  const labelledAmountOverMax = classifiedLines.some((classified, index) => {
+    if (classified.blockedAsReference) return referenceLineSpanOverMax(rawLines[index]!, overMax);
     if (!classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && !classified.hasOwnLineVatLabel) return false;
     return moneyTokenValues(classified.line).some(overMax) ||
       (classified.hasTotalLikeLabel && !classified.hasNetLikeLabel && overMax(classified.pickedGross)) ||

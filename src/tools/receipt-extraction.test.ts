@@ -3681,6 +3681,35 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
         expect(extractWith(below).labelled_amount_over_max).toBeUndefined();
       });
 
+      // Codex review round 3: a reference / IBAN excludes only its own span.
+      it.each([
+        "Grand total 60000    Reference PO-555",
+        "Grand total 60000    IBAN EE107700771005782542",
+        "Grand total 60000 IBAN EE107700771005782542",
+        "Viitenumber 123    Grand total 60000",
+      ])("text: an amount-labelled value beside a reference span holds: %s", (line) => {
+        const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 0% 0.00", "Kokku 100.00", line].join("\n"), "arve.pdf");
+        expect(result.total_gross).toBe(100);
+        expect(result.labelled_amount_over_max).toBe(true);
+      });
+
+      it("text: a reference in its own span beside a normal total is not evidence", () => {
+        const result = extractReceiptFieldsFromText(
+          ["Näidis OÜ", "Viitenumber 123456789012    Tellimus 123456789    Kokku 10,00 EUR"].join("\n"),
+          "arve.pdf",
+        );
+        expect(result.labelled_amount_over_max).toBeUndefined();
+      });
+
+      it("layout: an amount-labelled value beside a reference item holds", () => {
+        const items = [
+          ...cleanTrio.slice(0, -1),
+          item("Grand total", 52, 200, 60), item("60000", 200, 200, 30), item("Reference PO-555", 400, 200, 80),
+        ];
+        const result = extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "arve.pdf", { textItems: items });
+        expect(result.labelled_amount_over_max).toBe(true);
+      });
+
       // Codex review round 2: a value an amount label binds on its own row is
       // that label's amount, even under an identifier heading.
       it.each(["Arve nr", "Konto"])("a value bound on the label's own row under a \"%s\" heading holds", (heading) => {
