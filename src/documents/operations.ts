@@ -460,7 +460,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         if (!signals[signal]) continue;
         // A document addressed to another company would be booked whole into
         // the wrong books — no reviewed amounts fix that, so no plan handle.
-        if ((WRONG_COMPANY_SIGNALS as readonly string[]).includes(signal)) {
+        // A footer-derived supplier is only a suggestion: no plan handle either.
+        if ((WRONG_COMPANY_SIGNALS as readonly string[]).includes(signal) || signal === "supplier_from_footer_block") {
           blockers.push({ item_id: signal, code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal], severity: "blocker" });
         } else {
           warnings.push({ code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal] });

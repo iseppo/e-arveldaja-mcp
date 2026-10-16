@@ -4348,6 +4348,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(result.supplier_vat_no).toBe("EE100000010");
     expect(result.reg_code_rationale).toBe("identity_block");
     expect(result.vat_no_rationale).toBe("identity_block");
+    expect(result.supplier_from_footer_block).toBe(true);
     expect(result.field_provenance?.find(entry => entry.field === "supplier_name")).toMatchObject({
       source: "coordinate", rationale: "identity_block", bbox: { x: 28, y: 776 },
     });
@@ -4378,8 +4379,9 @@ describe("supplier identity from a page-column identity block (Telia footer live
   it("a block inside the buyer block is not taken", () => {
     // The name sits a line below the label and the letterhead names it, so only
     // the buyer-block check stops it.
-    const items = page([], "Testfirma").filter(entry => entry.y !== 118 && entry.y !== 129);
-    items.push(item("Testfirma OÜ", 28, 128, 53), item("Registrikood 10000024", 28, 140, 81));
+    // The label is "Klient", which is no role word, so the role-word band does not stop it either.
+    const items = page([], "Testfirma").filter(entry => entry.y !== 104 && entry.y !== 118 && entry.y !== 129);
+    items.push(item("Klient", 28, 104, 52, 13), item("Testfirma OÜ", 28, 128, 53), item("Registrikood 10000024", 28, 140, 81));
     const result = extract(items, { ownCompanyVat: own.ownCompanyVat });
     expect(result.supplier_reg_code).toBeUndefined();
     expect(result.reg_code_rationale).not.toBe("identity_block");
@@ -4465,7 +4467,8 @@ describe("supplier identity from a page-column identity block (Telia footer live
   });
 
   it("a label line directly above the name disqualifies the block", () => {
-    const result = extract(page(footer(["Arve väljastaja", "Näidis Side AS", "Registrikood 10000018"])));
+    // "Kontakt" is no role word, so only the label-above check stops it.
+    const result = extract(page(footer(["Kontakt", "Näidis Side AS", "Registrikood 10000018"])));
     expect(result.supplier_reg_code).toBeUndefined();
   });
 
@@ -4564,10 +4567,44 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(result.supplier_vat_no).toBeUndefined();
   });
 
-  it("a document whose letterhead is the agent itself takes the agent's block", () => {
-    const result = extract(page([...agentBlock, agentPlacements[1]!.label], "Maksekeskus"));
+  it("a document issued by the agent itself (letterhead names it, no role label) takes its block", () => {
+    const result = extract(page(agentBlock, "Maksekeskus"));
     expect(result.supplier_name).toBe("Maksekeskus AS");
     expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_from_footer_block).toBe(true);
+  });
+
+  // Codex round 3: a role label attached to the block excludes it even when the
+  // letterhead or a supplier marker names the same entity.
+  it.each(agentPlacements)("a role label $placement excludes the block even when the letterhead names it", ({ label }) => {
+    const result = extract(page([...agentBlock, label], "Maksekeskus"));
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+    expect(result.supplier_from_footer_block).toBeUndefined();
+  });
+
+  it.each(agentPlacements)("a role label $placement excludes the block even when a supplier marker names it", ({ label }) => {
+    const items = page([...agentBlock, label], "Muu Logo");
+    items.push(item("Müüja: Maksekeskus AS", 316, 104, 120));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Maksekeskus AS");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_from_footer_block).toBeUndefined();
+  });
+
+  it.each(["Eesti", "Group", "Baltic Holding", "Näi"])("a generic or short letterhead %s corroborates nothing", letterhead => {
+    const block = footer([`${letterhead} Side AS`, "Registrikood 10000018", "KMKR number EE100000010"]);
+    expect(extract(page(block, letterhead)).supplier_reg_code).toBeUndefined();
+  });
+
+  it("a letterhead word that is not the name's leading word corroborates nothing", () => {
+    const block = footer(["Teine Näidis AS", "Registrikood 10000018", "KMKR number EE100000010"]);
+    expect(extract(page(block, "Näidis")).supplier_reg_code).toBeUndefined();
+  });
+
+  it("a distinctive letterhead word still corroborates", () => {
+    const block = footer(["Näidis Side AS", "Registrikood 10000018", "KMKR number EE100000010"]);
+    expect(extract(page(block, "Näidis Side")).supplier_reg_code).toBe("10000018");
   });
 
   it("a footer block the letterhead does not name is not taken", () => {

@@ -307,6 +307,8 @@ export interface ExtractedReceiptFields {
   buyer_ownership_unverified?: boolean;
   /** The invoice-number labels offer two or more different numbers. */
   invoice_number_ambiguous?: boolean;
+  /** Supplier name / reg code / VAT came from a page-column identity block (footer): a suggestion, never a basis to create. */
+  supplier_from_footer_block?: boolean;
   /** The gross is the largest unlabelled amount, not corroborated by a labelled net + labelled VAT. */
   gross_unlabelled?: boolean;
   /** A labelled net / VAT / gross amount exceeds MAX_RECEIPT_FALLBACK_AMOUNT (kept or dropped). */
@@ -3086,6 +3088,13 @@ function classifyBuyerBlock(
 const IDENTITY_BLOCK_MAX_LINES = 4;
 // A line this close above the name (in block line pitches) is the name's label.
 const IDENTITY_BLOCK_LABEL_PITCH_FACTOR = 1.5;
+// The role-word band starts this many block lines above the name.
+const IDENTITY_BLOCK_ROLE_BAND_LINES = 3;
+// Letterhead words that name no particular company on their own.
+const LETTERHEAD_GENERIC_TOKENS: ReadonlySet<string> = new Set([
+  "eesti", "estonia", "baltic", "baltics", "nordic", "europe", "international", "group", "grupp", "holding",
+  "invest", "investments", "finance", "capital", "services", "teenused", "solutions", "trade", "consulting",
+]);
 const IDENTITY_BLOCK_REG_LINE_RE = new RegExp(`^(?:${REG_CODE_LABEL_RE.source})[.\\s]*$`, "i");
 const IDENTITY_BLOCK_VAT_LINE_RE = new RegExp(`^(?:${VAT_LABEL_RE.source})[.\\s]*$`, "i");
 // "Tänav 1, 10111 Tallinn", "Aadress: A. Kapi 3-4": an optional address label,
@@ -3093,7 +3102,8 @@ const IDENTITY_BLOCK_VAT_LINE_RE = new RegExp(`^(?:${VAT_LABEL_RE.source})[.\\s]
 const IDENTITY_BLOCK_ADDRESS_LINE_RE = /^(?:(?:aadress|address)\s*:\s*)?(?=.*\d)[\p{L}\d .,'\/-]+$/iu;
 const IDENTITY_BLOCK_CONTACT_LINE_RE =
   /^(?:(?:tel(?:efon)?|phone|mob(?:iil)?|e-?post|e-?mail|email|www|web|koduleht)\.?\s*:?\s*)?(?:\+?\d[\d ()-]{4,}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:https?:\/\/)?(?:www\.)?[\w-]+(?:\.[\w-]+)+\/?)$/iu;
-// A role word glued into the name line names someone other than the supplier.
+// A role word glued into the name line, or anywhere in the block's band of the
+// page, names someone other than the supplier.
 const IDENTITY_BLOCK_ROLE_WORD_RE = /(?<![\p{L}])(?:vahendaja|väljastaja|esitaja|saaja|maksja|agent|intermediary|on\s+behalf)(?![\p{L}])/iu;
 
 interface ColumnIdentityBlock {
@@ -3124,7 +3134,9 @@ function letterheadNamesEntity(textItems: readonly LayoutTextItem[], name: strin
   const nameTokens = normalizeCompanyNameShared(name, { stripNonAlphanumeric: true }).split(" ").filter(Boolean);
   if (letterheadTokens.length === 0 || nameTokens.length === 0) return false;
   const [shorter, longer] = letterheadTokens.length <= nameTokens.length ? [letterheadTokens, nameTokens] : [nameTokens, letterheadTokens];
-  return shorter.every((token, index) => longer[index] === token);
+  // The agreeing part must hold a distinctive word: "Eesti" or "Group" alone names nobody.
+  return shorter.every((token, index) => longer[index] === token) &&
+    shorter.some(token => token.length >= 4 && !LETTERHEAD_GENERIC_TOKENS.has(token));
 }
 
 /** An allowed identity-block line: address, labelled reg code / VAT, contact or country. */
@@ -3205,8 +3217,8 @@ function findColumnIdentityBlock(
         (regCode !== undefined && compact.includes(regCode)) ||
         (vatNo !== undefined && compact.includes(vatNo));
     })) continue;
-    // The name stands alone: no label line directly above it in its column, no
-    // text just left of it on its row, no role word inside it.
+    // The name stands alone: no label line directly above it in its column and
+    // no text just left of it on its row.
     const pitch = rows[0]![0]!.y - nameItem.y;
     const labelled = textItems.some(item => {
       if (item === nameItem || (item.pageNum ?? 1) !== (nameItem.pageNum ?? 1) || !clampTextLine(item.text)) return false;
@@ -3216,8 +3228,17 @@ function findColumnIdentityBlock(
       return item.y < nameItem.y &&
         nameItem.y - item.y <= IDENTITY_BLOCK_LABEL_PITCH_FACTOR * pitch &&
         classifyByPosition(nameItem, [{ ...item, side: "supplier" }]) === "supplier";
-    }) || IDENTITY_BLOCK_ROLE_WORD_RE.test(name);
-    const qualified = !labelled && lines.every(isIdentityBlockDetailLine);
+    });
+    // A role word anywhere in the block's band of the page (from a few lines
+    // above the name to just below its last line, any column, the name line
+    // included) attaches a third-party role to it, wherever the label sits.
+    const bandTop = nameItem.y - IDENTITY_BLOCK_ROLE_BAND_LINES * pitch;
+    const bandBottom = rows[rows.length - 1]![0]!.y + pitch;
+    const roleAttached = textItems.some(item =>
+      (item.pageNum ?? 1) === (nameItem.pageNum ?? 1) &&
+      item.y >= bandTop && item.y <= bandBottom &&
+      IDENTITY_BLOCK_ROLE_WORD_RE.test(item.text));
+    const qualified = !labelled && !roleAttached && lines.every(isIdentityBlockDetailLine);
     const key = [normalizeCompanyNameShared(name), regCode ?? "", vatNo ?? ""].join("|");
     const existing = blocks.get(key);
     if (!existing || (existing.qualified && !qualified)) blocks.set(key, { name, nameItem, regCode, vatNo, qualified });
@@ -4159,6 +4180,7 @@ export function extractReceiptFieldsFromText(
     ...(hasMultipleTicketNumbers(text) ? { multiple_documents_in_file: true } : {}),
     ...(buyerBlockSignal ? { [buyerBlockSignal]: true } : {}),
     ...(invoiceNumberAmbiguous ? { invoice_number_ambiguous: true } : {}),
+    ...(useIdentityBlock ? { supplier_from_footer_block: true } : {}),
   };
 }
 

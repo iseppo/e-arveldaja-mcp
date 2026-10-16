@@ -389,6 +389,38 @@ describe("AccountingDocumentOperations.create", () => {
     expectNoWrites(api);
   });
 
+  // Codex round 3: a supplier read only from a footer identity block is a
+  // suggestion — prepare issues no create plan handle for it.
+  it("withholds the plan handle when the supplier came from a footer identity block", async () => {
+    const items = [
+      { text: "ACME", x: 65, y: 38, height: 18 },
+      { text: "Arve saaja", x: 28, y: 104, height: 13 },
+      { text: "Seppo AI OÜ", x: 28, y: 118, height: 12 },
+      { text: "Arve INV-1", x: 316, y: 201, height: 13 },
+      { text: "Summa 12.00 EUR", x: 316, y: 550, height: 13 },
+      { text: "ACME OÜ", x: 28, y: 776, height: 9 },
+      { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, height: 9 },
+      { text: "Tänav 1, 10111 Tallinn", x: 28, y: 788, height: 9 },
+      { text: "Registrikood 17487472", x: 28, y: 800, height: 9 },
+    ];
+    mockedParseDocument.mockResolvedValue({
+      text: ["ACME", "Arve saaja", "Seppo AI OÜ", "Arve INV-1", "Summa 12.00 EUR",
+        "ACME OÜ    EE162200001234567890 SWIFT: TESTEE2X", "Tänav 1, 10111 Tallinn", "Registrikood 17487472"].join("\n"),
+      pageCount: 1,
+      ocrPartialFailure: false,
+      result: { pages: [{ pageNum: 1, textItems: items.map(entry => ({ ...entry, width: 90, confidence: 0.95 })) }] },
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+    const { path, api, ops } = createSetup();
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.extraction.fields.supplier_from_footer_block).toBe(true);
+    expect(outcome.value.extraction.fields.supplier_reg_code).toBe(REG_CODE);
+    expect(outcome.value.planHandle).toBeUndefined();
+    expect(outcome.value.blockers.map(b => b.code)).toContain("supplier_from_footer_block");
+    expectNoWrites(api);
+  });
+
   it("the same document addressed to the active company still gets a handle and creates", async () => {
     mockedParseDocument.mockResolvedValue(docWithBuyer("Seppo AI OÜ"));
     const { path, sha256, api, ops } = createSetup();

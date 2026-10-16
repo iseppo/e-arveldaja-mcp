@@ -373,6 +373,13 @@ async function processSingleReceipt(
         "Supplier identifier was only kept because the same value also appears in a supplier column (echo). Coordinate data cannot confirm it is the supplier's own code — verify the supplier before booking (#1).",
       );
     }
+    if (extracted.supplier_from_footer_block) {
+      const supplierName = extracted.supplier_name ? wrapUntrustedOcr(extracted.supplier_name) ?? extracted.supplier_name : "(unnamed)";
+      notes.push(
+        `Supplier ${supplierName} was read only from a footer identity block; it is a suggestion, not a verified supplier. ` +
+        "The receipt is never created from it (no new client either) and is skipped only as a duplicate of the same supplier's invoice with the same number and gross — verify the supplier before booking.",
+      );
+    }
     const inferredSupplierCountry = inferSupplierCountry(extracted);
     const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
     const llmFallback = summarize();
@@ -571,6 +578,25 @@ async function processSingleReceipt(
         notes.push(
           `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the document labels ` +
           "several different invoice numbers; verify which is this invoice's number before skipping or booking it.",
+        );
+        return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
+          supplier_resolution: supplierResolution,
+          booking_suggestion: bookingSuggestion,
+          duplicate_match: duplicate,
+        });
+      }
+      // A footer-derived supplier is a suggestion: skip only on the same
+      // invoice number AND the same gross, never on number or amount alone.
+      if (
+        duplicate &&
+        extracted.supplier_from_footer_block &&
+        !(duplicate.reason === "supplier_invoice_number" &&
+          duplicate.gross_price !== undefined &&
+          Math.abs(duplicate.gross_price - extracted.total_gross) < 0.01)
+      ) {
+        notes.push(
+          `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the supplier was read only from a footer ` +
+          "identity block and the invoice number and gross do not both match; verify before skipping or booking it.",
         );
         return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
           supplier_resolution: supplierResolution,

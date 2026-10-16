@@ -139,6 +139,13 @@ export interface ExtractionConfidenceSignals {
    * creation in every mode.
    */
   zero_total_stated?: boolean;
+  /**
+   * The supplier identity came from a page-column identity block (a footer):
+   * a suggestion only. Gated from automatic creation (and client creation) in
+   * every mode; receipt_batch may only skip it as a duplicate on the same
+   * invoice number AND gross.
+   */
+  supplier_from_footer_block?: boolean;
 }
 
 /**
@@ -154,6 +161,7 @@ export const CREATION_GATING_EXTRACTION_SIGNALS = [
   "gross_unlabelled",
   "labelled_amount_over_max",
   "zero_total_stated",
+  "supplier_from_footer_block",
 ] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
 
 /** Operator-facing review warning per creation-gating extraction signal. */
@@ -166,6 +174,7 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   gross_unlabelled: "The gross is the largest unlabelled amount; verify the payable amount before booking.",
   labelled_amount_over_max: "A labelled amount exceeds the receipt amount maximum; verify the totals before booking.",
   zero_total_stated: "The document states a zero total (credit note, prepaid or zero invoice); verify before booking.",
+  supplier_from_footer_block: "The supplier was read only from a footer identity block (name, registry code, VAT); it is a suggestion — verify the supplier before booking.",
 };
 
 export interface InvoiceExtractionFallback {

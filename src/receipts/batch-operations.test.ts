@@ -841,9 +841,10 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     { text: "Pank", x: 206, y: 776, width: 40, height: 9 },
     { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
   ];
-  const documentWith = (footerLines: string[], extra: typeof items = []) => {
+  const documentWith = (footerLines: string[], extra: typeof items = [], letterhead = "Näidis") => {
     const all = [
-      ...items,
+      { ...items[0]!, text: letterhead },
+      ...items.slice(1),
       ...footerLines.map((text, index) => ({ text, x: 28, y: 776 + index * 12, width: 90, height: 9 })),
       ...extra,
     ];
@@ -869,8 +870,10 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
   beforeEach(async () => {
     const extraction = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
     const resolution = await vi.importActual<typeof import("../tools/supplier-resolution.js")>("../tools/supplier-resolution.js");
+    const fallback = await vi.importActual<typeof import("../invoice-extraction-fallback.js")>("../invoice-extraction-fallback.js");
     vi.mocked(extractReceiptFieldsFromText).mockImplementation(extraction.extractReceiptFieldsFromText);
     vi.mocked(resolveSupplierInternal).mockImplementation(resolution.resolveSupplierInternal);
+    vi.mocked(summarizeInvoiceExtraction).mockImplementation(fallback.summarizeInvoiceExtraction);
     vi.mocked(parseDocument).mockResolvedValue(document as never);
   });
 
@@ -887,6 +890,63 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     expect(result.status).toBe("skipped_duplicate");
     expect(result.duplicate_match?.invoice_id).toBe(9001);
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  // Codex round 3: a footer-derived supplier is a suggestion. It is skipped only
+  // on the same invoice number AND gross, and never created.
+  function primeClients(api: never, invoices: unknown[], clients: unknown[] = [client]) {
+    const typed = api as unknown as { clients: { listAll: ReturnType<typeof vi.fn> }; purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } };
+    typed.clients.listAll.mockResolvedValue(clients);
+    typed.purchaseInvoices.listAll.mockResolvedValue(invoices);
+  }
+
+  it("the same invoice number with a different gross is reviewed, not skipped", async () => {
+    const { api, spies } = makeApi();
+    primeClients(api, [{ ...booked, gross_price: 125 }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ" });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.extracted?.supplier_from_footer_block).toBe(true);
+    expect(result.status).toBe("needs_review");
+    expect(result.duplicate_match?.invoice_id).toBe(9001);
+    expect(result.notes.join(" ")).toContain("footer identity block");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("an amount-and-date match without the invoice number is reviewed, not skipped", async () => {
+    const { api } = makeApi();
+    primeClients(api, [{ ...booked, number: "" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ" });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.status).toBe("needs_review");
+  });
+
+  it.each([
+    { mode: "create" as const, clients: [client] },
+    { mode: "create_and_confirm" as const, clients: [client] },
+    { mode: "create" as const, clients: [] },
+    { mode: "create_and_confirm" as const, clients: [] },
+  ])("with no existing invoice it is never created ($mode, $clients.length existing client(s))", async ({ mode, clients }) => {
+    const { api, spies } = makeApi();
+    primeClients(api, [], clients);
+    const createClient = vi.fn();
+    (api as unknown as { clients: Record<string, unknown> }).clients.create = createClient;
+    const ops = makeOperations(api);
+    const run = { ...baseRun, ownCompanyName: "Proovi OÜ" };
+    const dryRun = await ops.runBatch({ ...run, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    expect(dryRun.value.results[0]!.status).toBe("needs_review");
+    const outcome = await ops.runBatch({
+      ...run, executionMode: mode, dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.[mode],
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.llm_fallback?.confidence_signals).toContain("supplier_from_footer_block");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    expect(createClient).not.toHaveBeenCalled();
   });
 
   // Codex review: another entity's identity in the footer must never resolve to
@@ -926,6 +986,22 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
         { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
         label,
       ]),
+      other: { ...client, name: "Maksekeskus AS" },
+    })),
+    // Codex round 3: the letterhead names the agent itself, but a role label is
+    // attached to its block.
+    ...[
+      { placement: "right of the name on its row", label: { text: "Maksete vahendaja", x: 125, y: 787, width: 80, height: 12 } },
+      { placement: "24 pt above in its column", label: { text: "Maksete vahendaja", x: 28, y: 764, width: 80, height: 9 } },
+      { placement: "on the previous row, offset", label: { text: "Maksete vahendaja", x: 145, y: 776, width: 80, height: 9 } },
+    ].map(({ placement, label }) => ({
+      scenario: `letterhead "Maksekeskus" with the agent's block labelled ${placement}`,
+      document: documentWith([], [
+        ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
+          .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
+        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        label,
+      ], "Maksekeskus"),
       other: { ...client, name: "Maksekeskus AS" },
     })),
   ])("$scenario is held, not skipped as the other entity's duplicate", async ({ document: held, other }) => {
