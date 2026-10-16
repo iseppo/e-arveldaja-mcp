@@ -345,14 +345,20 @@ legitimate identical payments are possible).
   each create). The cash scan misses these: a manual prepayment journal
   `ETR1:EE1966453` has no bank posting in the ±7 day window. Matching is token
   equality, never substring: tokens split on anything but letters, digits and
-  `-` `/` `.` `_`, then again on those internal delimiters, plus 2-3 adjacent
-  joins (`ETR1-EE1966453` hits `EE1966453`; `XEE1966453` and `EE19664531` do
-  not). A strong reference (6+ characters with a digit, not date-shaped)
+  `-` `/` `.` `_`, then again on those internal delimiters; runs of 2-3
+  adjacent tokens and of 2-4 adjacent sub-tokens across the whole field are
+  joined (`ETR1-EE1966453` hits `EE1966453`, `ETR1-INV 2024/001` hits
+  `INV-2024-001`; `XEE1966453` and `EE19664531` do not). A strong reference (6+ characters with a digit, not date-shaped)
   matches any token of document_number or title; a weak one (4-5 characters,
   or date-shaped) only the whole document_number or its remainder after one
   `PREFIX:` (`LY:1234`), never a title, sub-token or join; shorter or
   digit-less numbers are never matched. No date window. An unavailable scan
-  only adds a note. `process_accounting_document` and
+  only adds a note (a `journal_reference_scan_unavailable` warning at
+  `process_accounting_document` prepare). Receipt extraction keeps an invoice
+  number's internal `.` (`AB1.234`, not `AB1`), and a number the line
+  continues past through another delimiter (`AB1,234`) is held as
+  `invoice_number_ambiguous`, so a cut-short number cannot slip under the
+  strength gate. `process_accounting_document` and
   `create_purchase_invoice_from_pdf` get the advisory
   `invoice_referenced_by_journal` / `referencing_journal_ids` and still create
   (also with `block_on_duplicate`).
