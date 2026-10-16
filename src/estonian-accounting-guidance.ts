@@ -222,7 +222,7 @@ export function buildReceiptReviewGuidance(params: {
       : undefined;
     return {
       recommendation: `Recommendation: do not create this invoice. Journal(s) ${ids} already reference this document's invoice number, so it may already be booked. ` +
-        "If so, attach the document to that journal (attach_document entity_type=journal) instead of creating an invoice." +
+        "If so, attach the document to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead of creating an invoice." +
         (cashIds !== undefined ? ` The same cash outflow may also be booked by journal(s) ${cashIds}.` : ""),
       compliance_basis: [BASIS_RPS_DOCUMENT],
       follow_up_questions: [

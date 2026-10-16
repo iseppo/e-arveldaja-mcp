@@ -185,6 +185,6 @@ export function formatJournalReferenceWarnings(result: JournalReferenceScanResul
   const ids = result.hits.map(hit => hit.journal_id).join(", ");
   return [
     `POSSIBLE duplicate: journal(s) ${ids} already reference this document's invoice number, so it may already be booked. ` +
-    "Verify before proceeding; if it is the same document, attach it to that journal (attach_document entity_type=journal) instead.",
+    "Verify before proceeding; if it is the same document, attach it to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead.",
   ];
 }

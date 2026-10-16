@@ -323,7 +323,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     if (referencingIds.length > 0) {
       notes.push(
         `Held: journal(s) ${referencingIds.join(", ")} already reference invoice number ${wrapUntrustedOcr(invoiceNumber) ?? ""}; ` +
-        "this document may already be booked. Attach it to that journal (attach_document entity_type=journal) instead of creating an invoice.",
+        "this document may already be booked. Attach it to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead of creating an invoice.",
       );
     }
     return {
