@@ -352,8 +352,11 @@ legitimate identical payments are possible).
   matches any token of document_number or title; a weak one (4-5 characters,
   or date-shaped) only the whole document_number or its remainder after one
   `PREFIX:` (`LY:1234`), never a title, sub-token or join; shorter or
-  digit-less numbers are never matched. No date window. An unavailable scan
-  only adds a note (a `journal_reference_scan_unavailable` warning at
+  digit-less numbers are never matched. No date window. In `receipt_batch` an
+  unavailable scan is retried once and, still unavailable, holds the row
+  (`journal_reference_scan_unavailable: true`, dry run and execute alike); on
+  the single-document tools it only adds a note (a
+  `journal_reference_scan_unavailable` warning at
   `process_accounting_document` prepare). Receipt extraction never changes the
   captured invoice number (an invoice booked under it must still be found as
   a duplicate), but a number the line continues past through a delimiter
