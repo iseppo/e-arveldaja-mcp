@@ -3374,28 +3374,37 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     return candidates;
   });
   const fallbackCandidates: Candidate[] = [];
+  // Cut-short evidence from fallback matches that are not the line's candidate.
+  let fallbackEvidenceTruncated = false;
   for (const line of lines) {
     if (NON_INVOICE_NUMBER_LINE_RE.test(line)) {
       continue;
     }
     // A match whose own label names a tax / VAT id ("Tax number:", "KM nr",
-    // "KM-number") is not an invoice number; the line's other matches stay
-    // candidates (mixed columns keep their cut-short evidence).
-    const match = [...line.matchAll(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/gi)]
-      .find(entry => !TAX_ID_LABEL_TAIL_RE.test(line.slice(0, entry.index)));
-    const candidate = acceptInvoiceNumberCandidate(match?.[1]);
-    if (candidate) {
-      fallbackCandidates.push({
-        value: candidate,
-        cited: false,
-        truncated: continuesPastCapture(line.slice((match!.index ?? 0) + match![0].length)),
-      });
+    // "KM-number") is never the invoice number; the line's first other match
+    // is its candidate. On such a line every match, the tax one included,
+    // still counts as cut-short evidence (mixed columns keep their hold); a
+    // line without a tax label reads only its first match, as before.
+    const matches = [...line.matchAll(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/gi)];
+    const taxLabelled = (entry: RegExpMatchArray) => TAX_ID_LABEL_TAIL_RE.test(line.slice(0, entry.index));
+    const considered = matches.some(taxLabelled) ? matches : matches.slice(0, 1);
+    const selected = considered.find(entry => !taxLabelled(entry));
+    for (const entry of considered) {
+      const candidate = acceptInvoiceNumberCandidate(entry[1]);
+      if (!candidate) continue;
+      const truncated = continuesPastCapture(line.slice((entry.index ?? 0) + entry[0].length));
+      if (entry === selected) {
+        fallbackCandidates.push({ value: candidate, cited: false, truncated });
+      } else if (truncated) {
+        fallbackEvidenceTruncated = true;
+      }
     }
   }
   // A number that looks cut short is held like a conflict: the short and the
   // longer reading are two different numbers. Any cut-short capture counts,
   // whichever capture of the same value was kept.
-  const anyTruncated = [...tierCandidates.flat(), ...fallbackCandidates].some(candidate => candidate.truncated);
+  const anyTruncated = fallbackEvidenceTruncated ||
+    [...tierCandidates.flat(), ...fallbackCandidates].some(candidate => candidate.truncated);
 
   for (const candidates of tierCandidates) {
     if (candidates.length > 0) {

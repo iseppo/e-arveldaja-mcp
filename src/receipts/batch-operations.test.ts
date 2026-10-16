@@ -1264,6 +1264,15 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
       clean: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1    Tax number: EE123456007", "Kuupäev 20.03.2026", ...labelledTrio]),
     },
     {
+      // A cut-short column behind the selected clean one still holds (Codex P0
+      // code review). The tax column is not first here: a leading "Tax" label
+      // is also read as a VAT amount label, which would add amount signals.
+      signal: "invoice_number_ambiguous",
+      name: "invoice_number_ambiguous (three columns, later cut-short)",
+      held: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1    Tax number: EE123456007    Number: AB1.X", "Kuupäev 20.03.2026", ...labelledTrio]),
+      clean: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1    Tax number: EE123456007    Number: AB1", "Kuupäev 20.03.2026", ...labelledTrio]),
+    },
+    {
       // An unlabelled buyer pair before the supplier pair: text order is not proof.
       signal: "supplier_identifier_ambiguous",
       held: textDocument([...head, "Rg-kood: 12345603", "KMKR: EE123456007", ...labelledTrio, "Rg-kood: 12345610", "KMKR: EE123456010"]),
@@ -1297,6 +1306,23 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
     });
     if (!outcome.ok) throw new Error("runBatch failed");
     return outcome.value.results[0]!;
+  }
+
+  // The Codex P0 code-review repro verbatim: its leading "Tax number" column
+  // also yields amount signals, so assert the number signal is among them.
+  for (const mode of ["dry_run", "create", "create_and_confirm"] as const) {
+    it(`three-column repro keeps invoice_number_ambiguous × ${mode}`, async () => {
+      vi.mocked(parseDocument).mockResolvedValue(textDocument([
+        "Supplier OÜ", "Invoice nr AB1", "Tax number: EE123456007.X    Number: AB1    Number: AB1.X", "Kuupäev 20.03.2026", ...labelledTrio,
+      ]) as never);
+      const { api, spies } = makeApi();
+      const result = await runMode(api, mode);
+      expect(result.status).toBe("needs_review");
+      expect(result.llm_fallback?.confidence_signals).toContain("invoice_number_ambiguous");
+      expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+      expect(spies.uploadDocument).not.toHaveBeenCalled();
+      expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    });
   }
 
   for (const testCase of cases) {

@@ -2261,6 +2261,23 @@ describe("extractInvoiceNumber hardening (finding 10)", () => {
     // The non-tax column of a mixed line is still the fallback number.
     expect(extractInvoiceNumber("Tax number: EE123456007    Number: 12345", "x.pdf")).toBe("12345");
   });
+
+  it("keeps every cut-short capture on a tax-labelled line as evidence, not only the selected one (Codex P0 code review)", () => {
+    for (const text of [
+      // A later cut-short column behind a clean one.
+      "Invoice nr AB1\nTax number: EE123456007.X    Number: AB1    Number: AB1.X",
+      "Invoice nr AB1\nTax number: EE123456007    Number: AB1    Number: AB1.X",
+      // The tax capture itself continuing past a delimiter held before the skip too.
+      "Invoice nr AB1\nTax number: EE123456007.X",
+    ]) {
+      expect(extractInvoiceNumber(text, "x.pdf")).toBe("AB1");
+      const fields = extractReceiptFieldsFromText(text, "x.pdf");
+      expect(fields.invoice_number).toBe("AB1");
+      expect(fields.invoice_number_ambiguous).toBe(true);
+    }
+    // The selected fallback number is unchanged: the first non-tax column.
+    expect(extractInvoiceNumber("Tax number: EE123456007    Number: 12345    Number: 67890", "x.pdf")).toBe("12345");
+  });
 });
 
 describe("extractDates invoice-date label precedence (finding 11)", () => {

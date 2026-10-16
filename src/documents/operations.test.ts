@@ -257,7 +257,7 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
   });
 
-  it("supplier_identifier_ambiguous is a blocker, not a warning (no plan handle)", async () => {
+  it("supplier_identifier_ambiguous is a blocker, not a warning", async () => {
     mockedParseDocument.mockResolvedValue(textDoc([
       "Näidis OÜ", "Arve nr 7", "Kuupäev 20.03.2026", "Rg-kood: 12345603", "KMKR: EE123456007",
       "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR", "Beeta Teenused AS", "Rg-kood: 12345610", "KMKR: EE123456010",
@@ -271,7 +271,6 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     expect(outcome.value.blockers.some(b => b.code === "supplier_identifier_ambiguous")).toBe(true);
     expect(outcome.value.warnings.some(w => w.code === "supplier_identifier_ambiguous")).toBe(false);
     expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain("supplier_identifier_ambiguous");
-    expect(outcome.value.planHandle).toBeUndefined();
   });
 
   it("a company buyer is a buyer_ownership_unverified blocker when the active company's identity is unknown", async () => {
@@ -409,6 +408,39 @@ describe("AccountingDocumentOperations.create", () => {
 
   // Codex round 3: a supplier read only from a footer identity block is a
   // suggestion — prepare issues no create plan handle for it.
+  // Codex P0 code review: with a valid booking and a resolved supplier, only the
+  // contested document is denied its handle; its clean twin gets one.
+  it("withholds the plan handle for contested supplier ids, but not for the clean twin", async () => {
+    const docWith = (lines: string[]) => ({
+      text: lines.join("\n"),
+      pageCount: 1,
+      ocrPartialFailure: false,
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+    const head = ["ACME OÜ", "Reg. nr 17487472", "Arve INV-1", "Summa 12.00 EUR"];
+
+    mockedParseDocument.mockResolvedValue(docWith([...head, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const contested = createSetup();
+    const held = await contested.ops.prepare({ source: { file_path: contested.path }, booking: bookingFields() });
+    expect(held.ok).toBe(true);
+    if (!held.ok) return;
+    expect(held.value.extraction.fields.supplier_reg_code).toBe(REG_CODE);
+    expect(held.value.supplierResolution.status).toBe("resolved");
+    expect(held.value.extraction.fields.supplier_identifier_ambiguous).toBe(true);
+    expect(held.value.blockers.map(b => b.code)).toContain("supplier_identifier_ambiguous");
+    expect(held.value.planHandle).toBeUndefined();
+    expectNoWrites(contested.api);
+
+    mockedParseDocument.mockResolvedValue(docWith(head));
+    const clean = createSetup();
+    const ok = await clean.ops.prepare({ source: { file_path: clean.path }, booking: bookingFields() });
+    expect(ok.ok).toBe(true);
+    if (!ok.ok) return;
+    expect(ok.value.supplierResolution.status).toBe("resolved");
+    expect(ok.value.extraction.fields.supplier_identifier_ambiguous).toBeUndefined();
+    expect(ok.value.blockers).toEqual([]);
+    expect(typeof ok.value.planHandle).toBe("string");
+  });
+
   it("withholds the plan handle when the supplier came from a footer identity block", async () => {
     const items = [
       { text: "ACME", x: 65, y: 38, height: 18 },
