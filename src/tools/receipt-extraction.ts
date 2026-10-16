@@ -748,7 +748,8 @@ function blankProvenIdentifiers(text: string): string {
   return text.replace(/[\p{L}\d/_-]*\d[\p{L}\d/_-]*/gu, (word, offset: number) => {
     if (/^[.,]\d{2}(?!\d)/.test(text.slice(offset + word.length))) return word;
     // A label is a few words: a bounded look-back keeps long lines linear.
-    const proven = isValidIban(word) || LAYOUT_IDENTIFIER_LABEL_RE.test(text.slice(Math.max(0, offset - 40), offset));
+    const labelSpan = text.slice(Math.max(0, offset - 40), offset).split(/\s{2,}|\t|[;|]/).pop() ?? "";
+    const proven = isValidIban(word) || isIdentifierLabelSpan(labelSpan);
     return proven ? " ".repeat(word.length) : word;
   });
 }
@@ -1720,6 +1721,16 @@ function buildLayoutTextCells(row: LayoutRow, columnByItem: ReadonlyMap<LayoutTe
 const LAYOUT_IDENTIFIER_LABEL_RE =
   /(?<![\p{L}\d])(?:reg\.?\s*(?:nr|kood|code)|registrikood|registry\s*code|(?:company|registration)\s*(?:number|nr|no)|kmkr|vat\s*(?:nr|number|no|id)|tax\s*id|viite\p{L}*|viitenr|reference|ref|konto|account|a\/a|iban|swift|bic|tel\p{L}*|phone|mob\p{L}*|fax|nr|no|number|kood|code|id|\p{L}*indeks|zip|postal\s*code)\.?[\s:#-]*$/iu;
 
+// A word naming an amount ("Summa", "Kokku", "VAT"): a label span holding one
+// is an amount label, whatever identifier word it also holds ("Summa nr").
+const AMOUNT_WORD_RE =
+  /(?<![\p{L}\d])(?:summa\p{L}*|kokku\p{L}*|total\p{L}*|subtotal|amount\p{L}*|sum|hind\p{L}*|price|km|käibemaks\p{L}*|vat|tax|tasuda|tasumisele|tasumiseks|tasutud|makstud|paid|netto|neto|net|bruto|brutto|gross|due|balance|eur|usd)(?![\p{L}\d])/iu;
+
+/** An identifier label ending the span, and no amount word anywhere in it. */
+function isIdentifierLabelSpan(span: string): boolean {
+  return LAYOUT_IDENTIFIER_LABEL_RE.test(span) && !AMOUNT_WORD_RE.test(span);
+}
+
 /**
  * G4: positive evidence that an over-maximum integer cell is an identifier,
  * not an amount: a date, an IBAN, a phone number, digits inside words or
@@ -1732,7 +1743,7 @@ function isLayoutIdentifierCell(item: LayoutTextItem, row: LayoutRow, rows: read
   const words = text.replace(/\b[A-Z]{3}\b/g, code => ISO_4217_CURRENCY_CODE_SET.has(code) ? " " : code).replace(/\beur\p{L}*/giu, " ");
   if (/\p{L}/u.test(words)) return true;
   const left = row.items.filter(other => other.x + other.width <= item.x + 1).sort((a, b) => b.x - a.x)[0];
-  if (left && LAYOUT_IDENTIFIER_LABEL_RE.test(clampTextLine(left.text))) return true;
+  if (left && isIdentifierLabelSpan(clampTextLine(left.text))) return true;
   // The column's heading: the nearest worded item above it ("Kood" over a
   // table's code column, "Reg. nr" over a footer value).
   const heading = rows
@@ -1740,7 +1751,7 @@ function isLayoutIdentifierCell(item: LayoutTextItem, row: LayoutRow, rows: read
     .flatMap(other => other.items)
     .filter(other => other.x < item.x + item.width && item.x < other.x + other.width && /\p{L}/u.test(other.text))
     .sort((a, b) => b.y - a.y)[0];
-  return heading !== undefined && LAYOUT_IDENTIFIER_LABEL_RE.test(clampTextLine(heading.text));
+  return heading !== undefined && isIdentifierLabelSpan(clampTextLine(heading.text));
 }
 
 function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {

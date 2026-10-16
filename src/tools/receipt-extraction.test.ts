@@ -3663,6 +3663,8 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       it.each([
         ["a bare integer", [item("60000", 400, 216, 30)]],
         ["an integer with a currency code", [item("60000 EUR", 400, 216, 50)]],
+        // Round 3: an amount word in the label span proves no identifier.
+        ["beside an amount-worded number label", [item("Summa nr:", 330, 216, 50), item("12345678", 400, 216, 40)]],
       ])("%s over the maximum holds", (_name, below) => {
         expect(extractWith(below).labelled_amount_over_max).toBe(true);
       });
@@ -3673,6 +3675,8 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
         ["inside an address", [item("Tartu 51013", 400, 216, 60)]],
         ["as a phone number", [item("+37251234567", 400, 216, 60)]],
         ["as an IBAN", [item("EE107700771005782542", 400, 216, 100)]],
+        // "tasumisel" (when paying) names no amount (seen live: ARVE425).
+        ["beside a payment reference label", [item("Palun kasutage tasumisel viitenumbrit:", 200, 216, 190), item("10106820451011", 400, 216, 70)]],
       ])("an identifier %s is not evidence", (_name, below) => {
         expect(extractWith(below).labelled_amount_over_max).toBeUndefined();
       });
@@ -3851,6 +3855,25 @@ describe("row triples and layout amount tokens (WP2)", () => {
     ])("a glued money token keeps the triple merged and held: %s", (line) => {
       const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 24% 24.00", line].join("\n"), "arve.pdf");
       expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    // Codex review round 3: an identifier word inside an amount label span
+    // ("Summa nr", "Kokku kood") proves nothing; the number competes.
+    it.each([
+      "Summa nr 248 / Kokku 100.00 24.00 124.00 EUR",
+      "Kokku kood 248 / Kokku 100.00 24.00 124.00 EUR",
+    ])("a number under an amount-worded identifier label keeps the triple merged and held: %s", (line) => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 24% 24.00", line].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("a number under an amount-worded identifier label on the layout row keeps the triple unbound", () => {
+      const layout = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Kokku", 52, 200, 40), item("Summa nr 248", 120, 200, 80),
+        item("350.00", 300, 200, 30), item("84.00", 360, 200, 30), item("434.00", 420, 200, 30),
+      ]);
+      expect(layout?.total_gross).not.toBe(434);
     });
 
     it("an unproven glued integer on the layout row keeps the triple unbound", () => {
