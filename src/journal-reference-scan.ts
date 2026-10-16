@@ -16,7 +16,9 @@ import { normalizeInvoiceNumberForComparison } from "./purchase-invoice-status.j
  * letters, digits, dashes, `/`, `.` and `_` (so `ETR1:EE1966453` splits at the
  * colon); each token is ALSO split on its internal delimiters (dash, `/`, `.`,
  * `_`) so a delimiter-joined `ETR1-EE1966453` yields `EE1966453`. Runs of 2-3
- * adjacent tokens / sub-tokens are joined as well (`INV 2024 01` = `INV-2024-01`).
+ * adjacent tokens, and of 2-4 adjacent sub-tokens across the whole field, are
+ * joined as well (`INV 2024 01` = `INV-2024-01`; `ETR1-INV 2024/001` holds
+ * `INV-2024-001`).
  * Every candidate is compared under `journalReferenceKey`.
  *
  * Strength gate on the reference (false holds are acceptable, but a short
@@ -52,7 +54,8 @@ type ReferenceStrength = "strong" | "weak";
 const TOKEN_SPLIT = /[^\p{L}\p{N}\-‐‑‒–—/._]+/u;
 const SUBTOKEN_SPLIT = /[\-‐‑‒–—/._]+/;
 const SOURCE_PREFIX = /^[A-Za-z][\w-]*:/;
-const MAX_JOIN = 3;
+const MAX_TOKEN_JOIN = 3;
+const MAX_SUBTOKEN_JOIN = 4;
 
 /** Comparison key: `normalizeInvoiceNumberForComparison`, then `/`, `.`, `_`, `:` dropped too. */
 export function journalReferenceKey(value: string | null | undefined): string {
@@ -74,25 +77,27 @@ export function journalReferenceStrength(key: string): ReferenceStrength | undef
   return "strong";
 }
 
-function addRunJoins(keys: Set<string>, parts: readonly string[]): void {
+function addRunJoins(keys: Set<string>, parts: readonly string[], maxJoin: number): void {
   for (let start = 0; start < parts.length; start++) {
     let joined = "";
-    for (let end = start; end < Math.min(parts.length, start + MAX_JOIN); end++) {
+    for (let end = start; end < Math.min(parts.length, start + maxJoin); end++) {
       joined += parts[end]!;
       if (joined !== "") keys.add(joined);
     }
   }
 }
 
-/** Every token, sub-token and 2-3 token join of `text`, under `journalReferenceKey`. */
+/**
+ * Every token and 2-3 token join of `text`, plus every run of 1-4 adjacent
+ * sub-tokens across the whole field (so `ETR1-INV 2024/001` yields
+ * `INV|2024|001`), under `journalReferenceKey`.
+ */
 function candidateKeys(text: string): Set<string> {
   const keys = new Set<string>();
   const tokens = text.split(TOKEN_SPLIT).filter(token => token !== "");
-  addRunJoins(keys, tokens.map(journalReferenceKey));
-  for (const token of tokens) {
-    const parts = token.split(SUBTOKEN_SPLIT).filter(part => part !== "");
-    if (parts.length > 1) addRunJoins(keys, parts.map(journalReferenceKey));
-  }
+  addRunJoins(keys, tokens.map(journalReferenceKey), MAX_TOKEN_JOIN);
+  const subTokens = tokens.flatMap(token => token.split(SUBTOKEN_SPLIT)).filter(part => part !== "");
+  addRunJoins(keys, subTokens.map(journalReferenceKey), MAX_SUBTOKEN_JOIN);
   return keys;
 }
 

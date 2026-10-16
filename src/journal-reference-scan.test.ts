@@ -63,6 +63,12 @@ describe("findJournalsReferencingDocument", () => {
     expect(ids([journal({ id: 9, document_number: "2024/001" })], ["2024-001"])).toEqual([9]);
   });
 
+  it("joins sub-tokens across outer tokens (ETR1-INV 2024/001 holds INV-2024-001)", () => {
+    expect(ids([journal({ id: 22, document_number: "ETR1-INV 2024/001", title: "Ettemakse" })], ["INV-2024-001"])).toEqual([22]);
+    expect(ids([journal({ id: 23, document_number: null, title: "Tasaarveldus ETR1-INV 2024/001" })], ["INV-2024-001"])).toEqual([23]);
+    expect(ids([journal({ id: 24, title: "Arve ETR1-INV 2024/0011" })], ["INV-2024-001"])).toEqual([]);
+  });
+
   it("never matches a reference shorter than 4 characters or without a digit", () => {
     const journals = [journal({ id: 10, document_number: "110", title: "Arve 110 kontor" })];
     expect(ids(journals, ["110"])).toEqual([]);
