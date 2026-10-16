@@ -3121,9 +3121,11 @@ export function extractInvoiceNumber(text: string, fileName: string): string {
  * for the conflict.
  */
 function extractInvoiceNumberCandidates(text: string, fileName: string): { invoiceNumber: string; ambiguous: boolean } {
+  // Column gaps are kept (as one tab) so a citation word stays in its own
+  // label span ("Order reference: PO-555    Invoice: #67890").
   const lines = text
     .split(/\r?\n/)
-    .map(clampTextLine)
+    .map(line => line.replace(/[ \u00a0]{2,}|\t+/g, "\t").replace(/\s+/g, match => match.includes("\t") ? "\t" : " ").trim())
     .filter(Boolean);
   // Ranked tiers, each matched line by line (never across a newline): an
   // invoice/arve label outranks an order/booking/ticket label wherever the two

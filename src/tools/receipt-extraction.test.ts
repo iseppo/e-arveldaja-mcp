@@ -4235,6 +4235,15 @@ describe("supplier names and invoice numbers (WP5)", () => {
       );
       expect(withCitation.invoice_number).toBe("67890");
       expect(withCitation.invoice_number_ambiguous).toBe(true);
+      // Round 3: the original column gap, not a collapsed single space, ends
+      // the citation's span.
+      const citationFirst = extractReceiptFieldsFromText(
+        ["Näidis Ltd", "Previous invoice no. 12345", "Order reference: PO-555    Invoice: #67890", "Total 10.00"].join("\n"),
+        "x.pdf",
+      );
+      expect(citationFirst.invoice_number).toBe("67890");
+      expect(citationFirst.invoice_number_ambiguous).toBe(true);
+      expect(extractInvoiceNumber(["Näidis OÜ", "Arve nr      INV-77", "Kokku 10,00"].join("\n"), "x.pdf")).toBe("INV-77");
       const estonian = extractReceiptFieldsFromText(["Näidis OÜ", "Viide arvele: 12345", "Arve: 67890", "Kokku 10,00"].join("\n"), "x.pdf");
       expect(estonian.invoice_number).toBe("67890");
     });
