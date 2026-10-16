@@ -67,6 +67,8 @@ describe("findJournalsReferencingDocument", () => {
     expect(ids([journal({ id: 22, document_number: "ETR1-INV 2024/001", title: "Ettemakse" })], ["INV-2024-001"])).toEqual([22]);
     expect(ids([journal({ id: 23, document_number: null, title: "Tasaarveldus ETR1-INV 2024/001" })], ["INV-2024-001"])).toEqual([23]);
     expect(ids([journal({ id: 24, title: "Arve ETR1-INV 2024/0011" })], ["INV-2024-001"])).toEqual([]);
+    // Four sub-tokens across three outer tokens.
+    expect(ids([journal({ id: 25, document_number: "ETR1-INV 2024/07 001" })], ["INV-2024-07-001"])).toEqual([25]);
   });
 
   it("never matches a reference shorter than 4 characters or without a digit", () => {
