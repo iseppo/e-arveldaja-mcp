@@ -2193,6 +2193,10 @@ describe("extractInvoiceNumber hardening (finding 10)", () => {
       ["Arve nr INV-0042.Date: 20.03.2026", "INV-0042"],
       ["Invoice AB1.234", "AB1"],
       ["Dokument no. AB1.234", "AB1"],
+      // A clean capture of the same value does not hide the cut-short one (Codex round 3).
+      ["Arve nr AB1\nArve nr AB1.234", "AB1"],
+      ["Arve nr AB1.234\nArve nr AB1", "AB1"],
+      ["Arve nr AB1\nTellimuse number ORD1.55", "AB1"],
     ] as const) {
       expect(fields(line).invoice_number).toBe(number);
       expect(fields(line).invoice_number_ambiguous).toBe(true);

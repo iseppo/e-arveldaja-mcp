@@ -3163,8 +3163,12 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     ],
   ];
 
-  for (const [tierIndex, tier] of invoiceNumberTiers.entries()) {
-    const candidates: Array<{ value: string; cited: boolean; truncated: boolean }> = [];
+  type Candidate = { value: string; cited: boolean; truncated: boolean };
+  // Every tier and the generic fallback are collected up front, so a
+  // cut-short capture anywhere ("Arve nr AB1" + "Arve nr AB1.234": both read
+  // AB1) still marks the chosen number. The chosen number is unchanged.
+  const tierCandidates: Candidate[][] = invoiceNumberTiers.map((tier, tierIndex) => {
+    const candidates: Candidate[] = [];
     const globalPatterns = tier.map(pattern => new RegExp(pattern.source, `${pattern.flags}g`));
     for (const [lineIndex, line] of lines.entries()) {
       for (const pattern of globalPatterns) {
@@ -3188,17 +3192,9 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
         if (candidate) candidates.push({ value: candidate, cited: false, truncated: false });
       }
     }
-    if (candidates.length > 0) {
-      const chosen = candidates.find(candidate => !candidate.cited) ?? candidates[0]!;
-      // A number that looks cut short is held like a conflict: the short and
-      // the longer reading are two different numbers.
-      return {
-        invoiceNumber: chosen.value,
-        ambiguous: new Set(candidates.map(candidate => candidate.value.toUpperCase())).size > 1 || chosen.truncated,
-      };
-    }
-  }
-
+    return candidates;
+  });
+  const fallbackCandidates: Candidate[] = [];
   for (const line of lines) {
     if (NON_INVOICE_NUMBER_LINE_RE.test(line)) {
       continue;
@@ -3206,9 +3202,31 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
     const match = line.match(/\b(?:number|nr|no\.?)[:#\t -]*([A-Z0-9/_-]{3,})/i);
     const candidate = acceptInvoiceNumberCandidate(match?.[1]);
     if (candidate) {
-      return { invoiceNumber: candidate, ambiguous: continuesPastCapture(line.slice((match!.index ?? 0) + match![0].length)) };
+      fallbackCandidates.push({
+        value: candidate,
+        cited: false,
+        truncated: continuesPastCapture(line.slice((match!.index ?? 0) + match![0].length)),
+      });
     }
   }
+  // A number that looks cut short is held like a conflict: the short and the
+  // longer reading are two different numbers. Any cut-short capture counts,
+  // whichever capture of the same value was kept.
+  const anyTruncated = [...tierCandidates.flat(), ...fallbackCandidates].some(candidate => candidate.truncated);
+
+  for (const candidates of tierCandidates) {
+    if (candidates.length > 0) {
+      const chosen = candidates.find(candidate => !candidate.cited) ?? candidates[0]!;
+      return {
+        invoiceNumber: chosen.value,
+        ambiguous: new Set(candidates.map(candidate => candidate.value.toUpperCase())).size > 1
+          || anyTruncated,
+      };
+    }
+  }
+
+  const fallback = fallbackCandidates[0];
+  if (fallback) return { invoiceNumber: fallback.value, ambiguous: anyTruncated };
 
   const todayToken = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   return { invoiceNumber: `AUTO-${todayToken}-${normalizeFilenameToken(fileName) || "RECEIPT"}`, ambiguous: false };

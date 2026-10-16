@@ -1247,6 +1247,21 @@ describe("receipt batch — a cut-short invoice number is held, never booked (Co
   }
 
   it.each(["dry_run", "create", "create_and_confirm"] as const)(
+    "a clean AB1 line before the cut-short AB1.234 line still holds (%s), zero writes",
+    async (mode) => {
+      vi.mocked(parseDocument).mockResolvedValue(documentWith("Arve nr AB1\nArve nr AB1.234") as never);
+      const { api, spies } = apiWithJournals([journal]);
+      const result = await runMode(api, mode);
+      expect(result.extracted?.invoice_number).toBe("AB1");
+      expect(result.extracted?.invoice_number_ambiguous).toBe(true);
+      expect(result.status).toBe("needs_review");
+      expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+      expect(spies.uploadDocument).not.toHaveBeenCalled();
+      expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["dry_run", "create", "create_and_confirm"] as const)(
     "an undelimited AB1234 is held by journal ETR1:AB1.234 (%s), zero writes",
     async (mode) => {
       vi.mocked(parseDocument).mockResolvedValue(documentWith("Arve nr AB1234") as never);
