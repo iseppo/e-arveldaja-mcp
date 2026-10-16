@@ -6,6 +6,8 @@ import {
   type MarkerPosition,
   type RejectedCandidate,
   BUYER_MARKER_RE,
+  REG_CODE_LABEL_RE,
+  VAT_LABEL_RE,
   buildIdentifierMarkers,
   classifyByPosition,
   extractIban,
@@ -3082,6 +3084,17 @@ function classifyBuyerBlock(
 
 // An identity block carries its identifiers within this many lines below the name.
 const IDENTITY_BLOCK_MAX_LINES = 4;
+// A line this close above the name (in block line pitches) is the name's label.
+const IDENTITY_BLOCK_LABEL_PITCH_FACTOR = 1.5;
+const IDENTITY_BLOCK_REG_LINE_RE = new RegExp(`^(?:${REG_CODE_LABEL_RE.source})[.\\s]*$`, "i");
+const IDENTITY_BLOCK_VAT_LINE_RE = new RegExp(`^(?:${VAT_LABEL_RE.source})[.\\s]*$`, "i");
+// "Tänav 1, 10111 Tallinn", "Aadress: A. Kapi 3-4": an optional address label,
+// then letters / digits / address punctuation only, with a house number or postcode.
+const IDENTITY_BLOCK_ADDRESS_LINE_RE = /^(?:(?:aadress|address)\s*:\s*)?(?=.*\d)[\p{L}\d .,'\/-]+$/iu;
+const IDENTITY_BLOCK_CONTACT_LINE_RE =
+  /^(?:(?:tel(?:efon)?|phone|mob(?:iil)?|e-?post|e-?mail|email|www|web|koduleht)\.?\s*:?\s*)?(?:\+?\d[\d ()-]{4,}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?:https?:\/\/)?(?:www\.)?[\w-]+(?:\.[\w-]+)+\/?)$/iu;
+// A role word glued into the name line names someone other than the supplier.
+const IDENTITY_BLOCK_ROLE_WORD_RE = /(?<![\p{L}])(?:vahendaja|väljastaja|esitaja|saaja|maksja|agent|intermediary|on\s+behalf)(?![\p{L}])/iu;
 
 interface ColumnIdentityBlock {
   name: string;
@@ -3090,14 +3103,28 @@ interface ColumnIdentityBlock {
   vatNo?: string;
 }
 
+/** An allowed identity-block line: address, labelled reg code / VAT, contact or country. */
+function isIdentityBlockDetailLine(line: string): boolean {
+  if (IDENTITY_BLOCK_REG_LINE_RE.test(line) || IDENTITY_BLOCK_VAT_LINE_RE.test(line)) return true;
+  if (IDENTITY_BLOCK_CONTACT_LINE_RE.test(line)) return true;
+  const country = line.toLowerCase().replace(/\s+vabariik$/, "").replace(/^republic\s+of\s+/, "");
+  if (SUPPLIER_COUNTRY_NAME_TO_CLIENT_COUNTRY.some(([name]) => name === country)) return true;
+  return IDENTITY_BLOCK_ADDRESS_LINE_RE.test(line) &&
+    buyerBlockLegalEntities(line).length === 0 &&
+    extractIban(line) === undefined;
+}
+
 /**
  * A page-column identity block with no supplier label, such as the footer
  * "Näidis Side AS / Tänav 1, Tallinn / Registrikood 10000018 / KMKR number
- * EE100000010": a line that is exactly a legal-entity name, followed in the
- * same column within IDENTITY_BLOCK_MAX_LINES by a labelled, checksum-valid
- * registry code and/or EE VAT number. A block that is the active company's or
- * lies in a buyer block never counts, a block with a checksum-failed code
- * never counts, and two different qualifying blocks return nothing.
+ * EE100000010". Positive proof only: a line that is exactly a legal-entity name
+ * with no label beside it, directly above it or glued into it, followed in its
+ * column by lines that are each an address, a labelled registry code / VAT
+ * number, contact info or a country, with a labelled checksum-valid registry
+ * code and/or EE VAT number within IDENTITY_BLOCK_MAX_LINES. A block that is
+ * the active company's or lies in a buyer block never counts, a checksum-failed
+ * code never counts, and any other identity with codes (qualifying or not)
+ * makes the result ambiguous: nothing is returned.
  */
 function findColumnIdentityBlock(
   textItems: readonly LayoutTextItem[],
@@ -3113,7 +3140,7 @@ function findColumnIdentityBlock(
         item.text === label.text && item.x === label.x && item.y === label.y && (item.pageNum ?? 1) === (label.pageNum ?? 1));
       return labelItem ? buyerBlockLines(label, labelItem, textItems, markers) : [];
     });
-  const blocks = new Map<string, ColumnIdentityBlock>();
+  const blocks = new Map<string, ColumnIdentityBlock & { qualified: boolean }>();
   for (const nameItem of textItems) {
     const name = clampTextLine(nameItem.text);
     if (!name || buyerBlockLegalEntity(name) !== name) continue;
@@ -3135,12 +3162,13 @@ function findColumnIdentityBlock(
         row.push(item);
         continue;
       }
-      if (rows.length === IDENTITY_BLOCK_MAX_LINES) break;
       if (item.y - previous.y > BUYER_BLOCK_LINE_GAP_FACTOR * Math.max(previous.height, item.height)) break;
       rows.push([item]);
       previous = item;
     }
-    const ids = extractIdentifiers(rows.map(row => row.map(item => clampTextLine(item.text)).join(" ")).join("\n"));
+    if (rows.length === 0) continue;
+    const lines = rows.map(row => row.sort((a, b) => a.x - b.x).map(item => clampTextLine(item.text)).join(" "));
+    const ids = extractIdentifiers(lines.slice(0, IDENTITY_BLOCK_MAX_LINES).join("\n"));
     if (ids.rejected_candidates.length > 0) continue;
     const regCode = ids.reg_code_rationale === "labeled" ? ids.reg_code : undefined;
     const vatNo = ids.vat_no_rationale === "labeled" && isValidEeVatNumber(ids.vat_no) ? ids.vat_no : undefined;
@@ -3153,10 +3181,27 @@ function findColumnIdentityBlock(
         (regCode !== undefined && compact.includes(regCode)) ||
         (vatNo !== undefined && compact.includes(vatNo));
     })) continue;
+    // The name stands alone: no label line directly above it in its column, no
+    // text just left of it on its row, no role word inside it.
+    const pitch = rows[0]![0]!.y - nameItem.y;
+    const labelled = textItems.some(item => {
+      if (item === nameItem || (item.pageNum ?? 1) !== (nameItem.pageNum ?? 1) || !clampTextLine(item.text)) return false;
+      if (sameLayoutRowItems(item, nameItem)) {
+        return item.x < nameItem.x && nameItem.x - (item.x + item.width) <= nameItem.height * 6;
+      }
+      return item.y < nameItem.y &&
+        nameItem.y - item.y <= IDENTITY_BLOCK_LABEL_PITCH_FACTOR * pitch &&
+        classifyByPosition(nameItem, [{ ...item, side: "supplier" }]) === "supplier";
+    }) || IDENTITY_BLOCK_ROLE_WORD_RE.test(name);
+    const qualified = !labelled && lines.every(isIdentityBlockDetailLine);
     const key = [normalizeCompanyNameShared(name), regCode ?? "", vatNo ?? ""].join("|");
-    if (!blocks.has(key)) blocks.set(key, { name, nameItem, regCode, vatNo });
+    const existing = blocks.get(key);
+    if (!existing || (existing.qualified && !qualified)) blocks.set(key, { name, nameItem, regCode, vatNo, qualified });
   }
-  return blocks.size === 1 ? [...blocks.values()][0] : undefined;
+  const [only, ...others] = [...blocks.values()];
+  return only?.qualified && others.length === 0
+    ? { name: only.name, nameItem: only.nameItem, regCode: only.regCode, vatNo: only.vatNo }
+    : undefined;
 }
 
 // Invoice-number candidates must carry a digit and must not be a real

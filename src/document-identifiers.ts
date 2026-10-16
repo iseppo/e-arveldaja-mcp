@@ -182,7 +182,7 @@ interface ExtractVatNumberOptions {
 // The `(?<!\d)` / `(?!\d)` boundaries around the 8-digit group stop a longer
 // digit run (e.g. a 9-digit "Registrikood: 171334169") from matching its
 // 8-digit prefix — mirroring the trailing boundary VAT_LABEL_RE already uses.
-const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*code|Rg[-\s]?kood)\.?[:\s]*(?<!\d)(\d{8})(?!\d)/gi;
+export const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*code|Rg[-\s]?kood)\.?[:\s]*(?<!\d)(\d{8})(?!\d)/gi;
 
 // Estonian VAT label variants seen on real invoices:
 //   "KMKR", "KMKR nr", "KMKR nr.", "KM nr", "KM-number", "KM Reg. Nr.",
@@ -194,7 +194,7 @@ const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Registry\s*
 // "VAT Registration EU VAT: IE4276970QH" (Anthropic invoice).
 const FOREIGN_VAT_SHAPE = String.raw`[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}`;
 const FOREIGN_VAT_SHAPE_RE = new RegExp(`^${FOREIGN_VAT_SHAPE}$`);
-const VAT_LABEL_RE = new RegExp(
+export const VAT_LABEL_RE = new RegExp(
   String.raw`(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:${FOREIGN_VAT_SHAPE}))`,
   "gi",
 );

@@ -838,20 +838,25 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     { text: "24,00", x: 529, y: 537, width: 33, height: 13 },
     { text: "Arve summa", x: 316, y: 550, width: 61, height: 13 },
     { text: "124,00", x: 529, y: 550, width: 33, height: 13 },
-    { text: "Näidis Side AS", x: 28, y: 776, width: 43, height: 9 },
     { text: "Pank", x: 206, y: 776, width: 40, height: 9 },
     { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
-    { text: "Tänav 1, 10111 Tallinn", x: 28, y: 788, width: 95, height: 9 },
-    { text: "Registrikood 10000018", x: 28, y: 800, width: 72, height: 9 },
-    { text: "KMKR number EE100000010", x: 28, y: 812, width: 92, height: 9 },
   ];
-  const rows = new Map<number, typeof items>();
-  for (const entry of items) rows.set(entry.y, [...(rows.get(entry.y) ?? []), entry]);
-  const document = {
-    text: [...rows.values()].map(row => row.map(entry => entry.text).join("    ")).join("\n"),
-    pageCount: 1,
-    result: { pages: [{ pageNum: 1, textItems: items }] },
+  const documentWith = (footerLines: string[], extra: typeof items = []) => {
+    const all = [
+      ...items,
+      ...footerLines.map((text, index) => ({ text, x: 28, y: 776 + index * 12, width: 90, height: 9 })),
+      ...extra,
+    ];
+    const rows = new Map<number, typeof items>();
+    for (const entry of all) rows.set(entry.y, [...(rows.get(entry.y) ?? []), entry]);
+    return {
+      text: [...rows.entries()].sort(([a], [b]) => a - b)
+        .map(([, row]) => row.sort((a, b) => a.x - b.x).map(entry => entry.text).join("    ")).join("\n"),
+      pageCount: 1,
+      result: { pages: [{ pageNum: 1, textItems: all }] },
+    };
   };
+  const document = documentWith(["Näidis Side AS", "Tänav 1, 10111 Tallinn", "Registrikood 10000018", "KMKR number EE100000010"]);
   const client = {
     id: 77, name: "Näidis Side AS", code: "10000018", invoice_vat_no: "EE100000010", is_supplier: true, is_client: false,
     cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false,
@@ -881,6 +886,44 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     expect(result.supplier_resolution?.client?.id).toBe(77);
     expect(result.status).toBe("skipped_duplicate");
     expect(result.duplicate_match?.invoice_id).toBe(9001);
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  // Codex review: another entity's identity in the footer must never resolve to
+  // that entity's client and skip the receipt as its duplicate.
+  it.each([
+    {
+      scenario: "a payment agent's block",
+      // As on the live footer, the bank columns share the name's row.
+      document: documentWith(
+        ["Maksete vahendaja", "Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"],
+        [{ text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 }],
+      ),
+      other: { ...client, name: "Maksekeskus AS" },
+    },
+    {
+      scenario: "another entity's codes inside the supplier's block",
+      document: documentWith(
+        ["Näidis Side AS", "Tänav 1", "Arve väljastaja: Teine Firma OÜ", "Registrikood 10000024", "KMKR number EE100000036"],
+        [
+          { text: "Makse saaja:", x: 316, y: 104, width: 50, height: 12 },
+          { text: "Näidis Side AS", x: 316, y: 118, width: 60, height: 12 },
+        ],
+      ),
+      other: { ...client, id: 78, name: "Teine Firma OÜ", code: "10000024", invoice_vat_no: "EE100000036" },
+    },
+  ])("$scenario is held, not skipped as the other entity's duplicate", async ({ document: held, other }) => {
+    vi.mocked(parseDocument).mockResolvedValue(held as never);
+    const { api, spies } = makeApi();
+    const typed = api as unknown as { clients: { listAll: ReturnType<typeof vi.fn> }; purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } };
+    typed.clients.listAll.mockResolvedValue([other]);
+    typed.purchaseInvoices.listAll.mockResolvedValue([{ ...booked, clients_id: other.id, client_name: other.name }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ" });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.extracted?.supplier_reg_code).toBeUndefined();
+    expect(result.extracted?.supplier_vat_no).toBeUndefined();
+    expect(result.status).toBe("needs_review");
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
 });

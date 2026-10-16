@@ -4376,8 +4376,9 @@ describe("supplier identity from a page-column identity block (Telia footer live
   });
 
   it("a block inside the buyer block is not taken", () => {
-    const items = page([]).filter(entry => entry.y !== 129);
-    items.push(item("Registrikood 10000024", 28, 129, 81));
+    // The name sits a line below the label, so only the buyer-block check stops it.
+    const items = page([]).filter(entry => entry.y !== 118 && entry.y !== 129);
+    items.push(item("Testfirma OÜ", 28, 128, 53), item("Registrikood 10000024", 28, 140, 81));
     const result = extract(items, { ownCompanyVat: own.ownCompanyVat });
     expect(result.supplier_reg_code).toBeUndefined();
     expect(result.reg_code_rationale).not.toBe("identity_block");
@@ -4415,7 +4416,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
 
   it("identifiers in another column than the name are not taken", () => {
     const result = extract(page([
-      item("Näidis Side AS", 446, 776, 60, 9),
+      item("Näidis Side AS", 500, 776, 60, 9),
       ...footer(["Registrikood 10000018", "KMKR number EE100000010"], 788),
     ]));
     expect(result.supplier_reg_code).toBeUndefined();
@@ -4439,6 +4440,86 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page(footer(["Näidis Side AS", "Tänav 1, 10111 Tallinn", "10000018"])));
     expect(result.supplier_reg_code).toBeUndefined();
     expect(result.supplier_name).toBe("ARVE NS0001234");
+  });
+
+  it("a payment agent's block with a role label above its name is not taken (Codex scenario 1)", () => {
+    const result = extract(page(footer(["Maksete vahendaja", "Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+    expect(result.reg_code_rationale).not.toBe("identity_block");
+  });
+
+  it("another entity's codes inside the supplier's block are not attached to it (Codex scenario 2)", () => {
+    const items = page(footer(["Näidis Side AS", "Tänav 1", "Arve väljastaja: Teine Firma OÜ", "Registrikood 10000024", "KMKR number EE100000036"]));
+    items.push(item("Makse saaja:", 316, 104, 50), item("Näidis Side AS", 316, 118, 60));
+    const result = extract(items);
+    expect(result.supplier_name).toBe("Näidis Side AS");
+    expect(result.supplier_reg_code).toBeUndefined();
+    expect(result.supplier_vat_no).toBeUndefined();
+    // Without the other entity's line the same block fills the agreed supplier's codes.
+    const clean = page(footer(supplierFooter));
+    clean.push(item("Makse saaja:", 316, 104, 50), item("Näidis Side AS", 316, 118, 60));
+    expect(extract(clean).supplier_reg_code).toBe("10000018");
+    expect(result.supplier_vat_no).toBeUndefined();
+  });
+
+  it("a label line directly above the name disqualifies the block", () => {
+    const result = extract(page(footer(["Arve väljastaja", "Näidis Side AS", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("a label left of the name on its row disqualifies the block", () => {
+    const block = [
+      item("Näidis Side AS", 75, 776, 60, 9),
+      item("Registrikood 10000018", 75, 788, 72, 9),
+      item("KMKR number EE100000010", 75, 800, 92, 9),
+    ];
+    expect(extract(page(block)).supplier_reg_code).toBe("10000018");
+    expect(extract(page([item("Partner", 28, 776, 40, 9), ...block])).supplier_reg_code).toBeUndefined();
+  });
+
+  it("a role word glued into the name line disqualifies the block", () => {
+    const result = extract(page(footer(["Maksete vahendaja Maksekeskus AS", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("a second legal-entity name inside the block disqualifies it", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Teine Firma OÜ", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+    // Also when it is printed with an address.
+    const withAddress = extract(page([
+      ...footer(["Näidis Side AS", "Teine Firma OÜ, Tänav 2", "Registrikood 10000018"]),
+      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 788, 145, 9),
+    ]));
+    expect(withAddress.supplier_reg_code).toBeUndefined();
+  });
+
+  it("a bank line inside the block disqualifies it", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Swedbank EE162200001234567890", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("an unknown labelled line inside the block disqualifies it", () => {
+    const result = extract(page(footer(["Näidis Side AS", "Tänav 1", "Kontaktisik: Mari Maasikas", "Registrikood 10000018"])));
+    expect(result.supplier_reg_code).toBeUndefined();
+  });
+
+  it("address, contact and country lines keep the block", () => {
+    const result = extract(page(footer([
+      "Näidis Side AS", "Aadress: Tänav 1-2", "Registrikood 10000018", "KMKR nr: EE100000010", "10111 Tallinn", "Eesti Vabariik",
+      "Tel: +372 5555 5555", "info@example.com", "www.example.com",
+    ])));
+    expect(result.supplier_reg_code).toBe("10000018");
+    expect(result.supplier_vat_no).toBe("EE100000010");
+  });
+
+  it("a disqualified block with codes still competes with a qualifying one", () => {
+    const result = extract(page([
+      ...footer(supplierFooter),
+      ...footer(["Maksete vahendaja", "Maksekeskus AS", "Registrikood 10000024"], 640),
+      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 652, 145, 9),
+    ]));
+    expect(result.supplier_reg_code).toBeUndefined();
   });
 
   it("a supplier already named as a different company keeps the current result", () => {
