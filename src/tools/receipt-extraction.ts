@@ -309,6 +309,10 @@ export interface ExtractedReceiptFields {
   invoice_number_ambiguous?: boolean;
   /** Supplier name / reg code / VAT came from a page-column identity block (footer): a suggestion, never a basis to create. */
   supplier_from_footer_block?: boolean;
+  /** Two or more different labelled supplier registry codes / VAT numbers compete; the chosen one has no positional proof. */
+  supplier_identifier_ambiguous?: boolean;
+  /** No invoice-date or due-date label matched: the dates are the first dates on the page. */
+  invoice_date_unlabelled?: boolean;
   /** The gross is the largest unlabelled amount, not corroborated by a labelled net + labelled VAT. */
   gross_unlabelled?: boolean;
   /** A labelled net / VAT / gross amount exceeds MAX_RECEIPT_FALLBACK_AMOUNT (kept or dropped). */
@@ -2617,7 +2621,7 @@ export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | u
 export function extractPdfIdentifiers(
   text: string,
   options?: ExtractReceiptFieldsOptions,
-): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number" | "all_vat_candidates" | "all_reg_code_candidates" | "reg_code_rationale" | "vat_no_rationale" | "rejected_candidates"> {
+): Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "ref_number" | "all_vat_candidates" | "all_reg_code_candidates" | "reg_code_rationale" | "vat_no_rationale" | "rejected_candidates" | "supplier_identifier_ambiguous"> {
   const ids = extractIdentifiers(text, {
     excludeVat: options?.ownCompanyVat,
     excludeRegCode: options?.ownCompanyRegistryCode,
@@ -2634,6 +2638,7 @@ export function extractPdfIdentifiers(
     ...(ids.reg_code_rationale ? { reg_code_rationale: ids.reg_code_rationale } : {}),
     ...(ids.vat_no_rationale ? { vat_no_rationale: ids.vat_no_rationale } : {}),
     rejected_candidates: ids.rejected_candidates,
+    ...(ids.supplier_identifier_ambiguous ? { supplier_identifier_ambiguous: true } : {}),
   };
 }
 
@@ -3410,7 +3415,7 @@ function extractInvoiceNumberCandidates(text: string, fileName: string): { invoi
   return { invoiceNumber: `AUTO-${todayToken}-${normalizeFilenameToken(fileName) || "RECEIPT"}`, ambiguous: false };
 }
 
-export function extractDates(text: string): { invoice_date?: string; due_date?: string } {
+export function extractDates(text: string): { invoice_date?: string; due_date?: string; invoice_date_unlabelled?: true } {
   const dateValue = `(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`;
   // Ranked: explicit invoice-date labels first, then receipt/purchase/paid
   // dates, then a generic "date"/"kuupäev" that is NOT the tail of a due /
@@ -3434,9 +3439,12 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
     .map(match => normalizeDate(match[1] ?? ""))
     .filter((value): value is string => value !== undefined);
 
+  // No label bound these dates: an unlabelled value is not proof, so the
+  // receipt is held (the dates themselves are kept).
   return {
     invoice_date: rawDates[0],
     due_date: rawDates[1],
+    ...(rawDates[0] !== undefined ? { invoice_date_unlabelled: true as const } : {}),
   };
 }
 
@@ -4048,7 +4056,7 @@ export function extractReceiptFieldsFromText(
     }
     : sourceOptions;
   const pdfIdentifiers = extractPdfIdentifiers(text, options);
-  const { invoice_date, due_date } = extractDates(text);
+  const { invoice_date, due_date, invoice_date_unlabelled } = extractDates(text);
   const extractedSupplier = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
   // A page-column identity block (e.g. a footer) names the supplier only when
   // nothing else did: no supplier reg code or VAT, and the name is the file
@@ -4190,6 +4198,7 @@ export function extractReceiptFieldsFromText(
     // Only a supplier whose NAME came from the block is footer-derived; codes
     // filled into a name a supplier label or the letterhead already gave are not.
     ...(useIdentityBlock && !sameAsExtractedName ? { supplier_from_footer_block: true } : {}),
+    ...(invoice_date_unlabelled ? { invoice_date_unlabelled: true } : {}),
   };
 }
 

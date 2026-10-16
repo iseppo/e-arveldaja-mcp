@@ -224,6 +224,7 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     ["gross_unlabelled", textDoc(["Näidis OÜ", "Arve nr 7", "50,000 tokens 1 US$50.00"])],
     ["labelled_amount_over_max", textDoc(["Näidis OÜ", "Arve nr 7", "Kokku 100.00 24.00 124.00 248.00"])],
     ["zero_total_stated", textDoc(["Näidis OÜ", "Arve nr 7", "Teenus 120,00", "Ettemaks −120,00", "Arve kokku 0,00"])],
+    ["invoice_date_unlabelled", textDoc(["Näidis OÜ", "Arve nr 7", "Teenus 01.03.2026 - 31.03.2026", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR"])],
   ] as const)("%s surfaces as a review warning and an llm_fallback signal", async (signal, doc) => {
     mockedParseDocument.mockResolvedValue(doc);
     const { path } = writeTempPdf();
@@ -254,6 +255,23 @@ describe("AccountingDocumentOperations.prepare document-scope and amount-evidenc
     expect(outcome.value.blockers.some(b => b.code === signal)).toBe(true);
     expect(outcome.value.warnings.some(w => w.code === signal)).toBe(false);
     expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain(signal);
+  });
+
+  it("supplier_identifier_ambiguous is a blocker, not a warning (no plan handle)", async () => {
+    mockedParseDocument.mockResolvedValue(textDoc([
+      "Näidis OÜ", "Arve nr 7", "Kuupäev 20.03.2026", "Rg-kood: 12345603", "KMKR: EE123456007",
+      "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00 EUR", "Beeta Teenused AS", "Rg-kood: 12345610", "KMKR: EE123456010",
+    ]));
+    const { path } = writeTempPdf();
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.extraction.fields.supplier_reg_code).toBe("12345603");
+    expect(outcome.value.blockers.some(b => b.code === "supplier_identifier_ambiguous")).toBe(true);
+    expect(outcome.value.warnings.some(w => w.code === "supplier_identifier_ambiguous")).toBe(false);
+    expect(outcome.value.extraction.llm_fallback.confidence_signals).toContain("supplier_identifier_ambiguous");
+    expect(outcome.value.planHandle).toBeUndefined();
   });
 
   it("a company buyer is a buyer_ownership_unverified blocker when the active company's identity is unknown", async () => {

@@ -130,6 +130,12 @@ interface ExtractedIdentifiers {
   vat_no_rationale?: VatNoRationale;
   /** Candidates rejected by validation (checksum/length) — for reviewer visibility. */
   rejected_candidates: RejectedCandidate[];
+  /**
+   * Two or more different labelled (not own, valid) registry codes or VAT
+   * numbers compete for the supplier slot and the chosen one has no positional
+   * proof: one may be the buyer's. The value is kept; the receipt is held.
+   */
+  supplier_identifier_ambiguous?: true;
 }
 
 interface ExtractIdentifiersOptions {
@@ -569,6 +575,12 @@ interface IdentifierResolutionResult<Rationale extends RegCodeRationale | VatNoR
   selectedOccurrenceIndex?: number;
   candidates: string[];
   rejected: RejectedCandidate[];
+  /**
+   * Labelled, not own, valid values competing for the supplier slot. When a
+   * buyer-section anchor chose the labelled match before it, only the matches
+   * before the anchor compete.
+   */
+  labeled: string[];
 }
 
 function resolveRegCode(
@@ -674,7 +686,10 @@ function resolveRegCode(
     rationale = "buyer_section_only";
   }
 
-  return { value, rationale, selectedOccurrenceIndex, candidates, rejected };
+  const labeled = (buyerSectionIndex >= 0 && rationale === "labeled"
+    ? labeledRegFiltered.filter(match => (match.index ?? 0) < buyerSectionIndex)
+    : labeledRegFiltered).map(match => match[1]!);
+  return { value, rationale, selectedOccurrenceIndex, candidates, rejected, labeled };
 }
 
 function resolveVatNo(
@@ -788,7 +803,10 @@ function resolveVatNo(
     }
   }
 
-  return { value, rationale, selectedOccurrenceIndex, candidates, rejected };
+  const labeled = (buyerSectionIndex >= 0 && rationale === "labeled"
+    ? labeledVatFiltered.filter(match => (match.index ?? 0) < buyerSectionIndex)
+    : labeledVatFiltered).map(match => normalizeVatCandidate(match[1]!));
+  return { value, rationale, selectedOccurrenceIndex, candidates, rejected, labeled };
 }
 
 /** Vertical tolerance (in layout units) for treating two items as same-row. */
@@ -858,7 +876,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
   textItems: readonly LayoutTextItem[],
   markers: MarkerPosition[],
   exclude: Set<string>,
-): { value?: string; rationale?: Rationale } {
+): { value?: string; rationale?: Rationale; supplierSide?: boolean } {
   const isValid = kind === "reg_code" ? isValidEeRegistryCode : isValidEeVatNumber;
   const confirmed = "coordinate_confirmed" as Rationale;
   const confirmedEcho = "coordinate_confirmed_echo" as Rationale;
@@ -894,7 +912,7 @@ function reclassifyByCoordinates<Rationale extends RegCodeRationale | VatNoRatio
     if (side === "supplier" && rationale !== "labeled") {
       return { value, rationale: confirmed };
     }
-    return { value, rationale };
+    return { value, rationale, supplierSide: side === "supplier" };
   }
 
   if (candidates.length > 0) {
@@ -931,6 +949,8 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
   let reg_code_rationale = regCode.rationale;
   let vat_no = vatNo.value;
   let vat_no_rationale = vatNo.rationale;
+  let regSupplierSide = false;
+  let vatSupplierSide = false;
 
   if (options?.textItems && options.textItems.length > 0) {
     const textItems = options.textItems;
@@ -949,6 +969,7 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       );
       reg_code = reclassifiedRegCode.value;
       reg_code_rationale = reclassifiedRegCode.rationale;
+      regSupplierSide = reclassifiedRegCode.supplierSide === true;
 
       const reclassifiedVatNo = reclassifyByCoordinates(
         "vat_no",
@@ -962,8 +983,28 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
       );
       vat_no = reclassifiedVatNo.value;
       vat_no_rationale = reclassifiedVatNo.rationale;
+      vatSupplierSide = reclassifiedVatNo.supplierSide === true;
     }
   }
+
+  // Competing labelled ids hold unless the choice has positional proof: a
+  // coordinate confirmation (an echo is gated by its own signal) or a
+  // supplier-side occurrence of the labelled value.
+  const contested = (
+    chosen: string | undefined,
+    rationale: RegCodeRationale | VatNoRationale | undefined,
+    labeled: string[],
+    supplierSide: boolean,
+  ) =>
+    chosen !== undefined &&
+    new Set(labeled).size >= 2 &&
+    labeled.includes(chosen) &&
+    rationale !== "coordinate_confirmed" &&
+    rationale !== "coordinate_confirmed_echo" &&
+    !supplierSide;
+  const supplierIdentifierAmbiguous =
+    contested(reg_code, reg_code_rationale, regCode.labeled, regSupplierSide) ||
+    contested(vat_no, vat_no_rationale, vatNo.labeled, vatSupplierSide);
 
   return {
     reg_code,
@@ -975,5 +1016,6 @@ export function extractIdentifiers(text: string, options?: ExtractIdentifiersOpt
     ...(reg_code_rationale ? { reg_code_rationale } : {}),
     ...(vat_no_rationale ? { vat_no_rationale } : {}),
     rejected_candidates: rejectedCandidates,
+    ...(supplierIdentifierAmbiguous ? { supplier_identifier_ambiguous: true as const } : {}),
   };
 }

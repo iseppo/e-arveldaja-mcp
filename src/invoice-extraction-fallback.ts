@@ -146,6 +146,18 @@ export interface ExtractionConfidenceSignals {
    * invoice number AND gross.
    */
   supplier_from_footer_block?: boolean;
+  /**
+   * Two or more different labelled supplier registry codes or VAT numbers
+   * compete and the chosen one has no positional proof (one may be the
+   * buyer's). Gated from automatic creation (and client creation) in every
+   * mode; receipt_batch never skips it as a duplicate.
+   */
+  supplier_identifier_ambiguous?: boolean;
+  /**
+   * No invoice-date label was found: the date is the first date on the page.
+   * Medium signal, gated from automatic creation in every mode.
+   */
+  invoice_date_unlabelled?: boolean;
 }
 
 /**
@@ -162,6 +174,8 @@ export const CREATION_GATING_EXTRACTION_SIGNALS = [
   "labelled_amount_over_max",
   "zero_total_stated",
   "supplier_from_footer_block",
+  "supplier_identifier_ambiguous",
+  "invoice_date_unlabelled",
 ] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
 
 /** Operator-facing review warning per creation-gating extraction signal. */
@@ -175,6 +189,8 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   labelled_amount_over_max: "A labelled amount exceeds the receipt amount maximum; verify the totals before booking.",
   zero_total_stated: "The document states a zero total (credit note, prepaid or zero invoice); verify before booking.",
   supplier_from_footer_block: "The supplier was read only from a footer identity block (name, registry code, VAT); it is a suggestion — verify the supplier before booking.",
+  supplier_identifier_ambiguous: "The document labels two or more different supplier registry codes or VAT numbers (one may be the buyer's); verify the supplier before booking.",
+  invoice_date_unlabelled: "No invoice-date label was found; the date is the first date on the page. Verify the invoice date before booking.",
 };
 
 export interface InvoiceExtractionFallback {

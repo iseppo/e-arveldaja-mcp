@@ -2280,6 +2280,39 @@ describe("extractDates invoice-date label precedence (finding 11)", () => {
   });
 });
 
+describe("extractDates unlabelled fallback is flagged, never re-picked (corpus #11, Google)", () => {
+  it("flags the first-dates fallback and keeps its values", () => {
+    expect(extractDates("Kokkuvõte – 1. juuli 2026 - 31. juuli 2026")).toEqual({
+      invoice_date: "2026-07-01",
+      due_date: "2026-07-31",
+      invoice_date_unlabelled: true,
+    });
+    // The Google shape: the label survives, its value is lost to dots.
+    const google = extractDates("Arve kuupäev     ....................\nKokkuvõte - 1. juuli 2026 - 31. juuli 2026");
+    expect(google.invoice_date).toBe("2026-07-01");
+    expect(google.invoice_date_unlabelled).toBe(true);
+  });
+
+  it("does not flag a labelled invoice or due date, nor a page with no date", () => {
+    expect(extractDates("Arve kuupäev 31.07.2026")).toEqual({ invoice_date: "2026-07-31", due_date: undefined });
+    const dueOnly = extractDates("Maksetähtaeg 14.08.2026");
+    expect(dueOnly.invoice_date).toBeUndefined();
+    expect(dueOnly.invoice_date_unlabelled).toBeUndefined();
+    expect(extractDates("Invoice date: 2026-02-30")).toEqual({});
+  });
+
+  it("carries the flag into the extracted fields and holds them as a creation-gating signal", () => {
+    const fields = extractReceiptFieldsFromText(
+      ["Näidis OÜ", "Arve nr INV-1", "Kokkuvõte - 1. juuli 2026 - 31. juuli 2026", "Kokku 10.00"].join("\n"),
+      "x.pdf",
+    );
+    expect(fields.invoice_date).toBe("2026-07-01");
+    expect(fields.invoice_date_unlabelled).toBe(true);
+    expect(extractReceiptFieldsFromText("Näidis OÜ\nArve nr INV-1\nArve kuupäev 31.07.2026\nKokku 10.00", "x.pdf").invoice_date_unlabelled)
+      .toBeUndefined();
+  });
+});
+
 describe("categorizeTransactionGroup — mixed directions (bank-review MAJOR-2)", () => {
   it("routes a group mixing incoming and outgoing rows to review instead of reading transactions[0]", () => {
     const classification = categorizeTransactionGroup({

@@ -572,12 +572,15 @@ async function processSingleReceipt(
         extracted.invoice_date,
         extracted.total_gross,
       );
-      // An ambiguous invoice number may match the wrong existing invoice: a
-      // real, unbooked invoice must not be skipped on it, so it is reviewed.
-      if (duplicate && extracted.invoice_number_ambiguous) {
+      // An ambiguous invoice number, or a client resolved from a contested
+      // supplier id, may match the wrong existing invoice: a real, unbooked
+      // invoice must not be skipped on it, so it is reviewed.
+      if (duplicate && (extracted.invoice_number_ambiguous || extracted.supplier_identifier_ambiguous)) {
         notes.push(
           `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the document labels ` +
-          "several different invoice numbers; verify which is this invoice's number before skipping or booking it.",
+          (extracted.invoice_number_ambiguous
+            ? "several different invoice numbers; verify which is this invoice's number before skipping or booking it."
+            : "several different supplier registry codes or VAT numbers; verify the supplier before skipping or booking it."),
         );
         return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
           supplier_resolution: supplierResolution,

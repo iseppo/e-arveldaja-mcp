@@ -816,6 +816,29 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(result.notes.join(" ")).toContain("purchase invoice 900");
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
+
+  // A client resolved from a contested supplier id may be the wrong one: its
+  // existing invoice must not skip a real one either.
+  it.each(["dry_run", "create"] as const)("a contested supplier id matching an existing invoice is reviewed, not skipped (%s)", async (mode) => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-03-20", due_date: "2026-03-20",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service", raw_text: "ignored",
+      supplier_identifier_ambiguous: true,
+    } as never);
+    const { api, spies } = apiWithInvoices([{ ...booked, id: 900, number: "INV-1", clients_id: 7, client_name: "Supplier OU", create_date: "2026-03-20", gross_price: 124 }]);
+    const ops = makeOperations(api);
+    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("runBatch failed");
+    const outcome = mode === "dry_run" ? dryRun : await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.duplicate_match?.invoice_id).toBe(900);
+    expect(result.notes.join(" ")).toContain("supplier registry codes or VAT numbers");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
 });
 
 describe("receipt batch — supplier from a footer identity block (Telia live miss)", () => {
@@ -1240,6 +1263,17 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
       held: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1.234    Tax number: EE123456007", "Kuupäev 20.03.2026", ...labelledTrio]),
       clean: textDocument(["Supplier OÜ", "Invoice nr AB1", "Number: AB1    Tax number: EE123456007", "Kuupäev 20.03.2026", ...labelledTrio]),
     },
+    {
+      // An unlabelled buyer pair before the supplier pair: text order is not proof.
+      signal: "supplier_identifier_ambiguous",
+      held: textDocument([...head, "Rg-kood: 12345603", "KMKR: EE123456007", ...labelledTrio, "Rg-kood: 12345610", "KMKR: EE123456010"]),
+      clean: textDocument([...head, ...labelledTrio, "Rg-kood: 12345610", "KMKR: EE123456010"]),
+    },
+    {
+      signal: "invoice_date_unlabelled",
+      held: textDocument(["Supplier OÜ", "Arve nr INV-1", "Teenus 01.03.2026 - 31.03.2026", ...labelledTrio]),
+      clean: textDocument([...head, ...labelledTrio]),
+    },
   ] as const;
 
   beforeEach(async () => {
@@ -1280,6 +1314,8 @@ describe("receipt batch — document-scope and amount-evidence holds, extraction
         expect(spies.createAndSetTotals).not.toHaveBeenCalled();
         expect(spies.uploadDocument).not.toHaveBeenCalled();
         expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+        // resolveSupplierInternal(..., allowCreate=true) is the supplier materialization.
+        expect(vi.mocked(resolveSupplierInternal).mock.calls.some(call => call[3] === true)).toBe(false);
       });
     }
 

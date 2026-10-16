@@ -1370,3 +1370,142 @@ describe("extractIdentifiers — third-review regression tests", () => {
     expect(ids.vat_no_rationale).toBe("coordinate_confirmed");
   });
 });
+
+describe("extractIdentifiers — competing labelled supplier ids (supplier_identifier_ambiguous, corpus #30 Piletilevi)", () => {
+  // Checksum-valid synthetic ids: A = 12345603 / EE123456007, B = 12345610 / EE123456010.
+  // Entity names avoid buyer-section words ("Ostja", "Klient", "Client"): such a
+  // word anchors a buyer section and changes the rationales.
+  const contest = [
+    "Arve nr 4003479",
+    "Alfa Ehitus OÜ",
+    "Kuupäev: 30.09.2025",
+    "Rg-kood: 12345603",
+    "KMKR: EE123456007",
+    "Vahesumma: 100,00",
+    "Käibemaks (24%): 24,00",
+    "Kokku (EUR): 124,00",
+    "Beeta Teenused AS",
+    "Rg-kood: 12345610",
+    "KMKR: EE123456010",
+  ];
+  function ti(text: string, x: number, y: number, w = 120, h = 10): LayoutTextItem {
+    return { text, x, y, width: w, height: h };
+  }
+
+  it("holds two labelled id pairs of other entities without changing the chosen value", () => {
+    const ids = extractIdentifiers(contest.join("\n"));
+    expect(ids.reg_code).toBe("12345603");
+    expect(ids.vat_no).toBe("EE123456007");
+    expect(ids.reg_code_rationale).toBe("labeled");
+    expect(ids.supplier_identifier_ambiguous).toBe(true);
+    // Own ids that are not on the page change nothing.
+    const unrelatedOwn = extractIdentifiers(contest.join("\n"), { excludeRegCode: "10195631", excludeVat: "EE100449794" });
+    expect(unrelatedOwn.reg_code).toBe("12345603");
+    expect(unrelatedOwn.supplier_identifier_ambiguous).toBe(true);
+  });
+
+  it("does not hold once the own pair is excluded, or when only one pair is printed", () => {
+    const own = extractIdentifiers(contest.join("\n"), { excludeRegCode: "12345603", excludeVat: "EE123456007" });
+    expect(own.reg_code).toBe("12345610");
+    expect(own.vat_no).toBe("EE123456010");
+    expect(own.reg_code_rationale).toBe("labeled");
+    expect(own.supplier_identifier_ambiguous).toBeUndefined();
+    expect(extractIdentifiers(contest.slice(8).join("\n")).supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("checks each kind on its own (registry-only and VAT-only contests)", () => {
+    const regOnly = extractIdentifiers("Alfa Ehitus OÜ\nRg-kood: 12345603\nBeeta Teenused AS\nRg-kood: 12345610");
+    expect(regOnly.vat_no).toBeUndefined();
+    expect(regOnly.supplier_identifier_ambiguous).toBe(true);
+    const vatOnly = extractIdentifiers("Alfa Ehitus OÜ\nKMKR: EE123456007\nBeeta Teenused AS\nKMKR: EE123456010");
+    expect(vatOnly.reg_code).toBeUndefined();
+    expect(vatOnly.supplier_identifier_ambiguous).toBe(true);
+    // Only the own registry code excluded: the VAT contest alone still holds.
+    const ownRegOnly = extractIdentifiers(contest.join("\n"), { excludeRegCode: "12345603" });
+    expect(ownRegOnly.reg_code).toBe("12345610");
+    expect(ownRegOnly.vat_no).toBe("EE123456007");
+    expect(ownRegOnly.supplier_identifier_ambiguous).toBe(true);
+  });
+
+  it("does not count a repeated, checksum-invalid or excluded candidate as a competitor", () => {
+    expect(extractIdentifiers(
+      "Alfa Ehitus OÜ\nRg-kood: 12345603\nKMKR: EE123456007\nRg-kood: 12345603\nKMKR: EE 123456007",
+    ).supplier_identifier_ambiguous).toBeUndefined();
+    expect(extractIdentifiers(
+      "Alfa Ehitus OÜ\nRg-kood: 12345603\nKMKR: EE123456007\nRg-kood: 12345604\nKMKR: EE123456008",
+    ).supplier_identifier_ambiguous).toBeUndefined();
+    const excluded = extractIdentifiers("Alfa Ehitus OÜ\nRg-kood: 12345603\nBeeta Teenused AS\nRg-kood: 12345610", { excludeRegCode: "12345603" });
+    expect(excluded.reg_code).toBe("12345610");
+    expect(excluded.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("does not hold when no value was chosen (coordinate_rejected)", () => {
+    const items = [ti("Saaja:", 50, 40), ti("Rg-kood: 12345603", 50, 55), ti("Rg-kood: 12345610", 50, 70)];
+    const ids = extractIdentifiers(items.map(item => item.text).join("\n"), { textItems: items });
+    expect(ids.reg_code).toBeUndefined();
+    expect(ids.reg_code_rationale).toBe("coordinate_rejected");
+    expect(ids.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("(E1) does not hold a coordinate_confirmed choice", () => {
+    const items = [
+      ti("Arve nr 4003479", 50, 20),
+      ti("Saaja:", 50, 40), ti("Alfa Ehitus OÜ", 50, 55), ti("Rg-kood: 12345603", 50, 70), ti("KMKR: EE123456007", 50, 85),
+      ti("Müüja:", 400, 40), ti("Beeta Teenused AS", 400, 55), ti("Rg-kood: 12345610", 400, 70), ti("KMKR: EE123456010", 400, 85),
+    ];
+    const ids = extractIdentifiers(items.map(item => item.text).join("\n"), { textItems: items });
+    expect(ids.reg_code).toBe("12345610");
+    expect(ids.reg_code_rationale).toBe("coordinate_confirmed");
+    expect(ids.vat_no_rationale).toBe("coordinate_confirmed");
+    expect(ids.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("(E2) leaves a coordinate_confirmed_echo choice to its own echo signal", () => {
+    const items = [
+      ti("Arve saaja", 50, 100), ti("Müüja", 400, 100),
+      ti("Buyer OÜ", 50, 115), ti("Supplier OÜ", 400, 115),
+      ti("Rg-kood 12176678", 50, 130, 90), ti("Rg-kood 12176678", 400, 130, 90),
+      ti("Rg-kood 12345603", 50, 145, 90),
+    ];
+    const ids = extractIdentifiers(items.map(item => item.text).join("\n"), { textItems: items });
+    expect(ids.reg_code).toBe("12176678");
+    expect(ids.reg_code_rationale).toBe("coordinate_confirmed_echo");
+    expect(ids.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("(E3) does not hold a labelled choice whose occurrence sits on the supplier side", () => {
+    const items = [
+      ti("Tarnija:", 50, 20), ti("Alfa Ehitus OÜ", 50, 35), ti("Rg-kood: 12345603", 50, 50), ti("KMKR: EE123456007", 50, 65),
+      ti("Beeta Teenused AS", 400, 300), ti("Rg-kood: 12345610", 400, 315), ti("KMKR: EE123456010", 400, 330),
+    ];
+    const ids = extractIdentifiers(items.map(item => item.text).join("\n"), { textItems: items });
+    expect(ids.reg_code).toBe("12345603");
+    expect(ids.reg_code_rationale).toBe("labeled");
+    expect(ids.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("(E4) a buyer-section anchor narrows the competitors to the labelled ids before it", () => {
+    const anchored = [
+      "Müüja: Alfa Ehitus OÜ", "Rg-kood: 12345603", "KMKR: EE123456007",
+      "Ostja: Beeta Teenused AS", "Rg-kood: 12345610", "KMKR: EE123456010",
+    ].join("\n");
+    // The active company's own registry code is unknown (inferred from the clients list).
+    const ids = extractIdentifiers(anchored, { excludeVat: "EE123456010" });
+    expect(ids.reg_code).toBe("12345603");
+    expect(ids.reg_code_rationale).toBe("labeled");
+    expect(ids.supplier_identifier_ambiguous).toBeUndefined();
+  });
+
+  it("(E4) never bypasses the check: two distinct ids before the anchor still hold", () => {
+    const reg = extractIdentifiers(
+      "Müüja: Alfa Ehitus OÜ\nRg-kood: 12345603\nRg-kood: 12345626\nOstja: Beeta Teenused AS\nRg-kood: 12345610",
+    );
+    expect(reg.reg_code).toBe("12345603");
+    expect(reg.supplier_identifier_ambiguous).toBe(true);
+    const vat = extractIdentifiers(
+      "Müüja: Alfa Ehitus OÜ\nKMKR: EE123456007\nKMKR: EE123456023\nOstja: Beeta Teenused AS\nKMKR: EE123456010",
+    );
+    expect(vat.vat_no).toBe("EE123456007");
+    expect(vat.supplier_identifier_ambiguous).toBe(true);
+  });
+});
