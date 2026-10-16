@@ -628,9 +628,11 @@ function summarizeAutopilotToolResult(
             .filter((id): id is number => typeof id === "number");
           const duplicateSuffix = referencingJournalIds.length > 0
             ? `: journal(s) ${referencingJournalIds.join(", ")} already reference its invoice number`
-            : duplicateJournalIds.length > 0
-              ? `: the payment may already be booked by journal(s) ${duplicateJournalIds.join(", ")}`
-              : "";
+            : item.journal_reference_scan_unavailable === true
+              ? ": the journal list could not be read to check for an earlier booking; re-run the batch"
+              : duplicateJournalIds.length > 0
+                ? `: the payment may already be booked by journal(s) ${duplicateJournalIds.join(", ")}`
+                : "";
           return toAutopilotFollowUp(
             tool,
             `${fileName} was left for review in the dry run (${classification})${duplicateSuffix}.`,

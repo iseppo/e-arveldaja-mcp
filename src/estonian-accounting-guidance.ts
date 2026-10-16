@@ -207,6 +207,8 @@ export function buildReceiptReviewGuidance(params: {
   possibleDuplicateJournalIds?: readonly number[];
   /** Live journals already referencing this receipt's invoice number (receipt_batch hold). */
   referencingJournalIds?: readonly number[];
+  /** The journal reference scan was unavailable twice (receipt_batch hold). */
+  journalReferenceScanUnavailable?: boolean;
 }): ReviewGuidance | undefined {
   const text = normalizedText(
     params.extracted?.supplier_name,
@@ -239,6 +241,17 @@ export function buildReceiptReviewGuidance(params: {
       compliance_basis: [BASIS_RPS_DOCUMENT],
       follow_up_questions: [
         `Is journal ${ids} the payment for this document, or a separate payment of the same amount?`,
+      ],
+    };
+  }
+
+  if (params.journalReferenceScanUnavailable) {
+    return {
+      recommendation: "Recommendation: do not create this invoice yet. The journal list could not be read, so journals that may already book this invoice number were not checked. " +
+        "Re-run the batch when the journal list is readable, or book this document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
+      compliance_basis: [BASIS_RPS_DOCUMENT],
+      follow_up_questions: [
+        "Is this document already booked by a journal?",
       ],
     };
   }

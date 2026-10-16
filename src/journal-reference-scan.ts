@@ -156,9 +156,10 @@ export function findJournalsReferencingDocument(
 /**
  * Fail-safe wrapper: reads the (cached) journal list and runs the matcher. A
  * list failure (200-page cap, timeout) returns `scan_available: false` with a
- * note and no hits — like the cash scan, an advisory sub-check never holds or
- * fails a booking by being unavailable. Skips the read when no reference
- * passes the strength gate.
+ * note and no hits — on the single-document tools, like the cash scan, an
+ * advisory sub-check never holds or fails a booking by being unavailable.
+ * (receipt_batch retries an unavailable scan once and then holds the row.)
+ * Skips the read when no reference passes the strength gate.
  */
 export async function checkJournalReferences(
   api: { journals: { listAll(): Promise<Journal[]> } },

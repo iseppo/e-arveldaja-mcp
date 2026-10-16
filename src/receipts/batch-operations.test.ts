@@ -1433,16 +1433,170 @@ describe("receipt batch — journal already references the invoice number (Messe
     expect(liveReads).toBe(3);
   });
 
-  it("an unavailable journal list adds a note and does not hold", async () => {
+  // An unavailable reference scan is retried once and then holds: a batch row
+  // nobody reads must not be created unchecked. The default journals mock has no
+  // listAllWithPostings, so listAll calls here are the reference scan's only.
+  const journalsOf = (api: never) => (api as { journals: Record<string, ReturnType<typeof vi.fn>> }).journals;
+
+  it("an unavailable journal list is retried once, then the dry-run row is held", async () => {
     const { api, spies } = makeApi();
-    (api as { journals: Record<string, ReturnType<typeof vi.fn>> }).journals.listAll!
-      .mockRejectedValue(new Error("page cap reached"));
+    journalsOf(api).listAll!.mockRejectedValue(new Error("page cap reached"));
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    const notes = result.notes.join(" ");
+    expect(notes).toContain("Journal reference scan unavailable");
+    expect(notes).toContain("Held: the journal reference scan was unavailable (twice)");
+    // Only the final scan note is kept, not one per attempt.
+    expect(result.notes.filter(note => note.startsWith("Journal reference scan unavailable"))).toHaveLength(1);
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(2);
+    expect(result.journal_reference_scan_unavailable).toBe(true);
+    expect(result.review_guidance?.recommendation).toContain("Re-run the batch");
+    expect(result.created_invoice).toBeUndefined();
+    expect(result.bank_match).toBeUndefined();
+    expectZeroWrites(spies);
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("an unavailable journal list holds %s with zero writes", async (mode) => {
+    const { api, spies } = makeApi();
+    journalsOf(api).listAll!.mockRejectedValue(new Error("page cap reached"));
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(2);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.journal_reference_scan_unavailable).toBe(true);
+    // Execute: the projection and the pre-create scan each read twice.
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(6);
+    expectZeroWrites(spies);
+  });
+
+  it("a scan that fails once and then reads cleanly is used: the row proceeds", async () => {
+    const { api, spies } = makeApi();
+    journalsOf(api).listAll!.mockRejectedValueOnce(new Error("timeout")).mockResolvedValue([]);
+    const ops = makeOperations(api);
+    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    const preview = dryRun.value.results[0]!;
+    expect(preview.status).toBe("dry_run_preview");
+    expect(preview.journal_reference_scan_unavailable).toBeUndefined();
+    expect(preview.notes.join(" ")).not.toContain("Journal reference scan unavailable");
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(2);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    expect(outcome.value.results[0]!.status).toBe("created");
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    // Execute: projection read + pre-create read, no retry needed.
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(4);
+  });
+
+  // Codex P0 review: the preview and the execute projection both read cleanly;
+  // the scan fails (twice) only after the pre-create cache drop, so this is the
+  // final booking hold, not plan_drift.
+  function failAfterPreCreateInvalidation(api: never): void {
+    const journals = journalsOf(api);
+    let invalidations = 0;
+    journals.invalidateListCache = vi.fn(() => { invalidations += 1; });
+    journals.listAll = vi.fn(async () => {
+      if (invalidations >= 2) throw new Error("page cap reached");
+      return [];
+    });
+  }
+
+  it("the scan failing only at the final pre-create read holds the row with no invoice written", async () => {
+    const { api, spies } = makeApi();
+    failAfterPreCreateInvalidation(api);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.journal_reference_scan_unavailable).toBe(true);
+    expect(journalsOf(api).invalidateListCache).toHaveBeenCalledTimes(2);
+    // dry run 1 + projection 1 + pre-create 2 (the retry).
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(4);
+    expectZeroWrites(spies);
+  });
+
+  it("a new supplier: the final hold writes no purchase invoice (the client may already be created)", async () => {
+    const created = {
+      id: 8, name: "ETR1 Group OÜ", is_supplier: true, is_client: false, cl_code_country: "EST",
+      is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false,
+    };
+    vi.mocked(resolveSupplierInternal).mockImplementation((async (...args: unknown[]) => args[3] === true
+      ? { found: true, created: true, match_type: "created", client: created }
+      : {
+          found: false, created: false,
+          preview_client: {
+            name: "ETR1 Group OÜ", is_client: false, is_supplier: true, cl_code_country: "EST",
+            is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+          },
+        }) as never);
+    // An unresolved supplier books through the keyword suggestion.
+    const actual = await vi.importActual<typeof import("../tools/receipt-extraction.js")>("../tools/receipt-extraction.js");
+    vi.mocked(buildKeywordSuggestion).mockReturnValue({
+      item: { custom_title: "Madrats", amount: 1, total_net_price: 125, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+      source: "keyword_match",
+    } as never);
+    try {
+      const { api, spies } = makeApi();
+      failAfterPreCreateInvalidation(api);
+      const ops = makeOperations(api);
+      const { manifest, planHandles } = await dryRunPlan(ops);
+      const outcome = await ops.runBatch({
+        ...baseRun, executionMode: "create", dryRun: false, approvedManifest: manifest, planHandle: planHandles.create,
+      });
+      if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+      const result = outcome.value.results[0]!;
+      expect(result.status).toBe("needs_review");
+      expect(result.journal_reference_scan_unavailable).toBe(true);
+      // Supplier materialization runs before the pre-create scan, like every other
+      // booking hold: the claim is no purchase invoice, not no client.
+      expect(vi.mocked(resolveSupplierInternal).mock.calls.some(call => call[3] === true)).toBe(true);
+      expectZeroWrites(spies);
+    } finally {
+      vi.mocked(buildKeywordSuggestion).mockImplementation(actual.buildKeywordSuggestion);
+    }
+  });
+
+  it("a number below the strength gate skips the scan and never holds on it", async () => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "ETR1 Group OÜ", invoice_number: "110", invoice_date: "2026-09-23", due_date: "2026-09-23",
+      total_net: 125, total_vat: 30, total_gross: 155, currency: "EUR", description: "Madrats", raw_text: "ignored",
+    } as never);
+    const { api } = makeApi();
+    journalsOf(api).listAll!.mockRejectedValue(new Error("page cap reached"));
     const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
     if (!outcome.ok) throw new Error("runBatch failed");
     const result = outcome.value.results[0]!;
     expect(result.status).toBe("dry_run_preview");
-    expect(result.notes.join(" ")).toContain("Journal reference scan unavailable");
-    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(result.journal_reference_scan_unavailable).toBeUndefined();
+    expect(journalsOf(api).listAll).not.toHaveBeenCalled();
+  });
+
+  it("an exact duplicate is still skipped while the journal list is unavailable", async () => {
+    const { api, spies } = makeApi();
+    journalsOf(api).listAll!.mockRejectedValue(new Error("page cap reached"));
+    (api as { purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } }).purchaseInvoices.listAll.mockResolvedValue([{
+      id: 901, number: "EE1966453", clients_id: 7, client_name: "Supplier OU", status: "CONFIRMED",
+      create_date: "2026-09-23", journal_date: "2026-09-23", gross_price: 155,
+    }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("skipped_duplicate");
+    expect(result.duplicate_match?.invoice_id).toBe(901);
+    expectZeroWrites(spies);
   });
 
   it("a deleted referencing journal does not hold; create proceeds", async () => {

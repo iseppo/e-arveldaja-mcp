@@ -126,6 +126,8 @@ export interface ReceiptBatchFileResult {
   possible_duplicate_journal_ids?: number[];
   /** Live journals whose document_number or title already carries this invoice number; the row is held as needs_review. */
   referencing_journal_ids?: number[];
+  /** The journal reference scan was unavailable twice, so the row is held as needs_review (re-run, or book it on its own). */
+  journal_reference_scan_unavailable?: boolean;
   /** Detail of `referencing_journal_ids`; document_number / title are raw journal text, wrapped at output. */
   referencing_journals?: Array<{
     journal_id: number;

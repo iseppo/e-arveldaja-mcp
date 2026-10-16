@@ -737,7 +737,7 @@ async function processSingleReceipt(
       booking_suggestion: bookingSuggestion,
       created_invoice: created.created_invoice,
       bank_match: created.bank_match,
-      ...(created.possible_duplicate_journal_ids || created.referencing_journal_ids
+      ...(created.possible_duplicate_journal_ids || created.referencing_journal_ids || created.journal_reference_scan_unavailable
         ? {
             ...(created.possible_duplicate_journal_ids
               ? { possible_duplicate_journal_ids: created.possible_duplicate_journal_ids }
@@ -748,12 +748,14 @@ async function processSingleReceipt(
                   referencing_journals: created.referencing_journals,
                 }
               : {}),
+            ...(created.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),
             review_guidance: buildReceiptReviewGuidance({
               classification,
               notes: created.notes,
               extracted,
               possibleDuplicateJournalIds: created.possible_duplicate_journal_ids,
               referencingJournalIds: created.referencing_journal_ids,
+              journalReferenceScanUnavailable: created.journal_reference_scan_unavailable,
             }),
           }
         : {}),

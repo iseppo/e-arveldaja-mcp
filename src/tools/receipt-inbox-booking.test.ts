@@ -51,7 +51,7 @@ function extracted(overrides: Record<string, unknown> = {}) {
 function makeApi() {
   const createAndSetTotals = vi.fn().mockResolvedValue({ id: 900, number: "T-100", status: "PROJECT", clients_id: 7, client_name: "Telia Eesti AS", create_date: "2026-08-10", gross_price: 124 });
   return {
-    api: { purchaseInvoices: { createAndSetTotals, uploadDocument: vi.fn().mockResolvedValue({}), invalidate: vi.fn() }, journals: { invalidateListCache: vi.fn() } } as any,
+    api: { purchaseInvoices: { createAndSetTotals, uploadDocument: vi.fn().mockResolvedValue({}), invalidate: vi.fn() }, journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) } } as any,
     createAndSetTotals,
   };
 }

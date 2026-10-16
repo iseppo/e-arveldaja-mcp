@@ -167,6 +167,7 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
       : {}),
     ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
     ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
+    ...(row.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),
     ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "confirmed"]) } : {}),
     ...(totals !== undefined && Object.keys(totals).length > 0 ? { extracted: totals } : {}),
   };
@@ -455,6 +456,13 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
           item_id: itemId,
           code: "invoice_referenced_by_journal",
           message: `Journal(s) ${referencingIds.join(", ")} already reference this invoice number; attach the document to that journal instead of booking it again.`,
+        };
+      }
+      if (row.journal_reference_scan_unavailable) {
+        return {
+          item_id: itemId,
+          code: "journal_reference_scan_unavailable",
+          message: "The journal list could not be read, so journals that may already book this invoice number were not checked; re-run the batch or book this document on its own.",
         };
       }
       if (postingIds.length > 0) {

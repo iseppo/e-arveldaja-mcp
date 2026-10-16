@@ -672,6 +672,44 @@ describe("runAccountingInboxDryRunPipeline", () => {
     );
   });
 
+  it("a receipt held on an unavailable journal reference scan says why in its follow-up", async () => {
+    const prepareReceiptBatch = vi.fn().mockResolvedValue(ok({
+      mode: "DRY_RUN",
+      results: [{
+        file: { name: "messenger.jpeg", path: "/tmp/accounting-inbox/receipts/messenger.jpeg" },
+        classification: "purchase_invoice",
+        status: "needs_review",
+        journal_reference_scan_unavailable: true,
+        notes: [],
+      }],
+      summary: {
+        created: 0, dry_run_preview: 0, matched: 0, skipped_duplicate: 0, needs_review: 1,
+        possible_duplicate_review: 0, referenced_by_journal_review: 0, failed: 0,
+      },
+    }));
+
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1,
+          tool: "process_receipt_batch",
+          purpose: "Preview receipts",
+          recommended: true,
+          suggested_args: { folder_path: "/tmp/accounting-inbox/receipts", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [],
+          reason: "Receipts found",
+        }],
+      }),
+      operations: mockOperations({ prepareReceiptBatch }),
+    });
+
+    const followUps = [...result.needs_one_decision, ...result.needs_accountant_review]
+      .filter(f => f.source === "process_receipt_batch");
+    expect(followUps.map(f => f.summary)).toContain(
+      "messenger.jpeg was left for review in the dry run (purchase_invoice): the journal list could not be read to check for an earlier booking; re-run the batch.",
+    );
+  });
+
   it("caps a failed import step's error message and leaves the single sandbox wrap to the output boundary", async () => {
     // wise-import throws with attacker-controlled cell/header text embedded in
     // the message. The pipeline caps it; accounting_inbox's output boundary

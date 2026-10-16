@@ -473,7 +473,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
         invalidate: vi.fn(),
       },
-      journals: { invalidateListCache: vi.fn() },
+      journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       transactions: {
         get: vi.fn().mockImplementation((id: number) =>
           Promise.resolve(bankTransactions.find(t => t.id === id) ?? { id, status: "PROJECT" })),
@@ -584,7 +584,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
         uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
         invalidate: vi.fn(),
       },
-      journals: { invalidateListCache: vi.fn() },
+      journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
     } as any;
     const result = await createAndMaybeMatchPurchaseInvoice(
       api,

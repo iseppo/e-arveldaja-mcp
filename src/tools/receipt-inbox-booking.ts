@@ -214,7 +214,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   executionMode: ReceiptBatchExecutionMode,
   legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "referencing_journals">> {
+): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "referencing_journals" | "journal_reference_scan_unavailable">> {
   const file = snapshot.file;
   // The inbox dir-entry name is untrusted (control chars, odd bytes): upload and
   // audit it only in sanitized form.
@@ -301,18 +301,21 @@ export async function createAndMaybeMatchPurchaseInvoice(
   // A live journal whose document_number or title carries this invoice number
   // (e.g. a manual prepayment journal `ETR1:EE1966453`) may already book this
   // document — the cash scan cannot see it (no bank posting in the window).
-  // Same policy: holds in both modes, an unavailable scan only adds its note.
+  // Same policy: holds in both modes. An unavailable scan is retried once and,
+  // still unavailable, holds too: no person reads each row, so an unchecked
+  // row must not be created. Only the final scan note is kept.
   const invoiceNumber = extracted.invoice_number;
-  const findReferencingJournals = async (): Promise<JournalReferenceHit[]> => {
-    const referenceScan = await checkJournalReferences(api, [invoiceNumber]);
+  const findReferencingJournals = async (): Promise<{ hits: JournalReferenceHit[]; unavailable: boolean }> => {
+    let referenceScan = await checkJournalReferences(api, [invoiceNumber]);
+    if (!referenceScan.scan_available) referenceScan = await checkJournalReferences(api, [invoiceNumber]);
     if (!referenceScan.scan_available && referenceScan.scan_note) notes.push(referenceScan.scan_note);
-    return referenceScan.hits;
+    return { hits: referenceScan.hits, unavailable: !referenceScan.scan_available };
   };
   // Both scans run before any hold so a held row reports both id lists.
   const holdIfAlreadyBooked = async () => {
     const suspects = await appendIntakeDuplicateNotes();
-    const referencing = await findReferencingJournals();
-    if (suspects.length === 0 && referencing.length === 0) return undefined;
+    const { hits: referencing, unavailable: referenceScanUnavailable } = await findReferencingJournals();
+    if (suspects.length === 0 && referencing.length === 0 && !referenceScanUnavailable) return undefined;
     if (suspects.length > 0) {
       notes.push(
         `Held: this cash outflow may already be booked by journal(s) ${suspects.join(", ")}. ` +
@@ -326,10 +329,17 @@ export async function createAndMaybeMatchPurchaseInvoice(
         "this document may already be booked. Attach it to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead of creating an invoice.",
       );
     }
+    if (referenceScanUnavailable) {
+      notes.push(
+        "Held: the journal reference scan was unavailable (twice), so journals that may already book this invoice number were not checked. " +
+        "Re-run the batch, or book this document on its own (process_accounting_document, or create_purchase_invoice_from_pdf on the standard surface).",
+      );
+    }
     return {
       notes,
       status: "needs_review" as const,
       ...(suspects.length > 0 ? { possible_duplicate_journal_ids: suspects } : {}),
+      ...(referenceScanUnavailable ? { journal_reference_scan_unavailable: true } : {}),
       ...(referencingIds.length > 0
         ? {
             referencing_journal_ids: referencingIds,

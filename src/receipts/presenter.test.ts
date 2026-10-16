@@ -283,6 +283,17 @@ describe("renderReceiptBatchCompact — dry_run", () => {
     expect(String(warning?.item_id)).toMatch(OCR);
     expect(summary.warnings?.some(w => w.code === "needs_review")).toBe(false);
   });
+
+  it("names why a row held on an unavailable journal reference scan", () => {
+    const batch = makeBatch(0, {
+      extraRows: [fileResult(906, "needs_review", { journal_reference_scan_unavailable: true })],
+    });
+    const { summary } = renderReceiptBatchCompact(compactInput(batch));
+    const warning = summary.warnings?.find(w => w.code === "journal_reference_scan_unavailable");
+    expect(warning?.message).toContain("re-run the batch");
+    expect(String(warning?.item_id)).toMatch(OCR);
+    expect(summary.warnings?.some(w => w.code === "needs_review")).toBe(false);
+  });
 });
 
 describe("receipt batch — journal already references the invoice number", () => {

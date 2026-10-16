@@ -173,7 +173,7 @@ function createReceiptBatchApi(options: {
   transactionMethods?: Record<string, unknown>;
 } = {}) {
   return {
-    journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
+    journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(options.clients ?? []) },
     purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), ...options.purchaseInvoices },
     readonly: {
