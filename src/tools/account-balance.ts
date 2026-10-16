@@ -11,6 +11,7 @@ import { withOpeningBalanceJournalStatus, withOpeningBalanceStatus } from "../op
 import { loadJournalsWithOpeningBalance, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import { listAccountDimensionPostings } from "../account-postings.js";
+import { toolError } from "../tool-error.js";
 
 interface BalanceDetail {
   journal_id: number;
@@ -35,7 +36,8 @@ export async function computeAccountBalance(
   clientId?: number,
   dateFrom?: string,
   dateTo?: string,
-  preloadedJournals?: Journal[]
+  preloadedJournals?: Journal[],
+  dimensionId?: number,
 ): Promise<AccountBalanceResult> {
   const [allJournals, account] = await Promise.all([
     preloadedJournals ?? api.journals.listAllWithPostings(),
@@ -60,6 +62,7 @@ export async function computeAccountBalance(
     for (const posting of journal.postings) {
       if (posting.accounts_id !== accountId) continue;
       if (posting.is_deleted) continue;
+      if (dimensionId !== undefined && posting.accounts_dimensions_id !== dimensionId) continue;
 
       const type = posting.type;
       if (type !== "D" && type !== "C") continue;
@@ -134,7 +137,7 @@ const MAX_LISTED_DRAFT_IDS = 20;
 export function findUnregisteredDrafts(
   journals: Journal[],
   accountId: number,
-  filters: { clientId?: number; dateFrom?: string; dateTo?: string } = {},
+  filters: { clientId?: number; dateFrom?: string; dateTo?: string; dimensionId?: number } = {},
 ): UnregisteredDrafts {
   const ids = new Set<number>();
   const byDimension = new Map<number | null, number>();
@@ -147,6 +150,7 @@ export function findUnregisteredDrafts(
     if (filters.clientId !== undefined && journal.clients_id !== filters.clientId) continue;
     for (const posting of journal.postings ?? []) {
       if (posting.accounts_id !== accountId || posting.is_deleted) continue;
+      if (filters.dimensionId !== undefined && posting.accounts_dimensions_id !== filters.dimensionId) continue;
       if (posting.type !== "D" && posting.type !== "C") continue;
       const amount = posting.base_amount ?? posting.amount;
       if (posting.type === "D") debit += amount;
@@ -211,9 +215,10 @@ function clientScopedOpeningBalanceWarnings(
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_account_balance",
-    "Compute account balance from journal postings with optional client/date filters.",
+    "Compute account balance from journal postings with optional client/dimension/date filters.",
     {
       account_id: coerceId.describe("Account id from list_accounts. In the RIK chart the id is the account number itself (e.g. 2110, 8900)."),
+      accounts_dimensions_id: coerceId.optional().describe("Filter to one dimension (sub-account) of the account, e.g. the Wise dimension of 1020. Dimension id from list_account_dimensions; must belong to account_id."),
       clients_id: z.number().optional().describe("Filter by client ID"),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
@@ -221,12 +226,23 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Account Balance" },
-    async ({ account_id, clients_id, date_from, date_to, include_entries, fresh }) => {
+    async ({ account_id, accounts_dimensions_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
+      if (accounts_dimensions_id !== undefined) {
+        // An unknown or foreign dimension would silently yield 0 — refuse it.
+        const dimensions = await api.readonly.getAccountDimensions();
+        const dimension = dimensions.find(d => d.id === accounts_dimensions_id);
+        if (!dimension || dimension.accounts_id !== account_id) {
+          return toolError({
+            error: `Dimension ${accounts_dimensions_id} is not a dimension of account ${account_id}. Use list_account_dimensions to find the dimension id.`,
+            code: "dimension_account_mismatch",
+          });
+        }
+      }
       const { journals: allJournals, journalsFromApi, opening } = await loadJournalsWithOpeningBalance(api);
-      const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals);
+      const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals, accounts_dimensions_id);
       const drafts = unregisteredDraftsOutput(findUnregisteredDrafts(journalsFromApi, account_id, {
-        clientId: clients_id, dateFrom: date_from, dateTo: date_to,
+        clientId: clients_id, dateFrom: date_from, dateTo: date_to, dimensionId: accounts_dimensions_id,
       }));
 
       const summary = {
@@ -237,6 +253,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         debit_total: roundMoney(result.debitTotal),
         credit_total: roundMoney(result.creditTotal),
         entry_count: result.entries.length,
+        ...(accounts_dimensions_id !== undefined && { accounts_dimensions_id }),
         ...(clients_id !== undefined && { clients_id }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),

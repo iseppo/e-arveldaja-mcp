@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 134824,
-    "descriptionsBytes": 18951,
-    "inputSchemasBytes": 84552,
+    "toolsListBytes": 135099,
+    "descriptionsBytes": 18961,
+    "inputSchemasBytes": 84817,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 4361
@@ -3224,7 +3224,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute account balance from journal postings with optional client/date filters.",
+      "description": "Compute account balance from journal postings with optional client/dimension/date filters.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3233,6 +3233,12 @@
         "properties": {
           "account_id": {
             "description": "Account id from list_accounts. In the RIK chart the id is the account number itself (e.g. 2110, 8900).",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
+          "accounts_dimensions_id": {
+            "description": "Filter to one dimension (sub-account) of the account, e.g. the Wise dimension of 1020. Dimension id from list_account_dimensions; must belong to account_id.",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"

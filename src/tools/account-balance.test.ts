@@ -341,6 +341,59 @@ describe("compute_account_balance tool", () => {
     expect(data.debit_total).toBe(300);
     expect(data.entry_count).toBe(1);
   });
+
+  describe("accounts_dimensions_id filter", () => {
+    const LHV = 11;
+    const WISE = 22;
+
+    function setupWithDimensions(journals: Journal[]) {
+      const api = makeApi(journals, D_ACCOUNT);
+      api.readonly.getAccountDimensions.mockResolvedValue([
+        { id: LHV, accounts_id: ACCOUNT_ID, title_est: "LHV" },
+        { id: WISE, accounts_id: ACCOUNT_ID, title_est: "Wise" },
+        { id: 33, accounts_id: 1360, title_est: "Other account" },
+      ]);
+      registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api as unknown as Parameters<typeof registerAccountBalanceTools>[1]);
+      return capturedHandlers["compute_account_balance"]!;
+    }
+
+    const journals = [
+      journal({ id: 1, postings: [{ ...posting(ACCOUNT_ID, "D", 29.79), accounts_dimensions_id: LHV }] }),
+      journal({ id: 2, postings: [{ ...posting(ACCOUNT_ID, "D", 300), accounts_dimensions_id: WISE }] }),
+      journal({ id: 3, postings: [{ ...posting(ACCOUNT_ID, "C", 48.28), accounts_dimensions_id: WISE }] }),
+      journal({ id: 4, registered: false, postings: [{ ...posting(ACCOUNT_ID, "C", 5), accounts_dimensions_id: LHV }] }),
+    ];
+
+    it("counts only postings on the requested dimension", async () => {
+      const handler = setupWithDimensions(journals);
+      const data = parse((await handler({ account_id: ACCOUNT_ID, accounts_dimensions_id: WISE, include_entries: true })).content[0]!.text);
+      expect(data.balance).toBe(251.72);
+      expect(data.entry_count).toBe(2);
+      expect(data.accounts_dimensions_id).toBe(WISE);
+      expect((data.entries as Array<{ journal_id: number }>).map(e => e.journal_id)).toEqual([2, 3]);
+      // The LHV draft is not on this dimension, so no draft warning.
+      expect(data.unregistered_drafts).toBeUndefined();
+    });
+
+    it("still returns the whole-account total without the filter", async () => {
+      const handler = setupWithDimensions(journals);
+      const data = parse((await handler({ account_id: ACCOUNT_ID })).content[0]!.text);
+      expect(data.balance).toBe(281.51);
+    });
+
+    it("refuses a dimension that belongs to another account", async () => {
+      const handler = setupWithDimensions(journals);
+      const result = await handler({ account_id: ACCOUNT_ID, accounts_dimensions_id: 33 }) as { isError?: boolean; content: Array<{ text: string }> };
+      expect(result.isError).toBe(true);
+      expect(parse(result.content[0]!.text).code).toBe("dimension_account_mismatch");
+    });
+
+    it("refuses an unknown dimension", async () => {
+      const handler = setupWithDimensions(journals);
+      const result = await handler({ account_id: ACCOUNT_ID, accounts_dimensions_id: 999 }) as { isError?: boolean };
+      expect(result.isError).toBe(true);
+    });
+  });
 });
 
 describe("compute_account_dimension_balances tool", () => {
