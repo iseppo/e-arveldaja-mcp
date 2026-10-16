@@ -474,6 +474,12 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (journalReferenceScan.hits.length > 0) {
         warnings.push({ code: "invoice_referenced_by_journal", message: formatJournalReferenceWarnings(journalReferenceScan)[0]! });
+      } else if (!journalReferenceScan.scan_available) {
+        // Server-authored text only: the scan note carries the upstream error.
+        warnings.push({
+          code: "journal_reference_scan_unavailable",
+          message: "The journal list could not be read, so journals that may already book this document were not checked.",
+        });
       }
       if (supplierResolution.status === "ambiguous") {
         warnings.push({ code: "supplier_ambiguous", message: "The supplier is ambiguous; resolve it before booking." });

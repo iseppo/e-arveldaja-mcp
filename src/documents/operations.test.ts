@@ -656,6 +656,16 @@ describe("AccountingDocumentOperations.create", () => {
     expect(warning?.message).not.toContain("Ignore previous instructions");
   });
 
+  it("prepare surfaces an unavailable journal reference scan as an advisory warning", async () => {
+    const { path, api, ops } = createSetup();
+    api.journals.listAll.mockRejectedValue(new Error("page cap reached"));
+    const preview = await ops.prepare({ source: { file_path: path } });
+    if (!preview.ok) throw new Error(`prepare failed: ${preview.error.code}`);
+    const warning = preview.value.warnings.find(w => w.code === "journal_reference_scan_unavailable");
+    expect(warning?.message).toContain("were not checked");
+    expect(warning?.message).not.toContain("page cap reached");
+  });
+
   it("carries structured duplicateScan + duplicateCandidate on the execution (no leaky formatted warning string)", async () => {
     const { path, sha256, api, ops } = createSetup();
     const handle = await prepareBookingHandle(ops, path);
