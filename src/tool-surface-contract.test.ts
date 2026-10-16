@@ -7,7 +7,7 @@ import {
   type ToolSurfaceSnapshot,
 } from "./__fixtures__/tool-surface.js";
 import { isGranularTool, TOOL_CATALOG } from "./tool-catalog.js";
-import { remapGuidedBankFacade, remapHiddenGranularTool } from "./tool-profile.js";
+import { isGuidedProfile, projectActionForProfile, remapHiddenGranularTool } from "./tool-profile.js";
 
 const fixtureUrl = (profile: ToolSurfaceProfileName): URL =>
   new URL(`../testdata/tool-surface/${profile}.json`, import.meta.url);
@@ -45,36 +45,44 @@ describe("MCP tool-surface contract", () => {
   });
 
   // Tool inputs are strict: a remapped call carrying a key the destination
-  // tool does not declare is refused. Feed each source tool every argument it
-  // accepts (plus each execute/execution_mode variant) and check the result
-  // only uses keys the destination advertises.
-  it("remaps hidden/guided tool calls only to arguments the destination tool declares", () => {
-    const props = new Map<string, Set<string>>();
-    for (const snapshot of snapshots.values()) {
-      for (const tool of snapshot.tools) {
-        const schema = tool.inputSchema as { properties?: Record<string, unknown> };
-        props.set(tool.name, new Set(Object.keys(schema.properties ?? {})));
-      }
-    }
+  // tool does not declare is refused. For every profile, feed each source tool
+  // every argument it accepts (plus each execute/execution_mode variant),
+  // project it the way that profile does, and check the result only uses keys
+  // the destination advertises in THAT profile's surface.
+  it("projects every tool call only to arguments the destination declares in that profile", () => {
+    const propsOf = (snapshot: ToolSurfaceSnapshot) => new Map(snapshot.tools.map((tool) => [
+      tool.name,
+      new Set(Object.keys((tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {})),
+    ]));
+    const sources = propsOf(snapshots.get("full")!);
     const variants = [{}, { execute: true }, { execute: false }, { execution_mode: "create" }, { execution_mode: "create_and_confirm" }];
     const problems: string[] = [];
-    let checked = 0;
-    for (const [source, sourceProps] of props) {
-      for (const variant of variants) {
-        if (Object.keys(variant).some((key) => !sourceProps.has(key))) continue;
-        const args = { ...Object.fromEntries([...sourceProps].map((key) => [key, "x"])), ...variant };
-        for (const remapped of [remapHiddenGranularTool(source, args), remapGuidedBankFacade(source, args)]) {
-          if (!remapped) continue;
-          checked++;
-          const allowed = props.get(remapped.tool);
-          if (!allowed) { problems.push(`${source} -> ${remapped.tool}: destination not registered`); continue; }
-          for (const key of Object.keys(remapped.args)) {
-            if (!allowed.has(key)) problems.push(`${source} -> ${remapped.tool}: undeclared "${key}"`);
+    const remappedPerProfile = new Map<ToolSurfaceProfileName, number>();
+    for (const profile of TOOL_SURFACE_PROFILES) {
+      const allowed = propsOf(snapshots.get(profile)!);
+      const toolProfile = profile === "setup" ? "standard" : profile;
+      for (const [source, sourceProps] of sources) {
+        for (const variant of variants) {
+          if (Object.keys(variant).some((key) => !sourceProps.has(key))) continue;
+          const args = { ...Object.fromEntries([...sourceProps].map((key) => [key, "x"])), ...variant };
+          // Standard-style surfaces hide granular tools and remap them; guided
+          // profiles run the full projection chain (granular → bank façade →
+          // inter-account).
+          const granularHidden = !allowed.has(source);
+          const projected = isGuidedProfile(toolProfile)
+            ? projectActionForProfile({ tool: source, args }, toolProfile)
+            : granularHidden ? remapHiddenGranularTool(source, args) : undefined;
+          if (!projected || projected.status === "needs_review" || projected.tool === source) continue;
+          remappedPerProfile.set(profile, (remappedPerProfile.get(profile) ?? 0) + 1);
+          const destination = allowed.get(projected.tool);
+          if (!destination) { problems.push(`${profile}: ${source} -> ${projected.tool}: destination not listed`); continue; }
+          for (const key of Object.keys(projected.args ?? {})) {
+            if (!destination.has(key)) problems.push(`${profile}: ${source} -> ${projected.tool}: undeclared "${key}"`);
           }
         }
       }
     }
-    expect(checked).toBeGreaterThan(0);
+    for (const profile of ["standard", "guided", "guided-sales"] as const) expect(remappedPerProfile.get(profile) ?? 0).toBeGreaterThan(0);
     expect([...new Set(problems)]).toEqual([]);
   });
 

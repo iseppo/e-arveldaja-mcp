@@ -1,5 +1,5 @@
 import { arrayAt, isRecord, numberAt, recordAt, stringAt } from "./record-utils.js";
-import { currentToolProfile, projectActionForCurrentProfile, remapHiddenGranularTool } from "./tool-profile.js";
+import { currentToolProfile, isProfileUnavailableBlocker, projectActionForCurrentProfile, remapHiddenGranularTool } from "./tool-profile.js";
 import { buildWorkflowActionV2, type BuildWorkflowActionV2Options, type WorkflowActionV2 } from "./workflow-action-v2.js";
 import type { WorkflowStateStore } from "./workflow-state-store.js";
 export { remapGuidedBankFacade, remapHiddenGranularTool } from "./tool-profile.js";
@@ -144,16 +144,27 @@ export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown 
         ? (recordAt(action, "proposal") ?? {})
         : action
     ));
-    const setupAction: WorkflowAction = {
-      kind: "tool_call",
-      label: "Show setup and profile instructions",
-      why: "Switch to standard or full before running a fresh preview.",
-      approval_required: false,
-      tool: "get_setup_instructions",
-      args: {},
-    };
+    const blocker = blockedActions[0]!.blocker;
+    const blockerMessage = String(recordAt(blockedActions[0]!, "blocker")?.message ?? "This action needs the owner's decision.");
+    const setupAction: WorkflowAction = isProfileUnavailableBlocker(blocker)
+      ? {
+          kind: "tool_call",
+          label: "Show setup and profile instructions",
+          why: "Switch to standard or full before running a fresh preview.",
+          approval_required: false,
+          tool: "get_setup_instructions",
+          args: {},
+        }
+      // Not a profile problem: switching profile would not help. Ask instead.
+      : {
+          kind: "answer_question",
+          label: "Resolve the blocked action",
+          why: blockerMessage,
+          approval_required: false,
+          question: blockerMessage,
+        };
     next.status = "needs_review";
-    next.blocker = blockedActions[0]!.blocker;
+    next.blocker = blocker;
     next.proposal = blockedProposals[0];
     next.blocked_proposals = blockedProposals;
     next.safe_action_context = safeActionContext;

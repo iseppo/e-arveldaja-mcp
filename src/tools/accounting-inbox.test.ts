@@ -19,6 +19,7 @@ import {
   analyzeInboxCamtFiles,
   buildRecommendedSteps,
   MAX_SCANNED_FILES,
+  projectPublicRecommendedSteps,
   registerAccountingInboxTools as registerAccountingInboxToolsProduction,
   resolveReviewItemPlan,
   sandboxReviewFields,
@@ -4855,5 +4856,32 @@ describe("accounting_inbox dry_run: receipt review items are compact", () => {
     }
     // The review resolver still works on the compact item.
     expect(resolveReviewItemPlan(reviews[0].resolver_input).review_type).toBe("receipt_review");
+  });
+});
+
+describe("projectPublicRecommendedSteps — non-profile blockers", () => {
+  const exposure = { ...EXPOSE_GRANULAR, exposeGranularTools: false };
+  const step = (n: number, tool: string, args: Record<string, unknown>) => ({
+    step: n, tool, purpose: `step ${n}`, recommended: n === 1, suggested_args: args, missing_inputs: [], reason: "r",
+  });
+
+  it("keeps the safe steps and the owner question for a Wise fee conflict (no profile-setup step)", () => {
+    const projected = runWithToolProfile("guided", () => projectPublicRecommendedSteps([
+      step(1, "accounting_inbox", { mode: "scan" }),
+      step(2, "import_wise_transactions", { fee_account_relation_id: 42, fee_account_dimensions_id: 7 }),
+    ], createTestRuntimeSafetyContext(), exposure, new Map()));
+
+    expect(projected.blocked?.blocker.code).toBe("wise_fee_dimension_conflict");
+    expect(projected.blocked?.next_actions).toEqual([]);
+    expect(projected.steps.map(s => s.tool)).toEqual(["accounting_inbox"]);
+  });
+
+  it("still replaces the steps with profile setup for an action the profile does not expose", () => {
+    const projected = runWithToolProfile("guided", () => projectPublicRecommendedSteps([
+      step(1, "create_journal", {}),
+    ], createTestRuntimeSafetyContext(), exposure, new Map()));
+
+    expect(projected.blocked?.blocker.code).toBe("advanced_action_unavailable_in_profile");
+    expect(projected.steps.map(s => s.tool)).toEqual(["get_setup_instructions"]);
   });
 });

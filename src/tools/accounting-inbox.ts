@@ -8,7 +8,7 @@ import { registerTool } from "../mcp-compat.js";
 import { canonicalBusinessText, toMcpJson } from "../mcp-json.js";
 import { desandboxText, sandboxExternalText } from "../external-text-renderer.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { currentToolProfile, isGuidedProfile, isToolVisibleForProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
+import { currentToolProfile, isGuidedProfile, isProfileUnavailableBlocker, isToolVisibleForProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
 import { parseCSV } from "../csv.js";
 import { receiptInboxReviewItem } from "../receipts/presenter.js";
 import { EXPECTED_STATEMENT_HEADERS, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
@@ -136,7 +136,7 @@ interface ReceiptFolderCandidate {
   last_modified_at?: string;
 }
 
-interface RecommendedStep {
+export interface RecommendedStep {
   step: number;
   tool: string;
   purpose: string;
@@ -1001,14 +1001,14 @@ function pickNextRecommendedAction(steps: RecommendedStep[]): RecommendedStep | 
 // EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1 the granular names are valid and the
 // power-user mode prefers them. Past-tense `executed_steps` telemetry keeps the
 // real internal delegate (like the envelope's informational `delegated_tool`).
-interface BlockedRecommendedAction {
+export interface BlockedRecommendedAction {
   blocker: Record<string, unknown>;
   proposals: Array<Record<string, unknown>>;
   safeActionContext: Array<Record<string, unknown>>;
   next_actions: Array<Record<string, unknown>>;
 }
 
-function projectPublicRecommendedSteps(
+export function projectPublicRecommendedSteps(
   rawSteps: RecommendedStep[],
   runtimeSafetyContext: RuntimeSafetyContext,
   exposure: ToolExposureConfig,
@@ -1072,6 +1072,10 @@ function projectPublicRecommendedSteps(
   }
 
   if (!blocked) return { steps };
+  // Only a profile blocker is fixed by get_setup_instructions; any other
+  // blocker (e.g. a Wise fee conflict) keeps the remaining safe steps and
+  // carries its own message for the owner.
+  if (!isProfileUnavailableBlocker(blocked.blocker)) return { steps, blocked };
   return {
     steps: [{
       step: 1,
@@ -1094,7 +1098,7 @@ function blockedProjectionFields(blocked: BlockedRecommendedAction): Record<stri
     accounting_proposal: blocked.proposals[0],
     accounting_proposals: blocked.proposals,
     safe_action_context: blocked.safeActionContext,
-    suggested_tools: ["get_setup_instructions"],
+    suggested_tools: isProfileUnavailableBlocker(blocked.blocker) ? ["get_setup_instructions"] : [],
     next_actions: blocked.next_actions,
   };
 }

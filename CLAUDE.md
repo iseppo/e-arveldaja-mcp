@@ -572,9 +572,12 @@ context.
 `src/server/create-server.ts` wraps every raw-shape input schema in
 `z.object(shape).strict()` after adding the `connection` guard, so an argument a
 tool does not declare is refused (SDK input-validation error) instead of being
-silently dropped. A remapped action (`remapHiddenGranularTool`,
-`remapGuidedBankFacade`) must emit only keys its destination tool declares —
-pinned by `src/tool-surface-contract.test.ts`.
+silently dropped. A remapped action (`remapHiddenGranularTool`, derived from
+the catalog's `granular_of` — `selector` names the branch argument, `mode` or
+`action`; `remapGuidedBankFacade`; `remapGuidedInterAccount`) must emit only
+keys its destination declares in that profile — pinned per profile by
+`src/tool-surface-contract.test.ts`. A single-connection server declares no
+`connection` argument, so passing one there is refused too.
 
 **When adding a new tool:** if it emits text from OCR/CAMT/CSV, upstream API
 errors, or fields known to be populated by import flows (journal title

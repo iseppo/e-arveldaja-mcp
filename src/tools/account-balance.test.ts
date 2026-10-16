@@ -568,6 +568,48 @@ describe("compute_account_dimension_balances tool — unmapped opening-balance d
     expect(msg!.indexOf(UNTRUSTED_OCR_START_PREFIX)).toBeLessThan(msg!.indexOf(label));
     expect(msg!.indexOf(label)).toBeLessThan(msg!.indexOf(UNTRUSTED_OCR_END_PREFIX));
   });
+
+  it("compute_account_balance warns that an unattributed opening balance is outside a dimension-scoped figure", async () => {
+    writeOpeningBalances(
+      {
+        openingDate: "2024-12-12",
+        accounts: [{ code: String(ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0, dimension: ["no such bank"] }],
+        totals: { debit: 1000, credit: 0 },
+        rawText: "n/a",
+        parsedAt: "2026-07-19T00:00:00Z",
+        source: "algbilanss_paste",
+      } as unknown as Parameters<typeof writeOpeningBalances>[0],
+    );
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([
+        journal({ id: 5, effective_date: "2025-01-10", postings: [{ ...posting(ACCOUNT_ID, "D", 40), accounts_dimensions_id: DIM_B.id }] }),
+      ]) },
+      readonly: {
+        getAccount: vi.fn().mockResolvedValue(D_ACCOUNT),
+        getAccounts: vi.fn().mockResolvedValue([makeAccount(ACCOUNT_ID, "D", "Varad", "Pank", "Bank")]),
+        getAccountDimensions: vi.fn().mockResolvedValue([DIM_A, DIM_B]),
+      },
+    } as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api);
+    const handler = capturedHandlers["compute_account_balance"]!;
+    const warningsOf = async (args: Record<string, unknown>) => {
+      const data = parseMcpResponse((await handler(args)).content[0]!.text) as Record<string, unknown>;
+      return { balance: data.balance, warnings: data.warnings as string[] };
+    };
+
+    const scoped = await warningsOf({ account_id: ACCOUNT_ID, accounts_dimensions_id: DIM_B.id });
+    expect(scoped.balance).toBe(40);
+    expect(scoped.warnings.some(w => w.includes("1000.00 EUR") && w.includes("NOT in this dimension-scoped figure"))).toBe(true);
+
+    // Whole account: the opening balance is in the figure, so no such warning.
+    const whole = await warningsOf({ account_id: ACCOUNT_ID });
+    expect(whole.balance).toBe(1040);
+    expect(whole.warnings.some(w => w.includes("dimension-scoped"))).toBe(false);
+
+    // Range starting after the opening date: the opening balance is not in range at all.
+    const later = await warningsOf({ account_id: ACCOUNT_ID, accounts_dimensions_id: DIM_B.id, date_from: "2025-01-01" });
+    expect(later.warnings.some(w => w.includes("dimension-scoped"))).toBe(false);
+  });
 });
 
 describe("opening balance folding", () => {

@@ -212,6 +212,26 @@ function clientScopedOpeningBalanceWarnings(
   return out;
 }
 
+// A stored opening balance whose dimension label did not resolve is folded in
+// without a dimension (account totals stay right), so a dimension-scoped figure
+// leaves it out. Say so instead of letting "opening balance applied" stand.
+function unattributedOpeningBalanceWarning(
+  opening: OpeningBalanceJournal | null,
+  accountId: number,
+  dateFrom: string | undefined,
+  dateTo: string | undefined,
+): string | undefined {
+  if (!opening) return undefined;
+  const date = opening.journal.effective_date;
+  if ((dateFrom && date < dateFrom) || (dateTo && date > dateTo)) return undefined;
+  const unattributed = (opening.journal.postings ?? []).filter(p => p.accounts_id === accountId && p.accounts_dimensions_id == null);
+  if (unattributed.length === 0) return undefined;
+  let net = 0;
+  for (const p of unattributed) net += p.type === "D" ? (p.base_amount ?? p.amount) : -(p.base_amount ?? p.amount);
+  return `The stored opening balance of account ${accountId} (as of ${opening.openingDate}) includes ${roundMoney(net).toFixed(2)} EUR (debit minus credit) that could not be attributed to a dimension, so it is NOT in this dimension-scoped figure. ` +
+    "Compare with compute_account_dimension_balances (row \"(määramata)\") and re-import the opening balances with dimension labels matching list_account_dimensions.";
+}
+
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_account_balance",
@@ -228,10 +248,13 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
     { ...readOnly, title: "Compute Account Balance" },
     async ({ account_id, accounts_dimensions_id, clients_id, date_from, date_to, include_entries, fresh }) => {
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
+      const [{ journals: allJournals, journalsFromApi, opening }, dimensions] = await Promise.all([
+        loadJournalsWithOpeningBalance(api),
+        accounts_dimensions_id !== undefined ? api.readonly.getAccountDimensions() : undefined,
+      ]);
       if (accounts_dimensions_id !== undefined) {
         // An unknown or foreign dimension would silently yield 0 — refuse it.
-        const dimensions = await api.readonly.getAccountDimensions();
-        const dimension = dimensions.find(d => d.id === accounts_dimensions_id);
+        const dimension = dimensions?.find(d => d.id === accounts_dimensions_id);
         if (!dimension || dimension.accounts_id !== account_id) {
           return toolError({
             error: `Dimension ${accounts_dimensions_id} is not a dimension of account ${account_id}. Use list_account_dimensions to find the dimension id.`,
@@ -239,11 +262,16 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           });
         }
       }
-      const { journals: allJournals, journalsFromApi, opening } = await loadJournalsWithOpeningBalance(api);
       const result = await computeAccountBalance(api, account_id, clients_id, date_from, date_to, allJournals, accounts_dimensions_id);
       const drafts = unregisteredDraftsOutput(findUnregisteredDrafts(journalsFromApi, account_id, {
         clientId: clients_id, dateFrom: date_from, dateTo: date_to, dimensionId: accounts_dimensions_id,
       }));
+
+      const baseWarnings = drafts.warning ? [drafts.warning] : [];
+      const unattributedOpening = accounts_dimensions_id !== undefined
+        ? unattributedOpeningBalanceWarning(opening, account_id, date_from, date_to)
+        : undefined;
+      if (unattributedOpening) baseWarnings.push(unattributedOpening);
 
       const summary = {
         account_id,
@@ -266,8 +294,8 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         }),
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         warnings: clients_id === undefined
-          ? withOpeningBalanceJournalStatus(drafts.warning ? [drafts.warning] : [], opening, date_from, date_to)
-          : clientScopedOpeningBalanceWarnings(drafts.warning ? [drafts.warning] : [], opening),
+          ? withOpeningBalanceJournalStatus(baseWarnings, opening, date_from, date_to)
+          : clientScopedOpeningBalanceWarnings(baseWarnings, opening),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };

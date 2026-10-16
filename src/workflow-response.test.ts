@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
-import { runWithToolProfile } from "./tool-profile.js";
+import { projectActionForProfile, runWithToolProfile } from "./tool-profile.js";
 import { createPublicWorkflowStateDetail } from "./workflow-state-store.js";
 import {
   approvalPreviewFromDryRunStep,
@@ -496,6 +496,13 @@ describe("hidden-granular → merged entry-point remap", () => {
     ["classify_unmatched_transactions", { accounts_dimensions_id: 9 }, "classify_bank_transactions", { mode: "classify", accounts_dimensions_id: 9 }],
     ["apply_transaction_classifications", { execute: true, classifications_json: "[]" }, "classify_bank_transactions", { mode: "execute_apply", classifications_json: "[]" }],
     ["apply_transaction_classifications", { execute: false }, "classify_bank_transactions", { mode: "dry_run_apply" }],
+    // Only a real boolean `execute: true` executes; a string "true" or an
+    // unknown execution_mode stays the dry run.
+    ["auto_confirm_exact_matches", { execute: "true" }, "reconcile_bank_transactions", { mode: "dry_run_auto_confirm" }],
+    ["import_camt053", { execute: "true" }, "process_camt053", { mode: "dry_run" }],
+    ["apply_transaction_classifications", { execute: "true" }, "classify_bank_transactions", { mode: "dry_run_apply" }],
+    ["process_receipt_batch", { execution_mode: "something_else" }, "receipt_batch", { mode: "dry_run" }],
+    ["process_receipt_batch", { execution_mode: true }, "receipt_batch", { mode: "dry_run" }],
     // continue_accounting_workflow selects its branch with `action`, not `mode`.
     ["resolve_accounting_review_item", { review_item_json: "{}" }, "continue_accounting_workflow", { action: "resolve_review", review_item_json: "{}" }],
     ["prepare_accounting_review_action", { review_item_json: "{}", save_as_rule: true }, "continue_accounting_workflow", { action: "prepare_action", review_item_json: "{}", save_as_rule: true }],
@@ -512,10 +519,19 @@ describe("hidden-granular → merged entry-point remap", () => {
       .toEqual({ tool: "process_bank_input", args: { file_path: "/tmp/w.csv", fee_account_dimensions_id: 42 } });
     expect(remapGuidedBankFacade("import_wise_transactions", { fee_account_relation_id: 42, fee_account_dimensions_id: 42 }))
       .toEqual({ tool: "process_bank_input", args: { fee_account_dimensions_id: 42 } });
-    // A conflicting pair is never resolved by picking one: it is left for the
-    // strict input check to refuse, like the Wise import refuses it.
+    // A conflicting pair is never resolved by picking one (the Wise import
+    // refuses it too): the guided projection turns it into a review blocker.
     expect(remapGuidedBankFacade("import_wise_transactions", { fee_account_relation_id: 42, fee_account_dimensions_id: 7 }))
       .toEqual({ tool: "process_bank_input", args: { fee_account_relation_id: 42, fee_account_dimensions_id: 7 } });
+    for (const profile of ["guided", "guided-sales"] as const) {
+      const projected = projectActionForProfile(
+        { tool: "import_wise_transactions", args: { file_path: "/tmp/w.csv", fee_account_relation_id: 42, fee_account_dimensions_id: 7 } },
+        profile,
+      );
+      expect(projected.status).toBe("needs_review");
+      expect(projected.blocker.code).toBe("wise_fee_dimension_conflict");
+      expect(projected.next_actions).toEqual([]);
+    }
   });
 
   it.each([
@@ -602,6 +618,26 @@ describe("hidden-granular → merged entry-point remap", () => {
   it("returns non-envelope values unchanged", () => {
     expect(remapHiddenGranularWorkflowEnvelope(undefined)).toBeUndefined();
     expect(remapHiddenGranularWorkflowEnvelope("not an envelope")).toBe("not an envelope");
+  });
+
+  it("a Wise fee conflict in a guided envelope asks the owner instead of pointing at profile setup", () => {
+    const conflict = {
+      kind: "tool_call", label: "Import Wise", why: "Import the statement.",
+      approval_required: false, tool: "import_wise_transactions",
+      args: { fee_account_relation_id: 42, fee_account_dimensions_id: 7 },
+    };
+    const remapped = runWithToolProfile("guided", () => remapHiddenGranularWorkflowEnvelope({
+      recommended_next_action: conflict,
+      available_actions: [conflict],
+      needs_review: [],
+    })) as Record<string, any>;
+
+    expect(remapped.status).toBe("needs_review");
+    expect(remapped.blocker.code).toBe("wise_fee_dimension_conflict");
+    expect(remapped.recommended_next_action.kind).toBe("answer_question");
+    expect(remapped.recommended_next_action.tool).toBeUndefined();
+    expect(remapped.recommended_next_action.question).toContain("fee sub-accounts");
+    expect(remapped.available_actions).toEqual([remapped.recommended_next_action]);
   });
 
   it("guided fail-closed output preserves ordered multiple blocked proposals and safe action context", () => {
