@@ -738,6 +738,21 @@ function splitAmountTripleRun(match: RegExpMatchArray, line: string, documentCon
   });
 }
 
+/**
+ * `text` with every proven identifier replaced by spaces (same length): a
+ * word holding digits but no money decimal part ("MA2600009", "12345", not
+ * "Kokku248.00" or "EUR248.00") that is an IBAN or follows an identifier
+ * label ("Arve nr", "Viitenumber", "Konto"). Anything else stays a candidate.
+ */
+function blankProvenIdentifiers(text: string): string {
+  return text.replace(/[\p{L}\d/_-]*\d[\p{L}\d/_-]*/gu, (word, offset: number) => {
+    if (/^[.,]\d{2}(?!\d)/.test(text.slice(offset + word.length))) return word;
+    // A label is a few words: a bounded look-back keeps long lines linear.
+    const proven = isValidIban(word) || LAYOUT_IDENTIFIER_LABEL_RE.test(text.slice(Math.max(0, offset - 40), offset));
+    return proven ? " ".repeat(word.length) : word;
+  });
+}
+
 /** extractAmountsFromLine before de-duplication: one value per amount token. */
 function extractAmountTokensFromLine(
   line: string,
@@ -764,9 +779,10 @@ function extractAmountTokensFromLine(
   const splitTokens = splitRuns.filter(split => split.length > 1).length === 1 ? splitRuns.flat().filter(isAmountToken) : [];
   // The triple is split only when it is the line's whole amount content: any
   // other amount on the line ("Kokku 248.00 / 100.00 24.00 124.00") keeps the
-  // run merged, so the line stays held instead of binding the triple. Digits
-  // glued to a letter ("Arve nr MA2600009") are an identifier, not an amount.
-  const splitAmountCount = splitTokens.filter(match => !/\p{L}/u.test(line[(match.index ?? 0) - 1] ?? "")).length;
+  // run merged, so the line stays held instead of binding the triple. Only a
+  // proven identifier ("Arve nr MA2600009") is not another amount.
+  const identifiersBlanked = splitTokens.length > 0 ? blankProvenIdentifiers(line) : line;
+  const splitAmountCount = splitTokens.filter(match => /\d/.test(identifiersBlanked[match.index ?? 0] ?? "")).length;
   const matches = splitTokens.length > 0 && splitAmountCount === 3 ? splitTokens : runs.filter(isAmountToken);
   return matches
     .map(match => {
@@ -1807,10 +1823,10 @@ function findSameRowLayoutAmount(label: LayoutLabelCell, amounts: readonly Layou
   // stated rate. Anything else keeps the binding below.
   // The whole row counts, including amounts left of the label and in the
   // label text: a fourth amount anywhere on the row is disagreeing evidence.
-  // Digits glued to a letter ("Arve nr MA2600009") are an identifier.
-  const rowTokenCount = label.row.items.reduce((count, item) =>
-    count + extractAmountTokensFromLine(clampTextLine(item.text).replace(/(?<=\p{L})\d+/gu, "")).length, 0);
-  if (candidates.length === 3 && rowTokenCount === 3) {
+  // Only a proven identifier ("Arve nr MA2600009") is not another amount.
+  const rowTokenCount = () => label.row.items.reduce((count, item) =>
+    count + extractAmountTokensFromLine(blankProvenIdentifiers(clampTextLine(item.text))).length, 0);
+  if (candidates.length === 3 && rowTokenCount() === 3) {
     const values = candidates.map(candidate => candidate.amount);
     const bound = label.field === "total_gross"
       ? uniqueAmountTriple(values)?.sum

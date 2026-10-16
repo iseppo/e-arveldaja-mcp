@@ -3817,16 +3817,48 @@ describe("row triples and layout amount tokens (WP2)", () => {
       expect(result.labelled_amount_over_max).toBe(true);
     });
 
-    it("an invoice number glued to letters on the row is not a fourth amount", () => {
+    it("a proven invoice number on the row is not a fourth amount", () => {
       const line = "Arve nr MA2600009 kokku: 350.00 84.00 434.00";
       expect(extractAmountsFromLine(line)).toEqual([2600009, 350, 84, 434]);
       expect(extractReceiptFieldsFromText(["Näidis OÜ", line].join("\n"), "arve.pdf").total_gross).toBe(434);
       const layout = extractAmountsFromLayout([
         item("Näidis OÜ", 52, 40, 60),
-        item("Kokku", 52, 200, 40), item("Leping LP2600009", 120, 200, 80),
+        item("Kokku", 52, 200, 40), item("Leping nr LP2600009", 120, 200, 90),
         item("350.00", 300, 200, 30), item("84.00", 360, 200, 30), item("434.00", 420, 200, 30),
       ]);
       expect(layout?.total_gross).toBe(434);
+    });
+
+    // Codex review round 2: a money-shaped token glued to a label or a
+    // currency code is a competing amount, not an identifier.
+    it.each([
+      "Kokku248.00 / 100.00 24.00 124.00",
+      "EUR248.00 Kokku 100.00 24.00 124.00",
+      // A money decimal part wins over an identifier label before it.
+      "Kokku nr 248.00 / 100.00 24.00 124.00",
+    ])("a glued money token keeps the triple merged and held: %s", (line) => {
+      const result = extractReceiptFieldsFromText(["Näidis OÜ", "Summa km-ta 100.00", "Käibemaks 24% 24.00", line].join("\n"), "arve.pdf");
+      expect(result.labelled_amount_over_max).toBe(true);
+    });
+
+    it("an unproven glued integer on the layout row keeps the triple unbound", () => {
+      const layout = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Kokku", 52, 200, 40), item("Leping LP2600009", 120, 200, 80),
+        item("350.00", 300, 200, 30), item("84.00", 360, 200, 30), item("434.00", 420, 200, 30),
+      ]);
+      expect(layout?.total_gross).not.toBe(434);
+    });
+
+    it("a glued money token left of the layout total label keeps the triple unbound", () => {
+      const layout = extractAmountsFromLayout([
+        item("Näidis OÜ", 52, 40, 60),
+        item("Summa km-ta", 52, 100, 60), item("100.00", 400, 100, 30),
+        item("Käibemaks 24%", 52, 116, 70), item("24.00", 400, 116, 30),
+        item("EUR248.00", 52, 132, 40), item("Kokku", 200, 132, 30),
+        item("100.00", 300, 132, 30), item("24.00", 350, 132, 30), item("124.00", 400, 132, 30),
+      ]);
+      expect(layout?.explicit_amount_conflicts ?? []).not.toHaveLength(0);
     });
 
     it("an amount left of the layout total label keeps the row out of the triple binding", () => {
