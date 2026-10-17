@@ -27,7 +27,7 @@ import { corpusRunIndex, loadStaged, registryPath } from "./stage.js";
 /** The frozen step-5 tag: its readings seed the per-case means of a new run, never its accounting. */
 export const FROZEN_TAG = "step5";
 const CEILING = { input: 30_000_000, output: 4_000_000 };
-const LEGACY = { input: 150_000, output: 50_000 };
+export const LEGACY = { input: 150_000, output: 50_000 };
 
 export interface RunArgs { tag: string; caps: { input: number; output: number } }
 

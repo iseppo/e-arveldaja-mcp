@@ -1,14 +1,21 @@
 // Legacy replication (plan §5.3): the 33 selfcheck/own/ cases inlined in ONE Codex prompt (the documented
 // exception to one case per context), own_B.md changed by one sentence plus one added sentence (deviation, see NO_TOOLS), one turn through run-codex.sh with the
 // output via -o, scored by a copy of score.py with own_B_codex added. key.json is never staged.
-// Usage: npx tsx scripts/reading-p1/legacy.ts [run|score]
+// Usage: npx tsx scripts/reading-p1/legacy.ts run --run <tag> --cap-input <n> --cap-output <n> | score
+// T4 (throughput round): each re-run has its own tag (a tag that already holds a reading is refused, so old
+// results are never reused), the shared pre-launch preflight, and caps checked against the legacy estimate
+// before the launch and against the measured usage after it. The step-5 output is kept as
+// review_own_B_codex.step5-legacy.json.
 
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { LEGACY_DIR, dataPath, writePrivate } from "./common.js";
 import { newCaseId, runCase } from "./run-cases.js";
 import { instructionFingerprints } from "./audit-claude.js";
+import { preflightRun } from "./restage.js";
+import { corpusRunIndex } from "./stage.js";
+import { LEGACY, parseRunArgs, type RunArgs } from "./step5.js";
 
 const SELF = join(LEGACY_DIR, "selfcheck");
 const ORIGINAL = "Write a JSON array to ./review_own_B_MODEL.json.";
@@ -36,10 +43,20 @@ export function legacyPrompt(): string {
   return `${changed.trimEnd()}\n\n${inline.join("\n")}`;
 }
 
-async function run(): Promise<void> {
+async function run(args: RunArgs): Promise<void> {
+  const refuse = (reason: string) => {
+    process.stdout.write(`STOP: ${reason}\n`);
+    process.exitCode = 3;
+  };
+  if (corpusRunIndex(args.tag).some((entry) => existsSync(dataPath("readings", `${entry.case_id}.json`)))) return refuse(`${args.tag} already holds a legacy reading; use a new tag`);
+  const preflight = preflightRun(args.tag);
+  if (preflight) return refuse(preflight);
+  if (LEGACY.input > args.caps.input || LEGACY.output > args.caps.output) return refuse(`the legacy estimate ${LEGACY.input}/${LEGACY.output} exceeds the ${args.tag} caps`);
   const caseId = newCaseId();
-  const outcome = await runCase({ case_id: caseId, reader: "codex", form: "legacy", kind: "legacy", doc_id: null, turns: 1, prompt: legacyPrompt(), meta: { run: "step5-legacy" } }, { fingerprints: instructionFingerprints() });
-  process.stdout.write(`${JSON.stringify({ case_id: caseId, leakage_pass: outcome.leakage_pass, failures: outcome.failures, run_errors: outcome.run_errors })}\n`);
+  const outcome = await runCase({ case_id: caseId, reader: "codex", form: "legacy", kind: "legacy", doc_id: null, turns: 1, prompt: legacyPrompt(), meta: { run: args.tag } }, { fingerprints: instructionFingerprints() });
+  const usage = (outcome.collected?.turns ?? []).reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
+  process.stdout.write(`${JSON.stringify({ case_id: caseId, leakage_pass: outcome.leakage_pass, failures: outcome.failures, run_errors: outcome.run_errors, usage })}\n`);
+  if (usage.input > args.caps.input || usage.output > args.caps.output) process.stdout.write(`WARNING: the legacy case used ${usage.input}/${usage.output}, above the ${args.tag} caps\n`);
   const text = outcome.collected?.turns[0]?.text;
   if (!outcome.leakage_pass || !text) {
     process.exitCode = 3;
@@ -57,7 +74,10 @@ async function run(): Promise<void> {
     process.exitCode = 3;
     return;
   }
-  writePrivate(dataPath("legacy", "review_own_B_codex.json"), stripped);
+  const current = dataPath("legacy", "review_own_B_codex.json");
+  const kept = dataPath("legacy", "review_own_B_codex.step5-legacy.json");
+  if (existsSync(current) && !existsSync(kept)) renameSync(current, kept);
+  writePrivate(current, stripped);
 }
 
 function score(): void {
@@ -77,7 +97,13 @@ function score(): void {
 
 if (process.argv[1]?.endsWith("/legacy.ts")) {
   const mode = process.argv[2] ?? "run";
-  if (mode === "run") await run();
+  if (mode === "run") {
+    const args = parseRunArgs(process.argv.slice(3));
+    if ("error" in args) {
+      process.stderr.write(`${args.error}\nusage: legacy.ts run --run <tag> --cap-input <n> --cap-output <n> | score\n`);
+      process.exitCode = 1;
+    } else await run(args);
+  }
   else if (mode === "score") score();
   else throw new Error("usage: legacy.ts run|score");
 }
