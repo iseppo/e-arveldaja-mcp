@@ -197,7 +197,9 @@ try {
     `import { projection } from ${JSON.stringify(join(SCRIPTS_DIR, "step5.ts"))};`,
     "const run = { tag: \"chain\", caps: { input: 100, output: 1_000_000 } };",
     "const stop = await restageRun({ tag: \"chain\", max: 2, exceeds: () => projection([], run).exceeds, log: () => {} });",
-    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(runRegistries(\"chain\").map((r) => [r.case_id, r.restaged_as ?? null])) }));",
+    `import { loadStaged } from ${JSON.stringify(join(SCRIPTS_DIR, "stage.ts"))};`,
+    "const regs = runRegistries(\"chain\");",
+    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])) }));",
   ].join("\n"));
   const cid = { a: "c-aaaaaaaaaaaa", b: "c-bbbbbbbbbbbb", s: "c-555555555555", x: "c-eeeeeeeeeeee", y: "c-ffffffffffff" };
   type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; reading?: number; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
@@ -226,7 +228,7 @@ try {
     const launches = existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter((line) => line.split("\t")[1] === "1") : [];
     // The stub's launches still staged a /tmp/reading-p1.* dir each: remove them.
     for (const line of launches) rmSync(line.split("\t")[2]!, { recursive: true, force: true });
-    return { ...(JSON.parse(out) as { stop: string | null; links: Record<string, string | null> }), launches: launches.length };
+    return { ...(JSON.parse(out) as { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null> }), launches: launches.length };
   };
   const transport = { failures: ["turn1_forbidden:event:error"] };
   const first = { id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b };
@@ -250,6 +252,20 @@ try {
     { id: cid.y, meta: { restaged_from: cid.x }, attempt: 2 }]);
   assert("b9_interrupted_replacement_rerun", interrupted.launches === 1 && interrupted.links[cid.x] !== null && interrupted.links[cid.x] !== cid.y &&
     interrupted.links[cid.y] === null, JSON.stringify(interrupted));
+  // Codex t3 #3: the new replacement's attempt is in its registry from staging (the stub launch failed before any
+  // completion callback could write it).
+  assert("b9_attempt_written_at_staging", interrupted.staged_attempts[String(interrupted.links[cid.x])] === 2, JSON.stringify(interrupted));
+  // Codex t3 #2: an interrupted replacement whose reader ran (events present, spend never collected): 70 + 50 against
+  // a cap of 100 must stop, not abandon it and launch again.
+  const spent = scenario("spent", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 70, restaged_as: cid.y },
+    { id: cid.y, events: ["stream disconnected"], meta: { restaged_from: cid.x }, attempt: 2 }]);
+  assert("b9_interrupted_spend_stops", spent.launches === 0 && String(spent.stop).startsWith("interrupted replacement"), JSON.stringify(spent));
+  // Codex t3 #3 crash probe: attempt 3 completed but its attempt was never written; ancestry numbers it 3, so no
+  // attempt 4 launches.
+  const crashed = scenario("crashed", [{ id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b },
+    { id: cid.b, leakage: transport, events: ["stream disconnected"], reading: 0, meta: { restaged_from: cid.a }, attempt: 2, restaged_as: cid.x },
+    { id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 0, meta: { restaged_from: cid.b } }]);
+  assert("b9_attempt_from_ancestry", crashed.launches === 0 && crashed.stop === null, JSON.stringify(crashed));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------
   const usage = (argv: string[]) => "error" in parseRunArgs(argv);

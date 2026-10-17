@@ -123,6 +123,12 @@ export function familyCases(): FamilyCase[] {
     // N2 Q4: the reading 12.10 is near, not equal to, a reading of 12,104.
     { family: "c", name: "amount_net_12,104_near_not_exact", doc: "06", patch: replace("Netosumma: €12.10", "Netosumma: €12,104"),
       edit: { set: [{ field: "net", value: 12.1, on: "Netosumma: €12,104", quote: "€12,104" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
+    // N2 Q8 (Codex t3): a zero-VAT trio closes at both scales; nothing is resolved.
+    { family: "c", name: "amount_zero_vat_0,160", doc: "06",
+      patch: replaceAll([["Netosumma: €12.10", "Netosumma: €0,160"], ["Käibemaks (24.00%): €2.90", "Käibemaks (24.00%): €0.00"], ["Kokku: €15.00", "Kokku: €0,160"]]),
+      edit: { set: [{ field: "net", value: 0.16, on: "Netosumma: €0,160", quote: "€0,160" }, { field: "vat", value: 0, on: "Käibemaks (24.00%): €0.00", quote: "€0.00" },
+        { field: "gross", value: 0.16, on: "Kokku: €0,160", quote: "€0,160" }, { field: "currency", value: KEEP, on: "Kokku: €0,160", quote: "€" }] },
+      expect: { hold_new: ["ambiguous_amount_token"] } },
     // N2 Q2: a space-grouped join is never resolved, even inside a closing trio.
     { family: "c", name: "amount_net_join_1_012,10", doc: "06", patch: replace("Netosumma: €12.10", "Netosumma: €1 012,10"),
       edit: { set: [{ field: "net", value: 12.1, on: "Netosumma: €1 012,10", quote: "€1 012,10" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },

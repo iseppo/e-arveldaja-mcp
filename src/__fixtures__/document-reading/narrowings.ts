@@ -71,7 +71,22 @@ const scaleCompetitors = (printed: [string, string, string]) => grossCompetitors
 const listed = (printed: [string, string, string], reading: [number, number, number], extra: string[] = [], answers: CaseInput["answers"] = {}) =>
   trio(printed, reading, extra, { ...scaleCompetitors(printed), ...answers });
 
+/** Codex t3 BLOCKER shape: a zero-VAT trio printed with three decimals, the other scale printed as a competitor. */
+const zeroVat = (net: string, vat: string, gross: string, reading: number, other: string): CaseInput => ({
+  lines: withExtra([`Kokku ilma ümarduseta ${other} €`], { 5: `Summa ilma KM-ta    ${net} €`, 6: `KM 0%    ${vat} €`, 7: `Kokku EUR    ${gross} €` }),
+  values: { net: reading, vat: 0, gross: reading },
+  evidence: { net: { line: "p1:005", quote: `Summa ilma KM-ta ¦ ${net} €` }, vat: { line: "p1:006", quote: `KM 0% ¦ ${vat} €` },
+    gross: { line: "p1:007", quote: `Kokku EUR ¦ ${gross} €` }, currency: { line: "p1:007", quote: `Kokku EUR ¦ ${gross} €` } },
+  answers: { gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: `${other} €` }], why_this_one: "", verdict: "confirm" } },
+});
+
 export const N2_CASES: NarrowingCase[] = [
+  { name: "N2-Q8-codex-zero-vat", violates: "Q8", input: zeroVat("0,160", "0,00", "0,160", 0.16, "160,00"), holds: ["ambiguous_amount_token:gross", "ambiguous_amount_token:net"] },
+  { name: "N2-Q8-zero-vat-integer", violates: "Q8", input: zeroVat("0,200", "0", "0,200", 0.2, "200,00"), holds: ["ambiguous_amount_token:gross", "ambiguous_amount_token:net"] },
+  { name: "N2-Q8-cent-vat", violates: "Q8", input: { ...zeroVat("0,300", "0,01", "0,310", 0.3, "310,00"), values: { net: 0.3, vat: 0.01, gross: 0.31 },
+    answers: { gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: "310,00 €" }, { line: "p1:005", quote: "0,300 €" }], why_this_one: "", verdict: "confirm" } } }, holds: ["ambiguous_amount_token:gross", "ambiguous_amount_token:net"] },
+  { name: "N2-Q8-gross-anchor", violates: "Q8", input: zeroVat("0,200", "0,00", "0,20", 0.2, "200,00"), holds: ["ambiguous_amount_token:net"] },
+  { name: "N2-Q8-zero-vat-net-anchor", violates: "Q8", input: zeroVat("0,16", "0,00", "0,160", 0.16, "160,00"), holds: ["ambiguous_amount_token:gross"] },
   { name: "N2-positive-10-shape", violates: "positive", input: trio(["6,000", "1,440", "7,44"], [6, 1.44, 7.44], ["6,000 €"], N10_COMPETITORS), holds: [] },
   { name: "N2-Q4-codex-6,004", violates: "Q4", input: listed(["6,004", "1,440", "7,44"], [6, 1.44, 7.44]), holds: ["ambiguous_amount_token:net", "ambiguous_amount_token:vat"] },
   { name: "N2-Q4-vat-1,445", violates: "Q4", input: listed(["6,000", "1,445", "7,44"], [6, 1.45, 7.44]), holds: ["ambiguous_amount_token:net", "ambiguous_amount_token:vat"] },

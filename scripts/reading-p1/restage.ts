@@ -10,12 +10,15 @@
 //     link (a crash in between) is linked on resume, and a link to a missing replacement is dropped, so a stop
 //     never loses a case;
 //   - a replacement interrupted before its audit (staged, no leakage record and no reading) is marked
-//     `abandoned` on resume and its original is unlinked, so the original is classified and re-staged again;
+//     `abandoned` on resume and its original is unlinked, so the original is classified and re-staged again,
+//     but only when its directory shows no reader launch (no spend); otherwise its spend is unknown and the
+//     re-stage stops (unrecoverableReplacements);
+//   - a replacement's attempt is written at staging; a registry without one is numbered from its ancestry;
 //   - one predicate (retryEligible) decides both whether a failed case may be re-staged and whether the
 //     projection reserves its retry.
 // Usage: npx tsx scripts/reading-p1/restage.ts --run <tag> --cap-input <n> --cap-output <n> [--max 2]
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadPacketFile } from "./cases.js";
 import { argValue, dataPath, readJson, writeJson } from "./common.js";
@@ -96,13 +99,36 @@ export function classifyFailure(caseId: string): "transport" | "stop" {
   return classifyEvidence(failureEvidence(caseId)).kind;
 }
 
+/** Fills a missing attempt from ancestry: an original is 1, a replacement its parent's + 1. In place. */
+export function withAttempts<T extends Pick<Registry, "case_id" | "meta" | "attempt">>(regs: T[]): T[] {
+  const byId = new Map(regs.map((entry) => [entry.case_id, entry]));
+  const attemptOf = (entry: T, depth = 0): number => {
+    if (entry.attempt !== undefined) return entry.attempt;
+    const parent = typeof entry.meta?.restaged_from === "string" ? byId.get(entry.meta.restaged_from) : undefined;
+    // A replacement whose parent is not in the index is treated as exhausted, never as a fresh original.
+    if (typeof entry.meta?.restaged_from === "string" && (!parent || depth > 32)) return Number.MAX_SAFE_INTEGER;
+    return parent ? attemptOf(parent, depth + 1) + 1 : 1;
+  };
+  for (const entry of regs) if (entry.attempt === undefined) entry.attempt = attemptOf(entry);
+  return regs;
+}
+
+const isInterrupted = (entry: Registry) => typeof entry.meta?.restaged_from === "string" && !entry.abandoned &&
+  !existsSync(dataPath("leakage", `${entry.case_id}.json`)) && !existsSync(dataPath("readings", `${entry.case_id}.json`));
+/** Staged inputs only: anything else in a case directory means a reader was launched there. */
+const STAGED_INPUT_RE = /^(?:PROMPT\.md|TURN2\.md|schema[12]\.json)$/;
+const launched = (entry: Registry) => !existsSync(entry.dir) || readdirSync(entry.dir).some((name) => !STAGED_INPUT_RE.test(name));
+
+/** Interrupted replacements whose reader may have spent tokens (launch output present, or the dir is gone). */
+export function unrecoverableReplacements(regs: Registry[]): string[] {
+  return regs.filter((entry) => isInterrupted(entry) && launched(entry)).map((entry) => entry.case_id);
+}
+
 /** The run's registries (corpus rows of its index only), with replacement links repaired (see header). */
 export function runRegistries(tag: string): Registry[] {
-  const regs = corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
+  const regs = withAttempts(corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
   for (const entry of regs) {
-    const interrupted = typeof entry.meta?.restaged_from === "string" && !entry.abandoned &&
-      !existsSync(dataPath("leakage", `${entry.case_id}.json`)) && !existsSync(dataPath("readings", `${entry.case_id}.json`));
-    if (interrupted) {
+    if (isInterrupted(entry) && !launched(entry)) {
       entry.abandoned = true;
       writeJson(registryPath(entry.case_id), entry);
     }
@@ -125,8 +151,8 @@ export function runRegistries(tag: string): Registry[] {
 const leakageFailed = (caseId: string) => existsSync(dataPath("leakage", `${caseId}.json`)) && !readJson<{ pass: boolean }>(dataPath("leakage", `${caseId}.json`)).pass;
 
 /** The failed, not yet re-staged cases of a run tag. */
-function failedCases(tag: string): Registry[] {
-  return runRegistries(tag).filter((staged) => !staged.restaged_as && retryEligible(staged) && leakageFailed(staged.case_id));
+function failedCases(regs: Registry[]): Registry[] {
+  return regs.filter((staged) => !staged.restaged_as && retryEligible(staged) && leakageFailed(staged.case_id));
 }
 
 export interface RestageOptions {
@@ -141,7 +167,10 @@ export interface RestageOptions {
 export async function restageRun(opts: RestageOptions): Promise<string | null> {
   const log = opts.log ?? ((line: string) => process.stdout.write(`${line}\n`));
   for (let round = 1; round <= opts.max; round++) {
-    const failed = failedCases(opts.tag);
+    const regs = runRegistries(opts.tag);
+    const lost = unrecoverableReplacements(regs);
+    if (lost.length > 0) return `interrupted replacement ${lost.join(",")}: a reader ran but its spend was never collected (round ${round})`;
+    const failed = failedCases(regs);
     if (failed.length === 0) return null;
     const verdicts = new Map<string, string[]>();
     for (const staged of failed) {
@@ -154,14 +183,13 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
       const schemas = [1, 2].map((turn) => join(staged.dir, `schema${turn}.json`)).filter((path) => existsSync(path))
         .map((path) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
       const { dir: _dir, prompt_sha256: _hash, turn2_sha256: _turn2, staged_at: _at, restaged_as: _as, restage_evidence: _ev, abandoned: _ab, attempt, ...rest } = staged;
-      const spec: CaseSpec = { ...rest, case_id: newCaseId(), prompt: readFileSync(join(staged.dir, "PROMPT.md"), "utf8"), ...(schemas.length ? { schemas } : {}), meta: { ...rest.meta, restaged_from: staged.case_id } };
-      return { original: staged, spec, packet: staged.doc_id && staged.form === "N-T" ? loadPacketFile(staged.doc_id).packet : undefined, attempt: (attempt ?? 1) + 1 };
+      const spec: CaseSpec = { ...rest, case_id: newCaseId(), prompt: readFileSync(join(staged.dir, "PROMPT.md"), "utf8"), ...(schemas.length ? { schemas } : {}),
+        meta: { ...rest.meta, restaged_from: staged.case_id }, attempt: (attempt ?? 1) + 1 };
+      return { original: staged, spec, packet: staged.doc_id && staged.form === "N-T" ? loadPacketFile(staged.doc_id).packet : undefined };
     });
     let stop: string | null = null;
     await runCases(items.map(({ spec, packet }) => ({ spec, packet })), 4, (outcome) => {
       const item = items.find((entry) => entry.spec.case_id === outcome.case_id)!;
-      const path = registryPath(outcome.case_id);
-      writeJson(path, { ...readJson<Registry>(path), attempt: item.attempt });
       writeJson(registryPath(item.original.case_id), { ...readJson<Registry>(registryPath(item.original.case_id)), restaged_as: outcome.case_id, restage_evidence: verdicts.get(item.original.case_id) });
       log(`round ${round}: ${item.original.case_id} → ${outcome.case_id} leakage=${outcome.leakage_pass} ${outcome.failures.join(",")}`);
       if (!outcome.leakage_pass && classifyFailure(outcome.case_id) === "stop") stop = stop ?? `leakage:${outcome.case_id}:${outcome.failures.join(",")}`;

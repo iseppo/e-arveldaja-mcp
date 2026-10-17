@@ -31,6 +31,8 @@ export interface CaseSpec {
   schemas?: Array<Record<string, unknown> | null>;
   /** Free metadata kept in the registry only (mutation family, field, …). */
   meta?: Record<string, unknown>;
+  /** Re-stage attempt (a replacement's, written at staging so a crash cannot lose it); absent on an original. */
+  attempt?: number;
 }
 
 export interface StagedCase extends Omit<CaseSpec, "prompt" | "schemas"> {

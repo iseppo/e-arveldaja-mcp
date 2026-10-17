@@ -20,7 +20,7 @@ import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
 import type { CollectedCase } from "./collect.js";
 import { argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
 import { rng, shuffle, type FamilyA } from "./mutate.js";
-import { MAX_RESTAGE_ROUNDS, classifyFailure, restageRun, retryEligible, runRegistries, type Registry } from "./restage.js";
+import { MAX_RESTAGE_ROUNDS, classifyFailure, restageRun, retryEligible, runRegistries, withAttempts, type Registry } from "./restage.js";
 import { runCases, type CaseOutcome } from "./run-cases.js";
 import { corpusRunIndex, loadStaged, registryPath } from "./stage.js";
 
@@ -56,7 +56,7 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
 
 /** The run's registries, from the corpus rows of its run index only (no other case record is opened). */
 function registries(tag: string): Registry[] {
-  return corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
+  return withAttempts(corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
 }
 
 const readingPath = (caseId: string) => dataPath("readings", `${caseId}.json`);

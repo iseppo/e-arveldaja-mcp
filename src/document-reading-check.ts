@@ -580,11 +580,15 @@ function citedMoney(doc: Doc, spans: ValueSpans, field: AmountField): MoneyToken
  * N2 Q3: the one (n, v, g) of the three readings sets with |n + v − g| ≤ 0.01 and at least one rate, or null when
  * none or several close. With Q1's anchor a second closing scale needs a near-zero term, so a checker-level case
  * cannot reach "several"; the helper is exported for that test.
+ * Q8 (zero VAT): rateMatches excludes 0 %, so a zero-VAT trio closes at every scale (net = gross) without a rate to
+ * tell them apart. Any closing combination with VAT within the cent tolerance of 0 (net = gross) resolves nothing.
  */
 export function uniqueClosingTrio(netValues: readonly number[], vatValues: readonly number[], grossValues: readonly number[], rates: readonly number[]): [number, number, number] | null {
   const closing: Array<[number, number, number]> = [];
   for (const n of netValues) for (const v of vatValues) for (const g of grossValues) {
-    if (Math.abs(n + v - g) <= 0.01 + 1e-9 && rateMatches(n, v, rates).length >= 1) closing.push([n, v, g]);
+    if (Math.abs(n + v - g) > 0.01 + 1e-9) continue;
+    if (Math.abs(v) <= 0.01 + 1e-9) return null; // Q8
+    if (rateMatches(n, v, rates).length >= 1) closing.push([n, v, g]);
   }
   return closing.length === 1 ? closing[0]! : null;
 }
