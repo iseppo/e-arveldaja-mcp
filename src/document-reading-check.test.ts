@@ -852,3 +852,28 @@ describe("reader text", () => {
   });
 });
 
+describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kill tests)", () => {
+  it("T-KILL-D1-billing: an XXX billing currency beside a EUR comparison currency holds foreign_currency_marker", () => {
+    expect(codesOf({ lines: withLines({}, ["Arveldusvaluuta AMOUNT10XXX", "Võrdlusvaluuta EUR"]) })).toContain("foreign_currency_marker");
+  });
+
+  it("T-KILL-D1-bic: a BIC branch code XXX keeps the hold (today's behaviour)", () => {
+    expect(codesOf({ lines: withLines({}, ["BIC: TRWIBEB1XXX"]) })).toContain("foreign_currency_marker");
+  });
+
+  const ocrNumberItems = (native: string[]) => [
+    { text: "Näidis OÜ", ocr: false },
+    { text: "Arve nr", ocr: false },
+    ...native.map((text) => ({ text, ocr: false })),
+    { text: "A-17", ocr: true },
+    ...BASE_LINES.slice(1).map((text) => ({ text, ocr: false })),
+  ];
+
+  it("T-KILL-D2-split: an OCR-read A-17 beside native A-1 and 7 holds ocr_cited_text", () => {
+    expect(keysOf({ pageMeta: { items: ocrNumberItems(["A-1", "7"]) } })).toContain("ocr_cited_text:invoice_number");
+  });
+
+  it("T-KILL-D2-longer: an OCR-read A-17 beside a native A-170 holds ocr_cited_text", () => {
+    expect(keysOf({ pageMeta: { items: ocrNumberItems(["A-170"]) } })).toContain("ocr_cited_text:invoice_number");
+  });
+});
