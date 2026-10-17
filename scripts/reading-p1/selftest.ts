@@ -188,8 +188,9 @@ try {
   assert("b9_reservations", reserve([reg("a")], ["a"], ["a"]) === 1 && reserve([reg("a"), reg("b", { restaged_from: "a" })], ["a"], ["a"]) === 1 &&
     reserve([reg("a"), reg("b", { restaged_from: "a" })], ["a", "b"], ["a"]) === 0 && reserve([reg("a", {}, 3)], ["a"], ["a"]) === 0 && reserve([reg("a")], ["a"], []) === 0);
 
-  // B7/B9 restage in a temp data dir, with the real projection as the cap callback. The child gets no reader on
-  // PATH and an empty HOME, so even a broken guard cannot start a reader.
+  // B7/B9 restage in a temp data dir, with the real projection as the cap callback. The child runs with the
+  // reader stub (READING_P1_READER_STUB): every launch is logged and fails, and no reader process starts. (The
+  // empty HOME also makes a real reader's auth copy fail; PATH alone would not stop one.)
   const scenarioScript = join(root, "restage-scenario.mts");
   writeFileSync(scenarioScript, [
     `import { restageRun, runRegistries } from ${JSON.stringify(join(SCRIPTS_DIR, "restage.ts"))};`,
@@ -206,6 +207,8 @@ try {
     for (const sub of ["staging", "leakage", "readings", "runs", "legacy", "corpus", home]) mkdirSync(sub.startsWith("/") ? sub : join(dir, sub), { recursive: true });
     writeFileSync(join(dir, "SENTINEL.txt"), `${"0".repeat(32)}\n`);
     writeFileSync(join(dir, "legacy", "review_own_B_codex.json"), "[]");
+    writeFileSync(join(dir, "corpus", "files.txt"), "doc1.pdf\n");
+    writeFileSync(join(dir, "corpus", "sha256.txt"), `${"a".repeat(64)}  doc1.pdf\n`);
     writeFileSync(join(dir, "runs", "step5.tsv"), `${cid.s}\t01\n`);
     writeFileSync(join(dir, "readings", `${cid.s}.json`), JSON.stringify({ case_id: cid.s, reader: "codex", form: "N-S", meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 20, output: 1 } }] }));
     for (const entry of cases) {
@@ -218,8 +221,12 @@ try {
       if (entry.events) writeFileSync(join(dir, entry.id, "events1.jsonl"), entry.events.map((message) => JSON.stringify({ type: "error", message })).join("\n"));
       if (entry.reading !== undefined) writeFileSync(join(dir, "readings", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", meta: { run: "chain" }, leakage_pass: false, turns: [{ usage: { input: entry.reading, output: 0 } }] }));
     }
-    const out = execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), scenarioScript], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin" } });
-    return JSON.parse(out) as { stop: string | null; links: Record<string, string | null> };
+    const stubLog = join(dir, "launches.log");
+    const out = execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), scenarioScript], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin", READING_P1_READER_STUB: stubLog } });
+    const launches = existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter((line) => line.split("\t")[1] === "1") : [];
+    // The stub's launches still staged a /tmp/reading-p1.* dir each: remove them.
+    for (const line of launches) rmSync(line.split("\t")[2]!, { recursive: true, force: true });
+    return { ...(JSON.parse(out) as { stop: string | null; links: Record<string, string | null> }), launches: launches.length };
   };
   const transport = { failures: ["turn1_forbidden:event:error"] };
   const first = { id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b };
@@ -232,7 +239,17 @@ try {
   const lostLink = scenario("lost-link", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 90, restaged_as: cid.y }]);
   assert("b9_missing_replacement_not_lost", lostLink.links[cid.x] === null && String(lostLink.stop).startsWith("projection exceeds"), JSON.stringify(lostLink));
   const unlinked = scenario("unlinked", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 0 }, { id: cid.y, reading: 0, meta: { restaged_from: cid.x }, attempt: 2 }]);
-  assert("b9_staged_replacement_relinked", unlinked.links[cid.x] === cid.y && unlinked.stop === null, JSON.stringify(unlinked));
+  assert("b9_staged_replacement_relinked", unlinked.links[cid.x] === cid.y && unlinked.stop === null && unlinked.launches === 0, JSON.stringify(unlinked));
+  // Codex ab2 #1: a failed attempt 3 is neither reserved nor retried (one predicate); 70 consumed + no reservation
+  // stays under the cap, and still nothing launches.
+  const exhausted = scenario("exhausted", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 70, attempt: 3 }]);
+  assert("b9_attempt_3_not_retried", exhausted.launches === 0 && exhausted.stop === null, JSON.stringify(exhausted));
+  // Codex ab2 #3: a replacement interrupted before its audit (staged, no leakage, no reading) is abandoned and
+  // the original re-staged: exactly one launch, the original linked to the new replacement.
+  const interrupted = scenario("interrupted", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.y },
+    { id: cid.y, meta: { restaged_from: cid.x }, attempt: 2 }]);
+  assert("b9_interrupted_replacement_rerun", interrupted.launches === 1 && interrupted.links[cid.x] !== null && interrupted.links[cid.x] !== cid.y &&
+    interrupted.links[cid.y] === null, JSON.stringify(interrupted));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------
   const usage = (argv: string[]) => "error" in parseRunArgs(argv);
@@ -261,7 +278,10 @@ try {
     reading_schema: "ok", proof_schema: "ok", leakage_pass: true, wrong_fields: [], proof_problem_fields: [], passes: {}, usage: { input: 1, cached_input: 0, output: 1, reasoning_output: 0 }, models: [] }]));
   writeFileSync(join(scoped, "readings", "c-000000000002.json"), JSON.stringify({ case_id: "c-000000000002", reader: "opus", form: "N-S", kind: "natural", doc_id: "h01", meta: { run: "scoped" }, turns: [], reading: {}, proof: null, leakage_pass: true }));
   // The run index names the held-out case; its reading and registry are unreadable, so opening either fails.
-  writeFileSync(join(scoped, "runs", "scoped.tsv"), "c-000000000002\th01\n");
+  // A mixed index: one corpus row (a staged case without a reading) and the held-out row.
+  writeFileSync(join(scoped, "runs", "scoped.tsv"), "c-000000000003\t01\nc-000000000002\th01\n");
+  writeFileSync(join(scoped, "staging", "c-000000000003.json"), JSON.stringify({ case_id: "c-000000000003", reader: "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1,
+    dir: "/nonexistent", staged_at: "2026-10-17T00:00:00Z", meta: { run: "scoped" } }));
   writeFileSync(join(scoped, "staging", "c-000000000002.json"), "{}");
   chmodSync(join(scoped, "readings", "c-000000000002.json"), 0o000);
   chmodSync(join(scoped, "staging", "c-000000000002.json"), 0o000);
@@ -271,7 +291,7 @@ try {
   chmodSync(join(scoped, "heldout"), 0o000);
   const scopedRun = (script: string, args: string[]) => {
     try {
-      execFileSync("npx", ["tsx", join(SCRIPTS_DIR, script), ...args], { encoding: "utf8", stdio: "pipe", env: { ...process.env, READING_P1_DATA_DIR: scoped } });
+      execFileSync("npx", ["tsx", join(SCRIPTS_DIR, script), ...args], { encoding: "utf8", stdio: "pipe", env: { ...process.env, READING_P1_DATA_DIR: scoped, READING_P1_READER_STUB: join(scoped, "launches.log") } });
       return "";
     } catch (error) {
       return String((error as { stderr?: string }).stderr ?? error).slice(0, 300);
@@ -281,6 +301,12 @@ try {
   assert("b8_report_corpus_scope_no_heldout_read", reportError === "", reportError);
   const replayError = scopedRun("replay.ts", ["--run", "scoped", "--scope", "corpus"]);
   assert("b8_replay_corpus_scope_skips_heldout", replayError === "", replayError);
+  // Codex ab2 #2: step5 (projection) and restage open no record of the h01 index row either.
+  const caps = ["--run", "scoped", "--cap-input", "1000", "--cap-output", "1000"];
+  const step5Error = scopedRun("step5.ts", ["status", ...caps]);
+  assert("b8_step5_skips_heldout_index_row", step5Error === "", step5Error);
+  const restageError = scopedRun("restage.ts", caps);
+  assert("b8_restage_skips_heldout_index_row", restageError === "", restageError);
   chmodSync(join(scoped, "heldout"), 0o700);
   chmodSync(join(scoped, "readings", "c-000000000002.json"), 0o600);
   chmodSync(join(scoped, "staging", "c-000000000002.json"), 0o600);

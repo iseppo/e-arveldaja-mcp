@@ -20,9 +20,9 @@ import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
 import type { CollectedCase } from "./collect.js";
 import { argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
 import { rng, shuffle, type FamilyA } from "./mutate.js";
-import { MAX_RESTAGE_ROUNDS, classifyFailure, restageRun, runRegistries, type Registry } from "./restage.js";
+import { MAX_RESTAGE_ROUNDS, classifyFailure, restageRun, retryEligible, runRegistries, type Registry } from "./restage.js";
 import { runCases, type CaseOutcome } from "./run-cases.js";
-import { loadStaged, registryPath, runIndex } from "./stage.js";
+import { corpusRunIndex, loadStaged, registryPath } from "./stage.js";
 
 /** The frozen step-5 tag: its readings seed the per-case means of a new run, never its accounting. */
 export const FROZEN_TAG = "step5";
@@ -54,15 +54,15 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
   return { tag, caps: { input, output } };
 }
 
-/** The run's registries, from its run index only (no other case record is opened). */
+/** The run's registries, from the corpus rows of its run index only (no other case record is opened). */
 function registries(tag: string): Registry[] {
-  return runIndex(tag, { optional: true }).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
+  return corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
 }
 
 const readingPath = (caseId: string) => dataPath("readings", `${caseId}.json`);
 
 function readingsOf(tag: string): CollectedCase[] {
-  return runIndex(tag, { optional: true }).filter((entry) => existsSync(readingPath(entry.case_id))).map((entry) => readJson<CollectedCase>(readingPath(entry.case_id)));
+  return corpusRunIndex(tag).filter((entry) => existsSync(readingPath(entry.case_id))).map((entry) => readJson<CollectedCase>(readingPath(entry.case_id)));
 }
 
 const sumUsage = (reading: CollectedCase) => reading.turns.reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
@@ -118,16 +118,18 @@ export function meansOf(readings: CollectedCase[]): Means {
 
 /**
  * Reader × form keys of the cases that will still consume tokens without being planned-and-unstaged: a staged
- * case with no reading yet (in flight, or its replacement), and a failed case of attempt ≤ MAX_RESTAGE_ROUNDS
- * with no replacement staged yet (a pending retry).
+ * case with no reading yet (in flight, or its replacement), and a failed case that restage.ts may still retry
+ * (retryEligible, the same predicate restage uses) with no live replacement staged yet. An abandoned
+ * (interrupted) replacement never runs again and is not reserved.
  */
-export function reservedKeys(regs: ReadonlyArray<Pick<Registry, "case_id" | "reader" | "form" | "meta" | "attempt">>, hasReading: (caseId: string) => boolean, failed: (caseId: string) => boolean): string[] {
-  const replaced = new Set(regs.map((entry) => entry.meta?.restaged_from).filter((id): id is string => typeof id === "string"));
+export function reservedKeys(regs: ReadonlyArray<Pick<Registry, "case_id" | "reader" | "form" | "meta" | "attempt" | "abandoned">>, hasReading: (caseId: string) => boolean, failed: (caseId: string) => boolean): string[] {
+  const live = regs.filter((entry) => !entry.abandoned);
+  const replaced = new Set(live.map((entry) => entry.meta?.restaged_from).filter((id): id is string => typeof id === "string"));
   const keys: string[] = [];
-  for (const entry of regs) {
+  for (const entry of live) {
     if (entry.form === "planted" || entry.form === "canary") continue;
     if (!hasReading(entry.case_id)) keys.push(`${entry.reader}|${entry.form}`);
-    else if (failed(entry.case_id) && !replaced.has(entry.case_id) && (entry.attempt ?? 1) <= MAX_RESTAGE_ROUNDS) keys.push(`${entry.reader}|${entry.form}`);
+    else if (failed(entry.case_id) && !replaced.has(entry.case_id) && retryEligible(entry)) keys.push(`${entry.reader}|${entry.form}`);
   }
   return keys;
 }

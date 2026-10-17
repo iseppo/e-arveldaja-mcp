@@ -3,7 +3,7 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { ReadingPacket } from "../../src/document-reading-packet.js";
@@ -33,6 +33,13 @@ export function schemasFor(reader: Reader, form: Form): CaseSpec["schemas"] {
 }
 
 async function runTurn(reader: Reader, dir: string, meta: string, turn: 1 | 2 | "cleanup"): Promise<{ ok: boolean; error?: string }> {
+  // Test mode (selftest): READING_P1_READER_STUB names a log file; each launch is logged there and fails as a
+  // non-transport error, and no reader process is started.
+  const stub = process.env.READING_P1_READER_STUB;
+  if (stub) {
+    appendFileSync(stub, `${reader}\t${turn}\t${dir}\n`);
+    return { ok: false, error: "reader stub (test mode)" };
+  }
   try {
     if (reader === "codex") await run(join(SCRIPTS_DIR, "run-codex.sh"), [dir, meta, String(turn)], { timeout: TURN_TIMEOUT_MS });
     else await run(join(SCRIPTS_DIR, "run-claude.sh"), [dir, reader, String(turn)], { timeout: TURN_TIMEOUT_MS });

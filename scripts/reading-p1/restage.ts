@@ -8,7 +8,11 @@
 //     in-flight replacements (step5.ts reservedKeys), so retries count against the same run-tag caps;
 //   - the original records `restaged_as` only after its replacement has run; a replacement found without that
 //     link (a crash in between) is linked on resume, and a link to a missing replacement is dropped, so a stop
-//     never loses a case.
+//     never loses a case;
+//   - a replacement interrupted before its audit (staged, no leakage record and no reading) is marked
+//     `abandoned` on resume and its original is unlinked, so the original is classified and re-staged again;
+//   - one predicate (retryEligible) decides both whether a failed case may be re-staged and whether the
+//     projection reserves its retry.
 // Usage: npx tsx scripts/reading-p1/restage.ts --run <tag> --cap-input <n> --cap-output <n> [--max 2]
 
 import { existsSync, readFileSync } from "node:fs";
@@ -16,12 +20,17 @@ import { join } from "node:path";
 import { loadPacketFile } from "./cases.js";
 import { argValue, dataPath, readJson, writeJson } from "./common.js";
 import { newCaseId, runCases } from "./run-cases.js";
-import { loadStaged, registryPath, runIndex, type CaseSpec, type StagedCase } from "./stage.js";
+import { corpusRunIndex, loadStaged, registryPath, type CaseSpec, type StagedCase } from "./stage.js";
 
-export type Registry = StagedCase & { restaged_as?: string; attempt?: number; restage_evidence?: string[] };
+export type Registry = StagedCase & { restaged_as?: string; attempt?: number; restage_evidence?: string[]; abandoned?: boolean };
 
 /** Re-stage rounds per run: a case of attempt ≤ MAX_RESTAGE_ROUNDS may still be replaced. */
 export const MAX_RESTAGE_ROUNDS = 2;
+
+/** B9: a failed case may be re-staged, and its retry is reserved, only while this holds (planted/canary never). */
+export function retryEligible(entry: Pick<Registry, "form" | "attempt" | "abandoned">): boolean {
+  return entry.form !== "planted" && entry.form !== "canary" && !entry.abandoned && (entry.attempt ?? 1) <= MAX_RESTAGE_ROUNDS;
+}
 export const TRANSPORT_RE = /reconnect|websocket|transport|stream|disconnect|timed? ?out|rate.?limit|\b429\b|\b5\d\d\b|overloaded|network|connection|routing discovery/i;
 /** Failure codes that can only come from a leak or an isolation fault: these stop the run. */
 export const LEAK_RE = /sentinel|tool_use|attachment|instruction_fragment|outside_path|mcp_server|codex_home|_model$|session_changed|thread_changed|prompt_hash/;
@@ -87,12 +96,21 @@ export function classifyFailure(caseId: string): "transport" | "stop" {
   return classifyEvidence(failureEvidence(caseId)).kind;
 }
 
-/** The run's registries (from its index only), with replacement links repaired (see header). */
+/** The run's registries (corpus rows of its index only), with replacement links repaired (see header). */
 export function runRegistries(tag: string): Registry[] {
-  const regs = runIndex(tag, { optional: true }).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
-  const byId = new Map(regs.map((entry) => [entry.case_id, entry]));
+  const regs = corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
   for (const entry of regs) {
-    const replacement = regs.find((other) => other.meta?.restaged_from === entry.case_id);
+    const interrupted = typeof entry.meta?.restaged_from === "string" && !entry.abandoned &&
+      !existsSync(dataPath("leakage", `${entry.case_id}.json`)) && !existsSync(dataPath("readings", `${entry.case_id}.json`));
+    if (interrupted) {
+      entry.abandoned = true;
+      writeJson(registryPath(entry.case_id), entry);
+    }
+  }
+  const live = regs.filter((entry) => !entry.abandoned);
+  const byId = new Map(live.map((entry) => [entry.case_id, entry]));
+  for (const entry of regs) {
+    const replacement = live.find((other) => other.meta?.restaged_from === entry.case_id);
     if (replacement && entry.restaged_as !== replacement.case_id) {
       entry.restaged_as = replacement.case_id;
       writeJson(registryPath(entry.case_id), entry);
@@ -108,7 +126,7 @@ const leakageFailed = (caseId: string) => existsSync(dataPath("leakage", `${case
 
 /** The failed, not yet re-staged cases of a run tag. */
 function failedCases(tag: string): Registry[] {
-  return runRegistries(tag).filter((staged) => !staged.restaged_as && staged.form !== "planted" && staged.form !== "canary" && leakageFailed(staged.case_id));
+  return runRegistries(tag).filter((staged) => !staged.restaged_as && retryEligible(staged) && leakageFailed(staged.case_id));
 }
 
 export interface RestageOptions {
@@ -135,7 +153,7 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
     const items = failed.map((staged) => {
       const schemas = [1, 2].map((turn) => join(staged.dir, `schema${turn}.json`)).filter((path) => existsSync(path))
         .map((path) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
-      const { dir: _dir, prompt_sha256: _hash, turn2_sha256: _turn2, staged_at: _at, restaged_as: _as, restage_evidence: _ev, attempt, ...rest } = staged;
+      const { dir: _dir, prompt_sha256: _hash, turn2_sha256: _turn2, staged_at: _at, restaged_as: _as, restage_evidence: _ev, abandoned: _ab, attempt, ...rest } = staged;
       const spec: CaseSpec = { ...rest, case_id: newCaseId(), prompt: readFileSync(join(staged.dir, "PROMPT.md"), "utf8"), ...(schemas.length ? { schemas } : {}), meta: { ...rest.meta, restaged_from: staged.case_id } };
       return { original: staged, spec, packet: staged.doc_id && staged.form === "N-T" ? loadPacketFile(staged.doc_id).packet : undefined, attempt: (attempt ?? 1) + 1 };
     });
@@ -157,18 +175,20 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
 }
 
 if (process.argv[1]?.endsWith("/restage.ts")) {
-  const { parseRunArgs, projection, allPlanned } = await import("./step5.js");
-  const argv = process.argv.slice(2);
-  const run = parseRunArgs(argv);
-  if ("error" in run) {
-    process.stderr.write(`${run.error}\nusage: restage.ts --run <tag> --cap-input <n> --cap-output <n> [--max 2]\n`);
-    process.exitCode = 1;
-  } else {
+  // Not a top-level await: step5.ts imports this module, so awaiting its import here would deadlock the cycle.
+  void import("./step5.js").then(async ({ parseRunArgs, projection, allPlanned }) => {
+    const argv = process.argv.slice(2);
+    const run = parseRunArgs(argv);
+    if ("error" in run) {
+      process.stderr.write(`${run.error}\nusage: restage.ts --run <tag> --cap-input <n> --cap-output <n> [--max 2]\n`);
+      process.exitCode = 1;
+      return;
+    }
     const planned = allPlanned(run.tag);
     const stop = await restageRun({ tag: run.tag, max: Number(argValue(argv, "--max") ?? String(MAX_RESTAGE_ROUNDS)), exceeds: () => projection(planned, run).exceeds });
     if (stop) {
       process.stdout.write(`STOP: ${stop}\n`);
       process.exitCode = 3;
     }
-  }
+  });
 }

@@ -8,13 +8,12 @@
 //
 // Usage (smoke): npx tsx scripts/reading-p1/stage.ts --request <request.json>
 //   request.json = {"cases": [CaseSpec]}; a request with more than one case is refused.
-// Usage (one-off, pre-index tags only): npx tsx scripts/reading-p1/stage.ts --backfill-index <tag>
 
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { REPO_ROOT, argValue, dataPath, readJson, sentinel, sha256Hex, writeJson } from "./common.js";
+import { REPO_ROOT, argValue, dataPath, readJson, scopeIds, sentinel, sha256Hex, writeJson } from "./common.js";
 import type { Form } from "./prompts.js";
 
 export type Reader = "opus" | "haiku" | "codex";
@@ -58,7 +57,7 @@ export function runIndex(tag: string, opts: { optional?: boolean } = {}): RunInd
   const path = runIndexPath(tag);
   if (!existsSync(path)) {
     if (opts.optional) return [];
-    throw new Error(`no run index ${tag}: stage the run, or backfill a pre-index tag (stage.ts --backfill-index)`);
+    throw new Error(`no run index ${tag}: stage the run first`);
   }
   const seen = new Set<string>();
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
@@ -68,16 +67,12 @@ export function runIndex(tag: string, opts: { optional?: boolean } = {}): RunInd
 }
 
 /**
- * One-off index of a tag staged before the run index existed (pilot, step5, step5-legacy). It opens every
- * registry, so it is only for the pre-index tags, all staged before any held-out case existed.
+ * B8: the run's index rows of corpus documents (and document-less smoke cases), filtered by document id before
+ * any case record is opened. Every script that opens a run's registries or readings goes through this.
  */
-export function backfillRunIndex(tag: string): number {
-  if (existsSync(runIndexPath(tag))) throw new Error(`run index ${tag} exists`);
-  const entries = readdirSync(dataPath("staging")).filter((name) => /^c-[0-9a-f]{12}\.json$/.test(name))
-    .map((name) => readJson<StagedCase>(dataPath("staging", name))).filter((staged) => staged.meta?.run === tag)
-    .sort((a, b) => a.staged_at.localeCompare(b.staged_at));
-  for (const staged of entries) appendRunIndex(tag, { case_id: staged.case_id, doc_id: staged.doc_id });
-  return entries.length;
+export function corpusRunIndex(tag: string): RunIndexEntry[] {
+  const ids = scopeIds("corpus");
+  return runIndex(tag, { optional: true }).filter((entry) => entry.doc_id === null || ids.has(entry.doc_id));
 }
 
 const FORBIDDEN_ROOTS = [resolve(REPO_ROOT), resolve(homedir(), "Dokumendid")];
@@ -143,11 +138,6 @@ export function stageRequest(request: { cases?: unknown }): StagedCase {
 
 if (process.argv[1]?.endsWith("/stage.ts")) {
   try {
-    const backfill = argValue(process.argv.slice(2), "--backfill-index");
-    if (backfill) {
-      process.stdout.write(`${backfill}: ${backfillRunIndex(backfill)} cases indexed\n`);
-      process.exit(0);
-    }
     const requestPath = argValue(process.argv.slice(2), "--request");
     if (!requestPath) throw new Error("--request <file> required");
     const staged = stageRequest(JSON.parse(readFileSync(requestPath, "utf8")) as { cases?: unknown });
