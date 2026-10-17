@@ -402,6 +402,20 @@ const FOREIGN_PREFIX_SET: ReadonlySet<string> = new Set(FOREIGN_VAT_PREFIXES);
 
 const BIC_RE = /\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b/g;
 
+/** The VAT label words (the `VAT_LABEL_RE` vocabulary and its foreign equivalents) a country prefix may end. */
+const VAT_LABEL_WORDS = ["VAT", "UST", "MWST", "IVA", "TVA", "BTW", "MOMS", "ALV"] as const;
+
+/** True when the two letters at `i` end a VAT label word that starts on a non-letter boundary. */
+function isVatLabelTail(text: string, i: number): boolean {
+  return VAT_LABEL_WORDS.some((word) => {
+    const start = i + 2 - word.length;
+    return start >= 0 && text.slice(start, i + 2) === word && (start === 0 || !/\p{L}/u.test(text[start - 1]!));
+  });
+}
+
+const FIRST_GROUP_RE = /^([A-Z0-9]+)|^ ([A-Z0-9]*\d[A-Z0-9]*)(?![A-Z0-9])/;
+const FR_FIRST_GROUP_RE = /^([A-Z0-9]+)|^ ([A-Z0-9]{2}|[A-Z0-9]*\d[A-Z0-9]*)(?![A-Z0-9])/;
+
 function inside(inner: Span, outer: Span): boolean {
   return inner.start >= outer.start && inner.end <= outer.end;
 }
@@ -444,18 +458,19 @@ function cellIdentifiers(cell: Cell, lineIdValue: string, mode: "strict" | "acco
   }
 
   // Foreign VAT: a country prefix, an optional space, then uppercase alphanumeric groups. A
-  // space-separated group must contain a digit, and a prefix glued to a letter on its left (accounting
-  // mode) must be followed directly by its first group: otherwise `VAT EE…` would read as `AT EE…` and
-  // `EU VAT IE…` as `EUVATIE…`, holding every document that prints its own VAT label.
+  // space-separated group must contain a digit, except where the country's format allows letters there
+  // (FR's two-character key: `FR AB 123456789`). Outer boundaries are ignored in accounting mode
+  // (`XDE 123456789` counts); only a prefix that is the tail of a VAT label word is discarded, so
+  // `VAT EE…` does not read as `AT EE…` and `ALV FI…` not as `LV FI…`.
   for (let i = 0; i + 2 <= text.length; i += 1) {
     const prefix = text.slice(i, i + 2);
     if (!FOREIGN_PREFIX_SET.has(prefix)) continue;
     if (strict && !strictBefore(text, i)) continue;
-    const gluedLeft = i > 0 && /\p{L}/u.test(text[i - 1]!);
+    if (isVatLabelTail(text, i)) continue;
     let end = i + 2;
     let compactValue = prefix;
     const prefixes: Array<{ value: string; end: number }> = [];
-    const firstGroup = (gluedLeft ? /^([A-Z0-9]+)/ : /^([A-Z0-9]+)|^ ([A-Z0-9]*\d[A-Z0-9]*)(?![A-Z0-9])/).exec(text.slice(end));
+    const firstGroup = (prefix === "FR" ? FR_FIRST_GROUP_RE : FIRST_GROUP_RE).exec(text.slice(end));
     if (!firstGroup) continue;
     compactValue += firstGroup[1] ?? firstGroup[2];
     end += firstGroup[0].length;

@@ -196,6 +196,19 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
     expect(scan("EU VAT IE4276970QH", "accounting")).toEqual([["foreign_vat", ["IE4276970QH"]]]);
     expect(scan("USt-IdNr DE 123 456 789 GMBH", "strict")).toEqual([["foreign_vat", ["DE123456789"]]]);
     expect(scan("XDE123456789", "accounting")).toEqual([["foreign_vat", ["DE123456789"]]]);
+    expect(scan("ALV FI12345678", "accounting").filter(([kind]) => kind === "foreign_vat")).toEqual([["foreign_vat", ["FI12345678"]]]);
+  });
+
+  it("T-ID-foreign-glued-left: accounting finds a prefix glued to a non-label letter, strict does not", () => {
+    expect(scan("XDE 123456789", "accounting")).toEqual([["foreign_vat", ["DE123456789"]]]);
+    expect(scan("XDE 123456789", "strict")).toEqual([]);
+  });
+
+  it("T-ID-foreign-fr-key: a French alphanumeric key group is read in both modes", () => {
+    expect(scan("VAT FR AB 123456789", "accounting")).toEqual([["foreign_vat", ["FRAB123456789"]]]);
+    expect(scan("VAT FR AB 123456789", "strict")).toEqual([["foreign_vat", ["FRAB123456789"]]]);
+    // only FR's first group may be letters: `DE AB 123456789` is not a German VAT
+    expect(scan("Kood DE AB 123456789", "accounting")).toEqual([]);
   });
 
   it("T-ID-iban-scan: finds grouped and compact IBANs with strict boundaries", () => {
