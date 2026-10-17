@@ -143,7 +143,7 @@ function claimSessions(caseId: string, ids: Array<string | null>): void {
 export function collectCase(caseId: string): CollectedCase {
   const staged = loadStaged(caseId);
   const leakage = readJson<{ pass: boolean }>(dataPath("leakage", `${caseId}.json`));
-  const expects: Array<CollectedTurn["expects"]> = staged.form === "canary" || staged.form === "planted"
+  const expects: Array<CollectedTurn["expects"]> = staged.form === "canary" || staged.form === "planted" || staged.form === "legacy"
     ? Array.from({ length: staged.turns }, () => "text" as const)
     : turnOutputs(staged.form as Form);
   const turns = expects.map((kind, index) => readTurn(staged, index + 1, kind));

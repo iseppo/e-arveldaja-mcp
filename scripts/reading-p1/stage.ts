@@ -13,12 +13,12 @@ import { REPO_ROOT, argValue, dataPath, readJson, sentinel, sha256Hex, writeJson
 import type { Form } from "./prompts.js";
 
 export type Reader = "opus" | "haiku" | "codex";
-export type CaseKind = "natural" | "clean" | "mutated" | "canary" | "planted";
+export type CaseKind = "natural" | "clean" | "mutated" | "canary" | "planted" | "legacy";
 
 export interface CaseSpec {
   case_id: string;
   reader: Reader;
-  form: Form | "canary" | "planted";
+  form: Form | "canary" | "planted" | "legacy";
   kind: CaseKind;
   doc_id: string | null;
   turns: 1 | 2;
