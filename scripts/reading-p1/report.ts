@@ -9,6 +9,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { PARSER_VERSION, type PacketFile } from "./build-packets.js";
 import { REPO_ROOT, SCOPES, argValue, dataPath, hasFlag, readJson, scopeIds, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
 import { FORMS } from "./prompts.js";
+import { loadStaged, registryPath, runIndex } from "./stage.js";
 import { PROOF_QUESTIONS } from "../../src/document-reading-check.js";
 import { mcpPayloadBytes } from "../../src/response-budget.js";
 import type { TruthRecord } from "./truth.js";
@@ -197,10 +198,11 @@ export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: str
   });
   // Every truth change with its reason (B1/B3/B5), and every re-staged case of the run with its evidence (B7, 5a).
   const truthChanges = Object.entries(truth).flatMap(([doc, record]) => (record.truth_changes ?? []).map((change) => ({ doc, ...change })));
-  const restaged = existsSync(dataPath("staging")) ? readdirSync(dataPath("staging")).filter((name) => /^c-[0-9a-f]{12}\.json$/.test(name))
-    .map((name) => readJson<{ case_id: string; doc_id: string | null; meta?: Record<string, unknown>; restaged_as?: string; restage_evidence?: string[] }>(dataPath("staging", name)))
-    .filter((entry) => entry.meta?.run === tag && entry.restaged_as && (entry.doc_id === null || ids.has(entry.doc_id)))
-    .map((entry) => ({ case_id: entry.case_id, restaged_as: entry.restaged_as!, evidence: entry.restage_evidence ?? null })) : [];
+  // From the run index, filtered by document before any registry is opened.
+  const restaged = runIndex(tag, { optional: true }).filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)))
+    .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string; restage_evidence?: string[] })
+    .filter((entry) => entry.restaged_as)
+    .map((entry) => ({ case_id: entry.case_id, restaged_as: entry.restaged_as!, evidence: entry.restage_evidence ?? null }));
   return {
     truth_changes: truthChanges,
     restaged,

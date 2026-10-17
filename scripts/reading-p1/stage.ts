@@ -2,11 +2,16 @@
 // The case is inlined in PROMPT.md (and TURN2.md for a two-turn form); case metadata, truth, snapshots and
 // the sentinel never enter the directory. The case registry lives in <data>/staging/<case_id>.json.
 //
+// Every case staged with a run tag is also appended to the run index <data>/runs/<tag>.tsv (case id, document
+// id), so readers of a run open only its own case records, filtered by document before any record is read
+// (throughput round B8).
+//
 // Usage (smoke): npx tsx scripts/reading-p1/stage.ts --request <request.json>
 //   request.json = {"cases": [CaseSpec]}; a request with more than one case is refused.
+// Usage (one-off, pre-index tags only): npx tsx scripts/reading-p1/stage.ts --backfill-index <tag>
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { REPO_ROOT, argValue, dataPath, readJson, sentinel, sha256Hex, writeJson } from "./common.js";
@@ -34,6 +39,45 @@ export interface StagedCase extends Omit<CaseSpec, "prompt" | "schemas"> {
   prompt_sha256: string;
   turn2_sha256?: string;
   staged_at: string;
+}
+
+export interface RunIndexEntry { case_id: string; doc_id: string | null }
+
+export function runIndexPath(tag: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(tag)) throw new Error(`bad run tag ${tag}`);
+  return dataPath("runs", `${tag}.tsv`);
+}
+
+function appendRunIndex(tag: string, entry: RunIndexEntry): void {
+  mkdirSync(dataPath("runs"), { recursive: true, mode: 0o700 });
+  appendFileSync(runIndexPath(tag), `${entry.case_id}\t${entry.doc_id ?? ""}\n`, { mode: 0o600 });
+}
+
+/** The cases staged under a run tag, in staging order; `optional` returns [] for a tag with no index. */
+export function runIndex(tag: string, opts: { optional?: boolean } = {}): RunIndexEntry[] {
+  const path = runIndexPath(tag);
+  if (!existsSync(path)) {
+    if (opts.optional) return [];
+    throw new Error(`no run index ${tag}: stage the run, or backfill a pre-index tag (stage.ts --backfill-index)`);
+  }
+  const seen = new Set<string>();
+  return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => {
+    const [caseId, docId] = line.split("\t");
+    return { case_id: caseId!, doc_id: docId ? docId : null };
+  }).filter((entry) => !seen.has(entry.case_id) && seen.add(entry.case_id));
+}
+
+/**
+ * One-off index of a tag staged before the run index existed (pilot, step5, step5-legacy). It opens every
+ * registry, so it is only for the pre-index tags, all staged before any held-out case existed.
+ */
+export function backfillRunIndex(tag: string): number {
+  if (existsSync(runIndexPath(tag))) throw new Error(`run index ${tag} exists`);
+  const entries = readdirSync(dataPath("staging")).filter((name) => /^c-[0-9a-f]{12}\.json$/.test(name))
+    .map((name) => readJson<StagedCase>(dataPath("staging", name))).filter((staged) => staged.meta?.run === tag)
+    .sort((a, b) => a.staged_at.localeCompare(b.staged_at));
+  for (const staged of entries) appendRunIndex(tag, { case_id: staged.case_id, doc_id: staged.doc_id });
+  return entries.length;
 }
 
 const FORBIDDEN_ROOTS = [resolve(REPO_ROOT), resolve(homedir(), "Dokumendid")];
@@ -72,6 +116,7 @@ export function stageCase(spec: CaseSpec): StagedCase {
   const { prompt: _prompt, schemas: _schemas, ...rest } = spec;
   const staged: StagedCase = { ...rest, dir, prompt_sha256: sha256Hex(spec.prompt), staged_at: new Date().toISOString() };
   writeJson(registryPath(spec.case_id), staged);
+  if (typeof spec.meta?.run === "string") appendRunIndex(spec.meta.run, { case_id: spec.case_id, doc_id: spec.doc_id });
   return staged;
 }
 
@@ -98,6 +143,11 @@ export function stageRequest(request: { cases?: unknown }): StagedCase {
 
 if (process.argv[1]?.endsWith("/stage.ts")) {
   try {
+    const backfill = argValue(process.argv.slice(2), "--backfill-index");
+    if (backfill) {
+      process.stdout.write(`${backfill}: ${backfillRunIndex(backfill)} cases indexed\n`);
+      process.exit(0);
+    }
     const requestPath = argValue(process.argv.slice(2), "--request");
     if (!requestPath) throw new Error("--request <file> required");
     const staged = stageRequest(JSON.parse(readFileSync(requestPath, "utf8")) as { cases?: unknown });

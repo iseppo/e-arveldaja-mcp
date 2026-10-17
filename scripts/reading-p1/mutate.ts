@@ -12,7 +12,8 @@ import type { ReadingPacket } from "../../src/document-reading-packet.js";
 import type { EvidenceField } from "../../src/document-reading-schemas.js";
 import { ibanScan, identifierScan, lineCells, lineTokens } from "../../src/document-reading-tokens.js";
 import type { OwnIds, PacketFile } from "./build-packets.js";
-import { readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { runIndex } from "./stage.js";
 import type { CollectedCase } from "./collect.js";
 import { addDays, argValue, dataPath, readJson, writeJson, type SetName } from "./common.js";
 import { admitBase, checkContext, FIELD_KIND, synthesizeProof, truthDerivedReading } from "./synth-proof.js";
@@ -143,7 +144,9 @@ const PAYLOAD_FIELDS = ["supplier_reg", "supplier_vat", "invoice_number", "invoi
  */
 function opusBase(docId: string, derived: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!derived) return undefined;
-  const readings = readdirSync(dataPath("readings")).filter((name) => name.endsWith(".json")).map((name) => readJson<CollectedCase>(dataPath("readings", name)))
+  const readings = runIndex("step5").filter((entry) => entry.doc_id === docId && existsSync(dataPath("readings", `${entry.case_id}.json`)))
+    .sort((a, b) => a.case_id.localeCompare(b.case_id))
+    .map((entry) => readJson<CollectedCase>(dataPath("readings", `${entry.case_id}.json`)))
     .filter((entry) => entry.meta?.run === "step5" && entry.reader === "opus" && entry.form === "N-T" && entry.doc_id === docId && entry.leakage_pass && entry.reading_schema === "ok");
   const reading = readings[0]?.reading as Record<string, unknown> | undefined;
   if (!reading) return undefined;

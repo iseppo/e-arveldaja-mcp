@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditClaudeCase, instructionFingerprints } from "./audit-claude.js";
 import { auditCodexEvents } from "./audit-codex.js";
-import { SCRIPTS_DIR, dataPath, manifest, sentinel, sha256Hex, writeJson } from "./common.js";
+import { REPO_ROOT, SCRIPTS_DIR, dataPath, manifest, sentinel, sha256Hex, writeJson } from "./common.js";
 import { registryPath, stageRequest } from "./stage.js";
 import { promptIS, promptIT, promptNT2 } from "./prompts.js";
 import type { ReadingPacket } from "../../src/document-reading-packet.js";
@@ -19,7 +19,7 @@ import { legacyPrompt, legacyShapeOk } from "./legacy.js";
 import { candidatesFor, type FamilyA } from "./mutate.js";
 import { caseWrongFields, wrongFields } from "./replay.js";
 import { classifyEvidence } from "./restage.js";
-import { injectedItems, parseRunArgs, todoItems } from "./step5.js";
+import { injectedItems, parseRunArgs, projectTotals, reservedKeys, todoItems } from "./step5.js";
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
 
@@ -162,8 +162,9 @@ try {
   assert("b6_legacy_shape", !legacyShapeOk({ confirm: 15, problem: 18 }) && !legacyShapeOk([{ case: "C01" }]) &&
     legacyShapeOk(Array.from({ length: 33 }, (_, index) => ({ case: `C${index + 1}` }))));
 
-  // ---- B7: transport only on positive evidence ----------------------------------------------------------------
-  const kind = (failures: string[], error_messages: string[] = [], run_errors: string[] = []) => classifyEvidence({ failures, error_messages, run_errors }).kind;
+  // ---- B7: transport only on positive evidence, per turn --------------------------------------------------------
+  const kind = (failures: string[], messages: Array<string | [number, string]> = [], run_errors: string[] = []) =>
+    classifyEvidence({ failures, run_errors, error_messages: messages.map((entry) => (typeof entry === "string" ? { turn: 1, message: entry } : { turn: entry[0], message: entry[1] })) }).kind;
   assert("b7_no_events_no_output_stop", kind(["turn1_no_output"]) === "stop" && kind(["turn1_output_missing"]) === "stop");
   assert("b7_stream_disconnected_transport", kind(["turn1_forbidden:event:error"], ["stream disconnected before completion"]) === "transport");
   assert("b7_transport_plus_unknown_stop", kind(["turn1_forbidden:event:error", "turn1_unknown"], ["stream disconnected before completion"]) === "stop");
@@ -171,28 +172,63 @@ try {
   assert("b7_mixed_messages_stop", kind(["turn1_forbidden:event:error"], ["stream disconnected", "invalid json schema"]) === "stop");
   assert("b7_transport_plus_leak_stop", kind(["turn1_forbidden:event:error", "turn1_sentinel"], ["stream disconnected"]) === "stop");
   assert("b7_run_error_transport", kind(["run:turn1", "turn1_output_missing"], [], ["turn1:connection reset by peer"]) === "transport");
+  assert("b7_mixed_turn_stop", kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"]]) === "stop" &&
+    kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"], [2, "stream disconnected"]]) === "transport");
 
-  // B7/B9 retry chain, in a temp data dir: an earlier transport link does not excuse a later unexplained or leak
-  // failure, and a transport retry is still refused once the caps are exceeded. No reader can start: either the
-  // classification stops, or the cap callback (always exceeded here) does, before any case is staged.
-  const restageChain = (second: { failures: string[]; run_errors?: string[] }, secondEvents: string[]) => {
-    const dir = join(root, `chain-${sha256Hex(JSON.stringify(second)).slice(0, 8)}`);
-    for (const sub of ["staging", "leakage", "a", "b"]) mkdirSync(join(dir, sub), { recursive: true });
-    const [a, b] = ["c-aaaaaaaaaaaa", "c-bbbbbbbbbbbb"];
-    writeFileSync(join(dir, "staging", `${a}.json`), JSON.stringify({ case_id: a, reader: "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1, dir: join(dir, "a"), meta: { run: "chain" }, restaged_as: b }));
-    writeFileSync(join(dir, "staging", `${b}.json`), JSON.stringify({ case_id: b, reader: "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1, dir: join(dir, "b"), meta: { run: "chain", restaged_from: a } }));
-    writeFileSync(join(dir, "leakage", `${a}.json`), JSON.stringify({ pass: false, failures: ["turn1_forbidden:event:error"], run_errors: [] }));
-    writeFileSync(join(dir, "leakage", `${b}.json`), JSON.stringify({ pass: false, run_errors: [], ...second }));
-    writeFileSync(join(dir, "b", "events1.jsonl"), secondEvents.map((message) => JSON.stringify({ type: "error", message })).join("\n"));
-    const code = `import(${JSON.stringify(join(SCRIPTS_DIR, "restage.ts"))}).then(async (m) => { process.stdout.write(String(await m.restageRun({ tag: "chain", max: 2, exceeds: () => true, log: () => {} }))); })`;
-    return execFileSync("npx", ["tsx", "--eval", code], { encoding: "utf8", env: { ...process.env, READING_P1_DATA_DIR: dir } }).trim();
+  // B9 accounting (pure): 90 consumed, cap 100, a reserved retry at mean 20 must exceed.
+  const means = new Map([["codex|N-S", { input: 20, output: 1, n: 1 }]]);
+  const totals = (keys: string[]) => projectTotals({ consumed: { input: 90, output: 0 }, keys, own: new Map(), prior: means, legacyPending: false, caps: { input: 100, output: 1_000_000 } }).exceeds;
+  assert("b9_reserved_retry_exceeds", totals(["codex|N-S"]) && !totals([]));
+  const reg = (case_id: string, meta: Record<string, unknown> = {}, attempt?: number) => ({ case_id, reader: "codex" as const, form: "N-S" as const, meta: { run: "t", ...meta }, ...(attempt ? { attempt } : {}) });
+  const reserve = (regs: ReturnType<typeof reg>[], withReading: string[], failed: string[]) => reservedKeys(regs, (id) => withReading.includes(id), (id) => failed.includes(id)).length;
+  assert("b9_reservations", reserve([reg("a")], ["a"], ["a"]) === 1 && reserve([reg("a"), reg("b", { restaged_from: "a" })], ["a"], ["a"]) === 1 &&
+    reserve([reg("a"), reg("b", { restaged_from: "a" })], ["a", "b"], ["a"]) === 0 && reserve([reg("a", {}, 3)], ["a"], ["a"]) === 0 && reserve([reg("a")], ["a"], []) === 0);
+
+  // B7/B9 restage in a temp data dir, with the real projection as the cap callback. The child gets no reader on
+  // PATH and an empty HOME, so even a broken guard cannot start a reader.
+  const scenarioScript = join(root, "restage-scenario.mts");
+  writeFileSync(scenarioScript, [
+    `import { restageRun, runRegistries } from ${JSON.stringify(join(SCRIPTS_DIR, "restage.ts"))};`,
+    `import { projection } from ${JSON.stringify(join(SCRIPTS_DIR, "step5.ts"))};`,
+    "const run = { tag: \"chain\", caps: { input: 100, output: 1_000_000 } };",
+    "const stop = await restageRun({ tag: \"chain\", max: 2, exceeds: () => projection([], run).exceeds, log: () => {} });",
+    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(runRegistries(\"chain\").map((r) => [r.case_id, r.restaged_as ?? null])) }));",
+  ].join("\n"));
+  const cid = { a: "c-aaaaaaaaaaaa", b: "c-bbbbbbbbbbbb", s: "c-555555555555", x: "c-eeeeeeeeeeee", y: "c-ffffffffffff" };
+  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; reading?: number; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
+  const scenario = (name: string, cases: Case[]) => {
+    const dir = join(root, `scenario-${name}`);
+    const home = join(dir, "home");
+    for (const sub of ["staging", "leakage", "readings", "runs", "legacy", "corpus", home]) mkdirSync(sub.startsWith("/") ? sub : join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, "SENTINEL.txt"), `${"0".repeat(32)}\n`);
+    writeFileSync(join(dir, "legacy", "review_own_B_codex.json"), "[]");
+    writeFileSync(join(dir, "runs", "step5.tsv"), `${cid.s}\t01\n`);
+    writeFileSync(join(dir, "readings", `${cid.s}.json`), JSON.stringify({ case_id: cid.s, reader: "codex", form: "N-S", meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 20, output: 1 } }] }));
+    for (const entry of cases) {
+      mkdirSync(join(dir, entry.id), { recursive: true });
+      writeFileSync(join(dir, entry.id, "PROMPT.md"), "x\n");
+      writeFileSync(join(dir, "staging", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1, dir: join(dir, entry.id),
+        staged_at: "2026-10-17T00:00:00Z", meta: { run: "chain", ...entry.meta }, ...(entry.restaged_as ? { restaged_as: entry.restaged_as } : {}), ...(entry.attempt ? { attempt: entry.attempt } : {}) }));
+      writeFileSync(join(dir, "runs", "chain.tsv"), `${entry.id}\t01\n`, { flag: "a" });
+      if (entry.leakage) writeFileSync(join(dir, "leakage", `${entry.id}.json`), JSON.stringify({ pass: false, run_errors: [], ...entry.leakage }));
+      if (entry.events) writeFileSync(join(dir, entry.id, "events1.jsonl"), entry.events.map((message) => JSON.stringify({ type: "error", message })).join("\n"));
+      if (entry.reading !== undefined) writeFileSync(join(dir, "readings", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", meta: { run: "chain" }, leakage_pass: false, turns: [{ usage: { input: entry.reading, output: 0 } }] }));
+    }
+    const out = execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), scenarioScript], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin" } });
+    return JSON.parse(out) as { stop: string | null; links: Record<string, string | null> };
   };
-  const chainLeak = restageChain({ failures: ["turn1_forbidden:event:error", "turn1_sentinel"] }, ["stream disconnected"]);
-  assert("b7_chain_leak_after_transport_stops", chainLeak.startsWith("leakage:c-bbbbbbbbbbbb"), chainLeak);
-  const chainUnexplained = restageChain({ failures: ["turn1_output_missing"] }, []);
-  assert("b7_chain_unexplained_after_transport_stops", chainUnexplained.startsWith("leakage:c-bbbbbbbbbbbb"), chainUnexplained);
-  const chainTransport = restageChain({ failures: ["turn1_forbidden:event:error"] }, ["stream disconnected"]);
-  assert("b9_chain_retry_counts_against_caps", chainTransport.startsWith("projection exceeds the chain caps"), chainTransport);
+  const transport = { failures: ["turn1_forbidden:event:error"] };
+  const first = { id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b };
+  const leak = scenario("leak", [first, { id: cid.b, leakage: { failures: ["turn1_forbidden:event:error", "turn1_sentinel"] }, events: ["stream disconnected"], reading: 0, meta: { restaged_from: cid.a }, attempt: 2 }]);
+  assert("b7_chain_leak_after_transport_stops", String(leak.stop).startsWith(`leakage:${cid.b}`), JSON.stringify(leak));
+  const unexplained = scenario("unexplained", [first, { id: cid.b, leakage: { failures: ["turn1_output_missing"] }, reading: 0, meta: { restaged_from: cid.a }, attempt: 2 }]);
+  assert("b7_chain_unexplained_after_transport_stops", String(unexplained.stop).startsWith(`leakage:${cid.b}`), JSON.stringify(unexplained));
+  const capped = scenario("capped", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 90 }]);
+  assert("b9_retry_reserved_against_caps", String(capped.stop).startsWith("projection exceeds the chain caps"), JSON.stringify(capped));
+  const lostLink = scenario("lost-link", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 90, restaged_as: cid.y }]);
+  assert("b9_missing_replacement_not_lost", lostLink.links[cid.x] === null && String(lostLink.stop).startsWith("projection exceeds"), JSON.stringify(lostLink));
+  const unlinked = scenario("unlinked", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 0 }, { id: cid.y, reading: 0, meta: { restaged_from: cid.x }, attempt: 2 }]);
+  assert("b9_staged_replacement_relinked", unlinked.links[cid.x] === cid.y && unlinked.stop === null, JSON.stringify(unlinked));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------
   const usage = (argv: string[]) => "error" in parseRunArgs(argv);
@@ -212,7 +248,7 @@ try {
 
   // ---- B8: corpus scope never reads the held-out set ----------------------------------------------------------
   const scoped = join(root, "scoped-data");
-  for (const sub of ["corpus", "packets", "results", "readings", "heldout"]) mkdirSync(join(scoped, sub), { recursive: true });
+  for (const sub of ["corpus", "packets", "results", "readings", "heldout", "runs", "staging"]) mkdirSync(join(scoped, sub), { recursive: true });
   writeFileSync(join(scoped, "corpus", "files.txt"), "doc1.pdf\n");
   writeFileSync(join(scoped, "corpus", "sha256.txt"), `${"a".repeat(64)}  doc1.pdf\n`);
   writeFileSync(join(scoped, "corpus", "truth.json"), "{}");
@@ -220,6 +256,11 @@ try {
   writeFileSync(join(scoped, "results", "scoped.json"), JSON.stringify([{ case_id: "c-000000000001", reader: "opus", form: "N-S", kind: "natural", doc_id: "01", set: "corpus", truth_available: false,
     reading_schema: "ok", proof_schema: "ok", leakage_pass: true, wrong_fields: [], proof_problem_fields: [], passes: {}, usage: { input: 1, cached_input: 0, output: 1, reasoning_output: 0 }, models: [] }]));
   writeFileSync(join(scoped, "readings", "c-000000000002.json"), JSON.stringify({ case_id: "c-000000000002", reader: "opus", form: "N-S", kind: "natural", doc_id: "h01", meta: { run: "scoped" }, turns: [], reading: {}, proof: null, leakage_pass: true }));
+  // The run index names the held-out case; its reading and registry are unreadable, so opening either fails.
+  writeFileSync(join(scoped, "runs", "scoped.tsv"), "c-000000000002\th01\n");
+  writeFileSync(join(scoped, "staging", "c-000000000002.json"), "{}");
+  chmodSync(join(scoped, "readings", "c-000000000002.json"), 0o000);
+  chmodSync(join(scoped, "staging", "c-000000000002.json"), 0o000);
   writeFileSync(join(scoped, "heldout", "files.txt"), "secret.pdf\n");
   writeFileSync(join(scoped, "packets", "h01.json"), "{}");
   chmodSync(join(scoped, "packets", "h01.json"), 0o000);
@@ -237,6 +278,8 @@ try {
   const replayError = scopedRun("replay.ts", ["--run", "scoped", "--scope", "corpus"]);
   assert("b8_replay_corpus_scope_skips_heldout", replayError === "", replayError);
   chmodSync(join(scoped, "heldout"), 0o700);
+  chmodSync(join(scoped, "readings", "c-000000000002.json"), 0o600);
+  chmodSync(join(scoped, "staging", "c-000000000002.json"), 0o600);
   chmodSync(join(scoped, "packets", "h01.json"), 0o600);
   const heldoutLiteral = ["report.ts", "replay.ts", "step5.ts", "restage.ts", "mutate.ts"].filter((name) => {
     const text = readFileSync(join(SCRIPTS_DIR, name), "utf8");

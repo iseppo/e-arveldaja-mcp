@@ -5,7 +5,7 @@
 // Scope (throughput round B8): "corpus" is the only scope; a reading of a document outside the corpus manifest is
 // skipped before its packet, own ids or truth are read.
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { normalizeVatValue } from "../../src/document-identifiers.js";
 import { checkReading, type AcceptedValues, type CheckResult } from "../../src/document-reading-check.js";
 import { normalizeInvoiceNumberForComparison } from "../../src/purchase-invoice-status.js";
@@ -14,6 +14,7 @@ import type { CollectedCase } from "./collect.js";
 import { SCOPES, addDays, argValue, dataPath, hasFlag, readJson, scopeIds, todayIso, writeJson, type Scope, type SetName } from "./common.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import { checkContext } from "./synth-proof.js";
+import { runIndex } from "./stage.js";
 import { companyOf, type TruthRecord } from "./truth.js";
 
 export const SCORED_FIELDS = ["invoice_date", "invoice_number", "due_date", "supplier_reg", "supplier_vat", "supplier_iban", "currency", "net", "vat", "gross"] as const;
@@ -128,10 +129,12 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
 export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope; readings?: string }): Promise<CaseResult[]> {
   const ids = scopeIds(opts.scope);
   const results: CaseResult[] = [];
-  const files = readdirSync(dataPath("readings")).filter((name) => name.endsWith(".json"));
-  for (const name of files.sort()) {
-    const collected = readJson<CollectedCase>(dataPath("readings", name));
-    if (collected.meta?.run !== (opts.readings ?? tag) || !collected.doc_id || !ids.has(collected.doc_id)) continue;
+  // The run index names each case's document, so a reading outside the scope is never opened.
+  const entries = runIndex(opts.readings ?? tag).filter((entry) => entry.doc_id !== null && ids.has(entry.doc_id))
+    .filter((entry) => existsSync(dataPath("readings", `${entry.case_id}.json`))).sort((a, b) => a.case_id.localeCompare(b.case_id));
+  for (const entry of entries) {
+    const collected = readJson<CollectedCase>(dataPath("readings", `${entry.case_id}.json`));
+    if (collected.meta?.run !== (opts.readings ?? tag) || collected.doc_id !== entry.doc_id || !collected.doc_id) continue;
     const set: SetName = opts.scope;
     const file = readJson<PacketFile>(dataPath("packets", `${collected.doc_id}.json`));
     const own = readJson<Record<string, OwnIds>>(dataPath(set, "own.json"))[collected.doc_id]!;
