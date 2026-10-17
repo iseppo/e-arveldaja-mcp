@@ -82,15 +82,62 @@ interface ImportRecord {
   module: string;
 }
 
+// Blank comments while KEEPING string, template and regex literals intact, so module specifiers survive
+// (blanking literals, as stripCommentsAndStrings does, turned every `from "node:fs"` into `from ""` and
+// made this guard vacuous). A single-pass lexer: `//` inside a string or regex is not a comment.
+function stripComments(source: string): string {
+  let out = "";
+  let i = 0;
+  let lastSignificant = "";
+  const regexCanStart = () => lastSignificant === "" || /[(,=:[!&|?{};+\-*%<>~^]/.test(lastSignificant) ||
+    /\b(?:return|typeof|case|do|else|in|of|void|yield|await)$/.test(out.trimEnd());
+  while (i < source.length) {
+    const c = source[i]!;
+    const next = source[i + 1];
+    if (c === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      out += " ";
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      out += " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`" || (c === "/" && regexCanStart())) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < source.length) {
+        const d = source[j]!;
+        if (d === "\\") { j += 2; continue; }
+        if (c === "/" && d === "[") inClass = true;
+        else if (c === "/" && d === "]") inClass = false;
+        else if (d === c && !inClass) break;
+        else if (c !== "`" && d === "\n") break;
+        j += 1;
+      }
+      out += source.slice(i, j + 1);
+      i = j + 1;
+      lastSignificant = c;
+      continue;
+    }
+    out += c;
+    if (!/\s/.test(c)) lastSignificant = c;
+    i += 1;
+  }
+  return out;
+}
+
 function importRecords(source: string): ImportRecord[] {
-  const code = stripCommentsAndStrings(source);
+  const code = stripComments(source);
   const records: ImportRecord[] = [];
-  // `import ... from "module"` (value + type imports)
-  for (const match of code.matchAll(/import\s+([\s\S]*?)\s+from\s+["']([^"']+)["']/g)) {
+  // `import ... from "module"` (value + type imports) and `export ... from "module"` re-exports
+  for (const match of code.matchAll(/\b(?:import|export)\s+([^;"'`]*?)\s*from\s*["']([^"']+)["']/g)) {
     records.push({ clause: match[1]!, module: match[2]! });
   }
-  // Side-effect imports: `import "module"`
-  for (const match of code.matchAll(/import\s+["']([^"']+)["']/g)) {
+  // Side-effect imports `import "module"`, dynamic `import("module")` and `require("module")`
+  for (const match of code.matchAll(/\b(?:import\s*\(?|require\s*\()\s*["']([^"']+)["']/g)) {
     records.push({ clause: "", module: match[1]! });
   }
   return records;
@@ -112,9 +159,7 @@ const FORBIDDEN_NAME_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: "HttpClient", pattern: /\bHttpClient\b/ },
 ];
 
-function forbiddenImportViolations(relativePath: string): string[] {
-  const absolute = join(process.cwd(), relativePath);
-  const source = readFileSync(absolute, "utf8");
+function forbiddenImportViolations(relativePath: string, source = readFileSync(join(process.cwd(), relativePath), "utf8")): string[] {
   const violations: string[] = [];
   for (const { clause, module } of importRecords(source)) {
     for (const { label, pattern } of FORBIDDEN_MODULE_PATTERNS) {
@@ -137,8 +182,36 @@ describe("architecture boundary — pure domain modules stay free of transport/I
     }
   });
 
+  // Pre-existing violations the vacuous scanner hid, pinned EXACTLY: a new violation fails, and so does a
+  // fixed one until it is removed from this list. Not an allowlist to grow.
+  const KNOWN_VIOLATIONS = [
+    'src/wise/projection.ts imports forbidden module (mcp-json): "../mcp-json.js"',
+    'src/wise/projection.ts imports forbidden module (mcp-json): "../mcp-json.js"',
+  ];
+
   it("has no forbidden imports in any pure module", () => {
-    const allViolations = pureFiles.flatMap(forbiddenImportViolations);
-    expect(allViolations).toEqual([]);
+    const allViolations = pureFiles.flatMap((file) => forbiddenImportViolations(file));
+    expect(allViolations).toEqual(KNOWN_VIOLATIONS);
+  });
+
+  it("canary: the scanner sees every forbidden import form, even after literals with comment-like text", () => {
+    const canary = [
+      'const url = "https://example.test/*"; import { readFileSync } from "node:fs";',
+      "const re = /[/*\"']+/g; // a regex holding quotes and a comment opener",
+      'import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";',
+      "import {",
+      "  HttpClient,",
+      '} from "./http-client.js";',
+      'export { toMcpJson } from "./mcp-json.js";',
+      'import "./audit-log.js";',
+      'const config = await import("../config.js");',
+      "/* import { readFileSync } from \"node:fs\"; */ // import \"node:fs\"",
+    ].join("\n");
+    const violations = forbiddenImportViolations("canary.ts", canary);
+    for (const label of ["node:fs", "MCP SDK", "McpServer", "http-client", "HttpClient", "mcp-json", "toMcpJson", "audit", "env/config"]) {
+      expect(violations.some((violation) => violation.includes(`(${label})`)), label).toBe(true);
+    }
+    // the commented-out imports on the last line are not counted
+    expect(violations.filter((violation) => violation.includes("(node:fs)"))).toHaveLength(1);
   });
 });
