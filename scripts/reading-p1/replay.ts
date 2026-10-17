@@ -1,6 +1,7 @@
 // checkReading (+ the full pipeline) over collected reader cases → results/<run>.json (plan §5.1, §5.7).
 // Two passes: real (--today, default the run date) and as-of (truth.invoice_date + 30 days, from truth).
-// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--scope corpus] [--today YYYY-MM-DD] [--pipeline]
+// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--readings <tag>] [--scope corpus] [--today YYYY-MM-DD] [--pipeline]
+// --readings rescores the readings of another run under --run (e.g. step5 → step5-rescored, zero reader cost).
 // Scope (throughput round B8): "corpus" is the only scope; a reading of a document outside the corpus manifest is
 // skipped before its packet, own ids or truth are read.
 
@@ -124,13 +125,13 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
   return pass;
 }
 
-export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope }): Promise<CaseResult[]> {
+export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope; readings?: string }): Promise<CaseResult[]> {
   const ids = scopeIds(opts.scope);
   const results: CaseResult[] = [];
   const files = readdirSync(dataPath("readings")).filter((name) => name.endsWith(".json"));
   for (const name of files.sort()) {
     const collected = readJson<CollectedCase>(dataPath("readings", name));
-    if (collected.meta?.run !== tag || !collected.doc_id || !ids.has(collected.doc_id)) continue;
+    if (collected.meta?.run !== (opts.readings ?? tag) || !collected.doc_id || !ids.has(collected.doc_id)) continue;
     const set: SetName = opts.scope;
     const file = readJson<PacketFile>(dataPath("packets", `${collected.doc_id}.json`));
     const own = readJson<Record<string, OwnIds>>(dataPath(set, "own.json"))[collected.doc_id]!;
@@ -178,7 +179,7 @@ if (process.argv[1]?.endsWith("/replay.ts")) {
   if (!tag) throw new Error("--run <tag> required");
   const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
-  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: hasFlag(argv, "--pipeline"), scope })
+  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: hasFlag(argv, "--pipeline"), scope, readings: argValue(argv, "--readings") })
     .then((results) => process.stdout.write(`replayed ${results.length} cases → results/${tag}.json\n`))
     .catch((error: unknown) => {
       process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
