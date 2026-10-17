@@ -12,6 +12,8 @@ import type { ReadingPacket } from "../../src/document-reading-packet.js";
 import type { EvidenceField } from "../../src/document-reading-schemas.js";
 import { ibanScan, identifierScan, lineCells, lineTokens } from "../../src/document-reading-tokens.js";
 import type { OwnIds, PacketFile } from "./build-packets.js";
+import { readdirSync } from "node:fs";
+import type { CollectedCase } from "./collect.js";
 import { addDays, argValue, dataPath, readJson, writeJson, type SetName } from "./common.js";
 import { admitBase, checkContext, FIELD_KIND, synthesizeProof, truthDerivedReading } from "./synth-proof.js";
 import type { TruthRecord } from "./truth.js";
@@ -126,7 +128,24 @@ export function shuffle<T>(items: readonly T[], random: () => number): T[] {
   return copy;
 }
 
-export interface AdmittedBase { doc_id: string; reading: Record<string, unknown>; sources: Record<string, string> }
+export interface AdmittedBase { doc_id: string; reading: Record<string, unknown>; sources: Record<string, string>; source?: "opus_nt" | "truth_derived" }
+
+const PAYLOAD_FIELDS = ["supplier_reg", "supplier_vat", "invoice_number", "invoice_date", "due_date", "currency", "net", "vat", "gross", "supplier_iban"] as const;
+
+/**
+ * §5.5 first base source: the step-5 opus N-T clean reading of the document, only if it equals truth on every
+ * payload field. Truth here is the truth-derived reading (the printed truth values, with unprinted ids/IBAN,
+ * VAT 0 and an unlabelled due date as null), so a null is equal only where that reading is null too.
+ */
+function opusBase(docId: string, derived: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!derived) return undefined;
+  const readings = readdirSync(dataPath("readings")).filter((name) => name.endsWith(".json")).map((name) => readJson<CollectedCase>(dataPath("readings", name)))
+    .filter((entry) => entry.meta?.run === "step5" && entry.reader === "opus" && entry.form === "N-T" && entry.doc_id === docId && entry.leakage_pass && entry.reading_schema === "ok");
+  const reading = readings[0]?.reading as Record<string, unknown> | undefined;
+  if (!reading) return undefined;
+  const same = (a: unknown, b: unknown) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) <= 0.005 : String(a ?? "") === String(b ?? ""));
+  return PAYLOAD_FIELDS.every((field) => same(reading[field], derived[field])) ? reading : undefined;
+}
 
 export interface FamilyA {
   family: "a";
@@ -155,13 +174,15 @@ function familyA(set: SetName): FamilyA {
     const file = readJson<PacketFile>(dataPath("packets", `${docId}.json`));
     const ownIds = own[docId]!;
     const asOf = addDays(record.invoice_date!, 30);
-    const base = truthDerivedReading(file, record, ownIds);
+    const derived = truthDerivedReading(file, record, ownIds);
+    const opus = opusBase(docId, derived.dropped === undefined ? derived.reading : undefined);
+    const base = opus ? { reading: opus as typeof derived.reading, sources: {} } : derived;
     const admission = admitBase(file, base, ownIds, asOf);
     if (!admission.admitted) {
       excluded.push({ doc_id: docId, reason: base.dropped ?? `held:${admission.result.holds.map((hold) => hold.code).join(",")}` });
       continue;
     }
-    admitted.push({ doc_id: docId, reading: base.reading, sources: base.sources as Record<string, string> });
+    admitted.push({ doc_id: docId, reading: base.reading, sources: base.sources as Record<string, string>, source: opus ? "opus_nt" : "truth_derived" });
     const ctx = checkContext(file, ownIds, asOf);
     for (const field of Object.keys(FIELD_TYPE) as EvidenceField[]) {
       const baseValue = base.reading[field];
