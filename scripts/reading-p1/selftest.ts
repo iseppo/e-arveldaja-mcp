@@ -22,6 +22,10 @@ import { classifyEvidence } from "./restage.js";
 import { injectedItems, parseRunArgs, projectTotals, reservedKeys, todoItems } from "./step5.js";
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
+import { buildCase } from "../../src/__fixtures__/document-reading/invoice.js";
+import { N1_CASES, type NarrowingCase } from "../../src/__fixtures__/document-reading/narrowings.js";
+import { checkReading } from "../../src/document-reading-check.js";
+import { runPipeline, type Snapshot } from "./pipeline.js";
 
 interface Check { name: string; expect: "pass" | "fail"; pass: boolean; failures: string[]; ok: boolean }
 
@@ -286,6 +290,23 @@ try {
     return text.includes('"heldout"') || text.includes('startsWith("h")');
   });
   assert("b8_no_heldout_literal_in_scoped_scripts", heldoutLiteral.length === 0, heldoutLiteral.join(","));
+
+  // ---- §10 narrowings: the pipeline outcome on a synthetic, non-private snapshot ------------------------------
+  const syntheticSnapshot: Snapshot = {
+    company: "10000024",
+    clients: [{ id: 1, name: "Näidis OÜ", code: "10000018", invoice_vat_no: "EE100000007", cl_code_country: "EST" } as Snapshot["clients"][number]],
+    purchaseInvoices: [], details: [], journals: [], transactions: [], bankAccounts: [], accountDimensions: [], purchaseArticles: [], vatRegistered: true,
+  };
+  const narrowingPipeline = async (entry: NarrowingCase) => {
+    const { packet, reading, proof, ctx } = buildCase(entry.input);
+    const check = checkReading(packet, reading, proof, ctx);
+    const file = { id: "n", path: "n.pdf", packet, heuristic: ctx.heuristic, heuristic_fields: { invoice_number: null } } as unknown as PacketFile;
+    const result = await runPipeline({ accepted: check.accepted, check, file, truth: undefined, company: "10000024", base: syntheticSnapshot });
+    const accepted = result.status === "evaluated" && result.holds.length === 0;
+    const ok = entry.holds.length === 0 ? accepted && check.verdict === "accept" : result.status === "not_accepted" && check.verdict === "hold";
+    assert(`narrowing_pipeline_${entry.name}`, ok, JSON.stringify({ status: result.status, holds: result.holds.map((hold) => hold.code), verdict: check.verdict }));
+  };
+  for (const entry of N1_CASES) await narrowingPipeline(entry);
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

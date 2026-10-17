@@ -24,6 +24,7 @@ import { READING_FIELDS } from "./document-reading-schemas.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS } from "./invoice-extraction-fallback.js";
 import { detectReverseChargeFromText } from "./tools/receipt-extraction.js";
 import { BASE_LINES, buildCase, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
+import { N1_CASES, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
 
 const withLines = (edits: Record<number, string>, extra: string[] = []) =>
   [...BASE_LINES.map((line, index) => edits[index + 1] ?? line), ...extra];
@@ -859,10 +860,6 @@ describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kil
     expect(codesOf({ lines: withLines({}, ["Arveldusvaluuta AMOUNT10XXX", "Võrdlusvaluuta EUR"]) })).toContain("foreign_currency_marker");
   });
 
-  it("T-KILL-D1-bic: a BIC branch code XXX keeps the hold (today's behaviour)", () => {
-    expect(codesOf({ lines: withLines({}, ["BIC: TRWIBEB1XXX"]) })).toContain("foreign_currency_marker");
-  });
-
   // The OCR item is the internal fragment `7` of the cited A-17 (not a separator-bounded part of it), so a
   // separator-boundary relaxation would accept both cases; today's substring rule holds them.
   const ocrFragmentItems = (native: string[]) => [
@@ -880,4 +877,14 @@ describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kil
   it("T-KILL-D2-longer: an OCR fragment 7 of A-17 beside a native A-170 holds ocr_cited_text", () => {
     expect(keysOf({ pageMeta: { items: ocrFragmentItems(["A-170"]) } })).toContain("ocr_cited_text:invoice_number");
   });
+});
+
+const expectNarrowing = (entry: NarrowingCase) => {
+  const result = runCase(entry.input);
+  expect(holdKeys(result).sort(), entry.name).toEqual(entry.holds);
+  expect(result.verdict, entry.name).toBe(entry.holds.length === 0 ? "accept" : "hold");
+};
+
+describe("N1: a label-bound BIC branch code XXX is not a currency (plan p1-throughput-round §10)", () => {
+  for (const entry of N1_CASES) it(`T-N1 ${entry.name} (${entry.violates}): exact holds ${JSON.stringify(entry.holds)}`, () => expectNarrowing(entry));
 });

@@ -130,8 +130,10 @@ export async function runPipeline(input: {
   company: string | null;
   /** Family (h)–(j) cases (plan §5.4): a transformed snapshot, unavailable clients, or a patched booking. */
   overrides?: { snapshot?: (snapshot: Snapshot) => Snapshot; clientsUnavailable?: boolean; booking?: (booking: BookingView) => BookingView };
+  /** A synthetic snapshot in place of the company's frozen one (selftest fixtures; never private data). */
+  base?: Snapshot;
 }): Promise<PipelineResult> {
-  const base = loadSnapshot(input.company);
+  const base = input.base ?? loadSnapshot(input.company);
   if (!base) return { status: "no_snapshot", holds: [], warnings: [], reversed_vat: null, pre_existing: [] };
   const accepted = input.accepted;
   if (!accepted || input.check.verdict !== "accept") return { status: "not_accepted", holds: [], warnings: [], reversed_vat: null, pre_existing: [] };

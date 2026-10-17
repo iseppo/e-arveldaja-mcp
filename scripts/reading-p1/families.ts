@@ -132,6 +132,11 @@ export function familyCases(): FamilyCase[] {
       edit: recite([["net", "Netosumma", "12.10"], ["vat", "Käibemaks", "2.90"], ["gross", "Kokku", "15.00"], ["currency", "Kokku", "zł"]]), expect: { hold_new: ["currency_not_stated"] } },
     { family: "d'", name: "moms_25_trio", doc: "06", patch: append(["Belopp exkl. moms ¦ 12,00", "Moms 25% ¦ 3,00", "Att betala ¦ 15,00"]),
       expect: { hold_new: ["foreign_rate_trio"] } },
+    // N1 (throughput round §10): only a label-bound BIC branch XXX is exempt; every other XXX still holds.
+    { family: "d'", name: "bic_branch_anchored", doc: "06", patch: append(["BIC: TRWIBEB1XXX"]), expect: { residual_pass: "label-bound BIC branch code (N1)" } },
+    { family: "d'", name: "bic_branch_adjacent_billing_xxx", doc: "06", patch: append(["BIC: TRWIBEB1XXX ¦ Arveldusvaluuta AMOUNT10XXX"]), expect: { hold_new: ["foreign_currency_marker"] } },
+    { family: "d'", name: "bic_branch_label_other_line", doc: "06", patch: append(["BIC:", "TRWIBEB1XXX"]), expect: { hold_new: ["foreign_currency_marker"] } },
+    { family: "d'", name: "bic_branch_plus_usd", doc: "06", patch: append(["BIC: TRWIBEB1XXX", "Summa 10,00 USD"]), expect: { hold_new: ["foreign_currency_marker"] } },
     { family: "d'", name: "every_eur_token_removed", doc: "06", patch: replaceAll([["€", ""]]),
       edit: recite([["net", "Netosumma", "12.10"], ["vat", "Käibemaks", "2.90"], ["gross", "Kokku", "15.00"], ["currency", "Kokku", "Kokku: 15.00"]]), expect: { hold_new: ["currency_not_stated"] } },
 

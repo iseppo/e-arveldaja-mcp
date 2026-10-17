@@ -256,6 +256,22 @@ describe("document-reading tokens: document-level scanners", () => {
     expect(currencyScan(linesOf("x", "€"), lists).eurStated).toBe(true);
   });
 
+  it("T-TOK-currency-bic-branch: N1 exempts a label-bound BIC branch XXX only with EUR stated and no other marker", () => {
+    const lists = { isoCodes: ["XXX", "USD"], wordLikeCodes: [], letterSymbols: [] };
+    const scan = (...texts: string[]) => currencyScan(linesOf(...texts), lists);
+    const exempt = scan("Kokku 5,00 EUR", "BIC: TRWIBEB1XXX");
+    expect(exempt.hits).toEqual([]);
+    expect(exempt.bicBranchHits.map((hit) => hit.text)).toEqual(["XXX"]);
+    // P5: another marker puts the exempted hit back into hits
+    const other = scan("Kokku 5,00 EUR", "BIC: TRWIBEB1XXX", "Summa 10,00 USD");
+    expect(other.hits.map((hit) => hit.text).sort()).toEqual(["USD", "XXX"]);
+    expect(other.bicBranchHits).toEqual([]);
+    // P4: no EUR stated, no exemption
+    const noEur = scan("Kokku 5,00", "BIC: TRWIBEB1XXX");
+    expect(noEur.hits.map((hit) => hit.text)).toEqual(["XXX"]);
+    expect(noEur.bicBranchHits).toEqual([]);
+  });
+
   it("T-TOK-percent: percent tokens compare by value", () => {
     expect(percentTokens(linesOf("KM 24%", "KM 24 %", "KM 9,5 %", "100%")).map((token) => token.value)).toEqual([24, 24, 9.5]);
   });

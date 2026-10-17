@@ -559,7 +559,35 @@ export interface CurrencyScanLists {
   letterSymbols: readonly string[];
 }
 export interface CurrencyHit { line: string; kind: "iso" | "symbol" | "letter_symbol"; text: string }
-export interface CurrencyScanResult { hits: CurrencyHit[]; eurStated: boolean }
+/** `bicBranchHits`: `XXX` hits exempted as the branch code of a BIC bound to a BIC/SWIFT label (N1); never in `hits`. */
+export interface CurrencyScanResult { hits: CurrencyHit[]; eurStated: boolean; bicBranchHits: CurrencyHit[] }
+
+const BIC_LABEL = String.raw`(?:SWIFT\/BIC|BIC\/SWIFT|BIC|SWIFT)(?:[ -]?(?:kood|code))?\s*:?`;
+const BIC_LABEL_ONLY_RE = new RegExp(`^${BIC_LABEL}$`, "i");
+/** P2's shape `^[A-Z]{6}[A-Z0-9]{2}XXX$` is checked as this 11-character BIC shape plus P1 (the hit is XXX at T[8..10]). */
+const BIC_SHAPE_RE = /^[A-Z]{6}[A-Z0-9]{5}$/;
+
+/**
+ * N1 P1–P3: an ISO hit `XXX` at `at` of `cell` is the branch code of a BIC directly bound to a BIC/SWIFT label:
+ * P1 the hit is XXX; P2 the maximal [A-Z0-9]+ run T around it is 11 characters of BIC shape with the hit at
+ * T[8..10]; P3 the label binds T directly, either (a) T is its whole cell and the immediately preceding cell
+ * is label-only, or (b) the whole cell is the label followed by T and nothing else.
+ */
+function isBicBranchCode(cells: readonly Cell[], cell: Cell, at: number, code: string): boolean {
+  if (code !== "XXX") return false;
+  let start = at;
+  while (start > 0 && /[A-Z0-9]/.test(cell.text[start - 1]!)) start -= 1;
+  let end = at + code.length;
+  while (end < cell.text.length && /[A-Z0-9]/.test(cell.text[end]!)) end += 1;
+  const run = cell.text.slice(start, end);
+  if (run.length !== 11 || !BIC_SHAPE_RE.test(run) || at - start !== 8) return false;
+  const trimmed = cell.text.trim();
+  if (trimmed === run) {
+    const previous = cell.index > 0 ? cells[cell.index - 1] : undefined;
+    return previous !== undefined && BIC_LABEL_ONLY_RE.test(previous.text.trim());
+  }
+  return new RegExp(`^${BIC_LABEL}\\s*${run}$`, "i").test(trimmed);
+}
 
 function nearMoney(wordIndex: number, cellWordsList: Word[], money: MoneyToken[], cellIndex: number): boolean {
   return money.some((token) => {
@@ -583,6 +611,7 @@ export function currencyScan(lines: ReadonlyArray<TokenLine>, lists: CurrencySca
   const wordLike = new Set(lists.wordLikeCodes);
   const letterSymbols = new Set(lists.letterSymbols);
   const hits: CurrencyHit[] = [];
+  const bicBranchHits: CurrencyHit[] = [];
   let eurStated = false;
   for (const line of lines) {
     if (line.text.includes("\u20AC")) eurStated = true;
@@ -602,7 +631,8 @@ export function currencyScan(lines: ReadonlyArray<TokenLine>, lists: CurrencySca
           const wordIndex = inCell.findIndex((word) => at >= word.start && at < word.end);
           if (!nearMoney(wordIndex, inCell, tokens.money, cell.index)) continue;
         }
-        hits.push({ line: line.id, kind: "iso", text: code });
+        if (isBicBranchCode(tokens.cells, cell, match.index!, code)) bicBranchHits.push({ line: line.id, kind: "iso", text: code });
+        else hits.push({ line: line.id, kind: "iso", text: code });
       }
       inCell.forEach((word, index) => {
         const bare = word.text.replace(/^[(]+/, "").replace(/[,;:!?)]+$/, "");
@@ -611,7 +641,9 @@ export function currencyScan(lines: ReadonlyArray<TokenLine>, lists: CurrencySca
       });
     }
   }
-  return { hits, eurStated };
+  // N1 P4/P5: the exemption stands only when EUR is stated and no other foreign marker exists anywhere.
+  if (bicBranchHits.length > 0 && (!eurStated || hits.length > 0)) return { hits: [...hits, ...bicBranchHits], eurStated, bicBranchHits: [] };
+  return { hits, eurStated, bicBranchHits };
 }
 
 export interface PercentToken extends Span { line: string; value: number }
