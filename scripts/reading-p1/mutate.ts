@@ -43,6 +43,8 @@ export interface Candidate {
 
 export interface EvaluatedCandidate extends Candidate { held: boolean; codes: string[] }
 
+const compactIban = (value: string | number) => String(value).replace(/\s+/g, "").toUpperCase();
+
 const cellQuote = (text: string, start: number, end: number) => {
   const cell = lineCells(text).find((candidate) => start >= candidate.start && end <= candidate.end);
   const quote = cell ? cell.text.trim() : text.slice(start, end);
@@ -57,9 +59,11 @@ export function candidatesFor(docId: string, packet: ReadingPacket, field: Evide
   const type = FIELD_TYPE[field];
   const out: Candidate[] = [];
   const seen = new Set<string>();
+  // IBANs compare compact: the base holds the printed form, equivalents may hold either.
+  const same = (a: string | number, b: string | number) => (type === "iban" ? compactIban(a) === compactIban(b) : a === b);
   const add = (value: string | number, line: string, quote: string) => {
-    if (value === baseValue || (typeof value === "number" && typeof baseValue === "number" && Math.abs(value - baseValue) <= 0.005)) return;
-    if (equivalent.includes(value)) return;
+    if (same(value, baseValue) || (typeof value === "number" && typeof baseValue === "number" && Math.abs(value - baseValue) <= 0.005)) return;
+    if (equivalent.some((entry) => same(entry, value))) return;
     if (quote.length === 0 || quote.length > 200) return;
     const key = `${value}\u0000${line}\u0000${quote}`;
     if (seen.has(key)) return;
@@ -79,7 +83,10 @@ export function candidatesFor(docId: string, packet: ReadingPacket, field: Evide
     return out;
   }
   if (type === "iban") {
-    for (const hit of ibanScan(packet.lines)) add(hit.value, hit.line, cellQuote(packet.lines.find((line) => line.id === hit.line)!.text, hit.start, hit.end));
+    for (const hit of ibanScan(packet.lines)) {
+      const text = packet.lines.find((line) => line.id === hit.line)!.text;
+      add(text.slice(hit.start, hit.end), hit.line, cellQuote(text, hit.start, hit.end));
+    }
     return out;
   }
   for (const line of packet.lines) {

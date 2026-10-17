@@ -117,8 +117,29 @@ export function dueLabelledDates(packet: ReadingPacket): Array<{ value: string; 
   return out;
 }
 
-/** The labelled occurrence: its cell, or the cell before it on the same line, has a letter. */
-function preferLabelled(candidates: Located[]): Located | undefined {
+/** A line prefix that names an amount (a totals or VAT line, not an item row). */
+const AMOUNT_LABEL = /net|neto|summa|total|kokku|vat|k\u00e4ibemaks|\bkm\b|tax|gross|amount|tasuda|tasumisele|paid|subtotal|vahesumma|bruto|brutto/iu;
+/** The field's own label, searched when the chosen amount sits on an item row. */
+const FIELD_LABEL: Partial<Record<EvidenceField, RegExp>> = {
+  net: /\bnet|neto|ilma|k\u00e4ibemaksuta|subtotal|vahesumma|taxable/iu,
+  vat: /vat|k\u00e4ibemaks|\bkm\b|tax/iu,
+  gross: /total|kokku|gross|tasuda|tasumisele|paid|amount due|bruto|brutto/iu,
+};
+const prefixOf = (located: Located) => located.line.text.slice(0, located.start);
+
+/**
+ * The labelled occurrence: its cell, or the cell before it on the same line, has a letter. For net/vat/gross,
+ * an occurrence on an item row (no amount label before it, e.g. "1.0 ¦ Day pass ¦ 20.00 EUR") gives way to
+ * the first occurrence after the field's own label ("Net Amount:", "TOTAL AMOUNT"), when there is one.
+ */
+function preferLabelled(candidates: Located[], field?: EvidenceField): Located | undefined {
+  const chosen = preferLetter(candidates);
+  const label = field ? FIELD_LABEL[field] : undefined;
+  if (!chosen || !label || AMOUNT_LABEL.test(prefixOf(chosen))) return chosen;
+  return candidates.find((candidate) => label.test(prefixOf(candidate))) ?? chosen;
+}
+
+function preferLetter(candidates: Located[]): Located | undefined {
   const labelled = candidates.find((candidate) => {
     const cells = lineCells(candidate.line.text);
     const index = cells.findIndex((cell) => candidate.start >= cell.start && candidate.end <= cell.end);
@@ -148,7 +169,8 @@ export function truthDerivedReading(file: PacketFile, truth: TruthRecord, own: O
   const sources: BaseReading["sources"] = {};
   const unscored = new Set(truth.unscored_fields ?? []);
   const set = (field: EvidenceField, value: string | number, located: Located, source: "truth" | "heuristic" | "own") => {
-    reading[field] = value;
+    // An IBAN is written as printed ("BE27 9051 9325 0073"), not as the compact booked string.
+    reading[field] = FIELD_KIND[field] === "iban" ? located.line.text.slice(located.start, located.end) : value;
     reading.evidence[field] = { line: located.line.id, quote: located.quote };
     sources[field] = source;
   };
@@ -174,12 +196,12 @@ export function truthDerivedReading(file: PacketFile, truth: TruthRecord, own: O
     if (unscored.has(field) || value === null || value === undefined) {
       // Unscored: the heuristic's value when printed as a complete token, else null.
       const heuristic = heuristicValue(file, field);
-      const located = heuristic === undefined ? undefined : preferLabelled(occurrences(packet, FIELD_KIND[field], heuristic));
+      const located = heuristic === undefined ? undefined : preferLabelled(occurrences(packet, FIELD_KIND[field], heuristic), field);
       if (heuristic !== undefined && located) set(field, heuristic, located, "heuristic");
       else reading[field] = null;
       continue;
     }
-    const located = preferLabelled(occurrences(packet, FIELD_KIND[field], value));
+    const located = preferLabelled(occurrences(packet, FIELD_KIND[field], value), field);
     if (!located) {
       // e-arveldaja may hold more than the document prints: an unprinted supplier id or IBAN, or a VAT of 0,
       // is read as null (no value is written from it). Any other unprinted truth value drops the base.

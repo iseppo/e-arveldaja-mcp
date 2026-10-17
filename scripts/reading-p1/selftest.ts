@@ -169,6 +169,21 @@ try {
   assert("b3_base_first_printed_iban", fixtureBase.reading.supplier_iban === ibanA, String(fixtureBase.reading.supplier_iban));
   const ibanCandidates = (equivalent: string[]) => candidatesFor("t1", fixtureFile.packet, "supplier_iban", ibanA, equivalent).map((candidate) => candidate.value);
   assert("b3_equivalent_iban_no_candidate", !ibanCandidates([ibanA, ibanB]).includes(ibanB) && ibanCandidates([]).includes(ibanB));
+  // Base #14 (step5b): the IBAN is printed in groups and the net/gross first appear on an item row.
+  const spacedIban = ibanA.replace(/(.{4})(?=.)/g, "$1 ");
+  const itemRow = ["Seller OÜ    Invoice no A-17", "Reg. nr 10000018    KMKR EE100000007", "Ostja: Ostja AS    Reg. nr 10000024", "Kuupäev 15.03.2026",
+    "Quantity    Description    Unit Amount    Total", "1.0    Day Pass for Aug 14 2026    100,00 EUR    124,00 EUR", "Net Amount: 100,00 EUR", "VAT 24% 24,00 EUR",
+    "TOTAL AMOUNT    124,00 EUR", `IBAN: ${spacedIban}`];
+  const itemFile = { ...fixtureFile, packet: makePacket(itemRow) } as PacketFile;
+  const itemBase = truthDerivedReading(itemFile, { ...fixtureTruth, supplier_iban: ibanA, unscored_fields: [], supplier_ibans_printed: undefined }, { reg: "10000024", vat: null, name: "Ostja AS" });
+  const lineOf = (field: string) => itemFile.packet.lines.find((line) => line.id === itemBase.reading.evidence[field]?.line)?.text ?? "";
+  assert("b14_base_iban_printed_form", itemBase.reading.supplier_iban === spacedIban, String(itemBase.reading.supplier_iban));
+  assert("b14_base_amounts_cite_labelled_lines", lineOf("net").startsWith("Net Amount") && lineOf("gross").startsWith("TOTAL AMOUNT") && lineOf("vat").startsWith("VAT"),
+    JSON.stringify({ net: lineOf("net"), gross: lineOf("gross") }));
+  // The base may hold either form (an opus base, a compact equivalent): the same account is never its own mutation.
+  const ownCandidates = [...candidatesFor("t1", itemFile.packet, "supplier_iban", spacedIban), ...candidatesFor("t1", itemFile.packet, "supplier_iban", ibanA)]
+    .map((candidate) => String(candidate.value).replace(/\s+/g, ""));
+  assert("b14_printed_iban_not_its_own_candidate", !ownCandidates.includes(ibanA), JSON.stringify(ownCandidates));
 
   // ---- B6: legacy prompt and output shape ---------------------------------------------------------------------
   const legacy = legacyPrompt();
