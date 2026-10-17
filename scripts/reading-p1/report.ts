@@ -13,7 +13,7 @@ const CEILING = { input: 30_000_000, output: 4_000_000 };
 const LEGACY_TOKENS = 200_000;
 const PLAN_MAX_I_CASES = 240;
 /** §2.5 proof / cross-check codes: a wrong field held by any OTHER code on that field was caught by a hard check. */
-const PROOF_CODES = new Set(["proof_problem", "label_quote_missing", "label_quote_not_printed", "label_quote_no_letter", "label_quote_overlaps_value", "competitor_not_printed", "competitor_equals_value", "reading_heuristic_conflict"]);
+const PROOF_CODES = new Set(["proof_problem", "label_quote_missing", "label_quote_not_printed", "label_quote_no_letter", "label_quote_overlaps_value", "competitor_not_printed", "reading_heuristic_conflict"]);
 
 export function wilson(successes: number, total: number): [number, number] | null {
   if (total === 0) return null;

@@ -99,7 +99,6 @@ export const HOLD_CODES = {
   label_quote_no_letter: content("2.5"),
   label_quote_overlaps_value: content("2.5"),
   competitor_not_printed: content("2.5"),
-  competitor_equals_value: content("2.5"),
   reading_heuristic_conflict: content("2.5"),
   supplier_id_contradiction: content("2.6"),
   // packet
@@ -313,9 +312,17 @@ export interface CheckContext {
 
 export type AcceptedValues = Omit<DocumentReading, "source_sha256" | "packet_digest" | "evidence" | "computed">;
 
+/** A non-hold observation (owner 2026-10-17, pilot: same-value occurrences are not competitors). */
+export interface CheckNote {
+  code: "competitor_same_value_ignored";
+  field: ReadingField;
+}
+
 export interface CheckResult {
   verdict: "accept" | "hold";
   holds: Hold[];
+  /** Present only when non-empty. */
+  notes?: CheckNote[];
   accepted?: AcceptedValues;
   vat_zero_note_proven: boolean;
   reverse_charge_note_present: boolean;
@@ -493,6 +500,10 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
     seen.add(key);
     holds.push(makeHold(code, field));
   };
+  const notes: CheckNote[] = [];
+  const note: NoteFn = (field) => {
+    if (!notes.some((entry) => entry.field === field)) notes.push({ code: "competitor_same_value_ignored", field });
+  };
   const debug: string[] = [];
   const finish = (accepted: AcceptedValues | undefined, vatZeroNoteProven: boolean): CheckResult => {
     const result: CheckResult = {
@@ -501,6 +512,7 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
       vat_zero_note_proven: vatZeroNoteProven,
       reverse_charge_note_present: reverseChargeNotePresent,
     };
+    if (notes.length > 0) result.notes = notes;
     if (holds.length === 0 && accepted) result.accepted = accepted;
     if (ctx.debug) result.debug = debug;
     return result;
@@ -533,7 +545,7 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold);
   checkAmounts(doc, reading, proof, hold);
   checkDocumentLevel(doc, reading, ctx, hold);
-  checkProof(doc, reading, proof, valueSpans, hold);
+  checkProof(doc, reading, proof, valueSpans, hold, note);
   checkHeuristicConflict(reading, ctx.heuristic, hold);
 
   const { source_sha256: _sha, packet_digest: _digest, evidence: _evidence, computed: _computed, ...accepted } = reading;
@@ -541,6 +553,7 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
 }
 
 type HoldFn = (code: HoldCode, field?: ReadingField) => void;
+type NoteFn = (field: ReadingField) => void;
 type ValueSpans = Partial<Record<EvidenceField, { line: PacketLine; span: TextSpan }>>;
 
 /** H1–H3, origin, required fields, strong id (§2.1). Returns the matched value token per field. */
@@ -680,6 +693,8 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hold: Ho
         const line = doc.lineById.get(competitor.line);
         if (!line) continue;
         const occ = matchOffsets(competitor.quote, line);
+        // Another occurrence of the accepted value is not a competitor and never counts toward A1.
+        if (competitorEqualsValue("gross", gross, line, tokensFor(doc, line), occ)) continue;
         for (const token of tokensFor(doc, line).money) {
           if (occ.some((o) => insideSpan(token, o))) covered.push(...token.values);
         }
@@ -733,7 +748,7 @@ function checkDocumentLevel(doc: Doc, reading: DocumentReading, ctx: CheckContex
 
 const LABEL_REQUIRED: readonly ReadingField[] = ["invoice_date", "invoice_number", "gross"];
 
-/** True when a typed line-level token inside one of `occ` has a reading equal to the accepted value. */
+/** True when a typed line-level token inside one of `occ` has a reading equal to the accepted value (a same-value occurrence). */
 function competitorEqualsValue(field: ReadingField, value: string | number, line: PacketLine, tokens: LineTokens, occ: TextSpan[]): boolean {
   if (field === "doc_type") return false;
   if ((PAYLOAD_NUMBER_FIELDS as readonly string[]).includes(field)) {
@@ -746,7 +761,7 @@ function competitorEqualsValue(field: ReadingField, value: string | number, line
   return match !== undefined && "span" in match;
 }
 
-function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans: ValueSpans, hold: HoldFn): void {
+function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans: ValueSpans, hold: HoldFn, note: NoteFn): void {
   for (const [field, answer] of Object.entries(proof.answers) as Array<[ReadingField, Proof["answers"][ReadingField]]>) {
     if (answer.verdict === "problem") hold("proof_problem", field);
     const needsLabel = LABEL_REQUIRED.includes(field) ||
@@ -772,7 +787,8 @@ function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans
         hold("competitor_not_printed", field);
         continue;
       }
-      if (accepted !== null && competitorEqualsValue(field, accepted, line, tokensFor(doc, line), occ)) hold("competitor_equals_value", field);
+      // Another occurrence of the same printed value is neither a competing reading nor an alternative: ignored.
+      if (accepted !== null && competitorEqualsValue(field, accepted, line, tokensFor(doc, line), occ)) note(field);
     }
   }
 }

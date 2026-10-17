@@ -21,6 +21,7 @@ export interface PassResult {
   verdict: CheckResult["verdict"];
   holds: string[];
   content_holds: string[];
+  notes: string[];
   silent_wrong: ScoredField[];
   pipeline?: PipelineResult & { verdict: "accept" | "hold"; silent_wrong_reverse_charge: boolean };
 }
@@ -100,6 +101,7 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
     verdict: result.verdict,
     holds: result.holds.map((hold) => (hold.field ? `${hold.code}:${hold.field}` : hold.code)),
     content_holds: result.holds.filter((hold) => hold.class === "content").map((hold) => hold.code),
+    notes: (result.notes ?? []).map((entry) => `${entry.code}:${entry.field}`),
     silent_wrong: result.verdict === "accept" && result.accepted ? wrongFields(result.accepted as AcceptedValues, truth) : [],
   };
   if (pipeline) {

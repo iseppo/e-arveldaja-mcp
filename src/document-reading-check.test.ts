@@ -713,27 +713,48 @@ describe("checkReading: proof checks (§2.5)", () => {
     expectAccept({ lines: withLines({}, ["Kokku EUR 124,00 tasutud"]), labels: { gross: "Kokku EUR 124,00" } });
   });
 
-  it("T-PR-competitor: a competitor must be printed on its line and differ from the accepted value", () => {
+  const notesOf = (input: CaseInput) => (runCase(input).notes ?? []).map((entry) => `${entry.code}:${entry.field}`);
+
+  it("T-PR-competitor: a competitor must be printed on its line", () => {
     expect(keysOf({ answers: gross({ competitors: [{ line: "p1:006", quote: "Kokku" }] }) })).toEqual(["competitor_not_printed:gross"]);
     expect(keysOf({ answers: gross({ competitors: [{ line: "p1:099", quote: "Kokku" }] }) })).toEqual(["competitor_not_printed:gross"]);
-    expect(keysOf({ answers: gross({ competitors: [{ line: "p1:007", quote: "Kokku EUR 124,00" }] }) })).toEqual(["competitor_equals_value:gross"]);
-    expect(keysOf({ answers: { invoice_date: { label_quote: "Kuupäev", competitors: [{ line: "p1:004", quote: "15.03.2026" }], why_this_one: "", verdict: "confirm" } } }))
-      .toEqual(["competitor_equals_value:invoice_date"]);
-    expect(keysOf({ answers: { supplier_reg: { label_quote: "Reg. nr", competitors: [{ line: "p1:002", quote: "10000018" }], why_this_one: "", verdict: "confirm" } } }))
-      .toEqual(["competitor_equals_value:supplier_reg"]);
+  });
+
+  it("T-PR-competitor-same-value: another occurrence of the accepted value is ignored with a note, never held", () => {
+    // owner 2026-10-17, pilot: same-value occurrences are not competitors.
+    const same = (input: CaseInput, field: string) => {
+      const result = expectAccept(input);
+      expect((result.notes ?? []).map((entry) => `${entry.code}:${entry.field}`)).toEqual([`competitor_same_value_ignored:${field}`]);
+    };
+    same({ answers: gross({ competitors: [{ line: "p1:007", quote: "Kokku EUR 124,00" }] }) }, "gross");
+    same({ answers: { invoice_date: { label_quote: "Kuupäev", competitors: [{ line: "p1:004", quote: "15.03.2026" }], why_this_one: "", verdict: "confirm" } } }, "invoice_date");
+    same({ answers: { supplier_reg: { label_quote: "Reg. nr", competitors: [{ line: "p1:002", quote: "10000018" }], why_this_one: "", verdict: "confirm" } } }, "supplier_reg");
+    expect(expectAccept().notes).toBeUndefined();
+  });
+
+  it("T-PR-competitor-same-value-A1: a same-value entry never satisfies A1 when a larger value is omitted", () => {
+    const lines = withLines({}, ["Vahesumma 124,00    Ettemaks 200,00"]);
+    const input = (quote: string): CaseInput => ({ lines, answers: gross({ competitors: [{ line: "p1:008", quote }] }) });
+    // The entry covers the larger 200,00 too, but it is a same-value occurrence: dropped, so 200,00 is omitted.
+    expect(keysOf(input("Vahesumma 124,00 ¦ Ettemaks 200,00"))).toEqual(["competitor_omitted:gross"]);
+    expect(notesOf(input("Vahesumma 124,00 ¦ Ettemaks 200,00"))).toEqual(["competitor_same_value_ignored:gross"]);
+    // Listing the larger value on its own satisfies A1.
+    expectAccept(input("Ettemaks 200,00"));
   });
 
   it("T-PR-competitor-cut: a competitor cut mid-token is not equal to the value", () => {
-    expectAccept({ answers: gross({ competitors: [{ line: "p1:007", quote: "124,0" }] }) });
+    const result = expectAccept({ answers: gross({ competitors: [{ line: "p1:007", quote: "124,0" }] }) });
+    expect(result.notes).toBeUndefined();
   });
 
-  it("T-PR-competitor-ambiguous: every reading of an ambiguous competitor token counts", () => {
-    expect(keysOf({
+  it("T-PR-competitor-ambiguous: every reading of an ambiguous competitor token counts as the same value", () => {
+    const input: CaseInput = {
       lines: withLines({}, ["Muu    6,000"]),
       values: { net: 6, vat: 1.44, gross: 7.44 },
       evidence: { net: { line: "p1:005", quote: "Summa ilma KM-ta 100,00" } },
       answers: { net: { label_quote: null, competitors: [{ line: "p1:008", quote: "6,000" }], why_this_one: "", verdict: "confirm" } },
-    })).toContain("competitor_equals_value:net");
+    };
+    expect(notesOf(input)).toEqual(["competitor_same_value_ignored:net"]);
   });
 });
 
