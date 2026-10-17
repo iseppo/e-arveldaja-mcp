@@ -128,15 +128,19 @@ export async function runPipeline(input: {
   file: PacketFile;
   truth: TruthRecord | undefined;
   company: string | null;
+  /** Family (h)–(j) cases (plan §5.4): a transformed snapshot, unavailable clients, or a patched booking. */
+  overrides?: { snapshot?: (snapshot: Snapshot) => Snapshot; clientsUnavailable?: boolean; booking?: (booking: BookingView) => BookingView };
 }): Promise<PipelineResult> {
   const base = loadSnapshot(input.company);
   if (!base) return { status: "no_snapshot", holds: [], warnings: [], reversed_vat: null, pre_existing: [] };
   const accepted = input.accepted;
   if (!accepted || input.check.verdict !== "accept") return { status: "not_accepted", holds: [], warnings: [], reversed_vat: null, pre_existing: [] };
-  const { snapshot, removed } = withoutOwnBooking(base, input.truth);
+  const own = withoutOwnBooking(base, input.truth);
+  const removed = own.removed;
+  const snapshot = input.overrides?.snapshot ? input.overrides.snapshot(own.snapshot) : own.snapshot;
 
   // Supplier
-  const candidates = supplierCandidates(accepted, snapshot.clients);
+  const candidates = supplierCandidates(accepted, input.overrides?.clientsUnavailable ? "unavailable" : snapshot.clients);
   const holds: BindingHold[] = [...candidates.holds];
   const supplier = candidates.candidates.length === 1 ? candidates.candidates[0]! : undefined;
   const supplierClient = supplier ? snapshot.clients.find((client) => client.id === supplier.id) : undefined;
@@ -186,7 +190,7 @@ export async function runPipeline(input: {
   for (const entry of amounts) {
     if (entry.vat > 0 && rateMatches(entry.net, entry.vat, vatRatesInForceOn(date)).length === 0) bookingSideSignals.push("vat_rate_implausible");
   }
-  const booking: BookingView = {
+  const built: BookingView = {
     clients_id: data.clients_id,
     number: data.number,
     create_date: data.create_date,
@@ -198,6 +202,7 @@ export async function runPipeline(input: {
     items: [{ vat_rate_dropdown: finalItem.vat_rate_dropdown ?? null, reversed_vat_id: finalItem.reversed_vat_id ?? null }],
     effective: { itemNet: Math.round(itemNet * 100) / 100, itemGross: Math.round(itemGross * 100) / 100 },
   };
+  const booking = input.overrides?.booking ? input.overrides.booking(built) : built;
   const binding = checkBookingBinding(accepted, booking, {
     vatRegistered: snapshot.vatRegistered,
     vatZeroNoteProven: input.check.vat_zero_note_proven,
