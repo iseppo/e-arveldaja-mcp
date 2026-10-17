@@ -189,6 +189,16 @@ try {
   assert("b7_mixed_turn_stop", kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"]]) === "stop" &&
     kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"], [2, "stream disconnected"]]) === "transport");
 
+  // c-7362249c9608 (step5b): a Codex turn that failed during a routing outage. turn.failed counts only with every
+  // message of the turn a transport message; the wrapper's "Command failed: …/run-codex.sh" is neutral.
+  const routingFailures = ["turn1_output_missing", "turn1_forbidden:event:error,event:turn.failed,item:error", "turn1_not_completed", "run:turn1"];
+  const routing = ["Reconnecting... 2/5 (workspace routing discovery failed)", "Falling back from WebSockets to HTTPS transport. workspace routing discovery failed",
+    "Reconnecting... 5/5 (workspace routing discovery failed)", "workspace routing discovery failed"];
+  const wrapper = ["turn1:Command failed: /x/scripts/reading-p1/run-codex.sh /tmp/reading-p1.AAAAAAAA /x/meta 1"];
+  assert("b7_turn_failed_routing_outage_transport", kind(routingFailures, routing, wrapper) === "transport");
+  assert("b7_turn_failed_plus_non_transport_stop", kind(routingFailures, [...routing, "invalid json schema"], wrapper) === "stop");
+  assert("b7_turn_failed_without_events_stop", kind(routingFailures, [], wrapper) === "stop" && kind(["turn1_forbidden:event:turn.failed"]) === "stop");
+  assert("b7_wrapper_text_alone_not_transport", kind(["run:turn1", "turn1_output_missing"], [], wrapper) === "stop");
   // classifier_interrupt classification: only alone, no error message, Claude path, once per chain.
   const ci = (failures: string[], extra: Partial<Parameters<typeof classifyEvidence>[0]> = {}) =>
     classifyEvidence({ failures, run_errors: [], error_messages: [], reader: "opus", ...extra }).kind;

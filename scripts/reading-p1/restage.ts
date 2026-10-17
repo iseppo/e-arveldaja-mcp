@@ -43,7 +43,13 @@ export const TRANSPORT_RE = /reconnect|websocket|transport|stream|disconnect|tim
 /** Failure codes that can only come from a leak or an isolation fault: these stop the run. */
 export const LEAK_RE = /sentinel|tool_use|attachment|instruction_fragment|outside_path|mcp_server|codex_home|_model$|session_changed|thread_changed|prompt_hash/;
 /** Audit failures a transport fault produces by itself in its turn (an error event, a missing or unfinished turn). */
-const TRANSPORT_CONSEQUENCE_RE = /^(?:turn(\d)_forbidden:(?:(?:event|item):error)(?:,(?:event|item):error)*|turn(\d)_output_missing|turn(\d)_events_missing|turn(\d)_not_completed|turn(\d)_is_error|run:turn(\d))$/;
+const TRANSPORT_CONSEQUENCE_RE = /^(?:turn(\d)_forbidden:(?:event:error|item:error|event:turn\.failed)(?:,(?:event:error|item:error|event:turn\.failed))*|turn(\d)_output_missing|turn(\d)_events_missing|turn(\d)_not_completed|turn(\d)_is_error|run:turn(\d))$/;
+
+/**
+ * The Codex wrapper's generic exit text ("Command failed: …/run-codex.sh …", cut at 300 characters): neutral. It is
+ * neither transport evidence nor stop evidence on its own; the turn's own event messages decide.
+ */
+const NEUTRAL_RUN_ERROR_RE = /^Command failed: \S*\/run-codex\.sh(?:\s|$)/;
 
 /** An error message with the turn it was raised in (null: no turn, e.g. a collect error). */
 export interface TurnMessage { turn: number | null; message: string }
@@ -60,7 +66,8 @@ export type FailureKind = "transport" | "classifier_interrupt" | "stop";
 
 /**
  * B7: "transport" only on positive evidence, per turn: every failure entry is a transport consequence of its
- * turn, that turn carries at least one transport message, and every error message is a transport message.
+ * turn (a `turn.failed` event included), that turn carries at least one transport message, and every error
+ * message is a transport message (the wrapper's neutral exit text aside).
  * Unknown, mixed, leak, empty or evidence-free failures → "stop". A recovered transport fault in one turn never
  * explains a failure in another.
  */
@@ -70,7 +77,7 @@ export function classifyEvidence(evidence: FailureEvidence): { kind: FailureKind
     ...evidence.run_errors.map((error) => {
       const turn = /^turn(\d):/.exec(error);
       return { turn: turn ? Number(turn[1]) : null, message: turn ? error.slice(turn[0].length) : error };
-    }),
+    }).filter((entry) => !NEUTRAL_RUN_ERROR_RE.test(entry.message)),
   ];
   const listed = messages.map((entry) => `${entry.turn === null ? "-" : `turn${entry.turn}`}: ${entry.message}`);
   const stop = { kind: "stop" as const, evidence: listed };
