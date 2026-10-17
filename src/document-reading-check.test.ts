@@ -863,19 +863,21 @@ describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kil
     expect(codesOf({ lines: withLines({}, ["BIC: TRWIBEB1XXX"]) })).toContain("foreign_currency_marker");
   });
 
-  const ocrNumberItems = (native: string[]) => [
+  // The OCR item is the internal fragment `7` of the cited A-17 (not a separator-bounded part of it), so a
+  // separator-boundary relaxation would accept both cases; today's substring rule holds them.
+  const ocrFragmentItems = (native: string[]) => [
     { text: "Näidis OÜ", ocr: false },
     { text: "Arve nr", ocr: false },
     ...native.map((text) => ({ text, ocr: false })),
-    { text: "A-17", ocr: true },
+    { text: "7", ocr: true },
     ...BASE_LINES.slice(1).map((text) => ({ text, ocr: false })),
   ];
 
-  it("T-KILL-D2-split: an OCR-read A-17 beside native A-1 and 7 holds ocr_cited_text", () => {
-    expect(keysOf({ pageMeta: { items: ocrNumberItems(["A-1", "7"]) } })).toContain("ocr_cited_text:invoice_number");
+  it("T-KILL-D2-split: an OCR fragment 7 of A-17 beside a native A-1 holds ocr_cited_text", () => {
+    expect(keysOf({ pageMeta: { items: ocrFragmentItems(["A-1"]) } })).toContain("ocr_cited_text:invoice_number");
   });
 
-  it("T-KILL-D2-longer: an OCR-read A-17 beside a native A-170 holds ocr_cited_text", () => {
-    expect(keysOf({ pageMeta: { items: ocrNumberItems(["A-170"]) } })).toContain("ocr_cited_text:invoice_number");
+  it("T-KILL-D2-longer: an OCR fragment 7 of A-17 beside a native A-170 holds ocr_cited_text", () => {
+    expect(keysOf({ pageMeta: { items: ocrFragmentItems(["A-170"]) } })).toContain("ocr_cited_text:invoice_number");
   });
 });
