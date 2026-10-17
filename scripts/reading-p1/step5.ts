@@ -14,7 +14,7 @@
 //     checked before every retry; any other failure stops the run.
 // Re-running a mode skips cases already staged under the same tag (key in the registry meta).
 // A sub-run (`--doc <id>`, `--form <form>`) plans, runs and projects only that slice under its own tag and caps.
-// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--concurrency 6]
+// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--concurrency 6]
 
 import { existsSync } from "node:fs";
 import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
@@ -30,11 +30,16 @@ export const FROZEN_TAG = "step5";
 const CEILING = { input: 30_000_000, output: 4_000_000 };
 export const LEGACY = { input: 150_000, output: 50_000 };
 
-export interface RunArgs { tag: string; caps: { input: number; output: number }; only?: { doc?: string; form?: string } }
+export interface RunArgs { tag: string; caps: { input: number; output: number }; only?: { doc?: string; form?: string; injectedReader?: string } }
 
-/** A sub-run (`--doc`, `--form`) plans, runs and projects only its slice of the cases. */
+/**
+ * A sub-run (`--doc`, `--form`, `--injected-reader`) plans, runs and projects only its slice of the cases;
+ * `--injected-reader` keeps every natural case and the I-cases of that reader only.
+ */
 export function scoped(items: CaseItem[], run: Pick<RunArgs, "only">): CaseItem[] {
-  return items.filter((item) => (!run.only?.doc || item.spec.doc_id === run.only.doc) && (!run.only?.form || item.spec.form === run.only.form));
+  const injected = (item: CaseItem) => item.spec.form === "I-S" || item.spec.form === "I-T";
+  return items.filter((item) => (!run.only?.doc || item.spec.doc_id === run.only.doc) && (!run.only?.form || item.spec.form === run.only.form) &&
+    (!run.only?.injectedReader || !injected(item) || item.spec.reader === run.only.injectedReader));
 }
 
 /** B9: --run (not the frozen tag) and both caps are required; caps may not exceed the OQ-P1-9 ceiling. */
@@ -44,12 +49,14 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
   let capOutput: string | undefined;
   let doc: string | undefined;
   let form: string | undefined;
+  let injectedReader: string | undefined;
   try {
     tag = argValue(argv, "--run");
     capInput = argValue(argv, "--cap-input");
     capOutput = argValue(argv, "--cap-output");
     doc = argValue(argv, "--doc");
     form = argValue(argv, "--form");
+    injectedReader = argValue(argv, "--injected-reader");
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
@@ -62,7 +69,9 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
   if (!Number.isInteger(input) || !Number.isInteger(output) || input <= 0 || output <= 0) return { error: "caps must be positive integers" };
   if (input > CEILING.input || output > CEILING.output) return { error: `caps exceed the OQ-P1-9 ceiling ${CEILING.input} / ${CEILING.output}` };
   if (form !== undefined && !["N-S", "N-T", "I-S", "I-T"].includes(form)) return { error: `--form ${form}: N-S, N-T, I-S or I-T` };
-  return { tag, caps: { input, output }, ...(doc || form ? { only: { ...(doc ? { doc } : {}), ...(form ? { form } : {}) } } : {}) };
+  if (injectedReader !== undefined && !(READERS as readonly string[]).includes(injectedReader)) return { error: `--injected-reader ${injectedReader}: one of ${READERS.join(", ")}` };
+  const only = { ...(doc ? { doc } : {}), ...(form ? { form } : {}), ...(injectedReader ? { injectedReader } : {}) };
+  return { tag, caps: { input, output }, ...(Object.keys(only).length ? { only } : {}) };
 }
 
 /** The run's registries, from the corpus rows of its run index only (no other case record is opened). */
@@ -251,7 +260,7 @@ if (process.argv[1]?.endsWith("/step5.ts")) {
   const concurrency = Number(argValue(rest, "--concurrency") ?? "6");
   const run = parseRunArgs(rest);
   if ("error" in run || !["natural", "injected", "status"].includes(mode ?? "")) {
-    process.stderr.write(`${"error" in run ? `${run.error}\n` : ""}usage: step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--concurrency 6]\n`);
+    process.stderr.write(`${"error" in run ? `${run.error}\n` : ""}usage: step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--concurrency 6]\n`);
     process.exitCode = 1;
   } else if (mode === "natural") await runSuite("natural", naturalItems(run.tag), run, concurrency);
   else if (mode === "injected") await runSuite("injected", injectedItems(run.tag), run, concurrency);

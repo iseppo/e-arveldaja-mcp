@@ -13,7 +13,7 @@ import { registryPath, stageRequest } from "./stage.js";
 import { promptIS, promptIT, promptNS, promptNT1, promptNT2 } from "./prompts.js";
 import type { ReadingPacket } from "../../src/document-reading-packet.js";
 import { makePacket } from "../../src/__fixtures__/document-reading/make-packet.js";
-import { READERS, type CaseItem } from "./cases.js";
+import { READERS, formCase, type CaseItem } from "./cases.js";
 import type { PacketFile } from "./build-packets.js";
 import { legacyPrompt, legacyShapeOk } from "./legacy.js";
 import { candidatesFor, type FamilyA } from "./mutate.js";
@@ -387,6 +387,11 @@ try {
   const subItems = "error" in sub ? [] : scopedItems(injectedItems("selftest", family(2)), sub);
   assert("b14_sub_run_scoped", subItems.length === READERS.length * 2 * 2 && subItems.every((item) => item.spec.form === "I-S" && item.spec.doc_id === doc) &&
     usage(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--form", "X-S"]), String(subItems.length));
+  const haikuOnly = parseRunArgs(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--injected-reader", "haiku"]);
+  const mixed = [...injectedItems("selftest", family(1)), formCase("opus", "N-S", doc, undefined, null, "selftest")];
+  const kept = "error" in haikuOnly ? [] : scopedItems(mixed, haikuOnly);
+  assert("step5c_injected_reader_scope", kept.length === 2 * 2 + 1 && kept.every((item) => item.spec.form === "N-S" || item.spec.reader === "haiku") &&
+    usage(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--injected-reader", "gpt"]), String(kept.length));
   const res = (case_id: string, doc_id: string, form: string) => ({ case_id, doc_id, form }) as unknown as CaseResult;
   const sup = supersede([res("a", "14", "I-S"), res("b", "14", "I-T"), res("c", "06", "I-S")], [res("d", "14", "I-S")]);
   assert("b14_supersede_slice_only", sup.results.map((item) => item.case_id).join() === "b,c,d" && sup.superseded.map((item) => item.case_id).join() === "a");
