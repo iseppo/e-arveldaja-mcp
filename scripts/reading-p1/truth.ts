@@ -7,16 +7,25 @@
 //   2. else the normalised invoice number of exactly one live invoice of the company equals a candidate
 //      number (the heuristic's; for the corpus also truth v1's) AND its gross or date corroborates.
 //
+// Owner-confirmed truth changes (throughput round B1/B3/B5) live in <set>/truth-overrides.json, never in code:
+// each entry names the document, the field, the new value (or `unscore`), the reason and who confirmed it. They
+// are applied on every build, and `apply-overrides` applies them to an existing truth.json; every applied change
+// is recorded in the record's `truth_changes` (field, from, to, reason) for the report.
+//
 // Usage:
 //   npx tsx scripts/reading-p1/truth.ts match --set corpus|heldout   → <set>/matches.json + ids to fetch
 //   npx tsx scripts/reading-p1/truth.ts build --set corpus|heldout   → <set>/truth.json (needs details)
+//   npx tsx scripts/reading-p1/truth.ts apply-overrides --set corpus → <set>/truth.json with the confirmed overrides
+//   npx tsx scripts/reading-p1/truth.ts draft-printed --set corpus   → <set>/truth-overrides.draft.json (for the owner)
 
 import { existsSync } from "node:fs";
+import { ibanScan } from "../../src/document-reading-tokens.js";
 import { join } from "node:path";
 import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../../src/purchase-invoice-status.js";
 import type { Client, PurchaseInvoice } from "../../src/types/api.js";
 import type { PacketFile, OwnIds } from "./build-packets.js";
 import { LEGACY_DIR, addDays, argValue, dataPath, manifest, readJson, writeJson, type SetName } from "./common.js";
+import { dueLabelledDates } from "./synth-proof.js";
 
 export interface TruthRecord {
   id: string;
@@ -48,6 +57,92 @@ export interface TruthRecord {
   /** Fields e-arveldaja holds no value for (or, for a non-VAT company, net/vat): never scored. */
   unscored_fields?: string[];
   note?: string;
+  /** B1: the due date the document prints under a due label (owner-confirmed); scored instead of `due_date`. */
+  due_date_printed?: string | null;
+  /** B3: every account the supplier prints as its own (owner-confirmed), in print order. */
+  supplier_ibans_printed?: string[];
+  /** B5: the booked reference kept apart when the printed number is the scored truth; never scored. */
+  booking_reference?: string;
+  /** Every override applied to this record, with its reason (listed by the report). */
+  truth_changes?: TruthChange[];
+}
+
+export interface TruthChange { field: string; from: unknown; to: unknown; reason: string }
+
+export const OVERRIDE_FIELDS = ["invoice_number", "supplier_reg", "supplier_vat", "supplier_iban", "invoice_date", "currency", "net", "vat", "gross", "due_date_printed", "supplier_ibans_printed"] as const;
+
+export interface TruthOverride {
+  doc: string;
+  field: typeof OVERRIDE_FIELDS[number];
+  /** The new truth value; omitted with `unscore`. */
+  value?: unknown;
+  /** Exclude the field from scoring (only for a genuinely ambiguous field). */
+  unscore?: boolean;
+  /** Keep the replaced value under this key (B5). */
+  keep_as?: "booking_reference";
+  reason: string;
+  /** Who confirmed the change (an unconfirmed draft is refused). */
+  confirmed_by: string;
+}
+
+const sameValue = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
+/** Applies confirmed overrides to the records in place (idempotent); returns the changes applied now. */
+export function applyOverrides(truth: Record<string, TruthRecord>, overrides: TruthOverride[]): TruthChange[] {
+  const applied: TruthChange[] = [];
+  for (const entry of overrides) {
+    if (!entry.confirmed_by?.trim()) throw new Error(`override ${entry.doc}/${entry.field} is not confirmed`);
+    if (!entry.reason?.trim()) throw new Error(`override ${entry.doc}/${entry.field} has no reason`);
+    if (!(OVERRIDE_FIELDS as readonly string[]).includes(entry.field)) throw new Error(`override field ${entry.field} not allowed`);
+    if (!entry.unscore && !("value" in entry)) throw new Error(`override ${entry.doc}/${entry.field} has no value`);
+    const record = truth[entry.doc];
+    if (!record || record.status !== "available") throw new Error(`override ${entry.doc}: no available truth record`);
+    const target = entry.unscore ? "unscored" : entry.value;
+    if ((record.truth_changes ?? []).some((change) => change.field === entry.field && sameValue(change.to, target))) continue;
+    const fields = record as unknown as Record<string, unknown>;
+    const from = fields[entry.field] ?? null;
+    if (entry.unscore) {
+      record.unscored_fields = [...new Set([...(record.unscored_fields ?? []), entry.field])];
+    } else {
+      if (entry.keep_as === "booking_reference") {
+        if (typeof from !== "string") throw new Error(`override ${entry.doc}/${entry.field}: nothing to keep as booking_reference`);
+        record.booking_reference = from;
+      }
+      fields[entry.field] = entry.value;
+    }
+    const change: TruthChange = { field: entry.field, from, to: target, reason: `${entry.reason} (confirmed: ${entry.confirmed_by})` };
+    record.truth_changes = [...(record.truth_changes ?? []), change];
+    applied.push(change);
+  }
+  return applied;
+}
+
+function loadOverrides(set: SetName): TruthOverride[] {
+  const path = dataPath(set, "truth-overrides.json");
+  return existsSync(path) ? readJson<TruthOverride[]>(path) : [];
+}
+
+/** Drafts B1/B3 values from the packets for the owner to confirm (nothing is applied). */
+function draftPrinted(set: SetName): void {
+  const truth = readJson<Record<string, TruthRecord>>(dataPath(set, "truth.json"));
+  const drafts: TruthOverride[] = [];
+  for (const entry of manifest(set)) {
+    const record = truth[entry.id];
+    if (!record || record.status !== "available") continue;
+    const packet = readJson<PacketFile>(dataPath("packets", `${entry.id}.json`)).packet;
+    const due = dueLabelledDates(packet);
+    if (due.length > 0) {
+      drafts.push({ doc: entry.id, field: "due_date_printed", value: due[0]!.value,
+        reason: `drafted: due-labelled date on ${due[0]!.line}${due.length > 1 ? ` (also ${due.slice(1).map((d) => `${d.value}@${d.line}`).join(", ")})` : ""}; booked ${record.due_date ?? "none"}`, confirmed_by: "" });
+    }
+    const ibans = [...new Set(ibanScan(packet.lines).map((hit) => hit.value))];
+    if (ibans.length > 0 && (record.supplier_iban == null || ibans.length > 1)) {
+      drafts.push({ doc: entry.id, field: "supplier_ibans_printed", value: ibans,
+        reason: `drafted: every printed IBAN in print order; keep only the supplier's own accounts (not a payer's); booked ${record.supplier_iban ?? "none"}`, confirmed_by: "" });
+    }
+  }
+  writeJson(dataPath(set, "truth-overrides.draft.json"), drafts);
+  process.stdout.write(`${drafts.length} drafted overrides → ${set}/truth-overrides.draft.json (confirm, then move to truth-overrides.json)\n`);
 }
 
 interface LegacyTruth { invoice_number?: string | null; invoice_date?: string | null; gross?: number | null; supplier_name?: string[] }
@@ -188,6 +283,7 @@ function build(set: SetName): void {
     }
     truth[row.id] = record;
   }
+  applyOverrides(truth, loadOverrides(set));
   writeJson(dataPath(set, "truth.json"), truth);
   const records = Object.values(truth);
   const reasons: Record<string, number> = {};
@@ -212,8 +308,14 @@ if (process.argv[1]?.endsWith("/truth.ts")) {
   const set = (argValue(rest, "--set") ?? "corpus") as SetName;
   if (mode === "match") match(set);
   else if (mode === "build") build(set);
+  else if (mode === "apply-overrides") {
+    const truth = readJson<Record<string, TruthRecord>>(dataPath(set, "truth.json"));
+    const applied = applyOverrides(truth, loadOverrides(set));
+    writeJson(dataPath(set, "truth.json"), truth);
+    process.stdout.write(`${JSON.stringify(applied, null, 2)}\n`);
+  } else if (mode === "draft-printed") draftPrinted(set);
   else {
-    process.stderr.write("usage: truth.ts match|build --set corpus|heldout\n");
+    process.stderr.write("usage: truth.ts match|build|apply-overrides|draft-printed --set corpus|heldout\n");
     process.exitCode = 1;
   }
 }

@@ -16,11 +16,21 @@ const REPLACEMENT = "Return the JSON array as your final message.";
 /** Deviation from §5.3 (coordinator 2026-10-17, after c-9a2c39e41ba2 ran shell commands to open ./own/): one
  *  added sentence and path-free inline headers, so the inlined cases do not read as files to open. */
 const NO_TOOLS = "The case files are inlined below; do not run any commands or read any files.";
+/** B6 (throughput round): the step-5 copy obeyed this line and returned only the counts; it is removed. */
+const FINAL_REPLY = "Final reply: one line with the counts.";
+const LEGACY_CASES = 33;
+
+/** B6: the output must be the 33-entry array of `{case, …}` objects, nothing else. */
+export function legacyShapeOk(value: unknown): boolean {
+  return Array.isArray(value) && value.length === LEGACY_CASES &&
+    value.every((entry) => typeof entry === "object" && entry !== null && !Array.isArray(entry) && "case" in entry);
+}
 
 export function legacyPrompt(): string {
   const instructions = readFileSync(join(SELF, "own_B.md"), "utf8");
   if (!instructions.includes(ORIGINAL)) throw new Error("own_B.md no longer carries the sentence to replace");
-  const changed = instructions.replace(ORIGINAL, `${REPLACEMENT} ${NO_TOOLS}`);
+  if (!instructions.includes(FINAL_REPLY)) throw new Error("own_B.md no longer carries the final-reply line to remove");
+  const changed = instructions.replace(ORIGINAL, `${REPLACEMENT} ${NO_TOOLS}`).replace(FINAL_REPLY, "");
   const files = readdirSync(join(SELF, "own")).filter((name) => /^C\d+\.(json|txt)$/.test(name)).sort();
   const inline = files.map((name) => `===== ${name} (inlined) =====\n${readFileSync(join(SELF, "own", name), "utf8").trimEnd()}\n`);
   return `${changed.trimEnd()}\n\n${inline.join("\n")}`;
@@ -36,7 +46,17 @@ async function run(): Promise<void> {
     return;
   }
   const stripped = /^\s*```(?:json)?\s*\n([\s\S]*?)\n\s*```\s*$/.exec(text)?.[1] ?? text;
-  JSON.parse(stripped);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch {
+    parsed = undefined;
+  }
+  if (!legacyShapeOk(parsed)) {
+    process.stdout.write(`refused: the output is not a ${LEGACY_CASES}-entry array of {case, …}; nothing written\n`);
+    process.exitCode = 3;
+    return;
+  }
   writePrivate(dataPath("legacy", "review_own_B_codex.json"), stripped);
 }
 

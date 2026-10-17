@@ -1,6 +1,8 @@
 // checkReading (+ the full pipeline) over collected reader cases → results/<run>.json (plan §5.1, §5.7).
 // Two passes: real (--today, default the run date) and as-of (truth.invoice_date + 30 days, from truth).
-// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--today YYYY-MM-DD] [--pipeline]
+// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--scope corpus] [--today YYYY-MM-DD] [--pipeline]
+// Scope (throughput round B8): "corpus" is the only scope; a reading of a document outside the corpus manifest is
+// skipped before its packet, own ids or truth are read.
 
 import { existsSync, readdirSync } from "node:fs";
 import { normalizeVatValue } from "../../src/document-identifiers.js";
@@ -8,7 +10,7 @@ import { checkReading, type AcceptedValues, type CheckResult } from "../../src/d
 import { normalizeInvoiceNumberForComparison } from "../../src/purchase-invoice-status.js";
 import type { OwnIds, PacketFile } from "./build-packets.js";
 import type { CollectedCase } from "./collect.js";
-import { addDays, argValue, dataPath, hasFlag, readJson, todayIso, writeJson, type SetName } from "./common.js";
+import { SCOPES, addDays, argValue, dataPath, hasFlag, readJson, scopeIds, todayIso, writeJson, type Scope, type SetName } from "./common.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import { checkContext } from "./synth-proof.js";
 import { companyOf, type TruthRecord } from "./truth.js";
@@ -46,12 +48,14 @@ export interface CaseResult {
   models: string[];
 }
 
-export function setOf(docId: string): SetName {
-  return docId.startsWith("h") ? "heldout" : "corpus";
+/** The scored truth of a field: a printed due date (truth v2, B1) takes precedence over the booked one. */
+function truthValue(field: ScoredField, truth: TruthRecord): unknown {
+  if (field === "due_date" && truth.due_date_printed !== undefined) return truth.due_date_printed;
+  return truth[field as keyof TruthRecord];
 }
 
 function differs(field: ScoredField, value: unknown, truth: TruthRecord): boolean {
-  const expected = truth[field as keyof TruthRecord];
+  const expected = truthValue(field, truth);
   if (value === null || value === undefined) {
     // A null that changes the booking counts: VAT null books 0; net null books gross − VAT.
     if (field === "vat") return typeof expected === "number" && Math.abs(expected) > 0.005;
@@ -94,6 +98,12 @@ export function wrongFields(values: Partial<Record<ScoredField, unknown>>, truth
   return wrong;
 }
 
+/** B4: only a schema-valid reading has field values to score; schema failures are counted apart. */
+export function caseWrongFields(collected: Pick<CollectedCase, "reading" | "reading_schema">, truth: TruthRecord | undefined): ScoredField[] {
+  if (!collected.reading || collected.reading_schema !== "ok") return [];
+  return wrongFields(collected.reading as Partial<Record<ScoredField, unknown>>, truth);
+}
+
 async function evaluatePass(collected: CollectedCase, file: PacketFile, own: OwnIds, truth: TruthRecord | undefined, today: string, pipeline: boolean): Promise<PassResult> {
   const result = checkReading(file.packet, collected.reading, collected.proof, checkContext(file, own, today));
   const pass: PassResult = {
@@ -114,19 +124,19 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
   return pass;
 }
 
-export async function replayRun(tag: string, opts: { today: string; pipeline: boolean }): Promise<CaseResult[]> {
+export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope }): Promise<CaseResult[]> {
+  const ids = scopeIds(opts.scope);
   const results: CaseResult[] = [];
   const files = readdirSync(dataPath("readings")).filter((name) => name.endsWith(".json"));
   for (const name of files.sort()) {
     const collected = readJson<CollectedCase>(dataPath("readings", name));
-    if (collected.meta?.run !== tag || !collected.doc_id) continue;
-    const set = setOf(collected.doc_id);
+    if (collected.meta?.run !== tag || !collected.doc_id || !ids.has(collected.doc_id)) continue;
+    const set: SetName = opts.scope;
     const file = readJson<PacketFile>(dataPath("packets", `${collected.doc_id}.json`));
     const own = readJson<Record<string, OwnIds>>(dataPath(set, "own.json"))[collected.doc_id]!;
     const truthPath = dataPath(set, "truth.json");
     const truth = existsSync(truthPath) ? readJson<Record<string, TruthRecord>>(truthPath)[collected.doc_id] : undefined;
     const available = truth?.status === "available";
-    const reading = (collected.reading ?? {}) as Partial<Record<ScoredField, unknown>>;
     const answers = ((collected.proof as { answers?: Record<string, { verdict?: string }> } | null)?.answers) ?? {};
     const usage = collected.turns.reduce((acc, turn) => ({
       input: acc.input + (turn.usage?.input ?? 0),
@@ -145,7 +155,7 @@ export async function replayRun(tag: string, opts: { today: string; pipeline: bo
       reading_schema: collected.reading_schema,
       proof_schema: collected.proof_schema,
       leakage_pass: collected.leakage_pass,
-      wrong_fields: collected.reading ? wrongFields(reading, truth) : [],
+      wrong_fields: caseWrongFields(collected, truth),
       proof_problem_fields: Object.entries(answers).filter(([, answer]) => answer?.verdict === "problem").map(([field]) => field),
       ...(typeof collected.meta?.mutated_field === "string" ? { mutated_field: collected.meta.mutated_field } : {}),
       passes: {},
@@ -166,7 +176,9 @@ if (process.argv[1]?.endsWith("/replay.ts")) {
   const argv = process.argv.slice(2);
   const tag = argValue(argv, "--run");
   if (!tag) throw new Error("--run <tag> required");
-  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: hasFlag(argv, "--pipeline") })
+  const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
+  if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
+  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: hasFlag(argv, "--pipeline"), scope })
     .then((results) => process.stdout.write(`replayed ${results.length} cases → results/${tag}.json\n`))
     .catch((error: unknown) => {
       process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

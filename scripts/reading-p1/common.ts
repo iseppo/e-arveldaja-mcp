@@ -64,6 +64,16 @@ export function manifest(set: SetName): ManifestEntry[] {
   });
 }
 
+/** Throughput round B8: the only report/replay scope this round. Paths derive from the scope's manifest ids. */
+export type Scope = "corpus";
+export const SCOPES: readonly Scope[] = ["corpus"];
+
+/** The document ids a scope may touch, from its own manifest only. */
+export function scopeIds(scope: Scope): Set<string> {
+  if (scope !== "corpus") throw new Error(`unknown scope ${String(scope)}`);
+  return new Set(manifest("corpus").map((entry) => entry.id));
+}
+
 export function manifestId(set: SetName, index: number): string {
   const n = String(index + 1).padStart(2, "0");
   return set === "corpus" ? n : `h${n}`;

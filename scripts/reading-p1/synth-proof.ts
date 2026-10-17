@@ -34,7 +34,7 @@ export const FIELD_KIND: Record<EvidenceField, FieldKind> = {
 
 const LETTER = /\p{L}/u;
 /** A due-date label on the token's line or the line above (a payment date such as "Makse kuupäev" is not one). */
-const DUE_LABEL = /t\u00e4htaeg|due|maksta hiljemalt|pay by|f\u00e4llig|termin/iu;
+const DUE_LABEL = /t\u00e4htaeg|t\u00e4htp\u00e4ev|due|maksta hiljemalt|pay by|f\u00e4llig|termin/iu;
 const UNPRINTED_AS_NULL: ReadonlySet<EvidenceField> = new Set(["supplier_reg", "supplier_vat", "supplier_iban"]);
 const compact = (value: string) => value.replace(/\s+/g, "").toUpperCase();
 
@@ -97,6 +97,26 @@ export function occurrences(packet: ReadingPacket, kind: FieldKind, value: strin
   return found;
 }
 
+/** A date token under a due-date label: the label before it on its line, or (nothing lettered before it) on the line above. */
+function isDueLabelled(packet: ReadingPacket, located: Located): boolean {
+  const index = packet.lines.findIndex((line) => line.id === located.line.id);
+  const before = located.line.text.slice(0, located.start);
+  return DUE_LABEL.test(before) || (!LETTER.test(before) && index > 0 && DUE_LABEL.test(packet.lines[index - 1]!.text));
+}
+
+/** Every due-labelled date of the packet, in packet order (B1 drafting of `due_date_printed`). */
+export function dueLabelledDates(packet: ReadingPacket): Array<{ value: string; line: string }> {
+  const out: Array<{ value: string; line: string }> = [];
+  for (const line of packet.lines) {
+    for (const token of lineTokens(line).dates) {
+      if (token.ambiguousSlash || token.values.length !== 1) continue;
+      const located = { line, start: token.start, end: token.end, quote: "" };
+      if (isDueLabelled(packet, located)) out.push({ value: token.values[0]!, line: line.id });
+    }
+  }
+  return out;
+}
+
 /** The labelled occurrence: its cell, or the cell before it on the same line, has a letter. */
 function preferLabelled(candidates: Located[]): Located | undefined {
   const labelled = candidates.find((candidate) => {
@@ -143,7 +163,14 @@ export function truthDerivedReading(file: PacketFile, truth: TruthRecord, own: O
     ["vat", truth.vat],
     ["gross", truth.gross],
   ];
+  // B3: with no booked IBAN, the base takes the first account the supplier prints as its own (owner-confirmed).
+  const printedIban = truth.supplier_ibans_printed?.find((iban) => occurrences(packet, "iban", iban).length > 0);
   for (const [field, value] of scoredFields) {
+    if (field === "supplier_iban" && (value === null || value === undefined) && printedIban) {
+      const located = preferLabelled(occurrences(packet, "iban", printedIban))!;
+      set(field, printedIban, located, "truth");
+      continue;
+    }
     if (unscored.has(field) || value === null || value === undefined) {
       // Unscored: the heuristic's value when printed as a complete token, else null.
       const heuristic = heuristicValue(file, field);
@@ -167,12 +194,10 @@ export function truthDerivedReading(file: PacketFile, truth: TruthRecord, own: O
   }
   // Due date: scored only when printed under a due-date label; e-arveldaja's create_date + term_days otherwise
   // has no source line, and the same date printed as an invoice or payment date is not a due date.
-  const due = truth.due_date ? occurrences(packet, "date", truth.due_date).find((located) => {
-    const index = packet.lines.findIndex((line) => line.id === located.line.id);
-    const before = located.line.text.slice(0, located.start);
-    return DUE_LABEL.test(before) || (!LETTER.test(before) && index > 0 && DUE_LABEL.test(packet.lines[index - 1]!.text));
-  }) : undefined;
-  if (due && truth.due_date) set("due_date", truth.due_date, due, "truth");
+  // B1: the printed due date (truth v2) takes precedence over the booked create_date + term_days.
+  const dueValue = truth.due_date_printed !== undefined ? truth.due_date_printed : truth.due_date;
+  const due = dueValue ? occurrences(packet, "date", dueValue).find((located) => isDueLabelled(packet, located)) : undefined;
+  if (due && dueValue) set("due_date", dueValue, due, "truth");
   else reading.due_date = null;
   // Buyer ids: the own ids, when printed.
   const buyerReg = own.reg ? preferLabelled(occurrences(packet, "reg", own.reg)) : undefined;

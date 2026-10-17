@@ -1,32 +1,55 @@
-// Step-5 reader runs on the corpus (plan step 5): N-S and N-T × 3 readers over every corpus document, then I-S
-// and I-T × 3 readers over family (a) with 1:1 clean controls. The held-out set is never touched here.
+// Reader runs on the corpus (plan step 5; throughput round T5 as run `step5b`): N-S and N-T × 3 readers over
+// every corpus document, then I-S and I-T × 3 readers over family (a) with 1:1 clean controls. The held-out set
+// is never touched here.
 // Guards:
-//   - OQ-P1-9: after every case the step-5 consumption (pilot + step 5 so far + the remaining planned cases at
-//     the running mean per reader × form + the legacy estimate) is projected; above 30M input / 4M output no
-//     new case starts and the run stops for owner approval.
-//   - Leakage: a failed audit whose failures are transport-only (Codex reconnect/transport error events, a
-//     runner error without any leak signal) is re-staged by restage.ts; any other failure stops the run.
-// Re-running a mode skips cases already staged under the step-5 tag (key in the registry meta).
-// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status [--concurrency 6]
+//   - B9 (throughput round): every run has its own tag (`--run`, required; `step5` is refused, it is frozen) and
+//     its own caps (`--cap-input/--cap-output`, required, at most the OQ-P1-9 ceiling 30M / 4M). Accounting counts
+//     only the cases of that tag: consumed tokens, the projection (the not-yet-staged planned cases at the tag's
+//     running mean per reader × form, the step-5 mean until the tag has its own) and the stop files under
+//     <data>/<tag>/. The I-case plan is recomputed from the current mutations/a.json (2 × sampled per reader ×
+//     form). Above a cap no new case starts, re-stages included.
+//   - Leakage (B7): a failed case is re-staged only on positive transport evidence (restage.ts classifyEvidence),
+//     checked before every retry; any other failure stops the run.
+// Re-running a mode skips cases already staged under the same tag (key in the registry meta).
+// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--concurrency 6]
 
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
 import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
 import type { CollectedCase } from "./collect.js";
-import { SCRIPTS_DIR, argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
-import { rng, shuffle } from "./mutate.js";
+import { argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
+import { rng, shuffle, type FamilyA } from "./mutate.js";
+import { classifyFailure, restageRun, type Registry } from "./restage.js";
 import { runCases, type CaseOutcome } from "./run-cases.js";
-import type { StagedCase } from "./stage.js";
 
-export const TAG = "step5";
+/** The frozen step-5 tag: its readings seed the per-case means of a new run, never its accounting. */
+export const FROZEN_TAG = "step5";
 const CEILING = { input: 30_000_000, output: 4_000_000 };
 const LEGACY = { input: 150_000, output: 50_000 };
-const TRANSPORT_RE = /reconnect|websocket|transport|stream|disconnect|timed? ?out|rate.?limit|\b429\b|\b5\d\d\b|overloaded|network|connection|routing discovery/i;
-/** Failure codes that can only come from a leak or an isolation fault: these stop the run. */
-const LEAK_RE = /sentinel|tool_use|attachment|instruction_fragment|outside_path|mcp_server|codex_home|_model$|session_changed|thread_changed|prompt_hash/;
 
-type Registry = StagedCase & { restaged_as?: string };
+export interface RunArgs { tag: string; caps: { input: number; output: number } }
+
+/** B9: --run (not the frozen tag) and both caps are required; caps may not exceed the OQ-P1-9 ceiling. */
+export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string } {
+  let tag: string | undefined;
+  let capInput: string | undefined;
+  let capOutput: string | undefined;
+  try {
+    tag = argValue(argv, "--run");
+    capInput = argValue(argv, "--cap-input");
+    capOutput = argValue(argv, "--cap-output");
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  if (!tag) return { error: "--run <tag> is required" };
+  if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(tag)) return { error: `--run ${tag}: lower-case letters, digits and - only` };
+  if (tag === FROZEN_TAG) return { error: `--run ${FROZEN_TAG} is frozen; use a new tag` };
+  if (capInput === undefined || capOutput === undefined) return { error: "--cap-input <n> and --cap-output <n> are required" };
+  const input = Number(capInput);
+  const output = Number(capOutput);
+  if (!Number.isInteger(input) || !Number.isInteger(output) || input <= 0 || output <= 0) return { error: "caps must be positive integers" };
+  if (input > CEILING.input || output > CEILING.output) return { error: `caps exceed the OQ-P1-9 ceiling ${CEILING.input} / ${CEILING.output}` };
+  return { tag, caps: { input, output } };
+}
 
 function registries(): Registry[] {
   return readdirSync(dataPath("staging")).filter((name) => /^c-[0-9a-f]{12}\.json$/.test(name)).map((name) => readJson<Registry>(dataPath("staging", name)));
@@ -39,25 +62,25 @@ function readingsOf(tags: string[]): CollectedCase[] {
 
 const sumUsage = (reading: CollectedCase) => reading.turns.reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
 
-export function naturalItems(): CaseItem[] {
+export function naturalItems(tag: string): CaseItem[] {
   const docs = manifest("corpus").map((entry) => entry.id);
   const items: CaseItem[] = [];
   for (const reader of READERS) for (const form of ["N-S", "N-T"] as const) for (const doc of docs) {
-    const item = formCase(reader, form, doc, undefined, null, TAG);
+    const item = formCase(reader, form, doc, undefined, null, tag);
     item.spec.meta = { ...item.spec.meta, key: `${reader}|${form}|${doc}` };
     items.push(item);
   }
   return shuffle(items, rng(5));
 }
 
-export function injectedItems(): CaseItem[] {
-  const family = loadFamilyA();
+/** I-S and I-T: 2 × sampled(a) per reader × form, from the given (by default the current) family (a). */
+export function injectedItems(tag: string, family: FamilyA = loadFamilyA()): CaseItem[] {
   const items: CaseItem[] = [];
   for (const reader of READERS) for (const form of ["I-S", "I-T"] as const) for (const candidate of family.sampled) {
     const base = family.admitted_bases.find((entry) => entry.doc_id === candidate.doc_id)!;
     const id = `${candidate.doc_id}|${candidate.field}|${candidate.value}|${candidate.line}`;
     for (const mutated of [true, false]) {
-      const item = formCase(reader, form, candidate.doc_id, base, mutated ? candidate : null, TAG);
+      const item = formCase(reader, form, candidate.doc_id, base, mutated ? candidate : null, tag);
       item.spec.meta = { ...item.spec.meta, key: `${reader}|${form}|${id}|${mutated ? "mutated" : "clean"}` };
       items.push(item);
     }
@@ -65,26 +88,48 @@ export function injectedItems(): CaseItem[] {
   return shuffle(items, rng(6));
 }
 
-/** Projected step-5 consumption: done so far + the not-yet-staged planned cases at the running means. */
-export function projection(planned: CaseItem[]) {
-  const done = readingsOf(["pilot", TAG]);
-  const consumed = done.reduce((acc, reading) => {
-    const usage = sumUsage(reading);
-    return { input: acc.input + usage.input, output: acc.output + usage.output };
-  }, { input: 0, output: 0 });
-  const means = new Map<string, { input: number; output: number; n: number }>();
-  for (const reading of done.filter((entry) => entry.leakage_pass)) {
+export function allPlanned(tag: string): CaseItem[] {
+  return [...naturalItems(tag), ...(existsSync(dataPath("mutations", "a.json")) ? injectedItems(tag) : [])];
+}
+
+/** The planned cases not yet staged under `tag` (registries of other tags never count). */
+export function todoItems(planned: CaseItem[], staged: ReadonlyArray<{ meta?: Record<string, unknown> }>, tag: string): CaseItem[] {
+  const keys = new Set(staged.filter((entry) => entry.meta?.run === tag).map((entry) => String(entry.meta?.key)));
+  return planned.filter((item) => !keys.has(String(item.spec.meta?.key)));
+}
+
+type Means = Map<string, { input: number; output: number; n: number }>;
+
+function meansOf(readings: CollectedCase[]): Means {
+  const means: Means = new Map();
+  for (const reading of readings.filter((entry) => entry.leakage_pass)) {
     const key = `${reading.reader}|${reading.form}`;
     const usage = sumUsage(reading);
     const entry = means.get(key) ?? { input: 0, output: 0, n: 0 };
     means.set(key, { input: entry.input + usage.input, output: entry.output + usage.output, n: entry.n + 1 });
   }
-  const staged = new Set(registries().filter((entry) => entry.meta?.run === TAG).map((entry) => String(entry.meta?.key)));
-  const remaining = planned.filter((item) => !staged.has(String(item.spec.meta?.key)));
+  return means;
+}
+
+/** Projected consumption of `run.tag`: its own cases so far + its not-yet-staged planned cases at the running means. */
+export function projection(planned: CaseItem[], run: RunArgs) {
+  const done = readingsOf([run.tag]);
+  const consumed = done.reduce((acc, reading) => {
+    const usage = sumUsage(reading);
+    return { input: acc.input + usage.input, output: acc.output + usage.output };
+  }, { input: 0, output: 0 });
+  const own = meansOf(done);
+  const prior = meansOf(readingsOf([FROZEN_TAG]));
+  const remaining = todoItems(planned, registries(), run.tag);
   const projected = { ...consumed };
+  let unestimated = 0;
   for (const item of remaining) {
-    const mean = means.get(`${item.spec.reader}|${item.spec.form}`);
-    if (!mean) continue;
+    const key = `${item.spec.reader}|${item.spec.form}`;
+    const mean = own.get(key) ?? prior.get(key);
+    if (!mean) {
+      unestimated += 1;
+      continue;
+    }
     projected.input += mean.input / mean.n;
     projected.output += mean.output / mean.n;
   }
@@ -93,39 +138,25 @@ export function projection(planned: CaseItem[]) {
     projected.input += LEGACY.input;
     projected.output += LEGACY.output;
   }
-  return { consumed, projected, remaining: remaining.length, exceeds: projected.input > CEILING.input || projected.output > CEILING.output };
+  const iCases = planned.filter((item) => item.spec.form === "I-S" || item.spec.form === "I-T").length;
+  return {
+    run: run.tag, caps: run.caps, consumed, projected, remaining: remaining.length, unestimated, planned_i_cases: iCases,
+    exceeds: unestimated > 0 || projected.input > run.caps.input || projected.output > run.caps.output,
+  };
 }
 
-/** "transport" when the failed audit shows no leak signal and every error event is a transport message. */
-export function classifyFailure(caseId: string): "transport" | "stop" {
-  const leakage = readJson<{ failures: string[] }>(dataPath("leakage", `${caseId}.json`));
-  if (leakage.failures.some((failure) => LEAK_RE.test(failure))) return "stop";
-  for (const failure of leakage.failures) {
-    const forbidden = /^turn\d_forbidden:(.*)$/.exec(failure);
-    if (forbidden && forbidden[1]!.split(",").some((entry) => entry !== "event:error" && entry !== "item:error")) return "stop";
-  }
-  const staged = readJson<Registry>(dataPath("staging", `${caseId}.json`));
-  for (const turn of [1, 2]) {
-    const path = join(staged.dir, `events${turn}.jsonl`);
-    if (!existsSync(path)) continue;
-    for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
-      const event = JSON.parse(line) as { type?: string; message?: string; item?: { type?: string; message?: string } };
-      const message = event.type === "error" ? event.message : event.item?.type === "error" ? event.item.message : undefined;
-      if (message !== undefined && !TRANSPORT_RE.test(message)) return "stop";
-    }
-  }
-  return "transport";
-}
-
-async function runSuite(name: string, planned: CaseItem[], concurrency: number): Promise<void> {
-  const staged = new Set(registries().filter((entry) => entry.meta?.run === TAG).map((entry) => String(entry.meta?.key)));
-  const todo = planned.filter((item) => !staged.has(String(item.spec.meta?.key)));
-  const all = [...naturalItems(), ...(existsSync(dataPath("mutations", "a.json")) ? injectedItems() : [])];
-  const start = projection(all);
+async function runSuite(name: string, planned: CaseItem[], run: RunArgs, concurrency: number): Promise<void> {
+  const todo = todoItems(planned, registries(), run.tag);
+  const all = allPlanned(run.tag);
+  const start = projection(all, run);
   process.stdout.write(`${name}: ${todo.length} to run; projection ${JSON.stringify(start)}\n`);
-  if (start.exceeds) {
-    process.stdout.write("STOP: projection exceeds OQ-P1-9 before starting\n");
+  const writeStop = (stop: string) => {
+    process.stdout.write(`STOP: ${stop}\n`);
+    writeJson(dataPath(run.tag, `stop-${name}.json`), { stop, at: new Date().toISOString() });
     process.exitCode = 3;
+  };
+  if (start.exceeds) {
+    writeStop(`projection exceeds the ${run.tag} caps before starting`);
     return;
   }
   let stop: string | null = null;
@@ -134,42 +165,41 @@ async function runSuite(name: string, planned: CaseItem[], concurrency: number):
     done += 1;
     if (!outcome.leakage_pass) {
       const kind = classifyFailure(outcome.case_id);
-      if (kind === "stop") stop = `leakage:${outcome.case_id}:${outcome.failures.join(",")}`;
+      if (kind === "stop") stop = stop ?? `leakage:${outcome.case_id}:${outcome.failures.join(",")}`;
       process.stdout.write(`  ${outcome.case_id} leakage FAIL (${kind}) ${outcome.failures.join(",")}\n`);
     }
-    if (done % 10 === 0 || stop) {
-      const current = projection(all);
-      process.stdout.write(`  ${done}/${todo.length} consumed ${current.consumed.input}/${current.consumed.output} projected ${Math.round(current.projected.input)}/${Math.round(current.projected.output)}\n`);
-      if (current.exceeds) stop = stop ?? "projection exceeds OQ-P1-9";
-    }
+    const current = projection(all, run);
+    if (done % 10 === 0 || stop) process.stdout.write(`  ${done}/${todo.length} consumed ${current.consumed.input}/${current.consumed.output} projected ${Math.round(current.projected.input)}/${Math.round(current.projected.output)}\n`);
+    if (current.exceeds) stop = stop ?? `projection exceeds the ${run.tag} caps`;
   }, () => stop !== null);
   if (stop) {
-    process.stdout.write(`STOP: ${stop}\n`);
-    writeJson(dataPath("step5", `stop-${name}.json`), { stop, at: new Date().toISOString() });
-    process.exitCode = 3;
+    writeStop(stop);
     return;
   }
-  // Transport-only failures: re-stage (restage.ts re-checks every failed case of the tag).
-  const output = execFileSync("npx", ["tsx", join(SCRIPTS_DIR, "restage.ts"), "--run", TAG, "--max", "2"], { encoding: "utf8" });
-  process.stdout.write(output);
-  const stillFailed = registries().filter((entry) => entry.meta?.run === TAG && !entry.restaged_as &&
+  // Transport-only failures: re-stage in-process, classified before every retry, under the same caps.
+  const restageStop = await restageRun({ tag: run.tag, max: 2, exceeds: () => projection(all, run).exceeds });
+  if (restageStop) {
+    writeStop(restageStop);
+    return;
+  }
+  const stillFailed = registries().filter((entry) => entry.meta?.run === run.tag && !entry.restaged_as &&
     existsSync(dataPath("leakage", `${entry.case_id}.json`)) && !readJson<{ pass: boolean }>(dataPath("leakage", `${entry.case_id}.json`)).pass);
   for (const entry of stillFailed) {
     const kind = classifyFailure(entry.case_id);
     process.stdout.write(`  after re-stage: ${entry.case_id} still failing (${kind})\n`);
     if (kind === "stop") process.exitCode = 3;
   }
-  process.stdout.write(`${name}: done; projection ${JSON.stringify(projection(all))}\n`);
+  process.stdout.write(`${name}: done; projection ${JSON.stringify(projection(all, run))}\n`);
 }
 
 if (process.argv[1]?.endsWith("/step5.ts")) {
   const [mode, ...rest] = process.argv.slice(2);
   const concurrency = Number(argValue(rest, "--concurrency") ?? "6");
-  if (mode === "natural") await runSuite("natural", naturalItems(), concurrency);
-  else if (mode === "injected") await runSuite("injected", injectedItems(), concurrency);
-  else if (mode === "status") process.stdout.write(`${JSON.stringify(projection([...naturalItems(), ...injectedItems()]), null, 2)}\n`);
-  else {
-    process.stderr.write("usage: step5.ts natural|injected|status\n");
+  const run = parseRunArgs(rest);
+  if ("error" in run || !["natural", "injected", "status"].includes(mode ?? "")) {
+    process.stderr.write(`${"error" in run ? `${run.error}\n` : ""}usage: step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--concurrency 6]\n`);
     process.exitCode = 1;
-  }
+  } else if (mode === "natural") await runSuite("natural", naturalItems(run.tag), run, concurrency);
+  else if (mode === "injected") await runSuite("injected", injectedItems(run.tag), run, concurrency);
+  else process.stdout.write(`${JSON.stringify(projection(allPlanned(run.tag), run), null, 2)}\n`);
 }

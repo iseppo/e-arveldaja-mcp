@@ -48,13 +48,17 @@ const cellQuote = (text: string, start: number, end: number) => {
   return quote.length <= 200 ? quote : text.slice(start, end);
 };
 
-/** Every other printed value of the field's type (exhaustive). */
-export function candidatesFor(docId: string, packet: ReadingPacket, field: EvidenceField, baseValue: string | number): Candidate[] {
+/**
+ * Every other printed value of the field's type (exhaustive). `equivalent` values are equally correct readings
+ * (B3: the supplier's other printed accounts), not errors, so they are no candidates.
+ */
+export function candidatesFor(docId: string, packet: ReadingPacket, field: EvidenceField, baseValue: string | number, equivalent: ReadonlyArray<string | number> = []): Candidate[] {
   const type = FIELD_TYPE[field];
   const out: Candidate[] = [];
   const seen = new Set<string>();
   const add = (value: string | number, line: string, quote: string) => {
     if (value === baseValue || (typeof value === "number" && typeof baseValue === "number" && Math.abs(value - baseValue) <= 0.005)) return;
+    if (equivalent.includes(value)) return;
     if (quote.length === 0 || quote.length > 200) return;
     const key = `${value}\u0000${line}\u0000${quote}`;
     if (seen.has(key)) return;
@@ -187,7 +191,8 @@ function familyA(set: SetName): FamilyA {
     for (const field of Object.keys(FIELD_TYPE) as EvidenceField[]) {
       const baseValue = base.reading[field];
       if (baseValue === null || baseValue === undefined) continue;
-      for (const candidate of candidatesFor(docId, file.packet, field, baseValue as string | number)) {
+      const equivalent = field === "supplier_iban" ? record.supplier_ibans_printed ?? [] : [];
+      for (const candidate of candidatesFor(docId, file.packet, field, baseValue as string | number, equivalent)) {
         const mutated = JSON.parse(JSON.stringify(base.reading)) as typeof base.reading;
         mutated[field] = candidate.value;
         mutated.evidence[field] = { line: candidate.line, quote: candidate.quote };
@@ -239,7 +244,11 @@ if (process.argv[1]?.endsWith("/mutate.ts")) {
   const argv = process.argv.slice(2);
   const family = argValue(argv, "--family") ?? "a";
   const set = (argValue(argv, "--set") ?? "corpus") as SetName;
-  if (family !== "a") {
+  if (set !== "corpus") {
+    // Family (a) is corpus-only (throughput round B8): no held-out truth, own ids or packet is read here.
+    process.stderr.write("mutate.ts: family (a) is built from the corpus only\n");
+    process.exitCode = 2;
+  } else if (family !== "a") {
     process.stderr.write(`family ${family}: not implemented in step 4 (families (c)-(k) are step-5 corpus patches)\n`);
     process.exitCode = 2;
   } else {

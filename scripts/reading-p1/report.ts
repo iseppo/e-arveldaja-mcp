@@ -1,11 +1,13 @@
 // results/<run>.json → reports/<run>/{summary.md, summary.json} (plan §5.8), plus the token projection for the
 // step-5 run sizes against the OQ-P1-9 ceiling (30M input / 4M output).
-// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
+// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--scope corpus] [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
+// Scope (throughput round B8): "corpus" is the only scope. Every path is derived from the corpus manifest ids
+// BEFORE any read, list or hash, so no held-out manifest, packet or projection input is touched.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { PARSER_VERSION, type PacketFile } from "./build-packets.js";
-import { REPO_ROOT, argValue, dataPath, hasFlag, readJson, sha256Hex, writeJson, writePrivate } from "./common.js";
+import { REPO_ROOT, SCOPES, argValue, dataPath, hasFlag, readJson, scopeIds, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
 import { FORMS } from "./prompts.js";
 import { PROOF_QUESTIONS } from "../../src/document-reading-check.js";
 import { mcpPayloadBytes } from "../../src/response-budget.js";
@@ -32,6 +34,11 @@ const rate = (successes: number, total: number) => ({ successes, total, rate: to
 const fmtRate = (value: ReturnType<typeof rate>) => value.total === 0 ? "n/a (0)" :
   `${value.successes}/${value.total} = ${(value.rate! * 100).toFixed(1)}% [${(value.ci95![0] * 100).toFixed(1)}, ${(value.ci95![1] * 100).toFixed(1)}]`;
 const fileHash = (path: string) => (existsSync(path) ? sha256Hex(readFileSync(path)) : null);
+
+/** Results of the scope's documents (legacy cases carry no document). */
+export function inScope(results: CaseResult[], ids: ReadonlySet<string>): CaseResult[] {
+  return results.filter((result) => result.doc_id === null || ids.has(result.doc_id));
+}
 
 function hardCaught(pass: PassResult | undefined, field: string): boolean {
   return (pass?.holds ?? []).some((hold) => {
@@ -113,9 +120,9 @@ export function summarize(tag: string, results: CaseResult[]) {
 }
 
 /** Projects the step-5 reader runs from this run's mean tokens per case (reader × form). */
-export function projection(usage: ReturnType<typeof summarize>["usage"]) {
-  const corpus = readFileSync(dataPath("corpus", "files.txt"), "utf8").split("\n").filter(Boolean).length;
-  const heldout = existsSync(dataPath("heldout", "files.txt")) ? readFileSync(dataPath("heldout", "files.txt"), "utf8").split("\n").filter(Boolean).length : 0;
+export function projection(usage: ReturnType<typeof summarize>["usage"], ids: ReadonlySet<string>) {
+  const corpus = ids.size;
+  const heldout = 0; // corpus scope: the held-out manifest is never read
   const familyA = existsSync(dataPath("mutations", "a.json")) ? readJson<{ sampled: unknown[] }>(dataPath("mutations", "a.json")) : { sampled: [] };
   const plannedI = 2 * familyA.sampled.length; // mutated + clean, 1:1, per reader and form
   const scenario = (iCases: number) => {
@@ -155,7 +162,7 @@ export function formDecision(forms: ReturnType<typeof summarize>["forms"], resul
 }
 
 /** §5.8 items 3-7 that come from outside the run's case results. */
-export function extras(results: CaseResult[]) {
+export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: string) {
   const families = existsSync(dataPath("mutations", "families.json")) ? readJson<{ base_acceptance: unknown; by_family: Record<string, Record<string, number>>; results: { family: string; name: string; doc: string; expected: unknown; status: string; layer?: string; new_codes?: string[] }[] }>(dataPath("mutations", "families.json")) : null;
   const a = existsSync(dataPath("mutations", "a.json")) ? readJson<{ bases: { admitted: string[] }; admitted_bases: { doc_id: string; source?: string | null }[]; candidates: number; held_by_hard_checks: number; survivors: number; sampled: unknown[]; by_field_type: unknown; amounts_by_direction: unknown }>(dataPath("mutations", "a.json")) : null;
   const injected = results.filter((item) => item.kind === "mutated" && item.leakage_pass);
@@ -165,8 +172,8 @@ export function extras(results: CaseResult[]) {
     entry.cases += 1;
     if (item.mutated_field && item.proof_problem_fields.includes(item.mutated_field)) entry.caught += 1;
   }
-  const packets = existsSync(dataPath("packets")) ? readdirSync(dataPath("packets")).filter((name) => name.endsWith(".json")).map((name) => readJson<PacketFile & { stats?: { text_bytes?: number; lines?: number } }>(dataPath("packets", name))) : [];
-  const corpusPackets = packets.filter((file) => !String((file as { id?: string }).id ?? "").startsWith("h"));
+  const corpusPackets = [...ids].sort().map((id) => dataPath("packets", `${id}.json`)).filter((path) => existsSync(path))
+    .map((path) => readJson<PacketFile & { stats?: { text_bytes?: number; lines?: number } }>(path));
   const dist = (values: number[]) => {
     const sorted = [...values].sort((x, y) => x - y);
     const at = (q: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]! : null;
@@ -175,7 +182,8 @@ export function extras(results: CaseResult[]) {
   const envelopes = corpusPackets.map((file) => mcpPayloadBytes({ packet: file.packet, questions: PROOF_QUESTIONS }) + 1024);
   const oversize = corpusPackets.filter((file) => ((file.packet as { holds?: { code?: string }[] | string[] }).holds ?? []).some((hold) => (typeof hold === "string" ? hold : hold.code) === "packet_oversize")).length;
   const proofOut = results.filter((item) => (item.form === "N-T" || item.form === "I-T") && item.leakage_pass).map((item) => item.usage.output);
-  const det = (["run1", "run2"] as const).map((run) => existsSync(dataPath("determinism", run)) ? Object.fromEntries(readdirSync(dataPath("determinism", run)).map((name) => [name, (readJson<PacketFile>(dataPath("determinism", run, name)).packet as { packet_digest?: string }).packet_digest])) : {});
+  const det = (["run1", "run2"] as const).map((run) => Object.fromEntries([...ids].sort().map((id) => dataPath("determinism", run, `${id}.json`)).filter((path) => existsSync(path))
+    .map((path) => [path.slice(path.lastIndexOf("/") + 1), (readJson<PacketFile>(path).packet as { packet_digest?: string }).packet_digest])));
   const detNames = Object.keys(det[0]!);
   const legacyScore = existsSync(dataPath("legacy", "score.txt")) ? readFileSync(dataPath("legacy", "score.txt"), "utf8") : null;
   const truth = existsSync(dataPath("corpus", "truth.json")) ? readJson<Record<string, TruthRecord>>(dataPath("corpus", "truth.json")) : {};
@@ -187,7 +195,15 @@ export function extras(results: CaseResult[]) {
     const schemaHeld = failing.filter((item) => item.passes.as_of!.verdict === "hold" && item.passes.as_of!.holds.every((hold) => hold.startsWith("reading_schema_invalid") || hold.startsWith("proof_schema_invalid")));
     return { doc, expected: codes, cases: cases.length, failing: failing.map((item) => item.case_id), schema_held: schemaHeld.map((item) => item.case_id) };
   });
+  // Every truth change with its reason (B1/B3/B5), and every re-staged case of the run with its evidence (B7, 5a).
+  const truthChanges = Object.entries(truth).flatMap(([doc, record]) => (record.truth_changes ?? []).map((change) => ({ doc, ...change })));
+  const restaged = existsSync(dataPath("staging")) ? readdirSync(dataPath("staging")).filter((name) => /^c-[0-9a-f]{12}\.json$/.test(name))
+    .map((name) => readJson<{ case_id: string; doc_id: string | null; meta?: Record<string, unknown>; restaged_as?: string; restage_evidence?: string[] }>(dataPath("staging", name)))
+    .filter((entry) => entry.meta?.run === tag && entry.restaged_as && (entry.doc_id === null || ids.has(entry.doc_id)))
+    .map((entry) => ({ case_id: entry.case_id, restaged_as: entry.restaged_as!, evidence: entry.restage_evidence ?? null })) : [];
   return {
+    truth_changes: truthChanges,
+    restaged,
     families: families && { base_acceptance: families.base_acceptance, by_family: families.by_family, escaped: families.results.filter((entry) => entry.status !== "OK"), cases: families.results.length },
     family_a: a && { bases: a.admitted_bases.map((base) => ({ doc_id: base.doc_id, source: base.source ?? null })), candidates: a.candidates, held_by_hard_checks: a.held_by_hard_checks, survivors: a.survivors, sampled: a.sampled.length, by_field_type: a.by_field_type, amounts_by_direction: a.amounts_by_direction, proof_catch: proofCatch },
     packets: { corpus_packets: corpusPackets.length, text_bytes: dist(corpusPackets.map((file) => (file.packet as { text_bytes: number }).text_bytes)), lines: dist(corpusPackets.map((file) => (file.packet as { lines: unknown[] }).lines.length)), packet_oversize: oversize, envelope_bytes: dist(envelopes), proof_output_tokens_per_two_turn_case: dist(proofOut),
@@ -209,7 +225,8 @@ function header(tag: string, results: CaseResult[]) {
     parser: PARSER_VERSION,
     builder: anyPacket ? (readJson<PacketFile>(dataPath("packets", `${anyPacket}.json`)).packet as { builder_version?: string }).builder_version ?? null : null,
     today: { real: [...new Set(results.map((result) => result.passes.real?.today).filter(Boolean))], as_of: "truth.invoice_date + 30 days" },
-    manifests: Object.fromEntries((["corpus", "heldout"] as const).map((set) => [set, { files: fileHash(dataPath(set, "files.txt")), sha256: fileHash(dataPath(set, "sha256.txt")) }])),
+    scope: "corpus",
+    manifests: { corpus: { files: fileHash(dataPath("corpus", "files.txt")), sha256: fileHash(dataPath("corpus", "sha256.txt")) } },
     snapshots: Object.fromEntries(snapshots.map((company) => {
       const meta = readJson<Record<string, unknown>>(dataPath("snapshots", company, "meta.json"));
       return [company, { meta_sha256: fileHash(dataPath("snapshots", company, "meta.json")), taken_at: meta.taken_at ?? meta.created_at ?? null }];
@@ -243,6 +260,8 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
   if (extra) {
     lines.push("", "Called out (plan §5.8.3): " + ["competing_consistent_total (A2)", "mixed_vat_rate (A3)", "invoice_number_is_identifier (H9)", "foreign_rate_trio", "cited_origin_unestablished", "unaccounted_identifier"].map((label) => { const code = label.split(" ")[0]!; const entry = summary.hold_rates[code]; return `${label} ${entry ? `${entry.with}/${entry.only}` : "0/0"}`; }).join("; ") + "; " +
       Object.entries(summary.hold_rates).filter(([code]) => code.startsWith("ocr_")).map(([code, entry]) => `${code} ${entry.with}/${entry.only}`).join("; ") + " (cases/only)");
+    lines.push("", "## Truth changes", "", ...(extra.truth_changes.length ? extra.truth_changes.map((change) => `- #${change.doc} ${change.field}: ${JSON.stringify(change.from)} → ${JSON.stringify(change.to)} (${change.reason})`) : ["- none"]));
+    lines.push("", "## Re-staged cases (transport evidence)", "", ...(extra.restaged.length ? extra.restaged.map((entry) => `- ${entry.case_id} → ${entry.restaged_as}: ${entry.evidence ? entry.evidence.join(" | ") : "NO EVIDENCE RECORDED"}`) : ["- none"]));
     lines.push("", "## Expected document holds (§7.7)", "");
     for (const entry of extra.expected_document_holds) lines.push(`- #${entry.doc} expects one of ${entry.expected.join(", ")}: ${entry.cases} natural cases, ${entry.failing.length} not held with one of them${entry.failing.length ? ` (${entry.failing.join(", ")})` : ""}${entry.schema_held.length ? `; of these ${entry.schema_held.length} held by a schema hold only (no content check ran)` : ""}`);
     if (extra.families) {
@@ -275,11 +294,14 @@ if (process.argv[1]?.endsWith("/report.ts")) {
   const argv = process.argv.slice(2);
   const tag = argValue(argv, "--run");
   if (!tag) throw new Error("--run <tag> required");
-  const results = readJson<CaseResult[]>(dataPath("results", `${tag}.json`));
+  const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
+  if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
+  const ids = scopeIds(scope);
+  const results = inScope(readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids);
   const head = header(tag, results);
   const summary = summarize(tag, results);
-  const proj = hasFlag(argv, "--projection") ? projection(summary.usage) : undefined;
-  const extra = hasFlag(argv, "--full") ? extras(results) : undefined;
+  const proj = hasFlag(argv, "--projection") ? projection(summary.usage, ids) : undefined;
+  const extra = hasFlag(argv, "--full") ? extras(results, ids, tag) : undefined;
   const decision = extra ? formDecision(summary.forms, results) : undefined;
   writeJson(dataPath("reports", tag, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}) });
   const md = markdown(head, summary, proj, extra, decision);
