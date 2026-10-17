@@ -157,7 +157,7 @@ export function formDecision(forms: ReturnType<typeof summarize>["forms"], resul
 /** §5.8 items 3-7 that come from outside the run's case results. */
 export function extras(results: CaseResult[]) {
   const families = existsSync(dataPath("mutations", "families.json")) ? readJson<{ base_acceptance: unknown; by_family: Record<string, Record<string, number>>; results: { family: string; name: string; doc: string; expected: unknown; status: string; layer?: string; new_codes?: string[] }[] }>(dataPath("mutations", "families.json")) : null;
-  const a = existsSync(dataPath("mutations", "a.json")) ? readJson<{ bases: { admitted: string[] }; admitted_bases: { doc_id: string; source?: string | null }[]; candidates: unknown[]; held_by_hard_checks: unknown[]; survivors: unknown[]; sampled: unknown[]; by_field_type: unknown; amounts_by_direction: unknown }>(dataPath("mutations", "a.json")) : null;
+  const a = existsSync(dataPath("mutations", "a.json")) ? readJson<{ bases: { admitted: string[] }; admitted_bases: { doc_id: string; source?: string | null }[]; candidates: number; held_by_hard_checks: number; survivors: number; sampled: unknown[]; by_field_type: unknown; amounts_by_direction: unknown }>(dataPath("mutations", "a.json")) : null;
   const injected = results.filter((item) => item.kind === "mutated" && item.leakage_pass);
   const proofCatch: Record<string, { caught: number; cases: number }> = {};
   for (const item of injected) {
@@ -183,11 +183,13 @@ export function extras(results: CaseResult[]) {
     const cases = results.filter((item) => item.doc_id === doc && item.kind === "natural" && item.leakage_pass && item.passes.as_of);
     const codes = record.expected_document_holds!;
     const failing = cases.filter((item) => item.passes.as_of!.verdict !== "hold" || !item.passes.as_of!.holds.some((hold) => codes.includes(hold.split(":")[0]!)));
-    return { doc, expected: codes, cases: cases.length, failing: failing.map((item) => item.case_id) };
+    // A reading that fails its schema holds before any content check can run: reported apart, not hidden.
+    const schemaHeld = failing.filter((item) => item.passes.as_of!.verdict === "hold" && item.passes.as_of!.holds.every((hold) => hold.startsWith("reading_schema_invalid") || hold.startsWith("proof_schema_invalid")));
+    return { doc, expected: codes, cases: cases.length, failing: failing.map((item) => item.case_id), schema_held: schemaHeld.map((item) => item.case_id) };
   });
   return {
     families: families && { base_acceptance: families.base_acceptance, by_family: families.by_family, escaped: families.results.filter((entry) => entry.status !== "OK"), cases: families.results.length },
-    family_a: a && { bases: a.admitted_bases.map((base) => ({ doc_id: base.doc_id, source: base.source ?? null })), candidates: a.candidates.length, held_by_hard_checks: a.held_by_hard_checks.length, survivors: a.survivors.length, sampled: a.sampled.length, by_field_type: a.by_field_type, amounts_by_direction: a.amounts_by_direction, proof_catch: proofCatch },
+    family_a: a && { bases: a.admitted_bases.map((base) => ({ doc_id: base.doc_id, source: base.source ?? null })), candidates: a.candidates, held_by_hard_checks: a.held_by_hard_checks, survivors: a.survivors, sampled: a.sampled.length, by_field_type: a.by_field_type, amounts_by_direction: a.amounts_by_direction, proof_catch: proofCatch },
     packets: { corpus_packets: corpusPackets.length, text_bytes: dist(corpusPackets.map((file) => (file.packet as { text_bytes: number }).text_bytes)), lines: dist(corpusPackets.map((file) => (file.packet as { lines: unknown[] }).lines.length)), packet_oversize: oversize, envelope_bytes: dist(envelopes), proof_output_tokens_per_two_turn_case: dist(proofOut),
       determinism: { files: detNames.length, identical: detNames.filter((name) => det[0]![name] !== undefined && det[0]![name] === det[1]![name]).length } },
     legacy_score: legacyScore,
@@ -242,7 +244,7 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
     lines.push("", "Called out (plan §5.8.3): " + ["competing_consistent_total (A2)", "mixed_vat_rate (A3)", "invoice_number_is_identifier (H9)", "foreign_rate_trio", "cited_origin_unestablished", "unaccounted_identifier"].map((label) => { const code = label.split(" ")[0]!; const entry = summary.hold_rates[code]; return `${label} ${entry ? `${entry.with}/${entry.only}` : "0/0"}`; }).join("; ") + "; " +
       Object.entries(summary.hold_rates).filter(([code]) => code.startsWith("ocr_")).map(([code, entry]) => `${code} ${entry.with}/${entry.only}`).join("; ") + " (cases/only)");
     lines.push("", "## Expected document holds (§7.7)", "");
-    for (const entry of extra.expected_document_holds) lines.push(`- #${entry.doc} expects one of ${entry.expected.join(", ")}: ${entry.cases} natural cases, ${entry.failing.length} not held with one of them${entry.failing.length ? ` (${entry.failing.join(", ")})` : ""}`);
+    for (const entry of extra.expected_document_holds) lines.push(`- #${entry.doc} expects one of ${entry.expected.join(", ")}: ${entry.cases} natural cases, ${entry.failing.length} not held with one of them${entry.failing.length ? ` (${entry.failing.join(", ")})` : ""}${entry.schema_held.length ? `; of these ${entry.schema_held.length} held by a schema hold only (no content check ran)` : ""}`);
     if (extra.families) {
       lines.push("", "## Families (c)–(k)", "", `- base acceptance: ${JSON.stringify(extra.families.base_acceptance)}`, `- ${extra.families.cases} cases; by family ${JSON.stringify(extra.families.by_family)}`, `- not OK: ${extra.families.escaped.length ? extra.families.escaped.map((entry) => `${entry.family}/${entry.name} ${entry.status}`).join("; ") : "none"}`);
     }
