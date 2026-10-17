@@ -249,6 +249,13 @@ function cellMoney(cell: Cell, words: Word[]): RawMoney[] {
       const digits = cores.slice(s, j + 1).map((c) => c.core).join("");
       values.add(Number(digits.replace(",", ".")));
     }
+    // Independently valid split readings that end before the last word: with currency adjacency of
+    // their own, `EUR 1 234,56` also reads as `EUR 1` (and `EUR 1 234 567,89` as `EUR 1 234`).
+    for (let b = start; b < j; b += 1) {
+      for (let a = start; a <= b; a += 1) {
+        if (adjacent(a, b)) values.add(Number(cores.slice(a, b + 1).map((c) => c.core).join("")));
+      }
+    }
     out.push({
       start: words[start]!.start + cores[start]!.offset,
       end: words[j]!.start + last.offset + last.core.length,
@@ -558,6 +565,13 @@ function nearMoney(wordIndex: number, cellWordsList: Word[], money: MoneyToken[]
   });
 }
 
+/** True when `text[start, start+length)` touches no letter or digit on either side (`EUR123` is no EUR). */
+export function isWholeToken(text: string, start: number, length: number): boolean {
+  const before = text[start - 1];
+  const after = text[start + length];
+  return (before === undefined || !ALNUM_RE.test(before)) && (after === undefined || !ALNUM_RE.test(after));
+}
+
 export function currencyScan(lines: ReadonlyArray<TokenLine>, lists: CurrencyScanLists): CurrencyScanResult {
   const iso = new Set(lists.isoCodes);
   const wordLike = new Set(lists.wordLikeCodes);
@@ -575,7 +589,7 @@ export function currencyScan(lines: ReadonlyArray<TokenLine>, lists: CurrencySca
       for (const match of cell.text.matchAll(/\p{L}+/gu)) {
         const code = match[0];
         const lower = code.toLowerCase();
-        if (lower === "eur" || lower === "euro" || lower === "eurot") eurStated = true;
+        if ((lower === "eur" || lower === "euro" || lower === "eurot") && isWholeToken(cell.text, match.index!, code.length)) eurStated = true;
         if (!iso.has(code)) continue;
         if (wordLike.has(code)) {
           const at = cell.start + match.index!;

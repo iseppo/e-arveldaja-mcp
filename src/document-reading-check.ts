@@ -37,6 +37,7 @@ import {
   currencyScan,
   ibanScan,
   identifierScan,
+  isWholeToken,
   lineTokens,
   percentTokens,
   type LineTokens,
@@ -452,7 +453,7 @@ function matchCurrency(value: string, line: PacketLine, occ: TextSpan[]): TokenM
   if (value !== "EUR") return undefined;
   for (const match of line.text.matchAll(/\p{L}+|€/gu)) {
     const token = match[0];
-    if (token !== "€" && !["eur", "euro", "eurot"].includes(token.toLowerCase())) continue;
+    if (token !== "€" && (!["eur", "euro", "eurot"].includes(token.toLowerCase()) || !isWholeToken(line.text, match.index!, token.length))) continue;
     const span = { start: match.index!, end: match.index! + token.length };
     if (occ.some((o) => insideSpan(span, o))) return { span };
   }

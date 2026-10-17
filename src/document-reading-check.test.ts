@@ -424,6 +424,17 @@ describe("checkReading: A3 mixed rate", () => {
   });
 });
 
+describe("checkReading: whole-token currency", () => {
+  it("T-CUR-glued: `EUR123` is neither currency evidence nor a stated EUR", () => {
+    const glued = "Kokku 124,00 EUR123";
+    const keys = keysOf({
+      lines: withLines({ 7: glued }),
+      evidence: { currency: { line: "p1:007", quote: glued }, gross: { line: "p1:007", quote: glued } },
+    });
+    expect(keys).toEqual(["value_not_complete_token:currency", "currency_not_stated"]);
+  });
+});
+
 describe("checkReading: A4 trio required", () => {
   const grossOnly = (lines: string[], gross: number, quote: string, line: string) => codesOf({
     lines,
@@ -443,6 +454,11 @@ describe("checkReading: A4 trio required", () => {
   it("T-A4-eur5: `EUR 5` / `1,20` / `6,20` / `10,00` with a gross-only 10 holds", () => {
     const lines = withLines({ 5: "Teenus EUR 5", 6: "KM 24% 1,20", 7: "Vahesumma 6,20" }, ["Tasuda EUR 10,00"]);
     expect(grossOnly(lines, 10, "Tasuda EUR 10,00", "p1:008")).toContain("trio_not_read");
+  });
+
+  it("T-A4-join-split: the split `1` of `EUR 1 234,56` forms the trio 1 + 0,24 = 1,24 a gross-only reading must not skip", () => {
+    const lines = withLines({ 5: "Teenus EUR 1 234,56", 6: "KM 24% 0,24", 7: "Vahesumma 1,24" }, ["Tasuda EUR 2000,00"]);
+    expect(grossOnly(lines, 2000, "Tasuda EUR 2000,00", "p1:008")).toContain("trio_not_read");
   });
 });
 

@@ -52,6 +52,13 @@ describe("document-reading tokens: money shapes", () => {
     expect(moneyOf("Teenus 1 483,07")[0]).toMatchObject({ kind: "ambiguous_join", values: [1483.07, 483.07], text: "1 483,07" });
   });
 
+  it("T-TOK-join-split: `EUR 1 234,56` keeps the independently valid split reading `EUR 1`", () => {
+    expect(moneyOf("Kokku EUR 1 234,56")[0]).toMatchObject({ kind: "ambiguous_join", values: [1234.56, 234.56, 1] });
+    expect(moneyOf("Kokku EUR 1 234 567,89")[0]!.values).toEqual(expect.arrayContaining([1, 1234]));
+    // without its own currency adjacency the leading word is no reading
+    expect(moneyOf("Teenus 1 483,07")[0]!.values).not.toContain(1);
+  });
+
   it("T-TOK-wholecell: a whole cell `3 082,64` is still ambiguous_join", () => {
     const { tokens } = tokensOf("Kokku     3 082,64");
     expect(tokens.money).toHaveLength(1);
@@ -236,6 +243,8 @@ describe("document-reading tokens: document-level scanners", () => {
     expect(currencyScan(linesOf("kr    1 250,00"), lists).hits).toEqual([]);
     expect(currencyScan(linesOf("Kokku 5,00"), lists).eurStated).toBe(false);
     expect(currencyScan(linesOf("Kokku 5,00 eurot"), lists).eurStated).toBe(true);
+    expect(currencyScan(linesOf("Kokku 124,00 EUR123"), lists).eurStated).toBe(false);
+    expect(currencyScan(linesOf("Kokku 124,00 XEUR"), lists).eurStated).toBe(false);
     expect(currencyScan(linesOf("x", "€"), lists).eurStated).toBe(true);
   });
 
