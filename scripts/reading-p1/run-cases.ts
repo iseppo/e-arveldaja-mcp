@@ -114,18 +114,22 @@ export async function runCases(
   items: Array<{ spec: CaseSpec; packet?: ReadingPacket; turn2Text?: string }>,
   concurrency = 4,
   onDone?: (outcome: CaseOutcome) => void,
-  shouldStop?: () => boolean,
+  /** Called before every launch with the case ids this call has launched and not finished. */
+  shouldStop?: (inFlight: ReadonlySet<string>) => boolean,
 ): Promise<CaseOutcome[]> {
   const fingerprints = instructionFingerprints();
   const outcomes: CaseOutcome[] = new Array(items.length);
+  const inFlight = new Set<string>();
   let next = 0;
   const worker = async () => {
     for (;;) {
-      if (shouldStop?.()) return;
+      if (shouldStop?.(inFlight)) return;
       const index = next++;
       if (index >= items.length) return;
       const item = items[index]!;
+      inFlight.add(item.spec.case_id);
       const outcome = await runCase(item.spec, { packet: item.packet, turn2Text: item.turn2Text, fingerprints });
+      inFlight.delete(item.spec.case_id);
       outcomes[index] = outcome;
       onDone?.(outcome);
     }

@@ -9,16 +9,18 @@
 //   - the original records `restaged_as` only after its replacement has run; a replacement found without that
 //     link (a crash in between) is linked on resume, and a link to a missing replacement is dropped, so a stop
 //     never loses a case;
-//   - a replacement interrupted before its audit (staged, no leakage record and no reading) is marked
-//     `abandoned` on resume and its original is unlinked, so the original is classified and re-staged again,
-//     but only when its directory shows no reader launch (no spend); otherwise its spend is unknown and the
-//     re-stage stops (unrecoverableReplacements);
+//   - one preflight (preflightRun) runs before every launch, in every path (step5 natural/injected, re-stage,
+//     resume): every indexed case of the run that shows reader activity must have its usage in the run's usage
+//     ledger (readings/<id>.json). An audited case is collected now; a case with activity but no audit stops the
+//     run. A staged case that was never launched is marked `abandoned` (its replacement link dropped, its plan
+//     key free again), so it is re-run;
 //   - a replacement's attempt is written at staging; a registry without one is numbered from its ancestry;
 //   - one predicate (retryEligible) decides both whether a failed case may be re-staged and whether the
 //     projection reserves its retry.
 // Usage: npx tsx scripts/reading-p1/restage.ts --run <tag> --cap-input <n> --cap-output <n> [--max 2]
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { collectCase } from "./collect.js";
 import { join } from "node:path";
 import { loadPacketFile } from "./cases.js";
 import { argValue, dataPath, readJson, writeJson } from "./common.js";
@@ -113,26 +115,35 @@ export function withAttempts<T extends Pick<Registry, "case_id" | "meta" | "atte
   return regs;
 }
 
-const isInterrupted = (entry: Registry) => typeof entry.meta?.restaged_from === "string" && !entry.abandoned &&
-  !existsSync(dataPath("leakage", `${entry.case_id}.json`)) && !existsSync(dataPath("readings", `${entry.case_id}.json`));
 /** Staged inputs only: anything else in a case directory means a reader was launched there. */
 const STAGED_INPUT_RE = /^(?:PROMPT\.md|TURN2\.md|schema[12]\.json)$/;
 const launched = (entry: Registry) => !existsSync(entry.dir) || readdirSync(entry.dir).some((name) => !STAGED_INPUT_RE.test(name));
 
-/** Interrupted replacements whose reader may have spent tokens (launch output present, or the dir is gone). */
-export function unrecoverableReplacements(regs: Registry[]): string[] {
-  return regs.filter((entry) => isInterrupted(entry) && launched(entry)).map((entry) => entry.case_id);
+/**
+ * The single pre-launch rule (see header). `inFlight`: case ids this process has launched and not finished.
+ * Returns the stop reason, or null when every active case's usage is in the ledger.
+ */
+export function preflightRun(tag: string, inFlight: ReadonlySet<string> = new Set()): string | null {
+  const regs = corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
+  for (const entry of regs) {
+    if (inFlight.has(entry.case_id) || entry.abandoned || existsSync(dataPath("readings", `${entry.case_id}.json`))) continue;
+    if (existsSync(dataPath("leakage", `${entry.case_id}.json`))) {
+      try {
+        collectCase(entry.case_id);
+      } catch (error) {
+        return `case ${entry.case_id}: audited, but its usage could not be collected (${error instanceof Error ? error.message : String(error)})`;
+      }
+      continue;
+    }
+    if (launched(entry)) return `case ${entry.case_id}: a reader ran but neither its audit nor its usage was recorded`;
+    writeJson(registryPath(entry.case_id), { ...entry, abandoned: true });
+  }
+  return null;
 }
 
 /** The run's registries (corpus rows of its index only), with replacement links repaired (see header). */
 export function runRegistries(tag: string): Registry[] {
   const regs = withAttempts(corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
-  for (const entry of regs) {
-    if (isInterrupted(entry) && !launched(entry)) {
-      entry.abandoned = true;
-      writeJson(registryPath(entry.case_id), entry);
-    }
-  }
   const live = regs.filter((entry) => !entry.abandoned);
   const byId = new Map(live.map((entry) => [entry.case_id, entry]));
   for (const entry of regs) {
@@ -167,9 +178,9 @@ export interface RestageOptions {
 export async function restageRun(opts: RestageOptions): Promise<string | null> {
   const log = opts.log ?? ((line: string) => process.stdout.write(`${line}\n`));
   for (let round = 1; round <= opts.max; round++) {
+    const preflight = preflightRun(opts.tag);
+    if (preflight) return `${preflight} (re-stage round ${round})`;
     const regs = runRegistries(opts.tag);
-    const lost = unrecoverableReplacements(regs);
-    if (lost.length > 0) return `interrupted replacement ${lost.join(",")}: a reader ran but its spend was never collected (round ${round})`;
     const failed = failedCases(regs);
     if (failed.length === 0) return null;
     const verdicts = new Map<string, string[]>();
@@ -193,7 +204,8 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
       writeJson(registryPath(item.original.case_id), { ...readJson<Registry>(registryPath(item.original.case_id)), restaged_as: outcome.case_id, restage_evidence: verdicts.get(item.original.case_id) });
       log(`round ${round}: ${item.original.case_id} → ${outcome.case_id} leakage=${outcome.leakage_pass} ${outcome.failures.join(",")}`);
       if (!outcome.leakage_pass && classifyFailure(outcome.case_id) === "stop") stop = stop ?? `leakage:${outcome.case_id}:${outcome.failures.join(",")}`;
-    }, () => {
+    }, (inFlight) => {
+      if (stop === null) stop = preflightRun(opts.tag, inFlight);
       if (stop === null && opts.exceeds()) stop = `projection exceeds the ${opts.tag} caps`;
       return stop !== null;
     });

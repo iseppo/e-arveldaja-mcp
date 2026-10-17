@@ -20,7 +20,7 @@ import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
 import type { CollectedCase } from "./collect.js";
 import { argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
 import { rng, shuffle, type FamilyA } from "./mutate.js";
-import { MAX_RESTAGE_ROUNDS, classifyFailure, restageRun, retryEligible, runRegistries, withAttempts, type Registry } from "./restage.js";
+import { MAX_RESTAGE_ROUNDS, classifyFailure, preflightRun, restageRun, retryEligible, runRegistries, withAttempts, type Registry } from "./restage.js";
 import { runCases, type CaseOutcome } from "./run-cases.js";
 import { corpusRunIndex, loadStaged, registryPath } from "./stage.js";
 
@@ -98,8 +98,9 @@ export function allPlanned(tag: string): CaseItem[] {
 }
 
 /** The planned cases not yet staged under `tag` (registries of other tags never count). */
-export function todoItems(planned: CaseItem[], staged: ReadonlyArray<{ meta?: Record<string, unknown> }>, tag: string): CaseItem[] {
-  const keys = new Set(staged.filter((entry) => entry.meta?.run === tag).map((entry) => String(entry.meta?.key)));
+export function todoItems(planned: CaseItem[], staged: ReadonlyArray<{ meta?: Record<string, unknown>; abandoned?: boolean }>, tag: string): CaseItem[] {
+  // An abandoned (staged, never launched) case frees its plan key: it is run again under a new id.
+  const keys = new Set(staged.filter((entry) => entry.meta?.run === tag && !entry.abandoned).map((entry) => String(entry.meta?.key)));
   return planned.filter((item) => !keys.has(String(item.spec.meta?.key)));
 }
 
@@ -178,15 +179,21 @@ export function projection(planned: CaseItem[], run: RunArgs) {
 }
 
 async function runSuite(name: string, planned: CaseItem[], run: RunArgs, concurrency: number): Promise<void> {
-  const todo = todoItems(planned, registries(run.tag), run.tag);
-  const all = allPlanned(run.tag);
-  const start = projection(all, run);
-  process.stdout.write(`${name}: ${todo.length} to run; projection ${JSON.stringify(start)}\n`);
   const writeStop = (stop: string) => {
     process.stdout.write(`STOP: ${stop}\n`);
     writeJson(dataPath(run.tag, `stop-${name}.json`), { stop, at: new Date().toISOString() });
     process.exitCode = 3;
   };
+  // The pre-launch rule runs before the todo list and the projection are computed, so both see the ledger.
+  const preflight = preflightRun(run.tag);
+  if (preflight) {
+    writeStop(preflight);
+    return;
+  }
+  const todo = todoItems(planned, registries(run.tag), run.tag);
+  const all = allPlanned(run.tag);
+  const start = projection(all, run);
+  process.stdout.write(`${name}: ${todo.length} to run; projection ${JSON.stringify(start)}\n`);
   if (start.exceeds) {
     writeStop(`projection exceeds the ${run.tag} caps before starting`);
     return;
@@ -203,7 +210,11 @@ async function runSuite(name: string, planned: CaseItem[], run: RunArgs, concurr
     const current = projection(all, run);
     if (done % 10 === 0 || stop) process.stdout.write(`  ${done}/${todo.length} consumed ${current.consumed.input}/${current.consumed.output} projected ${Math.round(current.projected.input)}/${Math.round(current.projected.output)}\n`);
     if (current.exceeds) stop = stop ?? `projection exceeds the ${run.tag} caps`;
-  }, () => stop !== null);
+  }, (inFlight) => {
+    if (stop === null) stop = preflightRun(run.tag, inFlight);
+    if (stop === null && projection(all, run).exceeds) stop = `projection exceeds the ${run.tag} caps`;
+    return stop !== null;
+  });
   if (stop) {
     writeStop(stop);
     return;

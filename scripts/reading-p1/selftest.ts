@@ -202,8 +202,9 @@ try {
     "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])) }));",
   ].join("\n"));
   const cid = { a: "c-aaaaaaaaaaaa", b: "c-bbbbbbbbbbbb", s: "c-555555555555", x: "c-eeeeeeeeeeee", y: "c-ffffffffffff" };
-  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; reading?: number; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
-  const scenario = (name: string, cases: Case[]) => {
+  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; usage?: number; reading?: number; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
+  // `step5`: run `step5.ts natural --run chain` (cap 100) on a one-document corpus instead of the restage script.
+  const scenario = (name: string, cases: Case[], step5 = false) => {
     const dir = join(root, `scenario-${name}`);
     const home = join(dir, "home");
     for (const sub of ["staging", "leakage", "readings", "runs", "legacy", "corpus", home]) mkdirSync(sub.startsWith("/") ? sub : join(dir, sub), { recursive: true });
@@ -220,14 +221,33 @@ try {
         staged_at: "2026-10-17T00:00:00Z", meta: { run: "chain", ...entry.meta }, ...(entry.restaged_as ? { restaged_as: entry.restaged_as } : {}), ...(entry.attempt ? { attempt: entry.attempt } : {}) }));
       writeFileSync(join(dir, "runs", "chain.tsv"), `${entry.id}\t01\n`, { flag: "a" });
       if (entry.leakage) writeFileSync(join(dir, "leakage", `${entry.id}.json`), JSON.stringify({ pass: false, run_errors: [], ...entry.leakage }));
-      if (entry.events) writeFileSync(join(dir, entry.id, "events1.jsonl"), entry.events.map((message) => JSON.stringify({ type: "error", message })).join("\n"));
+      const events = [...(entry.events ?? []).map((message) => JSON.stringify({ type: "error", message })),
+        ...(entry.usage !== undefined ? [JSON.stringify({ type: "turn.completed", usage: { input_tokens: entry.usage, output_tokens: 0 } })] : [])];
+      if (events.length) writeFileSync(join(dir, entry.id, "events1.jsonl"), events.join("\n"));
       if (entry.reading !== undefined) writeFileSync(join(dir, "readings", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", meta: { run: "chain" }, leakage_pass: false, turns: [{ usage: { input: entry.reading, output: 0 } }] }));
     }
+    if (step5) {
+      // Every natural reader × form has a step-5 mean of 1, so only the ledger can push the projection over 100.
+      mkdirSync(join(dir, "packets"), { recursive: true });
+      writeFileSync(join(dir, "packets", "01.json"), JSON.stringify({ id: "01", path: "doc1.pdf", packet: makePacket(["Arve 1"]), heuristic: {}, heuristic_fields: {} }));
+      READERS.forEach((reader, r) => (["N-S", "N-T"] as const).forEach((form, f) => {
+        const id = `c-00000000${r}${f}99`;
+        writeFileSync(join(dir, "runs", "step5.tsv"), `${id}\t01\n`, { flag: "a" });
+        writeFileSync(join(dir, "readings", `${id}.json`), JSON.stringify({ case_id: id, reader, form, meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 1, output: 0 } }] }));
+      }));
+    }
     const stubLog = join(dir, "launches.log");
-    const out = execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), scenarioScript], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin", READING_P1_READER_STUB: stubLog } });
+    const command = step5 ? [join(SCRIPTS_DIR, "step5.ts"), "natural", "--run", "chain", "--cap-input", "100", "--cap-output", "1000000"] : [scenarioScript];
+    let out: string;
+    try {
+      out = execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), ...command], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin", READING_P1_READER_STUB: stubLog } });
+    } catch (error) {
+      out = String((error as { stdout?: string }).stdout ?? "");
+    }
     const launches = existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter((line) => line.split("\t")[1] === "1") : [];
     // The stub's launches still staged a /tmp/reading-p1.* dir each: remove them.
     for (const line of launches) rmSync(line.split("\t")[2]!, { recursive: true, force: true });
+    if (step5) return { stop: /^STOP: (.*)$/m.exec(out)?.[1] ?? null, links: {}, staged_attempts: {}, launches: launches.length };
     return { ...(JSON.parse(out) as { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null> }), launches: launches.length };
   };
   const transport = { failures: ["turn1_forbidden:event:error"] };
@@ -259,7 +279,15 @@ try {
   // a cap of 100 must stop, not abandon it and launch again.
   const spent = scenario("spent", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 70, restaged_as: cid.y },
     { id: cid.y, events: ["stream disconnected"], meta: { restaged_from: cid.x }, attempt: 2 }]);
-  assert("b9_interrupted_spend_stops", spent.launches === 0 && String(spent.stop).startsWith("interrupted replacement"), JSON.stringify(spent));
+  assert("b9_interrupted_spend_stops", spent.launches === 0 && String(spent.stop).startsWith(`case ${cid.y}: a reader ran`), JSON.stringify(spent));
+  // Codex t3b (a): interrupted after the audit was written but before usage collection. The preflight collects the
+  // 50 from the events: 70 + 50 > 100 stops before any launch.
+  const audited = scenario("audited", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 70, restaged_as: cid.y },
+    { id: cid.y, leakage: transport, events: ["stream disconnected"], usage: 50, meta: { restaged_from: cid.x }, attempt: 2 }]);
+  assert("b9_audited_uncollected_spend_stops", audited.launches === 0 && String(audited.stop).startsWith("projection exceeds"), JSON.stringify(audited));
+  // Codex t3b (b): step5 resume with 120 spent by an audited-but-uncollected case: nothing launches.
+  const resumed = scenario("resumed", [{ id: cid.x, leakage: transport, events: ["stream disconnected"], usage: 120, meta: { key: "codex|N-S|01" } }], true);
+  assert("b9_step5_resume_checks_ledger_first", resumed.launches === 0 && String(resumed.stop).startsWith("projection exceeds"), JSON.stringify(resumed));
   // Codex t3 #3 crash probe: attempt 3 completed but its attempt was never written; ancestry numbers it 3, so no
   // attempt 4 launches.
   const crashed = scenario("crashed", [{ id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b },

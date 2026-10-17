@@ -91,7 +91,8 @@ function readTurn(staged: StagedCase, turn: number, expects: CollectedTurn["expe
     } catch {
       text = null;
     }
-  } else if (raw !== null) {
+  } else if (staged.reader === "codex") {
+    // Usage comes from the events even when the -o output is missing (an interrupted or failed turn).
     text = raw;
     const eventsPath = join(staged.dir, `events${turn}.jsonl`);
     if (existsSync(eventsPath)) {
