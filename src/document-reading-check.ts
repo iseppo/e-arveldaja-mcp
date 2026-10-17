@@ -99,6 +99,7 @@ export const HOLD_CODES = {
   label_quote_no_letter: content("2.5"),
   label_quote_overlaps_value: content("2.5"),
   competitor_not_printed: content("2.5"),
+  competitor_ambiguous: content("2.5"),
   reading_heuristic_conflict: content("2.5"),
   supplier_id_contradiction: content("2.6"),
   // packet
@@ -694,7 +695,7 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hold: Ho
         if (!line) continue;
         const occ = matchOffsets(competitor.quote, line);
         // Another occurrence of the accepted value is not a competitor and never counts toward A1.
-        if (competitorEqualsValue("gross", gross, line, tokensFor(doc, line), occ)) continue;
+        if (competitorSameValue("gross", gross, line, tokensFor(doc, line), occ) !== undefined) continue;
         for (const token of tokensFor(doc, line).money) {
           if (occ.some((o) => insideSpan(token, o))) covered.push(...token.values);
         }
@@ -748,17 +749,31 @@ function checkDocumentLevel(doc: Doc, reading: DocumentReading, ctx: CheckContex
 
 const LABEL_REQUIRED: readonly ReadingField[] = ["invoice_date", "invoice_number", "gross"];
 
-/** True when a typed line-level token inside one of `occ` has a reading equal to the accepted value (a same-value occurrence). */
-function competitorEqualsValue(field: ReadingField, value: string | number, line: PacketLine, tokens: LineTokens, occ: TextSpan[]): boolean {
-  if (field === "doc_type") return false;
+/**
+ * Whether a competitor entry repeats the accepted value. "same": every matching typed token inside one of `occ`
+ * reads ONLY as the accepted value (an unambiguous repetition). "ambiguous": a matching token also has a reading
+ * that differs (e.g. `03/02/2026` for 2026-02-03, `6,000` for 6). undefined: no token reads as the value.
+ */
+function competitorSameValue(field: ReadingField, value: string | number, line: PacketLine, tokens: LineTokens, occ: TextSpan[]): "same" | "ambiguous" | undefined {
+  if (field === "doc_type") return undefined;
+  const classify = (readings: Array<Array<string | number>>, equal: (reading: string | number) => boolean) => {
+    const matching = readings.filter((values) => values.some(equal));
+    if (matching.length === 0) return undefined;
+    return matching.some((values) => values.some((reading) => !equal(reading))) ? "ambiguous" : "same";
+  };
   if ((PAYLOAD_NUMBER_FIELDS as readonly string[]).includes(field)) {
-    return tokens.money.some((token) => occ.some((o) => insideSpan(token, o)) && token.values.some((v) => near(v, Number(value))));
+    return classify(tokens.money.filter((token) => occ.some((o) => insideSpan(token, o))).map((token) => token.values), (v) => near(Number(v), Number(value)));
   }
   if ((DATE_FIELDS as readonly string[]).includes(field)) {
-    return tokens.dates.some((token) => occ.some((o) => insideSpan(token, o)) && token.values.includes(String(value)));
+    return classify(tokens.dates.filter((token) => occ.some((o) => insideSpan(token, o))).map((token) => token.values), (v) => v === String(value));
+  }
+  if ((ID_FIELDS as readonly string[]).includes(field)) {
+    const normalized = normalizeId(field as typeof ID_FIELDS[number], String(value));
+    return classify(identifierScan([line], "strict").filter((id) => occ.some((o) => insideSpan(id, o))).map((id) => id.values), (v) => v === normalized);
   }
   const match = matchFieldToken(field, value, line, tokens, occ);
-  return match !== undefined && "span" in match;
+  if (match === undefined) return undefined;
+  return "span" in match ? "same" : "ambiguous";
 }
 
 function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans: ValueSpans, hold: HoldFn, note: NoteFn): void {
@@ -787,8 +802,11 @@ function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans
         hold("competitor_not_printed", field);
         continue;
       }
-      // Another occurrence of the same printed value is neither a competing reading nor an alternative: ignored.
-      if (accepted !== null && competitorEqualsValue(field, accepted, line, tokensFor(doc, line), occ)) note(field);
+      // An unambiguous repetition of the accepted value is neither a competing reading nor an alternative:
+      // ignored with a note. A repetition that also reads as another value is a competing interpretation: held.
+      const same = accepted === null ? undefined : competitorSameValue(field, accepted, line, tokensFor(doc, line), occ);
+      if (same === "same") note(field);
+      else if (same === "ambiguous") hold("competitor_ambiguous", field);
     }
   }
 }

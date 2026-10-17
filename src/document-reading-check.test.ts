@@ -747,14 +747,33 @@ describe("checkReading: proof checks (§2.5)", () => {
     expect(result.notes).toBeUndefined();
   });
 
-  it("T-PR-competitor-ambiguous: every reading of an ambiguous competitor token counts as the same value", () => {
+  it("T-PR-competitor-ambiguous-date: a repeat that also reads as another date holds competitor_ambiguous", () => {
+    // Codex review of e273703: 03/02/2026 is 3 February or 2 March; it is not an unambiguous repetition.
     const input: CaseInput = {
-      lines: withLines({}, ["Muu    6,000"]),
-      values: { net: 6, vat: 1.44, gross: 7.44 },
-      evidence: { net: { line: "p1:005", quote: "Summa ilma KM-ta 100,00" } },
-      answers: { net: { label_quote: null, competitors: [{ line: "p1:008", quote: "6,000" }], why_this_one: "", verdict: "confirm" } },
+      lines: withLines({ 4: "Kuupäev 03.02.2026" }, ["Arve kuupäev 03/02/2026"]),
+      values: { invoice_date: "2026-02-03" },
+      evidence: { invoice_date: { line: "p1:004", quote: "Kuupäev 03.02.2026" } },
+      answers: { invoice_date: { label_quote: "Kuupäev", competitors: [{ line: "p1:008", quote: "03/02/2026" }], why_this_one: "", verdict: "confirm" } },
     };
-    expect(notesOf(input)).toEqual(["competitor_same_value_ignored:net"]);
+    const result = runCase(input);
+    expect(result.verdict).toBe("hold");
+    expect(holdKeys(result)).toEqual(["competitor_ambiguous:invoice_date"]);
+    expect(result.notes).toBeUndefined();
+  });
+
+  it("T-PR-competitor-ambiguous-amount: a repeat that also reads as another amount holds competitor_ambiguous", () => {
+    // 24,000 reads as 24 or 24000; the larger reading is listed as a gross competitor, so A1 is satisfied.
+    const input: CaseInput = {
+      lines: withLines({}, ["Maks 24,000"]),
+      answers: {
+        vat: { label_quote: "KM", competitors: [{ line: "p1:008", quote: "24,000" }], why_this_one: "", verdict: "confirm" },
+        gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: "24,000" }], why_this_one: "", verdict: "confirm" },
+      },
+    };
+    const result = runCase(input);
+    expect(result.verdict).toBe("hold");
+    expect(holdKeys(result)).toEqual(["competitor_ambiguous:vat"]);
+    expect(result.notes).toBeUndefined();
   });
 });
 
