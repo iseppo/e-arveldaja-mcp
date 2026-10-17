@@ -107,12 +107,14 @@ export async function runCases(
   items: Array<{ spec: CaseSpec; packet?: ReadingPacket; turn2Text?: string }>,
   concurrency = 4,
   onDone?: (outcome: CaseOutcome) => void,
+  shouldStop?: () => boolean,
 ): Promise<CaseOutcome[]> {
   const fingerprints = instructionFingerprints();
   const outcomes: CaseOutcome[] = new Array(items.length);
   let next = 0;
   const worker = async () => {
     for (;;) {
+      if (shouldStop?.()) return;
       const index = next++;
       if (index >= items.length) return;
       const item = items[index]!;
@@ -122,5 +124,5 @@ export async function runCases(
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
-  return outcomes;
+  return outcomes.filter((outcome) => outcome !== undefined);
 }
