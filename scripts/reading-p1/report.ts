@@ -1,12 +1,15 @@
 // results/<run>.json → reports/<run>/{summary.md, summary.json} (plan §5.8), plus the token projection for the
 // step-5 run sizes against the OQ-P1-9 ceiling (30M input / 4M output).
-// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--projection]
+// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { PARSER_VERSION, type PacketFile } from "./build-packets.js";
 import { REPO_ROOT, argValue, dataPath, hasFlag, readJson, sha256Hex, writeJson, writePrivate } from "./common.js";
 import { FORMS } from "./prompts.js";
+import { PROOF_QUESTIONS } from "../../src/document-reading-check.js";
+import { mcpPayloadBytes } from "../../src/response-budget.js";
+import type { TruthRecord } from "./truth.js";
 import type { CaseResult, PassResult } from "./replay.js";
 
 const CEILING = { input: 30_000_000, output: 4_000_000 };
@@ -127,6 +130,71 @@ export function projection(usage: ReturnType<typeof summarize>["usage"]) {
   return { documents: { corpus, heldout }, ceiling: CEILING, planned: scenario(plannedI), plan_upper_bound: scenario(PLAN_MAX_I_CASES) };
 }
 
+/** Plan §5.2 decision rule, applied per reader; any unmet condition (incl. too little evidence) selects two-turn. */
+export function formDecision(forms: ReturnType<typeof summarize>["forms"], results: CaseResult[]) {
+  const readers = [...new Set(forms.map((row) => row.reader))].sort();
+  const perReader = readers.map((reader) => {
+    const row = (form: string) => forms.find((entry) => entry.reader === reader && entry.form === form);
+    const count = (form: string, kind: string) => results.filter((item) => item.reader === reader && item.form === form && item.kind === kind && item.leakage_pass).length;
+    const iS = row("I-S"), iT = row("I-T"), nS = row("N-S"), nT = row("N-T");
+    const conditions = {
+      c1_min_60_mutated_and_clean: { I_S: { mutated: count("I-S", "mutated"), clean: count("I-S", "clean") }, I_T: { mutated: count("I-T", "mutated"), clean: count("I-T", "clean") },
+        met: ["I-S", "I-T"].every((form) => count(form, "mutated") >= 60 && count(form, "clean") >= 60) },
+      c2_catch: { I_S: iS?.injected_catch.rate ?? null, I_T: iT?.injected_catch.rate ?? null,
+        met: iS?.injected_catch.rate != null && iT?.injected_catch.rate != null && iS.injected_catch.rate >= iT.injected_catch.rate - 0.05 },
+      c3_false_alarm: { I_S: iS?.false_alarm.rate ?? null, I_T: iT?.false_alarm.rate ?? null,
+        met: iS?.false_alarm.rate != null && iT?.false_alarm.rate != null && iS.false_alarm.rate <= iT.false_alarm.rate + 0.05 },
+      c4_natural: { N_S_wrong: nS?.natural_catch.total ?? 0, N_T_wrong: nT?.natural_catch.total ?? 0, N_S: nS?.natural_catch.rate ?? null, N_T: nT?.natural_catch.rate ?? null,
+        met: (nS?.natural_catch.total ?? 0) >= 5 && (nT?.natural_catch.total ?? 0) >= 5 && nS!.natural_catch.rate! >= nT!.natural_catch.rate! },
+    };
+    const unmet = Object.entries(conditions).filter(([, value]) => !value.met).map(([name]) => name);
+    return { reader, conditions, unmet };
+  });
+  const single = perReader.length > 0 && perReader.every((entry) => entry.unmet.length === 0);
+  return { decision: single ? "single-turn" : "two-turn", decided_by: single ? "all conditions met for every reader" : [...new Set(perReader.flatMap((entry) => entry.unmet))], per_reader: perReader };
+}
+
+/** §5.8 items 3-7 that come from outside the run's case results. */
+export function extras(results: CaseResult[]) {
+  const families = existsSync(dataPath("mutations", "families.json")) ? readJson<{ base_acceptance: unknown; by_family: Record<string, Record<string, number>>; results: { family: string; name: string; doc: string; expected: unknown; status: string; layer?: string; new_codes?: string[] }[] }>(dataPath("mutations", "families.json")) : null;
+  const a = existsSync(dataPath("mutations", "a.json")) ? readJson<{ bases: { admitted: string[] }; admitted_bases: { doc_id: string; source?: string | null }[]; candidates: unknown[]; held_by_hard_checks: unknown[]; survivors: unknown[]; sampled: unknown[]; by_field_type: unknown; amounts_by_direction: unknown }>(dataPath("mutations", "a.json")) : null;
+  const injected = results.filter((item) => item.kind === "mutated" && item.leakage_pass);
+  const proofCatch: Record<string, { caught: number; cases: number }> = {};
+  for (const item of injected) {
+    const entry = (proofCatch[`${item.reader}|${item.form}`] ??= { caught: 0, cases: 0 });
+    entry.cases += 1;
+    if (item.mutated_field && item.proof_problem_fields.includes(item.mutated_field)) entry.caught += 1;
+  }
+  const packets = existsSync(dataPath("packets")) ? readdirSync(dataPath("packets")).filter((name) => name.endsWith(".json")).map((name) => readJson<PacketFile & { stats?: { text_bytes?: number; lines?: number } }>(dataPath("packets", name))) : [];
+  const corpusPackets = packets.filter((file) => !String((file as { id?: string }).id ?? "").startsWith("h"));
+  const dist = (values: number[]) => {
+    const sorted = [...values].sort((x, y) => x - y);
+    const at = (q: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]! : null;
+    return { n: sorted.length, min: sorted[0] ?? null, p50: at(0.5), p90: at(0.9), max: sorted.at(-1) ?? null };
+  };
+  const envelopes = corpusPackets.map((file) => mcpPayloadBytes({ packet: file.packet, questions: PROOF_QUESTIONS }) + 1024);
+  const oversize = corpusPackets.filter((file) => ((file.packet as { holds?: { code?: string }[] | string[] }).holds ?? []).some((hold) => (typeof hold === "string" ? hold : hold.code) === "packet_oversize")).length;
+  const proofOut = results.filter((item) => (item.form === "N-T" || item.form === "I-T") && item.leakage_pass).map((item) => item.usage.output);
+  const det = (["run1", "run2"] as const).map((run) => existsSync(dataPath("determinism", run)) ? Object.fromEntries(readdirSync(dataPath("determinism", run)).map((name) => [name, (readJson<PacketFile>(dataPath("determinism", run, name)).packet as { packet_digest?: string }).packet_digest])) : {});
+  const detNames = Object.keys(det[0]!);
+  const legacyScore = existsSync(dataPath("legacy", "score.txt")) ? readFileSync(dataPath("legacy", "score.txt"), "utf8") : null;
+  const truth = existsSync(dataPath("corpus", "truth.json")) ? readJson<Record<string, TruthRecord>>(dataPath("corpus", "truth.json")) : {};
+  const expectedHolds = Object.entries(truth).filter(([, record]) => (record.expected_document_holds ?? []).length > 0).map(([doc, record]) => {
+    const cases = results.filter((item) => item.doc_id === doc && item.kind === "natural" && item.leakage_pass && item.passes.as_of);
+    const codes = record.expected_document_holds!;
+    const failing = cases.filter((item) => item.passes.as_of!.verdict !== "hold" || !item.passes.as_of!.holds.some((hold) => codes.includes(hold.split(":")[0]!)));
+    return { doc, expected: codes, cases: cases.length, failing: failing.map((item) => item.case_id) };
+  });
+  return {
+    families: families && { base_acceptance: families.base_acceptance, by_family: families.by_family, escaped: families.results.filter((entry) => entry.status !== "OK"), cases: families.results.length },
+    family_a: a && { bases: a.admitted_bases.map((base) => ({ doc_id: base.doc_id, source: base.source ?? null })), candidates: a.candidates.length, held_by_hard_checks: a.held_by_hard_checks.length, survivors: a.survivors.length, sampled: a.sampled.length, by_field_type: a.by_field_type, amounts_by_direction: a.amounts_by_direction, proof_catch: proofCatch },
+    packets: { corpus_packets: corpusPackets.length, text_bytes: dist(corpusPackets.map((file) => (file.packet as { text_bytes: number }).text_bytes)), lines: dist(corpusPackets.map((file) => (file.packet as { lines: unknown[] }).lines.length)), packet_oversize: oversize, envelope_bytes: dist(envelopes), proof_output_tokens_per_two_turn_case: dist(proofOut),
+      determinism: { files: detNames.length, identical: detNames.filter((name) => det[0]![name] !== undefined && det[0]![name] === det[1]![name]).length } },
+    legacy_score: legacyScore,
+    expected_document_holds: expectedHolds,
+  };
+}
+
 function header(tag: string, results: CaseResult[]) {
   const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   const dirty = execFileSync("git", ["-C", REPO_ROOT, "status", "--porcelain", "--", "src"], { encoding: "utf8" }).trim() !== "";
@@ -153,7 +221,7 @@ function header(tag: string, results: CaseResult[]) {
   };
 }
 
-function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof summarize>, proj?: ReturnType<typeof projection>): string {
+function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof summarize>, proj?: ReturnType<typeof projection>, extra?: ReturnType<typeof extras>, decision?: ReturnType<typeof formDecision>): string {
   const lines: string[] = [`# Reading P1 run \`${head.run}\``, ""];
   lines.push(`- checker commit ${head.checker_commit}${head.src_dirty ? " (src dirty)" : ""}, ${head.parser}, builder ${head.builder ?? "?"}`);
   lines.push(`- today: real ${head.today.real.join(", ") || "-"}; as-of ${head.today.as_of}`);
@@ -170,6 +238,28 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
   for (const [code, entry] of Object.entries(summary.hold_rates).sort((a, b) => b[1].with - a[1].with)) lines.push(`| ${code} | ${entry.with} | ${entry.only} |`);
   lines.push("", "## Forms (95% Wilson)", "", "| reader | form | natural catch | injected catch | false alarm | schema fail (reading/proof/missing) |", "|---|---|---|---|---|---|");
   for (const row of summary.forms) lines.push(`| ${row.reader} | ${row.form} | ${fmtRate(row.natural_catch)} | ${fmtRate(row.injected_catch)} | ${fmtRate(row.false_alarm)} | ${row.schema_failures.reading}/${row.schema_failures.proof}/${row.schema_failures.proof_missing} |`);
+  if (extra) {
+    lines.push("", "Called out (plan §5.8.3): " + ["competing_consistent_total (A2)", "mixed_vat_rate (A3)", "invoice_number_is_identifier (H9)", "foreign_rate_trio", "cited_origin_unestablished", "unaccounted_identifier"].map((label) => { const code = label.split(" ")[0]!; const entry = summary.hold_rates[code]; return `${label} ${entry ? `${entry.with}/${entry.only}` : "0/0"}`; }).join("; ") + "; " +
+      Object.entries(summary.hold_rates).filter(([code]) => code.startsWith("ocr_")).map(([code, entry]) => `${code} ${entry.with}/${entry.only}`).join("; ") + " (cases/only)");
+    lines.push("", "## Expected document holds (§7.7)", "");
+    for (const entry of extra.expected_document_holds) lines.push(`- #${entry.doc} expects one of ${entry.expected.join(", ")}: ${entry.cases} natural cases, ${entry.failing.length} not held with one of them${entry.failing.length ? ` (${entry.failing.join(", ")})` : ""}`);
+    if (extra.families) {
+      lines.push("", "## Families (c)–(k)", "", `- base acceptance: ${JSON.stringify(extra.families.base_acceptance)}`, `- ${extra.families.cases} cases; by family ${JSON.stringify(extra.families.by_family)}`, `- not OK: ${extra.families.escaped.length ? extra.families.escaped.map((entry) => `${entry.family}/${entry.name} ${entry.status}`).join("; ") : "none"}`);
+    }
+    if (extra.family_a) {
+      const fa = extra.family_a;
+      lines.push("", "## Family (a)", "", `- bases ${fa.bases.map((base) => `${base.doc_id} (${base.source ?? "truth-derived"})`).join(", ")}; candidates ${fa.candidates}, held by hard checks ${fa.held_by_hard_checks}, survivors ${fa.survivors}, sampled ${fa.sampled}`,
+        `- by field type ${JSON.stringify(fa.by_field_type)}`, `- amounts by direction ${JSON.stringify(fa.amounts_by_direction)}`, `- proof catch on the mutated field: ${Object.entries(fa.proof_catch).map(([key, value]) => `${key} ${value.caught}/${value.cases}`).join("; ") || "-"}`);
+    }
+    const pk = extra.packets;
+    lines.push("", "## Packets", "", `- ${pk.corpus_packets} corpus packets; text_bytes ${JSON.stringify(pk.text_bytes)}; lines ${JSON.stringify(pk.lines)}; packet_oversize ${pk.packet_oversize}`,
+      `- envelope estimate (packet + PROOF_QUESTIONS + 1 KiB, bytes) ${JSON.stringify(pk.envelope_bytes)}`, `- output tokens per two-turn case ${JSON.stringify(pk.proof_output_tokens_per_two_turn_case)}`, `- cross-process determinism: ${pk.determinism.identical}/${pk.determinism.files} packet digests identical`);
+    lines.push("", "## Legacy replication", "", extra.legacy_score ? "```\n" + extra.legacy_score.trim() + "\n```" : "- not scored");
+  }
+  if (decision) {
+    lines.push("", "## §5.2 form decision", "", `- **${decision.decision}**; decided by ${Array.isArray(decision.decided_by) ? decision.decided_by.join(", ") : decision.decided_by}`);
+    for (const entry of decision.per_reader) lines.push(`- ${entry.reader}: ${JSON.stringify(entry.conditions)}`);
+  }
   if (proj) {
     lines.push("", "## Token projection (step 5 reader runs)", "");
     for (const [name, scenario] of [["planned (family (a) as sampled)", proj.planned], ["plan upper bound (240 I-cases)", proj.plan_upper_bound]] as const) {
@@ -187,8 +277,10 @@ if (process.argv[1]?.endsWith("/report.ts")) {
   const head = header(tag, results);
   const summary = summarize(tag, results);
   const proj = hasFlag(argv, "--projection") ? projection(summary.usage) : undefined;
-  writeJson(dataPath("reports", tag, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}) });
-  const md = markdown(head, summary, proj);
+  const extra = hasFlag(argv, "--full") ? extras(results) : undefined;
+  const decision = extra ? formDecision(summary.forms, results) : undefined;
+  writeJson(dataPath("reports", tag, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}) });
+  const md = markdown(head, summary, proj, extra, decision);
   writePrivate(dataPath("reports", tag, "summary.md"), md);
   process.stdout.write(md);
 }
