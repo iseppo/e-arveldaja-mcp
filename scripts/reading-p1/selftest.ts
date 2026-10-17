@@ -10,7 +10,7 @@ import { CLASSIFIER_META_TEXT, auditClaudeCase, instructionFingerprints } from "
 import { auditCodexEvents } from "./audit-codex.js";
 import { REPO_ROOT, SCRIPTS_DIR, dataPath, manifest, sentinel, sha256Hex, writeJson } from "./common.js";
 import { registryPath, stageRequest } from "./stage.js";
-import { promptIS, promptIT, promptNT2 } from "./prompts.js";
+import { promptIS, promptIT, promptNS, promptNT1, promptNT2 } from "./prompts.js";
 import type { ReadingPacket } from "../../src/document-reading-packet.js";
 import { makePacket } from "../../src/__fixtures__/document-reading/make-packet.js";
 import { READERS, type CaseItem } from "./cases.js";
@@ -26,7 +26,7 @@ import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
 import { buildCase } from "../../src/__fixtures__/document-reading/invoice.js";
 import { N1_CASES, N2_CASES, type NarrowingCase } from "../../src/__fixtures__/document-reading/narrowings.js";
-import { checkReading } from "../../src/document-reading-check.js";
+import { JSON_OUTPUT_FORMAT, checkReading } from "../../src/document-reading-check.js";
 import { runPipeline, type Snapshot } from "./pipeline.js";
 
 interface Check { name: string; expect: "pass" | "fail"; pass: boolean; failures: string[]; ok: boolean }
@@ -135,6 +135,10 @@ try {
   const proofPrompts = { "I-S": promptIS(packet, {}), "I-T": promptIT(packet, {}), "N-T2": promptNT2(packet, "{}") };
   for (const [form, text] of Object.entries(proofPrompts)) assert(`prompt_${form}_do_not_wrap`, text.includes("do not wrap"), form);
   assert("prompt_I-S_no_both_object", !proofPrompts["I-S"].includes("{\"document_reading\": {...}, \"proof\": {...}}"));
+  // step5c: every JSON-returning prompt carries the one format line exactly once (no trailing characters).
+  const allPrompts = { ...proofPrompts, "N-S": promptNS(packet), "N-T1": promptNT1(packet) };
+  assert("prompt_format_line_once", Object.values(allPrompts).every((text) => text.split(JSON_OUTPUT_FORMAT).length === 2 && !text.includes("Reply with the JSON object only")),
+    Object.entries(allPrompts).map(([form, text]) => `${form}:${text.split(JSON_OUTPUT_FORMAT).length - 1}`).join(" "));
 
   // ---- B1/B5: truth v2 scoring ------------------------------------------------------------------------------
   const truth = (extra: Partial<TruthRecord> = {}): TruthRecord => ({ id: "t1", status: "available", company: "1", doc_type: null, invoice_number: "BOOK-1", due_date: "2026-07-22", ...extra });

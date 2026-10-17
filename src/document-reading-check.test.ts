@@ -10,6 +10,7 @@ import {
   HOLD_CODES,
   LOW_SIGNAL_PRODUCERS,
   PROOF_QUESTIONS,
+  JSON_OUTPUT_FORMAT,
   READING_INSTRUCTIONS,
   READING_BOOKING_SIDE_SIGNALS,
   READING_HAZARD_SIGNALS,
@@ -836,7 +837,9 @@ describe("reader text", () => {
     expect(READING_INSTRUCTIONS).toContain("evidence has only field keys (no source_sha256 or packet_digest inside it)");
     expect(READING_INSTRUCTIONS).toContain("without a label or a leading \"#\"");
     // Generic examples only: no corpus value is a prompt cue (Codex review of 4bf9ac8).
-    for (const corpusValue of ["80832991", "118,395", "6,000", "15.92"]) expect(`${READING_INSTRUCTIONS}\n${PROOF_QUESTIONS}`).not.toContain(corpusValue);
+    for (const corpusValue of ["80832991", "118,395", "6,000", "15.92"]) expect(`${READING_INSTRUCTIONS}\n${PROOF_QUESTIONS}\n${JSON_OUTPUT_FORMAT}`).not.toContain(corpusValue);
+    // step5c: haiku N-S returned a complete object plus one trailing "}"; the format line forbids trailing characters.
+    expect(JSON_OUTPUT_FORMAT).toBe("Output exactly one JSON object and nothing else: no code fence, no prose, and no characters after the final closing brace.");
     expect(READING_INSTRUCTIONS).toContain("currency: EUR when the document prints EUR, euro, eurot or €");
     expect(READING_INSTRUCTIONS).toContain("if the supplier prints several of its own accounts, give the first one printed");
     expect(PROOF_QUESTIONS).toContain("copied from ONE line, and not containing the value itself");

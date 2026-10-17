@@ -1,7 +1,7 @@
 // Reader prompt text per form (plan §5.2) and the Codex output schemas (§5.3, critic m14).
 // The text is the P2 tool text: READING_INSTRUCTIONS, PROOF_QUESTIONS and the packet inline.
 
-import { PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../../src/document-reading-check.js";
+import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../../src/document-reading-check.js";
 import type { ReadingPacket } from "../../src/document-reading-packet.js";
 import { EVIDENCE_FIELDS, READING_FIELDS, DOC_TYPES } from "../../src/document-reading-schemas.js";
 
@@ -18,7 +18,7 @@ export function renderPacket(packet: ReadingPacket): string {
   ].join("\n");
 }
 
-const JSON_ONLY = "Reply with the JSON object only: no prose, no code fence.";
+const JSON_ONLY = JSON_OUTPUT_FORMAT;
 /** A1 (throughput round): the proof turn returns the proof object itself, never wrapped. */
 export const PROOF_ONLY = "Return the proof object itself: its top-level keys are exactly source_sha256, packet_digest and answers (do not wrap it in {\"proof\": …}).";
 
