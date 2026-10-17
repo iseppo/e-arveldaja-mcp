@@ -1,6 +1,8 @@
 // results/<run>.json → reports/<run>/{summary.md, summary.json} (plan §5.8), plus the token projection for the
 // step-5 run sizes against the OQ-P1-9 ceiling (30M input / 4M output).
-// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--scope corpus] [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
+// Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--supersede <sub-tag>] [--scope corpus] [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
+// --supersede: the sub-run's results replace the run's results of the same document × form (listed as superseded,
+// never deleted); the report goes to reports/<tag>+<sub-tag>/.
 // Scope (throughput round B8): "corpus" is the only scope. Every path is derived from the corpus manifest ids
 // BEFORE any read, list or hash, so no held-out manifest, packet or projection input is touched.
 
@@ -37,6 +39,13 @@ const fmtRate = (value: ReturnType<typeof rate>) => value.total === 0 ? "n/a (0)
 const fileHash = (path: string) => (existsSync(path) ? sha256Hex(readFileSync(path)) : null);
 
 /** Results of the scope's documents (legacy cases carry no document). */
+/** The run's results with every document × form slice of `sub` replaced by the sub-run's results. */
+export function supersede(base: CaseResult[], sub: CaseResult[]): { results: CaseResult[]; superseded: CaseResult[] } {
+  const slices = new Set(sub.map((result) => `${result.doc_id}|${result.form}`));
+  const superseded = base.filter((result) => slices.has(`${result.doc_id}|${result.form}`));
+  return { results: [...base.filter((result) => !slices.has(`${result.doc_id}|${result.form}`)), ...sub], superseded };
+}
+
 export function inScope(results: CaseResult[], ids: ReadonlySet<string>): CaseResult[] {
   return results.filter((result) => result.doc_id === null || ids.has(result.doc_id));
 }
@@ -163,7 +172,8 @@ export function formDecision(forms: ReturnType<typeof summarize>["forms"], resul
 }
 
 /** §5.8 items 3-7 that come from outside the run's case results. */
-export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: string) {
+export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: string | string[]) {
+  const index = () => (Array.isArray(tag) ? tag : [tag]).flatMap((entry) => runIndex(entry, { optional: true }));
   const families = existsSync(dataPath("mutations", "families.json")) ? readJson<{ base_acceptance: unknown; by_family: Record<string, Record<string, number>>; results: { family: string; name: string; doc: string; expected: unknown; status: string; layer?: string; new_codes?: string[] }[] }>(dataPath("mutations", "families.json")) : null;
   const a = existsSync(dataPath("mutations", "a.json")) ? readJson<{ bases: { admitted: string[] }; admitted_bases: { doc_id: string; source?: string | null }[]; candidates: number; held_by_hard_checks: number; survivors: number; sampled: unknown[]; by_field_type: unknown; amounts_by_direction: unknown }>(dataPath("mutations", "a.json")) : null;
   const injected = results.filter((item) => item.kind === "mutated" && item.leakage_pass);
@@ -199,13 +209,13 @@ export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: str
   // Every truth change with its reason (B1/B3/B5), and every re-staged case of the run with its evidence (B7, 5a).
   const truthChanges = Object.entries(truth).flatMap(([doc, record]) => (record.truth_changes ?? []).map((change) => ({ doc, ...change })));
   // From the run index, filtered by document before any registry is opened.
-  const restaged = runIndex(tag, { optional: true }).filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)))
+  const restaged = index().filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)))
     .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string; restage_evidence?: string[]; restage_class?: string })
     .filter((entry) => entry.restaged_as)
     .map((entry) => ({ case_id: entry.case_id, doc_id: entry.doc_id, reader: entry.reader, form: entry.form, kind: entry.kind, restaged_as: entry.restaged_as!,
       restage_class: entry.restage_class ?? "transport", evidence: entry.restage_evidence ?? null }));
   // Every classifier-interrupted attempt of the run (discarded, never scored), so the measurement is not censored.
-  const classifierInterrupts = runIndex(tag, { optional: true }).filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)) &&
+  const classifierInterrupts = index().filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)) &&
     existsSync(dataPath("leakage", `${entry.case_id}.json`)) && (readJson<{ failures?: string[] }>(dataPath("leakage", `${entry.case_id}.json`)).failures ?? []).includes("classifier_interrupt"))
     .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string })
     .map((entry) => ({ case_id: entry.case_id, doc_id: entry.doc_id, reader: entry.reader, form: entry.form, kind: entry.kind, restaged_as: entry.restaged_as ?? null }));
@@ -249,8 +259,13 @@ function header(tag: string, results: CaseResult[]) {
   };
 }
 
-function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof summarize>, proj?: ReturnType<typeof projection>, extra?: ReturnType<typeof extras>, decision?: ReturnType<typeof formDecision>): string {
+function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof summarize>, proj?: ReturnType<typeof projection>, extra?: ReturnType<typeof extras>, decision?: ReturnType<typeof formDecision>, superseded?: { by: string; cases: CaseResult[] }): string {
   const lines: string[] = [`# Reading P1 run \`${head.run}\``, ""];
+  if (superseded) {
+    lines.push(`- superseded by \`${superseded.by}\` (kept, not scored here): ${superseded.cases.length} cases`);
+    for (const item of superseded.cases) lines.push(`  - ${item.case_id} #${item.doc_id ?? "-"} ${item.reader} ${item.form} ${item.kind}${item.proof_problem_fields.length ? ` problem ${item.proof_problem_fields.join(",")}` : ""}`);
+    lines.push("");
+  }
   lines.push(`- checker commit ${head.checker_commit}${head.src_dirty ? " (src dirty)" : ""}, ${head.parser}, builder ${head.builder ?? "?"}`);
   lines.push(`- today: real ${head.today.real.join(", ") || "-"}; as-of ${head.today.as_of}`);
   lines.push(`- models: ${head.models.join(", ")}; Claude path: ${head.claude_path}`);
@@ -307,14 +322,19 @@ if (process.argv[1]?.endsWith("/report.ts")) {
   const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
   const ids = scopeIds(scope);
-  const results = inScope(readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids);
-  const head = header(tag, results);
+  const sub = argValue(argv, "--supersede");
+  const merged = sub ? supersede(readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), readJson<CaseResult[]>(dataPath("results", `${sub}.json`))) : undefined;
+  const results = inScope(merged ? merged.results : readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids);
+  const out = sub ? `${tag}+${sub}` : tag;
+  const head = header(out, results);
   const summary = summarize(tag, results);
   const proj = hasFlag(argv, "--projection") ? projection(summary.usage, ids) : undefined;
-  const extra = hasFlag(argv, "--full") ? extras(results, ids, tag) : undefined;
+  const extra = hasFlag(argv, "--full") ? extras(results, ids, sub ? [tag, sub] : tag) : undefined;
   const decision = extra ? formDecision(summary.forms, results) : undefined;
-  writeJson(dataPath("reports", tag, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}) });
-  const md = markdown(head, summary, proj, extra, decision);
-  writePrivate(dataPath("reports", tag, "summary.md"), md);
+  const superseded = merged && sub ? { by: sub, cases: inScope(merged.superseded, ids) } : undefined;
+  writeJson(dataPath("reports", out, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}),
+    ...(superseded ? { superseded: { by: superseded.by, case_ids: superseded.cases.map((item) => item.case_id) } } : {}) });
+  const md = markdown(head, summary, proj, extra, decision, superseded);
+  writePrivate(dataPath("reports", out, "summary.md"), md);
   process.stdout.write(md);
 }

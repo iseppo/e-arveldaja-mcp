@@ -19,7 +19,9 @@ import { legacyPrompt, legacyShapeOk } from "./legacy.js";
 import { candidatesFor, type FamilyA } from "./mutate.js";
 import { caseWrongFields, wrongFields } from "./replay.js";
 import { classifyEvidence } from "./restage.js";
-import { injectedItems, parseRunArgs, projectTotals, reservedKeys, todoItems } from "./step5.js";
+import { supersede } from "./report.js";
+import type { CaseResult } from "./replay.js";
+import { injectedItems, parseRunArgs, projectTotals, reservedKeys, scoped as scopedItems, todoItems } from "./step5.js";
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
 import { buildCase } from "../../src/__fixtures__/document-reading/invoice.js";
@@ -362,6 +364,13 @@ try {
   }) as unknown as FamilyA;
   const iCount = (n: number) => injectedItems("selftest", family(n)).length;
   assert("b9_i_cases_from_a_json", iCount(1) === READERS.length * 2 * 2 && iCount(3) === READERS.length * 2 * 2 * 3, `${iCount(1)}/${iCount(3)}`);
+  const sub = parseRunArgs(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--doc", doc, "--form", "I-S"]);
+  const subItems = "error" in sub ? [] : scopedItems(injectedItems("selftest", family(2)), sub);
+  assert("b14_sub_run_scoped", subItems.length === READERS.length * 2 * 2 && subItems.every((item) => item.spec.form === "I-S" && item.spec.doc_id === doc) &&
+    usage(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--form", "X-S"]), String(subItems.length));
+  const res = (case_id: string, doc_id: string, form: string) => ({ case_id, doc_id, form }) as unknown as CaseResult;
+  const sup = supersede([res("a", "14", "I-S"), res("b", "14", "I-T"), res("c", "06", "I-S")], [res("d", "14", "I-S")]);
+  assert("b14_supersede_slice_only", sup.results.map((item) => item.case_id).join() === "b,c,d" && sup.superseded.map((item) => item.case_id).join() === "a");
 
   // ---- B8: corpus scope never reads the held-out set ----------------------------------------------------------
   const scoped = join(root, "scoped-data");
