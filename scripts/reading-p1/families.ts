@@ -114,7 +114,7 @@ export function familyCases(): FamilyCase[] {
     { family: "c", name: "number_INV_2024_cut", doc: "06", patch: replace("Arve JT-2026-000017", "Arve INV 2024 001"),
       edit: { set: [{ field: "invoice_number", value: "INV 2024", on: "Arve INV 2024 001", quote: "INV 2024" }] }, expect: { hold_new: ["value_not_complete_token"] } },
     { family: "c", name: "amount_6,000_style", doc: "06", patch: replace("Kokku: €15.00", "Kokku: €15,000"),
-      edit: { set: [{ field: "gross", value: 15, on: "Kokku: €15,000", quote: "€15,000" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
+      edit: { set: [{ field: "gross", value: 15, on: "Kokku: €15,000", quote: "€15,000" }, { field: "currency", value: KEEP, on: "Kokku: €15,000", quote: "€" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
     { family: "c", name: "slash_date", doc: "15", patch: replace("09.08.2026", "09/08/2026"),
       edit: { set: [{ field: "invoice_date", value: "2026-08-09", on: "09/08/2026", quote: "09/08/2026" }] }, expect: { hold_new: ["ambiguous_slash_date"] } },
     { family: "c", name: "date_split_over_two_lines", doc: "15", patch: splitLine("Kuupäev: ¦ 09.08.2026", ["Kuupäev: ¦ 09.08.", "2026"]),
