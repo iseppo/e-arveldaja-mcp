@@ -9,16 +9,21 @@ import {
   HEURISTIC_PICK_REPLACED_BY,
   HOLD_CODES,
   LOW_SIGNAL_PRODUCERS,
+  PROOF_QUESTIONS,
+  READING_INSTRUCTIONS,
   READING_BOOKING_SIDE_SIGNALS,
   READING_HAZARD_SIGNALS,
   READING_HEURISTIC_PICK_SIGNALS,
   READING_SIGNAL_CLASS,
   READING_UNATTENDED_GATE_SIGNALS,
+  checkReading,
+  labelledHeuristicValues,
   type SignalName,
 } from "./document-reading-check.js";
+import { READING_FIELDS } from "./document-reading-schemas.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS } from "./invoice-extraction-fallback.js";
 import { detectReverseChargeFromText } from "./tools/receipt-extraction.js";
-import { BASE_LINES, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
+import { BASE_LINES, buildCase, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
 
 const withLines = (edits: Record<number, string>, extra: string[] = []) =>
   [...BASE_LINES.map((line, index) => edits[index + 1] ?? line), ...extra];
@@ -615,5 +620,126 @@ describe("§3.3 walk-throughs (k)", () => {
       lines: withLines({}, ["Hind enne allahindlust 130,00", "Allahindlus 6,00"]),
       answers: { gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: "130,00" }], why_this_one: "", verdict: "confirm" } },
     });
+  });
+});
+
+describe("checkReading: proof checks (§2.5)", () => {
+  const gross = (extra: Record<string, unknown>) => ({ gross: { label_quote: "Kokku", competitors: [], why_this_one: "", verdict: "confirm", ...extra } });
+
+  it("T-PR-digest: a stale digest in the reading or the proof holds packet_changed", () => {
+    const { packet, reading, proof, ctx } = buildCase();
+    expect(holdCodes(checkReading(packet, { ...reading, packet_digest: "e".repeat(64) }, proof, ctx))).toEqual(["packet_changed"]);
+    expect(holdCodes(checkReading(packet, reading, { ...proof, source_sha256: "e".repeat(64) }, ctx))).toEqual(["packet_changed"]);
+  });
+
+  it("T-PR-problem: any `problem` verdict holds proof_problem", () => {
+    expect(keysOf({ answers: gross({ verdict: "problem" }) })).toEqual(["proof_problem:gross"]);
+    expect(keysOf({ answers: { due_date: { label_quote: null, competitors: [], why_this_one: "", verdict: "problem" } } })).toEqual(["proof_problem:due_date"]);
+  });
+
+  it("T-PR-label-missing: a null label on invoice_date, invoice_number, gross or a non-null supplier id holds", () => {
+    for (const field of ["invoice_date", "invoice_number", "gross", "supplier_reg", "supplier_vat"]) {
+      expect(keysOf({ labels: { [field]: null } }), field).toEqual([`label_quote_missing:${field}`]);
+    }
+    expect(keysOf({
+      lines: withLines({ 2: "Reg. nr 10000018" }),
+      labels: { supplier_vat: null },
+      values: { supplier_vat: null },
+      evidence: { supplier_vat: undefined },
+    })).toEqual([]);
+  });
+
+  it("T-PR-null-fields: answers for null fields are still required", () => {
+    const { packet, reading, proof, ctx } = buildCase();
+    const answers = { ...(proof.answers as Record<string, unknown>) };
+    delete answers.due_date;
+    expect(holdCodes(checkReading(packet, reading, { ...proof, answers }, ctx))).toEqual(["proof_schema_invalid"]);
+  });
+
+  it("T-PR-label-printed: a label must be printed and carry a letter", () => {
+    expect(keysOf({ labels: { gross: "Grand total" } })).toEqual(["label_quote_not_printed:gross"]);
+    expect(keysOf({ labels: { vat: "24%" } })).toEqual(["label_quote_no_letter:vat"]);
+  });
+
+  it("T-PR-overlap: a label that only overlaps the value token holds; another occurrence elsewhere passes", () => {
+    expect(keysOf({ labels: { gross: "Kokku EUR 124,00" } })).toEqual(["label_quote_overlaps_value:gross"]);
+    expect(keysOf({ labels: { gross: "EUR 124" } })).toEqual(["label_quote_overlaps_value:gross"]);
+    expectAccept({ lines: withLines({}, ["Kokku EUR 124,00 tasutud"]), labels: { gross: "Kokku EUR 124,00" } });
+  });
+
+  it("T-PR-competitor: a competitor must be printed on its line and differ from the accepted value", () => {
+    expect(keysOf({ answers: gross({ competitors: [{ line: "p1:006", quote: "Kokku" }] }) })).toEqual(["competitor_not_printed:gross"]);
+    expect(keysOf({ answers: gross({ competitors: [{ line: "p1:099", quote: "Kokku" }] }) })).toEqual(["competitor_not_printed:gross"]);
+    expect(keysOf({ answers: gross({ competitors: [{ line: "p1:007", quote: "Kokku EUR 124,00" }] }) })).toEqual(["competitor_equals_value:gross"]);
+    expect(keysOf({ answers: { invoice_date: { label_quote: "Kuupäev", competitors: [{ line: "p1:004", quote: "15.03.2026" }], why_this_one: "", verdict: "confirm" } } }))
+      .toEqual(["competitor_equals_value:invoice_date"]);
+    expect(keysOf({ answers: { supplier_reg: { label_quote: "Reg. nr", competitors: [{ line: "p1:002", quote: "10000018" }], why_this_one: "", verdict: "confirm" } } }))
+      .toEqual(["competitor_equals_value:supplier_reg"]);
+  });
+
+  it("T-PR-competitor-cut: a competitor cut mid-token is not equal to the value", () => {
+    expectAccept({ answers: gross({ competitors: [{ line: "p1:007", quote: "124,0" }] }) });
+  });
+
+  it("T-PR-competitor-ambiguous: every reading of an ambiguous competitor token counts", () => {
+    expect(keysOf({
+      lines: withLines({}, ["Muu    6,000"]),
+      values: { net: 6, vat: 1.44, gross: 7.44 },
+      evidence: { net: { line: "p1:005", quote: "Summa ilma KM-ta 100,00" } },
+      answers: { net: { label_quote: null, competitors: [{ line: "p1:008", quote: "6,000" }], why_this_one: "", verdict: "confirm" } },
+    })).toContain("competitor_equals_value:net");
+  });
+});
+
+describe("checkReading: heuristic cross-check (§2.5)", () => {
+  const view = (labelled: Record<string, unknown>) => ({ heuristic: { signals: [], confidence: "high" as const, labelled } });
+
+  it("T-HX-conflict: a labelled heuristic value that differs holds reading_heuristic_conflict", () => {
+    expect(keysOf({ ctx: view({ gross: 125 }) })).toEqual(["reading_heuristic_conflict:gross"]);
+    expect(keysOf({ ctx: view({ supplier_vat: "EE100000023" }) })).toEqual(["reading_heuristic_conflict:supplier_vat"]);
+    expect(keysOf({ ctx: view({ invoice_date: "2026-03-16" }) })).toEqual(["reading_heuristic_conflict:invoice_date"]);
+    expect(keysOf({ ctx: view({ due_date: undefined, net: 100, vat: "24,00", invoice_number: "a 17", supplier_reg: "1000 0018" }) })).toEqual([]);
+    expect(keysOf({ ctx: view({ net: 100 }), values: { net: null }, evidence: { net: undefined } })).toContain("reading_heuristic_conflict:net");
+  });
+
+  it("T-HX-regex-ignored: only label / coordinate provenance enters the cross-check", () => {
+    const labelled = labelledHeuristicValues([
+      { field: "total_gross", value: 999, source: "regex" },
+      { field: "invoice_number", value: "X-1", source: "fallback" },
+      { field: "total_vat", value: 24, source: "coordinate" },
+      { field: "supplier_vat_no", value: "EE100000007", source: "label" },
+    ]);
+    expect(labelled).toEqual({ vat: 24, supplier_vat: "EE100000007" });
+    expectAccept({ ctx: view(labelled) });
+  });
+});
+
+describe("hold objects carry no values", () => {
+  it("T-HOLD-no-values: every hold has only code, field and class keys", () => {
+    const cases: CaseInput[] = [
+      { lines: withLines({}, ["Ettemaks 200,00", "Allahindlus -26,00", "Summa SEK", "KM 9% 0,90", "Projektpartner: Kolmas OÜ    EE 100 000 023"]) },
+      { values: { gross: 125, supplier_reg: "10000019", invoice_number: null } },
+      { answers: { gross: { label_quote: "Kokku EUR 124,00", competitors: [{ line: "p1:007", quote: "Kokku EUR 124,00" }], why_this_one: "", verdict: "problem" } } },
+      { ctx: { own: "unavailable", heuristic: { signals: ["zero_total_stated"], confidence: "low", labelled: { gross: 1 } } }, pageMeta: { fullPageImage: true } },
+    ];
+    let seen = 0;
+    for (const input of cases) {
+      for (const hold of runCase(input).holds) {
+        seen += 1;
+        expect(Object.keys(hold).every((key) => ["code", "field", "class"].includes(key)), JSON.stringify(hold)).toBe(true);
+        expect(hold.code in HOLD_CODES).toBe(true);
+        expect(hold.class).toBe(HOLD_CODES[hold.code].class);
+      }
+    }
+    expect(seen).toBeGreaterThan(15);
+  });
+});
+
+describe("reader text", () => {
+  it("T-TXT-questions: the proof questions name all 15 fields and the untrusted-data rule", () => {
+    for (const field of READING_FIELDS) expect(PROOF_QUESTIONS).toContain(field);
+    expect(PROOF_QUESTIONS).toContain("untrusted");
+    expect(READING_INSTRUCTIONS).toContain("untrusted");
+    expect(READING_INSTRUCTIONS).toContain("evidence");
   });
 });

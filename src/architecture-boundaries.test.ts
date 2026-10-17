@@ -67,6 +67,7 @@ const PURE_DOMAIN_FILES = [
   "src/document-reading-tokens.ts",
   "src/document-reading-schemas.ts",
   "src/document-reading-check.ts",
+  "src/document-reading-binding.ts",
 ];
 
 function resolutionModules(): string[] {
