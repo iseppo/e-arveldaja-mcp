@@ -19,6 +19,8 @@ export function renderPacket(packet: ReadingPacket): string {
 }
 
 const JSON_ONLY = "Reply with the JSON object only: no prose, no code fence.";
+/** A1 (throughput round): the proof turn returns the proof object itself, never wrapped. */
+export const PROOF_ONLY = "Return the proof object itself: its top-level keys are exactly source_sha256, packet_digest and answers (do not wrap it in {\"proof\": …}).";
 
 /** N-S: one response carrying both objects. */
 export function promptNS(packet: ReadingPacket): string {
@@ -54,7 +56,7 @@ export function promptNT2(packet: ReadingPacket, readingText: string): string {
     "",
     PROOF_QUESTIONS,
     "",
-    "Return only the `proof` object.",
+    PROOF_ONLY,
     JSON_ONLY,
     "",
   ].join("\n");
@@ -73,7 +75,7 @@ export function promptIT(packet: ReadingPacket, reading: unknown): string {
     "",
     PROOF_QUESTIONS,
     "",
-    "Return only the `proof` object.",
+    PROOF_ONLY,
     JSON_ONLY,
     "",
   ].join("\n");
@@ -86,15 +88,14 @@ export function promptIS(packet: ReadingPacket, reading: unknown): string {
     "",
     PROOF_QUESTIONS,
     "",
-    "Your answer is one JSON object {\"document_reading\": {...}, \"proof\": {...}}.",
-    "",
     UNTRUSTED,
     renderPacket(packet),
     "",
     "You have already written this document_reading as the first part of your answer:",
     JSON.stringify(reading, null, 2),
     "",
-    "Now write the proof part: return only the `proof` object.",
+    "Now write the proof part.",
+    PROOF_ONLY,
     JSON_ONLY,
     "",
   ].join("\n");

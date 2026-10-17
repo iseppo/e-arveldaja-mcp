@@ -828,4 +828,27 @@ describe("reader text", () => {
     expect(READING_INSTRUCTIONS).toContain("untrusted");
     expect(READING_INSTRUCTIONS).toContain("evidence");
   });
+
+  it("T-TXT-throughput: the reader text carries the throughput-round format rules (plan p1-throughput-round §2)", () => {
+    expect(READING_INSTRUCTIONS).toContain("net, vat and gross are JSON numbers (15.92), never strings");
+    expect(READING_INSTRUCTIONS).toContain("evidence has only field keys (no source_sha256 or packet_digest inside it)");
+    expect(READING_INSTRUCTIONS).toContain("without a label or a leading \"#\"");
+    expect(READING_INSTRUCTIONS).toContain("currency: EUR when the document prints EUR, euro, eurot or €");
+    expect(READING_INSTRUCTIONS).toContain("if the supplier prints several of its own accounts, give the first one printed");
+    expect(PROOF_QUESTIONS).toContain("copied from ONE line, and not containing the value itself");
+    expect(PROOF_QUESTIONS).toContain("each quote copied from the line whose id you give");
+    expect(PROOF_QUESTIONS).toContain("Several bank accounts that all belong to the supplier are not a problem.");
+    expect(PROOF_QUESTIONS).toContain("larger only when its comma or point is read as a thousands separator (6,000; 118,395)");
+    expect(PROOF_QUESTIONS).toContain(`answers has exactly these 15 keys: ${READING_FIELDS.join(", ")}.`);
+  });
+
+  it("T-TXT-schema-strict: the A1 targets stay schema holds (the checker is not loosened)", () => {
+    expect(codesOf({ values: { gross: "124.00" } })).toEqual(["reading_schema_invalid"]);
+    expect(codesOf({ values: { net: "100", vat: "24" } })).toEqual(["reading_schema_invalid"]);
+    const { packet } = buildCase();
+    expect(codesOf({ evidence: { source_sha256: { line: "p1:001", quote: packet.source_sha256 } } })).toEqual(["reading_schema_invalid"]);
+    const { reading, proof, ctx } = buildCase();
+    expect(holdCodes(checkReading(packet, reading, { proof }, ctx))).toEqual(["proof_schema_invalid"]);
+  });
 });
+

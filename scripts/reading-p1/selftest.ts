@@ -9,6 +9,8 @@ import { auditClaudeCase, instructionFingerprints } from "./audit-claude.js";
 import { auditCodexEvents } from "./audit-codex.js";
 import { dataPath, sentinel, sha256Hex, writeJson } from "./common.js";
 import { registryPath, stageRequest } from "./stage.js";
+import { promptIS, promptIT, promptNT2 } from "./prompts.js";
+import type { ReadingPacket } from "../../src/document-reading-packet.js";
 
 interface Check { name: string; expect: "pass" | "fail"; pass: boolean; failures: string[]; ok: boolean }
 
@@ -17,6 +19,10 @@ const PROMPT = "Read the packet and reply with a JSON object.\n";
 const results: Check[] = [];
 const record = (name: string, expect: Check["expect"], audit: { pass: boolean; failures: string[] }) => {
   results.push({ name, expect, pass: audit.pass, failures: audit.failures, ok: (expect === "pass") === audit.pass });
+};
+/** A harness property check (throughput round): `ok` is the property itself. */
+const assert = (name: string, ok: boolean, detail = "") => {
+  results.push({ name, expect: "pass", pass: ok, failures: ok ? [] : [detail || "property violated"], ok });
 };
 
 const root = mkdtempSync(join(tmpdir(), "reading-p1-selftest."));
@@ -93,6 +99,12 @@ try {
   }
   const nothingStaged = ids.every((id) => !existsSync(registryPath(id)));
   results.push({ name: "stage_two_cases_refused", expect: "fail", pass: !refused, failures: [message], ok: refused && nothingStaged });
+
+  // ---- A1 prompt wrappers (throughput round §2) -------------------------------------------------------------
+  const packet = { source_sha256: "a".repeat(64), packet_digest: "d".repeat(64), text: "p1:001 │ Arve nr 1" } as unknown as ReadingPacket;
+  const proofPrompts = { "I-S": promptIS(packet, {}), "I-T": promptIT(packet, {}), "N-T2": promptNT2(packet, "{}") };
+  for (const [form, text] of Object.entries(proofPrompts)) assert(`prompt_${form}_do_not_wrap`, text.includes("do not wrap"), form);
+  assert("prompt_I-S_no_both_object", !proofPrompts["I-S"].includes("{\"document_reading\": {...}, \"proof\": {...}}"));
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
