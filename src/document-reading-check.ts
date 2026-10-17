@@ -635,7 +635,9 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
   if (supplierIds.some((id) => own.has(id))) hold("supplier_is_own");
   const accounted = new Set([...supplierIds, ...own]);
   const accountingHits = identifierScan(doc.packet.lines, "accounting");
-  if (accountingHits.some((hit) => !hit.values.some((value) => accounted.has(value)))) hold("unaccounted_identifier");
+  // Every distinct validating reading must be accounted on its own: one accepted alternative never exempts an
+  // overlapping one (a supplier DE123456 must not cover a third-party DE 123 456 789 printed over the same digits).
+  if (accountingHits.some((hit) => hit.values.some((value) => !accounted.has(value)))) hold("unaccounted_identifier");
   // H9
   if (reading.invoice_number !== null) {
     const number = reading.invoice_number;

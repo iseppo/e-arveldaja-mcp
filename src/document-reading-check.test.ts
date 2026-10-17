@@ -279,6 +279,18 @@ describe("checkReading: H8 parties", () => {
     expect(codesOf({ lines: withLines({}, ["Projektpartner: Kolmas OÜ    EE 100 000 023"]) })).toContain("unaccounted_identifier");
   });
 
+  it("T-H8-each-alternative: an accepted id never exempts an overlapping unaccounted alternative", () => {
+    const supplierDe = {
+      lines: withLines({ 2: "Reg. nr 10000018    VAT DE123456" }),
+      values: { supplier_vat: "DE123456" },
+      evidence: { supplier_vat: { line: "p1:002", quote: "VAT DE123456" } },
+      labels: { supplier_vat: "VAT" },
+    };
+    expectAccept(supplierDe);
+    expect(codesOf({ ...supplierDe, lines: withLines({ 2: "Reg. nr 10000018    VAT DE123456" }, ["Partner    DE 123 456 789"]) }))
+      .toContain("unaccounted_identifier");
+  });
+
   it("T-H8-iban-bic: IBAN and BIC lines account nothing", () => {
     expectAccept({ lines: withLines({}, ["IBAN EE59 1000 0018 2345 6789    BIC DEUTDEFF500"]) });
   });
