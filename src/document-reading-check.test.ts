@@ -25,7 +25,7 @@ import { READING_FIELDS } from "./document-reading-schemas.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS } from "./invoice-extraction-fallback.js";
 import { detectReverseChargeFromText } from "./tools/receipt-extraction.js";
 import { BASE_LINES, buildCase, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
-import { N1_CASES, N2_CASES, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
+import { N1_CASES, N2_CASES, N3_PINS, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
 
 const withLines = (edits: Record<number, string>, extra: string[] = []) =>
   [...BASE_LINES.map((line, index) => edits[index + 1] ?? line), ...extra];
@@ -899,4 +899,8 @@ describe("N2: a decimal-thousands ambiguity resolved by a unique, exact closing 
     expect(uniqueClosingTrio([1, 1000], [0.24, 240], [1.24], [24])).toEqual([1, 0.24, 1.24]);
     expect(uniqueClosingTrio([1, 1000], [0.5, 500], [1.5], [24])).toBeNull();
   });
+});
+
+describe("N3 rejected: third-party identifiers keep holding unaccounted_identifier (plan p1-throughput-round §10)", () => {
+  for (const entry of N3_PINS) it(`T-${entry.name}: exact holds ${JSON.stringify(entry.holds)}`, () => expectNarrowing(entry));
 });

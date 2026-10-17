@@ -87,3 +87,17 @@ export const N2_CASES: NarrowingCase[] = [
   { name: "N2-Q7-different-set", violates: "Q7", input: trio(["6,000", "1,440", "7,44"], [6, 1.44, 7.44], ["6,000 €", "1 006,00 €"],
     { ...grossCompetitors(["p1:008", "6,000 €"], ["p1:006", "1,440 €"], ["p1:009", "1 006,00 €"]), ...netCompetitors(["p1:009", "1 006,00 €"]) }), holds: ["competitor_ambiguous:net"] },
 ];
+
+/** We are under Ship to; another company is under Bill to, with the third-party identifier on the next line. */
+const shipToBillTo = (identifier: string): CaseInput => ({
+  lines: [...BASE_LINES.map((line, index) => (index === 2 ? "Ship to: Ostja AS    Reg. nr 10000024" : line)), "Bill to: Muu Firma GmbH", identifier],
+  evidence: { buyer_name: { line: "p1:003", quote: "Ship to: Ostja AS" }, buyer_reg: { line: "p1:003", quote: "Reg. nr 10000024" } },
+});
+
+/**
+ * N3 was rejected (rev. 3.1): a format rejection cannot prove another party is absent. These pins keep today's
+ * `unaccounted_identifier` hold on Codex's three third-party identifiers and the #21 / #28 / KMKR-glued shapes.
+ */
+export const N3_PINS: NarrowingCase[] = [
+  "DE1234S6789", "CH E123456789MWST", "Registration NO200312345A", "AENO ASC0002", "3 70449888", "KMKRDE123456789",
+].map((identifier) => ({ name: `N3-pin ${identifier}`, violates: "N3 (rejected)", input: shipToBillTo(identifier), holds: ["unaccounted_identifier"] }));
