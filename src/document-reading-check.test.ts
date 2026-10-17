@@ -830,15 +830,17 @@ describe("reader text", () => {
   });
 
   it("T-TXT-throughput: the reader text carries the throughput-round format rules (plan p1-throughput-round §2)", () => {
-    expect(READING_INSTRUCTIONS).toContain("net, vat and gross are JSON numbers (15.92), never strings");
+    expect(READING_INSTRUCTIONS).toContain("net, vat and gross are JSON numbers (12.34), never strings");
     expect(READING_INSTRUCTIONS).toContain("evidence has only field keys (no source_sha256 or packet_digest inside it)");
     expect(READING_INSTRUCTIONS).toContain("without a label or a leading \"#\"");
+    // Generic examples only: no corpus value is a prompt cue (Codex review of 4bf9ac8).
+    for (const corpusValue of ["80832991", "118,395", "6,000", "15.92"]) expect(`${READING_INSTRUCTIONS}\n${PROOF_QUESTIONS}`).not.toContain(corpusValue);
     expect(READING_INSTRUCTIONS).toContain("currency: EUR when the document prints EUR, euro, eurot or €");
     expect(READING_INSTRUCTIONS).toContain("if the supplier prints several of its own accounts, give the first one printed");
     expect(PROOF_QUESTIONS).toContain("copied from ONE line, and not containing the value itself");
     expect(PROOF_QUESTIONS).toContain("each quote copied from the line whose id you give");
     expect(PROOF_QUESTIONS).toContain("Several bank accounts that all belong to the supplier are not a problem.");
-    expect(PROOF_QUESTIONS).toContain("larger only when its comma or point is read as a thousands separator (6,000; 118,395)");
+    expect(PROOF_QUESTIONS).toContain("larger only when its comma or point is read as a thousands separator (1,500; 250,750)");
     expect(PROOF_QUESTIONS).toContain(`answers has exactly these 15 keys: ${READING_FIELDS.join(", ")}.`);
   });
 
