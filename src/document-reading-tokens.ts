@@ -412,8 +412,14 @@ const BIC_RE = /\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b/g;
 /** The VAT label words (the `VAT_LABEL_RE` vocabulary and its foreign equivalents) a country prefix may end. */
 const VAT_LABEL_WORDS = ["VAT", "UST", "MWST", "IVA", "TVA", "BTW", "MOMS", "ALV"] as const;
 
-/** True when the two letters at `i` end a VAT label word that starts on a non-letter boundary. */
+/**
+ * True when the two letters at `i` end a VAT label word (starting on a non-letter boundary) that is
+ * followed by a separator and then a letter-led token, i.e. another country prefix: `VAT EE…`, `ALV FI…`.
+ * `ALV40003032949` and `ALV 40003032949` are not exempt, so `LV40003032949` is still found.
+ */
 function isVatLabelTail(text: string, i: number): boolean {
+  const separator = /^[^\p{L}\p{N}]+(.)/u.exec(text.slice(i + 2));
+  if (!separator || !/\p{L}/u.test(separator[1]!)) return false;
   return VAT_LABEL_WORDS.some((word) => {
     const start = i + 2 - word.length;
     return start >= 0 && text.slice(start, i + 2) === word && (start === 0 || !/\p{L}/u.test(text[start - 1]!));

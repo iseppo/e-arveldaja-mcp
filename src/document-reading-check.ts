@@ -641,6 +641,8 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
   const accountingHits = identifierScan(doc.packet.lines, "accounting");
   // Every distinct validating reading must be accounted on its own: one accepted alternative never exempts an
   // overlapping one (a supplier DE123456 must not cover a third-party DE 123 456 789 printed over the same digits).
+  // Keeping only the maximal reading was rejected (`GB123456789 001` hides GB123456789), so a grouped foreign
+  // VAT holds: an accepted false hold.
   if (accountingHits.some((hit) => hit.values.some((value) => !accounted.has(value)))) hold("unaccounted_identifier");
   // H9
   if (reading.invoice_number !== null) {

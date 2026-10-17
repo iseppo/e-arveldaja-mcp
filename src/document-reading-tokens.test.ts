@@ -206,6 +206,14 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
     expect(scan("ALV FI12345678", "accounting").filter(([kind]) => kind === "foreign_vat")).toEqual([["foreign_vat", ["FI12345678"]]]);
   });
 
+  it("T-ID-label-tail-scope: the label exemption needs a separator and a letter-led next token", () => {
+    const foreign = (raw: string) => scan(raw, "accounting").filter(([kind]) => kind === "foreign_vat");
+    expect(foreign("ALV40003032949")).toEqual([["foreign_vat", ["LV40003032949"]]]);
+    expect(foreign("ALV 40003032949")).toEqual([["foreign_vat", ["LV40003032949"]]]);
+    expect(foreign("ALV: FI12345678")).toEqual([["foreign_vat", ["FI12345678"]]]);
+    expect(foreign("VAT: EE102809963")).toEqual([]);
+  });
+
   it("T-ID-foreign-glued-left: accounting finds a prefix glued to a non-label letter, strict does not", () => {
     expect(scan("XDE 123456789", "accounting")).toEqual([["foreign_vat", ["DE123456789"]]]);
     expect(scan("XDE 123456789", "strict")).toEqual([]);

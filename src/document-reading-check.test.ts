@@ -300,6 +300,10 @@ describe("checkReading: H8 parties", () => {
       .toContain("unaccounted_identifier");
   });
 
+  it("T-H8-alv-glued: a third-party VAT glued to a label word (`ALV40003032949`) holds unaccounted_identifier", () => {
+    expect(codesOf({ lines: withLines({}, ["ALV40003032949"]) })).toContain("unaccounted_identifier");
+  });
+
   it("T-H8-iban-bic: IBAN and BIC lines account nothing", () => {
     expectAccept({ lines: withLines({}, ["IBAN EE59 1000 0018 2345 6789    BIC DEUTDEFF500"]) });
   });
