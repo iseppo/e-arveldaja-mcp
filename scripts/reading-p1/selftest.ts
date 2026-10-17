@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { auditClaudeCase, instructionFingerprints } from "./audit-claude.js";
+import { CLASSIFIER_META_PREFIX, auditClaudeCase, instructionFingerprints } from "./audit-claude.js";
 import { auditCodexEvents } from "./audit-codex.js";
 import { REPO_ROOT, SCRIPTS_DIR, dataPath, manifest, sentinel, sha256Hex, writeJson } from "./common.js";
 import { registryPath, stageRequest } from "./stage.js";
@@ -100,6 +100,16 @@ try {
   record("claude_sentinel", "fail", claudeCase("sentinel", [{ type: "assistant", message: { role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: SENTINEL }] } }]));
   record("claude_prompt_hash", "fail", claudeCase("hash", [], { userText: `${PROMPT} (changed)` }));
   record("claude_wrong_model", "fail", claudeCase("model", [], { model: "claude-haiku-4" }));
+  // classifier_interrupt (owner 2026-10-17): the CLI's exact meta message is the only finding; an altered one is a
+  // second user message as before.
+  const meta = (text: string) => ({ type: "user", isMeta: true, message: { role: "user", content: text } });
+  const metaText = `${CLASSIFIER_META_PREFIX} The rest of it was withheld, and tool calls in it that had not finished did not run.`;
+  const ciAudit = claudeCase("classifier", [{ type: "assistant", message: { role: "assistant", model: "claude-opus-5-5", content: [{ type: "text", text: "{" }] } }, meta(metaText)]);
+  assert("ci_exact_meta_only_finding", JSON.stringify(ciAudit.failures) === JSON.stringify(["classifier_interrupt"]), JSON.stringify(ciAudit.failures));
+  const altered = claudeCase("classifier-altered", [meta(metaText.replace("safety classifier", "classifier"))]);
+  assert("ci_altered_meta_counts_as_user_message", !altered.failures.includes("classifier_interrupt") && altered.failures.includes("user_messages_2_expected_1"), JSON.stringify(altered.failures));
+  const notMeta = claudeCase("classifier-not-meta", [{ type: "user", message: { role: "user", content: metaText } }]);
+  assert("ci_non_meta_counts_as_user_message", !notMeta.failures.includes("classifier_interrupt"), JSON.stringify(notMeta.failures));
 
   // ---- stage.ts: one case per context -----------------------------------------------------------------------
   const spec = (id: string) => ({ case_id: id, reader: "opus", form: "N-S", kind: "natural", doc_id: null, turns: 1, prompt: PROMPT });
@@ -179,6 +189,15 @@ try {
   assert("b7_mixed_turn_stop", kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"]]) === "stop" &&
     kind(["turn1_forbidden:event:error", "turn2_output_missing"], [[1, "stream disconnected"], [2, "stream disconnected"]]) === "transport");
 
+  // classifier_interrupt classification: only alone, no error message, Claude path, once per chain.
+  const ci = (failures: string[], extra: Partial<Parameters<typeof classifyEvidence>[0]> = {}) =>
+    classifyEvidence({ failures, run_errors: [], error_messages: [], reader: "opus", ...extra }).kind;
+  assert("ci_exact_restages", ci(["classifier_interrupt"]) === "classifier_interrupt" && ci(["classifier_interrupt"], { reader: "haiku" }) === "classifier_interrupt");
+  assert("ci_plus_anomaly_stops", ci(["classifier_interrupt", "turn1_tool_use"]) === "stop" && ci(["classifier_interrupt", "turn1_output_missing"]) === "stop" &&
+    ci(["classifier_interrupt"], { run_errors: ["turn1:boom"] }) === "stop" && ci(["classifier_interrupt"], { error_messages: [{ turn: 1, message: "stream disconnected" }] }) === "stop");
+  assert("ci_codex_or_unknown_reader_stops", ci(["classifier_interrupt"], { reader: "codex" }) === "stop" && ci(["classifier_interrupt"], { reader: undefined }) === "stop");
+  assert("ci_second_interrupt_stops", ci(["classifier_interrupt"], { classifier_restaged: true }) === "stop");
+
   // B9 accounting (pure): 90 consumed, cap 100, a reserved retry at mean 20 must exceed.
   const means = new Map([["codex|N-S", { input: 20, output: 1, n: 1 }]]);
   const totals = (keys: string[]) => projectTotals({ consumed: { input: 90, output: 0 }, keys, own: new Map(), prior: means, legacyPending: false, caps: { input: 100, output: 1_000_000 } }).exceeds;
@@ -199,12 +218,13 @@ try {
     "const stop = await restageRun({ tag: \"chain\", max: 2, exceeds: () => projection([], run).exceeds, log: () => {} });",
     `import { loadStaged } from ${JSON.stringify(join(SCRIPTS_DIR, "stage.ts"))};`,
     "const regs = runRegistries(\"chain\");",
-    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])) }));",
+    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])), classifier_restaged: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).meta?.classifier_restaged === true])) }));",
   ].join("\n"));
   const cid = { a: "c-aaaaaaaaaaaa", b: "c-bbbbbbbbbbbb", s: "c-555555555555", x: "c-eeeeeeeeeeee", y: "c-ffffffffffff" };
-  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; usage?: number; reading?: number; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
+  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; usage?: number; reading?: number; reader?: string; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
   // `step5`: run `step5.ts natural --run chain` (cap 100) on a one-document corpus instead of the restage script.
-  const scenario = (name: string, cases: Case[], step5 = false) => {
+  type Outcome = { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null>; classifier_restaged: Record<string, boolean>; launches: number };
+  const scenario = (name: string, cases: Case[], step5 = false): Outcome => {
     const dir = join(root, `scenario-${name}`);
     const home = join(dir, "home");
     for (const sub of ["staging", "leakage", "readings", "runs", "legacy", "corpus", home]) mkdirSync(sub.startsWith("/") ? sub : join(dir, sub), { recursive: true });
@@ -212,12 +232,13 @@ try {
     writeFileSync(join(dir, "legacy", "review_own_B_codex.json"), "[]");
     writeFileSync(join(dir, "corpus", "files.txt"), "doc1.pdf\n");
     writeFileSync(join(dir, "corpus", "sha256.txt"), `${"a".repeat(64)}  doc1.pdf\n`);
-    writeFileSync(join(dir, "runs", "step5.tsv"), `${cid.s}\t01\n`);
+    writeFileSync(join(dir, "runs", "step5.tsv"), `${cid.s}\t01\nc-555555555556\t01\n`);
+    writeFileSync(join(dir, "readings", "c-555555555556.json"), JSON.stringify({ case_id: "c-555555555556", reader: "opus", form: "N-S", meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 20, output: 1 } }] }));
     writeFileSync(join(dir, "readings", `${cid.s}.json`), JSON.stringify({ case_id: cid.s, reader: "codex", form: "N-S", meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 20, output: 1 } }] }));
     for (const entry of cases) {
       mkdirSync(join(dir, entry.id), { recursive: true });
       writeFileSync(join(dir, entry.id, "PROMPT.md"), "x\n");
-      writeFileSync(join(dir, "staging", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1, dir: join(dir, entry.id),
+      writeFileSync(join(dir, "staging", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: entry.reader ?? "codex", form: "N-S", kind: "natural", doc_id: "01", turns: 1, dir: join(dir, entry.id),
         staged_at: "2026-10-17T00:00:00Z", meta: { run: "chain", ...entry.meta }, ...(entry.restaged_as ? { restaged_as: entry.restaged_as } : {}), ...(entry.attempt ? { attempt: entry.attempt } : {}) }));
       writeFileSync(join(dir, "runs", "chain.tsv"), `${entry.id}\t01\n`, { flag: "a" });
       if (entry.leakage) writeFileSync(join(dir, "leakage", `${entry.id}.json`), JSON.stringify({ pass: false, run_errors: [], ...entry.leakage }));
@@ -247,8 +268,8 @@ try {
     const launches = existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter((line) => line.split("\t")[1] === "1") : [];
     // The stub's launches still staged a /tmp/reading-p1.* dir each: remove them.
     for (const line of launches) rmSync(line.split("\t")[2]!, { recursive: true, force: true });
-    if (step5) return { stop: /^STOP: (.*)$/m.exec(out)?.[1] ?? null, links: {}, staged_attempts: {}, launches: launches.length };
-    return { ...(JSON.parse(out) as { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null> }), launches: launches.length };
+    if (step5) return { stop: /^STOP: (.*)$/m.exec(out)?.[1] ?? null, links: {}, staged_attempts: {}, classifier_restaged: {}, launches: launches.length };
+    return { ...(JSON.parse(out) as Omit<Outcome, "launches">), launches: launches.length };
   };
   const transport = { failures: ["turn1_forbidden:event:error"] };
   const first = { id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b };
@@ -293,6 +314,12 @@ try {
   const crashed = scenario("crashed", [{ id: cid.a, leakage: transport, events: ["stream disconnected"], reading: 0, restaged_as: cid.b },
     { id: cid.b, leakage: transport, events: ["stream disconnected"], reading: 0, meta: { restaged_from: cid.a }, attempt: 2, restaged_as: cid.x },
     { id: cid.x, leakage: transport, events: ["stream disconnected"], reading: 0, meta: { restaged_from: cid.b } }]);
+  // classifier_interrupt end to end: re-staged fresh once (the replacement carries classifier_restaged); a second
+  // interrupt in the chain stops with no launch.
+  const ciFirst = scenario("ci-first", [{ id: cid.x, reader: "opus", leakage: { failures: ["classifier_interrupt"] }, reading: 0 }]);
+  assert("ci_scenario_restaged_once", ciFirst.launches === 1 && ciFirst.links[cid.x] !== null && ciFirst.classifier_restaged[String(ciFirst.links[cid.x])] === true, JSON.stringify(ciFirst));
+  const ciSecond = scenario("ci-second", [{ id: cid.x, reader: "opus", leakage: { failures: ["classifier_interrupt"] }, reading: 0, meta: { classifier_restaged: true }, attempt: 2 }]);
+  assert("ci_scenario_second_interrupt_stops", ciSecond.launches === 0 && String(ciSecond.stop).startsWith(`leakage:${cid.x}`), JSON.stringify(ciSecond));
   assert("b9_attempt_from_ancestry", crashed.launches === 0 && crashed.stop === null, JSON.stringify(crashed));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------

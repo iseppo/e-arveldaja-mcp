@@ -68,6 +68,7 @@ export function transcriptPath(caseDir: string, sessionId: string): string {
 
 interface TranscriptEntry {
   type?: string;
+  isMeta?: boolean;
   message?: { role?: string; model?: string; content?: unknown };
   attachment?: { type?: string };
   isSidechain?: boolean;
@@ -104,6 +105,11 @@ export interface ClaudeAudit {
   pass: boolean;
 }
 
+/** The fixed opening of the Claude CLI's meta message after a safety-classifier stop. */
+export const CLASSIFIER_META_PREFIX = "Your response above was stopped by a safety classifier \u2014 this is not a tool or API error.";
+const isClassifierMeta = (entry: TranscriptEntry) => entry.type === "user" && entry.isMeta === true && entry.message?.role === "user" &&
+  textOf(entry.message.content).startsWith(CLASSIFIER_META_PREFIX);
+
 /** Audits a finished Claude case. `expectedModel` is a prefix such as `claude-opus-` or `claude-haiku-`. */
 export function auditClaudeCase(input: {
   caseDir: string;
@@ -134,10 +140,14 @@ export function auditClaudeCase(input: {
   if (!transcript || entries.length === 0) failures.push("transcript_missing");
   const transcriptText = transcript && existsSync(transcript) ? readFileSync(transcript, "utf8") : "";
 
+  // The CLI's own meta message after a safety-classifier stop is not a turn: it is flagged `classifier_interrupt`
+  // (a discarded attempt, restage.ts). Any other extra user message still fails the turn count.
+  const classifierMeta = entries.filter(isClassifierMeta).length;
+  if (classifierMeta > 0) failures.push("classifier_interrupt");
   // Split the transcript into turns at each real user message (string or text-block content, not a tool result).
   const userIndices = entries
     .map((entry, index) => ({ entry, index }))
-    .filter(({ entry }) => entry.type === "user" && entry.message?.role === "user" && textOf(entry.message.content) !== "" &&
+    .filter(({ entry }) => !isClassifierMeta(entry) && entry.type === "user" && entry.message?.role === "user" && textOf(entry.message.content) !== "" &&
       !(Array.isArray(entry.message.content) && (entry.message.content as Array<{ type?: string }>).some((block) => block.type === "tool_result")))
     .map(({ index }) => index);
   if (userIndices.length !== input.turns) failures.push(`user_messages_${userIndices.length}_expected_${input.turns}`);

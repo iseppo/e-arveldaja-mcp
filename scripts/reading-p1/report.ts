@@ -200,12 +200,19 @@ export function extras(results: CaseResult[], ids: ReadonlySet<string>, tag: str
   const truthChanges = Object.entries(truth).flatMap(([doc, record]) => (record.truth_changes ?? []).map((change) => ({ doc, ...change })));
   // From the run index, filtered by document before any registry is opened.
   const restaged = runIndex(tag, { optional: true }).filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)))
-    .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string; restage_evidence?: string[] })
+    .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string; restage_evidence?: string[]; restage_class?: string })
     .filter((entry) => entry.restaged_as)
-    .map((entry) => ({ case_id: entry.case_id, restaged_as: entry.restaged_as!, evidence: entry.restage_evidence ?? null }));
+    .map((entry) => ({ case_id: entry.case_id, doc_id: entry.doc_id, reader: entry.reader, form: entry.form, kind: entry.kind, restaged_as: entry.restaged_as!,
+      restage_class: entry.restage_class ?? "transport", evidence: entry.restage_evidence ?? null }));
+  // Every classifier-interrupted attempt of the run (discarded, never scored), so the measurement is not censored.
+  const classifierInterrupts = runIndex(tag, { optional: true }).filter((entry) => (entry.doc_id === null || ids.has(entry.doc_id)) && existsSync(registryPath(entry.case_id)) &&
+    existsSync(dataPath("leakage", `${entry.case_id}.json`)) && (readJson<{ failures?: string[] }>(dataPath("leakage", `${entry.case_id}.json`)).failures ?? []).includes("classifier_interrupt"))
+    .map((entry) => loadStaged(entry.case_id) as ReturnType<typeof loadStaged> & { restaged_as?: string })
+    .map((entry) => ({ case_id: entry.case_id, doc_id: entry.doc_id, reader: entry.reader, form: entry.form, kind: entry.kind, restaged_as: entry.restaged_as ?? null }));
   return {
     truth_changes: truthChanges,
     restaged,
+    classifier_interrupts: classifierInterrupts,
     families: families && { base_acceptance: families.base_acceptance, by_family: families.by_family, escaped: families.results.filter((entry) => entry.status !== "OK"), cases: families.results.length },
     family_a: a && { bases: a.admitted_bases.map((base) => ({ doc_id: base.doc_id, source: base.source ?? null })), candidates: a.candidates, held_by_hard_checks: a.held_by_hard_checks, survivors: a.survivors, sampled: a.sampled.length, by_field_type: a.by_field_type, amounts_by_direction: a.amounts_by_direction, proof_catch: proofCatch },
     packets: { corpus_packets: corpusPackets.length, text_bytes: dist(corpusPackets.map((file) => (file.packet as { text_bytes: number }).text_bytes)), lines: dist(corpusPackets.map((file) => (file.packet as { lines: unknown[] }).lines.length)), packet_oversize: oversize, envelope_bytes: dist(envelopes), proof_output_tokens_per_two_turn_case: dist(proofOut),
@@ -263,7 +270,8 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
     lines.push("", "Called out (plan §5.8.3): " + ["competing_consistent_total (A2)", "mixed_vat_rate (A3)", "invoice_number_is_identifier (H9)", "foreign_rate_trio", "cited_origin_unestablished", "unaccounted_identifier"].map((label) => { const code = label.split(" ")[0]!; const entry = summary.hold_rates[code]; return `${label} ${entry ? `${entry.with}/${entry.only}` : "0/0"}`; }).join("; ") + "; " +
       Object.entries(summary.hold_rates).filter(([code]) => code.startsWith("ocr_")).map(([code, entry]) => `${code} ${entry.with}/${entry.only}`).join("; ") + " (cases/only)");
     lines.push("", "## Truth changes", "", ...(extra.truth_changes.length ? extra.truth_changes.map((change) => `- #${change.doc} ${change.field}: ${JSON.stringify(change.from)} → ${JSON.stringify(change.to)} (${change.reason})`) : ["- none"]));
-    lines.push("", "## Re-staged cases (transport evidence)", "", ...(extra.restaged.length ? extra.restaged.map((entry) => `- ${entry.case_id} → ${entry.restaged_as}: ${entry.evidence ? entry.evidence.join(" | ") : "NO EVIDENCE RECORDED"}`) : ["- none"]));
+    lines.push("", "## Re-staged cases (transport evidence or classifier interrupt)", "", ...(extra.restaged.length ? extra.restaged.map((entry) => `- ${entry.case_id} → ${entry.restaged_as} [${entry.restage_class}]: ${entry.evidence ? entry.evidence.join(" | ") : "NO EVIDENCE RECORDED"}`) : ["- none"]));
+    lines.push("", "## Classifier interrupts (discarded attempts, never scored)", "", ...(extra.classifier_interrupts.length ? extra.classifier_interrupts.map((entry) => `- ${entry.case_id}: #${entry.doc_id ?? "-"} ${entry.reader} ${entry.form} ${entry.kind} → ${entry.restaged_as ?? "not re-staged"}`) : ["- none"]));
     lines.push("", "## Expected document holds (§7.7)", "");
     for (const entry of extra.expected_document_holds) lines.push(`- #${entry.doc} expects one of ${entry.expected.join(", ")}: ${entry.cases} natural cases, ${entry.failing.length} not held with one of them${entry.failing.length ? ` (${entry.failing.join(", ")})` : ""}${entry.schema_held.length ? `; of these ${entry.schema_held.length} held by a schema hold only (no content check ran)` : ""}`);
     if (extra.families) {

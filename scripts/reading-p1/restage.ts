@@ -4,6 +4,9 @@
 // Throughput round B7/B9:
 //   - every failed case is classified BEFORE every retry, including each link of a retry chain; only positive
 //     transport evidence, per turn, re-stages, anything else stops the run;
+//   - classifier_interrupt (owner 2026-10-17): a Claude case whose only audit finding is the CLI's
+//     safety-classifier meta message is discarded (never scored, its usage stays in the ledger) and re-staged
+//     fresh at most once per chain (meta.classifier_restaged); a second interrupt stops the run;
 //   - the cap callback runs before the round and before each launch; the projection reserves the pending and
 //     in-flight replacements (step5.ts reservedKeys), so retries count against the same run-tag caps;
 //   - the original records `restaged_as` only after its replacement has run; a replacement found without that
@@ -27,7 +30,7 @@ import { argValue, dataPath, readJson, writeJson } from "./common.js";
 import { newCaseId, runCases } from "./run-cases.js";
 import { corpusRunIndex, loadStaged, registryPath, type CaseSpec, type StagedCase } from "./stage.js";
 
-export type Registry = StagedCase & { restaged_as?: string; attempt?: number; restage_evidence?: string[]; abandoned?: boolean };
+export type Registry = StagedCase & { restaged_as?: string; attempt?: number; restage_evidence?: string[]; restage_class?: FailureKind; abandoned?: boolean };
 
 /** Re-stage rounds per run: a case of attempt ≤ MAX_RESTAGE_ROUNDS may still be replaced. */
 export const MAX_RESTAGE_ROUNDS = 2;
@@ -44,7 +47,16 @@ const TRANSPORT_CONSEQUENCE_RE = /^(?:turn(\d)_forbidden:(?:(?:event|item):error
 
 /** An error message with the turn it was raised in (null: no turn, e.g. a collect error). */
 export interface TurnMessage { turn: number | null; message: string }
-export interface FailureEvidence { failures: string[]; run_errors: string[]; error_messages: TurnMessage[] }
+export interface FailureEvidence {
+  failures: string[];
+  run_errors: string[];
+  error_messages: TurnMessage[];
+  /** The case's reader; classifier_interrupt is Claude-path only. */
+  reader?: string;
+  /** The case (or an ancestor) was already re-staged once for a classifier interrupt. */
+  classifier_restaged?: boolean;
+}
+export type FailureKind = "transport" | "classifier_interrupt" | "stop";
 
 /**
  * B7: "transport" only on positive evidence, per turn: every failure entry is a transport consequence of its
@@ -52,7 +64,7 @@ export interface FailureEvidence { failures: string[]; run_errors: string[]; err
  * Unknown, mixed, leak, empty or evidence-free failures → "stop". A recovered transport fault in one turn never
  * explains a failure in another.
  */
-export function classifyEvidence(evidence: FailureEvidence): { kind: "transport" | "stop"; evidence: string[] } {
+export function classifyEvidence(evidence: FailureEvidence): { kind: FailureKind; evidence: string[] } {
   const messages: TurnMessage[] = [
     ...evidence.error_messages,
     ...evidence.run_errors.map((error) => {
@@ -63,6 +75,12 @@ export function classifyEvidence(evidence: FailureEvidence): { kind: "transport"
   const listed = messages.map((entry) => `${entry.turn === null ? "-" : `turn${entry.turn}`}: ${entry.message}`);
   const stop = { kind: "stop" as const, evidence: listed };
   if (evidence.failures.length === 0) return stop;
+  // classifier_interrupt (owner decision 2026-10-17): the audit's only finding is the CLI's classifier meta
+  // message, with no error of any kind, on the Claude path, and never a second time in one case's chain.
+  if (evidence.failures.includes("classifier_interrupt")) {
+    const only = evidence.failures.length === 1 && messages.length === 0 && evidence.reader !== undefined && evidence.reader !== "codex";
+    return only && !evidence.classifier_restaged ? { kind: "classifier_interrupt", evidence: ["classifier_interrupt"] } : stop;
+  }
   if (evidence.failures.some((failure) => LEAK_RE.test(failure))) return stop;
   if (messages.length === 0 || !messages.every((entry) => TRANSPORT_RE.test(entry.message))) return stop;
   for (const failure of evidence.failures) {
@@ -94,10 +112,11 @@ export function failureEvidence(caseId: string): FailureEvidence {
       else if (event.item?.type === "error") messages.push({ turn, message: event.item.message ?? "error item without message" });
     }
   }
-  return { failures: leakage.failures ?? [], run_errors: leakage.run_errors ?? [], error_messages: messages };
+  return { failures: leakage.failures ?? [], run_errors: leakage.run_errors ?? [], error_messages: messages, reader: staged.reader,
+    classifier_restaged: staged.meta?.classifier_restaged === true };
 }
 
-export function classifyFailure(caseId: string): "transport" | "stop" {
+export function classifyFailure(caseId: string): FailureKind {
   return classifyEvidence(failureEvidence(caseId)).kind;
 }
 
@@ -183,11 +202,11 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
     const regs = runRegistries(opts.tag);
     const failed = failedCases(regs);
     if (failed.length === 0) return null;
-    const verdicts = new Map<string, string[]>();
+    const verdicts = new Map<string, { kind: FailureKind; evidence: string[] }>();
     for (const staged of failed) {
       const verdict = classifyEvidence(failureEvidence(staged.case_id));
       if (verdict.kind === "stop") return `leakage:${staged.case_id}:not transport-only (round ${round})`;
-      verdicts.set(staged.case_id, verdict.evidence);
+      verdicts.set(staged.case_id, verdict);
     }
     if (opts.exceeds()) return `projection exceeds the ${opts.tag} caps before re-stage round ${round}`;
     const items = failed.map((staged) => {
@@ -195,13 +214,14 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
         .map((path) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
       const { dir: _dir, prompt_sha256: _hash, turn2_sha256: _turn2, staged_at: _at, restaged_as: _as, restage_evidence: _ev, abandoned: _ab, attempt, ...rest } = staged;
       const spec: CaseSpec = { ...rest, case_id: newCaseId(), prompt: readFileSync(join(staged.dir, "PROMPT.md"), "utf8"), ...(schemas.length ? { schemas } : {}),
-        meta: { ...rest.meta, restaged_from: staged.case_id }, attempt: (attempt ?? 1) + 1 };
+        meta: { ...rest.meta, restaged_from: staged.case_id, ...(verdicts.get(staged.case_id)!.kind === "classifier_interrupt" ? { classifier_restaged: true } : {}) },
+        attempt: (attempt ?? 1) + 1 };
       return { original: staged, spec, packet: staged.doc_id && staged.form === "N-T" ? loadPacketFile(staged.doc_id).packet : undefined };
     });
     let stop: string | null = null;
     await runCases(items.map(({ spec, packet }) => ({ spec, packet })), 4, (outcome) => {
       const item = items.find((entry) => entry.spec.case_id === outcome.case_id)!;
-      writeJson(registryPath(item.original.case_id), { ...readJson<Registry>(registryPath(item.original.case_id)), restaged_as: outcome.case_id, restage_evidence: verdicts.get(item.original.case_id) });
+      writeJson(registryPath(item.original.case_id), { ...readJson<Registry>(registryPath(item.original.case_id)), restaged_as: outcome.case_id, restage_evidence: verdicts.get(item.original.case_id)!.evidence, restage_class: verdicts.get(item.original.case_id)!.kind });
       log(`round ${round}: ${item.original.case_id} → ${outcome.case_id} leakage=${outcome.leakage_pass} ${outcome.failures.join(",")}`);
       if (!outcome.leakage_pass && classifyFailure(outcome.case_id) === "stop") stop = stop ?? `leakage:${outcome.case_id}:${outcome.failures.join(",")}`;
     }, (inFlight) => {
