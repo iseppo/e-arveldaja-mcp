@@ -1,8 +1,9 @@
 // results/<run>.json → reports/<run>/{summary.md, summary.json} (plan §5.8), plus the token projection for the
 // step-5 run sizes against the OQ-P1-9 ceiling (30M input / 4M output).
 // Usage: npx tsx scripts/reading-p1/report.ts --run <tag> [--supersede <sub-tag>] [--scope corpus] [--projection] [--full]   (--full: §5.8 items 3-7 + the §5.2 decision)
-// --supersede: the sub-run's results replace the run's results of the same document × form (listed as superseded,
-// never deleted); the report goes to reports/<tag>+<sub-tag>/.
+// --supersede a[,b…]: each later run's results replace the results so far of the same reader × document × form
+// (listed as superseded, never deleted); the report goes to reports/<tag>+<a>+<b…>/. The carried slices (not
+// superseded) keep their original run's results.
 // Scope (throughput round B8): "corpus" is the only scope. Every path is derived from the corpus manifest ids
 // BEFORE any read, list or hash, so no held-out manifest, packet or projection input is touched.
 
@@ -39,11 +40,12 @@ const fmtRate = (value: ReturnType<typeof rate>) => value.total === 0 ? "n/a (0)
 const fileHash = (path: string) => (existsSync(path) ? sha256Hex(readFileSync(path)) : null);
 
 /** Results of the scope's documents (legacy cases carry no document). */
-/** The run's results with every document × form slice of `sub` replaced by the sub-run's results. */
+/** The run's results with every reader × document × form slice of `sub` replaced by the sub-run's results. */
 export function supersede(base: CaseResult[], sub: CaseResult[]): { results: CaseResult[]; superseded: CaseResult[] } {
-  const slices = new Set(sub.map((result) => `${result.doc_id}|${result.form}`));
-  const superseded = base.filter((result) => slices.has(`${result.doc_id}|${result.form}`));
-  return { results: [...base.filter((result) => !slices.has(`${result.doc_id}|${result.form}`)), ...sub], superseded };
+  const slice = (result: CaseResult) => `${result.reader}|${result.doc_id}|${result.form}`;
+  const slices = new Set(sub.map(slice));
+  const superseded = base.filter((result) => slices.has(slice(result)));
+  return { results: [...base.filter((result) => !slices.has(slice(result))), ...sub], superseded };
 }
 
 export function inScope(results: CaseResult[], ids: ReadonlySet<string>): CaseResult[] {
@@ -322,14 +324,19 @@ if (process.argv[1]?.endsWith("/report.ts")) {
   const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
   const ids = scopeIds(scope);
-  const sub = argValue(argv, "--supersede");
-  const merged = sub ? supersede(readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), readJson<CaseResult[]>(dataPath("results", `${sub}.json`))) : undefined;
+  const subs = (argValue(argv, "--supersede") ?? "").split(",").filter(Boolean);
+  const sub = subs.length ? subs.join("+") : undefined;
+  let merged: { results: CaseResult[]; superseded: CaseResult[] } | undefined;
+  for (const entry of subs) {
+    const next = supersede(merged?.results ?? readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), readJson<CaseResult[]>(dataPath("results", `${entry}.json`)));
+    merged = { results: next.results, superseded: [...(merged?.superseded ?? []), ...next.superseded] };
+  }
   const results = inScope(merged ? merged.results : readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids);
   const out = sub ? `${tag}+${sub}` : tag;
   const head = header(out, results);
   const summary = summarize(tag, results);
   const proj = hasFlag(argv, "--projection") ? projection(summary.usage, ids) : undefined;
-  const extra = hasFlag(argv, "--full") ? extras(results, ids, sub ? [tag, sub] : tag) : undefined;
+  const extra = hasFlag(argv, "--full") ? extras(results, ids, subs.length ? [tag, ...subs] : tag) : undefined;
   const decision = extra ? formDecision(summary.forms, results) : undefined;
   const superseded = merged && sub ? { by: sub, cases: inScope(merged.superseded, ids) } : undefined;
   writeJson(dataPath("reports", out, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}),

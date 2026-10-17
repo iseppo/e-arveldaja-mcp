@@ -392,9 +392,9 @@ try {
   const kept = "error" in haikuOnly ? [] : scopedItems(mixed, haikuOnly);
   assert("step5c_injected_reader_scope", kept.length === 2 * 2 + 1 && kept.every((item) => item.spec.form === "N-S" || item.spec.reader === "haiku") &&
     usage(["--run", "x", "--cap-input", "1", "--cap-output", "1", "--injected-reader", "gpt"]), String(kept.length));
-  const res = (case_id: string, doc_id: string, form: string) => ({ case_id, doc_id, form }) as unknown as CaseResult;
-  const sup = supersede([res("a", "14", "I-S"), res("b", "14", "I-T"), res("c", "06", "I-S")], [res("d", "14", "I-S")]);
-  assert("b14_supersede_slice_only", sup.results.map((item) => item.case_id).join() === "b,c,d" && sup.superseded.map((item) => item.case_id).join() === "a");
+  const res = (case_id: string, doc_id: string, form: string, reader = "haiku") => ({ case_id, doc_id, form, reader }) as unknown as CaseResult;
+  const sup = supersede([res("a", "14", "I-S"), res("b", "14", "I-T"), res("c", "06", "I-S"), res("e", "14", "I-S", "opus")], [res("d", "14", "I-S")]);
+  assert("b14_supersede_slice_only", sup.results.map((item) => item.case_id).join() === "b,c,e,d" && sup.superseded.map((item) => item.case_id).join() === "a");
 
   // ---- B8: corpus scope never reads the held-out set ----------------------------------------------------------
   const scoped = join(root, "scoped-data");
