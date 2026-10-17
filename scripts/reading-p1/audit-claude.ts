@@ -105,10 +105,11 @@ export interface ClaudeAudit {
   pass: boolean;
 }
 
-/** The fixed opening of the Claude CLI's meta message after a safety-classifier stop. */
-export const CLASSIFIER_META_PREFIX = "Your response above was stopped by a safety classifier \u2014 this is not a tool or API error.";
+/** The Claude CLI's full meta message after a safety-classifier stop (all 7 step5b occurrences). Exact match only. */
+export const CLASSIFIER_META_TEXT = "Your response above was stopped by a safety classifier \u2014 this is not a tool or API error. The rest of it was withheld, " +
+  "and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.";
 const isClassifierMeta = (entry: TranscriptEntry) => entry.type === "user" && entry.isMeta === true && entry.message?.role === "user" &&
-  textOf(entry.message.content).startsWith(CLASSIFIER_META_PREFIX);
+  textOf(entry.message.content) === CLASSIFIER_META_TEXT;
 
 /** Audits a finished Claude case. `expectedModel` is a prefix such as `claude-opus-` or `claude-haiku-`. */
 export function auditClaudeCase(input: {

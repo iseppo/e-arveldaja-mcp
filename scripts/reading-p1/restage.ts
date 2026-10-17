@@ -108,7 +108,7 @@ export function failureEvidence(caseId: string): FailureEvidence {
     const path = join(staged.dir, `events${turn}.jsonl`);
     if (!existsSync(path)) continue;
     for (const line of readFileSync(path, "utf8").split("\n").filter(Boolean)) {
-      let event: { type?: string; message?: string; item?: { type?: string; message?: string } };
+      let event: { type?: string; message?: string; item?: { type?: string; message?: string }; error?: { message?: string } };
       try {
         event = JSON.parse(line) as typeof event;
       } catch {
@@ -117,6 +117,8 @@ export function failureEvidence(caseId: string): FailureEvidence {
       }
       if (event.type === "error") messages.push({ turn, message: event.message ?? "error event without message" });
       else if (event.item?.type === "error") messages.push({ turn, message: event.item.message ?? "error item without message" });
+      // The terminal error text counts too: a turn.failed whose message is not a transport message (or is missing) stops.
+      else if (event.type === "turn.failed") messages.push({ turn, message: event.error?.message ?? "turn.failed without error message" });
     }
   }
   return { failures: leakage.failures ?? [], run_errors: leakage.run_errors ?? [], error_messages: messages, reader: staged.reader,

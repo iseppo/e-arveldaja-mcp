@@ -2,15 +2,15 @@
 // exception to one case per context), own_B.md changed by one sentence plus one added sentence (deviation, see NO_TOOLS), one turn through run-codex.sh with the
 // output via -o, scored by a copy of score.py with own_B_codex added. key.json is never staged.
 // Usage: npx tsx scripts/reading-p1/legacy.ts run --run <tag> --cap-input <n> --cap-output <n> | score
-// T4 (throughput round): each re-run has its own tag (a tag that already holds a reading is refused, so old
-// results are never reused), the shared pre-launch preflight, and caps checked against the legacy estimate
+// T4 (throughput round): each re-run has its own tag, the shared pre-launch preflight first, then a tag that holds
+// a reading (a recovered one included) is refused, so old results are never reused, and caps checked against the legacy estimate
 // before the launch and against the measured usage after it. The step-5 output is kept as
 // review_own_B_codex.step5-legacy.json.
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { LEGACY_DIR, dataPath, writePrivate } from "./common.js";
+import { LEGACY_DIR, dataPath, readJson, writePrivate } from "./common.js";
 import { newCaseId, runCase } from "./run-cases.js";
 import { instructionFingerprints } from "./audit-claude.js";
 import { preflightRun } from "./restage.js";
@@ -48,10 +48,14 @@ async function run(args: RunArgs): Promise<void> {
     process.stdout.write(`STOP: ${reason}\n`);
     process.exitCode = 3;
   };
-  if (corpusRunIndex(args.tag).some((entry) => existsSync(dataPath("readings", `${entry.case_id}.json`)))) return refuse(`${args.tag} already holds a legacy reading; use a new tag`);
+  // Preflight first: it may collect an audited case into a reading, which the checks below must see.
   const preflight = preflightRun(args.tag);
   if (preflight) return refuse(preflight);
-  if (LEGACY.input > args.caps.input || LEGACY.output > args.caps.output) return refuse(`the legacy estimate ${LEGACY.input}/${LEGACY.output} exceeds the ${args.tag} caps`);
+  const readings = corpusRunIndex(args.tag).map((entry) => dataPath("readings", `${entry.case_id}.json`)).filter((path) => existsSync(path))
+    .map((path) => readJson<{ turns?: Array<{ usage?: { input?: number; output?: number } }> }>(path));
+  const consumed = readings.flatMap((reading) => reading.turns ?? []).reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
+  if (readings.length > 0) return refuse(`${args.tag} already holds a legacy reading (${consumed.input}/${consumed.output} spent); use a new tag`);
+  if (consumed.input + LEGACY.input > args.caps.input || consumed.output + LEGACY.output > args.caps.output) return refuse(`the legacy estimate ${LEGACY.input}/${LEGACY.output} exceeds the ${args.tag} caps`);
   const caseId = newCaseId();
   const outcome = await runCase({ case_id: caseId, reader: "codex", form: "legacy", kind: "legacy", doc_id: null, turns: 1, prompt: legacyPrompt(), meta: { run: args.tag } }, { fingerprints: instructionFingerprints() });
   const usage = (outcome.collected?.turns ?? []).reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
