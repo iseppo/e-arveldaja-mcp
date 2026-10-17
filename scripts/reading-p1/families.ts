@@ -140,7 +140,9 @@ export function familyCases(): FamilyCase[] {
       edit: { set: [{ field: "net", value: 1350, on: "ettevalmistamine ¦ 1 350.00", quote: "1 350.00" }, { field: "vat", value: 84, on: "ettevalmistamine ¦ 1 350.00", quote: "84.00" }] },
       expect: { hold_new: ["ambiguous_amount_token"] } },
     { family: "c", name: "whole_cell_1_350,00", doc: "15", patch: replace("kokku: ¦ 350.00", "kokku: ¦ 1 350,00"),
-      edit: { set: [{ field: "net", value: 1350, on: "kokku: ¦ 1 350,00", quote: "1 350,00" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
+      // The rebuilt #15 base (opus N-T) cites vat and gross on this same line: re-cited after the patch.
+      edit: { set: [{ field: "net", value: 1350, on: "kokku: ¦ 1 350,00", quote: "1 350,00" }, { field: "vat", value: KEEP, on: "kokku: ¦ 1 350,00", quote: "84.00" },
+        { field: "gross", value: KEEP, on: "kokku: ¦ 1 350,00", quote: "434.00" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
 
     // (d′) currency
     { family: "d'", name: "kr_only", doc: "06", patch: replaceAll([["€12.10", "12.10 kr"], ["€2.90", "2.90 kr"], ["€15.00", "15.00 kr"]]),
