@@ -113,8 +113,19 @@ export function familyCases(): FamilyCase[] {
       edit: { set: [{ field: "invoice_number", value: "JT-2026", on: "Arve JT-2026-000017", quote: "JT-2026" }] }, expect: { hold_new: ["value_not_complete_token"] } },
     { family: "c", name: "number_INV_2024_cut", doc: "06", patch: replace("Arve JT-2026-000017", "Arve INV 2024 001"),
       edit: { set: [{ field: "invoice_number", value: "INV 2024", on: "Arve INV 2024 001", quote: "INV 2024" }] }, expect: { hold_new: ["value_not_complete_token"] } },
-    { family: "c", name: "amount_6,000_style", doc: "06", patch: replace("Kokku: €15.00", "Kokku: €15,000"),
-      edit: { set: [{ field: "gross", value: 15, on: "Kokku: €15,000", quote: "€15,000" }, { field: "currency", value: KEEP, on: "Kokku: €15,000", quote: "€" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
+    // N2 (throughput round §10): a gross-only reading has no trio to resolve the scale (Q1), so it still holds.
+    { family: "c", name: "amount_6,000_style", doc: "06", patch: chain(GROSS_ONLY_DOC, replace("Kokku: €15.00", "Kokku: €15,000")),
+      edit: { set: [{ field: "vat", value: null }, { field: "net", value: null }, { field: "gross", value: 15, on: "Kokku: €15,000", quote: "€15,000" },
+        { field: "currency", value: KEEP, on: "Kokku: €15,000", quote: "€" }] }, ctx: withoutLabelled(["net", "vat"]), expect: { hold_new: ["ambiguous_amount_token"] } },
+    // N2 resolves the scale with a unique anchored trio, but A1 (Q6) still sees 15000 as an unlisted gross competitor.
+    { family: "c", name: "amount_15,000_trio_unlisted_scale", doc: "06", patch: replace("Kokku: €15.00", "Kokku: €15,000"),
+      edit: { set: [{ field: "gross", value: 15, on: "Kokku: €15,000", quote: "€15,000" }, { field: "currency", value: KEEP, on: "Kokku: €15,000", quote: "€" }] }, expect: { hold_new: ["competitor_omitted"] } },
+    // N2 Q4: the reading 12.10 is near, not equal to, a reading of 12,104.
+    { family: "c", name: "amount_net_12,104_near_not_exact", doc: "06", patch: replace("Netosumma: €12.10", "Netosumma: €12,104"),
+      edit: { set: [{ field: "net", value: 12.1, on: "Netosumma: €12,104", quote: "€12,104" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
+    // N2 Q2: a space-grouped join is never resolved, even inside a closing trio.
+    { family: "c", name: "amount_net_join_1_012,10", doc: "06", patch: replace("Netosumma: €12.10", "Netosumma: €1 012,10"),
+      edit: { set: [{ field: "net", value: 12.1, on: "Netosumma: €1 012,10", quote: "€1 012,10" }] }, expect: { hold_new: ["ambiguous_amount_token"] } },
     { family: "c", name: "slash_date", doc: "15", patch: replace("09.08.2026", "09/08/2026"),
       edit: { set: [{ field: "invoice_date", value: "2026-08-09", on: "09/08/2026", quote: "09/08/2026" }] }, expect: { hold_new: ["ambiguous_slash_date"] } },
     { family: "c", name: "date_split_over_two_lines", doc: "15", patch: splitLine("Kuupäev: ¦ 09.08.2026", ["Kuupäev: ¦ 09.08.", "2026"]),

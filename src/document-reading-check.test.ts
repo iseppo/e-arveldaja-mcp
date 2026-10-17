@@ -18,13 +18,14 @@ import {
   READING_UNATTENDED_GATE_SIGNALS,
   checkReading,
   labelledHeuristicValues,
+  uniqueClosingTrio,
   type SignalName,
 } from "./document-reading-check.js";
 import { READING_FIELDS } from "./document-reading-schemas.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS } from "./invoice-extraction-fallback.js";
 import { detectReverseChargeFromText } from "./tools/receipt-extraction.js";
 import { BASE_LINES, buildCase, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
-import { N1_CASES, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
+import { N1_CASES, N2_CASES, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
 
 const withLines = (edits: Record<number, string>, extra: string[] = []) =>
   [...BASE_LINES.map((line, index) => edits[index + 1] ?? line), ...extra];
@@ -887,4 +888,15 @@ const expectNarrowing = (entry: NarrowingCase) => {
 
 describe("N1: a label-bound BIC branch code XXX is not a currency (plan p1-throughput-round §10)", () => {
   for (const entry of N1_CASES) it(`T-N1 ${entry.name} (${entry.violates}): exact holds ${JSON.stringify(entry.holds)}`, () => expectNarrowing(entry));
+});
+
+describe("N2: a decimal-thousands ambiguity resolved by a unique, exact closing trio (plan p1-throughput-round §10)", () => {
+  for (const entry of N2_CASES) it(`T-N2 ${entry.name} (${entry.violates}): exact holds ${JSON.stringify(entry.holds)}`, () => expectNarrowing(entry));
+
+  // Q3 at helper level: with Q1's anchor a second closing scale needs a near-zero term, so no checker case reaches it.
+  it("T-N2 Q3: two closing scales resolve nothing; one closing scale is returned", () => {
+    expect(uniqueClosingTrio([1, 1000], [0.24, 240], [1.24, 1240], [24])).toBeNull();
+    expect(uniqueClosingTrio([1, 1000], [0.24, 240], [1.24], [24])).toEqual([1, 0.24, 1.24]);
+    expect(uniqueClosingTrio([1, 1000], [0.5, 500], [1.5], [24])).toBeNull();
+  });
 });

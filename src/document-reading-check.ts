@@ -403,7 +403,8 @@ function tokensFor(doc: Doc, line: PacketLine): LineTokens {
 // H2: the cited value is a complete line-level token inside the quote
 // ---------------------------------------------------------------------------
 
-type TokenMatch = { span: TextSpan } | { hold: HoldCode };
+/** `pending`: an exact reading of a decimal-thousands `ambiguous` token, resolved or held after checkFields (N2). */
+type TokenMatch = { span: TextSpan; pending?: MoneyToken } | { hold: HoldCode };
 
 const SEPARATOR_BEFORE_RE = /[,;|:] ?$/;
 const SEPARATOR_AFTER_RE = /^ ?[,;|:]/;
@@ -450,6 +451,10 @@ function matchAmount(value: number, tokens: LineTokens, occ: TextSpan[]): TokenM
   const candidates = tokens.money.filter((token) => occ.some((o) => insideSpan(token, o)) && token.values.some((v) => near(v, value)));
   const clean = candidates.find((token) => token.kind === "decimal" || token.kind === "integer");
   if (clean) return { span: clean };
+  // N2 Q2: only a decimal-thousands `ambiguous` token is pending (resolved or held by resolveAmountAmbiguity, which
+  // applies Q4's exact selection); `ambiguous_join` holds as before.
+  const ambiguous = candidates.find((token) => token.kind === "ambiguous");
+  if (ambiguous) return { span: ambiguous, pending: ambiguous };
   return candidates.length > 0 ? { hold: "ambiguous_amount_token" } : undefined;
 }
 
@@ -542,11 +547,14 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   };
 
   // 4. Every remaining check
-  const valueSpans = checkFields(doc, reading, hold, debug);
+  const pending: PendingAmounts = {};
+  const valueSpans = checkFields(doc, reading, hold, debug, pending);
+  const resolved = resolveAmountAmbiguity(doc, reading, valueSpans, pending, vatRatesInForceOn(reading.invoice_date));
+  for (const field of Object.keys(pending) as Array<typeof PAYLOAD_NUMBER_FIELDS[number]>) if (!resolved.has(field)) hold("ambiguous_amount_token", field);
   const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold);
   checkAmounts(doc, reading, proof, hold);
   checkDocumentLevel(doc, reading, ctx, hold);
-  checkProof(doc, reading, proof, valueSpans, hold, note);
+  checkProof(doc, reading, proof, valueSpans, hold, note, resolved);
   checkHeuristicConflict(reading, ctx.heuristic, hold);
 
   const { source_sha256: _sha, packet_digest: _digest, evidence: _evidence, computed: _computed, ...accepted } = reading;
@@ -556,9 +564,59 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
 type HoldFn = (code: HoldCode, field?: ReadingField) => void;
 type NoteFn = (field: ReadingField) => void;
 type ValueSpans = Partial<Record<EvidenceField, { line: PacketLine; span: TextSpan }>>;
+type AmountField = typeof PAYLOAD_NUMBER_FIELDS[number];
+type PendingAmounts = Partial<Record<AmountField, MoneyToken>>;
+/** Fields whose pending token N2 resolved, with that cited token's readings (for Q7). */
+type ResolvedAmounts = Map<AmountField, number[]>;
+
+/** The cited money token of an amount field (the token at its matched span). */
+function citedMoney(doc: Doc, spans: ValueSpans, field: AmountField): MoneyToken | undefined {
+  const entry = spans[field];
+  if (!entry) return undefined;
+  return tokensFor(doc, entry.line).money.find((token) => token.start === entry.span.start && token.end === entry.span.end);
+}
+
+/**
+ * N2 Q3: the one (n, v, g) of the three readings sets with |n + v − g| ≤ 0.01 and at least one rate, or null when
+ * none or several close. With Q1's anchor a second closing scale needs a near-zero term, so a checker-level case
+ * cannot reach "several"; the helper is exported for that test.
+ */
+export function uniqueClosingTrio(netValues: readonly number[], vatValues: readonly number[], grossValues: readonly number[], rates: readonly number[]): [number, number, number] | null {
+  const closing: Array<[number, number, number]> = [];
+  for (const n of netValues) for (const v of vatValues) for (const g of grossValues) {
+    if (Math.abs(n + v - g) <= 0.01 + 1e-9 && rateMatches(n, v, rates).length >= 1) closing.push([n, v, g]);
+  }
+  return closing.length === 1 ? closing[0]! : null;
+}
+
+/**
+ * N2: resolves the pending decimal-thousands ambiguities only when (Q1) net, vat and gross are all cited with at
+ * least one unambiguous anchor, (Q3) exactly one combination of the three cited tokens' readings closes, (Q4)
+ * that combination is exactly the reading's values, and (Q5) the
+ * reading snaps to exactly one rate. Otherwise every pending field holds ambiguous_amount_token, as before.
+ */
+function resolveAmountAmbiguity(doc: Doc, reading: DocumentReading, spans: ValueSpans, pending: PendingAmounts, eeRates: readonly number[]): ResolvedAmounts {
+  const resolved: ResolvedAmounts = new Map();
+  const fields = Object.keys(pending) as AmountField[];
+  if (fields.length === 0) return resolved;
+  const { net, vat, gross } = reading;
+  if (net === null || vat === null || gross === null) return resolved;
+  const cited = PAYLOAD_NUMBER_FIELDS.map((field) => citedMoney(doc, spans, field));
+  if (cited.some((token) => token === undefined)) return resolved;
+  const [netToken, vatToken, grossToken] = cited as [MoneyToken, MoneyToken, MoneyToken];
+  if (!cited.some((token) => token!.kind === "decimal" || token!.kind === "integer")) return resolved; // Q1
+  const closing = uniqueClosingTrio(netToken.values, vatToken.values, grossToken.values, eeRates);
+  if (!closing) return resolved; // Q3
+  const [n, v, g] = closing;
+  // Q4: the unique close is exactly the reading (cent-representable: the reading schema rejects anything else).
+  if (n !== net || v !== vat || g !== gross) return resolved;
+  if (rateMatches(net, vat, eeRates).length !== 1) return resolved; // Q5
+  for (const field of fields) resolved.set(field, pending[field]!.values);
+  return resolved;
+}
 
 /** H1–H3, origin, required fields, strong id (§2.1). Returns the matched value token per field. */
-function checkFields(doc: Doc, reading: DocumentReading, hold: HoldFn, debug: string[]): ValueSpans {
+function checkFields(doc: Doc, reading: DocumentReading, hold: HoldFn, debug: string[], pending: PendingAmounts): ValueSpans {
   const spans: ValueSpans = {};
   for (const field of EVIDENCE_FIELDS) {
     const value = reading[field];
@@ -588,6 +646,7 @@ function checkFields(doc: Doc, reading: DocumentReading, hold: HoldFn, debug: st
       continue;
     }
     spans[field] = { line, span: match.span };
+    if (match.pending) pending[field as AmountField] = match.pending;
     debug.push(`${field}@${line.id}:${match.span.start}-${match.span.end}`);
     for (const code of citedTokenOriginHolds(doc.packet, line.page, line.text.slice(match.span.start, match.span.end), field)) {
       hold(code, field);
@@ -776,7 +835,14 @@ function competitorSameValue(field: ReadingField, value: string | number, line: 
   return "span" in match ? "same" : "ambiguous";
 }
 
-function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans: ValueSpans, hold: HoldFn, note: NoteFn): void {
+/** N2 Q7: every token of the competitor that reads as the value has exactly the resolved cited token's readings. */
+function sameResolvedNumber(cited: readonly number[], value: number, tokens: LineTokens, occ: TextSpan[]): boolean {
+  const matching = tokens.money.filter((token) => occ.some((o) => insideSpan(token, o)) && token.values.some((v) => near(v, value)));
+  const key = (values: readonly number[]) => [...new Set(values)].sort((a, b) => a - b).join("|");
+  return matching.length > 0 && matching.every((token) => key(token.values) === key(cited));
+}
+
+function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans: ValueSpans, hold: HoldFn, note: NoteFn, resolved: ResolvedAmounts): void {
   for (const [field, answer] of Object.entries(proof.answers) as Array<[ReadingField, Proof["answers"][ReadingField]]>) {
     if (answer.verdict === "problem") hold("proof_problem", field);
     const needsLabel = LABEL_REQUIRED.includes(field) ||
@@ -806,7 +872,10 @@ function checkProof(doc: Doc, reading: DocumentReading, proof: Proof, valueSpans
       // ignored with a note. A repetition that also reads as another value is a competing interpretation: held.
       const same = accepted === null ? undefined : competitorSameValue(field, accepted, line, tokensFor(doc, line), occ);
       if (same === "same") note(field);
-      else if (same === "ambiguous") hold("competitor_ambiguous", field);
+      else if (same === "ambiguous") {
+        const cited = resolved.get(field as AmountField);
+        if (!(cited && sameResolvedNumber(cited, Number(accepted), tokensFor(doc, line), occ))) hold("competitor_ambiguous", field);
+      }
     }
   }
 }

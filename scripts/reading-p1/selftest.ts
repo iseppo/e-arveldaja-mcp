@@ -23,7 +23,7 @@ import { injectedItems, parseRunArgs, projectTotals, reservedKeys, todoItems } f
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
 import { buildCase } from "../../src/__fixtures__/document-reading/invoice.js";
-import { N1_CASES, type NarrowingCase } from "../../src/__fixtures__/document-reading/narrowings.js";
+import { N1_CASES, N2_CASES, type NarrowingCase } from "../../src/__fixtures__/document-reading/narrowings.js";
 import { checkReading } from "../../src/document-reading-check.js";
 import { runPipeline, type Snapshot } from "./pipeline.js";
 
@@ -306,7 +306,7 @@ try {
     const ok = entry.holds.length === 0 ? accepted && check.verdict === "accept" : result.status === "not_accepted" && check.verdict === "hold";
     assert(`narrowing_pipeline_${entry.name}`, ok, JSON.stringify({ status: result.status, holds: result.holds.map((hold) => hold.code), verdict: check.verdict }));
   };
-  for (const entry of N1_CASES) await narrowingPipeline(entry);
+  for (const entry of [...N1_CASES, ...N2_CASES]) await narrowingPipeline(entry);
 } finally {
   rmSync(root, { recursive: true, force: true });
 }
