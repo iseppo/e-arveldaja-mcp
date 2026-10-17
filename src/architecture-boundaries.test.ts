@@ -63,6 +63,9 @@ const PURE_DOMAIN_FILES = [
   "src/banking/reconciliation/amount-resolution.ts",
   "src/banking/reconciliation/duplicate-policy.ts",
   "src/receipts/counterparty-booking-history.ts",
+  "src/document-reading-packet.ts",
+  "src/document-reading-tokens.ts",
+  "src/document-reading-schemas.ts",
 ];
 
 function resolutionModules(): string[] {
