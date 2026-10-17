@@ -28,8 +28,17 @@ function bindingHold(code: HoldCode, field?: BookingField): BindingHold {
   return field === undefined ? { code, class: HOLD_CODES[code].class } : { code, field, class: HOLD_CODES[code].class };
 }
 
-const MONEY_TOLERANCE = 0.005;
-const near = (a: number, b: number) => Math.abs(a - b) <= MONEY_TOLERANCE + 1e-9;
+/** Integer cents of a cent-precision amount, else undefined (`124.005` has no cent value). */
+function cents(value: number): number | undefined {
+  const scaled = value * 100;
+  const rounded = Math.round(scaled);
+  return Number.isFinite(scaled) && Math.abs(scaled - rounded) < 1e-6 ? rounded : undefined;
+}
+/** Booking amounts must equal the accepted amounts in whole cents. */
+const near = (a: number, b: number) => {
+  const ca = cents(a);
+  return ca !== undefined && ca === cents(b);
+};
 const normalizeReg = (value: string) => value.replace(/\s+/g, "");
 
 type StrongIds = Pick<AcceptedValues, "supplier_reg" | "supplier_vat">;

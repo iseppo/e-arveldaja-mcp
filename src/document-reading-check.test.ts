@@ -221,24 +221,33 @@ describe("checkReading: H5 arithmetic", () => {
 });
 
 describe("checkReading: H6 rate", () => {
+  // Every quote is the line it cites, so a positive case is a full acceptance (Codex P1 MINOR).
   const rateCase = (date: string, printed: string, vat: number, gross: number, today: string, net: number | null = 100) => keysOf({
-    lines: withLines({ 4: `Kuupäev ${printed}`, 6: `KM ${vat},00`, 7: `Kokku EUR ${gross},00` }),
+    // with net null the net line is not printed either, so A4 sees no trio
+    lines: withLines({ 4: `Kuupäev ${printed}`, ...(net === null ? { 5: "Teenus" } : {}), 6: `KM ${vat},00`, 7: `Kokku EUR ${gross},00` }),
     values: { invoice_date: date, vat, gross, net },
-    evidence: { vat: { line: "p1:006", quote: `KM ${vat},00` }, gross: { line: "p1:007", quote: `Kokku EUR ${gross},00` }, ...(net === null ? { net: undefined } : {}) },
+    evidence: {
+      invoice_date: { line: "p1:004", quote: `Kuupäev ${printed}` },
+      vat: { line: "p1:006", quote: `KM ${vat},00` },
+      currency: { line: "p1:007", quote: `Kokku EUR ${gross},00` },
+      gross: { line: "p1:007", quote: `Kokku EUR ${gross},00` },
+      ...(net === null ? { net: undefined } : {}),
+    },
     ctx: { today },
   });
+  const snapped: string[] = [];
 
   it("T-H6-2026: 24% snaps on 2026-07-01 and 22% holds", () => {
-    expect(rateCase("2026-07-01", "01.07.2026", 24, 124, "2026-08-01")).not.toContain("vat_rate_not_snapped:vat");
+    expect(rateCase("2026-07-01", "01.07.2026", 24, 124, "2026-08-01")).toEqual(snapped);
     expect(rateCase("2026-07-01", "01.07.2026", 22, 122, "2026-08-01")).toContain("vat_rate_not_snapped:vat");
   });
 
   it("T-H6-2024: 22% snaps on 2024-03-01", () => {
-    expect(rateCase("2024-03-01", "01.03.2024", 22, 122, "2025-08-01")).not.toContain("vat_rate_not_snapped:vat");
+    expect(rateCase("2024-03-01", "01.03.2024", 22, 122, "2025-08-01")).toEqual(snapped);
   });
 
   it("T-H6-net-null: with net null the base is gross − VAT", () => {
-    expect(rateCase("2026-03-15", "15.03.2026", 24, 124, "2026-04-01", null)).not.toContain("vat_rate_not_snapped:vat");
+    expect(rateCase("2026-03-15", "15.03.2026", 24, 124, "2026-04-01", null)).toEqual(snapped);
     expect(rateCase("2026-03-15", "15.03.2026", 22, 122, "2026-04-01", null)).toContain("vat_rate_not_snapped:vat");
   });
 });
@@ -508,6 +517,8 @@ describe("checkReading: document-level holds", () => {
 
   it("T-CU-codes: SEK, ALL next to money and `kr` next to money hold; ALL alone does not", () => {
     expect(codesOf({ lines: withLines({}, ["Summa SEK"]) })).toContain("foreign_currency_marker");
+    expect(codesOf({ lines: withLines({}, ["Kaart XXX"]) })).toContain("foreign_currency_marker");
+    expect(codesOf({ lines: withLines({}, ["Kood XTS"]) })).toContain("foreign_currency_marker");
     expect(codesOf({ lines: withLines({}, ["ALL items included"]) })).not.toContain("foreign_currency_marker");
     expect(codesOf({ lines: withLines({}, ["Hind ALL 50,00"]) })).toContain("foreign_currency_marker");
     expect(codesOf({ lines: withLines({}, ["Att betala 50,00 kr"]) })).toContain("foreign_currency_marker");
@@ -595,6 +606,9 @@ describe("FOREIGN_VAT_RATES", () => {
     expect(FOREIGN_VAT_RATES).not.toContain(0);
     expect(FOREIGN_VAT_RATES_VERIFIED_AT).toBe("2026-10-17");
     expect(FOREIGN_VAT_RATES_SOURCE).toContain("europa.eu");
+    for (const url of ["https://www.skatteetaten.no/en/rates/value-added-tax/", "https://www.estv.admin.ch/en/vat-rates-switzerland", "https://www.gov.uk/vat-rates"]) {
+      expect(FOREIGN_VAT_RATES_SOURCE).toContain(url);
+    }
   });
 });
 

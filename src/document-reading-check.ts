@@ -253,8 +253,8 @@ export const CREDIT_WORDS = [
 ] as const;
 
 /**
- * Active ISO 4217 codes except EUR (pinned list). XXX ("no currency") and XTS ("testing") are left out:
- * they name no currency and `XXX` is a common masking string on card receipts.
+ * Every active ISO 4217 code except EUR (pinned list), XXX and XTS included: a masked `XXX` on a card
+ * receipt is a deliberate, accepted false hold.
  */
 export const NON_EUR_ISO_CODES = [
   "AED", "AFN", "ALL", "AMD", "AOA", "ARS", "AUD", "AWG", "AZN", "BAM", "BBD", "BDT", "BGN", "BHD", "BIF", "BMD",
@@ -267,7 +267,7 @@ export const NON_EUR_ISO_CODES = [
   "PYG", "QAR", "RON", "RSD", "RUB", "RWF", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD", "SHP", "SLE", "SOS", "SRD",
   "SSP", "STN", "SVC", "SYP", "SZL", "THB", "TJS", "TMT", "TND", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "UGX",
   "USD", "USN", "UYI", "UYU", "UYW", "UZS", "VED", "VES", "VND", "VUV", "WST", "XAF", "XAG", "XAU", "XBA", "XBB",
-  "XBC", "XBD", "XCD", "XCG", "XDR", "XOF", "XPD", "XPF", "XPT", "XSU", "XUA", "YER", "ZAR", "ZMW", "ZWG",
+  "XBC", "XBD", "XCD", "XCG", "XDR", "XOF", "XPD", "XPF", "XPT", "XSU", "XTS", "XUA", "XXX", "YER", "ZAR", "ZMW", "ZWG",
 ] as const;
 /** ISO codes that are ordinary words: they count only within 2 words of a money token in the same cell. */
 export const WORD_LIKE_ISO_CODES = ["ALL", "PEN", "TOP", "CUP", "GEL"] as const;
@@ -275,7 +275,10 @@ export const LETTER_CURRENCY_SYMBOLS = ["kr", "kr.", "zł", "Kč", "Ft", "lei", 
 
 export const FOREIGN_VAT_RATES_VERIFIED_AT = "2026-10-17";
 export const FOREIGN_VAT_RATES_SOURCE =
-  "https://europa.eu/youreurope/business/taxation/vat/vat-rules-rates/index_en.htm (European Commission, last checked 13/07/2026); NO skatteetaten.no, CH estv.admin.ch, UK gov.uk";
+  "EU: https://europa.eu/youreurope/business/taxation/vat/vat-rules-rates/index_en.htm (European Commission, last checked 13/07/2026); " +
+  "NO: https://www.skatteetaten.no/en/rates/value-added-tax/ (25, 15, 12); " +
+  "CH: https://www.estv.admin.ch/en/vat-rates-switzerland (8.1, 3.8, 2.6; page updated 22 Sept 2026); " +
+  "UK: https://www.gov.uk/vat-rates (20, 5); NO/CH/UK fetched and confirmed 2026-10-17";
 
 /** Standard, reduced, super-reduced and parking rates (%), zero rates left out. */
 export const FOREIGN_VAT_RATES_BY_COUNTRY: Readonly<Record<string, readonly number[]>> = {

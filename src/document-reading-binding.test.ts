@@ -86,6 +86,13 @@ describe("checkBookingBinding", () => {
     expect(codes(checkBookingBinding(ACCEPTED, booking({ create_date: "2026-03-16" }), ctx()).holds)).toEqual(["booking_field_mismatch:create_date"]);
     expect(codes(checkBookingBinding(ACCEPTED, booking({ cl_currencies_id: "USD" }), ctx()).holds)).toEqual(["booking_field_mismatch:cl_currencies_id"]);
     expect(codes(checkBookingBinding(ACCEPTED, booking({ gross_price: 124.01 }), ctx()).holds)).toEqual(["booking_field_mismatch:gross_price"]);
+    expect(codes(checkBookingBinding(ACCEPTED, booking({ gross_price: 124.005 }), ctx()).holds)).toEqual(["booking_field_mismatch:gross_price"]);
+    expect(codes(checkBookingBinding(ACCEPTED, booking({ gross_price: 123.995 }), ctx()).holds)).toEqual(["booking_field_mismatch:gross_price"]);
+    // sub-cent precision holds even when it would round to the accepted cents
+    expect(codes(checkBookingBinding(ACCEPTED, booking({ gross_price: 124.004 }), ctx()).holds)).toEqual(["booking_field_mismatch:gross_price"]);
+    // float noise is still the same cent value: 0.29 * 100 is 28.999999999999996
+    const small: AcceptedValues = { ...ACCEPTED, net: 1, vat: 0.29, gross: 1.29 };
+    expect(codes(checkBookingBinding(small, booking({ gross_price: 1.29, vat_price: 0.29, effective: { itemNet: 1, itemGross: 1.29 } }), ctx()).holds)).toEqual([]);
     expect(codes(checkBookingBinding(ACCEPTED, booking({ vat_price: null }), ctx()).holds)).toEqual(["booking_field_mismatch:vat_price"]);
     expect(codes(checkBookingBinding(ACCEPTED, booking({ effective: { itemNet: 99, itemGross: 123 } }), ctx()).holds)).toEqual(["booking_field_mismatch:items"]);
   });
