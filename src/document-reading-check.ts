@@ -109,6 +109,7 @@ export const HOLD_CODES = {
   partial_parse_config: nonContent("1.2"),
   page_count_mismatch: nonContent("1.2"),
   page_extraction_failed: nonContent("1.2"),
+  text_layer_value_lost: nonContent("1.2"),
   // OCR and origin
   ocr_document: nonContent("1.2"),
   ocr_cited_text: nonContent("1.2"),

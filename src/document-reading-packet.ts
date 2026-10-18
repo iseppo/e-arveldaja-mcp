@@ -6,14 +6,14 @@
 import { createHash } from "node:crypto";
 import { stripSandboxMarkers } from "./sandbox-markers.js";
 import type { ReadingField } from "./document-reading-schemas.js";
+import { COLUMN_MARK, leaderOnlyCells } from "./document-reading-tokens.js";
+
+export { COLUMN_MARK };
 
 export const PACKET_BUILDER_VERSION = "1";
 /** RESPONSE_BUDGETS.detail.target (response-budget.ts), pinned here to keep this module pure. */
 export const PACKET_MAX_TEXT_BYTES = 24576;
 export const PACKET_MAX_LINES = 1500;
-
-/** The column mark that replaces a run of two or more whitespace characters inside a line. */
-export const COLUMN_MARK = " ¦ ";
 
 export const PACKET_HOLD_CODES = [
   "partial_parse_config",
@@ -21,6 +21,7 @@ export const PACKET_HOLD_CODES = [
   "page_extraction_failed",
   "packet_oversize",
   "ocr_document",
+  "text_layer_value_lost",
 ] as const;
 export type PacketHoldCode = typeof PACKET_HOLD_CODES[number];
 export interface PacketHold { code: PacketHoldCode; class: "non_content" }
@@ -140,6 +141,7 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
   if (input.pageErrors.length > 0) hold("page_extraction_failed");
   if (textBytes > PACKET_MAX_TEXT_BYTES || lines.length > PACKET_MAX_LINES) hold("packet_oversize");
   if (input.pages.some(isOcrPage)) hold("ocr_document");
+  if (leaderOnlyCells(lines).length > 0) hold("text_layer_value_lost");
 
   return {
     version: 1,

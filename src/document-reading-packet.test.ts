@@ -104,6 +104,19 @@ describe("document-reading packet: holds", () => {
     expect(codes(makePacket(many.slice(0, PACKET_MAX_LINES)))).toEqual([]);
   });
 
+  it("T-PK-leader-cell: holds text_layer_value_lost for a cell made only of ≥ 5 leader characters (C1)", () => {
+    expect(codes(makePacket(["Arve kuupäev    ....................    Kogusumma (EUR)    13,60 €"]))).toContain("text_layer_value_lost");
+    expect(codes(makePacket(["Arve number    _____"]))).toContain("text_layer_value_lost");
+    expect(codes(makePacket(["Arve number    ·····"]))).toContain("text_layer_value_lost");
+    expect(codes(makePacket(["Arve number    …………………"]))).toContain("text_layer_value_lost");
+  });
+
+  it("T-PK-leader-in-cell: a leader inside a cell with text, or 4 leader characters, does not hold (C1)", () => {
+    expect(codes(makePacket(["Total ........ 13,60"]))).not.toContain("text_layer_value_lost");
+    expect(codes(makePacket(["Võttis vastu: ............................................."]))).not.toContain("text_layer_value_lost");
+    expect(codes(makePacket(["Arve number    ...."]))).not.toContain("text_layer_value_lost");
+  });
+
   it("T-PK-ocr-full-page: holds ocr_document for fullPageImage", () => {
     expect(codes(makePacket(["x"], { fullPageImage: true }))).toEqual(["ocr_document"]);
   });

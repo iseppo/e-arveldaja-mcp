@@ -10,7 +10,9 @@ import {
   normalizeVatValue,
 } from "./document-identifiers.js";
 import { isStrictDate } from "./strict-date.js";
-import { COLUMN_MARK } from "./document-reading-packet.js";
+
+/** The column mark that replaces a run of two or more whitespace characters inside a line. */
+export const COLUMN_MARK = " ¦ ";
 
 /** Hyphen and minus/dash variants; the same set as the credit-word normalisation. */
 export const DASHES = "-\u2212\u2013\u2010\u2011\u2012\u2014";
@@ -61,6 +63,21 @@ export function lineCells(text: string): Cell[] {
     start = at + COLUMN_MARK.length;
   }
   return cells;
+}
+
+// A cell made only of dot-leader characters: the text layer kept the leader and lost the
+// value printed over it (liteparse, Google invoices; plan p2 §0, C1).
+const LEADER_ONLY_CELL_RE = /^[.…_·]{5,}$/;
+
+/** Every cell that is only a run of ≥ 5 leader characters (`.`, `…`, `_`, `·`). */
+export function leaderOnlyCells(lines: ReadonlyArray<TokenLine>): Array<{ line: string; cell: number }> {
+  const hits: Array<{ line: string; cell: number }> = [];
+  for (const line of lines) {
+    for (const cell of lineCells(line.text)) {
+      if (LEADER_ONLY_CELL_RE.test(cell.text.trim())) hits.push({ line: line.id, cell: cell.index });
+    }
+  }
+  return hits;
 }
 
 function cellWords(cell: Cell): Word[] {
