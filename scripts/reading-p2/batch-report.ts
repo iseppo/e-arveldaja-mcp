@@ -37,14 +37,21 @@ const createsClient = (row: Row) => row.writes.some((write) => write.method === 
 
 export type PrintedNumbers = Record<string, string>;
 const sameName = (a: unknown, b: unknown) => String(a ?? "").replace(/\s+/g, " ").trim().toLowerCase() === String(b ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-const invoiceWrite = (row: Row) => row.writes.find((entry) => entry.method === "purchaseInvoices.createAndSetTotals");
+const invoiceWrites = (row: Row) => row.writes.filter((entry) => entry.method === "purchaseInvoices.createAndSetTotals");
 const clientWrites = (row: Row) => row.writes.filter((entry) => entry.method === "clients.create");
 
-/** Fields of an invoice write that differ from truth (truth-available documents only). */
+/** Fields of every invoice write that differ from truth (truth-available documents only). One document books at
+ * most one invoice: a second create is an error of its own, and is scored too. */
 export function wrongFields(row: Row, printed: PrintedNumbers = {}): string[] {
-  const write = invoiceWrite(row);
-  if (!write?.fields || !row.truth) return [];
-  const fields = write.fields;
+  const writes = invoiceWrites(row);
+  const wrong: string[] = writes.length > 1 ? ["multiple_invoice_creates"] : [];
+  if (!row.truth) return wrong;
+  for (const write of writes) wrong.push(...invoiceWriteErrors(row, write.fields ?? {}, printed));
+  return wrong;
+}
+
+function invoiceWriteErrors(row: Row, fields: Record<string, unknown>, printed: PrintedNumbers): string[] {
+  if (!row.truth) return [];
   const wrong: string[] = [];
   const number = printed[row.doc] ?? row.truth.invoice_number;
   if (number !== undefined && normalizeInvoiceNumberForComparison(String(fields.number ?? "")) !== normalizeInvoiceNumberForComparison(number)) wrong.push("number");
@@ -65,7 +72,7 @@ export function wrongFields(row: Row, printed: PrintedNumbers = {}): string[] {
 
 /** Client creates checked on their own, with or without an invoice write: name and registry code against truth. */
 export function clientWriteErrors(row: Row): string[] {
-  const errors: string[] = [];
+  const errors: string[] = clientWrites(row).length > 1 ? ["multiple_client_creates"] : [];
   for (const entry of clientWrites(row)) {
     if (!row.truth) continue;
     if (!sameName(entry.fields?.name, row.truth.supplier_name)) errors.push("client_name");
@@ -75,7 +82,7 @@ export function clientWriteErrors(row: Row): string[] {
 }
 
 /** A write the truth cannot score (no truth record for the document). */
-export const unscoredWrite = (row: Row) => row.truth === null && (invoiceWrite(row) !== undefined || clientWrites(row).length > 0);
+export const unscoredWrite = (row: Row) => row.truth === null && (invoiceWrites(row).length > 0 || clientWrites(row).length > 0);
 
 /** E4 ceiling lines: per signal and for the union, over today's auto-creates (before file, registry up). */
 export function ceilingLines(before: Row[], after: Row[], signals: readonly string[]): string[] {

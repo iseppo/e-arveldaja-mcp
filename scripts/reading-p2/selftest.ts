@@ -31,6 +31,14 @@ assert("probe_wrong_client_only_create", clientWriteErrors(clientOnly).includes(
 // A created client the invoice does not use is a wrong supplier.
 const otherClient = row([{ method: "clients.create", fields: { name: truth.supplier_name, code: truth.supplier_reg, id: 9000000 } }, invoice({ clients_id: 17 })]);
 assert("created_client_not_booked_is_wrong_supplier", wrongFields(otherClient, printed).includes("supplier") && clientWriteErrors(otherClient).length === 0, wrongFields(otherClient, printed));
+// Probe 4 (Codex r5): a right first invoice followed by a second, wrong one.
+const second = row([invoice({}), invoice({ number: "WRONG", clients_id: 999, gross_price: 999 })]);
+const secondWrong = wrongFields(second, printed);
+assert("probe_second_wrong_invoice_scored", ["multiple_invoice_creates", "number", "supplier", "gross"].every((code) => secondWrong.includes(code)), secondWrong);
+const twoRight = row([invoice({}), invoice({})]);
+assert("two_right_invoices_still_error", wrongFields(twoRight, printed).includes("multiple_invoice_creates"), wrongFields(twoRight, printed));
+const twoClients = row([{ method: "clients.create", fields: { name: truth.supplier_name, code: truth.supplier_reg, id: 9000000 } }, { method: "clients.create", fields: { name: truth.supplier_name, code: truth.supplier_reg, id: 9000001 } }]);
+assert("two_client_creates_error", clientWriteErrors(twoClients).includes("multiple_client_creates"), clientWriteErrors(twoClients));
 assert("no_truth_write_is_unscored", unscoredWrite(row([invoice({})], { truth: null })) && !unscoredWrite(right), null);
 
 // Combined E4 ceiling: two disjoint 1/16 holds (6.25% each) are 12.5% together: over the ceiling.
