@@ -543,6 +543,8 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       {
         ...(ownCompanyVat !== undefined ? { ownCompanyVat } : {}),
         ...(ownCompanyRegistryCode !== undefined ? { ownCompanyRegistryCode } : {}),
+        // The customer name is the operator's own input (P2 E1).
+        operatorSuppliedName: true,
         // A sales-created customer is a CLIENT, not a supplier — invert the
         // resolver's supplier-only default so it appears in customer lists.
         _resolveSupplierOverrides: { country: clientInput.country ?? "EST", role: { is_client: true, is_supplier: false } },

@@ -268,13 +268,24 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
       expect(rec.invoicesCreate).not.toHaveBeenCalled();
     });
 
-    it("control: the same label on native text only is created as today", async () => {
+    it("native text only, registry unavailable: held too (no text-derived name is proof)", async () => {
       stubRegistry([false]);
       vi.mocked(parseDocument).mockResolvedValue(parsed(LINES, items.map(({ confidence: _c, ...item }) => item)));
       const { api, rec } = makeApi();
       const { run } = await runMode(api, "create");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    });
+
+    it.each(permutations)("%s, registry confirms the id: created once under the registry name", async (_label, ordered) => {
+      stubRegistry([true]);
+      vi.mocked(parseDocument).mockResolvedValue(parsed(LINES, ordered));
+      const { api, rec } = makeApi();
+      const { run } = await runMode(api, "create");
       expect(run.ok && run.value.results[0]!.status).toBe("created");
-      expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
+      expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
+      expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: REGISTRY_NAME });
     });
   });
 
@@ -309,15 +320,68 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
     expect(rec.invoicesCreate).not.toHaveBeenCalled();
   });
 
-  it("create: a supplier-label name with no registry name is created as today, with the extracted name", async () => {
-    stubRegistry([false]);
-    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1)]));
-    const { api, rec } = makeApi();
-    const { run } = await runMode(api, "create");
-    if (!run.ok) throw new Error("run failed");
-    expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
-    expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: "Näidis Trükk OÜ" });
-    expect(run.value.results[0]!.status).toBe("created");
+  describe("positive proof: no text-derived name creates a client when the registry did not name it", () => {
+    const tail = PRINT_RECEIPT.slice(1);
+    const item = (text: string, index: number, extra: Record<string, unknown> = {}) =>
+      ({ text, x: 40, y: 100 + 20 * index, width: 200, height: 12, ...extra });
+    const probes: Array<[string, string[], unknown[]]> = [
+      ["supplier label (native)", ["Müüja: Näidis Trükk OÜ", ...tail], ["Müüja: Näidis Trükk OÜ", ...tail].map((t, i) => item(t, i))],
+      ["split OCR name, label first", ["Supplier: ACME PRINT", ...tail],
+        [item("Supplier:", 0, { confidence: 0.9 }), { ...item("ACME", 0, { confidence: 0.9 }), x: 110 }, { ...item("PRINT", 0, { confidence: 0.9 }), x: 160 }, ...tail.map((t, i) => item(t, i + 1))]],
+      ["split OCR name, label last", ["Supplier: ACME PRINT", ...tail],
+        [...tail.map((t, i) => item(t, i + 1)), { ...item("PRINT", 0, { confidence: 0.9 }), x: 160 }, { ...item("ACME", 0, { confidence: 0.9 }), x: 110 }, item("Supplier:", 0, { confidence: 0.9 })]],
+      ["NFC text, NFD OCR items", ["Müüja: Näidis Trükk OÜ", ...tail],
+        [item("Müüja: Näidis Trükk OÜ".normalize("NFD"), 0, { confidence: 0.9 }), ...tail.map((t, i) => item(t, i + 1))]],
+      ["large native layout logo above the supplier label", ["ACME PRINT", "Müüja:", ...tail],
+        [{ text: "ACME PRINT", x: 40, y: 40, width: 300, height: 40 }, item("Müüja:", 1), ...tail.map((t, i) => item(t, i + 2))]],
+    ];
+
+    it.each(probes)("%s, registry unavailable: zero writes in dry run and create", async (_label, lines, textItems) => {
+      stubRegistry([false]);
+      vi.mocked(parseDocument).mockResolvedValue(parsed(lines, textItems));
+      const { api, rec } = makeApi();
+      const { dry, run } = await runMode(api, "create");
+      expect(dry.results[0]!.status).toBe("needs_review");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    });
+
+    it("file-name token name (KIRRET SINISILM ARVE), registry unavailable: zero writes in dry run and create", async () => {
+      stubRegistry([false]);
+      vi.mocked(readdir).mockResolvedValue([{ name: "KIRRET SINISILM ARVE.pdf", isFile: () => true }] as never);
+      vi.mocked(parseDocument).mockResolvedValue(parsed(tail, tail.map((t, i) => item(t, i))));
+      const { api, rec } = makeApi();
+      const { dry, run } = await runMode(api, "create");
+      expect(dry.results[0]!.extracted?.supplier_name).toBe("KIRRET SINISILM ARVE");
+      expect(dry.results[0]!.supplier_resolution?.code).toBe("supplier_name_unverified");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    });
+
+    it("the hold names the code, keeps the extracted name for confirmation, and adds the provenance as a diagnostic", async () => {
+      stubRegistry([false]);
+      const { api } = makeApi();
+      const { dry } = await runMode(api, "create");
+      const result = dry.results[0]!;
+      expect(result.supplier_resolution?.code).toBe("supplier_name_unverified");
+      expect(result.extracted?.supplier_name).toBe("PRINT");
+      expect(result.notes.join(" ")).toContain("Name provenance (diagnostic): ocr/top_line");
+    });
+
+    it("an existing client is matched as before: no registry lookup, no client created, invoice booked", async () => {
+      const fetchMock = stubRegistry([false]);
+      const { api, rec } = makeApi([{
+        id: 7, name: "Printimiskeskus OÜ", code: REG_CODE, is_supplier: true, is_client: false, cl_code_country: "EST",
+        is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+      }]);
+      const { run } = await runMode(api, "create");
+      expect(run.ok && run.value.results[0]!.status).toBe("created");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -453,5 +517,18 @@ describe("P2 E0: credit and signed-amount hazards are advisory on the real recei
     if (!outcome.ok) throw new Error("dry run failed");
     expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
     expect(outcome.value.results[0]!.llm_fallback?.confidence_signals).toContain(signal);
+    // The advisory note survives the booking helper's own notes.
+    expect(outcome.value.results[0]!.notes.some(note => note.startsWith(`${signal}:`))).toBe(true);
+  });
+
+  it("the advisory note also rides on a created result", async () => {
+    stubRegistry([true]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), "Kreeditarve viide K-1"]));
+    const { api, rec } = makeApi();
+    const { run } = await runMode(api, "create");
+    if (!run.ok) throw new Error("run failed");
+    expect(run.value.results[0]!.status).toBe("created");
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+    expect(run.value.results[0]!.notes.some(note => note.startsWith("credit_word_present:"))).toBe(true);
   });
 });

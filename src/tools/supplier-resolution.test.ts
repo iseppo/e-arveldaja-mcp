@@ -52,6 +52,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany],
       { supplier_vat_no: "EE102809963" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(true);
@@ -78,7 +79,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany, realSupplier],
       { supplier_vat_no: "EE102809963", supplier_name: "Anthropic, PBC" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     // VAT match against ourselves is blocked, but a name match still
@@ -106,7 +107,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany],
       { supplier_vat_no: "EE102809963" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(false);
@@ -127,7 +128,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany],
       { supplier_reg_code: "17133416", supplier_name: "Seppo AI OÜ" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(false);
@@ -148,7 +149,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany],
       { supplier_name: "Seppo AI OÜ" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     // No other clients to match → fuzzy match is filtered out, no fallback
@@ -172,7 +173,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
         supplier_vat_no: "EE102809963",
       },
       false, // dry run — must not call api.clients.create
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(false);
@@ -187,7 +188,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [],
       { supplier_name: "Hetzner Online GmbH", supplier_iban: "ee38 2200 2210 2014 5685" },
       false,
-      { ownIbans: ["EE382200221020145685"] },
+      { operatorSuppliedName: true, ownIbans: ["EE382200221020145685"] },
     );
     expect(result.preview_client?.name).toBe("Hetzner Online GmbH");
     expect(result.preview_client?.bank_account_no).toBeUndefined();
@@ -204,7 +205,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany],
       { supplier_vat_no: "ee 102 809 963" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(false);
@@ -229,7 +230,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany, apple, appleLp],
       { supplier_name: "Apple" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     // Fuzzy tier picks the literal "Apple" (distance 0). The important
@@ -252,7 +253,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany, abcShort],
       { supplier_name: "ABC" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     // ABC ↔ ABC still matches via the fuzzy tier (distance 0,
@@ -284,7 +285,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany, anthropic],
       { supplier_name: "Anthropic, PBC" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(true);
@@ -309,7 +310,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownStaleClient],
       { supplier_reg_code: "17133416", supplier_name: "Seppo AI OÜ" },
       false,
-      { ownCompanyVat: "EE102809963", ownCompanyRegistryCode: "17133416" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963", ownCompanyRegistryCode: "17133416" },
     );
 
     expect(result.found).toBe(false);
@@ -326,7 +327,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [],
       { supplier_reg_code: "17133416", supplier_name: "Anthropic, PBC" },
       false,
-      { ownCompanyRegistryCode: "17133416" },
+      { operatorSuppliedName: true, ownCompanyRegistryCode: "17133416" },
     );
 
     expect(result.found).toBe(false);
@@ -353,7 +354,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [collidingSupplier],
       { supplier_reg_code: "17133416", supplier_name: "Anthropic, PBC" },
       false,
-      { ownCompanyRegistryCode: "17133416" },
+      { operatorSuppliedName: true, ownCompanyRegistryCode: "17133416" },
     );
 
     expect(result.self_match_blocked).toBe(true);
@@ -380,7 +381,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
       [ownCompany, openai],
       { supplier_vat_no: "EU372041333" },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(true);
@@ -405,6 +406,7 @@ describe("resolveSupplierInternal — own-VAT guard (#14)", () => {
         raw_text: "Acme GmbH\nInvoice 123\nTotal 10.00",
       },
       true,
+      { operatorSuppliedName: true },
     );
 
     expect(result).toMatchObject({
@@ -430,6 +432,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
       { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result).toMatchObject({
@@ -453,6 +456,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [client],
       { supplier_name: "Globex Trading Hous" },
       false,
+      { operatorSuppliedName: true },
     );
     expect(control.match_type).toBe("name_fuzzy");
 
@@ -461,6 +465,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [client],
       { supplier_name: "Globex Trading Hous", supplier_reg_code: "87654321" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(false);
@@ -474,6 +479,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [makeClient({ id: 1, name: "Acme OÜ", invoice_vat_no: "EE111111111" })],
       { supplier_name: "Acme OÜ", supplier_vat_no: "EE999999999" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(false);
@@ -489,6 +495,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [makeClient({ id: 1, name: "Acme OÜ", code: "87654321" })],
       { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(true);
@@ -506,6 +513,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [makeClient({ id: 1, name: "Acme OÜ", code: null })],
       { supplier_name: "Acme OÜ", supplier_reg_code: "87654321" },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(true);
@@ -522,7 +530,7 @@ describe("resolveSupplierInternal — strong-identifier conflict (H13)", () => {
       [makeClient({ id: 1, name: "Acme OÜ", code: "12345678" })],
       { supplier_name: "Acme OÜ", supplier_reg_code: "17133416" },
       false,
-      { ownCompanyRegistryCode: "17133416" },
+      { operatorSuppliedName: true, ownCompanyRegistryCode: "17133416" },
     );
 
     expect(result.found).toBe(true);
@@ -549,7 +557,7 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
       [ownCompany, supplier],
       { supplier_name: wrap("Fragmented Tools OÜ") },
       false,
-      { ownCompanyVat: "EE102809963" },
+      { operatorSuppliedName: true, ownCompanyVat: "EE102809963" },
     );
 
     expect(result.found).toBe(true);
@@ -564,6 +572,7 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
       [supplier],
       { supplier_reg_code: wrap("16899999") },
       false,
+      { operatorSuppliedName: true },
     );
 
     expect(result.found).toBe(true);
@@ -587,7 +596,7 @@ describe("resolveSupplierInternal — sandbox-marker canonicalization (write/mat
       [],
       { supplier_name: wrap("Nonprofit Foreign LLC") },
       true,
-      { _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false, foreign_identity_attested: true } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: wrap("USA"), is_physical_entity: false, foreign_identity_attested: true } },
     );
 
     expect(create).toHaveBeenCalledTimes(1);
@@ -629,7 +638,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Valid Co OÜ", supplier_reg_code: "17133416" },
       true,
-      { _resolveSupplierOverrides: { country: "EST" } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } },
     );
     expect(create).toHaveBeenCalledTimes(1);
     expect(result.created).toBe(true);
@@ -647,7 +656,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Buyer Co OÜ", supplier_reg_code: "17133416" },
       true,
-      { _resolveSupplierOverrides: { country: "EST", role: { is_client: true, is_supplier: false } } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST", role: { is_client: true, is_supplier: false } } },
     );
     expect(result.created).toBe(true);
     const created = create.mock.calls[0]![0] as { is_supplier: boolean; is_client: boolean };
@@ -662,7 +671,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Nameonly OÜ" },
       true,
-      { _resolveSupplierOverrides: { country: "EST" } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } },
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.created).toBe(false);
@@ -676,7 +685,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Bad Checksum OÜ", supplier_reg_code: "12345679" },
       true,
-      { _resolveSupplierOverrides: { country: "EST" } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } },
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.code).toBe("legal_entity_identity_required");
@@ -689,7 +698,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Vatonly OÜ", supplier_vat_no: "EE100731910" },
       true,
-      { _resolveSupplierOverrides: { country: "EST" } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } },
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.code).toBe("legal_entity_identity_required");
@@ -702,7 +711,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Jaan Tamm" },
       true,
-      { _resolveSupplierOverrides: { country: "EST", is_physical_entity: true } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST", is_physical_entity: true } },
     );
     expect(create).toHaveBeenCalledTimes(1);
   });
@@ -714,7 +723,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Foreign Co LLC" },
       true,
-      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "USA", is_physical_entity: false } },
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.code).toBe("legal_entity_identity_required");
@@ -727,7 +736,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Foreign Co LLC" },
       true,
-      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: true } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: true } },
     );
     expect(create).toHaveBeenCalledTimes(1);
   });
@@ -739,7 +748,7 @@ describe("resolveSupplierInternal — P17 legal-entity identity gate", () => {
       [],
       { supplier_name: "Foreign Co LLC" },
       true,
-      { _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: wrap("true") as unknown as boolean } },
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "USA", is_physical_entity: false, foreign_identity_attested: wrap("true") as unknown as boolean } },
     );
     expect(create).not.toHaveBeenCalled();
     expect(result.code).toBe("legal_entity_identity_required");
@@ -846,30 +855,34 @@ describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-cr
     const get = vi.fn().mockImplementation(async (id: number) => makeClient({ id, name: String(create.mock.calls.at(-1)?.[0]?.name) }));
     return { api: { clients: { listAll: () => Promise.resolve([]), create, get } } as unknown as ApiContext, create };
   }
-  const fields = (field_provenance: ReturnType<typeof provenance>) => ({ supplier_name: "PRINT", supplier_reg_code: "10234957", field_provenance });
+  const fields = (field_provenance: ReturnType<typeof provenance> | undefined) => ({ supplier_name: "PRINT", supplier_reg_code: "10234957", field_provenance });
   afterEach(() => vi.unstubAllGlobals());
 
   it.each([
     ["filename token", provenance("fallback", "filename_token")],
     ["top line", provenance("ocr", "top_line")],
     ["OCR text item", provenance("coordinate", "layout", 0.9)],
+    ["supplier label", provenance("label", "labeled")],
+    ["layout logo", provenance("coordinate", "layout_marker")],
+    ["no provenance", undefined],
   ])("%s name, registry lookup failed: refused at execute and at preview, zero writes", async (_label, field_provenance) => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
     const { api, create } = recordingApi();
     for (const execute of [false, true]) {
-      const result = await resolveSupplierInternal(api, [], fields(field_provenance), execute, { _resolveSupplierOverrides: { country: "EST" } });
+      const result = await resolveSupplierInternal(api, [], fields(field_provenance as never), execute, { _resolveSupplierOverrides: { country: "EST" } });
       expect(result).toMatchObject({ found: false, created: false, code: "supplier_name_unverified" });
       expect(result.preview_client).toBeUndefined();
+      expect(result.registry_data).toBeUndefined();
     }
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("a top-line name whose registry entry has no name of its own is refused (the fallback name is display only)", async () => {
-    const { name: _name, ...nameless } = ARIREGISTER_AUTOCOMPLETE_TELIA.data[0];
-    const text = JSON.stringify({ status: "OK", data: [nameless] });
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, headers: { get: () => String(text.length) }, text: () => Promise.resolve(text) }));
+  it("a supplier with no registry id (a foreign supplier) is refused even with operator-style attestation flags", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
     const { api, create } = recordingApi();
-    const result = await resolveSupplierInternal(api, [], fields(provenance("ocr", "top_line")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    const result = await resolveSupplierInternal(api, [], { supplier_name: "Foreign Ltd", supplier_vat_no: "IE3668997OH" }, true,
+      { _resolveSupplierOverrides: { country: "IRL", foreign_identity_attested: true } });
     expect(result.code).toBe("supplier_name_unverified");
     expect(create).not.toHaveBeenCalled();
   });
@@ -883,19 +896,24 @@ describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-cr
     expect(create.mock.calls[0]![0]).toMatchObject({ name: "Telia Eesti AS", code: "10234957" });
   });
 
-  it("a label-provenance name with no registry name is created as today, with the extracted name", async () => {
+  it("an explicit operator-supplied name is created without a registry name (resolve_supplier, sales customer)", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
     const { api, create } = recordingApi();
-    const result = await resolveSupplierInternal(api, [], fields(provenance("label", "labeled")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    const result = await resolveSupplierInternal(api, [], { supplier_name: "PRINT", supplier_reg_code: "10234957" }, true,
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } });
     expect(result.created).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
   });
 
-  it("an operator-entered name (no provenance) is created as today", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
+  it("an existing client match is unaffected (no registry lookup, no create)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
     const { api, create } = recordingApi();
-    const result = await resolveSupplierInternal(api, [], { supplier_name: "PRINT", supplier_reg_code: "10234957" }, true, { _resolveSupplierOverrides: { country: "EST" } });
-    expect(result.created).toBe(true);
-    expect(create).toHaveBeenCalledTimes(1);
+    const result = await resolveSupplierInternal(api, [makeClient({ id: 5, name: "Printimiskeskus OÜ", code: "10234957" })],
+      fields(provenance("ocr", "top_line")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result).toMatchObject({ found: true, client: { id: 5 } });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
   });
 });

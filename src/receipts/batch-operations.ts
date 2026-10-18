@@ -34,7 +34,7 @@ import {
   normalizeCounterpartyName,
   suggestBookingInternal,
 } from "../tools/receipt-extraction.js";
-import { resolveSupplierInternal } from "../tools/supplier-resolution.js";
+import { resolveSupplierInternal, type SupplierResolution } from "../tools/supplier-resolution.js";
 import {
   type AccountingAutoBookingRule,
   findAutoBookingRule,
@@ -329,6 +329,21 @@ async function extractReceiptFields(
   return { extracted, textHazards: textHazardSignals(parsedDocument, extracted.currency) };
 }
 
+/**
+ * P2 E1: the hold note for a new supplier the registry did not name. The name
+ * provenance is a diagnostic only (code-defined source / rationale, no OCR text);
+ * the extracted name itself is in `extracted.supplier_name` for confirmation.
+ */
+function supplierNameUnverifiedNote(resolution: SupplierResolution, extracted: ExtractedReceiptFields): string {
+  const entry = extracted.field_provenance?.find(candidate => candidate.field === "supplier_name");
+  const diagnostic = entry
+    ? ` Name provenance (diagnostic): ${entry.source}${entry.rationale ? `/${entry.rationale}` : ""}` +
+      `${entry.ocr_occurrence ? ", OCR occurrence" : ""}${entry.filename_occurrence ? ", file-name occurrence" : ""}.`
+    : "";
+  return `Supplier auto-create refused (supplier_name_unverified): ${resolution.reason}${diagnostic} ` +
+    "Confirm the extracted supplier name (extracted.supplier_name), then create the supplier with that name or book this document on its own.";
+}
+
 interface ProcessSingleReceiptOptions {
   ownCompanyVat?: string;
   ownCompanyRegistryCode?: string;
@@ -367,9 +382,11 @@ async function processSingleReceipt(
       ownCompanyRegistryCode: options.ownCompanyRegistryCode,
     });
     Object.assign(signals, textHazards);
-    for (const signal of ADVISORY_TEXT_HAZARD_SIGNALS) {
-      if (signals[signal]) notes.push(`${signal}: ${ADVISORY_TEXT_HAZARD_WARNINGS[signal]}`);
-    }
+    // Advisory hazard notes ride on every result, also past the booking helper's own notes.
+    const hazardNotes = ADVISORY_TEXT_HAZARD_SIGNALS
+      .filter(signal => signals[signal])
+      .map(signal => `${signal}: ${ADVISORY_TEXT_HAZARD_WARNINGS[signal]}`);
+    notes.push(...hazardNotes);
     const selfVatDetected = signals.self_vat_detected === true;
     const selfRegCodeDetected = signals.self_reg_code_detected === true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
@@ -462,7 +479,7 @@ async function processSingleReceipt(
     }
     if (!supplierResolution.found) signals.supplier_resolution_failed = true;
     if (supplierResolution.code === "supplier_name_unverified") {
-      notes.push(`Supplier auto-create refused (supplier_name_unverified): ${supplierResolution.reason} Manual review required before booking.`);
+      notes.push(supplierNameUnverifiedNote(supplierResolution, extracted));
       const fallback = summarize();
       maybeAddLlmFallbackNote(notes, fallback);
       return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
@@ -729,7 +746,7 @@ async function processSingleReceipt(
     ) {
       notes.push(
         materializedSupplierResolution.code === "supplier_name_unverified"
-          ? `Supplier auto-create refused (supplier_name_unverified): ${materializedSupplierResolution.reason} Manual review required before booking.`
+          ? supplierNameUnverifiedNote(materializedSupplierResolution, extracted)
           : `Supplier auto-create refused: ${materializedSupplierResolution.reason ?? "a verified legal-entity identity is required"} Manual review required before booking.`,
       );
       const fallback = summarize();
@@ -784,7 +801,7 @@ async function processSingleReceipt(
             }),
           }
         : {}),
-      notes: created.notes,
+      notes: [...hazardNotes, ...created.notes],
       error: created.error,
     };
   } catch (error) {

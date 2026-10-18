@@ -630,6 +630,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           ownCompanyVat,
           ownCompanyRegistryCode,
           ownIbans,
+          operatorSuppliedName: true,
           _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
       );

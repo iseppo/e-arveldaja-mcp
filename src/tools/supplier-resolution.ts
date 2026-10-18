@@ -84,6 +84,12 @@ export interface SupplierResolutionOptions {
   ownCompanyRegistryCode?: string;
   /** The active company's own IBANs: never stored as the supplier's bank account. */
   ownIbans?: readonly string[];
+  /**
+   * P2 E1: the supplier name is an explicit operator input (a tool argument),
+   * not text read from a document or a bank row. Only then may a new client be
+   * created without a registry-confirmed name. Never set it on an automatic path.
+   */
+  operatorSuppliedName?: boolean;
   _resolveSupplierOverrides?: {
     country?: string;
     is_physical_entity?: boolean;
@@ -167,24 +173,6 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
   }
 }
 
-/**
- * P2 E1: a supplier name read from the file name, from a bare top line, or from
- * an OCR text item (any occurrence of it, not only the one its provenance
- * points at) is never proof of the supplier. Such a name may name a new
- * client only when this call's own registry lookup returned the registry's name.
- * A name from a supplier label or the layout keeps today's behaviour, and so do
- * operator-entered names (no field provenance).
- */
-function supplierNameNeedsRegistryProof(provenance: SupplierIdentityFields["field_provenance"]): boolean {
-  const entry = provenance?.find(candidate => candidate.field === "supplier_name");
-  if (!entry) return false;
-  return (entry.source === "fallback" && entry.rationale === "filename_token") ||
-    (entry.source === "ocr" && entry.rationale === "top_line") ||
-    entry.confidence !== undefined ||
-    entry.ocr_occurrence === true ||
-    entry.filename_occurrence === true;
-}
-
 // ---------------------------------------------------------------------------
 // Supplier resolution
 // ---------------------------------------------------------------------------
@@ -222,7 +210,6 @@ export async function resolveSupplierInternal(
       reason: matchOutcome.reason,
     };
   }
-  const nameNeedsRegistryProof = supplierNameNeedsRegistryProof(fields.field_provenance);
   // no_match — proceed to the create/persist path with the desandboxed fields.
   // self_match_blocked flags a suspect result (none found, or only the
   // previewed-new path is left); it is never propagated onto a found:true
@@ -312,17 +299,19 @@ export async function resolveSupplierInternal(
     };
   }
 
-  // P2 E1: decided on THIS call's registry lookup (at execute, the one made right
-  // before api.clients.create), never on an earlier preview's. The same check at
-  // preview makes a dry run show the hold. No preview client is returned, so no
-  // caller can go on to create one.
-  if (nameNeedsRegistryProof && registryData?.name_source !== "registry") {
+  // P2 E1 (positive proof): a NEW client is named only by the business registry,
+  // through a lookup made in THIS call (at execute, the one right before
+  // api.clients.create) that returned the registry's own non-empty name, or by
+  // an explicit operator-supplied name. Any text-derived name, whatever its
+  // provenance, a registry outage, a nameless entry or a missing id holds. No
+  // preview client and no registry echo (it would carry the text-derived name)
+  // are returned, so no caller can go on to create one.
+  if (options?.operatorSuppliedName !== true && registryData?.name_source !== "registry") {
     return {
       found: false,
       created: false,
       code: "supplier_name_unverified",
-      reason: "The supplier name was read from the file name or OCR text, not from a supplier label, and the business registry did not return its own name for the supplier's registry code. Verify the supplier before creating it.",
-      registry_data: registryData,
+      reason: "A new supplier is created only under the name the business registry returns for its registry code; the registry did not confirm a name. Confirm the supplier name before creating it.",
       ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }
