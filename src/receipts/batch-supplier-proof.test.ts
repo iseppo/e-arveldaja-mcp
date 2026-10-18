@@ -8,6 +8,7 @@ import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-auto
 import { createReceiptBatchOperations } from "./batch-operations.js";
 import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
 import { sha256Hex } from "../tools/receipt-inbox-files.js";
+import { renderReceiptBatchCompact } from "./presenter.js";
 
 // P2 E1 / E1b / E3 through the REAL receipt_batch path: real extraction, real
 // supplier resolution (registry lookup = stubbed fetch), real gating and booking.
@@ -535,6 +536,73 @@ describe("P2 E4: a credit word or a signed amount holds the receipt in every mod
     expect(signalsOf(dry.results[0]!)).not.toContain("credit_word_present");
     expect(run.ok && run.value.results[0]!.status).toBe("created");
     expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+  });
+
+  function exactDuplicate() {
+    const { api, rec } = makeApi([{
+      id: 7, name: "Näidis Trükk OÜ", code: REG_CODE, is_supplier: true, is_client: false, cl_code_country: "EST",
+      is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+    }]);
+    (api as { purchaseInvoices: { listAll: ReturnType<typeof vi.fn> } }).purchaseInvoices.listAll.mockResolvedValue([{
+      id: 123, clients_id: 7, number: "A-17", create_date: "2026-03-15", gross_price: 124,
+      cl_currencies_id: "EUR", status: "CONFIRMED", is_deleted: false,
+    }]);
+    return { api, rec };
+  }
+
+  const duplicateHazards = [
+    ["credit_word_present", "Kreeditarve viide K-1"],
+    ["credit_word_present", "Refund for order 17"],
+    ["signed_amount_present", "Allahindlus -5,00"],
+    ["signed_amount_present", "Allahindlus (5,00)"],
+  ] as const;
+  it.each(duplicateHazards.flatMap(([signal, line]) =>
+    (["create", "create_and_confirm"] as const).map(mode => ({ signal, line, mode })),
+  ))("an exact duplicate with $signal ($line) stays in review in dry run and $mode", async ({ signal, line, mode }) => {
+    stubRegistry([false]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), line]));
+    const { api, rec } = exactDuplicate();
+    const { dry, run } = await runMode(api, mode);
+    if (!run.ok) throw new Error(`run failed: ${run.error.code}`);
+    for (const batch of [dry, run.value]) {
+      const result = batch.results[0]!;
+      expect(signalsOf(result)).toContain(signal);
+      expect(result.status).toBe("needs_review");
+      expect(result.duplicate_match).toMatchObject({ invoice_id: 123, reason: "supplier_invoice_number", gross_price: 124 });
+      expect(result.supplier_resolution?.client?.id).toBe(7);
+      expect(result.booking_suggestion).toBeDefined();
+      expect(result.notes.join(" ")).toMatch(/credit|refund|signed/i);
+      const compact = renderReceiptBatchCompact({
+        result: batch, accountsDimensionsId: 100, executionMode: batch.executionMode, workflowFolderPath: FOLDER,
+      });
+      // A dry-run batch remains an approval preview; its counts and warning
+      // still expose the held row. Executed held batches report needs_review.
+      expect(compact.summary.status).toBe(batch.summary.dry_run ? "ready_for_approval" : "needs_review");
+      expect(compact.summary.counts).toMatchObject({ needs_review: 1, duplicates: 0 });
+      expect(compact.summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "needs_review" })]));
+    }
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("an ordinary exact duplicate still skips in dry run and %s", async mode => {
+    stubRegistry([false]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1)]));
+    const { api, rec } = exactDuplicate();
+    const { dry, run } = await runMode(api, mode);
+    if (!run.ok) throw new Error(`run failed: ${run.error.code}`);
+    for (const batch of [dry, run.value]) {
+      expect(batch.results[0]!.status).toBe("skipped_duplicate");
+      expect(batch.results[0]!.duplicate_match).toMatchObject({ invoice_id: 123, reason: "supplier_invoice_number" });
+      const compact = renderReceiptBatchCompact({
+        result: batch, accountsDimensionsId: 100, executionMode: batch.executionMode, workflowFolderPath: FOLDER,
+      });
+      expect(compact.summary.counts).toMatchObject({ needs_review: 0, duplicates: 1 });
+    }
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
   });
 });
 

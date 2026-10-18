@@ -229,17 +229,24 @@ describe("process_accounting_document reading modes: indeterminate create", () =
     const { reading, proof } = readingFor(packetFor(file.sha256));
     const first = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
     const second = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
-    expect((await handler({ mode: "create", file_path: file.path, plan_handle: first.plan_handle, owner_answers: {} })).isError).toBe(true);
+    const attempted = await handler({ mode: "create", file_path: file.path, plan_handle: first.plan_handle, owner_answers: {} });
+    expect(attempted.isError).toBe(true);
+    expect(parse(attempted)).toMatchObject({ category: "reading_create_indeterminate", retry: "never", mutation_occurred: null, mutation_may_have_occurred: true });
 
     const held = parse(await handler({ mode: "create", file_path: file.path, plan_handle: second.plan_handle, owner_answers: {} }));
     expect(held.holds.map((hold: { code: string }) => hold.code)).toContain("reading_create_indeterminate");
     expect(held.next_step).toContain("Do not book it with mode='prepare'");
+    expect(held.mutation_occurred).toBe(false);
+    expect(held).not.toHaveProperty("mutation_may_have_occurred");
 
     const prepare = await handler({ mode: "prepare", file_path: file.path });
     expect(prepare.isError).toBe(true);
     expect(parse(prepare).category).toBe("reading_create_indeterminate");
+    expect(parse(prepare).mutation_occurred).toBe(false);
+    expect(parse(prepare)).not.toHaveProperty("mutation_may_have_occurred");
 
     const blocked = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect(blocked.indeterminate_marker).toEqual(expect.any(String));
     const released = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, release_indeterminate: blocked.indeterminate_marker }));
     expect(released).toMatchObject({ status: "blocked", released_marker: blocked.indeterminate_marker });
     expect(released.plan_handle).toBeUndefined();

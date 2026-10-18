@@ -635,6 +635,17 @@ async function processSingleReceipt(
         });
       }
       if (duplicate) {
+        if (signals.credit_word_present || signals.signed_amount_present) {
+          notes.push(
+            `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but a credit/refund word or signed amount ` +
+            "means this cannot be decided as an ordinary duplicate; review the document before skipping or booking it.",
+          );
+          return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
+            supplier_resolution: supplierResolution,
+            booking_suggestion: bookingSuggestion,
+            duplicate_match: duplicate,
+          });
+        }
         return {
           file,
           classification,

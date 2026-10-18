@@ -35,9 +35,12 @@ export interface OperationFailure {
    * only record the caller gets: the plan handle is burned before validation
    * (one-attempt semantics), so there is no second response to correct it.
    *
-   * Omitted means "no mutation" — every site that CAN have written must say so.
+   * Omitted means "no known mutation". Sites where a write may have landed
+   * without a conclusive response must set mutationMayHaveOccurred instead.
    */
   readonly mutationOccurred?: boolean;
+  /** True when a write was attempted but its outcome could not be established. */
+  readonly mutationMayHaveOccurred?: boolean;
   readonly mutatedObjects?: readonly MutatedObject[];
 }
 
@@ -55,7 +58,8 @@ export function failureResponsePayload(error: OperationFailure): Record<string, 
     error: error.message,
     category: error.code,
     retry: error.retry,
-    mutation_occurred: error.mutationOccurred === true,
+    mutation_occurred: error.mutationOccurred === true ? true : error.mutationMayHaveOccurred === true ? null : false,
+    ...(error.mutationMayHaveOccurred === true ? { mutation_may_have_occurred: true } : {}),
     ...(error.mutatedObjects !== undefined && error.mutatedObjects.length > 0
       ? { mutated_objects: error.mutatedObjects.map(object => ({ type: object.type, id: object.id })) }
       : {}),
@@ -81,7 +85,7 @@ export function plainFailureOutcome<T>(
   code: string,
   message: string,
   retry: "never" | "safe" | "unknown" = "never",
-  mutation?: Readonly<{ mutationOccurred: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[] }>,
 ): OperationOutcome<T> {
   return {
     ok: false,
@@ -90,6 +94,7 @@ export function plainFailureOutcome<T>(
       message,
       retry,
       ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
+      ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
     },
     blockers: [],
@@ -109,7 +114,7 @@ export function failureOutcome<T = never>(
   message: string,
   retry: "never" | "safe" | "unknown",
   blockers: readonly CompactReviewItem[] = [],
-  mutation?: Readonly<{ mutationOccurred: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[] }>,
 ): OperationOutcome<T> {
   return cloneAndFreezePlanData({
     ok: false,
@@ -118,6 +123,7 @@ export function failureOutcome<T = never>(
       message,
       retry,
       ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
+      ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
     },
     blockers,

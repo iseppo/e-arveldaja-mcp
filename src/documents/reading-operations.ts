@@ -1102,7 +1102,7 @@ class ReadingDocumentOperations {
             });
             return fail("reading_create_indeterminate",
               `The create request's outcome is unknown: the invoice may still be created. Check e-arveldaja; matching documents are held until mode='verify' finds the draft or the owner releases marker ${marker.id}.`,
-              "never");
+              "never", { mutationMayHaveOccurred: true });
           }
           throw error;
         }

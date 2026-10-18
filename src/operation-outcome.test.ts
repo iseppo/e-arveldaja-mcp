@@ -1,7 +1,44 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { failureOutcome, plainFailureOutcome, plainSuccessOutcome, successOutcome, type OperationOutcome } from "./operation-outcome.js";
+import { failureOutcome, failureResponsePayload, plainFailureOutcome, plainSuccessOutcome, successOutcome, type OperationOutcome } from "./operation-outcome.js";
 
 describe("operation outcomes", () => {
+  it.each(["plain", "frozen"] as const)("preserves explicit unknown mutation in %s outcomes", kind => {
+    const outcome = kind === "plain"
+      ? plainFailureOutcome("timeout", "Outcome unknown", "never", { mutationMayHaveOccurred: true })
+      : failureOutcome("timeout", "Outcome unknown", "never", [], { mutationMayHaveOccurred: true });
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) throw new Error("expected failure");
+    expect(outcome.error).toEqual({ code: "timeout", message: "Outcome unknown", retry: "never", mutationMayHaveOccurred: true });
+    expect(failureResponsePayload(outcome.error)).toEqual({
+      error: "Outcome unknown", category: "timeout", retry: "never", mutation_occurred: null, mutation_may_have_occurred: true,
+    });
+    expect(Object.isFrozen(outcome.error)).toBe(kind === "frozen");
+  });
+
+  it.each([undefined, false, true])("keeps known/absent mutation payload byte-identical: %s", mutationOccurred => {
+    const error = { code: "failed", message: "Failed", retry: "never" as const, mutationOccurred };
+    expect(JSON.stringify(failureResponsePayload(error))).toBe(
+      `{"error":"Failed","category":"failed","retry":"never","mutation_occurred":${mutationOccurred === true}}`,
+    );
+    expect(failureResponsePayload({ ...error, mutationMayHaveOccurred: false })).toEqual(failureResponsePayload(error));
+    for (const outcome of [
+      plainFailureOutcome("failed", "Failed", "never", { mutationOccurred }),
+      failureOutcome("failed", "Failed", "never", [], { mutationOccurred }),
+    ]) {
+      expect(JSON.stringify(outcome)).toBe(`{"ok":false,"error":{"code":"failed","message":"Failed","retry":"never"${mutationOccurred ? ',"mutationOccurred":true' : ""}},"blockers":[]}`);
+    }
+  });
+
+  it("an uncertain write never becomes a known no-write through a false flag", () => {
+    expect(failureResponsePayload({ code: "timeout", message: "Unknown", retry: "never", mutationOccurred: false, mutationMayHaveOccurred: true }).mutation_occurred).toBeNull();
+  });
+
+  it("keeps known writes true when unknown-mutation evidence also exists", () => {
+    expect(failureResponsePayload({ code: "partial", message: "Partial", retry: "never", mutationOccurred: true, mutationMayHaveOccurred: true })).toEqual({
+      error: "Partial", category: "partial", retry: "never", mutation_occurred: true, mutation_may_have_occurred: true,
+    });
+  });
+
   it("creates frozen transport-independent success and failure outcomes", () => {
     const success = successOutcome({ id: 1 }, [{ code: "rounded", message: "Rounded", item_id: "1" }]);
     const failure = failureOutcome("network_unknown", "Outcome unknown", "unknown", [{
