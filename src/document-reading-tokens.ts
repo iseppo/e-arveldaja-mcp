@@ -73,30 +73,16 @@ const LEADER_GLYPHS = ".…·•‧．∙⋅‥_";
 const LEADER_RUN_RE = new RegExp(`[${LEADER_GLYPHS}](?: ?[${LEADER_GLYPHS}]){3,}`, "gu");
 const AMOUNT_START_RE = new RegExp(`^ *[0-9+\\-−(\\p{Sc}]`, "u");
 
-// Owner-approved narrow exemption: a signature line ("Allkiri ......", "Võttis vastu: ....") prints no value
-// over its leader. Exempt only when (a) a whole-token signature label from this fixed list (b) directly precedes
-// the leader, with only spaces, tabs or a colon between (an NBSP or a homoglyph is no match), and (c) the line
-// carries no payload label (date, due, number, amount, total, VAT, net, registry/VAT id, IBAN).
-const SIGNATURE_LABEL_BEFORE_RE = /(?<![\p{L}\p{N}])(?:allkirjad|allkiri|võttis vastu|kätte saanud|väljastas|signature|signed|received by)[ \t]*:?[ \t]*$/iu;
-const PAYLOAD_LABEL_RE = new RegExp(
-  "\\p{L}*(?:kuupäev|tähtaeg|kpv)|(?<![\\p{L}\\p{N}])(?:date|due|nr|no|number|invoice|summa|kokku|total|amount|tasuda|maksta|subtotal|" +
-  "käibemaks|km|kmkr|vat|tax|neto|net|reg|registrikood|iban|konto|account)(?![\\p{L}\\p{N}])",
-  "iu",
-);
-
-/** Every cell holding a leader (≥ 4 leader glyphs) that no amount follows in the same cell, minus exempt
- * signature lines; a line id in `noExemption` (its source printed a non-plain space) is never exempt. */
-export function lostValueLeaders(lines: ReadonlyArray<TokenLine>, noExemption: ReadonlySet<string> = new Set()): Array<{ line: string; cell: number }> {
+/** Every cell holding a leader (≥ 4 leader glyphs) that no amount follows in the same cell. */
+export function lostValueLeaders(lines: ReadonlyArray<TokenLine>): Array<{ line: string; cell: number }> {
   const hits: Array<{ line: string; cell: number }> = [];
   for (const line of lines) {
-    const exemptable = !noExemption.has(line.id) && !PAYLOAD_LABEL_RE.test(line.text.normalize("NFC"));
     for (const cell of lineCells(line.text)) {
-      const text = cell.text.normalize("NFC");
-      for (const run of text.matchAll(LEADER_RUN_RE)) {
-        if (AMOUNT_START_RE.test(text.slice(run.index! + run[0].length))) continue;
-        if (exemptable && SIGNATURE_LABEL_BEFORE_RE.test(text.slice(0, run.index!))) continue;
-        hits.push({ line: line.id, cell: cell.index });
-        break;
+      for (const run of cell.text.matchAll(LEADER_RUN_RE)) {
+        if (!AMOUNT_START_RE.test(cell.text.slice(run.index! + run[0].length))) {
+          hits.push({ line: line.id, cell: cell.index });
+          break;
+        }
       }
     }
   }

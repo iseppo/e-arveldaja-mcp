@@ -117,9 +117,6 @@ function isOcrPage(page: PacketSourcePage): boolean {
 export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
   const lines: PacketLine[] = [];
   const origin: PageOrigin[] = [];
-  // Lines whose source printed a space-like character other than a plain space (NBSP, U+202F, …): the packet
-  // text shows it as a space, so such a line never gets the C1 signature-line exemption.
-  const exoticSpaceLines = new Set<string>();
   for (const page of input.pages) {
     let n = 0;
     for (const raw of page.text.split("\n")) {
@@ -127,7 +124,6 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
       if (text === undefined) continue;
       n += 1;
       lines.push({ id: lineId(page.pageNum, n), page: page.pageNum, n, text });
-      if (/[^\S ]/u.test(raw.replace(CONTROL_CHARS_RE, " "))) exoticSpaceLines.add(lineId(page.pageNum, n));
     }
     origin.push({
       page: page.pageNum,
@@ -145,7 +141,7 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
   if (input.pageErrors.length > 0) hold("page_extraction_failed");
   if (textBytes > PACKET_MAX_TEXT_BYTES || lines.length > PACKET_MAX_LINES) hold("packet_oversize");
   if (input.pages.some(isOcrPage)) hold("ocr_document");
-  if (lostValueLeaders(lines, exoticSpaceLines).length > 0) hold("text_layer_value_lost");
+  if (lostValueLeaders(lines).length > 0) hold("text_layer_value_lost");
 
   return {
     version: 1,
