@@ -6,6 +6,8 @@ import { buildKeywordSuggestion, suggestBookingInternal } from "../tools/receipt
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 import { createReceiptBatchOperations } from "./batch-operations.js";
+import { createAndMaybeMatchPurchaseInvoice } from "../tools/receipt-inbox-booking.js";
+import { sha256Hex } from "../tools/receipt-inbox-files.js";
 
 // P2 E1 / E1b / E3 through the REAL receipt_batch path: real extraction, real
 // supplier resolution (registry lookup = stubbed fetch), real gating and booking.
@@ -265,5 +267,75 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
     expect(rec.clientsCreate).toHaveBeenCalledTimes(1);
     expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: "Näidis Trükk OÜ" });
     expect(run.value.results[0]!.status).toBe("created");
+  });
+});
+
+describe("P2 E1b: a generated description is booked with the bound client's name", () => {
+  const bookedTitle = (rec: Recorder) =>
+    (rec.invoicesCreate.mock.calls[0]![0] as { items: Array<{ custom_title: string }> }).items[0]!.custom_title;
+
+  it("existing client: the generated PRINT description becomes Expense from <client name>; supplier_name is unchanged", async () => {
+    stubRegistry([true]);
+    const { api, rec } = makeApi([{
+      id: 7, name: "Printimiskeskus OÜ", code: REG_CODE, is_supplier: true, is_client: false, cl_code_country: "EST",
+      is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+    }]);
+    const { run } = await runMode(api, "create");
+    if (!run.ok) throw new Error("run failed");
+    const result = run.value.results[0]!;
+    expect(result.extracted?.description).toBe("PRINT");
+    expect(result.extracted?.description_source).toBe("generated");
+    expect(result.extracted?.supplier_name).toBe("PRINT");
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+    expect(bookedTitle(rec)).toBe("Expense from Printimiskeskus OÜ");
+  });
+
+  it("newly created registry-verified client: the description and the client both carry the registry name", async () => {
+    stubRegistry([true]);
+    const { api, rec } = makeApi();
+    const { run } = await runMode(api, "create");
+    if (!run.ok) throw new Error("run failed");
+    expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: REGISTRY_NAME });
+    expect(bookedTitle(rec)).toBe(`Expense from ${REGISTRY_NAME}`);
+    expect(bookedTitle(rec)).not.toContain("PRINT");
+  });
+
+  describe("at the booking boundary", () => {
+    const snapshot = () => {
+      const bytes = Buffer.from("%PDF-receipt");
+      return {
+        file: { name: "receipt.pdf", path: "/tmp/receipts/receipt.pdf", extension: ".pdf", file_type: "pdf", size_bytes: bytes.length, modified_at: "2026-03-15T00:00:00.000Z" },
+        relative_path: "receipt.pdf", sha256: sha256Hex(bytes), bytes, snapshot_path: "/tmp/receipts/receipt.pdf",
+      } as never;
+    };
+    const extracted = (overrides: Record<string, unknown>) => ({
+      supplier_name: "PRINT", invoice_number: "A-17", invoice_date: "2026-03-15",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", ...overrides,
+    });
+    const client = { id: 7, name: "Printimiskeskus OÜ", is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false };
+    async function bookRaw(fields: Record<string, unknown>, resolution: Record<string, unknown>) {
+      const { api, rec } = makeApi();
+      const result = await createAndMaybeMatchPurchaseInvoice(
+        api, { clients: [], purchaseInvoices: [], purchaseArticlesWithVat: [], accounts: [], isVatRegistered: true } as never,
+        snapshot(), extracted(fields) as never, resolution as never, BOOKING as never, [], "create", false, new Set(),
+      );
+      return { result, rec };
+    }
+    const book = async (fields: Record<string, unknown>, resolution: Record<string, unknown>) =>
+      bookedTitle((await bookRaw(fields, resolution)).rec);
+
+    it("a document or operator description is kept, even with a bound client", async () => {
+      expect(await book({ description: "Kontoritarbed", description_source: "document" }, { found: true, created: false, client })).toBe("Kontoritarbed");
+      expect(await book({ description: "Paber A4" }, { found: true, created: false, client })).toBe("Paber A4");
+    });
+
+    it("an unresolved supplier keeps today's behaviour: held, nothing booked, the extraction unchanged", async () => {
+      const fields = { description: "PRINT", description_source: "generated" };
+      const { result, rec } = await bookRaw(fields, { found: false, created: false, preview_client: { name: "PRINT" } });
+      expect(result.status).toBe("needs_review");
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(fields.description).toBe("PRINT");
+    });
   });
 });

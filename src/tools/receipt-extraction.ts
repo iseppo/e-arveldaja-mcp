@@ -276,6 +276,13 @@ export interface ExtractedReceiptFields {
   vat_explicit?: boolean;
   currency?: string;
   description?: string;
+  /**
+   * P2 E1b: "generated" when `description` is the extractor's own text (the
+   * first non-keyword line, or an `Expense from …` / `Receipt expense`
+   * fallback), "document" when it was read from a document line. Only a
+   * generated description is replaced by the bound client's name at booking.
+   */
+  description_source?: "generated" | "document";
   raw_text?: string;
   /** Output-only: set when raw_text was capped for MCP output (see capUntrustedText). */
   raw_text_truncated?: boolean;
@@ -4195,6 +4202,7 @@ export function extractReceiptFieldsFromText(
     invoice_date,
     due_date,
     description: extractDescription(text, supplierName),
+    description_source: "generated",
     raw_text: text,
     ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
     ...(options?.partialOcrFailure ? { partial_ocr_failure: true } : {}),
