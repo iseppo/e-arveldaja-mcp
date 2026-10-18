@@ -64,7 +64,6 @@ describe("H05 default preservation", () => {
     ["supplier rounding", true, h05Invoice()],
     ["missing VAT", true, h05Invoice({ vat_price: undefined })],
     ["missing gross", true, h05Invoice({ gross_price: undefined })],
-    ["non-VAT item VAT", false, h05Invoice({ vat_price: 0 })],
     ["reverse charge", true, h05Invoice({ items: [{ ...h05Invoice().items[0], reversed_vat_id: 1 }] })],
     ["non-EUR", true, h05Invoice({ cl_currencies_id: "USD", currency_rate: 0.92 })],
   ])("registers %s without reading or rewriting totals", async (_label, isVatRegistered, invoice) => {
@@ -74,6 +73,18 @@ describe("H05 default preservation", () => {
     await api.confirmWithTotals(1, isVatRegistered as boolean);
 
     expect(get).not.toHaveBeenCalled();
+    expect(patch).toHaveBeenCalledTimes(1);
+    expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
+  });
+
+  it("registers non-VAT item VAT (folded draft) after one fresh read, without rewriting totals", async () => {
+    // GitHub #63: a non-VAT confirm reads the draft fresh to see whether a row carries a VAT account.
+    const get = vi.fn().mockResolvedValue(h05Invoice({ vat_price: 0 }));
+    const { api, patch } = h05Api(get);
+
+    await api.confirmWithTotals(1, false);
+
+    expect(get).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledTimes(1);
     expect(patch).toHaveBeenCalledWith("/purchase_invoices/1/register", {});
   });

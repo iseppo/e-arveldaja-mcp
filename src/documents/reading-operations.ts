@@ -55,7 +55,15 @@ import { checkJournalReferences } from "../journal-reference-scan.js";
 import { checkIntakeCashDuplicates } from "../bank-posting-duplicate-guard.js";
 import { normalizeItemsForNonVat, predictPurchaseItemAmounts, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { parseVatRateDropdown, roundMoney } from "../money.js";
-import { applyPurchaseItemStructuralDefaults } from "../tools/purchase-vat-defaults.js";
+import {
+  applyPurchaseItemStructuralDefaults,
+  classifyNonVatInvoiceForm,
+  hasVatAccountFields,
+  isNonDeductibleVatItem,
+  nonVatRegisterRefusal,
+  normalizeVatRate,
+} from "../tools/purchase-vat-defaults.js";
+import { parsePurchaseInvoiceItems } from "../tools/crud-tools.js";
 import { vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { logAudit } from "../audit-log.js";
@@ -67,7 +75,7 @@ import { uploadSourceDocumentOrInvalidate } from "../tools/pdf-workflow.js";
 import { assertFileInputSnapshotIdentity, FileInputSnapshotError } from "../file-input-snapshot.js";
 import { todayInTallinn } from "../local-date.js";
 import { parseStrictDate } from "../strict-date.js";
-import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
+import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, materializeSnapshot, MAX_INVOICE_DOCUMENT_SIZE, wrongCompanySignal, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
 import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
@@ -307,14 +315,100 @@ export function itemTitleHasDate(title: string | undefined): boolean {
   return title !== undefined && (DATE_TOKEN.test(title) || MONTH_WORD.test(title));
 }
 
-/** One booking item of the template with the document's amounts: net, and the unique VAT rate in force. */
-function itemWithAmounts(template: PurchaseInvoiceItem, values: AcceptedValues, itemTitle?: string): PurchaseInvoiceItem {
+/**
+ * One booking item of the template with the document's amounts: net, and the unique VAT rate in force. A non-VAT
+ * company's template keeps its rate: readingNonVatItems decides the non-VAT form.
+ */
+function itemWithAmounts(template: PurchaseInvoiceItem, values: AcceptedValues, isVatReg: boolean, itemTitle?: string): PurchaseInvoiceItem {
   const vat = values.vat ?? 0;
   const gross = values.gross ?? 0;
   const net = values.net ?? round2(gross - vat);
   const rates = vat > 0 && values.invoice_date ? rateMatches(net, vat, vatRatesInForceOn(values.invoice_date)) : [];
-  const vatRate = vat > 0 ? (rates.length === 1 ? String(rates[0]) : template.vat_rate_dropdown) : (template.vat_rate_dropdown ?? "0");
+  const vatRate = !isVatReg ? template.vat_rate_dropdown
+    : vat > 0 ? (rates.length === 1 ? String(rates[0]) : template.vat_rate_dropdown) : (template.vat_rate_dropdown ?? "0");
   return { ...template, ...(itemTitle !== undefined ? { custom_title: itemTitle } : {}), total_net_price: net, amount: 1, ...(vatRate !== undefined && vatRate !== null ? { vat_rate_dropdown: vatRate } : {}) };
+}
+
+/** The document's unique VAT rate in force on its date, or undefined (no VAT, no date, zero or several matching rates). */
+function documentVatRate(values: AcceptedValues): string | undefined {
+  const vat = values.vat ?? 0;
+  if (vat <= 0 || !values.invoice_date) return undefined;
+  const net = values.net ?? round2((values.gross ?? 0) - vat);
+  const rates = rateMatches(net, vat, vatRatesInForceOn(values.invoice_date));
+  return rates.length === 1 ? String(rates[0]) : undefined;
+}
+
+export type ReadingNonVatItemsResult =
+  | { ok: true; items: unknown; nonDeductible: boolean }
+  | { ok: false; code: "reading_vat_rate_ambiguous" | "reading_nonvat_item_conflict"; message: string };
+
+/**
+ * GitHub #63, owner decision Q2 = CONVERT: a non-VAT company's booking items for the verified reading. A document
+ * printing VAT books the non-deductible form (VAT account and dimension = the item's cost account and dimension,
+ * article 11, the document's unique rate in force); a folded item is converted, an item already non-deductible at
+ * that rate is kept, and anything else is held, never rewritten. A document printing no VAT keeps the folded form: a
+ * non-deductible server template is folded, caller-supplied VAT-account fields are held.
+ */
+export function readingNonVatItems(items: unknown, values: AcceptedValues, source: "template" | "supplied"): ReadingNonVatItemsResult {
+  let parsed: PurchaseInvoiceItem[];
+  try {
+    parsed = parsePurchaseInvoiceItems(items);
+  } catch {
+    return { ok: true, items, nonDeductible: false }; // computeEffectiveBooking reports the malformed items
+  }
+  const conflict = (index: number): ReadingNonVatItemsResult => ({
+    ok: false,
+    code: "reading_nonvat_item_conflict",
+    message: `items[${index}] cannot be booked for a non-VAT company on this document without rewriting a supplied field ` +
+      "(VAT account, article, rate, project_no_vat_gross_price or reversed_vat_id). Fix the item or book with mode='prepare'.",
+  });
+  if ((values.vat ?? 0) > 0) {
+    const rate = documentVatRate(values);
+    if (rate === undefined) {
+      return {
+        ok: false,
+        code: "reading_vat_rate_ambiguous",
+        message: "The document's VAT does not match exactly one VAT rate in force on its date: the non-deductible VAT form cannot be booked without guessing the rate.",
+      };
+    }
+    const converted: PurchaseInvoiceItem[] = [];
+    for (const [index, item] of parsed.entries()) {
+      const itemRate = normalizeVatRate(item.vat_rate_dropdown);
+      const folded = !hasVatAccountFields(item) && Number.isInteger(item.purchase_accounts_id)
+        && (item.cl_vat_articles_id ?? 11) === 11 && (itemRate === undefined || itemRate === "-" || itemRate === rate)
+        && (item.project_no_vat_gross_price ?? null) === null && (item.reversed_vat_id ?? null) === null;
+      const kept = isNonDeductibleVatItem(item) && itemRate === rate && (item.project_no_vat_gross_price ?? null) === null;
+      if (!folded && !kept) return conflict(index);
+      converted.push(kept ? item : {
+        ...item,
+        vat_accounts_id: item.purchase_accounts_id!,
+        ...((item.purchase_accounts_dimensions_id ?? null) !== null ? { vat_accounts_dimensions_id: item.purchase_accounts_dimensions_id } : {}),
+        cl_vat_articles_id: 11,
+        vat_rate_dropdown: rate,
+      });
+    }
+    return { ok: true, items: converted, nonDeductible: true };
+  }
+  if (source === "supplied") {
+    const conflicting = parsed.findIndex(item => hasVatAccountFields(item)
+      || (normalizeVatRate(item.vat_rate_dropdown) !== undefined && normalizeVatRate(item.vat_rate_dropdown) !== "-")
+      || (item.cl_vat_articles_id ?? 11) !== 11 || (item.reversed_vat_id ?? null) !== null);
+    if (conflicting !== -1) return conflict(conflicting);
+  }
+  const withVatAccount = parsed.findIndex(hasVatAccountFields);
+  if (withVatAccount === -1) return { ok: true, items, nonDeductible: false };
+  if (source === "supplied") return conflict(withVatAccount);
+  const unsupportedTemplate = parsed.findIndex(item => hasVatAccountFields(item) && !isNonDeductibleVatItem(item));
+  if (unsupportedTemplate !== -1) return conflict(unsupportedTemplate);
+  return {
+    ok: true,
+    nonDeductible: false,
+    items: parsed.map((item) => {
+      if (!hasVatAccountFields(item)) return item;
+      const { vat_accounts_id: _account, vat_accounts_dimensions_id: _dimension, ...rest } = item;
+      return { ...rest, cl_vat_articles_id: 11, vat_rate_dropdown: "-" };
+    }),
+  };
 }
 
 /** Where the booking items come from: the caller's items, or the server's one-item template (amounts from the values). */
@@ -348,7 +442,14 @@ export async function buildReadingBooking(
   isVatReg: boolean,
   knownIban: string | undefined,
 ): Promise<ReadingBookingResult> {
-  const items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values, input?.itemTitle)];
+  let items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values, isVatReg, input?.itemTitle)];
+  let nonDeductible = false;
+  if (!isVatReg) {
+    const nonVat = readingNonVatItems(items, values, "items" in itemsSource ? "supplied" : "template");
+    if (!nonVat.ok) return { bookingSideSignals: [], failure: { code: nonVat.code, message: nonVat.message } };
+    items = nonVat.items;
+    nonDeductible = nonVat.nonDeductible;
+  }
   const invoiceDate = values.invoice_date ?? "";
   const dueTerm = values.due_date && values.invoice_date ? dayDiff(values.invoice_date, values.due_date) : undefined;
   const fields: AccountingDocumentBookingFields = {
@@ -358,7 +459,7 @@ export async function buildReadingBooking(
     journalDate: input?.journalDate ?? invoiceDate,
     termDays: dueTerm ?? input?.termDays ?? 0,
     items,
-    ...(isVatReg ? { vatPrice: values.vat ?? 0 } : {}),
+    ...(isVatReg ? { vatPrice: values.vat ?? 0 } : nonDeductible ? { vatPrice: values.vat! } : {}),
     ...(values.gross !== null ? { grossPrice: values.gross } : {}),
     ...(input?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.liabilityAccountsId } : {}),
     ...(knownIban ? { bankAccountNo: knownIban } : {}),
@@ -366,14 +467,21 @@ export async function buildReadingBooking(
   const effective = await computeEffectiveBooking(api, fields, material.source_sha256, material.fileName);
   if (!effective.ok) return { bookingSideSignals: [], failure: { code: effective.error.code, message: effective.error.message } };
   const data = effective.value.invoiceData;
-  const preview = previewPurchaseInvoiceTotals(data, fields.vatPrice, fields.grossPrice, isVatReg);
-  const finalItems = preview.ok && preview.lastItemGross !== undefined && data.items.length > 0
-    ? [...data.items.slice(0, -1), { ...data.items[data.items.length - 1]!, project_no_vat_gross_price: preview.lastItemGross }]
-    : data.items;
+  const preview = previewPurchaseInvoiceTotals(data, fields.vatPrice, fields.grossPrice, isVatReg, effective.value.accounts);
+  // What createAndSetTotals sends: the form-aware non-VAT normalisation, then the last-item residue.
+  const normalized = normalizeItemsForNonVat(data.items, isVatReg, fields.grossPrice, nonDeductible);
+  const finalItems = preview.ok && preview.lastItemGross !== undefined && normalized.length > 0
+    ? [...normalized.slice(0, -1), { ...normalized[normalized.length - 1]!, project_no_vat_gross_price: preview.lastItemGross }]
+    : normalized;
   const amounts = predictPurchaseItemAmounts(finalItems);
   const bookingSideSignals: string[] = [];
   for (const entry of amounts) {
     if (entry.vat > 0 && rateMatches(entry.net, entry.vat, vatRatesInForceOn(invoiceDate)).length === 0) bookingSideSignals.push("vat_rate_implausible");
+  }
+  // The non-deductible rate must be the document's unique rate in force (P1 proves the per-row amounts).
+  const rate = documentVatRate(values);
+  if (nonDeductible && (rate === undefined || finalItems.some((item) => normalizeVatRate(item.vat_rate_dropdown) !== rate))) {
+    bookingSideSignals.push("vat_rate_not_document_rate");
   }
   const view: BookingView = {
     clients_id: data.clients_id,
@@ -530,9 +638,11 @@ function recordMismatches(
  */
 export function draftReadbackMismatches(
   draft: PurchaseInvoice, model: CreatePurchaseInvoiceData, totals: { vatPrice?: number; grossPrice?: number }, isVatRegistered: boolean,
+  accounts?: readonly Account[],
 ): string[] {
-  const preview = previewPurchaseInvoiceTotals(model, totals.vatPrice, totals.grossPrice, isVatRegistered);
-  const normalized = normalizeItemsForNonVat(model.items, isVatRegistered, totals.grossPrice);
+  const preview = previewPurchaseInvoiceTotals(model, totals.vatPrice, totals.grossPrice, isVatRegistered, accounts);
+  const nonDeductible = !isVatRegistered && classifyNonVatInvoiceForm(model.items, accounts) === "non_deductible";
+  const normalized = normalizeItemsForNonVat(model.items, isVatRegistered, totals.grossPrice, nonDeductible);
   const expectedItems = preview.ok && preview.lastItemGross !== undefined && normalized.length > 0
     ? [...normalized.slice(0, -1), { ...normalized[normalized.length - 1]!, project_no_vat_gross_price: preview.lastItemGross }]
     : normalized;
@@ -981,7 +1091,7 @@ class ReadingDocumentOperations {
         const { invoiceData } = booking.effective;
         let created;
         try {
-          created = await this.api.purchaseInvoices.createAndSetTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg);
+          created = await this.api.purchaseInvoices.createAndSetTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg, booking.effective.accounts);
         } catch (error: unknown) {
           if (error instanceof InvoiceCreationError) {
             return fail("invoice_creation_failed", error.message, "never", { mutationOccurred: true, mutatedObjects: [{ type: "purchase_invoice", id: error.invoiceId }] });
@@ -1032,7 +1142,7 @@ class ReadingDocumentOperations {
         try {
           this.api.purchaseInvoices.invalidateListCache();
           const draft = await this.api.purchaseInvoices.get(created.id);
-          const mismatches = draftReadbackMismatches(draft, invoiceData, booking, isVatReg);
+          const mismatches = draftReadbackMismatches(draft, invoiceData, booking, isVatReg, booking.effective.accounts);
           if (mismatches.length > 0) {
             readbackMismatch = mismatches;
             throw new Error("draft_readback_mismatch");
@@ -1101,6 +1211,14 @@ class ReadingDocumentOperations {
       const latest = await this.api.purchaseInvoices.get(input.invoiceId);
       if (latest.status !== "PROJECT" || draftFingerprint(latest) !== plan.draft_fingerprint) {
         return fail<ConfirmReadingResult>("draft_changed", "The draft changed after it was created and reviewed; it is not registered. Review it in e-arveldaja.", "never");
+      }
+      // GitHub #63 (P4): a non-VAT draft carrying a VAT account registers only when the proof accepts it on a fresh chart.
+      if ((latest.items ?? []).some(hasVatAccountFields) && !(await isCompanyVatRegistered(this.api))) {
+        const refusal = nonVatRegisterRefusal(latest, await this.api.readonly.getAccounts({ fresh: true }));
+        if (refusal !== undefined) {
+          return fail<ConfirmReadingResult>("nonvat_form_unproven",
+            `The draft is not registered: its VAT-account rows are not a proven non-deductible form (${refusal}). Review it in e-arveldaja.`, "never");
+        }
       }
 
       await this.api.purchaseInvoices.confirm(input.invoiceId);

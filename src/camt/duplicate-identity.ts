@@ -3,6 +3,8 @@ import { roundMoney } from "../money.js";
 import { centsKey } from "../money-cents.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { TRANSACTION_DESCRIPTION_MAX_LENGTH } from "../bank-transaction-create.js";
+import { buildCamtDescriptionWithMetadataV1, renderCamtDescriptionV1 } from "./marker-render-v1.js";
 import type {
   CamtPossibleDuplicateMatch,
   DuplicateLookup,
@@ -18,8 +20,7 @@ import type {
 // ../company-name helpers. Identity/fingerprint output MUST stay byte-compatible
 // with the baseline fixtures (the refnumber-dedup test proves this).
 
-const CAMT_DESCRIPTION_METADATA_PREFIX = "[e-arveldaja-mcp:camt";
-const TRANSACTION_DESCRIPTION_MAX_LENGTH = 150;
+export const CAMT_DESCRIPTION_METADATA_PREFIX = "[e-arveldaja-mcp:camt";
 
 export function normalizeOptionalReference(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -29,11 +30,11 @@ export function normalizeOptionalReference(value: string | undefined): string | 
   return normalized;
 }
 
-function encodeCamtMetadataValue(value: string): string {
+export function encodeCamtMetadataValue(value: string): string {
   return encodeURIComponent(value);
 }
 
-function bankReferenceHash(value: string): string {
+export function bankReferenceHash(value: string): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
 }
 
@@ -80,7 +81,7 @@ function normalizeCamtDescriptionLineBreaks(description: string): string {
   return description.replace(/&#(?:10|x0*a);/gi, "\n");
 }
 
-function markerSafeDescription(description: string | undefined): string | undefined {
+export function markerSafeDescription(description: string | undefined): string | undefined {
   if (!description) return undefined;
   const escaped = normalizeCamtDescriptionLineBreaks(description)
     .replace(/(^|\n)(\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\])/g, "$1\\$2")
@@ -88,7 +89,7 @@ function markerSafeDescription(description: string | undefined): string | undefi
   return escaped || undefined;
 }
 
-function stripCamtDescriptionMetadata(description: string | undefined): string | undefined {
+export function stripCamtDescriptionMetadata(description: string | undefined): string | undefined {
   if (!description) return undefined;
   const stripped = normalizeCamtDescriptionLineBreaks(description)
     .replace(/(?:^|\n)\[e-arveldaja-mcp:camt\s+[^\]\r\n]+\]\s*$/g, "")
@@ -126,6 +127,8 @@ function buildCamtEntrySignature(parts: {
   description?: string;
   sourceDirection?: ParsedCamtEntry["direction"];
   instructionId?: string;
+  /** `x=i`: the counterparty IBAN was left out of the marker (bankAccountNo is then absent). */
+  ibanOmitted?: boolean;
 }): string | undefined {
   if (!parts.bankReferenceKey || !parts.date || !parts.type || !Number.isFinite(parts.amount)) {
     return undefined;
@@ -145,56 +148,139 @@ function buildCamtEntrySignature(parts: {
   // Appended only when present, so every marker written without `instr=`
   // keeps its signature byte-for-byte.
   if (parts.instructionId) signatureParts.push(`instr:${parts.instructionId}`);
+  // Likewise for `x=i`: removing the flag, or adding it to a row that had no
+  // IBAN, breaks the sig.
+  if (parts.ibanOmitted) signatureParts.push("omit:iban");
   return shortStableHash(JSON.stringify(signatureParts));
 }
 
-export function extractCamtDescriptionMetadata(description: string | null | undefined): {
+/** The fields of a CAMT marker line. */
+export interface CamtDescriptionMetadata {
   bank_ref_number?: string;
   bank_ref_hash?: string;
   bank_account_no?: string;
   entry_sig?: string;
   source_direction?: ParsedCamtEntry["direction"];
   instruction_id?: string;
-} {
+  /** `x=i`: the counterparty IBAN was left out on purpose (signed). */
+  iban_omitted?: true;
+  /**
+   * Contradictory or malformed identity fields (two references or hashes that
+   * differ, a hash that is not the reference's, a bad `b=`, an unknown `x=`,
+   * `x=i` beside an IBAN). No identity field is returned: the row is never
+   * trusted and never duplicate evidence, only hold evidence.
+   */
+  poisoned?: true;
+  /** Poisoned markers only: the lookup key of every reference and hash the marker claims. */
+  claimed_reference_keys?: string[];
+}
+
+// A field starts at the start of the marker body or after whitespace, so a
+// value containing `i=` (or `x=i`) is never read as a field of its own.
+const CAMT_MARKER_FIELD = /(?<=^|\s)(bank_ref_number|bank_ref_hash|bank_account_no|entry_sig|source_direction|instr|br|brh|iban|sig|dir|b|h|i|s|d|x)=([^\s\]]*)/g;
+
+/** A bank reference `b=` can carry: UPPERCASE hex of even length, 16..64 characters. */
+function isCompactHexReference(reference: string): boolean {
+  return reference.length >= 16 && reference.length <= 64 && reference.length % 2 === 0 && /^[0-9A-F]+$/.test(reference);
+}
+
+function encodeCompactHexReference(reference: string): string {
+  return Buffer.from(reference, "hex").toString("base64url");
+}
+
+/** The UPPERCASE hex reference of a canonical `b=` value, else undefined. */
+function decodeCompactHexReference(value: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]{11,43}$/.test(value)) return undefined;
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.length < 8 || bytes.length > 32 || bytes.toString("base64url") !== value) return undefined;
+  return bytes.toString("hex").toUpperCase();
+}
+
+export function extractCamtDescriptionMetadata(description: string | null | undefined): CamtDescriptionMetadata {
   if (!description) return {};
   const normalizedDescription = normalizeCamtDescriptionLineBreaks(description).trimEnd();
   const match = normalizedDescription.match(/(?:^|\n)\[e-arveldaja-mcp:camt\s+([^\]\r\n]+)\]$/);
   if (!match) return {};
 
-  const metadata: { bank_ref_number?: string; bank_ref_hash?: string; bank_account_no?: string; entry_sig?: string; source_direction?: ParsedCamtEntry["direction"]; instruction_id?: string } = {};
-  for (const [, key, value] of match[1]!.matchAll(/(bank_ref_number|bank_ref_hash|bank_account_no|entry_sig|source_direction|instr|br|brh|iban|sig|dir|h|i|s|d)=([^\s\]]+)/g)) {
-    const decoded = decodeCamtMetadataValue(value);
-    if (!decoded) continue;
-    if (key === "bank_ref_number" || key === "br") metadata.bank_ref_number = decoded;
-    if (key === "bank_ref_hash" || key === "brh" || key === "h") metadata.bank_ref_hash = normalizeStoredBankReferenceHash(key === "h" ? `sha256:${decoded}` : decoded);
-    if (key === "bank_account_no" || key === "iban" || key === "i") metadata.bank_account_no = decoded;
+  const metadata: CamtDescriptionMetadata = {};
+  const references = new Set<string>();
+  const hashes = new Set<string>();
+  let ibanPresent = false;
+  let poisoned = false;
+  for (const [, key, value] of match[1]!.matchAll(CAMT_MARKER_FIELD)) {
+    // Presence is significant even when the value is empty: an `x=i` row
+    // cannot also claim an IBAN under any spelling.
+    if (key === "bank_account_no" || key === "iban" || key === "i") ibanPresent = true;
+    if (key === "b") {
+      const reference = decodeCompactHexReference(value!);
+      if (reference === undefined) poisoned = true;
+      else {
+        metadata.bank_ref_number = reference;
+        references.add(reference);
+      }
+      continue;
+    }
+    if (key === "x") {
+      if (value === "i") metadata.iban_omitted = true;
+      else poisoned = true;
+      continue;
+    }
+    const decoded = decodeCamtMetadataValue(value!);
+    if (!decoded) {
+      if (["bank_ref_number", "br", "bank_ref_hash", "brh", "h"].includes(key!)) poisoned = true;
+      continue;
+    }
+    if (key === "bank_ref_number" || key === "br") {
+      metadata.bank_ref_number = decoded;
+      references.add(decoded);
+    }
+    if (key === "bank_ref_hash" || key === "brh" || key === "h") {
+      metadata.bank_ref_hash = normalizeStoredBankReferenceHash(key === "h" ? `sha256:${decoded}` : decoded);
+      if (metadata.bank_ref_hash) hashes.add(metadata.bank_ref_hash);
+      else poisoned = true;
+    }
+    if (key === "bank_account_no" || key === "iban" || key === "i") {
+      metadata.bank_account_no = decoded;
+      ibanPresent = true;
+    }
     if (key === "entry_sig" || key === "sig" || key === "s") metadata.entry_sig = normalizeStoredEntrySignature(decoded);
     if ((key === "source_direction" || key === "dir" || key === "d") && (decoded === "CRDT" || decoded === "DBIT")) metadata.source_direction = decoded;
     if (key === "instr" && MARKER_INSTRUCTION_ID.test(decoded)) metadata.instruction_id = decoded;
   }
+  const referenceKeys = [...references]
+    .map((reference) => bankReferenceLookupKey(reference))
+    .filter((key): key is string => key !== undefined);
+  // Same-value repeats are fine; no released renderer writes any of these.
+  if (
+    poisoned ||
+    references.size > 1 ||
+    hashes.size > 1 ||
+    (referenceKeys.length === 1 && hashes.size === 1 && !hashes.has(referenceKeys[0]!)) ||
+    (metadata.iban_omitted && ibanPresent)
+  ) {
+    return { poisoned: true, claimed_reference_keys: [...new Set([...referenceKeys, ...hashes])] };
+  }
   return metadata;
-}
-
-function buildCamtDescriptionMarkerFromParts(parts: string[]): string | undefined {
-  return parts.length > 0
-    ? `${CAMT_DESCRIPTION_METADATA_PREFIX} ${parts.join(" ")}]`
-    : undefined;
 }
 
 /** A Refs/InstrId the marker persists: numeric, on an outgoing (DBIT) row. */
 const MARKER_INSTRUCTION_ID = /^\d{1,10}$/;
 
-function markerInstructionId(entry: ParsedCamtEntry): string | undefined {
+export function markerInstructionId(entry: ParsedCamtEntry): string | undefined {
   const id = normalizeOptionalReference(entry.instruction_id);
   return entry.direction === "DBIT" && id !== undefined && MARKER_INSTRUCTION_ID.test(id) ? id : undefined;
 }
 
-/** `legacy`: the dir-less signature an earlier release wrote (stored type, no direction). */
-function buildCamtEntrySignatureForParsedEntry(
+/**
+ * `legacy`: the dir-less signature an earlier release wrote (stored type, no direction).
+ * `ibanOmitted`: the `x=i` signature (no IBAN, `omit:iban` appended).
+ */
+export function buildCamtEntrySignatureForParsedEntry(
   entry: ParsedCamtEntry,
   cleanDescription: string | undefined,
   legacy = false,
   instructionId?: string,
+  ibanOmitted = false,
 ): string | undefined {
   const bankReferenceKey = bankReferenceLookupKey(entry.bank_reference);
   return buildCamtEntrySignature({
@@ -204,108 +290,214 @@ function buildCamtEntrySignatureForParsedEntry(
     currency: entry.currency,
     amount: entry.amount,
     refNumber: canonicalRefNumber(entry.reference_number).value,
-    bankAccountNo: entry.counterparty_iban,
+    bankAccountNo: ibanOmitted ? undefined : entry.counterparty_iban,
     bankAccountName: entry.counterparty_name,
     description: cleanDescription,
     sourceDirection: legacy ? undefined : entry.direction,
     instructionId: legacy ? undefined : instructionId,
+    ibanOmitted: !legacy && ibanOmitted,
   });
 }
 
-function buildCamtDescriptionMarker(
-  entry: ParsedCamtEntry,
-  cleanDescription: string | undefined,
-  instructionId?: string,
-): string | undefined {
-  const bankReference = normalizeOptionalReference(entry.bank_reference);
-  if (!bankReference && !entry.counterparty_iban) return undefined;
+// --- Marker selection (GitHub #64) -------------------------------------------
+//
+// V1 (marker-render-v1.ts) put the marker first and cut the text to whatever
+// was left. The forms below are tried in order instead, so the full text is
+// stored whenever any complete-identity form leaves room for it:
+//   C0 `br= iban= dir= sig=` (V1's first form), C1 `br= i= d= s=`,
+//   C2 `b= i= d= s=` (UPPERCASE hex refs), H `brh=`/`h=` with the IBAN, and,
+//   only on positive proof that the counterparty is not an own account, C3
+//   `b=/br=/h= x=i d= s=` (IBAN left out, signed).
 
-  const entrySignature = buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, false, instructionId);
-  const bankReferencePart = bankReference
-    ? `br=${encodeCamtMetadataValue(bankReference)}`
-    : undefined;
-  const bankReferenceHashPart = bankReference
-    ? `brh=${bankReferenceHash(bankReference)}`
-    : undefined;
-  const compactBankReferenceHashPart = bankReference
-    ? `h=${bankReferenceHash(bankReference).replace(/^sha256:/, "")}`
-    : undefined;
-  const bankAccountPart = entry.counterparty_iban
-    ? `iban=${encodeCamtMetadataValue(entry.counterparty_iban)}`
-    : undefined;
-  const signaturePart = entrySignature ? `sig=${entrySignature}` : undefined;
-  const directionPart = instructionId ? `dir=${entry.direction} instr=${instructionId}` : `dir=${entry.direction}`;
-  const compactBankAccountPart = entry.counterparty_iban
-    ? `i=${encodeCamtMetadataValue(entry.counterparty_iban)}`
-    : undefined;
-  const compactDirectionPart = instructionId ? `d=${entry.direction} instr=${instructionId}` : `d=${entry.direction}`;
-  const compactSignaturePart = entrySignature ? `s=${entrySignature}` : undefined;
-
-  const markerCandidates = [
-    buildCamtDescriptionMarkerFromParts([bankReferencePart, bankAccountPart, directionPart, signaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankReferenceHashPart, bankAccountPart, directionPart, signaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([compactBankReferenceHashPart, compactBankAccountPart, compactDirectionPart, compactSignaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankReferencePart, directionPart, signaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankReferenceHashPart, directionPart, signaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankAccountPart, directionPart, signaturePart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankReferencePart, directionPart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankReferenceHashPart, directionPart].filter((part): part is string => Boolean(part))),
-    buildCamtDescriptionMarkerFromParts([bankAccountPart, directionPart].filter((part): part is string => Boolean(part))),
-  ];
-
-  return markerCandidates.find((marker) => marker !== undefined && marker.length <= TRANSACTION_DESCRIPTION_MAX_LENGTH);
+interface CamtMarkerForm {
+  /** The encoded bank-reference field (`br=`, `b=`, `brh=` or `h=`). */
+  readonly reference: string;
+  /** The encoded counterparty field (`iban=`, `i=` or `x=i`), if any. */
+  readonly counterparty?: string;
+  /** `d=`/`s=` instead of `dir=`/`sig=`. */
+  readonly compact: boolean;
+  readonly ibanOmitted: boolean;
 }
 
-export function buildCamtDescriptionWithMetadata(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
-  const withoutInstruction = renderCamtDescriptionWithMetadata(description, entry);
-  const instructionId = markerInstructionId(entry);
-  if (!instructionId) return withoutInstruction;
-  // The instruction id is persisted only when it costs no description text:
-  // the stored text must stay exactly what a release without `instr=` stored,
-  // so exact duplicate keys and rendered-text checks are unchanged.
-  const withInstruction = renderCamtDescriptionWithMetadata(description, entry, instructionId);
-  const text = (stored: string | undefined) => stripCamtDescriptionMetadata(stored);
-  // ...and it must not cost an identity field either: a longer marker can fall
-  // back to a shorter form that drops the IBAN or bank reference the sig
-  // still covers, which would leave the row unverifiable.
-  const identity = (stored: string | undefined) => {
-    const { bank_ref_number, bank_ref_hash, bank_account_no, source_direction, entry_sig } = extractCamtDescriptionMetadata(stored);
-    return JSON.stringify([bank_ref_number, bank_ref_hash, bank_account_no, source_direction, entry_sig !== undefined]);
+/** Every sig is a 16-hex shortStableHash, so a form's length does not depend on the text. */
+const SIGNATURE_PLACEHOLDER = "0".repeat(16);
+
+function camtMarkerForms(entry: ParsedCamtEntry, reference: string): { complete: CamtMarkerForm[]; ibanOmitted: CamtMarkerForm[] } {
+  const fullReference = `br=${encodeCamtMetadataValue(reference)}`;
+  const compactReference = isCompactHexReference(reference) ? `b=${encodeCompactHexReference(reference)}` : undefined;
+  const hash = bankReferenceHash(reference);
+  const iban = entry.counterparty_iban ? encodeCamtMetadataValue(entry.counterparty_iban) : undefined;
+  const long = (field: string): CamtMarkerForm =>
+    ({ reference: field, counterparty: iban ? `iban=${iban}` : undefined, compact: false, ibanOmitted: false });
+  const compact = (field: string): CamtMarkerForm =>
+    ({ reference: field, counterparty: iban ? `i=${iban}` : undefined, compact: true, ibanOmitted: false });
+  const compactHash = `h=${hash.replace(/^sha256:/, "")}`;
+  return {
+    complete: [
+      long(fullReference),
+      compact(fullReference),
+      ...(compactReference ? [compact(compactReference)] : []),
+      long(`brh=${hash}`),
+      compact(compactHash),
+    ],
+    ibanOmitted: iban
+      ? [compactReference, fullReference, compactHash]
+          .filter((field): field is string => field !== undefined)
+          .map((field) => ({ reference: field, counterparty: "x=i", compact: true, ibanOmitted: true }))
+      : [],
   };
-  return withInstruction !== undefined &&
-    extractCamtDescriptionMetadata(withInstruction).instruction_id === instructionId &&
-    identity(withInstruction) === identity(withoutInstruction) &&
-    text(withInstruction) === text(withoutInstruction) &&
-    text(withInstruction) === markerSafeDescription(description)
-    ? withInstruction
-    : withoutInstruction;
 }
 
-function renderCamtDescriptionWithMetadata(
+function camtMarkerFromForm(form: CamtMarkerForm, direction: ParsedCamtEntry["direction"], signature: string, instructionId?: string): string {
+  const parts = [
+    form.reference,
+    form.counterparty,
+    `${form.compact ? "d" : "dir"}=${direction}`,
+    instructionId ? `instr=${instructionId}` : undefined,
+    `${form.compact ? "s" : "sig"}=${signature}`,
+  ].filter((part): part is string => part !== undefined);
+  return `${CAMT_DESCRIPTION_METADATA_PREFIX} ${parts.join(" ")}]`;
+}
+
+function camtMarkerFormLength(form: CamtMarkerForm, entry: ParsedCamtEntry, instructionId?: string): number {
+  return camtMarkerFromForm(form, entry.direction, SIGNATURE_PLACEHOLDER, instructionId).length;
+}
+
+/** The form signed over the text it stores. */
+function renderCamtMarkerForm(entry: ParsedCamtEntry, form: CamtMarkerForm, storedText: string | undefined, instructionId?: string): string {
+  const signature = buildCamtEntrySignatureForParsedEntry(entry, storedText, false, instructionId, form.ibanOmitted)!;
+  const marker = camtMarkerFromForm(form, entry.direction, signature, instructionId);
+  return storedText ? `${storedText}\n${marker}` : marker;
+}
+
+/** The row the CAMT import creates for this entry, as a trust check reads it back (no direct bank fields). */
+function renderedCamtRow(entry: ParsedCamtEntry, description: string): Parameters<typeof isTrustedCamtDescriptionMetadata>[0] {
+  return {
+    bank_ref_number: null,
+    date: entry.date,
+    type: "C",
+    amount: entry.amount,
+    cl_currencies_id: entry.currency || "EUR",
+    ref_number: canonicalRefNumber(entry.reference_number).value ?? null,
+    bank_account_no: null,
+    bank_account_name: entry.counterparty_name ?? null,
+    description,
+  };
+}
+
+/** V1's output stores the full text with a complete, verifiable identity. */
+function v1KeepsFullIdentity(v1: string | undefined, entry: ParsedCamtEntry, cleanDescription: string | undefined): v1 is string {
+  if (v1 === undefined || stripCamtDescriptionMetadata(v1) !== cleanDescription) return false;
+  const metadata = extractCamtDescriptionMetadata(v1);
+  if (metadata.poisoned || (metadata.bank_ref_number === undefined && metadata.bank_ref_hash === undefined)) return false;
+  if (entry.counterparty_iban && metadata.bank_account_no === undefined) return false;
+  return isTrustedCamtDescriptionMetadata(renderedCamtRow(entry, v1), metadata);
+}
+
+function camtMarkerIdentity(stored: string): string {
+  const metadata = extractCamtDescriptionMetadata(stored);
+  return JSON.stringify([
+    metadata.poisoned, metadata.bank_ref_number, metadata.bank_ref_hash, metadata.bank_account_no,
+    metadata.source_direction, metadata.entry_sig !== undefined, metadata.iban_omitted,
+  ]);
+}
+
+export interface CamtDescriptionRendering {
+  /** The description to store; undefined when held (or when there is nothing to store). */
+  readonly description?: string;
+  /** No complete-identity marker fits: the row must not be created (`camt_marker_identity_unfit`). */
+  readonly held?: true;
+  /** The stored text is shorter than the statement text. */
+  readonly truncated?: { readonly stored_length: number; readonly full_length: number };
+  /** The marker carries `x=i` instead of the counterparty IBAN. */
+  readonly ibanOmitted?: true;
+}
+
+function withTruncationReport(rendered: string | undefined, cleanDescription: string | undefined): CamtDescriptionRendering {
+  const storedLength = stripCamtDescriptionMetadata(rendered)?.length ?? 0;
+  const fullLength = cleanDescription?.length ?? 0;
+  return {
+    ...(rendered !== undefined ? { description: rendered } : {}),
+    ...(storedLength < fullLength ? { truncated: { stored_length: storedLength, full_length: fullLength } } : {}),
+  };
+}
+
+/**
+ * The description the CAMT import stores for an entry, with what it had to
+ * give up. `omitCounterpartyIban` is set only by the import projection, after
+ * positive proof that the counterparty IBAN is not an own account
+ * (camtIbanOmissionEvidence); every other caller gets the IBAN kept.
+ */
+export function renderCamtDescriptionDetailed(
   description: string | undefined,
   entry: ParsedCamtEntry,
-  instructionId?: string,
-): string | undefined {
+  options: { readonly omitCounterpartyIban?: boolean } = {},
+): CamtDescriptionRendering {
   const cleanDescription = markerSafeDescription(description);
-  const marker = buildCamtDescriptionMarker(entry, cleanDescription, instructionId);
-  if (!marker) return cleanDescription;
+  const v1 = buildCamtDescriptionWithMetadataV1(description, entry);
+  const reference = normalizeOptionalReference(entry.bank_reference);
+  // A reference-less entry has no sig to verify: exactly as V1 rendered it.
+  if (!reference || buildCamtEntrySignatureForParsedEntry(entry, cleanDescription) === undefined) {
+    return withTruncationReport(v1, cleanDescription);
+  }
+  // Every row V1 already stored whole and verifiable stays byte-identical
+  // (`instr=` included as V1 decided).
+  if (v1KeepsFullIdentity(v1, entry, cleanDescription)) return { description: v1 };
 
-  const separatorLength = cleanDescription ? 1 : 0;
-  const descriptionBudget = TRANSACTION_DESCRIPTION_MAX_LENGTH - marker.length - separatorLength;
-  if (!cleanDescription || descriptionBudget <= 0) return marker.slice(0, TRANSACTION_DESCRIPTION_MAX_LENGTH);
+  const forms = camtMarkerForms(entry, reference);
+  const fullTextFits = (form: CamtMarkerForm, instructionId?: string) =>
+    camtMarkerFormLength(form, entry, instructionId) + (cleanDescription ? cleanDescription.length + 1 : 0) <= TRANSACTION_DESCRIPTION_MAX_LENGTH;
+  const fullTextForm = forms.complete.find((form) => fullTextFits(form)) ??
+    (options.omitCounterpartyIban ? forms.ibanOmitted.find((form) => fullTextFits(form)) : undefined);
+  if (fullTextForm) {
+    const baseline = renderCamtMarkerForm(entry, fullTextForm, cleanDescription);
+    // `instr=` only on the same form and only while the full text still fits,
+    // so it never moves the choice to another form.
+    const instructionId = markerInstructionId(entry);
+    const withInstruction = instructionId && fullTextFits(fullTextForm, instructionId)
+      ? renderCamtMarkerForm(entry, fullTextForm, cleanDescription, instructionId)
+      : undefined;
+    const keepInstruction = withInstruction !== undefined &&
+      extractCamtDescriptionMetadata(withInstruction).instruction_id === instructionId &&
+      camtMarkerIdentity(withInstruction) === camtMarkerIdentity(baseline) &&
+      stripCamtDescriptionMetadata(withInstruction) === stripCamtDescriptionMetadata(baseline);
+    return {
+      description: keepInstruction ? withInstruction : baseline,
+      ...(fullTextForm.ibanOmitted ? { ibanOmitted: true as const } : {}),
+    };
+  }
 
-  const trimmedDescription = cleanDescription.length > descriptionBudget
-    ? cleanDescription.slice(0, descriptionBudget).trimEnd()
-    : cleanDescription;
-  // The sig covers the text actually stored, so a truncated row still passes
-  // its checksum. The sig has a fixed width, so re-signing keeps the marker's
-  // length and the budget computed above. (Releases before this signed the
-  // full text; such truncated rows stay unverifiable and are matched by
-  // findMarkerSignatureMatches instead.)
-  const storedMarker = trimmedDescription === cleanDescription
-    ? marker
-    : buildCamtDescriptionMarker(entry, trimmedDescription || undefined, instructionId) ?? marker;
-  return trimmedDescription ? `${trimmedDescription}\n${storedMarker}` : storedMarker;
+  // No form stores the full text: the shortest complete-identity form keeps
+  // the most of it (re-signed over the stored text). The IBAN is never dropped
+  // to save a cut it cannot avoid.
+  const shortest = forms.complete.reduce((best, form) =>
+    camtMarkerFormLength(form, entry) < camtMarkerFormLength(best, entry) ? form : best);
+  const markerLength = camtMarkerFormLength(shortest, entry);
+  // Not even the marker alone fits: hold rather than write a form that drops
+  // an identity field the sig covers.
+  if (markerLength > TRANSACTION_DESCRIPTION_MAX_LENGTH) return { held: true };
+  const budget = TRANSACTION_DESCRIPTION_MAX_LENGTH - markerLength - 1;
+  const storedText = budget > 0 && cleanDescription ? cleanDescription.slice(0, budget).trimEnd() || undefined : undefined;
+  return withTruncationReport(renderCamtMarkerForm(entry, shortest, storedText), cleanDescription);
+}
+
+/** The full-text C3 (`x=i`) rendering of this entry, whether or not it is eligible today. */
+function renderCamtDescriptionIbanOmitted(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
+  const reference = normalizeOptionalReference(entry.bank_reference);
+  if (!reference || !entry.counterparty_iban) return undefined;
+  const cleanDescription = markerSafeDescription(description);
+  if (buildCamtEntrySignatureForParsedEntry(entry, cleanDescription) === undefined) return undefined;
+  const form = camtMarkerForms(entry, reference).ibanOmitted.find((candidate) =>
+    camtMarkerFormLength(candidate, entry) + (cleanDescription ? cleanDescription.length + 1 : 0) <= TRANSACTION_DESCRIPTION_MAX_LENGTH);
+  return form ? renderCamtMarkerForm(entry, form, cleanDescription) : undefined;
+}
+
+export function buildCamtDescriptionWithMetadata(
+  description: string | undefined,
+  entry: ParsedCamtEntry,
+  options: { readonly omitCounterpartyIban?: boolean } = {},
+): string | undefined {
+  return renderCamtDescriptionDetailed(description, entry, options).description;
 }
 
 export function isTrustedCamtDescriptionMetadata(
@@ -322,7 +514,8 @@ export function isTrustedCamtDescriptionMetadata(
   >,
   metadata = extractCamtDescriptionMetadata(transaction.description),
 ): boolean {
-  if (!metadata.entry_sig) return false;
+  // Before the direct reference: a poisoned marker never verifies.
+  if (metadata.poisoned || !metadata.entry_sig) return false;
   const bankReferenceKey = bankReferenceLookupKey(transaction.bank_ref_number ?? undefined) ??
     bankReferenceLookupKey(metadata.bank_ref_number) ??
     metadata.bank_ref_hash;
@@ -333,13 +526,31 @@ export function isTrustedCamtDescriptionMetadata(
     currency: transaction.cl_currencies_id ?? "",
     amount: transaction.amount,
     refNumber: transaction.ref_number ?? undefined,
-    bankAccountNo: normalizeOptionalReference(transaction.bank_account_no ?? undefined) ?? metadata.bank_account_no,
+    // An `x=i` marker was signed without the IBAN, even if a direct one appears.
+    bankAccountNo: metadata.iban_omitted
+      ? undefined
+      : normalizeOptionalReference(transaction.bank_account_no ?? undefined) ?? metadata.bank_account_no,
     bankAccountName: transaction.bank_account_name ?? undefined,
     description: stripCamtDescriptionMetadata(transaction.description ?? undefined),
     sourceDirection: metadata.source_direction,
     instructionId: metadata.instruction_id,
+    ibanOmitted: metadata.iban_omitted === true,
   });
   return expectedSignature !== undefined && expectedSignature === metadata.entry_sig;
+}
+
+/**
+ * A row whose trusted CAMT marker says the counterparty IBAN was left out on
+ * purpose (`x=i`, written only after proof that it is not an own account) and
+ * that has no direct IBAN. Such a row is a KNOWN EXTERNAL counterparty, never
+ * "no IBAN": no name-based own-origin or own-transfer fallback may use it.
+ */
+export function isCamtCounterpartyIbanOmitted(
+  transaction: Parameters<typeof isTrustedCamtDescriptionMetadata>[0],
+): boolean {
+  if (normalizeOptionalReference(transaction.bank_account_no ?? undefined)) return false;
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  return metadata.iban_omitted === true && isTrustedCamtDescriptionMetadata(transaction, metadata);
 }
 
 /**
@@ -386,10 +597,12 @@ export function storedBankReferenceLookupKey(transaction: Pick<Transaction,
   "bank_account_name" |
   "description"
 >): string | undefined {
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  // A poisoned marker withdraws the row's identity, direct fields included.
+  if (metadata.poisoned) return undefined;
   const directBankReferenceKey = bankReferenceLookupKey(transaction.bank_ref_number ?? undefined);
   if (directBankReferenceKey) return directBankReferenceKey;
 
-  const metadata = extractCamtDescriptionMetadata(transaction.description);
   if (!isTrustedCamtDescriptionMetadata(transaction, metadata)) return undefined;
   return bankReferenceLookupKey(metadata.bank_ref_number) ?? metadata.bank_ref_hash;
 }
@@ -405,17 +618,18 @@ export function storedBankAccountNo(transaction: Pick<Transaction,
   "bank_account_name" |
   "description"
 >): string | undefined {
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  if (metadata.poisoned) return undefined;
   const directBankAccountNo = normalizeOptionalReference(transaction.bank_account_no ?? undefined);
   if (directBankAccountNo) return directBankAccountNo;
 
-  const metadata = extractCamtDescriptionMetadata(transaction.description);
   return isTrustedCamtDescriptionMetadata(transaction, metadata)
     ? metadata.bank_account_no
     : undefined;
 }
 
 export function buildDuplicateLookup(transactions: Transaction[], selectedDimensionId: number): DuplicateLookup {
-  const lookup: DuplicateLookup = { byBankRef: new Map(), byEntryKey: new Map(), bySignature: new Map(), byMarkerReference: new Map() };
+  const lookup: DuplicateLookup = { byBankRef: new Map(), byEntryKey: new Map(), bySignature: new Map(), byMarkerReference: new Map(), byPoisonedMarker: [] };
   for (const transaction of transactions) {
     addToDuplicateLookup(lookup, transaction, selectedDimensionId);
   }
@@ -439,6 +653,14 @@ export function addToDuplicateLookup(
     return;
   }
 
+  const metadata = extractCamtDescriptionMetadata(transaction.description);
+  // A poisoned row is never duplicate evidence, not even through its direct
+  // bank reference; it only holds the entries it may be (findPoisonedMarkerHolds).
+  if (metadata.poisoned) {
+    lookup.byPoisonedMarker.push(transaction);
+    return;
+  }
+
   const entryKey = buildExistingTransactionDuplicateKey(transaction, selectedDimensionId);
   if (entryKey) {
     const exactExisting = byEntryKey.get(entryKey) ?? [];
@@ -446,7 +668,6 @@ export function addToDuplicateLookup(
     byEntryKey.set(entryKey, exactExisting);
   }
 
-  const metadata = extractCamtDescriptionMetadata(transaction.description);
   if (metadata.entry_sig) pushToMap(lookup.bySignature, metadata.entry_sig, transaction);
   const markerReferenceKey = dimensionScopedBankReferenceLookupKey(markerBankReferenceLookupKey(metadata), selectedDimensionId);
   if (markerReferenceKey) pushToMap(lookup.byMarkerReference, markerReferenceKey, transaction);
@@ -460,6 +681,26 @@ export function addToDuplicateLookup(
   const existing = byBankRef.get(directBankRefKey) ?? [];
   existing.push(transaction.id);
   byBankRef.set(directBankRefKey, existing);
+}
+
+/**
+ * Stored rows with a poisoned CAMT marker that may be this entry: they claim
+ * its bank reference (in the marker or directly), or carry its date, amount
+ * and currency. Such an entry is held for review, neither created nor skipped
+ * as a duplicate.
+ */
+export function findPoisonedMarkerHolds(entry: ParsedCamtEntry, lookup: DuplicateLookup): Transaction[] {
+  const entryReferenceKey = bankReferenceLookupKey(entry.bank_reference);
+  return lookup.byPoisonedMarker.filter((row) => {
+    const claims = [
+      ...(extractCamtDescriptionMetadata(row.description).claimed_reference_keys ?? []),
+      directBankReferenceLookupKey(row),
+    ];
+    if (entryReferenceKey !== undefined && claims.includes(entryReferenceKey)) return true;
+    return row.date === entry.date &&
+      Number.isFinite(row.amount) && centsKey(row.amount) === centsKey(entry.amount) &&
+      (row.cl_currencies_id || "EUR") === (entry.currency || "EUR");
+  });
 }
 
 function pushToMap<T>(map: Map<string, T[]>, key: string, value: T): void {
@@ -512,8 +753,11 @@ export function findMarkerSignatureMatches(
   const cleanDescription = markerSafeDescription(entry.description);
   const signatures = new Set([
     extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
-    // What a release without the `instr=` marker field stored for this entry.
-    extractCamtDescriptionMetadata(renderCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
+    // What a release before #64 stored for this entry, with and without `instr=`.
+    extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadataV1(entry.description, entry)).entry_sig,
+    extractCamtDescriptionMetadata(renderCamtDescriptionV1(entry.description, entry)).entry_sig,
+    // The `x=i` rendering, whatever today's ownership evidence says.
+    extractCamtDescriptionMetadata(renderCamtDescriptionIbanOmitted(entry.description, entry)).entry_sig,
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription),
     buildCamtEntrySignatureForParsedEntry(entry, cleanDescription, true),
   ].filter((signature): signature is string => signature !== undefined));
@@ -610,39 +854,119 @@ export function buildExistingDuplicateKeysForEntry(entry: ParsedCamtEntry, selec
   return [...current, ...alias];
 }
 
-/** Current-identity keys, then legacy alias keys (what an earlier release stored for this same leg) not already current. */
+/**
+ * Current-identity keys, then legacy alias keys (what an earlier release stored
+ * for this same leg) not already current. `lossy`: keys whose rendering lost
+ * part of the entry's identity (IBAN left out, or text cut), so two different
+ * entries can share them (findLossyIdentityConflicts).
+ */
 function existingDuplicateKeysByKind(
   entry: ParsedCamtEntry,
   selectedDimensionId: number,
-): { current: string[]; alias: string[] } {
+): { current: string[]; alias: string[]; lossy: Set<string> } {
   const bankReference = normalizeOptionalReference(entry.bank_reference);
   const bankReferenceKey = dimensionScopedBankReferenceLookupKey(
     bankReferenceLookupKey(bankReference),
     selectedDimensionId,
   );
-  const current = [...new Set(bankReference && bankReferenceKey ? currentExistingDuplicateKeys(entry, bankReferenceKey) : [])];
+  const variants = bankReference && bankReferenceKey ? currentExistingDuplicateKeys(entry, bankReferenceKey) : [];
+  const current = [...new Set(variants.map((variant) => variant.key))];
+  const lossy = new Set<string>();
+  const exact = new Set<string>();
+  for (const variant of variants) (variant.lossy ? lossy : exact).add(variant.key);
   const alias = new Set<string>();
   for (const legacy of entry.legacy_identities ?? []) {
     const legacyEntry = { ...entry, ...legacy, legacy_identities: undefined };
-    for (const key of buildExistingDuplicateKeysForEntry(legacyEntry, selectedDimensionId)) {
+    const legacyKeys = existingDuplicateKeysByKind(legacyEntry, selectedDimensionId);
+    for (const key of [...legacyKeys.current, ...legacyKeys.alias]) {
       if (!current.includes(key)) alias.add(key);
+      (legacyKeys.lossy.has(key) ? lossy : exact).add(key);
     }
   }
-  return { current, alias: [...alias] };
+  return { current, alias: [...alias], lossy: new Set([...lossy].filter((key) => !exact.has(key))) };
 }
 
-function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: string): string[] {
-  return transactionTypesForDuplicateCompatibility(entry).map((type) => [
-      bankReferenceKey,
-      entry.date,
-      type,
-      entry.currency,
-      centsKey(entry.amount),
-      normalizeBatchDuplicateKeyPart(canonicalRefNumber(entry.reference_number).value),
-      normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
-      normalizeBatchDuplicateKeyPart(entry.counterparty_name),
-      normalizeBatchDuplicateKeyPart(buildCamtDescriptionWithMetadata(entry.description, entry)),
-    ].join("|"));
+/**
+ * One exact key per rendering this entry could have been stored as,
+ * independent of today's ownership evidence: the current rendering, the V1
+ * rendering (a release before #64), and the full-text `x=i` rendering, whose
+ * row reads back without an IBAN.
+ */
+function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: string): Array<{ key: string; lossy: boolean }> {
+  const cleanDescription = markerSafeDescription(entry.description);
+  const current = renderCamtDescriptionDetailed(entry.description, entry);
+  const ibanOmitted = renderCamtDescriptionIbanOmitted(entry.description, entry);
+  const renderings = [
+    ...(current.held ? [] : [{ description: current.description, ibanOmitted: false }]),
+    { description: buildCamtDescriptionWithMetadataV1(entry.description, entry), ibanOmitted: false },
+    ...(ibanOmitted !== undefined ? [{ description: ibanOmitted, ibanOmitted: true }] : []),
+  ];
+  const lossyByKey = new Map<string, boolean>();
+  for (const rendering of renderings) {
+    const lossy = rendering.ibanOmitted ||
+      (stripCamtDescriptionMetadata(rendering.description)?.length ?? 0) < (cleanDescription?.length ?? 0);
+    for (const type of transactionTypesForDuplicateCompatibility(entry)) {
+      const key = [
+        bankReferenceKey,
+        entry.date,
+        type,
+        entry.currency,
+        centsKey(entry.amount),
+        normalizeBatchDuplicateKeyPart(canonicalRefNumber(entry.reference_number).value),
+        normalizeBatchDuplicateKeyPart(rendering.ibanOmitted ? undefined : entry.counterparty_iban),
+        normalizeBatchDuplicateKeyPart(entry.counterparty_name),
+        normalizeBatchDuplicateKeyPart(rendering.description),
+      ].join("|");
+      lossyByKey.set(key, (lossyByKey.get(key) ?? true) && lossy);
+    }
+  }
+  return [...lossyByKey].map(([key, lossy]) => ({ key, lossy }));
+}
+
+/**
+ * Batch keys of entries a lossy exact key cannot tell apart: two entries that
+ * differ only in the IBAN an `x=i` row left out, or only after the point a
+ * stored text was cut, share such a key, and occurrence counting could let one
+ * consume the other's stored row while the other is created again. Per lossy
+ * key with stored rows: claimants with the same untruncated identity (IBAN +
+ * full text, e.g. identical legs) form one group and keep today's counting;
+ * two or more groups, or more stored rows than claimants, hold every claimant
+ * that no non-lossy key matches.
+ */
+export function findLossyIdentityConflicts(
+  entries: ParsedCamtEntry[],
+  lookup: DuplicateLookup,
+  selectedDimensionId: number,
+): Set<string> {
+  const keysByBatchKey = new Map<string, { entry: ParsedCamtEntry; keys: ReturnType<typeof existingDuplicateKeysByKind> }>();
+  for (const entry of entries) {
+    const batchKey = buildBatchDuplicateKey(entry);
+    if (!keysByBatchKey.has(batchKey)) keysByBatchKey.set(batchKey, { entry, keys: existingDuplicateKeysByKind(entry, selectedDimensionId) });
+  }
+  const claimantsByKey = new Map<string, string[]>();
+  for (const [batchKey, { keys }] of keysByBatchKey) {
+    for (const key of keys.lossy) pushToMap(claimantsByKey, key, batchKey);
+  }
+  const occurrences = findExactKeyOccurrences(entries, selectedDimensionId);
+  const untruncatedIdentity = (entry: ParsedCamtEntry) => JSON.stringify([
+    normalizeBatchDuplicateKeyPart(entry.counterparty_iban),
+    normalizeBatchDuplicateKeyPart(markerSafeDescription(entry.description)),
+  ]);
+  const held = new Set<string>();
+  for (const [key, claimants] of claimantsByKey) {
+    const storedCount = lookup.byEntryKey.get(key)?.length ?? 0;
+    if (storedCount === 0) continue;
+    const groups = new Set(claimants.map((batchKey) => untruncatedIdentity(keysByBatchKey.get(batchKey)!.entry)));
+    if (groups.size < 2 && storedCount <= claimants.length) continue;
+    for (const batchKey of claimants) {
+      const { keys } = keysByBatchKey.get(batchKey)!;
+      const entryOccurrences = occurrences.get(batchKey);
+      const nonLossyMatch = [...keys.current, ...keys.alias].some((candidate) => !keys.lossy.has(candidate) &&
+        (lookup.byEntryKey.get(candidate)?.length ?? 0) >= Math.max(1, entryOccurrences?.get(candidate) ?? 1));
+      if (!nonLossyMatch) held.add(batchKey);
+    }
+  }
+  return held;
 }
 
 /**

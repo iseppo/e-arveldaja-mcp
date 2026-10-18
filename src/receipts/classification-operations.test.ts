@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { buildCamtDescriptionWithMetadataV1 } from "../camt/marker-render-v1.js";
 import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { logAudit } from "../audit-log.js";
 import {
@@ -839,8 +840,9 @@ describe("classification operations — ledger context (F6)", () => {
   function camtRow(spec: {
     id: number; amount: number; date: string; direction: "CRDT" | "DBIT"; name: string;
     iban?: string; reference?: string; description?: string; dim?: number;
+    render?: typeof buildCamtDescriptionWithMetadataV1;
   }) {
-    const description = buildCamtDescriptionWithMetadata(spec.description ?? "laen", {
+    const description = (spec.render ?? buildCamtDescriptionWithMetadata)(spec.description ?? "laen", {
       date: spec.date,
       amount: spec.amount,
       currency: "EUR",
@@ -1077,7 +1079,7 @@ describe("classification operations — ledger context (F6)", () => {
   });
 
   it("(h2) a cap-filling row whose sig fails says it may be a legacy truncated marker", async () => {
-    const long = camtRow({ id: 17, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE, description: `Laenu tagastus ${"x".repeat(160)}` });
+    const long = camtRow({ id: 17, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE, description: `Laenu tagastus ${"x".repeat(160)}`, render: buildCamtDescriptionWithMetadataV1 });
     // Same shape as a row an earlier release stored: cut at the cap, sig over text no longer stored.
     const legacy = { ...long, description: long.description!.replace(/sig=([0-9a-f])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
     expect(legacy.description!.length).toBe(150);

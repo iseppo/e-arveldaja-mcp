@@ -81,6 +81,23 @@ function makeData(rows: number, errorCount = 0): CamtImportRenderData {
 }
 
 describe("renderCamtImportCompact", () => {
+  it("reports signed IBAN omission even when no description is shortened", () => {
+    const data = makeData(1);
+    data.results[0] = { ...data.results[0]!, counterparty_iban_omitted: true };
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: "camt_counterparty_iban_omitted" })]));
+    expect(summary.warnings?.some(w => w.code === "camt_description_truncated")).toBe(false);
+  });
+
+  it.each(["camt_marker_identity_unfit", "camt_marker_conflict_review", "camt_lossy_identity_ambiguous"])("requires review for an all-held dry run: %s", skip_code => {
+    const data = makeData(0);
+    data.projection.skipped.push({ date: "2026-02-01", amount: 10, duplicate_transaction_ids: [], reason: "Needs review", skip_code });
+    const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data });
+    expect(summary.status).toBe("needs_review");
+    expect(summary.counts?.held_for_review).toBe(1);
+    expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({ code: skip_code })]));
+  });
+
   it("stays approximately constant from 100 to 1000 clean rows and under the batch budget", () => {
     const bytes100 = mcpPayloadBytes(renderCamtImportCompact({ mode: "DRY_RUN", data: makeData(100) }));
     const bytes1000 = mcpPayloadBytes(renderCamtImportCompact({ mode: "DRY_RUN", data: makeData(1000) }));

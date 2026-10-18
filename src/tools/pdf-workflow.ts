@@ -1042,7 +1042,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       journal_date: z.string().describe("Turnover/booking date (YYYY-MM-DD)"),
       term_days: z.number().describe("Payment term days"),
       items: jsonObjectArrayInput.describe(
-        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch)."
+        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch). Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
       ),
       vat_price: z.number().optional().describe("EXACT total VAT from the original invoice; never recalculate. Omit only if truly absent from the document."),
       gross_price: z.number().optional().describe("EXACT total gross from the original invoice; never recalculate. Omit only if truly absent from the document."),
@@ -1100,7 +1100,9 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       if (nonVatRefusal) return nonVatRefusal;
 
       // Validate dimension requirements before hitting the API
-      const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
+      const { items, dimErrors, accounts } = await applyPurchaseVatDefaultsAndValidateDimensions(
+        api, purchaseArticles, rawItems, isVatReg, { allowNonDeductible: true },
+      );
       if (dimErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
@@ -1134,7 +1136,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // createAndSetTotals' own totals rules, on predicted item amounts, before
       // the duplicate scans and any write: totals the API would refuse after
       // create are refused here with zero writes.
-      const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, params.vat_price, params.gross_price, isVatReg);
+      const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, params.vat_price, params.gross_price, isVatReg, accounts);
       if (!totalsPreview.ok) {
         return toolError({ error: totalsPreview.message, category: totalsPreview.code, retry: "never" });
       }
@@ -1202,6 +1204,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
           params.vat_price,
           params.gross_price,
           isVatReg,
+          accounts,
         );
       } catch (error: unknown) {
         // createAndSetTotals invalidates the draft internally on PATCH failure but

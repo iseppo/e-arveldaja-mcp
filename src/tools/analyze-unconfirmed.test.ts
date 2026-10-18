@@ -413,6 +413,24 @@ describe("analyze_unconfirmed_transactions", () => {
   });
 
   describe("inter-account detection", () => {
+    it.each(["DBIT", "CRDT"] as const)("never infers own origin from the name of a trusted C3 %s row", async direction => {
+      const description = "a".repeat(60);
+      const tx = { id: 987, status: "PROJECT", is_deleted: false, type: "C", amount: 100,
+        date: "2026-03-20", accounts_dimensions_id: 100, cl_currencies_id: "EUR",
+        bank_account_name: "Test OÜ", bank_account_no: null, bank_ref_number: null, ref_number: null,
+        description: buildCamtDescriptionWithMetadata(description, {
+          date: "2026-03-20", amount: 100, currency: "EUR", direction,
+          counterparty_name: "Test OÜ", counterparty_iban: "EE471000001020145685",
+          bank_reference: "2947447407B8F111BB4E0627B324E395", description,
+          duplicate: false, duplicate_transaction_ids: [],
+        }, { omitCounterpartyIban: true }),
+      };
+      expect(isTrustedCamtDescriptionMetadata(tx as any)).toBe(true);
+      const handler = setupTool({ transactions: [tx], bankAccounts: defaultBankAccounts, companyName: "Test OÜ" });
+      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      expect(payload.suggestions.every((s: any) => s.suggested_action !== "confirm_inter_account")).toBe(true);
+    });
+
     it("does not pick a single target when the counterparty IBAN backs several own accounts", async () => {
       const handler = setupTool({
         transactions: [{

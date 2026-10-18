@@ -24,7 +24,13 @@ import type {
   ImportRejectedField,
   StatementBalanceCheckResult,
 } from "./types.js";
-import { isCamtJournalReviewRow } from "./projection.js";
+import {
+  CAMT_HOLD_SKIP_CODES,
+  CAMT_LOSSY_IDENTITY_AMBIGUOUS,
+  CAMT_MARKER_CONFLICT_REVIEW,
+  CAMT_MARKER_IDENTITY_UNFIT,
+  isCamtJournalReviewRow,
+} from "./projection.js";
 
 // OUTPUT layer. This is the only CAMT module that shapes MCP envelopes and
 // applies the OCR/untrusted-text sandbox (wrapUntrustedOcr). The pure
@@ -89,6 +95,8 @@ export function camtResultRow(
     ...(descriptor.storedDescription !== descriptor.entry.description
       ? { stored_description: descriptor.storedDescription }
       : {}),
+    ...(descriptor.description_truncated ? { description_truncated: descriptor.description_truncated } : {}),
+    ...(descriptor.counterparty_iban_omitted ? { counterparty_iban_omitted: true as const } : {}),
   };
 }
 
@@ -142,6 +150,10 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     possible_duplicate_count: input.possibleDuplicates.length,
     // Skipped rows an existing journal may already book; they stay unimported.
     journal_review_count: projection.skipped.filter(isCamtJournalReviewRow).length,
+    // Rows whose stored text is shorter than the statement text, and rows
+    // whose marker left the (proven external) counterparty IBAN out.
+    description_truncated_count: input.results.filter(row => row.description_truncated !== undefined).length,
+    counterparty_iban_omitted_count: input.results.filter(row => row.counterparty_iban_omitted === true).length,
   };
 
   const sanitizedStatementMetadata = {
@@ -166,6 +178,16 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     bank_reference: wrapUntrustedOcr(row.bank_reference),
     ref_number: wrapUntrustedOcr(row.ref_number),
   }));
+  // No statement text: date, amount, the wrapped bank reference and lengths only.
+  const descriptionTruncatedRows = input.results
+    .filter(row => row.description_truncated !== undefined)
+    .map(row => ({
+      date: row.date,
+      amount: row.amount,
+      bank_reference: wrapUntrustedOcr(row.bank_reference),
+      stored_length: row.description_truncated!.stored_length,
+      full_length: row.description_truncated!.full_length,
+    }));
   const sanitizedSkipped = projection.skipped.map(row => ({
     ...row,
     bank_reference: wrapUntrustedOcr(row.bank_reference),
@@ -231,6 +253,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
     skipped_count: summary.skipped_count,
     error_count: summary.error_count,
     sample: sanitizedResults.slice(0, 10),
+    ...(descriptionTruncatedRows.length > 0 ? { description_truncated_rows: descriptionTruncatedRows } : {}),
     execution: buildBatchExecutionContract({
       mode,
       summary,
@@ -344,6 +367,10 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   const journalReviews = data.projection.skipped.filter(isCamtJournalReviewRow);
   const partialLegacy = data.projection.skipped.filter(row => row.review_code === undefined && row.review_note !== undefined);
   const nativeMatches = data.projection.skipped.filter(row => row.skip_code === "camt_native_import_match");
+  // Neither created nor skipped as duplicates: each needs a human look.
+  const heldRows = data.projection.skipped.filter(row => row.skip_code !== undefined && CAMT_HOLD_SKIP_CODES.includes(row.skip_code));
+  const truncatedCount = data.results.filter(row => row.description_truncated !== undefined).length;
+  const ibanOmittedCount = data.results.filter(row => row.counterparty_iban_omitted === true).length;
   const counts = {
     total_statement_entries: data.projection.totalStatementEntries,
     eligible_entries: data.projection.eligibleEntries,
@@ -353,6 +380,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     possible_duplicates: possibleDuplicateCount,
     journal_reviews: journalReviews.length,
     auto_matched: nativeMatches.length,
+    held_for_review: heldRows.length,
     errors: data.errorCount,
   };
   const totals = {
@@ -393,6 +421,28 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     };
   }), moreHint));
 
+  const holdWarning: Record<string, string> = {
+    [CAMT_MARKER_IDENTITY_UNFIT]: "row(s) not created: the bank reference and counterparty account are too long for a verifiable import marker. Next: book them by hand from the bank statement.",
+    [CAMT_MARKER_CONFLICT_REVIEW]: "row(s) not created: an existing transaction with a contradictory import marker may be the same payment. Next: check that transaction against the bank statement, correct or delete it, then re-run the preview.",
+    [CAMT_LOSSY_IDENTITY_AMBIGUOUS]: "row(s) not created: a stored row with a shortened description or a left-out IBAN matches more than one statement entry. Next: compare the ledger with the bank statement and create only the missing rows manually.",
+  };
+  for (const code of CAMT_HOLD_SKIP_CODES) {
+    const count = heldRows.filter(row => row.skip_code === code).length;
+    if (count > 0) warnings.push({ code, message: `${count} ${holdWarning[code]}` });
+  }
+  if (truncatedCount > 0) {
+    warnings.push({
+      code: "camt_description_truncated",
+      message: `${truncatedCount} row(s) store a shortened description. Next: nothing to do; the full text is in the bank statement and the row is still recognised on re-import.`,
+    });
+  }
+  if (ibanOmittedCount > 0) {
+    warnings.push({
+      code: "camt_counterparty_iban_omitted",
+      message: `${ibanOmittedCount} row(s) keep the full description but leave the counterparty IBAN out of the import marker. Next: nothing to do; the IBAN is only in the bank statement, and these rows are treated as external payments and never auto-paired as own transfers.`,
+    });
+  }
+
   // Errors (indeterminate / failed commands) surface as blockers — never hidden.
   const blockers: CompactReviewItem[] = [];
   if (!dryRun && data.errorCount > 0) {
@@ -430,7 +480,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
   const status = compactImportStatus({
     dryRun,
     zeroWrite,
-    reviews: journalReviews.length + partialLegacy.length > 0,
+    reviews: journalReviews.length + partialLegacy.length + heldRows.length > 0,
     reviewsBlockApproval: false,
     failed: data.errorCount > 0,
   });

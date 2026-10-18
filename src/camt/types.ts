@@ -110,6 +110,8 @@ export interface DuplicateLookup {
   bySignature: Map<string, Transaction[]>;
   /** Rows by the dimension-scoped bank-reference key their CAMT marker carries (trusted or not). */
   byMarkerReference: Map<string, Transaction[]>;
+  /** Rows whose CAMT marker is poisoned: never duplicate evidence, only hold evidence. */
+  byPoisonedMarker: Transaction[];
 }
 
 export interface PossibleDuplicateLookup {
@@ -161,6 +163,10 @@ export interface CamtCreateDescriptor {
   clientResolution: ClientResolution;
   possibleDuplicateMatches: CamtPossibleDuplicateMatch[];
   batchDuplicateKey: string;
+  /** The stored text is shorter than the statement text (the full text stays in the statement). */
+  description_truncated?: { stored_length: number; full_length: number };
+  /** The marker carries `x=i` instead of the counterparty IBAN (proven external). */
+  counterparty_iban_omitted?: true;
 }
 
 export interface CamtSkippedRow {

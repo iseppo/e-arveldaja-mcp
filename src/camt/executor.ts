@@ -34,8 +34,11 @@ import {
   buildDuplicateLookup,
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
+  findLossyIdentityConflicts,
   findPartialLegacyEntries,
+  findPoisonedMarkerHolds,
 } from "./duplicate-identity.js";
+import { camtIbanOmissionEvidence, isCamtIbanOmissionEligible } from "./iban-omission.js";
 import {
   buildCamtJournalCoverageContext,
   classifyCamtJournalCoverage,
@@ -277,13 +280,17 @@ export class CamtJournalSnapshotError extends Error {
   }
 }
 
-/** Journals (with postings), bank accounts and the dimension's own bank GL account. */
-async function loadCamtJournalSnapshot(api: ApiContext, accountsDimensionsId: number): Promise<CamtJournalSnapshot> {
+/**
+ * Journals (with postings), bank accounts and the dimension's own bank GL
+ * account. `freshBankAccounts`: bypass the bank-account cache, so an execute
+ * never reuses the ownership evidence its preview saw (the `x=i` decision).
+ */
+async function loadCamtJournalSnapshot(api: ApiContext, accountsDimensionsId: number, freshBankAccounts = false): Promise<CamtJournalSnapshot> {
   let dimensions, bankAccounts, journals;
   try {
     [dimensions, bankAccounts, journals] = await Promise.all([
       api.readonly.getAccountDimensions(),
-      api.readonly.getBankAccounts(),
+      freshBankAccounts ? api.readonly.getBankAccounts({ fresh: true }) : api.readonly.getBankAccounts(),
       api.journals.listAllWithPostings(),
     ]);
   } catch (error) {
@@ -319,9 +326,10 @@ export async function buildImportProjection(
   accountsDimensionsId: number,
   dateFrom: string | undefined,
   dateTo: string | undefined,
+  freshBankAccounts = false,
 ): Promise<CamtImportProjection> {
   const ledgerTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
-  const journalCoverage = await loadCamtJournalSnapshot(api, accountsDimensionsId);
+  const journalCoverage = await loadCamtJournalSnapshot(api, accountsDimensionsId, freshBankAccounts);
   return computeCamtImportProjection({
     loaded,
     accountsDimensionsId,
@@ -645,7 +653,9 @@ export async function executeCamtImport(
 
   let projection: CamtImportProjection;
   try {
-    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo);
+    // Uncached bank accounts: a changed `x=i` decision changes a stored
+    // description, which the fingerprint compare below reports as plan_drift.
+    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo, true);
   } catch (error) {
     if (error instanceof CamtJournalSnapshotError) return { ok: false, code: error.code, message: error.message };
     throw error;
@@ -709,11 +719,19 @@ export async function executeCamtImport(
       for (const created of createdThisRun) {
         if (!listedIds.has(created.id)) addToDuplicateLookup(lookup, created, accountsDimensionsId);
       }
+      // The projection's holds, on the fresh ledger: a lossy key now shared
+      // by competing entries, and a stored row with a poisoned marker.
+      if (findLossyIdentityConflicts(projection.parsed.entries, lookup, accountsDimensionsId).has(descriptor.batchDuplicateKey)) {
+        return { outcome: "drift", error_code: "camt_lossy_identity_ambiguous" };
+      }
       const duplicateIds = findDuplicateTransactionIds(
         descriptor.entry, lookup, projection.repeatedBankReferences, accountsDimensionsId,
         exactKeyOccurrences.get(buildBatchDuplicateKey(descriptor.entry)),
       );
       if (duplicateIds.length > 0) return { outcome: "drift", error_code: "duplicate_appeared" };
+      if (findPoisonedMarkerHolds(descriptor.entry, lookup).length > 0) {
+        return { outcome: "drift", error_code: "poisoned_marker_appeared" };
+      }
       // The group-level partial-legacy check, on the same fresh ledger: an old
       // aggregate row of this entry's split group may have appeared too.
       const entries = projection.parsed.entries;
@@ -733,10 +751,21 @@ export async function executeCamtImport(
       api.journals.invalidateListCache();
       let snapshot: CamtJournalSnapshot;
       try {
-        snapshot = await loadCamtJournalSnapshot(api, accountsDimensionsId);
+        snapshot = await loadCamtJournalSnapshot(api, accountsDimensionsId, descriptor.counterparty_iban_omitted === true);
       } catch (error) {
         if (error instanceof CamtJournalSnapshotError) return { outcome: "drift", error_code: error.code };
         throw error;
+      }
+      // An `x=i` row needs fresh proof that its counterparty is still not an
+      // own account (one may have been added since the projection).
+      if (
+        descriptor.counterparty_iban_omitted &&
+        !isCamtIbanOmissionEligible(
+          camtIbanOmissionEvidence(snapshot.bankAccounts, projection.statementMetadata.iban),
+          descriptor.entry.counterparty_iban,
+        )
+      ) {
+        return { outcome: "drift", error_code: "camt_iban_ownership_changed" };
       }
       const coverage = classifyCamtJournalCoverage(descriptor.entry, buildCamtJournalCoverageContext({
         snapshot,

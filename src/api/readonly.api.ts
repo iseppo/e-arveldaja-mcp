@@ -131,8 +131,10 @@ async function readonlyCachedGetAll<T>(client: HttpClient, path: string): Promis
 export class ReferenceDataApi {
   constructor(private client: HttpClient) {}
 
-  // Chart of accounts
-  async getAccounts(): Promise<Account[]> {
+  // Chart of accounts. `fresh` drops the 10-minute cache key first (the
+  // non-deductible VAT proofs need the chart as it is now).
+  async getAccounts(options: { fresh?: boolean } = {}): Promise<Account[]> {
+    if (options.fresh === true) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/accounts:all"));
     return readonlyCachedGetAll<Account>(this.client, "/accounts");
   }
 
@@ -211,7 +213,9 @@ export class ReferenceDataApi {
   }
 
   // Bank accounts
-  async getBankAccounts(): Promise<BankAccount[]> {
+  /** `fresh`: bypass the reference-data cache (e.g. an execute re-checking account ownership). */
+  async getBankAccounts(options: { fresh?: boolean } = {}): Promise<BankAccount[]> {
+    if (options.fresh) invalidateReadonlyCache(this.client, "/bank_accounts");
     return readonlyCachedGetAll<BankAccount>(this.client, "/bank_accounts");
   }
 

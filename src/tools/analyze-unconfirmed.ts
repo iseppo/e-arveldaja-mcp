@@ -13,6 +13,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  isCamtCounterpartyIbanOmitted,
   journalEurNetCents,
   resolveTransfer,
   resolveWithReferences,
@@ -170,6 +171,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       const hasOwnOriginEvidence = (row: Transaction, sourceDim: number): boolean => {
         const iban = counterpartyIbanOf(row);
         if (iban) return ownIbanToDimension.get(iban)?.has(sourceDim) ?? false;
+        if (isCamtCounterpartyIbanOmitted(row)) return false;
         return sameCompanyIdentity(row.bank_account_name, companyLegalName);
       };
       const reconcileReviewReason = (tx: Transaction, targetDim: number): string | undefined => {
@@ -496,7 +498,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
 
         // Check counterparty name matches company name
         // Same name AND legal form, as reconcile's one-sided inference requires.
-        if (!isInterAccount && !markerUnverified) {
+        if (!isInterAccount && !markerUnverified && !isCamtCounterpartyIbanOmitted(tx)) {
           if (sameCompanyIdentity(tx.bank_account_name, companyLegalName)) {
             const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== txDim);
             const booked = otherDimensions.length === 1 ? alreadyBookedTransfer(otherDimensions[0]!) : undefined;

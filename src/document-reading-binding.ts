@@ -161,8 +161,10 @@ export function checkBookingBinding(accepted: AcceptedValues, booking: BookingVi
         (item.reversed_vat_id === undefined || item.reversed_vat_id === null) && parseVatRateDropdown(item.vat_rate_dropdown) !== 0);
       if (deductible) mismatch("items");
     }
-  } else if (accepted.gross !== null && !near(booking.effective.itemGross, accepted.gross)) {
-    mismatch("items");
+  } else {
+    // Non-VAT: invoice VAT is 0 (folded) or, in the non-deductible form (GitHub #63), exactly the document's VAT.
+    if (isSet(booking.vat_price) && booking.vat_price !== 0 && (accepted.vat === null || !near(booking.vat_price!, accepted.vat))) mismatch("vat_price");
+    if (accepted.gross !== null && !near(booking.effective.itemGross, accepted.gross)) mismatch("items");
   }
   const expectedNet = accepted.net ?? (accepted.gross !== null ? accepted.gross - (accepted.vat ?? 0) : undefined);
   if (expectedNet !== undefined && !near(booking.effective.itemNet, expectedNet)) mismatch("items");
@@ -173,7 +175,9 @@ export function checkBookingBinding(accepted: AcceptedValues, booking: BookingVi
     ctx.bookingSideSignals.some((signal) => REVERSE_CHARGE_SIGNALS.includes(signal)) ||
     ctx.supplierCountry !== "EST";
   if (ctx.vatRegistered && reverseChargeIndicated && reversedItems.length === 0) holds.push(bindingHold("reading_reverse_charge_unbooked"));
-  if (ctx.bookingSideSignals.includes("vat_rate_implausible")) holds.push(bindingHold("booking_vat_rate_implausible"));
+  if (ctx.bookingSideSignals.includes("vat_rate_implausible") || ctx.bookingSideSignals.includes("vat_rate_not_document_rate")) {
+    holds.push(bindingHold("booking_vat_rate_implausible"));
+  }
 
   if (accepted.due_date !== null && accepted.invoice_date !== null) {
     const term = dayDiff(accepted.invoice_date, accepted.due_date);

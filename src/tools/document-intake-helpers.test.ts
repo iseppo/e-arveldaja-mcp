@@ -83,7 +83,8 @@ describe("non-VAT item guards", () => {
       error: "Non-VAT purchase invoice contains deductible VAT fields",
       category: "manual_review_required",
       details: ["items[0].vat_accounts_id must be absent", 'items[0].vat_rate_dropdown must be absent or "-"'],
-      next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+      next_action: "Use one non-VAT form for every item: folded (no VAT account, article 11, rate \"-\") or non-deductible VAT on the cost account " +
+        "(VAT account and dimension = the item's cost account and dimension, article 11, the document's VAT rate), then review and retry.",
     });
   });
 });

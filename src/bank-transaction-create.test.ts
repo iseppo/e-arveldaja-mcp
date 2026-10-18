@@ -5,6 +5,14 @@ import { REF_NUMBER_MAX_LENGTH } from "./ref-number.js";
 import { extractCamtDescriptionMetadata } from "./tools/camt-import.js";
 
 describe("bank transaction create boundary", () => {
+  it.each(["i=EE471000001020145685", "x=i"])("weaves refs before dense C2/C3 marker: %s", counterparty => {
+    const marker = `[e-arveldaja-mcp:camt b=KUdEdAe48RG7TgYnsyTjlQ ${counterparty} d=DBIT s=0123456789abcdef]`;
+    const result = weaveFullRefIntoDescription(`x\n${marker}`, "FULL-REF");
+    expect(result).toBe(`x FULL-REF\n${marker}`);
+    expect(extractCamtDescriptionMetadata(result).source_direction).toBe("DBIT");
+    expect(bankTransactionDirection({ description: result })).toBe("outgoing");
+  });
+
   it("books an explicit incoming direction as API type D (cash debited at confirm)", async () => {
     const create = vi.fn().mockResolvedValue({ created_object_id: 91 });
     const api = { transactions: { create } };

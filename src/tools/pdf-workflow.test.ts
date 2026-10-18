@@ -203,6 +203,7 @@ describe("pdf workflow tools", () => {
       23.99,
       123.99,
       true,
+      expect.any(Array),
     );
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
     expect(payload.note).toContain("confirm_purchase_invoice");

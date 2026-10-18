@@ -14,6 +14,7 @@ import { renderCamtImportCompact } from "../camt/presenter.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { preflightCamt053Xml } from "../camt/parser.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { buildCamtDescriptionWithMetadataV1 } from "../camt/marker-render-v1.js";
 import {
   createAccountingWorkflowApi,
   createMockToolServer,
@@ -68,6 +69,89 @@ const mockedLogAudit = vi.mocked(logAudit);
 
 const singleEntryXml = fixtureCamtXml();
 const counterpartyIban = "EE471000001020145685";
+
+describe("CAMT marker dense forms: execution and reporting", () => {
+  const args = { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 };
+  const markerXml = (text = "a".repeat(60)) => withUnstructuredDescription(
+    withCounterpartyIban(singleEntryXml).replaceAll("REF-VOID-1", "2947447407B8F111BB4E0627B324E395"), text);
+  const load = (xml: string) => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(xml);
+    const parsed = preflightCamt053Xml(xml);
+    if (!parsed.ok) throw new Error("fixture preflight failed");
+    return parsed.value.entries;
+  };
+  const asRow = (entry: ReturnType<typeof load>[number], description: string) => ({
+    id: 9010, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 7,
+    date: entry.date, amount: entry.amount, type: "C", cl_currencies_id: entry.currency,
+    bank_ref_number: null, bank_account_no: null, ref_number: entry.reference_number ?? null,
+    bank_account_name: entry.counterparty_name, description,
+  });
+
+  it.each([60, 100])("reports omission or truncation for %i characters in preview and execute", async length => {
+    load(markerXml("a".repeat(length)));
+    const { api, handler } = setupCamtTool({ allowWrites: true });
+    const dry = parseMcpResponse((await handler(args)).content[0]!.text);
+    const executed = parseMcpResponse((await handler({ ...args, execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
+    for (const payload of [dry, executed]) {
+      expect(payload.summary.description_truncated_count).toBe(length === 100 ? 1 : 0);
+      expect(payload.summary.counterparty_iban_omitted_count).toBe(length === 60 ? 1 : 0);
+      if (length === 60) expect(payload.sample[0].counterparty_iban_omitted).toBe(true);
+    }
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("holds a poisoned marker appearing after projection, direct reference=%s", async direct => {
+    const [entry] = load(markerXml());
+    const { api, handler } = setupCamtTool({ allowWrites: true });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    const row = asRow(entry!, buildCamtDescriptionWithMetadata(entry!.description, entry!, { omitCounterpartyIban: true })!.replace(/\]$/, " bank_account_no=X]"));
+    if (direct) (row.bank_ref_number as string | null) = entry!.bank_reference!;
+    let reads = 0;
+    api.transactions.listAll.mockImplementation(async () => reads++ === 0 ? [] : [row]);
+    const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(payload.execution.execution_report.stop_reason).toMatchObject({ category: "plan_drift", code: "poisoned_marker_appeared" });
+  });
+
+  it.each(["projection", "row"])("refuses ownership changes at the %s fresh read", async phase => {
+    load(markerXml());
+    const { api, handler } = setupCamtTool({ allowWrites: true });
+    const plan_handle = await issueCamtPlanHandle(handler, args);
+    const own = fixtureBankAccount({ accounts_dimensions_id: 7 });
+    const newlyOwn = fixtureBankAccount({ accounts_dimensions_id: 8, iban_code: counterpartyIban, account_no: counterpartyIban });
+    let freshReads = 0;
+    api.readonly.getBankAccounts.mockImplementation(async (options?: { fresh?: boolean }) => {
+      if (!options?.fresh) return [own];
+      return ++freshReads >= (phase === "projection" ? 1 : 2) ? [own, newlyOwn] : [own];
+    });
+    const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+    expect(api.transactions.create).not.toHaveBeenCalled();
+    expect(api.readonly.getBankAccounts).toHaveBeenCalledWith({ fresh: true });
+    if (phase === "projection") expect(payload.category).toBe("plan_drift");
+    else expect(payload.execution.execution_report.stop_reason).toMatchObject({ category: "plan_drift", code: "camt_iban_ownership_changed" });
+  });
+
+  it.each(["C3", "V1"])("holds competing %s identities when the stored row appears at the write boundary", async kind => {
+    const aXml = markerXml(kind === "V1" ? "a".repeat(35) + "A" : "a".repeat(60));
+    const ntry = aXml.match(/<Ntry>[\s\S]*?<\/Ntry>/)![0];
+    const bNtry = kind === "V1" ? ntry.replace("a".repeat(35) + "A", "a".repeat(35) + "B") : ntry.replace(counterpartyIban, "GB82WEST12345698765432");
+    const xml = aXml.replace("</Stmt>", `${bNtry}</Stmt>`);
+    for (const reverse of [false, true]) {
+      const source = reverse ? aXml.replace(ntry, bNtry + ntry) : xml;
+      const entries = load(source);
+      const { api, handler } = setupCamtTool({ allowWrites: true });
+      const plan_handle = await issueCamtPlanHandle(handler, args);
+      const e = entries[0]!;
+      const row = asRow(e, kind === "V1" ? buildCamtDescriptionWithMetadataV1(e.description, e)! : buildCamtDescriptionWithMetadata(e.description, e, { omitCounterpartyIban: true })!);
+      let reads = 0;
+      api.transactions.listAll.mockImplementation(async () => reads++ === 0 ? [] : [row]);
+      const payload = parseMcpResponse((await handler({ ...args, execute: true, plan_handle })).content[0]!.text);
+      expect(api.transactions.create).not.toHaveBeenCalled();
+      expect(payload.execution.execution_report.stop_reason).toMatchObject({ category: "plan_drift", code: "camt_lossy_identity_ambiguous" });
+    }
+  });
+});
 
 function bankReferenceHash(value: string): string {
   return "sha256:" + createHash("sha256").update(value).digest("hex");
@@ -1663,7 +1747,8 @@ describe("camt import tool", () => {
 
     const payload = api.transactions.create.mock.calls[0]![0] as { description?: string };
     expect(payload.description?.length).toBeLessThanOrEqual(150);
-    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-LONG-DESC-1 iban=EE471000001020145685 dir=DBIT sig=[a-f0-9]{16}\]/);
+    // Too long for any form: the shortest complete-identity form keeps the most text.
+    expect(payload.description).toMatch(/\[e-arveldaja-mcp:camt br=REF-LONG-DESC-1 i=EE471000001020145685 d=DBIT s=[a-f0-9]{16}\]/);
     expect(payload.description).toContain("Long CAMT description");
   });
 
@@ -1700,7 +1785,12 @@ describe("camt import tool", () => {
   </BkToCstmrStmt>
 </Document>`);
 
-    const { api, handler } = setupCamtTool();
+    // A bank account with only a local account number leaves the ownership
+    // evidence unknown, so the counterparty IBAN is kept (no x=i).
+    const { api, handler } = setupCamtTool({ bankAccounts: [
+      fixtureBankAccount({ accounts_dimensions_id: 7 }),
+      fixtureBankAccount({ accounts_dimensions_id: 8, iban_code: "", account_no: "10220034796011" }),
+    ] });
 
     await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
@@ -1719,7 +1809,12 @@ describe("camt import tool", () => {
     const mediumBankReference = "REF-" + "1234567890".repeat(9);
     mockedReadFile.mockResolvedValue(withCounterpartyIban(singleEntryXml.replace(/REF-VOID-1/g, mediumBankReference)));
 
-    const { api, handler } = setupCamtTool();
+    // A bank account with only a local account number leaves the ownership
+    // evidence unknown, so the counterparty IBAN is kept (no x=i).
+    const { api, handler } = setupCamtTool({ bankAccounts: [
+      fixtureBankAccount({ accounts_dimensions_id: 7 }),
+      fixtureBankAccount({ accounts_dimensions_id: 8, iban_code: "", account_no: "10220034796011" }),
+    ] });
 
     await executeGranularWithPlan(handler, {
       file_path: "/tmp/camt.xml",
@@ -2002,8 +2097,8 @@ describe("camt import tool", () => {
     const payload = parseMcpResponse(result.content[0]!.text);
 
     expect(payload.sample[0]!.description).toEqual(expect.stringMatching(wrapped(longDescription)));
-    expect(payload.sample[0]!.stored_description).toContain("br=REF-VOID-1 iban=EE471000001020145685");
-    expect(payload.sample[0]!.stored_description).toMatch(/sig=[a-f0-9]{16}\]/);
+    expect(payload.sample[0]!.stored_description).toContain("br=REF-VOID-1 i=EE471000001020145685");
+    expect(payload.sample[0]!.stored_description).toMatch(/ s=[a-f0-9]{16}\]/);
   });
 
   it("matches clients by normalized company name when findByName returns multiple variants", async () => {

@@ -49,6 +49,7 @@ import {
   counterpartyIbanOf,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
+  isCamtCounterpartyIbanOmitted,
   resolveTransfer,
   resolveWithReferences,
   transferReferenceOf,
@@ -842,6 +843,8 @@ export async function runInterAccountMatching(
   function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
     const iban = counterpartyIbanOf(row);
     if (iban) return ownIbanToDimension.get(iban)?.has(sourceDimensionId) ?? false;
+    // An `x=i` row left out a proven external IBAN: no name fallback.
+    if (isCamtCounterpartyIbanOmitted(row)) return false;
     return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
   }
 
@@ -884,6 +887,8 @@ export async function runInterAccountMatching(
     for (const txIn of incoming) {
       if (!txIn.id || consumedTxIds.has(txIn.id)) continue;
       if (txOut.accounts_dimensions_id === txIn.accounts_dimensions_id) continue;
+      // A trusted `x=i` leg is a proven external payment, on either side.
+      if (isCamtCounterpartyIbanOmitted(txOut) || isCamtCounterpartyIbanOmitted(txIn)) continue;
 
       const compatibility = getTransferPairCompatibility(txOut, txIn, maxGap);
       if (!compatibility) continue;
@@ -1119,6 +1124,7 @@ export async function runInterAccountMatching(
 
     for (const other of phaseOneRemaining) {
       if (!other.id || other.id === tx.id || consumedTxIds.has(other.id) || blockedOneSidedTxIds.has(other.id)) continue;
+      if (isCamtCounterpartyIbanOmitted(tx) || isCamtCounterpartyIbanOmitted(other)) continue;
       if (other.type !== tx.type) continue;
       if (other.accounts_dimensions_id !== txInference.targetDimension) continue;
 

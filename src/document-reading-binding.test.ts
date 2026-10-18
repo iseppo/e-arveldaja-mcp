@@ -79,6 +79,16 @@ describe("checkBookingBinding", () => {
     expect(checkBookingBinding(ACCEPTED, booking(), ctx())).toEqual({ holds: [], warnings: [] });
   });
 
+  it("non-VAT invoice VAT must equal accepted document VAT when nonzero", () => {
+    const accepted = { ...ACCEPTED, net: 11.92, vat: 1.07, gross: 12.99 };
+    const booked = booking({ vat_price: 1.07, gross_price: 12.99, effective: { itemNet: 11.92, itemGross: 12.99 } });
+    expect(codes(checkBookingBinding(accepted, booked, ctx({ vatRegistered: false })).holds)).toEqual([]);
+    expect(codes(checkBookingBinding({ ...accepted, vat: null }, booked, ctx({ vatRegistered: false })).holds))
+      .toContain("booking_field_mismatch:vat_price");
+    expect(codes(checkBookingBinding(accepted, booked, ctx({ vatRegistered: false, bookingSideSignals: ["vat_rate_not_document_rate"] })).holds))
+      .toContain("booking_vat_rate_implausible");
+  });
+
   it("T-B-fields: client, number, date, currency, gross and VAT mismatches hold with the field", () => {
     expect(codes(checkBookingBinding(ACCEPTED, booking({ clients_id: 8 }), ctx()).holds)).toEqual(["booking_field_mismatch:clients_id"]);
     expect(codes(checkBookingBinding(ACCEPTED, booking(), ctx({ supplierCandidateIds: [7, 8] })).holds)).toEqual(["booking_field_mismatch:clients_id"]);

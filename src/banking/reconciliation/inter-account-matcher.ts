@@ -9,6 +9,7 @@ import { comparableTransactionAmount, sameAmountToTheCent } from "./match-score.
 import { hasMeaningfulComparableAmount } from "./amount-resolution.js";
 import {
   extractCamtDescriptionMetadata,
+  isCamtCounterpartyIbanOmitted,
   isTrustedCamtDescriptionMetadata,
   journalDocumentReferenceKeys,
   normalizeOptionalReference,
@@ -34,6 +35,13 @@ import {
 export function counterpartyIbanOf(tx: Transaction): string {
   return normalizeIban(storedBankAccountNo(tx)) ?? "";
 }
+
+/**
+ * True when a row's empty {@link counterpartyIbanOf} means "known external"
+ * (a trusted `x=i` CAMT marker), not "no IBAN": never a name-based own-origin
+ * or own-transfer fallback.
+ */
+export { isCamtCounterpartyIbanOmitted };
 
 /**
  * True when the row carries a signed CAMT marker whose `sig` does not verify:
@@ -212,6 +220,11 @@ export function inferOneSidedTransfer(
 ): OneSidedInference {
   if (tx.id && cache.has(tx.id)) {
     return cache.get(tx.id)!;
+  }
+  if (isCamtCounterpartyIbanOmitted(tx)) {
+    const inference: OneSidedInference = { confidence: 0, reasons: [] };
+    if (tx.id) cache.set(tx.id, inference);
+    return inference;
   }
 
   const { ownIbanToDimension, dimensionToIban, companyName } = lookups;

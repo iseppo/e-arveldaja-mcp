@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Journal, Transaction } from "../types/api.js";
 import { buildCounterpartyBookingHistory, lookupCounterpartyHistory } from "./counterparty-booking-history.js";
+import { buildCamtDescriptionWithMetadata, isCamtCounterpartyIbanOmitted } from "../camt/duplicate-identity.js";
 
 // Anonymised: company "Näide OÜ", related company "Laenaja OÜ", own bank dims
 // 100/200 on account 1020, loan dim 900 on account 2110, old treatment 1410/901.
@@ -74,6 +75,25 @@ function history(rows: RowSpec[]) {
 const month = (index: number) => `2026-${String(index).padStart(2, "0")}-15`;
 
 describe("counterparty booking history — chronological streak", () => {
+  it.each(["Laenaja", "Laenaja OÜ"])("C3 only allows legal-form name identity: %s", name => {
+    const rows = ledger([1, 2, 3].map(m => ({ date: month(m), name })));
+    for (const tx of rows.transactions) {
+      const description = "a".repeat(60);
+      tx.description = buildCamtDescriptionWithMetadata(description, {
+        date: tx.date, amount: tx.amount, currency: "EUR", direction: "CRDT", counterparty_name: name,
+        counterparty_iban: "EE471000001020145685", bank_reference: "2947447407B8F111BB4E0627B324E395",
+        description, duplicate: false, duplicate_transaction_ids: [],
+      }, { omitCounterpartyIban: true });
+      expect(isCamtCounterpartyIbanOmitted(tx)).toBe(true);
+    }
+    const index = buildCounterpartyBookingHistory({ ...rows, ownBankDimensionIds: OWN_DIMS });
+    const result = lookupCounterpartyHistory(index, { name, direction: "incoming", accounts_dimensions_id: 100 });
+    expect(result.history_total).toBe(name.endsWith("OÜ") ? 3 : 0);
+    // Query-side omission has the same rule even against an IBAN-less row.
+    const plain = history([1, 2, 3].map(m => ({ date: month(m), name })));
+    expect(lookupCounterpartyHistory(plain, { name, iban_omitted: true, direction: "incoming", accounts_dimensions_id: 100 }).history_total).toBe(name.endsWith("OÜ") ? 3 : 0);
+  });
+
   it("(1) suggests only the most recent unbroken run: 5× 1410/901 then 3× 2110/900 → 2110/900, streak 3, total 8", () => {
     const index = history([
       ...[1, 2, 3, 4, 5].map((m) => ({ date: month(m), contra: [[1410, 901]] as Array<[number, number]> })),

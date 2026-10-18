@@ -40,14 +40,20 @@ import {
   checkIntakeCashDuplicates,
   type DuplicatePostingCandidate,
 } from "../bank-posting-duplicate-guard.js";
-import { applyPurchaseVatDefaultsAndValidateDimensions, collectNonVatItemErrors, getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
+import {
+  applyPurchaseVatDefaultsAndValidateDimensions,
+  collectNonVatItemErrors,
+  getPurchaseArticlesWithVat,
+  hasVatAccountFields,
+  nonVatRegisterRefusal,
+} from "../tools/purchase-vat-defaults.js";
 import { isCompanyVatRegistered, parsePurchaseInvoiceItems, tagNotes } from "../tools/crud-tools.js";
 import { InvoiceCreationError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { CreatePurchaseInvoiceData } from "../types/api.js";
+import type { Account, CreatePurchaseInvoiceData } from "../types/api.js";
 import type {
   AccountingDocumentBookingFields,
   AccountingDocumentConfirmation,
@@ -168,6 +174,8 @@ export interface EffectiveBookingModel {
   readonly blockOnDuplicate: boolean;
   readonly allowDuplicateInvoiceNumber: boolean;
   readonly grossAmountEur?: number;
+  /** The chart the items were validated against (uncached for a non-VAT VAT-account item); not fingerprinted. */
+  readonly accounts?: readonly Account[];
 }
 
 // P0-1: compute the canonical effective booking model. Called IDENTICALLY at
@@ -197,12 +205,15 @@ export async function computeEffectiveBooking(
       return fail(
         "manual_review_required",
         `Non-VAT purchase invoice contains deductible VAT fields: ${details.join("; ")}. ` +
-          "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+          "Use one non-VAT form for every item: folded (no VAT account, article 11, rate \"-\") or non-deductible VAT on the cost account " +
+          "(VAT account and dimension = the item's cost account and dimension, article 11, the document's VAT rate), then review and retry.",
         "never",
       );
     }
   }
-  const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
+  const { items, dimErrors, accounts } = await applyPurchaseVatDefaultsAndValidateDimensions(
+    api, purchaseArticles, rawItems, isVatReg, { allowNonDeductible: true },
+  );
   if (dimErrors.length > 0) {
     return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
   }
@@ -247,7 +258,7 @@ export async function computeEffectiveBooking(
   // createAndSetTotals' own totals rules, on predicted item amounts, before
   // the fingerprint: prepare refuses, and so does a create whose stored plan
   // predates this check (create recomputes this model before any write).
-  const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg);
+  const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg, accounts);
   if (!totalsPreview.ok) return fail(totalsPreview.code, totalsPreview.message, "never");
 
   // Every material write value is bound: source identity, supplier id +
@@ -295,6 +306,7 @@ export async function computeEffectiveBooking(
     blockOnDuplicate,
     allowDuplicateInvoiceNumber,
     ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
+    accounts,
   });
 }
 
@@ -703,7 +715,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       if (wrongCompany !== undefined) {
         return fail(wrongCompany, CREATION_GATING_SIGNAL_WARNINGS[wrongCompany], "never");
       }
-      const { invoiceData, isVatReg, blockOnDuplicate, allowDuplicateInvoiceNumber, grossAmountEur } = effective.value;
+      const { invoiceData, isVatReg, blockOnDuplicate, allowDuplicateInvoiceNumber, grossAmountEur, accounts } = effective.value;
       const supplierName = effective.value.supplierName;
       const invoiceNumber = invoiceData.number;
       const items = invoiceData.items;
@@ -741,7 +753,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
       let result;
       try {
-        result = await this.api.purchaseInvoices.createAndSetTotals(invoiceData, input.vatPrice, input.grossPrice, isVatReg);
+        result = await this.api.purchaseInvoices.createAndSetTotals(invoiceData, input.vatPrice, input.grossPrice, isVatReg, accounts);
       } catch (error: unknown) {
         if (error instanceof InvoiceCreationError) {
           // Thrown only AFTER the invoice exists (it carries the id). The draft
@@ -854,6 +866,21 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     // Rejected with ZERO API side effect BEFORE any register call.
     if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson({ invoice_id: input.invoiceId })) {
       return fail("plan_drift", "The reviewed confirm plan no longer matches the requested invoice_id.", "never");
+    }
+
+    // GitHub #63 (P4): a non-VAT draft is read fresh; one carrying a VAT account
+    // registers only when the non-deductible proof accepts it on a fresh chart.
+    if (!(await isCompanyVatRegistered(this.api))) {
+      this.api.purchaseInvoices.invalidateListCache();
+      const draft = await this.api.purchaseInvoices.get(input.invoiceId);
+      if ((draft.items ?? []).some(hasVatAccountFields)) {
+        const refusal = nonVatRegisterRefusal(draft, await this.api.readonly.getAccounts({ fresh: true }));
+        if (refusal !== undefined) {
+          return fail("nonvat_form_unproven",
+            `Purchase invoice ${input.invoiceId} is not registered: its VAT-account rows are not a proven non-deductible form (${refusal}). Fix it in e-arveldaja or recreate it.`,
+            "never");
+        }
+      }
     }
 
     // Register via the same API confirm_purchase_invoice uses (PATCH .../register).

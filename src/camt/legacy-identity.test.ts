@@ -3,6 +3,7 @@ import { describe, it, expect } from "vitest";
 import { preflightCamt053Xml } from "./parser.js";
 import { computeCamtImportProjection } from "./projection.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "./duplicate-identity.js";
+import { buildCamtDescriptionWithMetadataV1 } from "./marker-render-v1.js";
 import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE } from "../banking/reconciliation/duplicate-policy.js";
 import type { ParsedCamtEntry, Transaction } from "./types.js";
 import type { Journal, SaleInvoice } from "../types/api.js";
@@ -193,6 +194,9 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
   }) as Transaction;
   const currentRow = (id: number, e: ParsedCamtEntry, over: Partial<Transaction> = {}) =>
     apiRow(id, e, buildCamtDescriptionWithMetadata(e.description, e)!, over);
+  /** What a release before #64 wrote: the marker first, the text cut to fill the cap. */
+  const v1Row = (id: number, e: ParsedCamtEntry, over: Partial<Transaction> = {}) =>
+    apiRow(id, e, buildCamtDescriptionWithMetadataV1(e.description, e)!, over);
   const legacyMarker = (e: ParsedCamtEntry, signature = sig(e, e.direction === "CRDT" ? "D" : "C", false)) =>
     `[e-arveldaja-mcp:camt br=${e.bank_reference} iban=${e.counterparty_iban} sig=${signature}]`;
   const projectEntries = (xml: string, ledger: Transaction[]) => project(xml, ledger);
@@ -214,7 +218,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
 
   it("signs a truncated row over the stored text, so its marker verifies", () => {
     const [entry] = parse(wrap(crdt(E682)));
-    const row = currentRow(9001, entry!);
+    const row = v1Row(9001, entry!);
     expect(row.description!.length).toBe(MAX);
     const [text, marker] = row.description!.split("\n") as [string, string];
     expect(text.length).toBeLessThan(entry!.description!.length);
@@ -324,7 +328,7 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     // This marker leaves a 57-char budget; characters 56-57 are spaces, so the renderer stores 55.
     const xml = wrap(crdt({ ...E682, ref: "TRIM-REF-1", ustrd: `RKID:${"1".repeat(50)}  SA 2026 14 09.09.2026` }));
     const [entry] = parse(xml);
-    const row = currentRow(9013, entry!);
+    const row = v1Row(9013, entry!);
     expect(row.description!.length).toBeLessThan(MAX);
     const rerun = await projectBooked(xml, [row]);
     expect(rerun.descriptors).toHaveLength(0);
@@ -334,8 +338,8 @@ describe("CAMT re-import against API-read-back rows whose marker sig fails (F3)"
     const xml = wrap(crdt({ amount: "170.90", date: "2026-05-22", ref: "1E569879CB55F111BB420A0159F9DEBB", name: "RUNIKON RETAIL OÜ", iban: "EE582200221083078634", ustrd: "IKEA.COM/EE/EE, st683943, 961358341328", dir: "DBIT" }));
     const [entry] = parse(xml);
     const description = `${entry!.description}\n${legacyMarker(entry!)}`;
-    // Today's marker is longer (dir=), so today's renderer would cut the text.
-    expect(buildCamtDescriptionWithMetadata(entry!.description, entry!)!.split("\n")[0]!.length).toBeLessThan(entry!.description!.length);
+    // The V1 marker is longer (dir=), so the V1 renderer would cut the text.
+    expect(buildCamtDescriptionWithMetadataV1(entry!.description, entry!)!.split("\n")[0]!.length).toBeLessThan(entry!.description!.length);
     const rerun = await projectBooked(xml, [apiRow(9004, entry!, description)]);
     expect(rerun.descriptors).toHaveLength(0);
     expect(skippedAsDuplicate(rerun)).toHaveLength(1);

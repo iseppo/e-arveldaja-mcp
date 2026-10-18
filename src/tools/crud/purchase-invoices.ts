@@ -15,6 +15,7 @@ import {
   applyPurchaseItemStructuralDefaults,
   applyPurchaseVatDefaultsAndValidateDimensions,
   getPurchaseArticlesWithVat,
+  hasVatAccountFields,
   refuseNonVatItemsWithVatFields,
 } from "../purchase-vat-defaults.js";
 import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
@@ -100,7 +101,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       base_gross_price: z.number().optional().describe("Actual settled EUR gross total; auto-derived from currency_rate when omitted."),
       liability_accounts_id: z.number().optional().describe("Liability account (default 2310)"),
       items: jsonObjectArrayInput.describe(
-        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
+        "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
       ),
       notes: z.string().optional().describe("Notes"),
       bank_ref_number: z.string().optional().describe("Payment reference number"),
@@ -121,7 +122,9 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
 
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
       // Validate dimension requirements before hitting the API
-      const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
+      const { items, dimErrors, accounts } = await applyPurchaseVatDefaultsAndValidateDimensions(
+        api, purchaseArticles, rawItems, isVatReg, { allowNonDeductible: true },
+      );
       if (dimErrors.length > 0) {
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
@@ -156,6 +159,7 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         params.vat_price,
         params.gross_price,
         isVatReg,
+        accounts,
       );
       logAudit({
         tool: "create_purchase_invoice", action: "CREATED", entity_type: "purchase_invoice",
@@ -223,6 +227,17 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     if (parsed.items !== undefined && isDraft) {
       const isVatReg = await isCompanyVatRegistered(api);
       const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(parsed.items));
+      // GitHub #63: rows of the non-deductible form (VAT on the cost account) are
+      // not edited here: the defaults would fold them silently, and a supplied
+      // VAT-account row would skip the create-time proof.
+      if (!isVatReg && ((current.items ?? []).some(hasVatAccountFields) || rawItems.some(hasVatAccountFields))) {
+        return toolError({
+          error: "Supplied item updates are not supported for a non-VAT purchase invoice whose rows carry a VAT account (non-deductible VAT on the cost account).",
+          category: "manual_review_required",
+          code: "nonvat_nondeductible_update_unsupported",
+          next_action: "Edit the rows in e-arveldaja, or delete the draft and recreate it with create_purchase_invoice. Header-only updates (without items) keep the rows unchanged.",
+        });
+      }
       const nonVatRefusal = refuseNonVatItemsWithVatFields(isVatReg, rawItems);
       if (nonVatRefusal) return nonVatRefusal;
       const purchaseArticles = await getPurchaseArticlesWithVat(api);
@@ -277,7 +292,10 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       const isVatReg = await isCompanyVatRegistered(api);
       let preview: PurchaseInvoiceTotalsCorrectionPreview;
       try {
-        preview = await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg);
+        // Non-VAT: the fresh chart for the non-deductible proof (GitHub #63).
+        preview = isVatReg
+          ? await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg)
+          : await api.purchaseInvoices.previewTotalsCorrection(id, isVatReg, await api.readonly.getAccounts({ fresh: true }));
       } catch (error) {
         if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
           return totalsCorrectionToolError(error);
@@ -312,14 +330,19 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
       }
 
       const isVatReg = await isCompanyVatRegistered(api);
+      // Non-VAT: the fresh chart for the register proof (GitHub #63).
+      const chart = isVatReg ? {} : { accounts: await api.readonly.getAccounts({ fresh: true }) };
       let result;
       try {
         result = recalculate_totals === true
           ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg, {
               recalculateTotals: true,
               approvedCorrection: approved_correction,
+              ...chart,
             })
-          : await api.purchaseInvoices.confirmWithTotals(id, isVatReg);
+          : isVatReg
+            ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg)
+            : await api.purchaseInvoices.confirmWithTotals(id, isVatReg, chart);
       } catch (error) {
         if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
           return totalsCorrectionToolError(error);

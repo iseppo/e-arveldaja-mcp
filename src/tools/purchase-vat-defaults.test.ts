@@ -343,3 +343,155 @@ describe("M21 validateNonVatItem", () => {
     }
   });
 });
+
+describe("GitHub #63: the non-deductible VAT form for non-VAT companies", () => {
+  const {
+    isNonDeductibleVatItem, classifyNonVatInvoiceForm, proveNonDeductibleInvoice, validateNonVatItem, collectNonVatItemErrors,
+  } = purchaseVatDefaults;
+  const account = (id: number, isVatAccount: boolean | undefined) => ({ id, is_vat_account: isVatAccount }) as never;
+  const CHART = [account(7910, false), account(6000, false), account(1510, true)];
+  const ui = (overrides: Partial<PurchaseInvoiceItem> = {}): PurchaseInvoiceItem => ({
+    custom_title: "Delfi",
+    purchase_accounts_id: 7910,
+    purchase_accounts_dimensions_id: 942283,
+    vat_accounts_id: 7910,
+    vat_accounts_dimensions_id: 942283,
+    cl_vat_articles_id: 11,
+    vat_rate_dropdown: "9",
+    total_net_price: 11.92,
+    vat_amount: 1.07,
+    ...overrides,
+  });
+  const row24 = (net: number, vat: number, overrides: Partial<PurchaseInvoiceItem> = {}) =>
+    ui({ purchase_accounts_id: 6000, purchase_accounts_dimensions_id: null, vat_accounts_id: 6000, vat_accounts_dimensions_id: null,
+      vat_rate_dropdown: "24", total_net_price: net, vat_amount: vat, ...overrides });
+  const header = (net: number, vat: number, gross: number, extra: Record<string, unknown> = {}) =>
+    ({ net_price: net, vat_price: vat, gross_price: gross, cl_currencies_id: "EUR", ...extra });
+
+  describe("1. shape", () => {
+    it("accepts the same-account 7910/942283, article 11, rate 9 row", () => {
+      expect(isNonDeductibleVatItem(ui())).toBe(true);
+      expect(validateNonVatItem(ui())).toEqual([]);
+    });
+
+    it.each([
+      ["a 1510 VAT account", { vat_accounts_id: 1510 }],
+      ["a VAT dimension that differs", { vat_accounts_dimensions_id: 1 }],
+      ["a one-sided VAT dimension (missing)", { vat_accounts_dimensions_id: null }],
+      ["a one-sided VAT dimension (cost account has none)", { purchase_accounts_dimensions_id: null }],
+      ["article 1", { cl_vat_articles_id: 1 }],
+      ["rate \"-\"", { vat_rate_dropdown: "-" }],
+      ["rate \"0\"", { vat_rate_dropdown: "0" }],
+      ["a non-numeric rate", { vat_rate_dropdown: "KM" }],
+      ["a reversed_vat_id", { reversed_vat_id: 1 }],
+    ])("rejects %s", (_label, overrides) => {
+      const item = ui(overrides as Partial<PurchaseInvoiceItem>);
+      expect(isNonDeductibleVatItem(item)).toBe(false);
+      expect(validateNonVatItem(item).length).toBeGreaterThan(0);
+    });
+
+    it("names the incomplete non-deductible shape when the VAT account equals the cost account", () => {
+      expect(validateNonVatItem(ui({ cl_vat_articles_id: 1 }))).toContain(
+        "the non-deductible form (VAT on the cost account) also needs vat_accounts_dimensions_id equal to purchase_accounts_dimensions_id, " +
+        "cl_vat_articles_id 11, a numeric vat_rate_dropdown above 0 and no reversed_vat_id");
+    });
+
+    it("refuses mixed forms and mixed rates at list level", () => {
+      expect(collectNonVatItemErrors([ui(), { custom_title: "Folded", purchase_accounts_id: 6000, total_net_price: 5 }]))
+        .toContain("items mix the folded form (no VAT account) and the non-deductible form (VAT account = cost account); use one form for the whole invoice");
+      expect(collectNonVatItemErrors([ui(), row24(100, 24)]))
+        .toContain("non-deductible items carry different VAT rates; an invoice in this form uses one rate");
+    });
+  });
+
+  describe("2. classifier", () => {
+    it.each([
+      ["is_vat_account true", [account(7910, true)]],
+      ["is_vat_account undefined", [account(7910, undefined)]],
+      ["the account missing from the chart", [account(6000, false)]],
+      ["no chart", undefined],
+    ])("%s → unproven", (_label, accounts) => {
+      expect(classifyNonVatInvoiceForm([ui()], accounts)).toBe("unproven");
+    });
+
+    it("mixed folded + non-deductible and mixed rates → unproven; all folded → folded; proven → non_deductible", () => {
+      const folded = { custom_title: "Folded", purchase_accounts_id: 6000, total_net_price: 5, cl_vat_articles_id: 11, vat_rate_dropdown: "-" };
+      expect(classifyNonVatInvoiceForm([ui(), folded], CHART)).toBe("unproven");
+      expect(classifyNonVatInvoiceForm([ui(), row24(100, 24)], CHART)).toBe("unproven");
+      expect(classifyNonVatInvoiceForm([folded, folded])).toBe("folded");
+      expect(classifyNonVatInvoiceForm([ui()], CHART)).toBe("non_deductible");
+    });
+  });
+
+  describe("3. proveNonDeductibleInvoice", () => {
+    const ok = (rows: PurchaseInvoiceItem[], head: Record<string, unknown>) => expect(proveNonDeductibleInvoice(rows, head, CHART)).toMatchObject({ ok: true });
+    const reject = (rows: PurchaseInvoiceItem[], head: Record<string, unknown>) => expect(proveNonDeductibleInvoice(rows, head, CHART)).toMatchObject({ ok: false });
+
+    it("11.92 @9 → 1.07 / 12.99 and 609.20 @24 → 146.21 / 755.41 are proven", () => {
+      expect(proveNonDeductibleInvoice([ui()], header(11.92, 1.07, 12.99), CHART)).toEqual({ ok: true, rate: "9" });
+      ok([row24(609.2, 146.21)], header(609.2, 146.21, 755.41));
+    });
+
+    it("a last-row residue of 0.01 is proven; 0.02 is not", () => {
+      ok([row24(100, 24.01)], header(100, 24.01, 124.01));
+      reject([row24(100, 24.02)], header(100, 24.02, 124.02));
+    });
+
+    it("override + residue: net 100 @24, override 124.01, VAT 24.02 / gross 124.02 → rejected (0.02 off the rate)", () => {
+      reject([row24(100, 24.02, { project_no_vat_gross_price: 124.01 })], header(100, 24.02, 124.02));
+      reject([row24(100, 24.02, { project_no_vat_gross_price: 124.02 })], header(100, 24.02, 124.02));
+    });
+
+    it("redistribution: two net-100 @24 rows with VAT 24.01 / 23.99 (header 200/48/248) → rejected (row 1 not cent-exact)", () => {
+      reject([row24(100, 24.01), row24(100, 23.99, { purchase_accounts_id: 7910, vat_accounts_id: 7910 })], header(200, 48, 248));
+    });
+
+    it("header mismatches are rejected", () => {
+      reject([ui()], header(12.92, 1.07, 13.99));
+      reject([ui()], header(11.92, 1.07, 13.99));
+      reject([row24(100, 24), row24(100, 24)], header(200, 48.02, 248.02));
+    });
+
+    it("an override disagreeing with net + VAT, a non-finite amount and a reversed_vat_id are rejected", () => {
+      reject([ui({ project_no_vat_gross_price: 13.99 })], header(11.92, 1.07, 12.99));
+      reject([ui({ vat_amount: Number.NaN })], header(11.92, 1.07, 12.99));
+      reject([ui({ total_net_price: Number.POSITIVE_INFINITY })], header(11.92, 1.07, 12.99));
+      reject([ui()], header(11.92, 1.07, Number.NaN));
+      reject([ui({ reversed_vat_id: 1 })], header(11.92, 1.07, 12.99));
+    });
+
+    it("a row base net other than the row net, and non-EUR or base settlement overrides, are rejected", () => {
+      reject([ui({ base_total_net_price: 10 })], header(11.92, 1.07, 12.99));
+      ok([ui({ base_total_net_price: 11.92 })], header(11.92, 1.07, 12.99, { currency_rate: 1, base_net_price: 11.92, base_vat_price: 1.07, base_gross_price: 12.99 }));
+      reject([ui()], header(11.92, 1.07, 12.99, { cl_currencies_id: "USD" }));
+      reject([ui()], header(11.92, 1.07, 12.99, { currency_rate: 1.08 }));
+      reject([ui()], header(11.92, 1.07, 12.99, { base_gross_price: 10 }));
+      reject([ui()], { net_price: 11.92, vat_price: 1.07, gross_price: 12.99 }); // a read-back without currency
+    });
+
+    it("an intended payload predicts the row VAT and refuses a supplied vat_amount", () => {
+      const intended = (rows: PurchaseInvoiceItem[], head: Record<string, unknown>) => proveNonDeductibleInvoice(rows, head, CHART, { intended: true });
+      const { vat_amount: _vat, ...payloadRow } = ui();
+      expect(intended([payloadRow], { net_price: 11.92, vat_price: 1.07, gross_price: 12.99 })).toEqual({ ok: true, rate: "9" });
+      expect(intended([ui()], { net_price: 11.92, vat_price: 1.07, gross_price: 12.99 })).toMatchObject({ ok: false });
+    });
+  });
+
+  describe("4. applyPurchaseVatDefaults", () => {
+    it("folds a non-deductible item without the option (receipt/classification, Q4) and keeps it with the option", () => {
+      const folded = applyPurchaseVatDefaults([], ui(), false);
+      expect(folded).not.toHaveProperty("vat_accounts_id");
+      expect(folded).not.toHaveProperty("vat_accounts_dimensions_id");
+      expect(folded).toMatchObject({ cl_vat_articles_id: 11, vat_rate_dropdown: "-" });
+      expect(applyPurchaseVatDefaults([], ui(), false, { allowNonDeductible: true }))
+        .toEqual({ ...ui(), cl_fringe_benefits_id: 1, amount: 1 });
+      // An item that is not the shape folds even with the option.
+      expect(applyPurchaseVatDefaults([], ui({ vat_accounts_id: 1510 }), false, { allowNonDeductible: true })).not.toHaveProperty("vat_accounts_id");
+    });
+
+    it("VAT-registered defaults are unchanged by the option", () => {
+      const item = { custom_title: "Internet", purchase_accounts_id: 5230, total_net_price: 100, vat_rate_dropdown: "24" };
+      expect(applyPurchaseVatDefaults([], item, true, { allowNonDeductible: true })).toEqual(applyPurchaseVatDefaults([], item, true));
+    });
+  });
+});

@@ -1,10 +1,11 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { PurchaseArticle, PurchaseInvoiceItem } from "../types/api.js";
+import type { Account, PurchaseArticle, PurchaseInvoiceItem } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { log } from "../logger.js";
 import { DEFAULT_VAT_ACCOUNT } from "../accounting-defaults.js";
 import { validateItemDimensions } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
+import { parseVatRateDropdown, roundMoney } from "../money.js";
 
 const VAT_REGISTERED_FALLBACK = {
   vat_accounts_id: DEFAULT_VAT_ACCOUNT,
@@ -67,7 +68,157 @@ export function normalizeVatRate(value: unknown): string | undefined {
   return String(parsed);
 }
 
+/** True when an item carries a VAT account or VAT-account dimension (null and undefined count as absent). */
+export function hasVatAccountFields(item: PurchaseInvoiceItem): boolean {
+  return (item.vat_accounts_id ?? null) !== null || (item.vat_accounts_dimensions_id ?? null) !== null;
+}
+
+/**
+ * The non-deductible form of a non-VAT purchase item, as e-arveldaja's own UI
+ * books it (GitHub #63): the VAT is posted to the item's own cost account.
+ * Structural only; the amounts are proven by proveNonDeductibleInvoice.
+ */
+export function isNonDeductibleVatItem(item: PurchaseInvoiceItem): boolean {
+  const rate = normalizeVatRate(item.vat_rate_dropdown);
+  return item.cl_vat_articles_id === 11
+    && Number.isInteger(item.vat_accounts_id)
+    && item.vat_accounts_id === item.purchase_accounts_id
+    && (item.vat_accounts_dimensions_id ?? null) === (item.purchase_accounts_dimensions_id ?? null)
+    && rate !== undefined && /^\d+(\.\d+)?$/.test(rate) && Number(rate) > 0
+    && (item.reversed_vat_id ?? null) === null;
+}
+
+export type NonVatInvoiceForm = "folded" | "non_deductible" | "unproven";
+
+/**
+ * Routes a non-VAT invoice's items: "folded" (no item carries a VAT account,
+ * today's form), "non_deductible" (every item has the non-deductible shape at
+ * one shared rate and every shared account is in the chart with
+ * is_vat_account === false; no chart fails closed), else "unproven". It never
+ * authorizes a write on its own: proveNonDeductibleInvoice does.
+ */
+export function classifyNonVatInvoiceForm(items: readonly PurchaseInvoiceItem[], accounts?: readonly Account[]): NonVatInvoiceForm {
+  if (items.every(item => !hasVatAccountFields(item))) return "folded";
+  if (!accounts || !items.every(isNonDeductibleVatItem)) return "unproven";
+  if (new Set(items.map(item => normalizeVatRate(item.vat_rate_dropdown))).size !== 1) return "unproven";
+  const chartProven = items.every(item => accounts.find(account => account.id === item.vat_accounts_id)?.is_vat_account === false);
+  return chartProven ? "non_deductible" : "unproven";
+}
+
+/** Invoice-level figures the non-deductible proof checks (an intended payload or a read-back invoice). */
+export interface NonDeductibleProofHeader {
+  net_price?: number | null;
+  vat_price?: number | null;
+  gross_price?: number | null;
+  cl_currencies_id?: string | null;
+  currency_rate?: number | null;
+  base_net_price?: number | null;
+  base_vat_price?: number | null;
+  base_gross_price?: number | null;
+}
+
+export type NonDeductibleProof = { ok: true; rate: string } | { ok: false; reason: string };
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+const toCents = (value: number) => Math.round(value * 100);
+
+/**
+ * The one proof for the non-deductible form (GitHub #63), used before the POST,
+ * on both create read-backs and before every register. Positive proof only:
+ * whole invoice, row by row, cent-exact, against the chart, EUR only. It
+ * refuses with a reason and never returns a corrected value.
+ *
+ * `intended: true` is an intended payload: a row VAT is predicted (from a row
+ * project_no_vat_gross_price, else net × rate) and a caller-supplied
+ * vat_amount is refused. Otherwise the rows are read back and their
+ * vat_amount is the API's.
+ */
+export function proveNonDeductibleInvoice(
+  rows: readonly PurchaseInvoiceItem[],
+  header: NonDeductibleProofHeader,
+  accounts: readonly Account[] | undefined,
+  options: { intended?: boolean } = {},
+): NonDeductibleProof {
+  // a. shape, one rate, chart, no reversed_vat_id
+  if (classifyNonVatInvoiceForm(rows, accounts) !== "non_deductible") {
+    return { ok: false, reason: "items are not all the non-deductible form (VAT account = cost account, article 11, one rate) on a non-VAT chart account" };
+  }
+  const rate = normalizeVatRate(rows[0]!.vat_rate_dropdown)!;
+  const r = parseVatRateDropdown(rate);
+  let netCents = 0;
+  let vatCents = 0;
+  for (const [index, row] of rows.entries()) {
+    if (options.intended && row.vat_amount !== undefined && row.vat_amount !== null) {
+      return { ok: false, reason: `items[${index}].vat_amount must not be supplied for the non-deductible form` };
+    }
+    // b. every amount used is a finite number
+    const net = row.total_net_price ?? (isFiniteNumber(row.unit_net_price) ? roundMoney(row.unit_net_price * (row.amount ?? 1)) : undefined);
+    const override = row.project_no_vat_gross_price ?? null;
+    if (!isFiniteNumber(net) || (override !== null && !isFiniteNumber(override))) {
+      return { ok: false, reason: `items[${index}] has a non-finite amount` };
+    }
+    const vat = options.intended
+      ? (override !== null ? roundMoney(override - net) : roundMoney(net * r / 100))
+      : row.vat_amount;
+    if (!isFiniteNumber(vat)) return { ok: false, reason: `items[${index}].vat_amount is not a finite number` };
+    // c. per row: VAT cent-exact to net × rate; only the last row may be one cent off
+    const offBy = Math.abs(toCents(vat) - toCents(roundMoney(net * r / 100)));
+    if (index < rows.length - 1 ? offBy !== 0 : offBy > 1) {
+      return { ok: false, reason: `items[${index}] VAT ${vat} is not net ${net} × ${rate}%` };
+    }
+    if (override !== null && toCents(override) !== toCents(net) + toCents(vat)) {
+      return { ok: false, reason: `items[${index}].project_no_vat_gross_price ${override} is not net ${net} + VAT ${vat}` };
+    }
+    const baseNet = row.base_total_net_price ?? null;
+    if (baseNet !== null && (!isFiniteNumber(baseNet) || toCents(baseNet) !== toCents(net))) {
+      return { ok: false, reason: `items[${index}].base_total_net_price ${baseNet} is not the row net ${net}` };
+    }
+    netCents += toCents(net);
+    vatCents += toCents(vat);
+  }
+  // d. header sums, cent-exact
+  const { net_price: net, vat_price: vat, gross_price: gross } = header;
+  if (!isFiniteNumber(net) || !isFiniteNumber(vat) || !isFiniteNumber(gross)) {
+    return { ok: false, reason: "invoice net_price, vat_price and gross_price must be finite numbers" };
+  }
+  if (toCents(net) !== netCents) return { ok: false, reason: `invoice net_price ${net} is not the item net sum ${netCents / 100}` };
+  if (toCents(vat) !== vatCents) return { ok: false, reason: `invoice vat_price ${vat} is not the item VAT sum ${vatCents / 100}` };
+  if (toCents(gross) !== toCents(net) + toCents(vat)) return { ok: false, reason: `invoice gross_price ${gross} is not net ${net} + VAT ${vat}` };
+  // e. EUR only: no foreign currency, rate or base settlement override
+  const currency = header.cl_currencies_id ?? null;
+  if (currency === null ? !options.intended : currency.toUpperCase() !== "EUR") {
+    return { ok: false, reason: "the non-deductible form supports EUR invoices only" };
+  }
+  if ((header.currency_rate ?? null) !== null && header.currency_rate !== 1) {
+    return { ok: false, reason: "the non-deductible form supports EUR invoices only (currency_rate must be absent or 1)" };
+  }
+  const bases: Array<[string, number | null | undefined, number]> = [
+    ["base_net_price", header.base_net_price, net], ["base_vat_price", header.base_vat_price, vat], ["base_gross_price", header.base_gross_price, gross],
+  ];
+  for (const [field, base, total] of bases) {
+    if ((base ?? null) !== null && (!isFiniteNumber(base) || toCents(base) !== toCents(total))) {
+      return { ok: false, reason: `${field} ${base} differs from the EUR total ${total}` };
+    }
+  }
+  return { ok: true, rate };
+}
+
+/**
+ * The register gate (P4) of a non-VAT invoice: undefined when no item carries
+ * a VAT account (folded, today's form), else the proof's refusal reason, if any.
+ */
+export function nonVatRegisterRefusal(
+  invoice: NonDeductibleProofHeader & { items?: PurchaseInvoiceItem[] },
+  accounts: readonly Account[] | undefined,
+): string | undefined {
+  const items = invoice.items ?? [];
+  if (!items.some(hasVatAccountFields)) return undefined;
+  const proof = proveNonDeductibleInvoice(items, invoice, accounts);
+  return proof.ok ? undefined : proof.reason;
+}
+
 export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
+  if (isNonDeductibleVatItem(item)) return [];
   const errors: string[] = [];
   const vatRateDropdown = normalizeVatRate(item.vat_rate_dropdown);
 
@@ -83,13 +234,29 @@ export function validateNonVatItem(item: PurchaseInvoiceItem): string[] {
   if (vatRateDropdown !== undefined && vatRateDropdown !== "-") {
     errors.push('vat_rate_dropdown must be absent or "-"');
   }
+  if (item.vat_accounts_id !== undefined && item.vat_accounts_id !== null && item.vat_accounts_id === item.purchase_accounts_id) {
+    errors.push("the non-deductible form (VAT on the cost account) also needs vat_accounts_dimensions_id equal to purchase_accounts_dimensions_id, " +
+      "cl_vat_articles_id 11, a numeric vat_rate_dropdown above 0 and no reversed_vat_id");
+  }
 
   return errors;
 }
 
-/** `validateNonVatItem` over a whole item list, each error prefixed `items[<index>].`. */
+/**
+ * `validateNonVatItem` over a whole item list, each error prefixed
+ * `items[<index>].`, plus list-level errors: one invoice is either all folded
+ * or all non-deductible at one rate.
+ */
 export function collectNonVatItemErrors(items: PurchaseInvoiceItem[]): string[] {
-  return items.flatMap((item, index) => validateNonVatItem(item).map(error => `items[${index}].${error}`));
+  const errors = items.flatMap((item, index) => validateNonVatItem(item).map(error => `items[${index}].${error}`));
+  const nonDeductible = items.filter(isNonDeductibleVatItem);
+  if (nonDeductible.length > 0 && nonDeductible.length < items.length) {
+    errors.push("items mix the folded form (no VAT account) and the non-deductible form (VAT account = cost account); use one form for the whole invoice");
+  }
+  if (new Set(nonDeductible.map(item => normalizeVatRate(item.vat_rate_dropdown))).size > 1) {
+    errors.push("non-deductible items carry different VAT rates; an invoice in this form uses one rate");
+  }
+  return errors;
 }
 
 /**
@@ -105,7 +272,8 @@ export function refuseNonVatItemsWithVatFields(isVatRegistered: boolean, items: 
     error: "Non-VAT purchase invoice contains deductible VAT fields",
     category: "manual_review_required",
     details,
-    next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+    next_action: "Use one non-VAT form for every item: folded (no VAT account, article 11, rate \"-\") or non-deductible VAT on the cost account " +
+      "(VAT account and dimension = the item's cost account and dimension, article 11, the document's VAT rate), then review and retry.",
   });
 }
 
@@ -183,10 +351,14 @@ export function applyPurchaseVatDefaults(
   purchaseArticles: PurchaseArticleWithVat[],
   item: PurchaseInvoiceItem,
   isVatRegistered: boolean,
+  options: { allowNonDeductible?: boolean } = {},
 ): PurchaseInvoiceItem {
   const merged = applyPurchaseItemStructuralDefaults(item);
 
   if (!isVatRegistered) {
+    // Opted-in create paths keep the non-deductible form (GitHub #63); it is
+    // proven whole-invoice before any write. Everyone else folds, as before.
+    if (options.allowNonDeductible === true && isNonDeductibleVatItem(merged)) return merged;
     delete merged.vat_accounts_id;
     delete merged.vat_accounts_dimensions_id;
     merged.cl_vat_articles_id = 11;
@@ -213,18 +385,27 @@ export function applyPurchaseVatDefaults(
  * Apply purchase VAT defaults to every item, then validate the referenced
  * accounts and dimensions against the live chart (validateItemDimensions may
  * auto-fill a unique dimension on the returned items). An empty `dimErrors`
- * means the items are ready to write.
+ * means the items are ready to write. For a non-VAT company whose (opted-in)
+ * items keep a VAT account, the chart is read uncached and an unproven
+ * non-VAT form is an error; the loaded chart is returned for the later proofs.
  */
 export async function applyPurchaseVatDefaultsAndValidateDimensions(
   api: ApiContext,
   purchaseArticles: PurchaseArticleWithVat[],
   rawItems: PurchaseInvoiceItem[],
   isVatRegistered: boolean,
-): Promise<{ items: PurchaseInvoiceItem[]; dimErrors: string[] }> {
-  const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatRegistered));
+  options: { allowNonDeductible?: boolean } = {},
+): Promise<{ items: PurchaseInvoiceItem[]; dimErrors: string[]; accounts: Account[] }> {
+  const items = rawItems.map(item => applyPurchaseVatDefaults(purchaseArticles, item, isVatRegistered, options));
+  const freshChart = !isVatRegistered && items.some(hasVatAccountFields);
   const [accounts, accountDimensions] = await Promise.all([
-    api.readonly.getAccounts(),
+    freshChart ? api.readonly.getAccounts({ fresh: true }) : api.readonly.getAccounts(),
     api.readonly.getAccountDimensions(),
   ]);
-  return { items, dimErrors: validateItemDimensions(items, accounts, accountDimensions) };
+  const dimErrors = validateItemDimensions(items, accounts, accountDimensions);
+  if (!isVatRegistered && classifyNonVatInvoiceForm(items, accounts) === "unproven") {
+    dimErrors.push("Non-VAT items carrying a VAT account must all be the non-deductible form: VAT account and dimension = the item's cost account and dimension " +
+      "(a chart account with is_vat_account false), article 11, one VAT rate above 0.");
+  }
+  return { items, dimErrors, accounts };
 }

@@ -2,17 +2,20 @@ import { canonicalRefNumber } from "../ref-number.js";
 import { summarizeEntries } from "./parser.js";
 import {
   buildBatchDuplicateKey,
-  buildCamtDescriptionWithMetadata,
   buildDuplicateLookup,
   buildPossibleDuplicateLookup,
   camtMovementIdentity,
   findDuplicateTransactionIds,
   findExactKeyOccurrences,
+  findLossyIdentityConflicts,
   findPartialLegacyEntries,
+  findPoisonedMarkerHolds,
   findPossibleDuplicateMatches,
   findRepeatedBankReferences,
   normalizeOptionalReference,
+  renderCamtDescriptionDetailed,
 } from "./duplicate-identity.js";
+import { camtIbanOmissionEvidence, isCamtIbanOmissionEligible } from "./iban-omission.js";
 import {
   buildCamtJournalCoverageContext,
   checkCamtDuplicateRegistration,
@@ -72,6 +75,15 @@ function enrichWithDuplicates(
 const CAMT_DUPLICATE_JOURNAL_CONFLICT = "camt_duplicate_journal_conflict";
 const CAMT_NATIVE_IMPORT_MATCH = "camt_native_import_match";
 const CAMT_PARTIAL_LEGACY_REASON = "Partially imported by a previous release; needs review";
+export const CAMT_MARKER_IDENTITY_UNFIT = "camt_marker_identity_unfit";
+export const CAMT_MARKER_CONFLICT_REVIEW = "camt_marker_conflict_review";
+export const CAMT_LOSSY_IDENTITY_AMBIGUOUS = "camt_lossy_identity_ambiguous";
+/** Skip codes of rows held for review: neither created nor skipped as duplicates. */
+export const CAMT_HOLD_SKIP_CODES: readonly string[] = [
+  CAMT_MARKER_IDENTITY_UNFIT,
+  CAMT_MARKER_CONFLICT_REVIEW,
+  CAMT_LOSSY_IDENTITY_AMBIGUOUS,
+];
 
 function journalCoverageSkip(entry: ParsedCamtEntry, coverage: Exclude<CamtJournalCoverage, { kind: "none" }>): CamtSkippedRow {
   const ids = coverage.journal_ids.join(", ");
@@ -156,11 +168,11 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
   const refLessOccurrences = new Map<string, number>();
   const clientCache: ClientResolutionCache = { byCode: new Map(), byName: new Map() };
   const possibleDuplicateLookup = buildPossibleDuplicateLookup(existingTransactions, accountsDimensionsId);
-  const partialLegacyEntries = findPartialLegacyEntries(
-    parsed.entries,
-    buildDuplicateLookup(existingTransactions, accountsDimensionsId),
-    accountsDimensionsId,
-  );
+  const duplicateLookup = buildDuplicateLookup(existingTransactions, accountsDimensionsId);
+  const partialLegacyEntries = findPartialLegacyEntries(parsed.entries, duplicateLookup, accountsDimensionsId);
+  const lossyIdentityConflicts = findLossyIdentityConflicts(parsed.entries, duplicateLookup, accountsDimensionsId);
+  // Computed once per import: may a counterparty IBAN be left out of the marker?
+  const ibanOmissionEvidence = camtIbanOmissionEvidence(input.journalCoverage.bankAccounts, parsed.statement_metadata.iban);
   const descriptors: CamtCreateDescriptor[] = [];
   const skipped: CamtSkippedRow[] = [];
 
@@ -178,6 +190,20 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
         reason: CAMT_PARTIAL_LEGACY_REASON,
         movement_identity: camtMovementIdentity(entry),
         review_note: `The ${entry.amount} ${entry.currency} ${entry.direction} row on ${entry.date} belongs to a statement entry a previous release imported only in part: some of its old per-leg rows are in the ledger, others are not. It was not created; compare the ledger with the statement entry and book the missing amount manually.`,
+      });
+      continue;
+    }
+    // Before the duplicate check: a lossy key shared by competing entries is
+    // no evidence either way.
+    if (lossyIdentityConflicts.has(batchDuplicateKey)) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: [],
+        reason: "A stored row with a shortened description or a left-out IBAN cannot be told apart from another statement entry; " +
+          "not created and not skipped as a duplicate. Compare the ledger with the bank statement and create the row manually only if it is missing.",
+        skip_code: CAMT_LOSSY_IDENTITY_AMBIGUOUS,
       });
       continue;
     }
@@ -213,6 +239,22 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
         bank_reference: entry.bank_reference,
         duplicate_transaction_ids: entry.duplicate_transaction_ids,
         reason: "Existing transaction matched by bank reference",
+      });
+      continue;
+    }
+    // A stored row whose CAMT marker contradicts itself is never duplicate
+    // evidence; when it may be this entry, hold instead of creating.
+    const poisonedHolds = findPoisonedMarkerHolds(entry, duplicateLookup);
+    if (poisonedHolds.length > 0) {
+      const ids = poisonedHolds.map(row => row.id!).sort((left, right) => left - right);
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: ids,
+        reason: `Existing transaction ${ids.join(", ")} carries a contradictory CAMT marker and may be this entry; not created. ` +
+          "Check it against the bank statement, correct or delete it (after owner approval), then re-run the preview.",
+        skip_code: CAMT_MARKER_CONFLICT_REVIEW,
       });
       continue;
     }
@@ -258,8 +300,23 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       continue;
     }
 
+    const rendering = renderCamtDescriptionDetailed(entry.description, entry, {
+      omitCounterpartyIban: isCamtIbanOmissionEligible(ibanOmissionEvidence, entry.counterparty_iban),
+    });
+    if (rendering.held) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: [],
+        reason: "The bank reference and counterparty account are too long to store with a verifiable import marker; not created. " +
+          "Book this payment by hand from the bank statement.",
+        skip_code: CAMT_MARKER_IDENTITY_UNFIT,
+      });
+      continue;
+    }
     const clientResolution = await resolveClient(entry, clientCache);
-    const storedDescription = buildCamtDescriptionWithMetadata(entry.description, entry);
+    const storedDescription = rendering.description;
     const ledgerMatches = findPossibleDuplicateMatches(entry, possibleDuplicateLookup);
     // Cardinality: k matching ledger rows can already account for at most the
     // first k in-file copies of a ref-less entry; copies beyond that are new.
@@ -284,7 +341,11 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       ref_number: canonicalRefNumber(entry.reference_number).value,
       bank_ref_number: entry.bank_reference,
     };
-    descriptors.push({ entry, payload, storedDescription, clientResolution, possibleDuplicateMatches, batchDuplicateKey });
+    descriptors.push({
+      entry, payload, storedDescription, clientResolution, possibleDuplicateMatches, batchDuplicateKey,
+      ...(rendering.truncated ? { description_truncated: rendering.truncated } : {}),
+      ...(rendering.ibanOmitted ? { counterparty_iban_omitted: true as const } : {}),
+    });
     seenBatchDuplicateKeys.add(batchDuplicateKey);
   }
 

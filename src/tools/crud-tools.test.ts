@@ -162,7 +162,8 @@ describe("M21 create_purchase_invoice non-VAT boundary", () => {
       error: "Non-VAT purchase invoice contains deductible VAT fields",
       category: "manual_review_required",
       details: ["items[0].vat_accounts_id must be absent"],
-      next_action: "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+      next_action: "Use one non-VAT form for every item: folded (no VAT account, article 11, rate \"-\") or non-deductible VAT on the cost account " +
+        "(VAT account and dimension = the item's cost account and dimension, article 11, the document's VAT rate), then review and retry.",
     });
     expect(getVatInfo).toHaveBeenCalledTimes(1);
     expect(getPurchaseArticles).not.toHaveBeenCalled();
@@ -278,7 +279,7 @@ describe("M21 create_purchase_invoice non-VAT boundary", () => {
       expect(item.cl_vat_articles_id).toBe(11);
       expect(item.vat_rate_dropdown).toBe("-");
     }
-    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, false);
+    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, false, expect.any(Array));
     expect(api.readonly.getAccounts).toHaveBeenCalledTimes(1);
     expect(api.readonly.getAccountDimensions).toHaveBeenCalledTimes(1);
     expect(logAudit).toHaveBeenCalledTimes(1);
@@ -319,7 +320,7 @@ describe("M21 create_purchase_invoice non-VAT boundary", () => {
     expect((createAndSetTotals.mock.calls[0]![0] as { items: unknown[] }).items).toEqual([
       expect.objectContaining(deductibleItem),
     ]);
-    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, true);
+    expect(createAndSetTotals).toHaveBeenCalledWith(expect.any(Object), 0, 100, true, expect.any(Array));
   });
 });
 
@@ -3412,6 +3413,14 @@ describe("M1 update_transaction preserves importer markers", () => {
     const { handler, update } = harness({ description: `Old\n${marker}`, bank_ref_number: "ABC" });
     await handler({ id: 9, data: { description: "New [source_direction=OUT]" } });
     expect(update.mock.calls[0]![1].description).toBe(`New\n${marker}`);
+  });
+
+  it.each(["i=EE471000001020145685", "x=i"])("keeps dense C2/C3 marker byte-identical: %s", counterparty => {
+    const marker = `[e-arveldaja-mcp:camt b=KUdEdAe48RG7TgYnsyTjlQ ${counterparty} d=DBIT s=0123456789abcdef]`;
+    const { handler, update } = harness({ description: `Old\n${marker}` });
+    return handler({ id: 9, data: { description: "New" } }).then(() => {
+      expect(update.mock.calls[0]![1].description).toBe(`New\n${marker}`);
+    });
   });
 
   it("keeps only the markers when the description is cleared", async () => {

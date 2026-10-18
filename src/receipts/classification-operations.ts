@@ -25,6 +25,7 @@ import { buildCamtJournalCoverageContext, classifyCamtJournalCoverage, type Camt
 import type { ParsedCamtEntry } from "../camt/types.js";
 import {
   counterpartyIbanOf,
+  isCamtCounterpartyIbanOmitted,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   type OneSidedInference,
@@ -685,6 +686,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       : lookupCounterpartyHistory(partition.history, {
           name: transaction.bank_account_name,
           iban: counterpartyIbanOf(transaction) || undefined,
+          iban_omitted: isCamtCounterpartyIbanOmitted(transaction),
           accounts_dimensions_id: transaction.accounts_dimensions_id,
           direction: trustedDirection(transaction) ?? "unknown",
         }).suggestion;

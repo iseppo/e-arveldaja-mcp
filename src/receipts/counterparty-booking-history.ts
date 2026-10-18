@@ -1,7 +1,7 @@
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import { DEFAULT_ACCOUNTS_RECEIVABLE, DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { signedBankTransactionDirection } from "../bank-transaction-direction.js";
-import { storedBankAccountNo } from "../camt/duplicate-identity.js";
+import { isCamtCounterpartyIbanOmitted, storedBankAccountNo } from "../camt/duplicate-identity.js";
 import type { Journal, Transaction } from "../types/api.js";
 
 // PURE: how confirmed bank rows of one counterparty were booked before. A row's
@@ -28,6 +28,8 @@ interface HistoryRow {
   readonly date: string;
   readonly name: string;
   readonly iban: string | undefined;
+  /** A trusted `x=i` marker: the IBAN exists but was left out (proven external). */
+  readonly iban_omitted: boolean;
   /** The own bank dimension the row was imported on. */
   readonly dimension_id: number | null;
   /** undefined: the row breaks any streak it sits in. */
@@ -42,6 +44,8 @@ export interface CounterpartyBookingHistory {
 export interface CounterpartyHistoryQuery {
   readonly name: string | null | undefined;
   readonly iban?: string | null;
+  /** The query row's IBAN was left out of its CAMT marker (`x=i`): present, value unknown. */
+  readonly iban_omitted?: boolean;
   /** The query row's own bank dimension; required for a name-only match. */
   readonly accounts_dimensions_id?: number | null;
   readonly direction: HistoryDirection | "unknown";
@@ -135,6 +139,7 @@ export function buildCounterpartyBookingHistory(input: {
       date: transaction.date,
       name: transaction.bank_account_name ?? "",
       iban: normalizedIban(storedBankAccountNo(transaction)),
+      iban_omitted: isCamtCounterpartyIbanOmitted(transaction),
       dimension_id: transaction.accounts_dimensions_id ?? null,
       treatment,
     };
@@ -169,7 +174,12 @@ function sameCounterparty(query: CounterpartyHistoryQuery, row: HistoryRow): boo
   if (queryHasForm && rowHasForm) {
     return sameCompanyIdentity(query.name, row.name);
   }
-  if (queryIban !== undefined || row.iban !== undefined) return queryIban !== undefined && queryIban === row.iban;
+  // An omitted IBAN is present with an unknown value: it never equals anything.
+  const queryOmitted = queryIban === undefined && query.iban_omitted === true;
+  const rowOmitted = row.iban === undefined && row.iban_omitted;
+  if (queryIban !== undefined || row.iban !== undefined || queryOmitted || rowOmitted) {
+    return !queryOmitted && !rowOmitted && queryIban !== undefined && queryIban === row.iban;
+  }
   if (queryHasForm || rowHasForm) return false;
   return query.accounts_dimensions_id != null &&
     query.accounts_dimensions_id === row.dimension_id &&

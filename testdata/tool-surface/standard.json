@@ -2,12 +2,12 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 136229,
+    "toolsListBytes": 136445,
     "descriptionsBytes": 18438,
-    "inputSchemasBytes": 87213,
+    "inputSchemasBytes": 87429,
     "largestTool": {
-      "name": "import_wise_transactions",
-      "bytes": 4390
+      "name": "create_purchase_invoice_from_pdf",
+      "bytes": 4431
     },
     "serverInstructionsBytes": 964,
     "promptMetadataBytes": 11702,
@@ -2295,7 +2295,7 @@
                 "type": "string"
               }
             ],
-            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts."
+            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, amount, vat_rate_dropdown?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, project_no_vat_gross_price?, cl_fringe_benefits_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
           },
           "journal_date": {
             "description": "Turnover date (YYYY-MM-DD)",
@@ -3605,7 +3605,7 @@
                 "type": "string"
               }
             ],
-            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch)."
+            "description": "Items [{custom_title, cl_purchase_articles_id, purchase_accounts_id, purchase_accounts_dimensions_id?, total_net_price, vat_rate_dropdown?, amount?, vat_accounts_id?, vat_accounts_dimensions_id?, cl_vat_articles_id?, reversed_vat_id?}]. purchase_accounts_dimensions_id is REQUIRED when the expense account has dimensions; same for vat_accounts_dimensions_id on dimensioned VAT accounts. A VAT-registered company's items carrying VAT need vat_rate_dropdown, else refused before create (purchase_totals_mismatch). Non-VAT EUR invoices may post VAT to the same cost account/dimension with article 11 and one document rate."
           },
           "journal_date": {
             "description": "Turnover/booking date (YYYY-MM-DD)",

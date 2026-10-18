@@ -30,6 +30,8 @@ This whole flow runs through ONE tool, `process_accounting_document`, in four se
 
 Never recalculate `vat_price` / `gross_price`, and do not put the source filename into `notes`.
 
+For a non-VAT company, keep the folded form (no VAT account, article 11, rate `"-"`, invoice VAT 0) or use non-deductible VAT on EUR invoices: VAT account and dimension equal the item's cost account and dimension, article 11, one document rate, invoice `vat_price` equal to document VAT. The chart must prove this is not a VAT account; never use 1510. Only the last row may absorb a single cent. Do not supply row `vat_amount`. Verified reading converts a folded history template to the non-deductible form when the document prints VAT at one identifiable rate; a document with no VAT keeps folding. Unproven drafts are held for UI correction or recreation.
+
 Totals are checked before anything is written. `purchase_totals_mismatch`: the explicit `vat_price` differs from the VAT the items compute (item net × VAT rate) by more than 1 cent per item; correct the item net amounts or VAT rates, or the totals, to match the document. `purchase_base_sign_mismatch`: a `base_*` EUR amount has the opposite sign of the document-currency amount (for example a positive EUR total on a credit note); fix the `base_*` values. Then rerun step 2.
 
 A receipt that `receipt_batch` held as a possible duplicate (`possible_duplicate_journal_ids`) may be booked here on purpose only after the user confirms it is a different payment from those journals; name the journal ids on the approval card.
@@ -41,7 +43,7 @@ A warning `invoice_referenced_by_journal` (or a receipt `receipt_batch` held wit
 
 Call `get_vat_info` first to confirm whether this company is currently VAT-registered.
 
-Use that status when deciding whether VAT fields matter for the booking and which VAT treatments are valid. A non-VAT company must not have item-level VAT applied.
+Use that status when deciding which VAT treatments are valid. A non-VAT company may keep VAT folded (no VAT account, article 11, rate `"-"`, invoice VAT 0) or book non-deductible VAT on EUR invoices: VAT account and dimension equal the item's own cost account and dimension, article 11, one document rate, invoice `vat_price` equal to the document VAT. The chart must say `is_vat_account: false`; never use 1510. Only the last row may absorb one cent; do not supply row `vat_amount`.
 
 ## Step 2: Extract the document text
 
@@ -135,6 +137,8 @@ Review `past_invoices` and reuse the most relevant:
 - `purchase_accounts_id`
 - `purchase_accounts_dimensions_id` (required when the account has sub-accounts, alamkontod)
 - VAT fields such as `vat_rate_dropdown`, `vat_accounts_id`, `vat_accounts_dimensions_id`, `cl_vat_articles_id`, `reversed_vat_id`
+
+For a non-VAT company, review which of the two forms the document supports before copying VAT fields. Verified reading converts a folded history template when the document prints VAT at one identifiable rate; a document with no VAT stays folded. Rows carrying a VAT account must pass the non-deductible proof again before confirmation; edit unsupported rows in e-arveldaja or recreate the draft.
 
 `suggest_booking` returns the historical `vat_accounts_dimensions_id` last used for this supplier's VAT account (and `purchase_accounts_dimensions_id` for the expense account). Reuse it — but do NOT guess a dimension you do not have:
 - If the account carries dimensions (alamkontod) but the returned history has no dimension id for it (the dimension is missing), call `list_account_dimensions` for that account and confirm the correct dimension with the operator.

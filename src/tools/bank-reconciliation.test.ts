@@ -1521,6 +1521,30 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
 
+    it.each(["incoming", "outgoing", "standalone"])("vetoes trusted C3 %s own-transfer inference in preview and execute", async kind => {
+      const base = kind === "incoming" ? { ...customerIntoC, accounts_dimensions_id: 22, bank_account_name: "Test OÜ", clients_id: null } : outAtoB;
+      const description = "a".repeat(60);
+      const row = {
+        ...base, bank_account_no: null, bank_ref_number: null, cl_currencies_id: "EUR", ref_number: null,
+        description: buildCamtDescriptionWithMetadata(description, {
+          date: base.date, amount: base.amount, currency: "EUR", direction: kind === "incoming" ? "CRDT" : "DBIT",
+          counterparty_name: "Test OÜ", counterparty_iban: "EE471000001020145685",
+          bank_reference: "2947447407B8F111BB4E0627B324E395", description,
+          duplicate: false, duplicate_transaction_ids: [],
+        }, { omitCounterpartyIban: true }),
+      };
+      expect(isTrustedCamtDescriptionMetadata(row as any)).toBe(true);
+      for (const execute of [false, true]) {
+        const transactions = kind === "standalone" ? [row] : kind === "incoming" ? [outAtoB, row] : [row, { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: "EE11AAAA" }];
+        const { handler, api } = setupInterAccountTool({ transactions, bankAccounts: threeAccounts.slice(0, 2), companyName: "Test OÜ" });
+        const result = execute ? await executeInterAccount(handler) : await handler({});
+        const payload = parseMcpResponse(result.content[0]!.text) as any;
+        expect(payload.matched_pairs).toBe(0);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        for (const call of api.transactions.confirm.mock.calls) expect(call[0]).not.toBe(row.id);
+      }
+    });
+
     it("does not delete a receipt from a same-stem company with a different legal form", async () => {
       // "Männipuu AS" is a different legal person from the company "Männipuu OÜ".
       for (const bankAccountNo of ["EE77THIRD", null]) {

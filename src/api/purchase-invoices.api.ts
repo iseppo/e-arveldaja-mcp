@@ -1,10 +1,17 @@
 import { createHash } from "node:crypto";
 import type { HttpClient } from "../http-client.js";
-import type { PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
+import type { Account, PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
 import type { CreatePurchaseInvoiceRequest, UpdatePurchaseInvoiceRequest } from "../types/mutations.js";
 import { BaseResource } from "./base-resource.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
-import { applyPurchaseItemStructuralDefaults } from "../tools/purchase-vat-defaults.js";
+import {
+  applyPurchaseItemStructuralDefaults,
+  classifyNonVatInvoiceForm,
+  hasVatAccountFields,
+  normalizeVatRate,
+  nonVatRegisterRefusal,
+  proveNonDeductibleInvoice,
+} from "../tools/purchase-vat-defaults.js";
 
 export class InvoiceCreationError extends Error {
   constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions) {
@@ -27,6 +34,8 @@ export interface PurchaseInvoiceTotalsCorrectionPreview {
 interface ConfirmPurchaseInvoiceOptions {
   recalculateTotals?: boolean;
   approvedCorrection?: PurchaseInvoiceTotalsCorrectionPreview;
+  /** Fresh chart for the non-VAT register proof (GitHub #63); a non-VAT draft with a VAT-account item is held without it. */
+  accounts?: readonly Account[];
 }
 
 export type PurchaseInvoiceTotalsCorrectionCode =
@@ -35,7 +44,8 @@ export type PurchaseInvoiceTotalsCorrectionCode =
   | "correction_reverse_charge_not_supported"
   | "correction_items_missing"
   | "correction_preview_required"
-  | "correction_preview_mismatch";
+  | "correction_preview_mismatch"
+  | "correction_nonvat_form_unproven";
 
 const TOTALS_CORRECTION_ERRORS: Record<PurchaseInvoiceTotalsCorrectionCode, {
   message: string;
@@ -64,6 +74,10 @@ const TOTALS_CORRECTION_ERRORS: Record<PurchaseInvoiceTotalsCorrectionCode, {
   correction_preview_mismatch: {
     message: "The approved purchase invoice totals correction preview no longer matches fresh invoice state.",
     nextAction: "Call preview_purchase_invoice_totals_correction again and obtain approval for the new snapshot.",
+  },
+  correction_nonvat_form_unproven: {
+    message: "Non-VAT purchase invoice carries a VAT account that is not a proven non-deductible form (VAT on the cost account, cent-exact, EUR); it is not registered.",
+    nextAction: "Fix the rows and totals in e-arveldaja (VAT account = the item's cost account, article 11, one rate, invoice VAT = item VAT sum), or delete the draft and recreate it.",
   },
 };
 
@@ -130,13 +144,15 @@ function isCorrectionPreview(value: unknown): value is PurchaseInvoiceTotalsCorr
  * For non-VAT companies: set project_no_vat_gross_price on items
  * so the API computes item-level vat_amount for informational tracking.
  * Without this field, item vat_amount stays 0 and gross_price = net_price.
+ * The non-deductible form (GitHub #63) is left unchanged: its VAT is real.
  */
 export function normalizeItemsForNonVat(
   items: PurchaseInvoiceItem[],
   isVatRegistered: boolean,
   grossPrice?: number,
+  nonDeductible = false,
 ) : PurchaseInvoiceItem[] {
-  if (!items || isVatRegistered) return items;
+  if (!items || isVatRegistered || nonDeductible) return items;
 
   // Multi-item invoice with a known invoice gross: distribute that gross across
   // the items pro rata to their net, cent-exact with the remainder on the last
@@ -207,7 +223,7 @@ export type PurchaseInvoiceTotalsResolution =
     }
   | {
       ok: false;
-      code: "currency_rate_required" | "purchase_totals_mismatch" | "purchase_base_sign_mismatch";
+      code: "currency_rate_required" | "purchase_totals_mismatch" | "purchase_base_sign_mismatch" | "nonvat_form_unproven";
       message: string;
     };
 
@@ -228,8 +244,11 @@ export function resolvePurchaseInvoiceTotals(input: {
   isVatRegistered: boolean;
   items: readonly PurchaseInvoiceItem[] | undefined;
   itemAmounts: readonly PurchaseItemAmounts[] | undefined;
+  /** A non-VAT invoice in the proven non-deductible form: its VAT is the invoice VAT, as for VAT-registered. */
+  nonDeductible?: boolean;
 }): PurchaseInvoiceTotalsResolution {
-  const { data, vatPrice, grossPrice, isVatRegistered, items, itemAmounts } = input;
+  const { data, vatPrice, grossPrice, items, itemAmounts } = input;
+  const isVatRegistered = input.isVatRegistered || input.nonDeductible === true;
   const currency = (data.cl_currencies_id ?? "EUR").toUpperCase();
   const isForeignCurrency = currency !== "EUR";
   if (isForeignCurrency && (data.currency_rate === undefined || data.currency_rate === null || !Number.isFinite(data.currency_rate) || data.currency_rate <= 0)) {
@@ -353,7 +372,11 @@ export function previewPurchaseInvoiceTotals(
   vatPrice: number | undefined,
   grossPrice: number | undefined,
   isVatRegistered: boolean,
+  accounts?: readonly Account[],
 ): PurchaseInvoiceTotalsResolution {
+  if (!isVatRegistered && data.items?.some(hasVatAccountFields)) {
+    return previewNonDeductibleTotals(data, vatPrice, grossPrice, accounts);
+  }
   const normalizedItems = normalizeItemsForNonVat(data.items, isVatRegistered, grossPrice);
   return resolvePurchaseInvoiceTotals({
     data,
@@ -363,6 +386,125 @@ export function previewPurchaseInvoiceTotals(
     items: normalizedItems,
     itemAmounts: normalizedItems ? predictPurchaseItemAmounts(normalizedItems) : undefined,
   });
+}
+
+type TotalsFailure = Extract<PurchaseInvoiceTotalsResolution, { ok: false }>;
+type TotalsSuccess = Extract<PurchaseInvoiceTotalsResolution, { ok: true }>;
+
+/**
+ * P1 (GitHub #63): a non-VAT invoice whose items carry a VAT account must be
+ * the proven non-deductible form before anything is written. Returns the
+ * totals and the intended rows after the last-row residue (the immutable
+ * baseline createAndSetTotals writes and compares against).
+ */
+function resolveNonDeductibleIntended(
+  data: CreatePurchaseInvoiceData,
+  vatPrice: number | undefined,
+  grossPrice: number | undefined,
+  accounts: readonly Account[] | undefined,
+): { ok: true; totals: TotalsSuccess; rows: PurchaseInvoiceItem[] } | { ok: false; totals: TotalsFailure } {
+  const items = data.items;
+  if (classifyNonVatInvoiceForm(items, accounts) !== "non_deductible") {
+    return {
+      ok: false,
+      totals: {
+        ok: false,
+        code: "nonvat_form_unproven",
+        message: "Non-VAT purchase invoice items carry a VAT account but are not the proven non-deductible form " +
+          "(VAT account and dimension = the item's cost account and dimension, a non-VAT chart account, article 11, one rate). Nothing was created.",
+      },
+    };
+  }
+  const totals = resolvePurchaseInvoiceTotals({
+    data, vatPrice, grossPrice, isVatRegistered: false, nonDeductible: true, items, itemAmounts: predictPurchaseItemAmounts(items),
+  });
+  if (!totals.ok) return { ok: false, totals };
+  const last = items[items.length - 1]!;
+  const suppliedOverride = last.project_no_vat_gross_price ?? null;
+  // The residue is never placed on a caller-supplied override (it would rewrite it).
+  if (totals.lastItemGross !== undefined && suppliedOverride !== null &&
+      Math.round(totals.lastItemGross * 100) !== Math.round(suppliedOverride * 100)) {
+    return {
+      ok: false,
+      totals: {
+        ok: false,
+        code: "purchase_totals_mismatch",
+        message: `Purchase invoice totals mismatch: the invoice VAT differs from the item VAT and the last item's supplied project_no_vat_gross_price ${suppliedOverride} ` +
+          "would have to change; it is never rewritten. Fix the item amounts or the invoice totals.",
+      },
+    };
+  }
+  const rows = totals.lastItemGross !== undefined
+    ? [...items.slice(0, -1), { ...last, project_no_vat_gross_price: totals.lastItemGross }]
+    : [...items];
+  const net = roundMoney(predictPurchaseItemAmounts(rows).reduce((sum, entry) => sum + entry.net, 0));
+  const proof = proveNonDeductibleInvoice(rows, {
+    net_price: net,
+    vat_price: totals.vat,
+    gross_price: totals.gross,
+    cl_currencies_id: data.cl_currencies_id,
+    currency_rate: data.currency_rate,
+    base_net_price: data.base_net_price,
+    base_vat_price: data.base_vat_price,
+    base_gross_price: data.base_gross_price,
+  }, accounts, { intended: true });
+  if (!proof.ok) {
+    return {
+      ok: false,
+      totals: { ok: false, code: "purchase_totals_mismatch", message: `Purchase invoice totals mismatch (non-deductible VAT form): ${proof.reason}. Nothing was created.` },
+    };
+  }
+  return { ok: true, totals, rows };
+}
+
+function previewNonDeductibleTotals(
+  data: CreatePurchaseInvoiceData,
+  vatPrice: number | undefined,
+  grossPrice: number | undefined,
+  accounts: readonly Account[] | undefined,
+): PurchaseInvoiceTotalsResolution {
+  return resolveNonDeductibleIntended(data, vatPrice, grossPrice, accounts).totals;
+}
+
+const sameCents = (a: unknown, b: unknown) =>
+  typeof a === "number" && typeof b === "number" && Number.isFinite(a) && Number.isFinite(b) && Math.round(a * 100) === Math.round(b * 100);
+
+/**
+ * P2/P3 (GitHub #63): read-back rows that differ from the immutable intended
+ * baseline: count, accounts, dimensions, article, rate, reversed_vat_id and net;
+ * after the PATCH (`afterPatch`), also the expected item VAT and, when
+ * present, the gross override.
+ */
+function nonDeductibleBaselineMismatches(
+  readBack: readonly PurchaseInvoiceItem[] | undefined,
+  baseline: readonly PurchaseInvoiceItem[],
+  afterPatch: boolean,
+): string[] {
+  const rows = readBack ?? [];
+  if (rows.length !== baseline.length) return [`items (${rows.length} read back, ${baseline.length} intended)`];
+  const amounts = predictPurchaseItemAmounts(baseline);
+  const mismatches: string[] = [];
+  baseline.forEach((expected, index) => {
+    const actual = rows[index]!;
+    const same = (field: keyof PurchaseInvoiceItem) => (expected[field] ?? null) === (actual[field] ?? null);
+    for (const field of ["purchase_accounts_id", "purchase_accounts_dimensions_id", "vat_accounts_id", "vat_accounts_dimensions_id",
+      "cl_vat_articles_id", "reversed_vat_id"] as const) {
+      if (!same(field)) mismatches.push(`items[${index}].${field}`);
+    }
+    if (normalizeVatRate(expected.vat_rate_dropdown) !== normalizeVatRate(actual.vat_rate_dropdown)) mismatches.push(`items[${index}].vat_rate_dropdown`);
+    const { net, vat } = amounts[index]!;
+    if (!sameCents(actual.total_net_price, net)) mismatches.push(`items[${index}].total_net_price`);
+    if (afterPatch) {
+      if (!sameCents(actual.vat_amount, vat)) mismatches.push(`items[${index}].vat_amount`);
+      const expectedOverride = expected.project_no_vat_gross_price ?? null;
+      const actualOverride = actual.project_no_vat_gross_price ?? null;
+      if (expectedOverride !== null ? !sameCents(actualOverride, expectedOverride)
+        : actualOverride !== null && !sameCents(actualOverride, roundMoney(net + vat))) {
+        mismatches.push(`items[${index}].project_no_vat_gross_price`);
+      }
+    }
+  });
+  return mismatches;
 }
 
 export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
@@ -407,7 +549,11 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     vatPrice?: number,
     grossPrice?: number,
     isVatRegistered = true,
+    accounts?: readonly Account[],
   ): Promise<PurchaseInvoice> {
+    if (!isVatRegistered && data.items?.some(hasVatAccountFields)) {
+      return this.createNonDeductible(data, vatPrice, grossPrice, accounts);
+    }
     // Same totals rules as after the read-back, on predicted item amounts:
     // totals the API would refuse are refused before the draft exists.
     const preview = previewPurchaseInvoiceTotals(data, vatPrice, grossPrice, isVatRegistered);
@@ -476,22 +622,85 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
 
       return this.get(id);
     } catch (error) {
-      const followUpMessage = error instanceof Error ? error.message : String(error);
-      try {
-        await this.invalidate(id);
-      } catch (invalidateError) {
-        const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
-        throw new InvoiceCreationError(
-          `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
-          `Automatic invalidation also failed: ${invalidateMessage}`,
-          id,
-        );
-      }
+      return this.invalidateAfterFailedFollowUp(id, error);
+    }
+  }
 
+  /** Invalidates a created draft whose follow-up failed and throws InvoiceCreationError (never returns). */
+  private async invalidateAfterFailedFollowUp(id: number, error: unknown): Promise<never> {
+    const followUpMessage = error instanceof Error ? error.message : String(error);
+    try {
+      await this.invalidate(id);
+    } catch (invalidateError) {
+      const invalidateMessage = invalidateError instanceof Error ? invalidateError.message : String(invalidateError);
       throw new InvoiceCreationError(
-        `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`,
+        `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
+        `Automatic invalidation also failed: ${invalidateMessage}`,
         id,
       );
+    }
+
+    throw new InvoiceCreationError(
+      `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`,
+      id,
+    );
+  }
+
+  /**
+   * GitHub #63: create a non-VAT invoice in the non-deductible form (VAT on the
+   * cost account). P1 proves the intended payload before the POST; P2 compares
+   * the first read-back with the immutable intended rows before the PATCH; P3
+   * proves the read-back after the PATCH. Any P2/P3 failure invalidates the draft.
+   */
+  private async createNonDeductible(
+    data: CreatePurchaseInvoiceData,
+    vatPrice: number | undefined,
+    grossPrice: number | undefined,
+    accounts: readonly Account[] | undefined,
+  ): Promise<PurchaseInvoice> {
+    const intended = resolveNonDeductibleIntended(data, vatPrice, grossPrice, accounts);
+    if (!intended.ok) throw new Error(intended.totals.message);
+    const { totals } = intended;
+    const baseline: readonly PurchaseInvoiceItem[] = intended.rows.map(applyPurchaseItemStructuralDefaults);
+    const response = await this.create({ ...data, items: data.items });
+    const id = response.created_object_id;
+    if (!id) throw new Error("Purchase invoice created but no ID returned");
+
+    try {
+      // P2: the first read-back must be the intended rows; never fall back to API rows.
+      const first = await this.get(id);
+      const p2 = nonDeductibleBaselineMismatches(first.items, baseline, false);
+      if (p2.length > 0) throw new Error(`nonvat_form_unproven: the created rows differ from the intended rows (${p2.join(", ")})`);
+      // The first GET precedes the totals PATCH. Prove the actual rows with
+      // their own sums; its invoice totals (and matching base totals) are not
+      // final yet. Currency, row base nets and every shape/amount rule still apply.
+      const firstNet = roundMoney(first.items!.reduce((sum, item) => sum + item.total_net_price!, 0));
+      const firstVat = roundMoney(first.items!.reduce((sum, item) => sum + item.vat_amount!, 0));
+      const firstProof = proveNonDeductibleInvoice(first.items!, {
+        cl_currencies_id: first.cl_currencies_id, currency_rate: first.currency_rate,
+        net_price: firstNet, vat_price: firstVat, gross_price: roundMoney(firstNet + firstVat),
+      }, accounts);
+      if (!firstProof.ok) throw new Error(`nonvat_form_unproven: ${firstProof.reason}`);
+
+      await this.update(id, {
+        vat_price: totals.vat,
+        gross_price: totals.gross,
+        items: baseline.map((item, index) => ({ ...item, id: first.items![index]!.id })),
+      });
+
+      // P3: the stored draft must be exactly the intended one, and proven.
+      const stored = await this.getFreshInvoice(id);
+      const p3 = nonDeductibleBaselineMismatches(stored.items, baseline, true);
+      const expectedNet = roundMoney(predictPurchaseItemAmounts(baseline).reduce((sum, entry) => sum + entry.net, 0));
+      if (!sameCents(stored.net_price, expectedNet)) p3.push("net_price");
+      if (!sameCents(stored.vat_price, totals.vat)) p3.push("vat_price");
+      if (!sameCents(stored.gross_price, totals.gross)) p3.push("gross_price");
+      if (p3.length > 0) throw new Error(`nonvat_form_unproven: the stored draft differs from the intended one (${p3.join(", ")})`);
+      const proof = proveNonDeductibleInvoice(stored.items ?? [], stored, accounts);
+      if (!proof.ok) throw new Error(`nonvat_form_unproven: ${proof.reason}`);
+      return stored;
+    } catch (error) {
+      return this.invalidateAfterFailedFollowUp(id, error);
     }
   }
 
@@ -504,6 +713,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     id: number,
     invoice: PurchaseInvoice,
     isVatRegistered: boolean,
+    accounts?: readonly Account[],
   ): PurchaseInvoiceTotalsCorrectionPreview {
     if (invoice.status !== "PROJECT") {
       throw new PurchaseInvoiceTotalsCorrectionError("correction_invoice_not_project");
@@ -518,12 +728,19 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       throw new PurchaseInvoiceTotalsCorrectionError("correction_reverse_charge_not_supported");
     }
 
-    const itemVat = roundMoney(invoice.items.reduce((sum, item) => sum + (item.vat_amount ?? 0), 0));
-    const itemNet = roundMoney(invoice.items.reduce((sum, item) => sum + (item.total_net_price ?? 0), 0));
-    const proposedVat = isVatRegistered ? itemVat : 0;
-    const proposedGross = roundMoney(itemNet + itemVat);
     const currentVat = invoice.vat_price ?? null;
     const currentGross = invoice.gross_price ?? null;
+    // GitHub #63: no correction PATCH for a non-VAT invoice with a VAT-account
+    // item. A proven one already has consistent totals (no correction); an
+    // unproven one has nothing to approve.
+    const nonVatWithVatAccount = !isVatRegistered && invoice.items.some(hasVatAccountFields);
+    if (nonVatWithVatAccount && nonVatRegisterRefusal(invoice, accounts) !== undefined) {
+      throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
+    }
+    const itemVat = roundMoney(invoice.items.reduce((sum, item) => sum + (item.vat_amount ?? 0), 0));
+    const itemNet = roundMoney(invoice.items.reduce((sum, item) => sum + (item.total_net_price ?? 0), 0));
+    const proposedVat = nonVatWithVatAccount ? currentVat! : isVatRegistered ? itemVat : 0;
+    const proposedGross = nonVatWithVatAccount ? currentGross! : roundMoney(itemNet + itemVat);
     const correctionRequired =
       currentVat === null || roundMoney(currentVat) !== proposedVat ||
       currentGross === null || roundMoney(currentGross) !== proposedGross;
@@ -564,12 +781,17 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
   async previewTotalsCorrection(
     id: number,
     isVatRegistered = true,
+    accounts?: readonly Account[],
   ): Promise<PurchaseInvoiceTotalsCorrectionPreview> {
     const invoice = await this.getFreshInvoice(id);
-    return this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered);
+    return this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered, accounts);
   }
 
-  /** Confirm without changing totals unless an exact fresh correction preview was approved. */
+  /**
+   * Confirm without changing totals unless an exact fresh correction preview was approved.
+   * A non-VAT invoice is read fresh first: one with a VAT-account item registers only
+   * when proveNonDeductibleInvoice accepts it against `options.accounts` (P4, GitHub #63).
+   */
   async confirmWithTotals(
     id: number,
     isVatRegistered = true,
@@ -578,6 +800,9 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     if (!options.recalculateTotals) {
       if (options.approvedCorrection !== undefined) {
         throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
+      }
+      if (!isVatRegistered && nonVatRegisterRefusal(await this.getFreshInvoice(id), options.accounts) !== undefined) {
+        throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
       }
       return this.confirm(id);
     }
@@ -589,7 +814,7 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
     }
 
     const invoice = await this.getFreshInvoice(id);
-    const freshPreview = this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered);
+    const freshPreview = this.buildTotalsCorrectionPreview(id, invoice, isVatRegistered, options.accounts);
     if (canonicalCorrectionJson(options.approvedCorrection) !== canonicalCorrectionJson(freshPreview)) {
       throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
     }
