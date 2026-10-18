@@ -81,6 +81,19 @@ export function scopeIds(scope: Scope): Set<string> {
   return new Set(ids);
 }
 
+/** Normalized supplier keys of one document (VAT, registry number, name), for the seen/unseen split. */
+export function supplierKeys(...sources: Array<{ supplier_reg?: string | null; supplier_vat?: string | null; supplier_name?: string | null } | undefined>): string[] {
+  const keys = new Set<string>();
+  for (const source of sources) {
+    if (!source) continue;
+    if (source.supplier_vat) keys.add(`vat:${source.supplier_vat.replace(/[\s.-]+/g, "").toUpperCase()}`);
+    if (source.supplier_reg) keys.add(`reg:${source.supplier_reg.replace(/\s+/g, "")}`);
+    const name = source.supplier_name?.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    if (name) keys.add(`name:${name}`);
+  }
+  return [...keys];
+}
+
 export function manifestId(set: SetName, index: number): string {
   const n = String(index + 1).padStart(2, "0");
   return set === "corpus" ? n : `h${n}`;

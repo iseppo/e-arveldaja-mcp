@@ -10,13 +10,13 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { PARSER_VERSION, type PacketFile } from "./build-packets.js";
-import { REPO_ROOT, SCOPES, argValue, dataPath, hasFlag, readJson, scopeIds, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
+import { REPO_ROOT, SCOPES, argValue, dataPath, hasFlag, readJson, scopeIds, sha256Hex, supplierKeys, writeJson, writePrivate, type Scope } from "./common.js";
 import { FORMS } from "./prompts.js";
-import { loadStaged, registryPath, runIndex } from "./stage.js";
+import { loadStaged, registryPath, runIndex, tagScopeError } from "./stage.js";
 import { PROOF_QUESTIONS } from "../../src/document-reading-check.js";
 import { mcpPayloadBytes } from "../../src/response-budget.js";
 import type { TruthRecord } from "./truth.js";
-import type { CaseResult, PassResult } from "./replay.js";
+import { resultsScopeError, type CaseResult, type PassResult } from "./replay.js";
 
 const CEILING = { input: 30_000_000, output: 4_000_000 };
 const LEGACY_TOKENS = 200_000;
@@ -48,8 +48,44 @@ export function supersede(base: CaseResult[], sub: CaseResult[]): { results: Cas
   return { results: [...base.filter((result) => !slices.has(slice(result))), ...sub], superseded };
 }
 
-export function inScope(results: CaseResult[], ids: ReadonlySet<string>): CaseResult[] {
-  return results.filter((result) => result.doc_id === null || ids.has(result.doc_id));
+/** The results of the scope's documents; a document-less result belongs to the corpus scope only. */
+export function inScope(results: CaseResult[], ids: ReadonlySet<string>, scope: Scope = "corpus"): CaseResult[] {
+  return results.filter((result) => (result.doc_id === null ? scope === "corpus" : ids.has(result.doc_id)));
+}
+
+type SupplierSource = { supplier_reg?: string | null; supplier_vat?: string | null; supplier_name?: string | null };
+
+/**
+ * Plan §5.1/§5.8 (critic m13): held-out results split by supplier seen or unseen in the corpus. A document's
+ * supplier keys come from its truth and its packet heuristic (VAT, registry number, normalized name); it is
+ * "seen" when any key is a corpus document's key, "unknown" when it has none. Yield per reader × form × pass.
+ */
+export function supplierSplit(results: CaseResult[], heldout: Record<string, SupplierSource[]>, corpus: SupplierSource[][]) {
+  const corpusKeys = new Set(corpus.flatMap((sources) => supplierKeys(...sources)));
+  const group = (doc: string): "seen" | "unseen" | "unknown" => {
+    const keys = supplierKeys(...(heldout[doc] ?? []));
+    return keys.length === 0 ? "unknown" : keys.some((key) => corpusKeys.has(key)) ? "seen" : "unseen";
+  };
+  const docs = Object.keys(heldout).sort();
+  const groups = { seen: docs.filter((doc) => group(doc) === "seen"), unseen: docs.filter((doc) => group(doc) === "unseen"), unknown: docs.filter((doc) => group(doc) === "unknown") };
+  const rows: Array<{ reader: string; form: string; pass: string; group: string; cases: number; accepted: number; held: number; silent_wrong_cases: number; pipeline_silent_wrong_cases: number }> = [];
+  for (const item of results) {
+    if (!item.doc_id || item.kind !== "natural") continue;
+    for (const pass of ["real", "as_of"] as const) {
+      const entry = item.passes[pass];
+      if (!entry) continue;
+      const key = { reader: item.reader, form: item.form, pass, group: group(item.doc_id) };
+      let row = rows.find((candidate) => candidate.reader === key.reader && candidate.form === key.form && candidate.pass === key.pass && candidate.group === key.group);
+      if (!row) rows.push(row = { ...key, cases: 0, accepted: 0, held: 0, silent_wrong_cases: 0, pipeline_silent_wrong_cases: 0 });
+      row.cases += 1;
+      if (entry.verdict === "accept") row.accepted += 1;
+      else row.held += 1;
+      if (entry.silent_wrong.length > 0) row.silent_wrong_cases += 1;
+      if (entry.pipeline && entry.pipeline.verdict === "accept" && (entry.silent_wrong.length > 0 || entry.pipeline.silent_wrong_reverse_charge)) row.pipeline_silent_wrong_cases += 1;
+    }
+  }
+  rows.sort((a, b) => `${a.reader}|${a.form}|${a.pass}|${a.group}`.localeCompare(`${b.reader}|${b.form}|${b.pass}|${b.group}`));
+  return { documents: groups, rows };
 }
 
 function hardCaught(pass: PassResult | undefined, field: string): boolean {
@@ -319,31 +355,62 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
   return `${lines.join("\n")}\n`;
 }
 
+/** Step 6: the held-out report is always the full report (plan §6 step 6). */
+export const fullFor = (scope: Scope, flag: boolean): boolean => scope !== "corpus" || flag;
+
+/** A document's supplier sources: its truth (when available) and its packet heuristic. */
+function supplierSourcesOf(set: Scope, id: string): SupplierSource[] {
+  const truthPath = dataPath(set, "truth.json");
+  const truth = existsSync(truthPath) ? readJson<Record<string, TruthRecord>>(truthPath)[id] : undefined;
+  const packetPath = dataPath("packets", `${id}.json`);
+  const heuristic = existsSync(packetPath) ? readJson<PacketFile>(packetPath).heuristic_fields : undefined;
+  const sources: SupplierSource[] = [];
+  if (truth?.status === "available") sources.push(truth);
+  if (heuristic) sources.push(heuristic);
+  return sources;
+}
+
 if (process.argv[1]?.endsWith("/report.ts")) {
   const argv = process.argv.slice(2);
   const tag = argValue(argv, "--run");
   if (!tag) throw new Error("--run <tag> required");
   const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
-  const ids = scopeIds(scope);
   const subs = (argValue(argv, "--supersede") ?? "").split(",").filter(Boolean);
   const sub = subs.length ? subs.join("+") : undefined;
+  const out = sub ? `${tag}+${sub}` : tag;
+  // Every report tag and superseding tag belongs to the scope, and a report of another scope is never overwritten.
+  for (const name of [tag, ...subs]) {
+    const error = tagScopeError(name, scope) ?? resultsScopeError(name, scope);
+    if (error) throw new Error(error);
+  }
+  const previous = dataPath("reports", out, "summary.json");
+  if (existsSync(previous) && (readJson<{ header?: { scope?: string } }>(previous).header?.scope ?? "corpus") !== scope) throw new Error(`reports/${out} is a report of another scope`);
+  const ids = scopeIds(scope);
   let merged: { results: CaseResult[]; superseded: CaseResult[] } | undefined;
   for (const entry of subs) {
     const next = supersede(merged?.results ?? readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), readJson<CaseResult[]>(dataPath("results", `${entry}.json`)));
     merged = { results: next.results, superseded: [...(merged?.superseded ?? []), ...next.superseded] };
   }
-  const results = inScope(merged ? merged.results : readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids);
-  const out = sub ? `${tag}+${sub}` : tag;
+  const results = inScope(merged ? merged.results : readJson<CaseResult[]>(dataPath("results", `${tag}.json`)), ids, scope);
   const head = header(out, results, scope);
   const summary = summarize(tag, results);
   const proj = hasFlag(argv, "--projection") && scope === "corpus" ? projection(summary.usage, ids) : undefined;
-  const extra = hasFlag(argv, "--full") ? extras(results, ids, subs.length ? [tag, ...subs] : tag, scope) : undefined;
+  const extra = fullFor(scope, hasFlag(argv, "--full")) ? extras(results, ids, subs.length ? [tag, ...subs] : tag, scope) : undefined;
   const decision = extra ? formDecision(summary.forms, results) : undefined;
-  const superseded = merged && sub ? { by: sub, cases: inScope(merged.superseded, ids) } : undefined;
+  const superseded = merged && sub ? { by: sub, cases: inScope(merged.superseded, ids, scope) } : undefined;
+  const split = scope !== "corpus" ? supplierSplit(results,
+    Object.fromEntries([...ids].map((id) => [id, supplierSourcesOf(scope, id)])),
+    [...scopeIds("corpus")].map((id) => supplierSourcesOf("corpus", id))) : undefined;
   writeJson(dataPath("reports", out, "summary.json"), { header: head, ...summary, ...(proj ? { projection: proj } : {}), ...(extra ? { extras: extra, form_decision: decision } : {}),
-    ...(superseded ? { superseded: { by: superseded.by, case_ids: superseded.cases.map((item) => item.case_id) } } : {}) });
-  const md = markdown(head, summary, proj, extra, decision, superseded);
+    ...(superseded ? { superseded: { by: superseded.by, case_ids: superseded.cases.map((item) => item.case_id) } } : {}), ...(split ? { supplier_split: split } : {}) });
+  let md = markdown(head, summary, proj, extra, decision, superseded);
+  if (split) {
+    const lines = ["", "## Held-out by supplier seen/unseen in the corpus (§5.1)", "", `- documents: seen ${split.documents.seen.length}, unseen ${split.documents.unseen.length}, unknown ${split.documents.unknown.length}`, "",
+      "| reader | form | pass | supplier | cases | accepted | held | silent-wrong | pipeline silent-wrong |", "|---|---|---|---|---|---|---|---|---|",
+      ...split.rows.map((row) => `| ${row.reader} | ${row.form} | ${row.pass} | ${row.group} | ${row.cases} | ${row.accepted} | ${row.held} | ${row.silent_wrong_cases} | ${row.pipeline_silent_wrong_cases} |`)];
+    md += `${lines.join("\n")}\n`;
+  }
   writePrivate(dataPath("reports", out, "summary.md"), md);
   process.stdout.write(md);
 }

@@ -19,8 +19,8 @@ import { legacyPrompt, legacyShapeOk } from "./legacy.js";
 import { candidatesFor, type FamilyA } from "./mutate.js";
 import { caseWrongFields, wrongFields } from "./replay.js";
 import { classifyEvidence } from "./restage.js";
-import { supersede } from "./report.js";
-import type { CaseResult } from "./replay.js";
+import { fullFor, inScope, supersede, supplierSplit } from "./report.js";
+import { pipelineFor, type CaseResult, type PassResult } from "./replay.js";
 import { injectedItems, parseRunArgs, projectTotals, reservedKeys, scoped as scopedItems, todoItems } from "./step5.js";
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
@@ -410,6 +410,18 @@ try {
     // A legacy-style tag holding rows of both scopes and a document-less row.
     writeFileSync(join(dir, "runs", "mix.tsv"), "c-111111111111\t01\nc-222222222222\th01\nc-333333333333\t\n");
     writeFileSync(join(dir, "runs", "ho.tsv"), "c-444444444444\t02\nc-555555555555\th02\n");
+    // Codex ho review: destinations and reports. hsrc/hr are clean held-out tags; cdest a corpus results file;
+    // hdest a held-out-bound tag whose results file holds a corpus case; reports/hr is a corpus report.
+    mkdirSync(join(dir, "results"), { recursive: true });
+    mkdirSync(join(dir, "reports", "hr"), { recursive: true });
+    for (const tag of ["hsrc", "hdest", "hr"]) writeFileSync(join(dir, "runs", `${tag}.scope`), "heldout\n");
+    writeFileSync(join(dir, "runs", "hsrc.tsv"), "c-666666666666\th01\n");
+    writeFileSync(join(dir, "runs", "hr.tsv"), "c-777777777777\th01\n");
+    writeFileSync(join(dir, "results", "cdest.json"), JSON.stringify([{ case_id: "c-888888888888", set: "corpus", doc_id: "01" }]));
+    writeFileSync(join(dir, "results", "hdest.json"), JSON.stringify([{ case_id: "c-888888888888", set: "corpus", doc_id: "01" }]));
+    writeFileSync(join(dir, "results", "hr.json"), "[]");
+    writeFileSync(join(dir, "results", "mix.json"), JSON.stringify([{ case_id: "c-111111111111", set: "corpus", doc_id: "01" }]));
+    writeFileSync(join(dir, "reports", "hr", "summary.json"), JSON.stringify({ header: { scope: "corpus" } }));
     const probe = join(root, "scope-probe.mts");
     writeFileSync(probe, [
       `import { bindRunScope, scopedRunIndex, runScope } from ${JSON.stringify(join(SCRIPTS_DIR, "stage.ts"))};`,
@@ -433,6 +445,11 @@ try {
       "out.shapes = { corpusIsNotHeldout: !SCOPE_ID_SHAPE.heldout.test(\"01\"), heldoutIsNotCorpus: !SCOPE_ID_SHAPE.corpus.test(\"h01\") };",
       "out.heldoutIds = [...scopeIds(\"heldout\")].sort();",
       "try { await replayRun(\"mix\", { today: \"2026-10-18\", pipeline: false, scope: \"heldout\" }); out.replayMismatch = null; } catch (error) { out.replayMismatch = String(error); }",
+      "const refuses = async (run) => { try { await run(); return null; } catch (error) { return String(error); } };",
+      "out.toCorpusDest = await refuses(() => replayRun(\"cdest\", { today: \"2026-10-18\", pipeline: true, scope: \"heldout\", readings: \"hsrc\" }));",
+      "out.toForeignResults = await refuses(() => replayRun(\"hdest\", { today: \"2026-10-18\", pipeline: true, scope: \"heldout\", readings: \"hsrc\" }));",
+      "out.corpusIntoHeldout = await refuses(() => replayRun(\"hsrc\", { today: \"2026-10-18\", pipeline: true, scope: \"corpus\" }));",
+      "out.heldoutOk = await refuses(() => replayRun(\"hsrc\", { today: \"2026-10-18\", pipeline: true, scope: \"heldout\" }));",
       "process.stdout.write(JSON.stringify(out));",
     ].join("\n"));
     const env = { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin" };
@@ -452,6 +469,24 @@ try {
     assert("s6_scope_args_and_shapes", scope.scopeArg === "heldout" && scope.badScope === true && JSON.stringify(scope.shapes) === JSON.stringify({ corpusIsNotHeldout: true, heldoutIsNotCorpus: true }) &&
       JSON.stringify(scope.heldoutIds) === JSON.stringify(["h01", "h02", "h03"]), show);
     assert("s6_replay_refuses_other_scope", String(scope.replayMismatch).includes("bound to scope corpus, not heldout"), show);
+    assert("s6_replay_destination_scoped", String(scope.toCorpusDest).includes("cdest is bound to scope corpus") && String(scope.toForeignResults).includes("results/hdest.json holds a case of another scope") &&
+      String(scope.corpusIntoHeldout).includes("hsrc is bound to scope heldout") && scope.heldoutOk === null, show);
+    const report = (args: string[]) => {
+      try {
+        execFileSync(process.execPath, [tsx, join(SCRIPTS_DIR, "report.ts"), ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] });
+        return null;
+      } catch (error) {
+        return String((error as { stderr?: string }).stderr ?? error);
+      }
+    };
+    assert("s6_report_refuses_other_scope", String(report(["--run", "mix", "--scope", "heldout"])).includes("run mix is bound to scope corpus") &&
+      String(report(["--run", "hr", "--supersede", "mix", "--scope", "heldout"])).includes("run mix is bound to scope corpus") &&
+      String(report(["--run", "hr", "--scope", "heldout"])).includes("reports/hr is a report of another scope"));
+    const docless = { case_id: "c-1", doc_id: null } as unknown as CaseResult;
+    const ofDoc = { case_id: "c-2", doc_id: "h01" } as unknown as CaseResult;
+    assert("s6_docless_rows_corpus_only", inScope([docless, ofDoc], new Set(["h01"]), "heldout").map((item) => item.case_id).join() === "c-2" &&
+      inScope([docless], new Set(), "corpus").length === 1);
+    assert("s6_heldout_pipeline_and_full_default", pipelineFor("heldout", false) && !pipelineFor("corpus", false) && fullFor("heldout", false) && !fullFor("corpus", false));
     // End to end: a held-out run (reader stub) stages only held-out documents, and binds its tag first.
     const stubLog = join(dir, "launches.log");
     try {
@@ -494,6 +529,16 @@ try {
   const res = (case_id: string, doc_id: string, form: string, reader = "haiku") => ({ case_id, doc_id, form, reader }) as unknown as CaseResult;
   const sup = supersede([res("a", "14", "I-S"), res("b", "14", "I-T"), res("c", "06", "I-S"), res("e", "14", "I-S", "opus")], [res("d", "14", "I-S")]);
   assert("b14_supersede_slice_only", sup.results.map((item) => item.case_id).join() === "b,c,e,d" && sup.superseded.map((item) => item.case_id).join() === "a");
+  // §5.1 seen/unseen supplier split: seen by any shared key (VAT, registry number, name), unknown without one.
+  const passOf = (verdict: string, silent: string[] = []) => ({ verdict, holds: [], silent_wrong: silent }) as unknown as PassResult;
+  const hr = (case_id: string, doc_id: string, verdict: string, silent: string[] = []) =>
+    ({ case_id, doc_id, reader: "opus", form: "N-S", kind: "natural", passes: { real: passOf(verdict, silent), as_of: passOf(verdict, silent) } }) as unknown as CaseResult;
+  const split = supplierSplit([hr("c-a", "h01", "accept"), hr("c-b", "h02", "accept", ["gross"]), hr("c-c", "h03", "hold")],
+    { h01: [{ supplier_vat: "EE 100000007" }], h02: [{ supplier_reg: "99999999", supplier_name: "Uus OÜ" }], h03: [] },
+    [[{ supplier_vat: "EE100000007", supplier_name: "Vana OÜ" }], [{ supplier_reg: "10000018" }]]);
+  const row = (group: string) => split.rows.find((entry) => entry.pass === "as_of" && entry.group === group);
+  assert("s6_supplier_split", JSON.stringify(split.documents) === JSON.stringify({ seen: ["h01"], unseen: ["h02"], unknown: ["h03"] }) &&
+    row("seen")?.accepted === 1 && row("unseen")?.silent_wrong_cases === 1 && row("unknown")?.held === 1, JSON.stringify(split));
 
   // ---- B8: corpus scope never reads the held-out set ----------------------------------------------------------
   const scoped = join(root, "scoped-data");
@@ -525,16 +570,23 @@ try {
       return String((error as { stderr?: string }).stderr ?? error).slice(0, 300);
     }
   };
+  // Codex ho review: a corpus report or replay of a tag holding a held-out row now refuses (by id shape, so the
+  // unreadable held-out records are still never opened); without that row it runs.
+  const refusal = "run scoped holds a case of another scope (c-000000000002, document h01)";
   const reportError = scopedRun("report.ts", ["--run", "scoped", "--scope", "corpus", "--projection", "--full"]);
-  assert("b8_report_corpus_scope_no_heldout_read", reportError === "", reportError);
+  assert("b8_report_corpus_scope_no_heldout_read", reportError.includes(refusal) && !reportError.includes("EACCES"), reportError);
   const replayError = scopedRun("replay.ts", ["--run", "scoped", "--scope", "corpus"]);
-  assert("b8_replay_corpus_scope_skips_heldout", replayError === "", replayError);
+  assert("b8_replay_corpus_scope_skips_heldout", replayError.includes(refusal) && !replayError.includes("EACCES"), replayError);
   // Codex ab2 #2: step5 (projection) and restage open no record of the h01 index row either.
   const caps = ["--run", "scoped", "--cap-input", "1000", "--cap-output", "1000"];
   const step5Error = scopedRun("step5.ts", ["status", ...caps]);
   assert("b8_step5_skips_heldout_index_row", step5Error === "", step5Error);
   const restageError = scopedRun("restage.ts", caps);
   assert("b8_restage_skips_heldout_index_row", restageError === "", restageError);
+  writeFileSync(join(scoped, "runs", "scoped.tsv"), "c-000000000003\t01\n");
+  const cleanReport = scopedRun("report.ts", ["--run", "scoped", "--scope", "corpus", "--projection", "--full"]);
+  const cleanReplay = scopedRun("replay.ts", ["--run", "scoped", "--readings", "scoped", "--scope", "corpus"]);
+  assert("b8_corpus_report_and_replay_run_without_heldout_row", cleanReport === "" && cleanReplay === "", `${cleanReport} ${cleanReplay}`);
   chmodSync(join(scoped, "heldout"), 0o700);
   chmodSync(join(scoped, "readings", "c-000000000002.json"), 0o600);
   chmodSync(join(scoped, "staging", "c-000000000002.json"), 0o600);

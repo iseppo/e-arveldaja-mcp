@@ -11,10 +11,10 @@ import { checkReading, type AcceptedValues, type CheckResult } from "../../src/d
 import { normalizeInvoiceNumberForComparison } from "../../src/purchase-invoice-status.js";
 import type { OwnIds, PacketFile } from "./build-packets.js";
 import type { CollectedCase } from "./collect.js";
-import { SCOPES, addDays, argValue, dataPath, hasFlag, readJson, scopeIds, todayIso, writeJson, type Scope, type SetName } from "./common.js";
+import { SCOPES, SCOPE_ID_SHAPE, addDays, argValue, dataPath, hasFlag, readJson, scopeIds, todayIso, writeJson, type Scope, type SetName } from "./common.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import { checkContext } from "./synth-proof.js";
-import { runIndex, runScope } from "./stage.js";
+import { runIndex, tagScopeError } from "./stage.js";
 import { companyOf, type TruthRecord } from "./truth.js";
 
 export const SCORED_FIELDS = ["invoice_date", "invoice_number", "due_date", "supplier_reg", "supplier_vat", "supplier_iban", "currency", "net", "vat", "gross"] as const;
@@ -126,9 +126,24 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
   return pass;
 }
 
+/** Step 6: the held-out replay always evaluates the full pipeline (plan §6 step 6). */
+export const pipelineFor = (scope: Scope, flag: boolean): boolean => scope !== "corpus" || flag;
+
+/** An existing results/<tag>.json of another scope (by each result's set and document id shape) refuses. */
+export function resultsScopeError(tag: string, scope: Scope): string | null {
+  const path = dataPath("results", `${tag}.json`);
+  if (!existsSync(path)) return null;
+  const foreign = readJson<CaseResult[]>(path).find((result) => result.set !== scope || (result.doc_id === null ? scope !== "corpus" : !SCOPE_ID_SHAPE[scope].test(result.doc_id)));
+  return foreign ? `results/${tag}.json holds a case of another scope (${foreign.case_id})` : null;
+}
+
 export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope; readings?: string }): Promise<CaseResult[]> {
   const source = opts.readings ?? tag;
-  if (runScope(source) !== opts.scope) throw new Error(`run ${source} is bound to scope ${runScope(source)}, not ${opts.scope}`);
+  // Source and destination both belong to the scope: a replay never writes one scope's results over another's.
+  for (const name of new Set([source, tag])) {
+    const error = tagScopeError(name, opts.scope) ?? resultsScopeError(name, opts.scope);
+    if (error) throw new Error(error);
+  }
   const ids = scopeIds(opts.scope);
   const results: CaseResult[] = [];
   // The run index names each case's document, so a reading outside the scope is never opened.
@@ -184,7 +199,7 @@ if (process.argv[1]?.endsWith("/replay.ts")) {
   if (!tag) throw new Error("--run <tag> required");
   const scope = (argValue(argv, "--scope") ?? "corpus") as Scope;
   if (!SCOPES.includes(scope)) throw new Error(`--scope must be one of ${SCOPES.join(", ")}`);
-  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: hasFlag(argv, "--pipeline"), scope, readings: argValue(argv, "--readings") })
+  replayRun(tag, { today: argValue(argv, "--today") ?? todayIso(), pipeline: pipelineFor(scope, hasFlag(argv, "--pipeline")), scope, readings: argValue(argv, "--readings") })
     .then((results) => process.stdout.write(`replayed ${results.length} cases → results/${tag}.json\n`))
     .catch((error: unknown) => {
       process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);

@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { REPO_ROOT, SCOPES, argValue, dataPath, readJson, scopeIds, sentinel, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
+import { REPO_ROOT, SCOPES, SCOPE_ID_SHAPE, argValue, dataPath, readJson, scopeIds, sentinel, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
 import type { Form } from "./prompts.js";
 
 export type Reader = "opus" | "haiku" | "codex";
@@ -94,6 +94,16 @@ export function bindRunScope(tag: string, scope: Scope): string | null {
   if (runIndex(tag, { optional: true }).length > 0) return `run ${tag} already holds corpus cases; use a new tag for scope ${scope}`;
   writePrivate(runScopePath(tag), `${scope}\n`);
   return null;
+}
+
+/**
+ * A tag usable in `scope`: bound to it (corpus when unbound), and every index row of that scope's id shape
+ * (a document-less row only in the corpus scope). Checked by shape, so no manifest is read.
+ */
+export function tagScopeError(tag: string, scope: Scope): string | null {
+  if (runScope(tag) !== scope) return `run ${tag} is bound to scope ${runScope(tag)}, not ${scope}`;
+  const foreign = runIndex(tag, { optional: true }).find((entry) => (entry.doc_id === null ? scope !== "corpus" : !SCOPE_ID_SHAPE[scope].test(entry.doc_id)));
+  return foreign ? `run ${tag} holds a case of another scope (${foreign.case_id}, document ${foreign.doc_id ?? "none"})` : null;
 }
 
 /**
