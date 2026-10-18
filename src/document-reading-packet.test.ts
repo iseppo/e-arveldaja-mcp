@@ -118,7 +118,30 @@ describe("document-reading packet: holds", () => {
     holds("Arve kuupäev ‧‧‧‧‧‧‧‧");
     holds("Arve kuupäev ．．．．．．");
     holds("Arve kuupäev ........ Periood");
-    holds("Võttis vastu: .............................................");
+  });
+
+  it("T-PK-signature-exempt: a bare signature-label leader does not hold (owner-approved C1 exemption)", () => {
+    const passes = (line: string) => expect(codes(makePacket([line])), line).not.toContain("text_layer_value_lost");
+    passes("Arve koostas: PIM i Allkiri .....................................................");
+    passes("Arve väljastas: Mart Parve ¦ Võttis vastu: .............................................");
+    passes("Received by: ________");
+    passes("ALLKIRJAD ........");
+  });
+
+  it("T-KILL-signature: a signature leader holds unless every exemption condition holds", () => {
+    const holds = (line: string) => expect(codes(makePacket([line])), JSON.stringify(line)).toContain("text_layer_value_lost");
+    holds("Allkiri .... Kuupäev ....");
+    holds("Kuupäev / Allkiri ....");
+    holds("Allkiri ¦ Kokku ........");
+    holds("Allkirjastatud arve kuupäev ....");
+    holds("Allkirjastatud ........");
+    holds("Kinnitusallkiri ........");
+    holds("Võttis\u00a0vastu: ........");
+    holds("Аllkiri ........"); // Cyrillic А
+    holds("Allkiri, kuupäev ........");
+    holds("Allkiri ........ ¦ Arve nr ........");
+    holds("Allkiri / ........");
+    holds("Arve väljastaja: ________________________________ ¦ Kauba kätte saanud: ________________________________");
   });
 
   it("T-PK-leader-in-cell: a leader an amount follows, or 3 leader glyphs, does not hold (C1)", () => {
