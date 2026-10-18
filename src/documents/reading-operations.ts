@@ -434,37 +434,60 @@ const sameScalar = (expected: unknown, actual: unknown) =>
   typeof expected === "number" && typeof actual === "number" ? Math.abs(expected - actual) < 0.005 : expected === actual;
 
 /**
- * §5.5: the fields of the created draft, as read back, that differ from the approved write model. Only the model's
- * defined fields are compared (the API fills in derived ones); the payment fields must be absent: the reading path
- * never books a cash payment.
+ * The material fields the readback is compared on (§5.5), each with the values the API may return when the approved
+ * model leaves it out. Expected absent means read back absent (undefined, null, "") or one of those defaults; a
+ * value present where the model has none is a mismatch.
+ */
+const READBACK_HEADER_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
+  clients_id: [], number: [], create_date: [], journal_date: [], term_days: [0], cl_currencies_id: [],
+  currency_rate: [1], liability_accounts_id: [], liability_accounts_dimensions_id: [], bank_ref_number: [], bank_account_no: [],
+  notes: [], paid_in_cash: [false], cash_accounts_id: [], cash_accounts_dimensions_id: [], cash_payment_date: [],
+  subclients_id: [], overdue_charge: [0],
+};
+const READBACK_ITEM_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
+  custom_title: [], cl_purchase_articles_id: [], purchase_accounts_id: [], purchase_accounts_dimensions_id: [],
+  vat_accounts_id: [], vat_accounts_dimensions_id: [], cl_vat_articles_id: [], vat_rate_dropdown: [], reversed_vat_id: [],
+  total_net_price: [], amount: [1], cl_fringe_benefits_id: [1], products_id: [],
+  projects_project_id: [], projects_location_id: [], projects_person_id: [],
+};
+
+const isAbsent = (value: unknown) => value === undefined || value === null || value === "";
+
+function readbackFieldMatches(expected: unknown, actual: unknown, defaults: readonly unknown[]): boolean {
+  if (isAbsent(expected)) return isAbsent(actual) || defaults.some((entry) => sameScalar(entry, actual));
+  return sameScalar(expected, actual);
+}
+
+/**
+ * §5.5: the fields of the created draft, as read back, that differ from the approved write model, over an explicit
+ * set of material header and item fields (item count and order included). The base amounts may only echo the
+ * invoice-level amounts when the model has none.
  */
 export function draftReadbackMismatches(draft: PurchaseInvoice, model: CreatePurchaseInvoiceData, totals: { vatPrice?: number; grossPrice?: number }): string[] {
   const fields: string[] = [];
   const draftRecord = draft as unknown as Record<string, unknown>;
-  for (const [key, expected] of Object.entries(model)) {
-    if (key === "items" || key === "client_name" || expected === undefined || expected === null) continue;
-    if (!sameScalar(expected, draftRecord[key])) fields.push(key);
+  const modelRecord = model as unknown as Record<string, unknown>;
+  for (const [key, defaults] of Object.entries(READBACK_HEADER_DEFAULTS)) {
+    if (!readbackFieldMatches(modelRecord[key], draftRecord[key], defaults)) fields.push(key);
   }
-  if (totals.grossPrice !== undefined && !sameScalar(totals.grossPrice, draft.gross_price)) fields.push("gross_price");
-  if (totals.vatPrice !== undefined && !sameScalar(totals.vatPrice, draft.vat_price ?? 0)) fields.push("vat_price");
-  if (draft.paid_in_cash === true) fields.push("paid_in_cash");
-  for (const key of ["cash_accounts_id", "cash_accounts_dimensions_id", "cash_payment_date"] as const) {
-    if (draft[key] !== undefined && draft[key] !== null) fields.push(key);
+  const echoes: Record<string, unknown> = { base_net_price: draft.net_price, base_vat_price: draft.vat_price, base_gross_price: draft.gross_price };
+  for (const key of ["base_net_price", "base_vat_price", "base_gross_price"] as const) {
+    if (!readbackFieldMatches(model[key], draft[key], [echoes[key]])) fields.push(key);
   }
+  if (!readbackFieldMatches(totals.grossPrice, draft.gross_price, [])) fields.push("gross_price");
+  if (!readbackFieldMatches(totals.vatPrice, draft.vat_price, [0])) fields.push("vat_price");
   const items = draft.items ?? [];
   if (items.length !== model.items.length) {
     fields.push("items");
-  } else {
-    model.items.forEach((item, index) => {
-      const actual = items[index] as unknown as Record<string, unknown>;
-      for (const key of ["custom_title", "cl_purchase_articles_id", "purchase_accounts_id", "purchase_accounts_dimensions_id", "vat_accounts_id",
-        "vat_accounts_dimensions_id", "cl_vat_articles_id", "vat_rate_dropdown", "reversed_vat_id", "total_net_price", "amount"] as const) {
-        const expected = (item as unknown as Record<string, unknown>)[key];
-        if (expected === undefined || expected === null) continue;
-        if (!sameScalar(expected, actual[key])) fields.push(`items[${index}].${key}`);
-      }
-    });
+    return fields;
   }
+  model.items.forEach((item, index) => {
+    const expected = item as unknown as Record<string, unknown>;
+    const actual = items[index] as unknown as Record<string, unknown>;
+    for (const [key, defaults] of Object.entries(READBACK_ITEM_DEFAULTS)) {
+      if (!readbackFieldMatches(expected[key], actual[key], defaults)) fields.push(`items[${index}].${key}`);
+    }
+  });
   return fields;
 }
 

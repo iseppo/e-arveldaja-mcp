@@ -274,6 +274,40 @@ describe("reading create", () => {
     expect(outcome.value.readbackMismatch).toEqual(expect.arrayContaining(["number", "paid_in_cash", "cash_accounts_id"]));
   });
 
+  it.each([
+    ["an item purchase dimension", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], purchase_accounts_dimensions_id: 999 }] }), "items[0].purchase_accounts_dimensions_id"],
+    ["an item VAT dimension", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], vat_accounts_dimensions_id: 998 }] }), "items[0].vat_accounts_dimensions_id"],
+    ["a liability dimension", (data: Record<string, any>) => ({ ...data, liability_accounts_dimensions_id: 997 }), "liability_accounts_dimensions_id"],
+    ["an unexpected IBAN", (data: Record<string, any>) => ({ ...data, bank_account_no: "EE382200221020145685" }), "bank_account_no"],
+    ["an extra item", (data: Record<string, any>) => ({ ...data, items: [...data.items, { ...data.items[0], custom_title: "extra" }] }), "items"],
+    ["swapped item order", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], custom_title: "other" }] }), "items[0].custom_title"],
+  ])("a readback that adds %s the approved model lacks gets no confirm handle", async (_name, mutate, field) => {
+    const w = world();
+    const file = writePdf("%PDF readback probe");
+    const verify = await verified(w, file);
+    w.createAndSetTotals.mockImplementationOnce(async (data: Record<string, unknown>, vat?: number, gross?: number) =>
+      ({ id: w.commit(mutate(data), vat, gross) }));
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(outcome.value.confirmPlan).toBeUndefined();
+    expect(outcome.value.readbackMismatch).toContain(field);
+  });
+
+  it("a readback with the API's own defaults for absent fields still gets a confirm handle", async () => {
+    const w = world();
+    const file = writePdf("%PDF readback defaults");
+    const verify = await verified(w, file);
+    w.createAndSetTotals.mockImplementationOnce(async (data: Record<string, any>, vat?: number, gross?: number) => ({ id: w.commit({
+      ...data, currency_rate: 1, paid_in_cash: false, liability_accounts_dimensions_id: null, bank_ref_number: "", overdue_charge: 0,
+      net_price: 100, base_net_price: 100, base_vat_price: vat, base_gross_price: gross,
+      items: data.items.map((item: Record<string, unknown>) => ({ ...item, purchase_accounts_dimensions_id: null, vat_accounts_dimensions_id: null })),
+    }, vat, gross) }));
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(outcome.value.readbackMismatch).toBeUndefined();
+    expect(outcome.value.confirmPlan).toBeDefined();
+  });
+
   it("a wrong-company signal on the document holds at create, 0 writes", async () => {
     const w = world();
     const file = writePdf("%PDF wrong company");
