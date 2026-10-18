@@ -11,8 +11,6 @@ import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
 import {
-  ADVISORY_TEXT_HAZARD_SIGNALS,
-  ADVISORY_TEXT_HAZARD_WARNINGS,
   type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
@@ -382,11 +380,6 @@ async function processSingleReceipt(
       ownCompanyRegistryCode: options.ownCompanyRegistryCode,
     });
     Object.assign(signals, textHazards);
-    // Advisory hazard notes ride on every result, also past the booking helper's own notes.
-    const hazardNotes = ADVISORY_TEXT_HAZARD_SIGNALS
-      .filter(signal => signals[signal])
-      .map(signal => `${signal}: ${ADVISORY_TEXT_HAZARD_WARNINGS[signal]}`);
-    notes.push(...hazardNotes);
     const selfVatDetected = signals.self_vat_detected === true;
     const selfRegCodeDetected = signals.self_reg_code_detected === true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)
@@ -801,7 +794,7 @@ async function processSingleReceipt(
             }),
           }
         : {}),
-      notes: [...hazardNotes, ...created.notes],
+      notes: created.notes,
       error: created.error,
     };
   } catch (error) {

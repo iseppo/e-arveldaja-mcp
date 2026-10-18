@@ -25,7 +25,7 @@ import {
   buildExtractionConfidenceSignals,
   supplierCountryNeedsReview,
 } from "./receipt-inbox.js";
-import { CREATION_GATING_EXTRACTION_SIGNALS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, TEXT_HAZARD_GATING_SIGNALS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { createAndMaybeMatchPurchaseInvoice } from "./receipt-inbox-booking.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import type { ReceiptFileSnapshot } from "./receipt-inbox-types.js";
@@ -1878,7 +1878,7 @@ describe("shouldGateCreation — document-scope and amount-evidence holds (WP1)"
     raw_text: "Invoice content",
   };
 
-  it.each(CREATION_GATING_EXTRACTION_SIGNALS.filter(signal => signal !== "foreign_currency_marker" && signal !== "text_layer_value_lost"))("maps the extracted %s flag to its signal", signal => {
+  it.each(CREATION_GATING_EXTRACTION_SIGNALS.filter(signal => !(TEXT_HAZARD_GATING_SIGNALS as readonly string[]).includes(signal)))("maps the extracted %s flag to its signal", signal => {
     expect(buildExtractionConfidenceSignals({ [signal]: true }, {})).toEqual({ [signal]: true });
   });
 
@@ -1886,8 +1886,8 @@ describe("shouldGateCreation — document-scope and amount-evidence holds (WP1)"
     expect(buildExtractionConfidenceSignals({ foreign_currency_marker: true } as never, {})).toEqual({});
   });
 
-  it("text_layer_value_lost is never an extraction flag: only textHazardSignals raises it (P2 E2)", () => {
-    expect(buildExtractionConfidenceSignals({ text_layer_value_lost: true } as never, {})).toEqual({});
+  it.each(["text_layer_value_lost", "credit_word_present", "signed_amount_present"])("%s is never an extraction flag: only textHazardSignals raises it (P2 E2/E4)", signal => {
+    expect(buildExtractionConfidenceSignals({ [signal]: true } as never, {})).toEqual({});
   });
 
   it.each(CREATION_GATING_EXTRACTION_SIGNALS.flatMap(signal =>

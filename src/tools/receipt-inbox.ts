@@ -20,7 +20,7 @@ import { type ApiContext, jsonObjectOrArrayInput, coerceId } from "./crud-tools.
 import { getPurchaseArticlesWithVat } from "./purchase-vat-defaults.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
-import { CREATION_GATING_EXTRACTION_SIGNALS, type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, TEXT_HAZARD_GATING_SIGNALS, type ExtractionConfidenceSignals, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import {
   type BookingSuggestion,
   type ClassificationApplyMode,
@@ -761,8 +761,8 @@ export function buildExtractionConfidenceSignals(
   if (amountIssues.some(code => code !== "vat_rate_implausible")) signals.amounts_inconsistent = true;
   if (amountIssues.includes("vat_rate_implausible")) signals.vat_rate_implausible = true;
   for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
-    // foreign_currency_marker and text_layer_value_lost come from the caller's textHazardSignals, not from the extraction.
-    if (signal !== "foreign_currency_marker" && signal !== "text_layer_value_lost" && extracted[signal]) signals[signal] = true;
+    // The text hazards come from the caller's textHazardSignals, not from the extraction.
+    if (!(TEXT_HAZARD_GATING_SIGNALS as readonly string[]).includes(signal) && extracted[signal as keyof typeof extracted]) signals[signal] = true;
   }
   if (
     extracted.reg_code_rationale === "coordinate_confirmed_echo" ||

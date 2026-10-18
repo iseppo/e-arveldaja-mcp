@@ -21,7 +21,7 @@ import {
   inferSupplierCountry,
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
-import { ADVISORY_TEXT_HAZARD_SIGNALS, ADVISORY_TEXT_HAZARD_WARNINGS, CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
@@ -473,9 +473,6 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         } else {
           warnings.push({ code: signal, message: CREATION_GATING_SIGNAL_WARNINGS[signal] });
         }
-      }
-      for (const signal of ADVISORY_TEXT_HAZARD_SIGNALS) {
-        if (signals[signal]) warnings.push({ code: signal, message: ADVISORY_TEXT_HAZARD_WARNINGS[signal] });
       }
       if (currencyWarning) {
         warnings.push({ code: currencyWarning.code, message: currencyWarning.message });

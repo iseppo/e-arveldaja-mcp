@@ -504,32 +504,37 @@ describe("P2 E3: a receipt read as EUR that prints another currency is held in e
   });
 });
 
-describe("P2 E0: credit and signed-amount hazards are advisory on the real receipt_batch path", () => {
+describe("P2 E4: a credit word or a signed amount holds the receipt in every mode", () => {
+  const signalsOf = (result: { llm_fallback?: { confidence_signals?: string[] } }) => result.llm_fallback?.confidence_signals ?? [];
+
   it.each([
     ["credit_word_present", "Kreeditarve viide K-1"],
+    ["credit_word_present", "Refund for order 17"],
     ["signed_amount_present", "Allahindlus -5,00"],
-  ])("%s is listed in the summary but does not hold the receipt (E4 decides)", async (signal, line) => {
-    stubRegistry([true]);
+    ["signed_amount_present", "Allahindlus (5,00)"],
+  ])("%s (%s): dry run, create and create_and_confirm write nothing", async (signal, line) => {
     vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), line]));
-    const { api } = makeApi();
-    const outcome = await createReceiptBatchOperations(api, createTestRuntimeSafetyContext())
-      .runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
-    if (!outcome.ok) throw new Error("dry run failed");
-    expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
-    expect(outcome.value.results[0]!.llm_fallback?.confidence_signals).toContain(signal);
-    // The advisory note survives the booking helper's own notes.
-    expect(outcome.value.results[0]!.notes.some(note => note.startsWith(`${signal}:`))).toBe(true);
+    for (const mode of ["create", "create_and_confirm"] as const) {
+      stubRegistry([true]);
+      const { api, rec } = makeApi();
+      const { dry, run } = await runMode(api, mode);
+      expect(dry.results[0]!.status).toBe("needs_review");
+      expect(signalsOf(dry.results[0]!)).toContain(signal);
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(rec.confirm).not.toHaveBeenCalled();
+    }
   });
 
-  it("the advisory note also rides on a created result", async () => {
+  it("a credit word only inside a longer word (non-refundable) is no hold: the receipt is created", async () => {
     stubRegistry([true]);
-    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), "Kreeditarve viide K-1"]));
+    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), "Tickets are non-refundable"]));
     const { api, rec } = makeApi();
-    const { run } = await runMode(api, "create");
-    if (!run.ok) throw new Error("run failed");
-    expect(run.value.results[0]!.status).toBe("created");
+    const { dry, run } = await runMode(api, "create");
+    expect(signalsOf(dry.results[0]!)).not.toContain("credit_word_present");
+    expect(run.ok && run.value.results[0]!.status).toBe("created");
     expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
-    expect(run.value.results[0]!.notes.some(note => note.startsWith("credit_word_present:"))).toBe(true);
   });
 });
 
