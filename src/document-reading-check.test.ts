@@ -883,6 +883,40 @@ describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kil
   });
 });
 
+describe("C2/C3 deferred: their counterexamples stay held (plan p2 §0, §3 kill tests)", () => {
+  it("T-KILL-C2-pair: `Arve nr 10000018/EE100000007` read as supplier reg/VAT holds", () => {
+    const keys = keysOf({
+      lines: withLines({ 1: "Näidis OÜ    Arve nr 10000018/EE100000007", 2: "Aadress Tallinn" }),
+      values: { invoice_number: null },
+      evidence: {
+        invoice_number: undefined,
+        supplier_reg: { line: "p1:001", quote: "Arve nr 10000018/EE100000007" },
+        supplier_vat: { line: "p1:001", quote: "Arve nr 10000018/EE100000007" },
+      },
+      labels: { invoice_number: null, supplier_reg: null, supplier_vat: null },
+    });
+    expect(keys).toContain("value_not_complete_token:supplier_reg");
+    expect(keys).toContain("value_not_complete_token:supplier_vat");
+  });
+
+  it("T-KILL-C2-glued: `Arve nr.10000018` read as supplier reg holds", () => {
+    expect(keysOf({
+      lines: withLines({ 1: "Näidis OÜ    Arve nr.10000018", 2: "KMKR EE100000007" }),
+      values: { invoice_number: null },
+      evidence: { invoice_number: undefined, supplier_reg: { line: "p1:001", quote: "Arve nr.10000018" } },
+      labels: { invoice_number: null, supplier_reg: null },
+    })).toContain("value_not_complete_token:supplier_reg");
+  });
+
+  it("T-KILL-C3-order: `Tellimuse nr.A-17` read as the invoice number holds", () => {
+    expect(keysOf({
+      lines: withLines({ 1: "Näidis OÜ    Tellimuse nr.A-17" }),
+      evidence: { invoice_number: { line: "p1:001", quote: "Tellimuse nr.A-17" } },
+      labels: { invoice_number: "Tellimuse" },
+    })).toEqual(["value_not_complete_token:invoice_number"]);
+  });
+});
+
 describe("C7: packet holds survive a schema failure (plan p2 §3 C7)", () => {
   // h21 shape: an oversize packet whose proof fails its schema.
   const oversizeLines = [...BASE_LINES, ...Array.from({ length: 1500 }, (_, index) => `Rida ${index + 1}`)];
