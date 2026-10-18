@@ -555,6 +555,22 @@ describe("draftReadbackMismatches", () => {
     expect(draftReadbackMismatches({ ...omitting([]), net_price: null } as never, noOverride as never, totals, true)).toEqual(["net_price"]);
   });
 
+  it("text fields compare as exact strings, never as numbers: a big-number invoice number one digit off is a mismatch", () => {
+    const model = { ...noOverride, number: "9007199254740992" };
+    expect(draftReadbackMismatches({ ...omitting([]), number: "9007199254740993" } as never, model as never, totals, true)).toEqual(["number"]);
+    expect(draftReadbackMismatches({ ...omitting([]), number: " 9007199254740992 " } as never, model as never, totals, true)).toEqual([]);
+  });
+
+  it("the money tolerance applies to money only: an id off by a fraction is a mismatch", () => {
+    expect(draftReadbackMismatches(omitting([], [{ purchase_accounts_id: 5000.004 }]) as never, noOverride as never, totals, true))
+      .toEqual(["items[0].purchase_accounts_id"]);
+  });
+
+  it("a payment_type the model sent is compared exactly", () => {
+    const model = { ...noOverride, payment_type: "Ülekanne" };
+    expect(draftReadbackMismatches({ ...omitting([]), payment_type: "Sularaha" } as never, model as never, totals, true)).toEqual(["payment_type"]);
+  });
+
   it("a server-computed item VAT alone that differs from the predicted VAT is a mismatch", () => {
     expect(draftReadbackMismatches(readback([{ vat_amount: 24 }, { vat_amount: 0 }]) as never, twoItems as never, totals, true))
       .toEqual(["items[0].vat_amount", "items[1].vat_amount"]);

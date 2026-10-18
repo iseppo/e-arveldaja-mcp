@@ -432,17 +432,37 @@ export function draftFingerprint(invoice: PurchaseInvoice): string {
   return createHash("sha256").update(canonicalPlanJson(stripUndefinedDeep(material))).digest("hex");
 }
 
-/** A numeric string ("12.50") reads as its number; anything else is left as is. */
+/** Money fields: compared as numbers within half a cent (a numeric string reads as its number). */
+const READBACK_MONEY_FIELDS: ReadonlySet<string> = new Set([
+  "net_price", "vat_price", "gross_price", "base_net_price", "base_vat_price", "base_gross_price",
+  "total_net_price", "unit_net_price", "base_total_net_price", "vat_amount", "project_no_vat_gross_price",
+]);
+/** Other numeric fields (rates, quantities, day counts, ids): compared as exact numbers, a numeric string read as its number. */
+const READBACK_NUMERIC_FIELDS: ReadonlySet<string> = new Set([
+  "currency_rate", "vat_rate", "overdue_charge", "amount", "term_days",
+  "clients_id", "subclients_id", "liability_accounts_id", "liability_accounts_dimensions_id", "cash_accounts_id", "cash_accounts_dimensions_id",
+  "cl_purchase_articles_id", "purchase_accounts_id", "purchase_accounts_dimensions_id", "vat_accounts_id", "vat_accounts_dimensions_id",
+  "cl_vat_articles_id", "cl_fringe_benefits_id", "reversed_vat_id", "products_id", "projects_project_id", "projects_location_id", "projects_person_id",
+]);
+
 const asNumber = (value: unknown) => (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value.trim()) ? Number(value) : value);
 
-const sameValue = (expectedRaw: unknown, actualRaw: unknown): boolean => {
-  const expected = asNumber(expectedRaw);
-  const actual = asNumber(actualRaw);
-  return typeof expected === "number" && typeof actual === "number"
-    ? Math.abs(expected - actual) < 0.005
-    : typeof expected === "object" && expected !== null && typeof actual === "object" && actual !== null
-      ? canonicalPlanJson(stripUndefinedDeep(expected)) === canonicalPlanJson(stripUndefinedDeep(actual))
-      : expected === actual;
+/**
+ * Field-aware equality: money within half a cent, other numeric fields exact, and every other field (invoice number,
+ * reference, IBAN, notes, titles, …) exact after trimming a string, never coerced to a number.
+ */
+const sameValue = (key: string, expectedRaw: unknown, actualRaw: unknown): boolean => {
+  if (READBACK_MONEY_FIELDS.has(key) || READBACK_NUMERIC_FIELDS.has(key)) {
+    const expected = asNumber(expectedRaw);
+    const actual = asNumber(actualRaw);
+    if (typeof expected !== "number" || typeof actual !== "number") return false;
+    return READBACK_MONEY_FIELDS.has(key) ? Math.abs(expected - actual) < 0.005 : expected === actual;
+  }
+  if (typeof expectedRaw === "string" && typeof actualRaw === "string") return expectedRaw.trim() === actualRaw.trim();
+  if (typeof expectedRaw === "object" && expectedRaw !== null && typeof actualRaw === "object" && actualRaw !== null) {
+    return canonicalPlanJson(stripUndefinedDeep(expectedRaw)) === canonicalPlanJson(stripUndefinedDeep(actualRaw));
+  }
+  return expectedRaw === actualRaw;
 };
 
 /** A returned null or "" counts as absent, like an omitted field. */
@@ -460,7 +480,6 @@ const READBACK_HEADER_ALLOWED_TO_DIFFER: ReadonlySet<string> = new Set([
   "journals", "settlements", "transactions", "bank_payment_orders_id", // ledger and payment links the server fills in
   "insert_date", "modified_at", // server timestamps
   "base_document_files_id", "is_xls_imported", // document/attachment metadata (the source upload, the import origin)
-  "payment_type", // how the document arrived (e.g. "E-arve"): a server label, no posting effect
 ]);
 const READBACK_ITEM_ALLOWED_TO_DIFFER: ReadonlySet<string> = new Set([
   "id", // server id of the item row
@@ -475,9 +494,9 @@ const READBACK_HEADER_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
   term_days: [0], currency_rate: [1], paid_in_cash: [false], overdue_charge: [0],
 };
 
-function readbackFieldMatches(expected: unknown, actual: unknown, defaults: readonly unknown[]): boolean {
-  if (isAbsent(expected)) return isAbsent(actual) || defaults.some((entry) => sameValue(entry, actual));
-  return !isAbsent(actual) && sameValue(expected, actual);
+function readbackFieldMatches(key: string, expected: unknown, actual: unknown, defaults: readonly unknown[]): boolean {
+  if (isAbsent(expected)) return isAbsent(actual) || defaults.some((entry) => sameValue(key, entry, actual));
+  return !isAbsent(actual) && sameValue(key, expected, actual);
 }
 
 /** Fields of `actual` or `expected`, minus those allowed to differ, that do not match. */
@@ -485,7 +504,7 @@ function recordMismatches(
   expected: Record<string, unknown>, actual: Record<string, unknown>, allowed: ReadonlySet<string>, defaultsOf: (key: string) => readonly unknown[],
 ): string[] {
   const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].filter((key) => !allowed.has(key));
-  return keys.filter((key) => !readbackFieldMatches(expected[key], actual[key], defaultsOf(key)));
+  return keys.filter((key) => !readbackFieldMatches(key, expected[key], actual[key], defaultsOf(key)));
 }
 
 /**
@@ -517,6 +536,9 @@ export function draftReadbackMismatches(
     base_net_price: model.base_net_price ?? base?.net ?? expectedNet,
     base_vat_price: model.base_vat_price ?? base?.vat ?? expectedVat,
     base_gross_price: model.base_gross_price ?? base?.gross ?? expectedGross,
+    // The create payload never sends payment_type: its first readback is the baseline, which draftFingerprint binds
+    // at confirm, so a later change is draft_changed. A model that did send one is compared exactly.
+    payment_type: (modelHeader as Record<string, unknown>).payment_type ?? draft.payment_type,
   };
   const fields = recordMismatches(expectedHeader, draftHeader as Record<string, unknown>, READBACK_HEADER_ALLOWED_TO_DIFFER,
     (key) => READBACK_HEADER_DEFAULTS[key] ?? []);
