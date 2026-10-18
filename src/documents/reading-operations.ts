@@ -53,7 +53,8 @@ import { detectDuplicatePurchaseInvoice } from "../tools/document-audit.js";
 import { findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { checkJournalReferences } from "../journal-reference-scan.js";
 import { checkIntakeCashDuplicates } from "../bank-posting-duplicate-guard.js";
-import { predictPurchaseItemAmounts, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
+import { normalizeItemsForNonVat, predictPurchaseItemAmounts, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
+import { parseVatRateDropdown, roundMoney } from "../money.js";
 import { vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { logAudit } from "../audit-log.js";
@@ -430,62 +431,106 @@ export function draftFingerprint(invoice: PurchaseInvoice): string {
   return createHash("sha256").update(canonicalPlanJson(stripUndefinedDeep(material))).digest("hex");
 }
 
-const sameScalar = (expected: unknown, actual: unknown) =>
-  typeof expected === "number" && typeof actual === "number" ? Math.abs(expected - actual) < 0.005 : expected === actual;
-
-/**
- * The material fields the readback is compared on (§5.5), each with the values the API may return when the approved
- * model leaves it out. Expected absent means read back absent (undefined, null, "") or one of those defaults; a
- * value present where the model has none is a mismatch.
- */
-const READBACK_HEADER_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
-  clients_id: [], number: [], create_date: [], journal_date: [], term_days: [0], cl_currencies_id: [],
-  currency_rate: [1], liability_accounts_id: [], liability_accounts_dimensions_id: [], bank_ref_number: [], bank_account_no: [],
-  notes: [], paid_in_cash: [false], cash_accounts_id: [], cash_accounts_dimensions_id: [], cash_payment_date: [],
-  subclients_id: [], overdue_charge: [0],
-};
-const READBACK_ITEM_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
-  custom_title: [], cl_purchase_articles_id: [], purchase_accounts_id: [], purchase_accounts_dimensions_id: [],
-  vat_accounts_id: [], vat_accounts_dimensions_id: [], cl_vat_articles_id: [], vat_rate_dropdown: [], reversed_vat_id: [],
-  total_net_price: [], amount: [1], cl_fringe_benefits_id: [1], products_id: [],
-  projects_project_id: [], projects_location_id: [], projects_person_id: [],
-};
+const sameValue = (expected: unknown, actual: unknown): boolean =>
+  typeof expected === "number" && typeof actual === "number"
+    ? Math.abs(expected - actual) < 0.005
+    : typeof expected === "object" && expected !== null && typeof actual === "object" && actual !== null
+      ? canonicalPlanJson(stripUndefinedDeep(expected)) === canonicalPlanJson(stripUndefinedDeep(actual))
+      : expected === actual;
 
 const isAbsent = (value: unknown) => value === undefined || value === null || value === "";
 
+/**
+ * §5.5 readback, deny by default: header fields that may differ from the approved write model. Every other field the
+ * readback carries, known or new, must equal the model (or, where the model has none, be absent or a listed default).
+ */
+const READBACK_HEADER_ALLOWED_TO_DIFFER: ReadonlySet<string> = new Set([
+  "id", // server id of the new draft
+  "status", "payment_status", "registered", "register_date", "is_deleted", // registration and payment state register itself sets
+  "journals", "settlements", "transactions", "bank_payment_orders_id", // ledger and payment links the server fills in
+  "insert_date", "modified_at", // server timestamps
+  "base_document_files_id", "is_xls_imported", // document/attachment metadata (the source upload, the import origin)
+]);
+/** Item fields that may differ: the server id of the item row. */
+const READBACK_ITEM_ALLOWED_TO_DIFFER: ReadonlySet<string> = new Set(["id"]);
+/**
+ * Fields a readback may leave out; when present they must match. Items: amount and cl_fringe_benefits_id (the GET
+ * does not echo them, #62 structural defaults) and the server-computed item VAT. Header: the server-computed net.
+ */
+const READBACK_ITEM_NOT_ECHOED: ReadonlySet<string> = new Set(["amount", "cl_fringe_benefits_id", "vat_amount"]);
+const READBACK_HEADER_NOT_ECHOED: ReadonlySet<string> = new Set(["net_price"]);
+
+/**
+ * The values the API returns for a header field the approved model leaves out. Expected absent means read back absent
+ * (undefined, null, "") or one of these; anything else, on any field, is a mismatch.
+ */
+const READBACK_HEADER_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = {
+  term_days: [0], currency_rate: [1], paid_in_cash: [false], overdue_charge: [0],
+};
+const READBACK_ITEM_DEFAULTS: Readonly<Record<string, readonly unknown[]>> = { amount: [1], cl_fringe_benefits_id: [1] };
+
 function readbackFieldMatches(expected: unknown, actual: unknown, defaults: readonly unknown[]): boolean {
-  if (isAbsent(expected)) return isAbsent(actual) || defaults.some((entry) => sameScalar(entry, actual));
-  return sameScalar(expected, actual);
+  if (isAbsent(expected)) return isAbsent(actual) || defaults.some((entry) => sameValue(entry, actual));
+  return sameValue(expected, actual);
+}
+
+/** Fields of `actual` or `expected`, minus those allowed to differ, that do not match. */
+function recordMismatches(
+  expected: Record<string, unknown>, actual: Record<string, unknown>, allowed: ReadonlySet<string>,
+  defaultsOf: (key: string) => readonly unknown[], notEchoed: ReadonlySet<string> = new Set(),
+): string[] {
+  const keys = [...new Set([...Object.keys(expected), ...Object.keys(actual)])].filter((key) => !allowed.has(key));
+  return keys.filter((key) => !(notEchoed.has(key) && actual[key] === undefined) && !readbackFieldMatches(expected[key], actual[key], defaultsOf(key)));
 }
 
 /**
- * §5.5: the fields of the created draft, as read back, that differ from the approved write model, over an explicit
- * set of material header and item fields (item count and order included). The base amounts may only echo the
- * invoice-level amounts when the model has none.
+ * §5.5: the fields of the created draft, as read back, that differ from the approved write model, deny by default:
+ * every header and item field (item count and order included) except the allowlists above. The expected write is what
+ * createAndSetTotals sends (non-VAT item normalisation, last-item gross residue); the server-derived amounts (invoice
+ * net/VAT/gross, item VAT, VAT rate, unit and base net) are predicted from it with the repo's own amount predictor.
  */
-export function draftReadbackMismatches(draft: PurchaseInvoice, model: CreatePurchaseInvoiceData, totals: { vatPrice?: number; grossPrice?: number }): string[] {
-  const fields: string[] = [];
-  const draftRecord = draft as unknown as Record<string, unknown>;
-  const modelRecord = model as unknown as Record<string, unknown>;
-  for (const [key, defaults] of Object.entries(READBACK_HEADER_DEFAULTS)) {
-    if (!readbackFieldMatches(modelRecord[key], draftRecord[key], defaults)) fields.push(key);
-  }
-  const echoes: Record<string, unknown> = { base_net_price: draft.net_price, base_vat_price: draft.vat_price, base_gross_price: draft.gross_price };
-  for (const key of ["base_net_price", "base_vat_price", "base_gross_price"] as const) {
-    if (!readbackFieldMatches(model[key], draft[key], [echoes[key]])) fields.push(key);
-  }
-  if (!readbackFieldMatches(totals.grossPrice, draft.gross_price, [])) fields.push("gross_price");
-  if (!readbackFieldMatches(totals.vatPrice, draft.vat_price, [0])) fields.push("vat_price");
-  const items = draft.items ?? [];
-  if (items.length !== model.items.length) {
-    fields.push("items");
-    return fields;
-  }
-  model.items.forEach((item, index) => {
-    const expected = item as unknown as Record<string, unknown>;
+export function draftReadbackMismatches(
+  draft: PurchaseInvoice, model: CreatePurchaseInvoiceData, totals: { vatPrice?: number; grossPrice?: number }, isVatRegistered: boolean,
+): string[] {
+  const preview = previewPurchaseInvoiceTotals(model, totals.vatPrice, totals.grossPrice, isVatRegistered);
+  const normalized = normalizeItemsForNonVat(model.items, isVatRegistered, totals.grossPrice);
+  const expectedItems = preview.ok && preview.lastItemGross !== undefined && normalized.length > 0
+    ? [...normalized.slice(0, -1), { ...normalized[normalized.length - 1]!, project_no_vat_gross_price: preview.lastItemGross }]
+    : normalized;
+  const amounts = predictPurchaseItemAmounts(expectedItems);
+  const expectedNet = roundMoney(amounts.reduce((sum, entry) => sum + entry.net, 0));
+  const expectedVat = preview.ok ? preview.vat : totals.vatPrice;
+  const expectedGross = preview.ok ? preview.gross : totals.grossPrice;
+
+  const { items: draftItems, ...draftHeader } = draft;
+  const { items: _modelItems, ...modelHeader } = model;
+  const expectedHeader: Record<string, unknown> = {
+    ...modelHeader, net_price: expectedNet, vat_price: expectedVat, gross_price: expectedGross,
+  };
+  const baseDefaults: Record<string, readonly unknown[]> = {
+    base_net_price: [expectedNet, ...(preview.ok && preview.base ? [preview.base.net] : [])],
+    base_vat_price: [expectedVat, ...(preview.ok && preview.base ? [preview.base.vat] : [])],
+    base_gross_price: [expectedGross, ...(preview.ok && preview.base ? [preview.base.gross] : [])],
+  };
+  const fields = recordMismatches(expectedHeader, draftHeader as Record<string, unknown>, READBACK_HEADER_ALLOWED_TO_DIFFER,
+    (key) => READBACK_HEADER_DEFAULTS[key] ?? baseDefaults[key] ?? [], READBACK_HEADER_NOT_ECHOED);
+
+  const items = draftItems ?? [];
+  if (items.length !== expectedItems.length) return [...fields, "items"];
+  const rate = model.currency_rate ?? 1;
+  expectedItems.forEach((item, index) => {
+    const { net, vat } = amounts[index]!;
+    const expected: Record<string, unknown> = { ...item, total_net_price: net, vat_amount: vat };
+    const derivedDefaults: Record<string, readonly unknown[]> = {
+      vat_rate: [parseVatRateDropdown(item.vat_rate_dropdown)],
+      unit_net_price: [roundMoney(net / (item.amount ?? 1))],
+      base_total_net_price: [net, roundMoney(net / rate)],
+      project_no_vat_gross_price: [roundMoney(net + vat)],
+    };
     const actual = items[index] as unknown as Record<string, unknown>;
-    for (const [key, defaults] of Object.entries(READBACK_ITEM_DEFAULTS)) {
-      if (!readbackFieldMatches(expected[key], actual[key], defaults)) fields.push(`items[${index}].${key}`);
+    for (const key of recordMismatches(expected, actual, READBACK_ITEM_ALLOWED_TO_DIFFER,
+      (field) => READBACK_ITEM_DEFAULTS[field] ?? derivedDefaults[field] ?? [], READBACK_ITEM_NOT_ECHOED)) {
+      fields.push(`items[${index}].${key}`);
     }
   });
   return fields;
@@ -925,7 +970,7 @@ class ReadingDocumentOperations {
         try {
           this.api.purchaseInvoices.invalidateListCache();
           const draft = await this.api.purchaseInvoices.get(created.id);
-          const mismatches = draftReadbackMismatches(draft, invoiceData, booking);
+          const mismatches = draftReadbackMismatches(draft, invoiceData, booking, isVatReg);
           if (mismatches.length > 0) {
             readbackMismatch = mismatches;
             throw new Error("draft_readback_mismatch");

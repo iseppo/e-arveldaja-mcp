@@ -131,7 +131,7 @@ function isCorrectionPreview(value: unknown): value is PurchaseInvoiceTotalsCorr
  * so the API computes item-level vat_amount for informational tracking.
  * Without this field, item vat_amount stays 0 and gross_price = net_price.
  */
-function normalizeItemsForNonVat(
+export function normalizeItemsForNonVat(
   items: PurchaseInvoiceItem[],
   isVatRegistered: boolean,
   grossPrice?: number,

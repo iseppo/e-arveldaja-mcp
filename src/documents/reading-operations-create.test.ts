@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
@@ -281,6 +281,9 @@ describe("reading create", () => {
     ["an unexpected IBAN", (data: Record<string, any>) => ({ ...data, bank_account_no: "EE382200221020145685" }), "bank_account_no"],
     ["an extra item", (data: Record<string, any>) => ({ ...data, items: [...data.items, { ...data.items[0], custom_title: "extra" }] }), "items"],
     ["swapped item order", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], custom_title: "other" }] }), "items[0].custom_title"],
+    ["a brand-new header field", (data: Record<string, any>) => ({ ...data, a_field_added_later: "x" }), "a_field_added_later"],
+    ["a brand-new item field", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], an_item_field_added_later: 7 }] }), "items[0].an_item_field_added_later"],
+    ["a reallocated item gross", (data: Record<string, any>) => ({ ...data, items: [{ ...data.items[0], project_no_vat_gross_price: 99 }] }), "items[0].project_no_vat_gross_price"],
   ])("a readback that adds %s the approved model lacks gets no confirm handle", async (_name, mutate, field) => {
     const w = world();
     const file = writePdf("%PDF readback probe");
@@ -490,6 +493,41 @@ describe("reading confirm (§5.5)", () => {
     expect(await create(w, file, plan.planHandle)).toMatchObject({ ok: false, error: { code: "plan_domain_mismatch" } });
     expect(await w.ops.confirm({ planHandle: verify.planHandle!, invoiceId: plan.invoiceId })).toMatchObject({ ok: false, error: { code: "plan_domain_mismatch" } });
     expect(w.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("draftReadbackMismatches", () => {
+  const twoItems = {
+    clients_id: 4242, client_name: "Näidis OÜ", number: "A-17", create_date: "2026-03-15", journal_date: "2026-03-15", term_days: 0,
+    cl_currencies_id: "EUR", liability_accounts_id: 2310,
+    items: [
+      { custom_title: "Üks", purchase_accounts_id: 5000, vat_accounts_id: 1510, vat_rate_dropdown: "24", total_net_price: 50, project_no_vat_gross_price: 62 },
+      { custom_title: "Kaks", purchase_accounts_id: 5000, vat_accounts_id: 1520, vat_rate_dropdown: "24", total_net_price: 50, project_no_vat_gross_price: 62 },
+    ],
+  };
+  const readback = (items: Array<Record<string, unknown>>) => ({
+    ...twoItems, id: 900, status: "PROJECT", net_price: 100, vat_price: 24, gross_price: 124,
+    base_net_price: 100, base_vat_price: 24, base_gross_price: 124,
+    items: twoItems.items.map((item, index) => ({ ...item, id: 70 + index, vat_rate: 24, unit_net_price: 50, base_total_net_price: 50, vat_amount: 12, ...items[index] })),
+  });
+  const totals = { vatPrice: 24, grossPrice: 124 };
+
+  it("a readback that echoes the approved items, with the server-derived amounts the predictor expects, matches", () => {
+    expect(draftReadbackMismatches(readback([]) as never, twoItems as never, totals, true)).toEqual([]);
+  });
+
+  it("a 74/50 + 24/0 reallocation with unchanged invoice totals is a mismatch", () => {
+    const mismatches = draftReadbackMismatches(readback([
+      { project_no_vat_gross_price: 74, vat_amount: 24 }, { project_no_vat_gross_price: 50, vat_amount: 0 },
+    ]) as never, twoItems as never, totals, true);
+    expect(mismatches).toEqual(expect.arrayContaining([
+      "items[0].project_no_vat_gross_price", "items[0].vat_amount", "items[1].project_no_vat_gross_price", "items[1].vat_amount",
+    ]));
+  });
+
+  it("a server-computed item VAT alone that differs from the predicted VAT is a mismatch", () => {
+    expect(draftReadbackMismatches(readback([{ vat_amount: 24 }, { vat_amount: 0 }]) as never, twoItems as never, totals, true))
+      .toEqual(["items[0].vat_amount", "items[1].vat_amount"]);
   });
 });
 
