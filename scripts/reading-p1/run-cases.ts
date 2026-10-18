@@ -12,7 +12,7 @@ import { auditCodexEvents } from "./audit-codex.js";
 import { collectCase, type CollectedCase } from "./collect.js";
 import { SCRIPTS_DIR, dataPath, sentinel, writeJson } from "./common.js";
 import { promptNT2, schemaFor, turnOutputs, type Form } from "./prompts.js";
-import { stageCase, stageTurn2, type CaseSpec, type Reader } from "./stage.js";
+import { appendRunIndex, registryPath, stageCase, stageTurn2, type CaseSpec, type Reader } from "./stage.js";
 
 const run = promisify(execFile);
 const TURN_TIMEOUT_MS = 15 * 60_000;
@@ -68,12 +68,46 @@ export interface CaseOutcome {
   failures: string[];
   run_errors: string[];
   collected?: CollectedCase;
+  reader_skipped?: true;
+}
+
+/**
+ * P2 C4: production holds an oversize packet before any reader (D1), so the harness does not send it to one.
+ * The case is recorded as a skipped reading (no turns, usage 0); null for any other packet.
+ */
+export function readerSkippedCase(spec: CaseSpec, packet: ReadingPacket | undefined): CollectedCase | null {
+  if (!packet?.holds.some((hold) => hold.code === "packet_oversize")) return null;
+  return {
+    case_id: spec.case_id,
+    reader: spec.reader,
+    form: spec.form,
+    kind: spec.kind,
+    doc_id: spec.doc_id,
+    ...(spec.meta ? { meta: spec.meta } : {}),
+    turns: [],
+    reading: null,
+    proof: null,
+    reading_schema: null,
+    proof_schema: null,
+    leakage_pass: true,
+    reader_skipped: true,
+  };
 }
 
 /**
  * Runs one case. `turn2` builds the second prompt from the turn-1 text (N-T), or is a fixed text (smoke cases).
  */
 export async function runCase(spec: CaseSpec, opts: { packet?: ReadingPacket; turn2Text?: string; fingerprints?: string[] } = {}): Promise<CaseOutcome> {
+  const skipped = readerSkippedCase(spec, opts.packet);
+  if (skipped) {
+    // No staging dir and no reader launch; the registry keeps the plan key so the case is not planned again.
+    if (existsSync(registryPath(spec.case_id))) throw new Error(`case ${spec.case_id} already staged`);
+    const { prompt: _prompt, schemas: _schemas, ...rest } = spec;
+    writeJson(registryPath(spec.case_id), { ...rest, dir: "", prompt_sha256: "", staged_at: new Date().toISOString(), reader_skipped: true });
+    writeJson(dataPath("readings", `${spec.case_id}.json`), skipped);
+    if (typeof spec.meta?.run === "string") appendRunIndex(spec.meta.run, { case_id: spec.case_id, doc_id: spec.doc_id });
+    return { case_id: spec.case_id, leakage_pass: true, failures: [], run_errors: [], collected: skipped, reader_skipped: true };
+  }
   const staged = stageCase(spec);
   const meta = dataPath("staging", `${spec.case_id}.codex`);
   const errors: string[] = [];

@@ -49,7 +49,7 @@ export function runIndexPath(tag: string): string {
   return dataPath("runs", `${tag}.tsv`);
 }
 
-function appendRunIndex(tag: string, entry: RunIndexEntry): void {
+export function appendRunIndex(tag: string, entry: RunIndexEntry): void {
   mkdirSync(dataPath("runs"), { recursive: true, mode: 0o700 });
   appendFileSync(runIndexPath(tag), `${entry.case_id}\t${entry.doc_id ?? ""}\n`, { mode: 0o600 });
 }

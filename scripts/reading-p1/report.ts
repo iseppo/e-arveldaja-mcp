@@ -164,7 +164,8 @@ export function summarize(tag: string, results: CaseResult[]) {
     };
   });
 
-  return { tag, readers, usage, yield: yieldRows, hold_rates: holdRates, forms };
+  const readerSkipped = results.filter((item) => item.reader_skipped).length;
+  return { tag, readers, usage, yield: yieldRows, hold_rates: holdRates, forms, reader_skipped: readerSkipped };
 }
 
 /** Projects the step-5 reader runs from this run's mean tokens per case (reader × form). */
@@ -310,6 +311,7 @@ function markdown(head: ReturnType<typeof header>, summary: ReturnType<typeof su
   lines.push(`- today: real ${head.today.real.join(", ") || "-"}; as-of ${head.today.as_of}`);
   lines.push(`- models: ${head.models.join(", ")}; Claude path: ${head.claude_path}`);
   lines.push(`- leakage: ${Object.entries(head.leakage).map(([reader, entry]) => `${reader} ${entry.failed}/${entry.cases} failed`).join("; ")}`, "");
+  lines.push(`- reader skipped (oversize packet, held packet_oversize, usage 0): ${summary.reader_skipped} cases`, "");
   lines.push("## Tokens", "", "| reader | form | cases | input | cached | output | reasoning | in/case | out/case |", "|---|---|---|---|---|---|---|---|---|");
   for (const row of summary.usage) lines.push(`| ${row.reader} | ${row.form} | ${row.cases} | ${row.input} | ${row.cached_input} | ${row.output} | ${row.reasoning_output} | ${row.per_case_input} | ${row.per_case_output} |`);
   lines.push("", "## Yield", "", "| reader | form | pass | cases | leak fail | accepted | held | silent-wrong (cases/fields) | pipeline acc/held/sw |", "|---|---|---|---|---|---|---|---|---|");

@@ -48,6 +48,7 @@ export function injectedCase(reader: Reader, form: "I-S" | "I-T", base: Admitted
   if (candidate) Object.assign(meta, { mutated_field: candidate.field, field_type: candidate.field_type, ...(candidate.direction ? { direction: candidate.direction } : {}) });
   return {
     spec: { case_id: newCaseId(), reader, form, kind: candidate ? "mutated" : "clean", doc_id: base.doc_id, turns: 1, prompt, schemas: schemasFor(reader, form), meta },
+    packet: file.packet,
   };
 }
 

@@ -48,6 +48,13 @@ export interface CaseResult {
   passes: { real?: PassResult; as_of?: PassResult };
   usage: { input: number; cached_input: number; output: number; reasoning_output: number };
   models: string[];
+  /** P2 C4: no reader ran on this oversize packet; both passes hold packet_oversize. */
+  reader_skipped?: true;
+}
+
+/** P2 C4: the pass of a reader-skipped case, the hold production would return. */
+export function readerSkippedPass(today: string): PassResult {
+  return { today, verdict: "hold", holds: ["packet_oversize"], content_holds: [], notes: [], silent_wrong: [] };
 }
 
 /** The scored truth of a field: a printed due date (truth v2, B1) takes precedence over the booked one. */
@@ -183,7 +190,11 @@ export async function replayRun(tag: string, opts: { today: string; pipeline: bo
       usage,
       models: [...new Set(collected.turns.map((turn) => turn.model).filter((model): model is string => model !== null))],
     };
-    if (collected.leakage_pass && collected.reading !== null) {
+    if (collected.reader_skipped) {
+      result.reader_skipped = true;
+      result.passes.real = readerSkippedPass(opts.today);
+      if (available && truth?.invoice_date) result.passes.as_of = readerSkippedPass(addDays(truth.invoice_date, 30));
+    } else if (collected.leakage_pass && collected.reading !== null) {
       result.passes.real = await evaluatePass(collected, file, own, truth, opts.today, opts.pipeline);
       if (available && truth?.invoice_date) result.passes.as_of = await evaluatePass(collected, file, own, truth, addDays(truth.invoice_date, 30), opts.pipeline);
     }

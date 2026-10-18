@@ -19,8 +19,9 @@ import { legacyPrompt, legacyShapeOk } from "./legacy.js";
 import { candidatesFor, type FamilyA } from "./mutate.js";
 import { caseWrongFields, wrongFields } from "./replay.js";
 import { classifyEvidence } from "./restage.js";
-import { fullFor, inScope, supersede, supplierSplit } from "./report.js";
-import { pipelineFor, type CaseResult, type PassResult } from "./replay.js";
+import { fullFor, inScope, summarize, supersede, supplierSplit } from "./report.js";
+import { pipelineFor, readerSkippedPass, type CaseResult, type PassResult } from "./replay.js";
+import { readerSkippedCase } from "./run-cases.js";
 import { injectedItems, parseRunArgs, projectTotals, reservedKeys, scoped as scopedItems, todoItems } from "./step5.js";
 import { truthDerivedReading } from "./synth-proof.js";
 import { applyOverrides, type TruthRecord } from "./truth.js";
@@ -596,6 +597,39 @@ try {
     return text.includes('"heldout"') || text.includes('startsWith("h")');
   });
   assert("b8_no_heldout_literal_in_scoped_scripts", heldoutLiteral.length === 0, heldoutLiteral.join(","));
+
+  // ---- P2 C4: an oversize packet is never sent to a reader -----------------------------------------------------
+  {
+    const dir = join(root, "c4-skip");
+    for (const sub of ["staging", "readings", "runs", "home"]) mkdirSync(join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, "SENTINEL.txt"), `${"0".repeat(32)}\n`);
+    const oversize = makePacket(Array.from({ length: 1501 }, (_, index) => `Rida ${index + 1}`));
+    const c4Script = join(root, "c4-skip.mts");
+    writeFileSync(c4Script, [
+      `import { runCase } from ${JSON.stringify(join(SCRIPTS_DIR, "run-cases.ts"))};`,
+      `const packet = ${JSON.stringify(oversize)};`,
+      "const spec = { case_id: \"c-c4c4c4c4c4c4\", reader: \"codex\", form: \"N-S\", kind: \"natural\", doc_id: \"01\", turns: 1, prompt: \"x\", meta: { run: \"c4\", key: \"k\" } };",
+      "const outcome = await runCase(spec, { packet });",
+      "process.stdout.write(JSON.stringify(outcome));",
+    ].join("\n"));
+    const stubLog = join(dir, "launches.log");
+    let outcome: { reader_skipped?: boolean; collected?: { turns: unknown[]; reader_skipped?: boolean } } = {};
+    try {
+      outcome = JSON.parse(execFileSync(process.execPath, [join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"), c4Script], { encoding: "utf8", env: { READING_P1_DATA_DIR: dir, HOME: join(dir, "home"), PATH: "/usr/bin:/bin", READING_P1_READER_STUB: stubLog } })) as typeof outcome;
+    } catch (error) {
+      outcome = { reader_skipped: false, collected: { turns: [String(error).slice(0, 200)] } };
+    }
+    const registry = existsSync(join(dir, "staging", "c-c4c4c4c4c4c4.json")) ? JSON.parse(readFileSync(join(dir, "staging", "c-c4c4c4c4c4c4.json"), "utf8")) as { dir: string } : null;
+    const reading = existsSync(join(dir, "readings", "c-c4c4c4c4c4c4.json")) ? JSON.parse(readFileSync(join(dir, "readings", "c-c4c4c4c4c4c4.json"), "utf8")) as { reader_skipped?: boolean; turns: unknown[] } : null;
+    assert("c4_oversize_no_reader_no_staging_dir", outcome.reader_skipped === true && !existsSync(stubLog) && registry?.dir === "" &&
+      reading?.reader_skipped === true && reading.turns.length === 0 && readFileSync(join(dir, "runs", "c4.tsv"), "utf8") === "c-c4c4c4c4c4c4\t01\n", JSON.stringify({ outcome, registry, reading }));
+    assert("c4_normal_packet_not_skipped", readerSkippedCase({ case_id: "c-000000000c40", reader: "opus", form: "N-S", kind: "natural", doc_id: "01", turns: 1, prompt: "x" }, makePacket(["Arve 1"])) === null);
+    const skippedResult = { case_id: "c-c4c4c4c4c4c4", reader: "codex", form: "N-S", kind: "natural", doc_id: "01", set: "corpus", truth_available: true, reading_schema: null, proof_schema: null, leakage_pass: true, wrong_fields: [], proof_problem_fields: [],
+      passes: { real: readerSkippedPass("2026-10-18"), as_of: readerSkippedPass("2026-10-18") }, usage: { input: 0, cached_input: 0, output: 0, reasoning_output: 0 }, models: [], reader_skipped: true } as CaseResult;
+    const summary = summarize("c4", [skippedResult]);
+    assert("c4_report_counts_reader_skipped", summary.reader_skipped === 1 && summary.yield.some((row) => row.pass === "real" && row.checker.held === 1) &&
+      skippedResult.passes.real!.holds.join() === "packet_oversize", JSON.stringify(summary.yield));
+  }
 
   // ---- §10 narrowings: the pipeline outcome on a synthetic, non-private snapshot ------------------------------
   const syntheticSnapshot: Snapshot = {

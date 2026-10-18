@@ -37,6 +37,8 @@ export interface CollectedCase {
   reading_schema: "ok" | string | null;
   proof_schema: "ok" | string | null;
   leakage_pass: boolean;
+  /** P2 C4: the packet holds packet_oversize, so no reader ran (no staging dir, usage 0). */
+  reader_skipped?: true;
 }
 
 function stripFence(text: string): { text: string; fenced: boolean } {

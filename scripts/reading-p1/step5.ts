@@ -136,7 +136,8 @@ export type Means = Map<string, { input: number; output: number; n: number }>;
 
 export function meansOf(readings: CollectedCase[]): Means {
   const means: Means = new Map();
-  for (const reading of readings.filter((entry) => entry.leakage_pass)) {
+  // A reader-skipped case (P2 C4) spent nothing and says nothing about a reader's per-case cost.
+  for (const reading of readings.filter((entry) => entry.leakage_pass && !entry.reader_skipped)) {
     const key = `${reading.reader}|${reading.form}`;
     const usage = sumUsage(reading);
     const entry = means.get(key) ?? { input: 0, output: 0, n: 0 };
