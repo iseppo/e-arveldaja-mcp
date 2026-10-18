@@ -158,6 +158,16 @@ export interface ExtractionConfidenceSignals {
    * Medium signal, gated from automatic creation in every mode.
    */
   invoice_date_unlabelled?: boolean;
+  /**
+   * Text hazards (documentTextHazards, shared with the reading checker; P2 E0),
+   * computed on the caller's own parse by textHazardSignals.
+   * A credit or refund word appears as whole tokens.
+   */
+  credit_word_present?: boolean;
+  /** An amount is printed with a minus sign or in parentheses. */
+  signed_amount_present?: boolean;
+  /** A non-EUR currency code, symbol or letter symbol next to an amount appears in the text. */
+  foreign_currency_marker?: boolean;
 }
 
 /**

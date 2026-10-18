@@ -15,6 +15,8 @@ import { HttpError } from "../http-client.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { createReceiptBatchOperations } from "./batch-operations.js";
 import type { ReceiptApprovedManifestEntry } from "./types.js";
+import { textHazardSignals } from "../tools/document-text-hazards.js";
+import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 // The typed operation is exercised DIRECTLY (no mock McpServer): narrow api / fs
 // / OCR ports only. These pin the staged-approval invariants the refactor must
@@ -70,6 +72,11 @@ vi.mock("../file-validation.js", async (importOriginal) => ({
 vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
 }));
+
+vi.mock("../tools/document-text-hazards.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/document-text-hazards.js")>();
+  return { ...actual, textHazardSignals: vi.fn(actual.textHazardSignals) };
+});
 
 vi.mock("../tools/receipt-extraction.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../tools/receipt-extraction.js")>();
@@ -1737,4 +1744,21 @@ describe("receipt batch — a cut-short invoice number is held, never booked (Co
     expect(result.status).not.toBe("needs_review");
     expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
+});
+
+describe("P2 E0: text hazards on the receipt_batch parse", () => {
+  it.each(Object.keys(TEXT_HAZARD_EXPECTED) as TextHazardFixture[])(
+    "%s: one parse per receipt, and the hazards come from that parse",
+    async (kind) => {
+      const parsed = textHazardParse(kind);
+      vi.mocked(parseDocument).mockResolvedValue(parsed);
+      const { api } = makeApi();
+      const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+      expect(outcome.ok).toBe(true);
+      expect(parseDocument).toHaveBeenCalledTimes(1);
+      expect(textHazardSignals).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
+      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+    },
+  );
 });

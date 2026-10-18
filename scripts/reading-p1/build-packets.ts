@@ -11,6 +11,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseDocument } from "../../src/document-parser.js";
 import { buildReadingPacket, type ReadingPacket } from "../../src/document-reading-packet.js";
+import { packetInputFromParse } from "../../src/tools/document-text-hazards.js";
 import { labelledHeuristicValues, type HeuristicView } from "../../src/document-reading-check.js";
 import { summarizeInvoiceExtraction } from "../../src/invoice-extraction-fallback.js";
 import {
@@ -75,28 +76,7 @@ export async function buildPacketFile(id: string, path: string, own: OwnIds): Pr
   const result = parsed.result;
   const complexityPages = parsed.complexity?.pages;
   if (!result || !complexityPages) throw new Error(`parseDocument returned no result or complexity for ${id}`);
-  const complexityByPage = new Map(complexityPages.map((page) => [page.pageNumber, page]));
-  const packet = buildReadingPacket({
-    sourceSha256: sha256Hex(source),
-    parserVersion: PARSER_VERSION,
-    pages: result.pages.map((page) => {
-      const complexity = complexityByPage.get(page.pageNum);
-      return {
-        pageNum: page.pageNum,
-        text: page.text,
-        items: page.textItems.map((item) => ({ text: item.text, ocr: item.confidence !== undefined })),
-        fullPageImage: complexity?.fullPageImage ?? false,
-        reasons: complexity?.reasons ?? [],
-        isGarbled: complexity?.isGarbled ?? false,
-      };
-    }),
-    totalPages: result.totalPages,
-    pageErrors: result.pageErrors,
-    parseConfig: {
-      maxPagesSet: process.env.EARVELDAJA_LITEPARSE_MAX_PAGES !== undefined,
-      targetPagesSet: Boolean(process.env.EARVELDAJA_LITEPARSE_TARGET_PAGES),
-    },
-  });
+  const packet = buildReadingPacket(packetInputFromParse(parsed, sha256Hex(source), PARSER_VERSION));
 
   const items = textItemsWithPageNums(result.pages);
   const ownCompanyVat = own.vat ?? undefined;

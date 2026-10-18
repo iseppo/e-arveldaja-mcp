@@ -25,6 +25,7 @@ import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, su
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
+import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import {
   computeBookingSuggestion,
@@ -337,6 +338,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ownCompanyVat,
         ownCompanyRegistryCode,
       });
+      Object.assign(signals, textHazardSignals(parsedDocument));
       let llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
 
       const extractionWarnings: string[] = [];

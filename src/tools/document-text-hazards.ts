@@ -1,0 +1,49 @@
+// Tool-side adapter of the reading checker's text-hazard producer (P2 E0). The
+// heuristic intake paths (receipt_batch, extract_pdf_invoice /
+// create_purchase_invoice_from_pdf, process_accounting_document prepare) call it
+// on the parse they already made, so the hazards are never computed from a
+// second parse and are the same ones the checker holds on.
+
+import type { ParsedDocument } from "../document-parser.js";
+import { documentTextHazards } from "../document-reading-check.js";
+import { buildReadingPacket, type PacketBuildInput, type ReadingPacket } from "../document-reading-packet.js";
+import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
+
+/** The packet input of one parse, the same mapping the reading harness uses (OCR item = one with a confidence). */
+export function packetInputFromParse(parsed: ParsedDocument, sourceSha256: string, parserVersion: string): PacketBuildInput {
+  const complexityByPage = new Map((parsed.complexity?.pages ?? []).map((page) => [page.pageNumber, page]));
+  const pages = parsed.result?.pages ?? [];
+  return {
+    sourceSha256,
+    parserVersion,
+    pages: pages.map((page) => {
+      const complexity = complexityByPage.get(page.pageNum);
+      return {
+        pageNum: page.pageNum,
+        text: page.text ?? "",
+        items: (page.textItems ?? []).map((item) => ({ text: item.text, ocr: item.confidence !== undefined })),
+        fullPageImage: complexity?.fullPageImage ?? false,
+        reasons: complexity?.reasons ?? [],
+        isGarbled: complexity?.isGarbled ?? false,
+      };
+    }),
+    totalPages: parsed.result?.totalPages ?? pages.length,
+    pageErrors: parsed.result?.pageErrors ?? [],
+    parseConfig: {
+      maxPagesSet: process.env.EARVELDAJA_LITEPARSE_MAX_PAGES !== undefined,
+      targetPagesSet: Boolean(process.env.EARVELDAJA_LITEPARSE_TARGET_PAGES),
+    },
+  };
+}
+
+/** The checker's text hazards on the caller's parse, as extraction confidence signals (only the raised ones). */
+export function textHazardSignals(parsed: ParsedDocument): ExtractionConfidenceSignals {
+  // The digest is never read here: the packet only normalizes the lines exactly as the checker sees them.
+  const packet: ReadingPacket = buildReadingPacket(packetInputFromParse(parsed, "", ""));
+  const hazards = documentTextHazards(packet.lines);
+  const signals: ExtractionConfidenceSignals = {};
+  if (hazards.credit_word_present) signals.credit_word_present = true;
+  if (hazards.signed_amount_present) signals.signed_amount_present = true;
+  if (hazards.foreign_currency_marker) signals.foreign_currency_marker = true;
+  return signals;
+}

@@ -42,6 +42,7 @@ import {
   percentTokens,
   type LineTokens,
   type MoneyToken,
+  type TokenLine,
 } from "./document-reading-tokens.js";
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,9 @@ export const READING_SIGNAL_CLASS = {
   self_reg_code_detected: "hazard",
   duplicate_invoice_in_batch: "hazard",
   raw_text_missing: "hazard",
+  credit_word_present: "hazard",
+  signed_amount_present: "hazard",
+  foreign_currency_marker: "hazard",
   gross_unlabelled: "heuristic_pick",
   invoice_number_ambiguous: "heuristic_pick",
   labelled_amount_over_max: "heuristic_pick",
@@ -290,6 +294,36 @@ export const FOREIGN_VAT_RATES_BY_COUNTRY: Readonly<Record<string, readonly numb
   NO: [25, 15, 12], CH: [8.1, 3.8, 2.6], UK: [20, 5],
 };
 export const FOREIGN_VAT_RATES: readonly number[] = [...new Set(Object.values(FOREIGN_VAT_RATES_BY_COUNTRY).flat())].sort((a, b) => a - b);
+
+// ---------------------------------------------------------------------------
+// Text hazards (P2 E0): the one producer shared by the checker and the heuristic intake paths
+// ---------------------------------------------------------------------------
+
+export interface DocumentTextHazards {
+  /** A CREDIT_WORDS entry appears as whole tokens. */
+  credit_word_present: boolean;
+  /** A money token is printed with a minus sign or in parentheses (A5). */
+  signed_amount_present: boolean;
+  /** A non-EUR ISO code, a non-€ symbol or a letter symbol next to money (BIC branch rule N1 applied). */
+  foreign_currency_marker: boolean;
+  /** EUR is stated as `€`, `EUR`, `euro` or `eurot`. */
+  eur_stated: boolean;
+}
+
+/** The text-only document hazards of §2.4 and A5, from the packet's lines. */
+export function documentTextHazards(lines: ReadonlyArray<TokenLine>, tokensOf: (line: TokenLine) => LineTokens = lineTokens): DocumentTextHazards {
+  const currency = currencyScan(lines, {
+    isoCodes: NON_EUR_ISO_CODES,
+    wordLikeCodes: WORD_LIKE_ISO_CODES,
+    letterSymbols: LETTER_CURRENCY_SYMBOLS,
+  });
+  return {
+    credit_word_present: creditWordHits(lines, CREDIT_WORDS).length > 0,
+    signed_amount_present: lines.some((line) => tokensOf(line).money.some((token) => token.signed)),
+    foreign_currency_marker: currency.hits.length > 0,
+    eur_stated: currency.eurStated,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Context and result types
@@ -552,8 +586,9 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   const resolved = resolveAmountAmbiguity(doc, reading, valueSpans, pending, vatRatesInForceOn(reading.invoice_date));
   for (const field of Object.keys(pending) as Array<typeof PAYLOAD_NUMBER_FIELDS[number]>) if (!resolved.has(field)) hold("ambiguous_amount_token", field);
   const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold);
-  checkAmounts(doc, reading, proof, hold);
-  checkDocumentLevel(doc, reading, ctx, hold);
+  const hazards = documentTextHazards(packet.lines, (line) => tokensFor(doc, line as PacketLine));
+  checkAmounts(doc, reading, proof, hazards, hold);
+  checkDocumentLevel(reading, ctx, hazards, hold);
   checkProof(doc, reading, proof, valueSpans, hold, note, resolved);
   checkHeuristicConflict(reading, ctx.heuristic, hold);
 
@@ -740,7 +775,7 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
 }
 
 /** A1–A5 and the foreign-rate trio (§2.3). */
-function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hold: HoldFn): void {
+function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards: DocumentTextHazards, hold: HoldFn): void {
   const money: MoneyToken[] = doc.packet.lines.flatMap((line) => tokensFor(doc, line).money);
   const values = [...new Set(money.flatMap((token) => token.values))];
   const eeRates = vatRatesInForceOn(reading.invoice_date);
@@ -781,28 +816,22 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hold: Ho
   if (disjointPair || percentValues.size >= 2) hold("mixed_vat_rate");
 
   // A5
-  if (money.some((token) => token.signed)) hold("signed_amount_present");
+  if (hazards.signed_amount_present) hold("signed_amount_present");
 
   // Foreign-rate trio
   if (trios(values, FOREIGN_VAT_RATES).some((t) => rateMatches(t.net, t.vat, eeRates).length === 0)) hold("foreign_rate_trio");
 }
 
 /** §2.4: document-level holds, all text, independent of doc_type. */
-function checkDocumentLevel(doc: Doc, reading: DocumentReading, ctx: CheckContext, hold: HoldFn): void {
-  const lines = doc.packet.lines;
+function checkDocumentLevel(reading: DocumentReading, ctx: CheckContext, hazards: DocumentTextHazards, hold: HoldFn): void {
   if (reading.doc_type !== "invoice" && reading.doc_type !== "receipt") hold("doc_type_not_bookable");
-  if (creditWordHits(lines, CREDIT_WORDS).length > 0) hold("credit_word_present");
+  if (hazards.credit_word_present) hold("credit_word_present");
   if (reading.currency !== null && reading.currency !== "EUR") hold("non_eur_currency", "currency");
-  const currency = currencyScan(lines, {
-    isoCodes: NON_EUR_ISO_CODES,
-    wordLikeCodes: WORD_LIKE_ISO_CODES,
-    letterSymbols: LETTER_CURRENCY_SYMBOLS,
-  });
-  if (currency.hits.length > 0) hold("foreign_currency_marker");
-  if (!currency.eurStated) hold("currency_not_stated");
-  const hazards = new Set<string>(READING_HAZARD_SIGNALS);
+  if (hazards.foreign_currency_marker) hold("foreign_currency_marker");
+  if (!hazards.eur_stated) hold("currency_not_stated");
+  const hazardSignals = new Set<string>(READING_HAZARD_SIGNALS);
   for (const signal of ctx.heuristic.signals) {
-    if (hazards.has(signal)) hold(signal as HoldCode);
+    if (hazardSignals.has(signal)) hold(signal as HoldCode);
   }
 }
 

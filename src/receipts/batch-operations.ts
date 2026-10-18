@@ -11,6 +11,7 @@ import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
 import {
+  type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
 } from "../invoice-extraction-fallback.js";
@@ -54,6 +55,7 @@ import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
+import { textHazardSignals } from "../tools/document-text-hazards.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
 // are exported for pdf-workflow / own-company-identity / unit tests, and the
 // rule-target resolvers are shared with the classification path). Importing them
@@ -303,7 +305,7 @@ async function extractReceiptFields(
   ownCompanyRegistryCode?: string,
   ownIbans?: string[],
   ownCompanyName?: string,
-): Promise<ExtractedReceiptFields> {
+): Promise<{ extracted: ExtractedReceiptFields; textHazards: ExtractionConfidenceSignals }> {
   // Parse the immutable snapshot bytes (snapshot_path), never the live folder
   // file, so the parser and the later uploader observe byte-identical content.
   const parsedDocument = await parseDocument(snapshot.snapshot_path);
@@ -313,7 +315,7 @@ async function extractReceiptFields(
       pageNum: page.pageNum,
     }))
   );
-  return extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
+  const extracted = extractReceiptFieldsFromText(parsedDocument.text, snapshot.file.name, {
     ownCompanyVat,
     ownCompanyRegistryCode,
     ownIbans,
@@ -322,6 +324,7 @@ async function extractReceiptFields(
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
   });
+  return { extracted, textHazards: textHazardSignals(parsedDocument) };
 }
 
 interface ProcessSingleReceiptOptions {
@@ -347,7 +350,7 @@ async function processSingleReceipt(
   const notes: string[] = [];
 
   try {
-    const extracted = await extractReceiptFields(
+    const { extracted, textHazards } = await extractReceiptFields(
       snapshot,
       options.ownCompanyVat,
       options.ownCompanyRegistryCode,
@@ -361,6 +364,7 @@ async function processSingleReceipt(
       ownCompanyVat: options.ownCompanyVat,
       ownCompanyRegistryCode: options.ownCompanyRegistryCode,
     });
+    Object.assign(signals, textHazards);
     const selfVatDetected = signals.self_vat_detected === true;
     const selfRegCodeDetected = signals.self_reg_code_detected === true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)

@@ -29,6 +29,7 @@ import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractRece
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
+import { textHazardSignals } from "./document-text-hazards.js";
 import {
   detectVatDeductionNotes,
   ESTONIAN_VAT_METADATA,
@@ -456,6 +457,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           ownCompanyVat,
           ownCompanyRegistryCode,
         });
+        Object.assign(signals, textHazardSignals(parsedDocument));
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).

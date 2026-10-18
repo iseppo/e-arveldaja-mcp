@@ -12,6 +12,8 @@ import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX 
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { textHazardSignals } from "./document-text-hazards.js";
+import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 vi.mock("../file-validation.js", async () => ({
   ...await vi.importActual<typeof import("../file-validation.js")>("../file-validation.js"),
@@ -21,6 +23,11 @@ vi.mock("../file-validation.js", async () => ({
 vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
 }));
+
+vi.mock("./document-text-hazards.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./document-text-hazards.js")>();
+  return { ...actual, textHazardSignals: vi.fn(actual.textHazardSignals) };
+});
 
 vi.mock("../bounded-read.js", async () => {
   const actual = await vi.importActual<typeof import("../bounded-read.js")>("../bounded-read.js");
@@ -1818,4 +1825,23 @@ describe("validateInvoiceData — foreign VAT shape", () => {
   it("still accepts a foreign VAT number with digits", () => {
     expect(warningsFor("IE4276970QH")).toContain("is a foreign VAT number");
   });
+});
+
+describe("P2 E0: text hazards on the extract_pdf_invoice parse", () => {
+  it.each(Object.keys(TEXT_HAZARD_EXPECTED) as TextHazardFixture[])(
+    "%s: one parse per call, and the hazards come from that parse",
+    async (kind) => {
+      vi.mocked(textHazardSignals).mockClear();
+      const parsed = textHazardParse(kind);
+      mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("hazard.pdf", "%PDF-1.4") });
+      mockedParseDocument.mockResolvedValue(parsed);
+      const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", { clients: { listAll: vi.fn().mockResolvedValue([]) } });
+      const response = await handler({ file_path: "/tmp/hazard.pdf" });
+      expect(response.isError).toBeFalsy();
+      expect(mockedParseDocument).toHaveBeenCalledTimes(1);
+      expect(textHazardSignals).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
+      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+    },
+  );
 });

@@ -9,9 +9,15 @@ import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../_
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
+import { textHazardSignals } from "../tools/document-text-hazards.js";
+import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
+vi.mock("../tools/document-text-hazards.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../tools/document-text-hazards.js")>();
+  return { ...actual, textHazardSignals: vi.fn(actual.textHazardSignals) };
+});
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
   return { ...actual, mkdtemp: vi.fn(actual.mkdtemp), writeFile: vi.fn(actual.writeFile) };
@@ -1060,4 +1066,22 @@ describe("AccountingDocumentOperations.confirmDraft", () => {
     expect(outcome.value.echoedCurrency).toBeUndefined();
     expect(outcome.value.echoedBaseGross).toBeUndefined();
   });
+});
+
+describe("P2 E0: text hazards on the guided prepare parse", () => {
+  it.each(Object.keys(TEXT_HAZARD_EXPECTED) as TextHazardFixture[])(
+    "%s: one parse per prepare, and the hazards come from that parse",
+    async (kind) => {
+      const parsed = textHazardParse(kind);
+      mockedParseDocument.mockResolvedValue(parsed);
+      const { path } = writeTempPdf();
+      const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+      const outcome = await ops.prepare({ source: { file_path: path } });
+      expect(outcome.ok).toBe(true);
+      expect(mockedParseDocument).toHaveBeenCalledTimes(1);
+      expect(textHazardSignals).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
+      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+    },
+  );
 });
