@@ -883,6 +883,21 @@ describe("rejected relaxations stay held (plan p1-throughput-round §4 D1/D2 kil
   });
 });
 
+describe("C7: packet holds survive a schema failure (plan p2 §3 C7)", () => {
+  // h21 shape: an oversize packet whose proof fails its schema.
+  const oversizeLines = [...BASE_LINES, ...Array.from({ length: 1500 }, (_, index) => `Rida ${index + 1}`)];
+
+  it("T-C7-proof: an invalid proof on an oversize packet holds proof_schema_invalid and packet_oversize", () => {
+    expect(codesOf({ lines: oversizeLines, answers: { gross: { verdict: "maybe" } } }).sort())
+      .toEqual(["packet_oversize", "proof_schema_invalid"]);
+  });
+
+  it("T-C7-reading: an invalid reading on an oversize packet holds reading_schema_invalid and packet_oversize", () => {
+    expect(codesOf({ lines: oversizeLines, values: { gross: "124.00" } }).sort())
+      .toEqual(["packet_oversize", "reading_schema_invalid"]);
+  });
+});
+
 describe("C1: a value lost under a dot leader holds (plan p2 §3 C1)", () => {
   // Google-invoice shape (#11 / h25): the date cell is only a leader; the period line prints other dates.
   const googleLines = withLines({ 4: "Arve kuupäev    ....................    Kogusumma (EUR)    124,00 €" }, [

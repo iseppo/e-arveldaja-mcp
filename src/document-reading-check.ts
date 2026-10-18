@@ -564,7 +564,11 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   const proofOutcome = parseProof(proofInput);
   if (!readingOutcome.ok) hold(readingOutcome.code);
   if (!proofOutcome.ok) hold(proofOutcome.code);
-  if (!readingOutcome.ok || !proofOutcome.ok) return finish(undefined, false);
+  if (!readingOutcome.ok || !proofOutcome.ok) {
+    // Packet holds are facts about the document, not the reading: they survive a schema failure (P2 C7).
+    for (const packetHold of packet.holds) hold(packetHold.code);
+    return finish(undefined, false);
+  }
   const reading = readingOutcome.value;
   const proof = proofOutcome.value;
 
