@@ -27,6 +27,7 @@ import { jsonObjectInput } from "../tools/crud/shared.js";
 import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../document-reading-check.js";
 import { createReadingDocumentOperations, type VerifyDocumentResult } from "../documents/reading-operations.js";
 import type { ReadingCard } from "../document-reading-card.js";
+import { desandboxText } from "../external-text-renderer.js";
 
 // GUIDED FAÇADE. `process_accounting_document` unifies the single-document
 // purchase-invoice booking flow (extract → validate → resolve supplier → check
@@ -197,6 +198,7 @@ interface DocArgs {
   proof?: unknown;
   owner_answers?: unknown;
   release_indeterminate?: string;
+  item_title?: string;
   file_ref?: string;
   file_path?: string;
   plan_handle?: string;
@@ -302,6 +304,7 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
     ...(result.booking ? { booking_review: wrapBookingReview(result.booking) } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
+    ...(result.itemTitleRequired ? { item_title_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),
     ...(result.releasedMarker ? { released_marker: result.releasedMarker } : {}),
@@ -314,6 +317,8 @@ function renderVerify(result: VerifyDocumentResult) {
         ? "An earlier create of a matching document may still complete. Check e-arveldaja: when the invoice is not there, the owner may release the marker by calling mode='verify' again with release_indeterminate set to indeterminate_marker; when it is there, nothing more is needed."
         : result.bookingItemsRequired
         ? "The server has no booking history to suggest the expense account: call mode='verify' again with items (accounts, dimensions, VAT settings)."
+        : result.itemTitleRequired
+        ? "The suggested item title comes from the supplier's previous invoice and carries a date or period that may not fit this document: call mode='verify' again with the same arguments plus item_title, a title for this document (the service and its date or period as this document prints them)."
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
     mutation_occurred: false,
   };
@@ -341,6 +346,7 @@ export function registerProcessAccountingDocumentTool(
         document_reading: jsonObjectInput.optional().describe("mode='verify': the document_reading JSON object from your reading of the mode='read' packet."),
         proof: jsonObjectInput.optional().describe("mode='verify': the proof JSON object answering the proof questions for your reading."),
         owner_answers: jsonObjectInput.optional().describe("mode='create' with a verified-reading plan_handle: the owner's answer to every card row, keyed by row id (an empty object when the card has no rows)."),
+        item_title: z.string().optional().describe("mode='verify': the item title for this document when the server suggests the booking from the supplier's history (the service and its date or period as this document prints them; at most 200 characters, one line). Shown in booking_review for the owner's approval."),
         release_indeterminate: z.string().optional().describe("mode='verify': the owner's explicit release of an indeterminate-create marker (its id), only after checking in e-arveldaja that the earlier create did not book the invoice."),
       }
     : {};
@@ -379,6 +385,9 @@ export function registerProcessAccountingDocumentTool(
     { ...createAnnotation, ...batch, openWorldHint: true, title: "Process Accounting Document" },
     async (args: DocArgs) => {
       const mode = args.mode ?? "prepare";
+      if (args.item_title !== undefined && mode !== "verify") {
+        return textResult({ error: "item_title is taken only by mode='verify' on a verified reading", category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
+      }
       for (const [key, value] of [["invoice_date", args.invoice_date], ["journal_date", args.journal_date]] as const) {
         if (value !== undefined && !isStrictDate(value)) {
           return textResult({ error: `${key} must be a real calendar date in canonical YYYY-MM-DD form`, category: "invalid_date", retry: "never", mutation_occurred: false }, true);
@@ -554,6 +563,13 @@ export function registerProcessAccountingDocumentTool(
         if (missing.length > 0) {
           return textResult({ error: `Missing required fields for mode='verify': ${missing.join(", ")}`, category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
         }
+        const itemTitle = args.item_title !== undefined ? desandboxText(args.item_title).trim() : undefined;
+        if (itemTitle !== undefined) {
+          const problem = args.items !== undefined ? "item_title cannot be combined with items (caller items carry their own titles)"
+            : itemTitle.length === 0 || itemTitle.length > 200 || /\p{Cc}/u.test(itemTitle) ? "item_title must be one line of 1 to 200 characters"
+            : undefined;
+          if (problem) return textResult({ error: problem, category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
+        }
         const outcome = await readingOperations.verify({
           source,
           snapshot,
@@ -565,6 +581,7 @@ export function registerProcessAccountingDocumentTool(
             ...(args.liability_accounts_id !== undefined ? { liabilityAccountsId: args.liability_accounts_id } : {}),
             ...(args.journal_date !== undefined ? { journalDate: args.journal_date } : {}),
             ...(args.term_days !== undefined ? { termDays: args.term_days } : {}),
+            ...(itemTitle !== undefined ? { itemTitle } : {}),
           },
         });
         if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);

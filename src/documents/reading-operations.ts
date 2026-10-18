@@ -94,6 +94,8 @@ export interface ReadingBookingInput {
   liabilityAccountsId?: number;
   journalDate?: string;
   termDays?: number;
+  /** The client's item title for the one-item history template (verify only; bound in the plan). */
+  itemTitle?: string;
 }
 
 export interface ReadDocumentInput { source: FileInputSource; snapshot?: FileInputSnapshot }
@@ -128,6 +130,8 @@ export interface VerifyDocumentResult {
   booking?: PlanRecord;
   /** Set when the server could not suggest booking items: the client repeats verify with `items`. */
   bookingItemsRequired?: true;
+  /** Set when the history template's item title carries a date: the client repeats verify with `item_title`. */
+  itemTitleRequired?: true;
   /** The owner card (present when nothing blocks). */
   card?: ReadingCard;
   /** §5.2a: an earlier create of a matching document may still complete; the owner checks e-arveldaja, then releases it. */
@@ -295,14 +299,22 @@ async function suggestedItemTemplate(api: ApiContext, supplierClientId: number):
   } as PurchaseInvoiceItem;
 }
 
+const MONTH_WORD = /(?<!\p{L})(?:(?:jaanuar|veebruar|märts|aprill|juuni|juuli|august|septemb|oktoob|novemb|detsemb|january|february|march|april|june|july|september|october|november|december)\p{L}*|(?:jan|feb|mar|apr|mai|may|jun|jul|aug|sep|sept|oct|okt|nov|dec|dets)(?!\p{L}))/iu;
+const DATE_TOKEN = /\d{1,2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\.\s*-\s*\d{1,2}\.\d{1,2}|(?<!\d)\d{1,2}[./]\d{4}(?!\d)|(?<!\d)(19|20)\d{2}(?!\d)/;
+
+/** True when a history item title names a date, period or month: copied to another document it would be stale. */
+export function itemTitleHasDate(title: string | undefined): boolean {
+  return title !== undefined && (DATE_TOKEN.test(title) || MONTH_WORD.test(title));
+}
+
 /** One booking item of the template with the document's amounts: net, and the unique VAT rate in force. */
-function itemWithAmounts(template: PurchaseInvoiceItem, values: AcceptedValues): PurchaseInvoiceItem {
+function itemWithAmounts(template: PurchaseInvoiceItem, values: AcceptedValues, itemTitle?: string): PurchaseInvoiceItem {
   const vat = values.vat ?? 0;
   const gross = values.gross ?? 0;
   const net = values.net ?? round2(gross - vat);
   const rates = vat > 0 && values.invoice_date ? rateMatches(net, vat, vatRatesInForceOn(values.invoice_date)) : [];
   const vatRate = vat > 0 ? (rates.length === 1 ? String(rates[0]) : template.vat_rate_dropdown) : (template.vat_rate_dropdown ?? "0");
-  return { ...template, total_net_price: net, amount: 1, ...(vatRate !== undefined && vatRate !== null ? { vat_rate_dropdown: vatRate } : {}) };
+  return { ...template, ...(itemTitle !== undefined ? { custom_title: itemTitle } : {}), total_net_price: net, amount: 1, ...(vatRate !== undefined && vatRate !== null ? { vat_rate_dropdown: vatRate } : {}) };
 }
 
 /** Where the booking items come from: the caller's items, or the server's one-item template (amounts from the values). */
@@ -336,7 +348,7 @@ export async function buildReadingBooking(
   isVatReg: boolean,
   knownIban: string | undefined,
 ): Promise<ReadingBookingResult> {
-  const items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values)];
+  const items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values, input?.itemTitle)];
   const invoiceDate = values.invoice_date ?? "";
   const dueTerm = values.due_date && values.invoice_date ? dayDiff(values.invoice_date, values.due_date) : undefined;
   const fields: AccountingDocumentBookingFields = {
@@ -818,12 +830,16 @@ class ReadingDocumentOperations {
         ...(supplierClient?.id !== undefined && !itemsSource ? { bookingItemsRequired: true as const } : {}),
         ...(marker ? { indeterminateMarker: marker.id } : {}),
       };
+      const itemTitleRequired = itemsSource !== undefined && "template" in itemsSource && input.booking?.itemTitle === undefined &&
+        itemTitleHasDate(itemsSource.template.custom_title);
       if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
       if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
       // A booking the owner has not seen is never created: no gross, no booking review, no handle.
       if (!booking?.effective) {
         return ok(values.gross === null ? { ...result, holds: [{ code: "required_field_missing", field: "gross" }] } : result);
       }
+      // A dated history title would land on this document unchanged: no handle until the client gives item_title.
+      if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true });
       const card = cardOutcome.card;
 
       const scope = this.runtimeSafetyContext.getActiveScope();
@@ -839,6 +855,7 @@ class ReadingDocumentOperations {
           ...(input.booking?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.booking.liabilityAccountsId } : {}),
           ...(input.booking?.journalDate !== undefined ? { journalDate: input.booking.journalDate } : {}),
           ...(input.booking?.termDays !== undefined ? { termDays: input.booking.termDays } : {}),
+          ...(input.booking?.itemTitle !== undefined ? { itemTitle: input.booking.itemTitle } : {}),
         },
         booking: booking.effective.fingerprint,
         heuristic_keys: heuristicKeys,

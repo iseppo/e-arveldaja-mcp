@@ -53,6 +53,8 @@ describe("process_accounting_document reading modes: flag", () => {
     const { config } = setupReading(false);
     expect(Object.keys(config.inputSchema)).not.toContain("document_reading");
     expect(Object.keys(config.inputSchema)).not.toContain("proof");
+    const readingKeys = ["document_reading", "proof", "owner_answers", "item_title", "release_indeterminate"];
+    expect(Object.keys(config.inputSchema).sort()).toEqual(Object.keys(setupReading(true).config.inputSchema).filter((key) => !readingKeys.includes(key)).sort());
     expect(config.inputSchema.mode!.safeParse("read").success).toBe(false);
     expect(config.inputSchema.mode!.safeParse("verify").success).toBe(false);
     expect(config.description).not.toContain("mode='read'");
@@ -196,6 +198,23 @@ describe("process_accounting_document reading modes: create and confirm", () => 
     expect(body.category).toBe("reading_create_held");
     expect(body.holds.map((hold: { code: string }) => hold.code)).toContain("arithmetic_mismatch");
     expect(JSON.stringify(body.holds)).not.toContain("125");
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
+
+describe("process_accounting_document reading modes: item_title", () => {
+  it("item_title is refused outside mode='verify', beside items, and when empty, too long or multi-line; 0 writes", async () => {
+    const { handler, createAndSetTotals } = setupReading(true);
+    const file = writePdf("%PDF-1.4 reading facade title");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    for (const mode of ["prepare", "create", "read", "confirm"]) {
+      const result = await handler({ mode, file_path: file.path, item_title: "Pealkiri", plan_handle: "x", invoice_id: 1 });
+      expect(parse(result).category).toBe("reading_args_refused");
+    }
+    for (const extra of [{ item_title: "Pealkiri", items: [] }, { item_title: "  " }, { item_title: "x".repeat(201) }, { item_title: "rida\nteine" }]) {
+      const result = await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, ...extra });
+      expect(parse(result).category).toBe("reading_args_refused");
+    }
     expect(createAndSetTotals).not.toHaveBeenCalled();
   });
 });

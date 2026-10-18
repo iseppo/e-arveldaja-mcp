@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
@@ -556,6 +556,69 @@ describe("reading confirm (§5.5)", () => {
     expect(await w.ops.confirm({ planHandle: verify.planHandle!, invoiceId: plan.invoiceId })).toMatchObject({ ok: false, error: { code: "plan_domain_mismatch" } });
     expect(w.confirm).not.toHaveBeenCalled();
   });
+});
+
+describe("reading item title (history template)", () => {
+  function datedHistory(w: World, title = "Bussipilet Tallinn-Tartu-Tallinn 13.10.2026") {
+    const detail = w.details[HISTORY_INVOICE.id as number]!;
+    w.details[HISTORY_INVOICE.id as number] = { ...detail, items: (detail.items as Array<Record<string, unknown>>).map((item) => ({ ...item, custom_title: title })) };
+  }
+  async function verifyWithTitle(w: World, file: { path: string; sha256: string }, itemTitle?: string) {
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof, booking: itemTitle !== undefined ? { itemTitle } : {} });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    return outcome.value;
+  }
+  const titleOf = (booking: unknown) => ((booking as { items: Array<{ custom_title: string }> }).items[0]!.custom_title);
+
+  it("a dated history title issues no handle until the client gives item_title", async () => {
+    const w = world();
+    datedHistory(w);
+    const file = writePdf("%PDF dated title");
+    const held = await verifyWithTitle(w, file);
+    expect(held).toMatchObject({ status: "blocked", itemTitleRequired: true });
+    expect(held.planHandle).toBeUndefined();
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("item_title replaces the template title in the reviewed booking and in the created draft", async () => {
+    const w = world();
+    datedHistory(w);
+    const file = writePdf("%PDF titled");
+    const ready = await verifyWithTitle(w, file, "Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
+    expect(ready.status).toBe("ready");
+    expect(titleOf(ready.booking)).toBe("Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
+    const created = await create(w, file, ready.planHandle!);
+    expect(created.ok && created.value.status).toBe("created");
+    expect(w.createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
+  });
+
+  it("each handle keeps its own reviewed title", async () => {
+    const w = world();
+    datedHistory(w);
+    const file = writePdf("%PDF two titles");
+    const first = await verifyWithTitle(w, file, "Pealkiri A");
+    const second = await verifyWithTitle(w, file, "Pealkiri B");
+    expect((await create(w, file, first.planHandle!)).ok).toBe(true);
+    expect(w.createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Pealkiri A");
+    expect(second.planHandle).not.toBe(first.planHandle);
+  });
+
+  it("an undated history title needs no item_title", async () => {
+    const w = world();
+    datedHistory(w, "Bussipilet Tallinn-Tartu");
+    const ready = await verifyWithTitle(w, writePdf("%PDF undated"));
+    expect(ready.status).toBe("ready");
+    expect(ready.itemTitleRequired).toBeUndefined();
+  });
+
+  it.each([
+    "Bussipilet 13.10.2026", "Bussipilet 13/10/2026", "Pilet 5.1.26", "Tartu-Tallinn 05.-06.10.2026", "Arve 2026-10-05", "Teenus 03.2026",
+    "Delfi september", "Digitellimus septembri eest", "Hosting Oct", "Üür mai", "Rent 2025", "Tellimus detsembris",
+  ])("%s is a dated title", (title) => { expect(itemTitleHasDate(title)).toBe(true); });
+
+  it.each(["Teenus", "Bussipilet Tallinn-Tartu", "Mainor koolitus", "Marketing", "Junior arendaja", "Decor", "Kontoritarbed 24%"])(
+    "%s is not a dated title", (title) => { expect(itemTitleHasDate(title)).toBe(false); });
 });
 
 describe("draftReadbackMismatches", () => {
