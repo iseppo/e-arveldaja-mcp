@@ -120,4 +120,21 @@ describe("process_accounting_document reading modes: read and verify", () => {
     expect(body.holds.length).toBeGreaterThan(0);
     expect(body).not.toHaveProperty("plan_handle");
   });
+
+  it("verify renders the card with every document line wrapped", async () => {
+    const { handler } = setupReading(true);
+    const file = writePdf();
+    const { reading, proof } = readingFor(packetFor(file.sha256), {
+      values: { buyer_name: null, buyer_reg: null },
+      evidence: { buyer_name: undefined, buyer_reg: undefined },
+    });
+    const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect(body.status).toBe("ready");
+    expect(body.card.look_here.gross.line).toMatch(/^<<UNTRUSTED_OCR_START:/);
+    expect(body.card.look_here.supplier.name).toMatch(/^<<UNTRUSTED_OCR_START:/);
+    const buyer = body.card.rows.find((row: { id: string }) => row.id === "buyer");
+    expect(buyer.company).toEqual({ name: "Ostja AS", reg: "10000024", vat: "EE100000010" });
+    expect(buyer.lines[0]).toMatch(/^<<UNTRUSTED_OCR_START:/);
+    expect(body.card.answer_format).toContain("owner_answers");
+  });
 });

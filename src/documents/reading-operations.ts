@@ -60,6 +60,7 @@ import { parseStrictDate } from "../strict-date.js";
 import type { Client, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, loadSnapshot, materializeSnapshot, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
+import { buildReadingCard, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
 
 export const READING_PLAN_DOMAIN = "accounting_document_reading";
 
@@ -75,7 +76,7 @@ function liteparseVersion(): string {
 export const READING_PARSER_VERSION = `liteparse@${liteparseVersion()}`;
 
 /** A hold as the reading path reports it: a code and an optional field, never a value. */
-export interface ReadingHold { code: HoldCode; field?: ReadingField | BookingField }
+export type ReadingHold = CardHold;
 
 /** Booking inputs the reading cannot supply; the server suggests them from the supplier's history when omitted. */
 export interface ReadingBookingInput {
@@ -115,13 +116,39 @@ export interface VerifyDocumentResult {
   booking?: PlanRecord;
   /** Set when the server could not suggest booking items: the client repeats verify with `items`. */
   bookingItemsRequired?: true;
+  /** The owner card (present when nothing blocks). */
+  card?: ReadingCard;
   planHandle?: string;
+}
+
+/** What a reading-domain create handle binds (§5.2): everything create re-checks the owner's answers against. */
+export interface ReadingPlan {
+  source_sha256: string;
+  packet_digest: string;
+  file_name: string;
+  values: PlanRecord;
+  card: PlanRecord;
+  supplier_client_id: number;
+  items_source: PlanRecord;
+  booking_input: PlanRecord;
+  /** The booking computed on the reading's values; null when the owner still types the gross. */
+  booking: PlanRecord | null;
+  heuristic_keys: { invoiceNumber: string | null; supplierClientId: number | null };
+  vat_zero_note_proven: boolean;
+  reverse_charge_note_present: boolean;
+  connection_fingerprint: string | null;
+  own: { name: string | null; reg: string | null; vat: string | null };
+}
+
+function sameIban(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.replace(/\s+/g, "").toUpperCase() === b.replace(/\s+/g, "").toUpperCase();
 }
 
 /** Packet holds that do not block the reading path (the owner types the lost values, §5.3). */
 const NON_BLOCKING_PACKET_HOLDS: readonly PacketHoldCode[] = ["text_layer_value_lost"];
 
-const holdOf = (hold: { code: HoldCode; field?: ReadingField | BookingField }): ReadingHold =>
+const holdOf = (hold: { code: CardHoldCode; field?: ReadingField | BookingField }): ReadingHold =>
   hold.field === undefined ? { code: hold.code } : { code: hold.code, field: hold.field };
 
 function dayDiff(from: string, to: string): number | undefined {
@@ -262,11 +289,20 @@ function itemWithAmounts(template: PurchaseInvoiceItem, values: AcceptedValues):
   return { ...template, total_net_price: net, amount: 1, ...(vatRate !== undefined && vatRate !== null ? { vat_rate_dropdown: vatRate } : {}) };
 }
 
+/** Where the booking items come from: the caller's items, or the server's one-item template (amounts from the values). */
+export type ReadingItemsSource = { items: unknown } | { template: PurchaseInvoiceItem };
+
+/** The caller's items, else the supplier's one-item history template; undefined when the server has nothing to suggest. */
+export async function resolveItemsSource(api: ApiContext, supplierClientId: number, input: ReadingBookingInput | undefined): Promise<ReadingItemsSource | undefined> {
+  if (input?.items !== undefined) return { items: input.items };
+  const template = await suggestedItemTemplate(api, supplierClientId);
+  return template ? { template } : undefined;
+}
+
 export interface ReadingBookingResult {
   effective?: EffectiveBookingModel;
   view?: BookingView;
   bookingSideSignals: string[];
-  itemsRequired?: true;
   failure?: { code: string; message: string };
 }
 
@@ -275,17 +311,13 @@ export async function buildReadingBooking(
   api: ApiContext,
   values: AcceptedValues,
   supplierClientId: number,
-  input: ReadingBookingInput | undefined,
+  itemsSource: ReadingItemsSource,
+  input: Omit<ReadingBookingInput, "items"> | undefined,
   material: Pick<MaterializedSnapshot, "source_sha256" | "fileName">,
   isVatReg: boolean,
   knownIban: string | undefined,
 ): Promise<ReadingBookingResult> {
-  let items: unknown = input?.items;
-  if (items === undefined) {
-    const template = await suggestedItemTemplate(api, supplierClientId);
-    if (!template) return { bookingSideSignals: [], itemsRequired: true };
-    items = [itemWithAmounts(template, values)];
-  }
+  const items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values)];
   const invoiceDate = values.invoice_date ?? "";
   const dueTerm = values.due_date && values.invoice_date ? dayDiff(values.invoice_date, values.due_date) : undefined;
   const fields: AccountingDocumentBookingFields = {
@@ -412,63 +444,94 @@ class ReadingDocumentOperations {
       };
       holds.push(...(await readingDuplicateHolds(this.api, values, supplierClient?.id, heuristicKeys, { uncached: false })).map(holdOf));
 
+      const ownCompany = { name: own?.ownCompanyName ?? null, reg: own?.ownCompanyRegistryCode ?? null, vat: own?.ownCompanyVat ?? null };
       let booking: ReadingBookingResult | undefined;
+      let itemsSource: ReadingItemsSource | undefined;
+      let isVatReg = false;
+      let knownIban: string | undefined;
       if (supplierClient?.id !== undefined) {
-        const isVatReg = await isCompanyVatRegistered(this.api);
-        const knownIban = values.supplier_iban && supplierClient.bank_account_no &&
-          supplierClient.bank_account_no.replace(/\s+/g, "").toUpperCase() === values.supplier_iban.replace(/\s+/g, "").toUpperCase()
-          ? values.supplier_iban : undefined;
-        booking = await buildReadingBooking(this.api, values, supplierClient.id, input.booking, material, isVatReg, knownIban);
-        if (booking.view) {
-          const binding = checkBookingBinding(values, booking.view, {
-            vatRegistered: isVatReg,
-            vatZeroNoteProven: check.vat_zero_note_proven,
-            reverseChargeNotePresent: check.reverse_charge_note_present,
-            supplierCountry: supplierClient.cl_code_country ?? null,
-            bookingSideSignals: booking.bookingSideSignals,
-            supplierKnownIbans: supplierClient.bank_account_no ? [supplierClient.bank_account_no] : [],
-            supplierCandidateIds: candidates.candidates.map((candidate) => candidate.id!),
-          });
-          holds.push(...binding.holds.map(holdOf));
+        isVatReg = await isCompanyVatRegistered(this.api);
+        knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
+        itemsSource = await resolveItemsSource(this.api, supplierClient.id, input.booking);
+        // A gross the owner still has to type cannot be booked yet: the booking is computed at create.
+        if (itemsSource && values.gross !== null) {
+          booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban);
+          if (booking.view) {
+            const binding = checkBookingBinding(values, booking.view, {
+              vatRegistered: isVatReg,
+              vatZeroNoteProven: check.vat_zero_note_proven,
+              reverseChargeNotePresent: check.reverse_charge_note_present,
+              supplierCountry: supplierClient.cl_code_country ?? null,
+              bookingSideSignals: booking.bookingSideSignals,
+              supplierKnownIbans: supplierClient.bank_account_no ? [supplierClient.bank_account_no] : [],
+              supplierCandidateIds: candidates.candidates.map((candidate) => candidate.id!),
+            });
+            holds.push(...binding.holds.map(holdOf));
+          }
         }
       }
-
+      const cardOutcome = supplierClient?.id !== undefined
+        ? buildReadingCard({
+            packet,
+            values,
+            evidence: parsedReading.value.evidence,
+            holds,
+            noteCount: check.notes?.length ?? 0,
+            heuristic: heuristic.view,
+            supplier: { clientId: supplierClient.id, name: supplierClient.name },
+            company: ownCompany,
+          })
+        : undefined;
       const result: VerifyDocumentResult = {
         status: "blocked",
         ...base,
-        holds,
+        holds: cardOutcome && !cardOutcome.blocked ? [] : cardOutcome?.blockHolds ?? holds,
         values,
         ...(supplierClient?.id !== undefined ? { supplier: { clientId: supplierClient.id, name: supplierClient.name } } : {}),
         ...(booking?.effective ? { booking: booking.effective.fingerprint } : {}),
-        ...(booking?.itemsRequired ? { bookingItemsRequired: true as const } : {}),
+        ...(supplierClient?.id !== undefined && !itemsSource ? { bookingItemsRequired: true as const } : {}),
       };
       if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
-      if (holds.length > 0 || !booking?.effective || supplierClient?.id === undefined) return ok(result);
+      if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
+      if (values.gross !== null && !booking?.effective) return ok(result);
+      const card = cardOutcome.card;
 
       const scope = this.runtimeSafetyContext.getActiveScope();
-      const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
-        normalizedArgs: {
-          source_sha256: packet.source_sha256,
-          packet_digest: packet.packet_digest,
-          values: values as unknown as PlanRecord,
-          supplier_client_id: supplierClient.id,
-          booking: booking.effective.fingerprint,
-          connection_fingerprint: scope.connectionFingerprint ?? null,
-          own: { reg: own?.ownCompanyRegistryCode ?? null, vat: own?.ownCompanyVat ?? null },
+      const planned: ReadingPlan = {
+        source_sha256: packet.source_sha256,
+        packet_digest: packet.packet_digest,
+        file_name: material.fileName,
+        values: values as unknown as PlanRecord,
+        card: card as unknown as PlanRecord,
+        supplier_client_id: supplierClient.id,
+        items_source: itemsSource as unknown as PlanRecord,
+        booking_input: {
+          ...(input.booking?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.booking.liabilityAccountsId } : {}),
+          ...(input.booking?.journalDate !== undefined ? { journalDate: input.booking.journalDate } : {}),
+          ...(input.booking?.termDays !== undefined ? { termDays: input.booking.termDays } : {}),
         },
+        booking: booking?.effective?.fingerprint ?? null,
+        heuristic_keys: heuristicKeys,
+        vat_zero_note_proven: check.vat_zero_note_proven,
+        reverse_charge_note_present: check.reverse_charge_note_present,
+        connection_fingerprint: scope.connectionFingerprint ?? null,
+        own: ownCompany,
+      };
+      const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
+        normalizedArgs: planned as unknown as PlanRecord,
         sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
         liveSnapshot: { source_sha256: packet.source_sha256, packet_digest: packet.packet_digest },
         commands: [
-          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: booking.effective.fingerprint },
+          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: booking?.effective?.fingerprint ?? { deferred: true } },
           { id: "reading-document-upload", category: "purchase_invoice_upload", reviewProjection: { file_name: material.fileName, source_sha256: material.source_sha256 } },
         ],
-        counts: { holds: 0 },
+        counts: { rows: card.rows.length },
         totals: values.gross !== null ? { gross_price: values.gross } : {},
         exclusions: [],
         reviews: [],
         privatePayload: { source_sha256: packet.source_sha256 },
       });
-      return ok({ ...result, status: "ready", planHandle });
+      return ok({ ...result, status: "ready", card, planHandle });
     } finally {
       await material.cleanup();
     }

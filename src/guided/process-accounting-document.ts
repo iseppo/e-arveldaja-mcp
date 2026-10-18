@@ -26,6 +26,7 @@ import { documentReadingEnabled } from "../config.js";
 import { jsonObjectInput } from "../tools/crud/shared.js";
 import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../document-reading-check.js";
 import { createReadingDocumentOperations, type VerifyDocumentResult } from "../documents/reading-operations.js";
+import type { ReadingCard } from "../document-reading-card.js";
 
 // GUIDED FAÇADE. `process_accounting_document` unifies the single-document
 // purchase-invoice booking flow (extract → validate → resolve supplier → check
@@ -243,6 +244,36 @@ function renderReadingValues(values: Record<string, unknown>): Record<string, un
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, typeof value === "string" && key !== "doc_type" && key !== "currency" && !key.endsWith("_date") ? wrapUntrustedOcr(value) : value]));
 }
 
+const wrapText = (value: unknown) => (typeof value === "string" ? wrapUntrustedOcr(value) : value);
+
+// Card lines, printed tokens and reading strings are document text: every one is wrapped here.
+function renderCard(card: ReadingCard) {
+  return {
+    look_here: {
+      gross: { value: card.look_here.gross.value, ...(card.look_here.gross.line !== undefined ? { line: wrapUntrustedOcr(card.look_here.gross.line) } : {}) },
+      supplier: {
+        client_id: card.look_here.supplier.client_id,
+        name: wrapUntrustedOcr(card.look_here.supplier.name),
+        ...(card.look_here.supplier.line !== undefined ? { line: wrapUntrustedOcr(card.look_here.supplier.line) } : {}),
+      },
+    },
+    rows: card.rows.map((row) => {
+      switch (row.kind) {
+        case "question":
+          return { ...row, options: row.options.map((option) => ({ ...option, ...(option.value !== undefined ? { value: wrapText(option.value) } : {}) })), ...(row.line !== undefined ? { line: wrapUntrustedOcr(row.line) } : {}) };
+        case "buyer_question":
+          return { ...row, lines: row.lines.map((line) => wrapUntrustedOcr(line)) };
+        case "field_review":
+          return { ...row, value: wrapText(row.value), printed_token: wrapUntrustedOcr(row.printed_token), line: wrapUntrustedOcr(row.line) };
+        default:
+          return row;
+      }
+    }),
+    minor_notes: card.minor_notes,
+    answer_format: "owner_answers maps every row id to one answer: a question → {\"choice\": \"<option id>\"} (no default; an option with stop ends the card, nothing is written); a typed row → {\"value\": <the value typed from the PDF>}; a field_review row → {\"confirm\": true} when the PDF shows exactly printed_token, else {\"value\": <typed value>}.",
+  };
+}
+
 function renderVerify(result: VerifyDocumentResult) {
   return {
     status: result.status,
@@ -253,9 +284,10 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
     ...(result.booking ? { booking_review: result.booking } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
+    ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
     next_step: result.status === "ready"
-      ? "Show the values, supplier and booking_review to the operator. After explicit approval, call mode='create' with this plan_handle and the same file."
+      ? "Show the card (look_here rows and every row) and booking_review to the operator and ask each row's question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
       : result.bookingItemsRequired
         ? "The server has no booking history to suggest the expense account: call mode='verify' again with items (accounts, dimensions, VAT settings)."
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",

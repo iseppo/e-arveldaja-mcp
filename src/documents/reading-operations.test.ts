@@ -120,3 +120,49 @@ describe("reading operations: verify", () => {
     expect(outcome.value.planHandle).toBeUndefined();
   });
 });
+
+describe("reading operations: the owner card (D2)", () => {
+  it("a buyer-less invoice is ready with one company-expense question naming the active company", async () => {
+    const { ops, file, createAndSetTotals } = setup();
+    const { reading, proof } = readingFor(packetFor(file.sha256), {
+      values: { buyer_name: null, buyer_reg: null },
+      evidence: { buyer_name: undefined, buyer_reg: undefined },
+    });
+    const outcome = await ops.verify({ source: { file_path: file.path }, reading, proof });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    expect(outcome.value.status).toBe("ready");
+    expect(outcome.value.card!.rows).toEqual([expect.objectContaining({
+      id: "buyer", kind: "buyer_question", company: { name: "Ostja AS", reg: "10000024", vat: "EE100000010" },
+    })]);
+    expect(outcome.value.planHandle).toEqual(expect.any(String));
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a fabricated invoice number whose quote is not printed gets a mandatory row even with a correct gross and supplier", async () => {
+    const { ops, file } = setup();
+    const { reading, proof } = readingFor(packetFor(file.sha256), {
+      values: { invoice_number: "A-99" },
+      evidence: { invoice_number: { line: "p1:001", quote: "Arve nr A-99" } },
+    });
+    const outcome = await ops.verify({ source: { file_path: file.path }, reading, proof });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    expect(outcome.value.card!.rows.map((row) => row.id)).toContain("t:invoice_number");
+    expect(outcome.value.card!.look_here.gross.value).toBe(124);
+  });
+
+  it("a block code beside released codes stops the card: blocked, only the block codes reported, no handle", async () => {
+    const { ops, file, createAndSetTotals } = setup();
+    const { reading, proof } = readingFor(packetFor(file.sha256), {
+      values: { buyer_name: null, buyer_reg: null, gross: 125 },
+      evidence: { buyer_name: undefined, buyer_reg: undefined },
+    });
+    const outcome = await ops.verify({ source: { file_path: file.path }, reading, proof });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    expect(outcome.value.status).toBe("blocked");
+    expect(outcome.value.holds.map((hold) => hold.code)).toContain("arithmetic_mismatch");
+    expect(outcome.value.holds.map((hold) => hold.code)).not.toContain("buyer_id_missing");
+    expect(outcome.value.card).toBeUndefined();
+    expect(outcome.value.planHandle).toBeUndefined();
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
