@@ -949,6 +949,17 @@ describe("C1: a value lost under a dot leader holds (plan p2 §3 C1)", () => {
     expect(result.verdict).toBe("hold");
   });
 
+  it("T-KILL-C1-spaced: single-space label leaders (Codex r4) hold the same wrong date", () => {
+    const result = runCase({
+      lines: withLines({ 4: "Arve kuupäev ....................    Kogusumma (EUR)    124,00 €" }, [
+        "Domeeni nimi ....................    Kokkuvõte - 1. märts 2026 - 15.03.2026",
+      ]),
+      evidence: { invoice_date: { line: "p1:008", quote: "15.03.2026" } },
+      labels: { invoice_date: "Kokkuvõte" },
+    });
+    expect(holdCodes(result)).toEqual(["text_layer_value_lost"]);
+  });
+
   it("T-C1-control: the base invoice without a leader cell does not hold text_layer_value_lost", () => {
     expect(codesOf({})).not.toContain("text_layer_value_lost");
   });

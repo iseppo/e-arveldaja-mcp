@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { stripSandboxMarkers } from "./sandbox-markers.js";
 import type { ReadingField } from "./document-reading-schemas.js";
-import { COLUMN_MARK, leaderOnlyCells } from "./document-reading-tokens.js";
+import { COLUMN_MARK, lostValueLeaders } from "./document-reading-tokens.js";
 
 export { COLUMN_MARK };
 
@@ -141,7 +141,7 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
   if (input.pageErrors.length > 0) hold("page_extraction_failed");
   if (textBytes > PACKET_MAX_TEXT_BYTES || lines.length > PACKET_MAX_LINES) hold("packet_oversize");
   if (input.pages.some(isOcrPage)) hold("ocr_document");
-  if (leaderOnlyCells(lines).length > 0) hold("text_layer_value_lost");
+  if (lostValueLeaders(lines).length > 0) hold("text_layer_value_lost");
 
   return {
     version: 1,

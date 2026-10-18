@@ -104,17 +104,32 @@ describe("document-reading packet: holds", () => {
     expect(codes(makePacket(many.slice(0, PACKET_MAX_LINES)))).toEqual([]);
   });
 
-  it("T-PK-leader-cell: holds text_layer_value_lost for a cell made only of ≥ 5 leader characters (C1)", () => {
-    expect(codes(makePacket(["Arve kuupäev    ....................    Kogusumma (EUR)    13,60 €"]))).toContain("text_layer_value_lost");
-    expect(codes(makePacket(["Arve number    _____"]))).toContain("text_layer_value_lost");
-    expect(codes(makePacket(["Arve number    ·····"]))).toContain("text_layer_value_lost");
-    expect(codes(makePacket(["Arve number    …………………"]))).toContain("text_layer_value_lost");
+  it("T-PK-leader-cell: holds text_layer_value_lost for a leader no amount follows (C1)", () => {
+    const holds = (line: string) => expect(codes(makePacket([line])), line).toContain("text_layer_value_lost");
+    holds("Arve kuupäev    ....................    Kogusumma (EUR)    13,60 €");
+    holds("Arve number    _____");
+    holds("Arve number    ·····");
+    holds("Arve number    …………………");
+    holds("Arve number    ....");
+    // Codex r4 counterexamples: single-space label, spaced dots, other leader glyphs.
+    holds("Arve kuupäev ....................");
+    holds("Arve kuupäev . . . . . . . .");
+    holds("Arve kuupäev ••••••••");
+    holds("Arve kuupäev ‧‧‧‧‧‧‧‧");
+    holds("Arve kuupäev ．．．．．．");
+    holds("Arve kuupäev ........ Periood");
+    holds("Võttis vastu: .............................................");
   });
 
-  it("T-PK-leader-in-cell: a leader inside a cell with text, or 4 leader characters, does not hold (C1)", () => {
-    expect(codes(makePacket(["Total ........ 13,60"]))).not.toContain("text_layer_value_lost");
-    expect(codes(makePacket(["Võttis vastu: ............................................."]))).not.toContain("text_layer_value_lost");
-    expect(codes(makePacket(["Arve number    ...."]))).not.toContain("text_layer_value_lost");
+  it("T-PK-leader-in-cell: a leader an amount follows, or 3 leader glyphs, does not hold (C1)", () => {
+    const passes = (line: string) => expect(codes(makePacket([line])), line).not.toContain("text_layer_value_lost");
+    passes("Total ........ 13,60");
+    passes("Total ........13,60");
+    passes("Total . . . . . 13,60");
+    passes("Allahindlus ........ -5,00");
+    passes("Kokku ........ €13,60");
+    passes("Arve number    ...");
+    passes("Vaata lisa...");
   });
 
   it("T-PK-ocr-full-page: holds ocr_document for fullPageImage", () => {

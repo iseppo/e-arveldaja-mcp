@@ -65,16 +65,25 @@ export function lineCells(text: string): Cell[] {
   return cells;
 }
 
-// A cell made only of dot-leader characters: the text layer kept the leader and lost the
-// value printed over it (liteparse, Google invoices; plan p2 §0, C1).
-const LEADER_ONLY_CELL_RE = /^[.…_·]{5,}$/;
+// A dot leader the value printed over it was lost from: the text layer kept the leader and
+// dropped the value (liteparse, Google invoices; plan p2 §0, C1). A leader is a run of ≥ 4
+// leader glyphs, unspaced or single-spaced. It counts as lost unless an amount follows it in
+// the same cell ("Total ........ 13,60"); a false hold is acceptable, a missed loss is not.
+const LEADER_GLYPHS = ".…·•‧．∙⋅‥_";
+const LEADER_RUN_RE = new RegExp(`[${LEADER_GLYPHS}](?: ?[${LEADER_GLYPHS}]){3,}`, "gu");
+const AMOUNT_START_RE = new RegExp(`^ *[0-9+\\-−(\\p{Sc}]`, "u");
 
-/** Every cell that is only a run of ≥ 5 leader characters (`.`, `…`, `_`, `·`). */
-export function leaderOnlyCells(lines: ReadonlyArray<TokenLine>): Array<{ line: string; cell: number }> {
+/** Every cell holding a leader (≥ 4 leader glyphs) that no amount follows in the same cell. */
+export function lostValueLeaders(lines: ReadonlyArray<TokenLine>): Array<{ line: string; cell: number }> {
   const hits: Array<{ line: string; cell: number }> = [];
   for (const line of lines) {
     for (const cell of lineCells(line.text)) {
-      if (LEADER_ONLY_CELL_RE.test(cell.text.trim())) hits.push({ line: line.id, cell: cell.index });
+      for (const run of cell.text.matchAll(LEADER_RUN_RE)) {
+        if (!AMOUNT_START_RE.test(cell.text.slice(run.index! + run[0].length))) {
+          hits.push({ line: line.id, cell: cell.index });
+          break;
+        }
+      }
     }
   }
   return hits;
