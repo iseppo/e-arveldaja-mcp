@@ -423,6 +423,27 @@ describe("reading create serialisation (§5.2a)", () => {
     expect(stillB.planHandle).toBeUndefined();
   });
 
+  it("after a release the verify scans stay uncached: a draft that commits later is still found", async () => {
+    const w = world();
+    const file = writePdf("%PDF timeout late");
+    let lateDraft: Record<string, unknown> | undefined;
+    w.createAndSetTotals.mockImplementationOnce(async (data: Record<string, unknown>) => {
+      lateDraft = data;
+      throw new MutationIndeterminateError({ operation: "create", entity: "purchase_invoice", businessKey: "A-17", affectedCaches: [], cause: new Error("timeout"), nextAction: "re-read" });
+    });
+    await create(w, file, (await verified(w, file)).planHandle!);
+    const marker = (await verified(w, file)).indeterminateMarker!;
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    expect((await w.ops.verify({ source: { file_path: file.path }, reading, proof, releaseIndeterminate: marker })).ok).toBe(true);
+    // The scan is empty, so this verify is ready and fills the list cache.
+    expect((await verified(w, file)).status).toBe("ready");
+    // POST1 commits now; nothing invalidates the cache.
+    w.commit(lateDraft!, 24, 124);
+    const after = await verified(w, file);
+    expect(after.holds.map((hold) => hold.code)).toContain("duplicate_supplier_number");
+    expect(after.planHandle).toBeUndefined();
+  });
+
   it("a marker cannot be released with a document it was not made for", async () => {
     const w = world();
     const fileA = writePdf("%PDF timeout A-17 bound");
@@ -437,6 +458,10 @@ describe("reading create serialisation (§5.2a)", () => {
     const { reading, proof } = readingFor(packetFor(fileB.sha256, LINES_B), B);
     const outcome = await w.ops.verify({ source: { file_path: fileB.path }, reading, proof, releaseIndeterminate: markerA });
     expect(outcome).toMatchObject({ ok: false, error: { code: "indeterminate_marker_other_document" } });
+    // A's own (stale) reading passed with file B does not release it either.
+    const stale = readingFor(packetFor(fileA.sha256));
+    const staleOutcome = await w.ops.verify({ source: { file_path: fileB.path }, reading: stale.reading, proof: stale.proof, releaseIndeterminate: markerA });
+    expect(staleOutcome).toMatchObject({ ok: false, error: { code: "indeterminate_marker_other_document" } });
     expect((await verified(w, fileA)).indeterminateMarker).toBe(markerA);
     expect(w.ops.hasPendingMarkerForSource(fileA.sha256)).toBe(true);
     expect(w.ops.hasPendingMarkerForSource(fileB.sha256)).toBe(false);

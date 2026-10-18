@@ -717,6 +717,16 @@ class ReadingDocumentOperations {
     const uncached = input.releaseIndeterminate !== undefined || this.markers.has(key) || this.releasedConnections.has(key);
     const { material, snapshot, parsed, packet } = await this.parseSource(input.source, input.snapshot);
     try {
+      // The release is bound to the exact file whose create was indeterminate, and the releasing call issues no handle.
+      if (input.releaseIndeterminate !== undefined) {
+        const target = (this.markers.get(key) ?? []).find((entry) => entry.id === input.releaseIndeterminate);
+        if (!target || target.sourceSha256 !== packet.source_sha256) {
+          return fail("indeterminate_marker_other_document", "That marker was made for a different file; release it with the file whose create was indeterminate.", "never");
+        }
+        this.releaseMarker(key, target.id);
+        this.releasedConnections.add(key);
+        return ok({ status: "blocked", sourceSha256: packet.source_sha256, packetDigest: packet.packet_digest, holds: [], releasedMarker: target.id });
+      }
       const allClients = await this.api.clients.listAll().catch(() => "unavailable" as const);
       const own = await readingOwnIdentity(this.api, allClients === "unavailable" ? [] : allClients);
       const heuristic = readingHeuristic(parsed, material.fileName, own);
@@ -781,20 +791,9 @@ class ReadingDocumentOperations {
           }
         }
       }
-      const markerKey: Partial<MarkerKey> = {
+      const marker = this.matchingMarker(key, {
         supplierClientId: supplierClient?.id, invoiceNumber: values.invoice_number, gross: values.gross, invoiceDate: values.invoice_date, sourceSha256: packet.source_sha256,
-      };
-      // The release is bound to a marker this document matches, and the releasing call issues no handle.
-      if (input.releaseIndeterminate !== undefined) {
-        const target = (this.markers.get(key) ?? []).find((entry) => entry.id === input.releaseIndeterminate && markerMatches(entry, markerKey));
-        if (!target) {
-          return fail("indeterminate_marker_other_document", "That marker was not made for a document matching this one; release it with the document whose create was indeterminate.", "never");
-        }
-        this.releaseMarker(key, target.id);
-        this.releasedConnections.add(key);
-        return ok({ status: "blocked", ...base, holds: [], releasedMarker: target.id });
-      }
-      const marker = this.matchingMarker(key, markerKey);
+      });
       if (marker) holds.push({ code: "reading_create_indeterminate" });
 
       const cardOutcome = supplierClient?.id !== undefined
