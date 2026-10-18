@@ -304,9 +304,12 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),
+    ...(result.releasedMarker ? { released_marker: result.releasedMarker } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
     next_step: result.status === "ready"
       ? "Show the card (look_here rows and every row) and booking_review to the operator and ask each row's question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
+      : result.releasedMarker
+        ? "The marker is released. Call mode='verify' again with the same file and objects, without release_indeterminate: the duplicate scans re-run uncached before a plan_handle is issued."
       : result.indeterminateMarker
         ? "An earlier create of a matching document may still complete. Check e-arveldaja: when the invoice is not there, the owner may release the marker by calling mode='verify' again with release_indeterminate set to indeterminate_marker; when it is there, nothing more is needed."
         : result.bookingItemsRequired
@@ -489,7 +492,9 @@ export function registerProcessAccountingDocumentTool(
         if (outcome.value.status === "held") {
           return textResult({
             status: "held", category: "reading_create_held", holds: outcome.value.holds,
-            next_step: "Nothing was created: the final values hold on the codes above. Book the document with mode='prepare' instead, or run mode='verify' again when a hold can change.",
+            next_step: outcome.value.holds.some((hold) => hold.code === "reading_create_indeterminate")
+              ? "Nothing was created now, but an earlier create of a matching document may still complete. Do not book it with mode='prepare'. Check e-arveldaja, then run mode='verify' again; release the marker only after confirming the invoice is absent."
+              : "Nothing was created: the final values hold on the codes above. Book the document with mode='prepare' instead, or run mode='verify' again when a hold can change.",
             mutation_occurred: false,
           }, true);
         }
@@ -506,6 +511,13 @@ export function registerProcessAccountingDocumentTool(
           ...(created.confirmPlan ? { confirm_plan: { plan_handle: created.confirmPlan.planHandle, invoice_id: created.confirmPlan.invoiceId } } : {}),
           mutation_occurred: true,
         });
+      }
+
+      if ((mode === "prepare" || mode === "create") && readingOperations?.hasPendingMarkerForSource(snapshot.identity.digest_sha256)) {
+        return textResult({
+          error: "An earlier verified-reading create of this file may still complete, so it is not booked on the prepare path. Check e-arveldaja, then run mode='verify' again; the owner releases the marker only after confirming the invoice is absent.",
+          category: "reading_create_indeterminate", retry: "never", mutation_occurred: false,
+        }, true);
       }
 
       if (readingOperations && (mode === "read" || mode === "verify")) {

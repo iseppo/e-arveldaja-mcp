@@ -132,6 +132,8 @@ export interface VerifyDocumentResult {
   card?: ReadingCard;
   /** §5.2a: an earlier create of a matching document may still complete; the owner checks e-arveldaja, then releases it. */
   indeterminateMarker?: string;
+  /** The marker the owner released in this call; no handle is issued until verify runs again. */
+  releasedMarker?: string;
   planHandle?: string;
 }
 
@@ -616,6 +618,8 @@ class ReadingDocumentOperations {
   private readonly locks = new Map<string, Promise<void>>();
   /** §5.2a pending markers per connection fingerprint. */
   private readonly markers = new Map<string, IndeterminateMarker[]>();
+  /** Connections where the owner released a marker: their verify scans stay uncached, so a late commit is seen. */
+  private readonly releasedConnections = new Set<string>();
 
   constructor(
     private readonly api: ApiContext,
@@ -642,6 +646,11 @@ class ReadingDocumentOperations {
     } finally {
       if (this.locks.get(key) === tail) this.locks.delete(key);
     }
+  }
+
+  /** True while a pending marker on the active connection was made for this exact file; the prepare path refuses it. */
+  hasPendingMarkerForSource(sourceSha256: string): boolean {
+    return (this.markers.get(this.connectionKey()) ?? []).some((marker) => marker.sourceSha256 === sourceSha256);
   }
 
   private matchingMarker(key: string, match: Partial<MarkerKey>): IndeterminateMarker | undefined {
@@ -701,11 +710,11 @@ class ReadingDocumentOperations {
   /** mode='verify': the checker, binding and duplicate set; a create handle only when nothing holds. */
   async verify(input: VerifyDocumentInput): Promise<OperationOutcome<VerifyDocumentResult>> {
     const key = this.connectionKey();
-    if (input.releaseIndeterminate !== undefined && !this.releaseMarker(key, input.releaseIndeterminate)) {
+    if (input.releaseIndeterminate !== undefined && !(this.markers.get(key) ?? []).some((marker) => marker.id === input.releaseIndeterminate)) {
       return fail("indeterminate_marker_unknown", "No pending indeterminate-create marker has that id on this connection.", "never");
     }
-    // Uncached while a marker is pending or was just released: a late-committed draft must be seen.
-    const uncached = input.releaseIndeterminate !== undefined || this.markers.has(key);
+    // Uncached while a marker is pending or was released on this connection: a late-committed draft must be seen.
+    const uncached = input.releaseIndeterminate !== undefined || this.markers.has(key) || this.releasedConnections.has(key);
     const { material, snapshot, parsed, packet } = await this.parseSource(input.source, input.snapshot);
     try {
       const allClients = await this.api.clients.listAll().catch(() => "unavailable" as const);
@@ -772,9 +781,20 @@ class ReadingDocumentOperations {
           }
         }
       }
-      const marker = this.matchingMarker(key, {
+      const markerKey: Partial<MarkerKey> = {
         supplierClientId: supplierClient?.id, invoiceNumber: values.invoice_number, gross: values.gross, invoiceDate: values.invoice_date, sourceSha256: packet.source_sha256,
-      });
+      };
+      // The release is bound to a marker this document matches, and the releasing call issues no handle.
+      if (input.releaseIndeterminate !== undefined) {
+        const target = (this.markers.get(key) ?? []).find((entry) => entry.id === input.releaseIndeterminate && markerMatches(entry, markerKey));
+        if (!target) {
+          return fail("indeterminate_marker_other_document", "That marker was not made for a document matching this one; release it with the document whose create was indeterminate.", "never");
+        }
+        this.releaseMarker(key, target.id);
+        this.releasedConnections.add(key);
+        return ok({ status: "blocked", ...base, holds: [], releasedMarker: target.id });
+      }
+      const marker = this.matchingMarker(key, markerKey);
       if (marker) holds.push({ code: "reading_create_indeterminate" });
 
       const cardOutcome = supplierClient?.id !== undefined
@@ -1060,6 +1080,12 @@ class ReadingDocumentOperations {
         invoice_number: draft.number, gross: draft.gross_price ?? null, invoice_date: draft.create_date, currency: draft.cl_currencies_id,
       }, draft.clients_id, plan.heuristic_keys, { uncached: true, excludeInvoiceId: input.invoiceId });
       if (holds.length > 0) return ok<ConfirmReadingResult>({ status: "held", holds: holds.map(holdOf) });
+      // The scans take time: read the draft once more right before registering it.
+      this.api.purchaseInvoices.invalidateListCache();
+      const latest = await this.api.purchaseInvoices.get(input.invoiceId);
+      if (latest.status !== "PROJECT" || draftFingerprint(latest) !== plan.draft_fingerprint) {
+        return fail<ConfirmReadingResult>("draft_changed", "The draft changed after it was created and reviewed; it is not registered. Review it in e-arveldaja.", "never");
+      }
 
       await this.api.purchaseInvoices.confirm(input.invoiceId);
       logAudit({

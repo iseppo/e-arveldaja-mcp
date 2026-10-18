@@ -13,6 +13,7 @@ import { documentReadingEnabled } from "../config.js";
 import { logAudit } from "../audit-log.js";
 import { isToolVisibleForProfile, parseToolProfile } from "../tool-profile.js";
 import { TOOL_CATALOG } from "../tool-catalog.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { FIXTURE_NOW, HISTORY_DETAIL, ownClient, packetFor, readingApi, readingFor, readingParse, served, supplierClient, type ReadingApiOptions } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -196,6 +197,36 @@ describe("process_accounting_document reading modes: create and confirm", () => 
     expect(body.holds.map((hold: { code: string }) => hold.code)).toContain("arithmetic_mismatch");
     expect(JSON.stringify(body.holds)).not.toContain("125");
     expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
+
+describe("process_accounting_document reading modes: indeterminate create", () => {
+  it("a timed-out create holds the prepare path and a second handle, and the release issues no handle", async () => {
+    const createAndSetTotals = vi.fn().mockRejectedValue(new MutationIndeterminateError({
+      operation: "create", entity: "purchase_invoice", businessKey: "A-17", affectedCaches: [], cause: new Error("socket timeout"), nextAction: "re-read",
+    }));
+    const { handler } = setupReading(true, { createAndSetTotals });
+    const file = writePdf("%PDF-1.4 reading facade timeout");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const first = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    const second = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect((await handler({ mode: "create", file_path: file.path, plan_handle: first.plan_handle, owner_answers: {} })).isError).toBe(true);
+
+    const held = parse(await handler({ mode: "create", file_path: file.path, plan_handle: second.plan_handle, owner_answers: {} }));
+    expect(held.holds.map((hold: { code: string }) => hold.code)).toContain("reading_create_indeterminate");
+    expect(held.next_step).toContain("Do not book it with mode='prepare'");
+
+    const prepare = await handler({ mode: "prepare", file_path: file.path });
+    expect(prepare.isError).toBe(true);
+    expect(parse(prepare).category).toBe("reading_create_indeterminate");
+
+    const blocked = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    const released = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, release_indeterminate: blocked.indeterminate_marker }));
+    expect(released).toMatchObject({ status: "blocked", released_marker: blocked.indeterminate_marker });
+    expect(released.plan_handle).toBeUndefined();
+    expect(released.next_step).toContain("without release_indeterminate");
+    expect(parse(await handler({ mode: "prepare", file_path: file.path })).category).not.toBe("reading_create_indeterminate");
+    expect(createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 });
 

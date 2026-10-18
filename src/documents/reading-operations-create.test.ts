@@ -380,13 +380,17 @@ describe("reading create serialisation (§5.2a)", () => {
     expect(stillHeld.holds.map((hold) => hold.code)).toContain("reading_create_indeterminate");
     expect(stillHeld.planHandle).toBeUndefined();
 
-    // The owner releases the marker: the fresh scan finds POST1's draft, a duplicate hold, still no handle.
+    // The owner releases the marker: the releasing call issues no handle.
     const { reading, proof } = readingFor(packetFor(file.sha256));
     const released = await w.ops.verify({ source: { file_path: file.path }, reading, proof, releaseIndeterminate: stillHeld.indeterminateMarker! });
     if (!released.ok) throw new Error(released.error.message);
-    expect(released.value.holds.map((hold) => hold.code)).toContain("duplicate_supplier_number");
-    expect(released.value.holds.map((hold) => hold.code)).not.toContain("reading_create_indeterminate");
+    expect(released.value).toMatchObject({ status: "blocked", holds: [], releasedMarker: stillHeld.indeterminateMarker });
     expect(released.value.planHandle).toBeUndefined();
+    // The next verify scans uncached: it finds POST1's draft, a duplicate hold, still no handle.
+    const after = await verified(w, file);
+    expect(after.holds.map((hold) => hold.code)).toContain("duplicate_supplier_number");
+    expect(after.holds.map((hold) => hold.code)).not.toContain("reading_create_indeterminate");
+    expect(after.planHandle).toBeUndefined();
     expect(w.createAndSetTotals).toHaveBeenCalledTimes(1);
   });
 
@@ -412,10 +416,30 @@ describe("reading create serialisation (§5.2a)", () => {
 
     const { reading, proof } = readingFor(packetFor(fileA.sha256));
     const releasedA = await w.ops.verify({ source: { file_path: fileA.path }, reading, proof, releaseIndeterminate: markerA });
-    expect(releasedA.ok && releasedA.value.status).toBe("ready");
+    expect(releasedA.ok && releasedA.value.releasedMarker).toBe(markerA);
+    expect((await verified(w, fileA)).status).toBe("ready");
     const stillB = await verified(w, fileB, B, LINES_B);
     expect(stillB.indeterminateMarker).toBe(markerB);
     expect(stillB.planHandle).toBeUndefined();
+  });
+
+  it("a marker cannot be released with a document it was not made for", async () => {
+    const w = world();
+    const fileA = writePdf("%PDF timeout A-17 bound");
+    const fileB = writePdf("%PDF other B-DOC bound");
+    const B: ReadingCaseInput = {
+      values: { invoice_number: "A-18", invoice_date: "2026-03-01" },
+      evidence: { invoice_number: { line: "p1:001", quote: "Arve nr A-18" }, invoice_date: { line: "p1:004", quote: "Kuupäev 01.03.2026" } },
+    };
+    w.createAndSetTotals.mockImplementationOnce(async () => { throw new MutationIndeterminateError({ operation: "create", entity: "purchase_invoice", businessKey: "x", affectedCaches: [], cause: new Error("timeout"), nextAction: "re-read" }); });
+    await create(w, fileA, (await verified(w, fileA)).planHandle!);
+    const markerA = (await verified(w, fileA)).indeterminateMarker!;
+    const { reading, proof } = readingFor(packetFor(fileB.sha256, LINES_B), B);
+    const outcome = await w.ops.verify({ source: { file_path: fileB.path }, reading, proof, releaseIndeterminate: markerA });
+    expect(outcome).toMatchObject({ ok: false, error: { code: "indeterminate_marker_other_document" } });
+    expect((await verified(w, fileA)).indeterminateMarker).toBe(markerA);
+    expect(w.ops.hasPendingMarkerForSource(fileA.sha256)).toBe(true);
+    expect(w.ops.hasPendingMarkerForSource(fileB.sha256)).toBe(false);
   });
 
   it("an unknown marker id is refused", async () => {
@@ -449,6 +473,18 @@ describe("reading confirm (§5.5)", () => {
     const w = world();
     const plan = await createdDraft(w);
     w.details[plan.invoiceId]!.gross_price = 125;
+    expect(await w.ops.confirm(plan)).toMatchObject({ ok: false, error: { code: "draft_changed" } });
+    expect(w.confirm).not.toHaveBeenCalled();
+  });
+
+  it("a draft edited while the confirm scans run is draft_changed, 0 registers", async () => {
+    const w = world();
+    const plan = await createdDraft(w);
+    const scan = w.api.journals.listAll.getMockImplementation();
+    w.api.journals.listAll.mockImplementation(async (...args: unknown[]) => {
+      w.details[plan.invoiceId]!.gross_price = 125;
+      return scan ? scan(...(args as [])) : [];
+    });
     expect(await w.ops.confirm(plan)).toMatchObject({ ok: false, error: { code: "draft_changed" } });
     expect(w.confirm).not.toHaveBeenCalled();
   });
