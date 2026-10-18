@@ -211,7 +211,7 @@ describe("process_accounting_document reading modes: item_title", () => {
       const result = await handler({ mode, file_path: file.path, item_title: "Pealkiri", plan_handle: "x", invoice_id: 1 });
       expect(parse(result).category).toBe("reading_args_refused");
     }
-    for (const extra of [{ item_title: "Pealkiri", items: [] }, { item_title: "  " }, { item_title: "x".repeat(201) }, { item_title: "rida\nteine" }]) {
+    for (const extra of [{ item_title: "Pealkiri", items: [] }, { item_title: "  " }, { item_title: "x".repeat(201) }, { item_title: "rida\nteine" }, { item_title: "rida teine" }]) {
       const result = await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, ...extra });
       expect(parse(result).category).toBe("reading_args_refused");
     }

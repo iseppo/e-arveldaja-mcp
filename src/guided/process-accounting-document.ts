@@ -566,7 +566,7 @@ export function registerProcessAccountingDocumentTool(
         const itemTitle = args.item_title !== undefined ? desandboxText(args.item_title).trim() : undefined;
         if (itemTitle !== undefined) {
           const problem = args.items !== undefined ? "item_title cannot be combined with items (caller items carry their own titles)"
-            : itemTitle.length === 0 || itemTitle.length > 200 || /\p{Cc}/u.test(itemTitle) ? "item_title must be one line of 1 to 200 characters"
+            : itemTitle.length === 0 || itemTitle.length > 200 || /[\p{Cc}\p{Zl}\p{Zp}]/u.test(itemTitle) ? "item_title must be one line of 1 to 200 characters"
             : undefined;
           if (problem) return textResult({ error: problem, category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
         }

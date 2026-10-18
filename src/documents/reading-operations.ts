@@ -299,7 +299,7 @@ async function suggestedItemTemplate(api: ApiContext, supplierClientId: number):
   } as PurchaseInvoiceItem;
 }
 
-const MONTH_WORD = /(?<!\p{L})(?:(?:jaanuar|veebruar|märts|aprill|juuni|juuli|august|septemb|oktoob|novemb|detsemb|january|february|march|april|june|july|september|october|november|december)\p{L}*|(?:jan|feb|mar|apr|mai|may|jun|jul|aug|sep|sept|oct|okt|nov|dec|dets)(?!\p{L}))/iu;
+const MONTH_WORD = /(?<!\p{L})(?:(?:jaanuar|veebruar|märts|aprill|juuni|juuli|august|septemb|oktoob|novemb|detsemb|january|february|march|april|june|july|september|october|november|december)\p{L}*|mai(?:s|ks|st|le|ni|ga|l|lt|kuu\p{L}*)(?!\p{L})|(?:jan|feb|mar|apr|mai|may|jun|jul|aug|sep|sept|oct|okt|nov|dec|dets)(?!\p{L}))/iu;
 const DATE_TOKEN = /\d{1,2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\.\s*-\s*\d{1,2}\.\d{1,2}|(?<!\d)\d{1,2}[./]\d{4}(?!\d)|(?<!\d)(19|20)\d{2}(?!\d)/;
 
 /** True when a history item title names a date, period or month: copied to another document it would be stale. */

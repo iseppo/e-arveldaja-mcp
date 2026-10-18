@@ -614,7 +614,7 @@ describe("reading item title (history template)", () => {
 
   it.each([
     "Bussipilet 13.10.2026", "Bussipilet 13/10/2026", "Pilet 5.1.26", "Tartu-Tallinn 05.-06.10.2026", "Arve 2026-10-05", "Teenus 03.2026",
-    "Delfi september", "Digitellimus septembri eest", "Hosting Oct", "Üür mai", "Rent 2025", "Tellimus detsembris",
+    "Delfi september", "Digitellimus septembri eest", "Hosting Oct", "Üür mai", "Rent 2025", "Tellimus detsembris", "Rent mais", "Üür maiks", "Teenus maikuu eest",
   ])("%s is a dated title", (title) => { expect(itemTitleHasDate(title)).toBe(true); });
 
   it.each(["Teenus", "Bussipilet Tallinn-Tartu", "Mainor koolitus", "Marketing", "Junior arendaja", "Decor", "Kontoritarbed 24%"])(
