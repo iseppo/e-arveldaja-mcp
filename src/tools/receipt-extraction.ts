@@ -3008,6 +3008,16 @@ function buyerBlockLegalEntities(line: string): string[] {
   return entities.map(entity => entity.replace(/^[^\p{L}\d]+/u, "")).filter(Boolean);
 }
 
+/** Exclude label-proven identifier tokens from buyer names, keeping every other word on the row. */
+function buyerNameCandidateText(line: string): string {
+  // Match complete whitespace-bounded tokens first: an ASCII substring in a
+  // longer Unicode name/identifier must never become a removable token.
+  return line.replace(/\S+/gu, (token: string, offset: number) => {
+    if (!/^[A-Z0-9][A-Z0-9/_-]*$/i.test(token) || !/\d/.test(token)) return token;
+    return isIdentifierLabelSpan(line.slice(0, offset)) ? " ".repeat(token.length) : token;
+  });
+}
+
 function sameLayoutRowItems(a: LayoutTextItem, b: LayoutTextItem): boolean {
   return (a.pageNum ?? 1) === (b.pageNum ?? 1) &&
     Math.abs(a.y - b.y) <= Math.max(4, Math.max(a.height, b.height) * 0.7);
@@ -3092,7 +3102,7 @@ function classifyBuyerBlock(
       const compact = line.replace(/\s+/g, "").toUpperCase();
       if (ownRegistryCode && /^\d+$/.test(ownRegistryCode) && new RegExp(`(?<!\\d)${ownRegistryCode}(?!\\d)`).test(compact)) ownSeen = true;
       if (ownVat && compact.includes(ownVat)) ownSeen = true;
-      for (const entity of buyerBlockLegalEntities(line)) {
+      for (const entity of buyerBlockLegalEntities(buyerNameCandidateText(line))) {
         if (own.name && (sameCompanyIdentity(entity, own.name) || sameCompanyIdentity(line, own.name))) ownSeen = true;
         else otherSeen = true;
       }

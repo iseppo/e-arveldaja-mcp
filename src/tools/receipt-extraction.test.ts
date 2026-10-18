@@ -3684,6 +3684,65 @@ describe("document-scope and amount-evidence holds (WP1)", () => {
       expect(result.buyer_ambiguous).toBeUndefined();
       expect(result.buyer_not_active_company).toBeUndefined();
     });
+
+    describe("labelled identifiers below a single-column buyer", () => {
+      const extract = (buyer: string[], metadata: string[], options: Parameters<typeof extractReceiptFieldsFromText>[2] = {
+        ownCompanyName: "Seppo OÜ", ownCompanyRegistryCode: "14417608",
+      }) => {
+        const lines = [
+          "Delfi Meedia AS", "Müüja: Delfi Meedia AS", "Müüja registrikood: 10586863", "Müüja KMKR: EE100576146",
+          "Ostja:", ...buyer, ...metadata, "Arve kuupäev: 2026-10-18", "Valuuta: EUR",
+          "Summa ilma KM-ta: 11,92 EUR", "Käibemaks 9%: 1,07 EUR", "Kokku: 12,99 EUR",
+        ];
+        const textItems = lines.map((text, index) => item(text, 52, 40 + index * 14, 240));
+        return extractReceiptFieldsFromText(lines.join("\n"), "01-base.pdf", { ...options, textItems });
+      };
+
+      it.each(["Arve nr LIVE-OU-A17", "Invoice no LIVE-OU-A17"])("%s is the unchanged invoice identifier, not a second buyer", metadata => {
+        const result = extract(["Seppo OÜ", "Ostja registrikood: 14417608"], [metadata]);
+        expect(result.invoice_number).toBe("LIVE-OU-A17");
+        expect(result.buyer_ambiguous).toBeUndefined();
+        expect(result.buyer_not_active_company).toBeUndefined();
+        expect(result.supplier_reg_code).toBe("10586863");
+      });
+
+      it("a reference identifier containing AS is not a legal entity", () => {
+        const result = extract(["Seppo OÜ"], ["Arve nr LIVE-X-A17", "Reference: ABC-AS-123"]);
+        expect(result.buyer_ambiguous).toBeUndefined();
+        expect(result.invoice_number).toBe("LIVE-X-A17");
+      });
+
+      it("metadata does not turn a different buyer into the active company", () => {
+        const result = extract(["Teine OÜ"], ["Arve nr LIVE-OU-A17"]);
+        expect(result.buyer_not_active_company).toBe(true);
+        expect(result.buyer_ambiguous).toBeUndefined();
+      });
+
+      it.each([
+        ["Seppo OÜ", "Teine OÜ"],
+        ["Seppo OÜ / Teine OÜ"],
+        ["Seppo OÜ / Osaühing Näidis"],
+        ["Seppo OÜ", "Studio 54 OÜ"],
+      ])("genuine additional buyer names remain ambiguous: %j", (...buyer) => {
+        expect(extract(buyer, ["Arve nr LIVE-OU-A17"]).buyer_ambiguous).toBe(true);
+      });
+
+      it.each([
+        "Arve nr LIVE-OU-A17 / Teine OÜ",
+        "Arve nr LIVE-OU-A17 Teine OÜ",
+        "Arve nr LIVE-OU-A17 Studio 54 OÜ",
+      ])("preserves a real company after metadata: %s", metadata => {
+        expect(extract(["Seppo OÜ"], [metadata]).buyer_ambiguous).toBe(true);
+      });
+
+      it.each(["LIVE-OU-A17", "Arve nr ÄLIVE-OU-A17", "Arve nr LIVE-OU-A17Ä", "Arve nr LIVE-OU-A17\u0301"])("unproven or Unicode-extended token stays conservative: %s", metadata => {
+        expect(extract(["Seppo OÜ"], [metadata]).buyer_ambiguous).toBe(true);
+      });
+
+      it("an identifier filter cannot verify a legal buyer when own identity is unknown", () => {
+        expect(extract(["Seppo OÜ"], ["Arve nr LIVE-OU-A17"], {}).buyer_ownership_unverified).toBe(true);
+      });
+    });
   });
 
   describe("G3 gross_unlabelled", () => {

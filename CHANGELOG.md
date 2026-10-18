@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- **An invoice number containing `OU` or `AS` no longer looks like a second buyer.** A labelled identifier such as `Arve nr LIVE-OU-A17` is excluded only from buyer-name detection; actual company names on the same line still trigger the buyer checks.
 - **Credit notes and refunds stay in review even when they refer to an invoice already entered.** Details: receipt batches check `credit_word_present` and `signed_amount_present` before returning `skipped_duplicate`, retain the matching invoice in `duplicate_match`, and report the document as `needs_review` without writing anything.
 - **A timed-out invoice creation is no longer reported as if nothing was written.** Details: an indeterminate verified-reading POST returns `mutation_occurred: null` and `mutation_may_have_occurred: true`, with `retry: "never"` and the existing pending-marker protection. Definite mutation and no-mutation responses keep their existing shape.
 
