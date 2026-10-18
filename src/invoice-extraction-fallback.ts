@@ -209,6 +209,18 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   foreign_currency_marker: "The document is read as EUR but prints another currency's code or symbol next to an amount; verify the currency before booking.",
 };
 
+/**
+ * Text hazards that are advisory for now (P2 E0): listed in every intake
+ * caller's warnings/notes and in `confidence_signals`, but they neither lower
+ * the confidence nor gate creation (E4 decides that).
+ */
+export const ADVISORY_TEXT_HAZARD_SIGNALS = ["credit_word_present", "signed_amount_present"] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
+
+export const ADVISORY_TEXT_HAZARD_WARNINGS: Record<typeof ADVISORY_TEXT_HAZARD_SIGNALS[number], string> = {
+  credit_word_present: "The document contains a credit-note or refund word; verify it is a purchase invoice, not a credit note or refund, before booking.",
+  signed_amount_present: "The document prints an amount with a minus sign or in parentheses; verify the totals are not a credit or refund before booking.",
+};
+
 export interface InvoiceExtractionFallback {
   raw_text_available: boolean;
   /**
@@ -334,7 +346,9 @@ export function summarizeInvoiceExtraction(
       ? "medium"
       : "high";
 
-  const confidenceSignals: string[] = [...lowSignals, ...mediumSignals];
+  // Advisory text hazards are listed but never change the confidence (P2 E0).
+  const advisorySignals = ADVISORY_TEXT_HAZARD_SIGNALS.filter(signal => signals?.[signal]);
+  const confidenceSignals: string[] = [...lowSignals, ...mediumSignals, ...advisorySignals];
   if (confidence === "medium" && signals?.booking_from_history === false && !confidenceSignals.includes("booking_not_from_history")) {
     confidenceSignals.push("booking_not_from_history");
   }

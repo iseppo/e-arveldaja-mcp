@@ -169,7 +169,8 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
 
 /**
  * P2 E1: a supplier name read from the file name, from a bare top line, or from
- * an OCR text item is never proof of the supplier. Such a name may name a new
+ * an OCR text item (any occurrence of it, not only the one its provenance
+ * points at) is never proof of the supplier. Such a name may name a new
  * client only when this call's own registry lookup returned the registry's name.
  * A name from a supplier label or the layout keeps today's behaviour, and so do
  * operator-entered names (no field provenance).
@@ -179,7 +180,9 @@ function supplierNameNeedsRegistryProof(provenance: SupplierIdentityFields["fiel
   if (!entry) return false;
   return (entry.source === "fallback" && entry.rationale === "filename_token") ||
     (entry.source === "ocr" && entry.rationale === "top_line") ||
-    entry.confidence !== undefined;
+    entry.confidence !== undefined ||
+    entry.ocr_occurrence === true ||
+    entry.filename_occurrence === true;
 }
 
 // ---------------------------------------------------------------------------

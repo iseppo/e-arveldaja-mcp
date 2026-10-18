@@ -80,12 +80,12 @@ const PRINT_RECEIPT = [
   "Kokku 124,00 EUR",
 ];
 
-function parsed(lines: string[]) {
+function parsed(lines: string[], textItems: unknown[] = []) {
   const text = lines.join("\n");
   return {
     text,
     pageCount: 1,
-    result: { text, totalPages: 1, pageErrors: [], pages: [{ pageNum: 1, width: 595, height: 842, text, textItems: [] }] },
+    result: { text, totalPages: 1, pageErrors: [], pages: [{ pageNum: 1, width: 595, height: 842, text, textItems }] },
   } as never;
 }
 
@@ -210,22 +210,73 @@ describe("P2 E1: a new supplier's name needs proof right before the client is cr
     expect(rec.invoicesCreate).not.toHaveBeenCalled();
   });
 
-  it.each<Mode>(["create", "create_and_confirm"])(
-    "%s: preview verified, then the persistence lookup fails → zero writes, no client named PRINT",
-    async (mode) => {
-      // dry run, execute projection, execute preview: the registry answers; the lookup right before create fails.
-      stubRegistry([true, true, true, false]);
+  it("create: preview verified, then the persistence lookup (the one right before clients.create) fails → zero writes, no client named PRINT", async () => {
+    // dry run, execute projection, execute preview: the registry answers; the lookup right before create fails.
+    const fetchMock = stubRegistry([true, true, true, false]);
+    const { api, rec } = makeApi();
+    const { dry, run } = await runMode(api, "create");
+    expect(dry.results[0]!.supplier_resolution?.preview_client?.name).toBe(REGISTRY_NAME);
+    if (!run.ok) throw new Error("run failed");
+    // The 4th lookup is the persistence-time one: the E1 boundary was reached.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(run.value.results[0]!.status).toBe("needs_review");
+    expect(run.value.results[0]!.supplier_resolution?.code).toBe("supplier_name_unverified");
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  it("create_and_confirm (earlier-gate coverage, not the E1 boundary): a new supplier is never high confidence, so the batch stops before the persistence lookup", async () => {
+    // create_and_confirm needs high confidence, and an unmatched supplier always raises
+    // supplier_resolution_failed (medium), so this mode can never reach clients.create
+    // for a new supplier; the E1 boundary itself is covered by the create arm above.
+    const fetchMock = stubRegistry([true, true, true, false]);
+    const { api, rec } = makeApi();
+    const { run } = await runMode(api, "create_and_confirm");
+    if (!run.ok) throw new Error("run failed");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(run.value.results[0]!.status).toBe("needs_review");
+    expect(run.value.results[0]!.llm_fallback?.confidence_signals).toContain("supplier_resolution_failed");
+    expect(rec.clientsCreate).not.toHaveBeenCalled();
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+    expect(rec.confirm).not.toHaveBeenCalled();
+  });
+
+  describe("occurrence-specific name evidence: text-item order never hides an OCR origin", () => {
+    // A supplier label read from an OCR item, and an unrelated native line that also contains the name.
+    const LINES = ["Printed on 15.03.2026", "Supplier: PRINT", ...PRINT_RECEIPT.slice(1)];
+    const items = LINES.map((text, index) => ({
+      text, x: 40, y: 40 + 20 * index, width: 200, height: 12, ...(index === 1 ? { confidence: 0.9 } : {}),
+    }));
+    const permutations: Array<[string, typeof items]> = [
+      ["page order", items],
+      ["reversed", [...items].reverse()],
+      ["native footer first, OCR label last", [items[0]!, ...items.slice(2), items[1]!]],
+      ["OCR label first", [items[1]!, items[0]!, ...items.slice(2)]],
+      ["rotated", [...items.slice(4), ...items.slice(0, 4)]],
+    ];
+
+    it.each(permutations)("%s: registry unavailable → zero writes in create", async (_label, ordered) => {
+      stubRegistry([false]);
+      vi.mocked(parseDocument).mockResolvedValue(parsed(LINES, ordered));
       const { api, rec } = makeApi();
-      const { dry, run } = await runMode(api, mode);
-      expect(dry.results[0]!.supplier_resolution?.preview_client?.name).toBe(REGISTRY_NAME);
-      expect(run.ok).toBe(true);
-      if (!run.ok) throw new Error("run failed");
-      expect(run.value.results[0]!.status).toBe("needs_review");
+      const { dry, run } = await runMode(api, "create");
+      expect(dry.results[0]!.extracted?.supplier_name).toBe("PRINT");
+      expect(dry.results[0]!.supplier_resolution?.code).toBe("supplier_name_unverified");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
       expect(rec.clientsCreate).not.toHaveBeenCalled();
       expect(rec.invoicesCreate).not.toHaveBeenCalled();
-      expect(rec.confirm).not.toHaveBeenCalled();
-    },
-  );
+    });
+
+    it("control: the same label on native text only is created as today", async () => {
+      stubRegistry([false]);
+      vi.mocked(parseDocument).mockResolvedValue(parsed(LINES, items.map(({ confidence: _c, ...item }) => item)));
+      const { api, rec } = makeApi();
+      const { run } = await runMode(api, "create");
+      expect(run.ok && run.value.results[0]!.status).toBe("created");
+      expect(rec.clientsCreate.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
+    });
+  });
 
   it.each<Mode>(["create", "create_and_confirm"])("%s: the preview lookup fails → zero writes", async (mode) => {
     stubRegistry([false]);
@@ -386,5 +437,21 @@ describe("P2 E3: a receipt read as EUR that prints another currency is held in e
     expect(run.value.results[0]!.status).toBe("needs_review");
     expect(run.value.results[0]!.notes.join(" ")).toContain("Non-EUR receipt currency USD");
     expect(rec.invoicesCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("P2 E0: credit and signed-amount hazards are advisory on the real receipt_batch path", () => {
+  it.each([
+    ["credit_word_present", "Kreeditarve viide K-1"],
+    ["signed_amount_present", "Allahindlus -5,00"],
+  ])("%s is listed in the summary but does not hold the receipt (E4 decides)", async (signal, line) => {
+    stubRegistry([true]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed(["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1), line]));
+    const { api } = makeApi();
+    const outcome = await createReceiptBatchOperations(api, createTestRuntimeSafetyContext())
+      .runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("dry run failed");
+    expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
+    expect(outcome.value.results[0]!.llm_fallback?.confidence_signals).toContain(signal);
   });
 });

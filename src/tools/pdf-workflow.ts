@@ -22,7 +22,7 @@ import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
-import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { ADVISORY_TEXT_HAZARD_SIGNALS, ADVISORY_TEXT_HAZARD_WARNINGS, CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
@@ -495,6 +495,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         }
         for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
           if (signals[signal]) warnings.push(`${signal}: ${CREATION_GATING_SIGNAL_WARNINGS[signal]}`);
+        }
+        for (const signal of ADVISORY_TEXT_HAZARD_SIGNALS) {
+          if (signals[signal]) warnings.push(`${signal}: ${ADVISORY_TEXT_HAZARD_WARNINGS[signal]}`);
         }
         // ISO-4217 codes are exactly three uppercase letters. Reject anything
         // else — the OCR-derived `extracted.currency` could otherwise smuggle

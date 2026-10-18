@@ -258,6 +258,13 @@ export interface FieldProvenance {
   bbox?: { x: number; y: number; width: number; height: number };
   confidence?: number;
   rationale?: string;
+  /**
+   * supplier_name only (P2 E1): SOME text item holding the name is OCR text,
+   * whichever item `pageNum` / `bbox` / `confidence` point at.
+   */
+  ocr_occurrence?: boolean;
+  /** supplier_name only (P2 E1): the name is the file-name token, whatever its `source`. */
+  filename_occurrence?: boolean;
 }
 
 export interface ExtractedReceiptFields {
@@ -3606,6 +3613,20 @@ function buildFieldProvenance(
     ? { source: "coordinate" as const, rationale: layoutSupplierNameRationale }
     : supplierNameSource(text, fileName, fields.supplier_name);
   pushString("supplier_name", fields.supplier_name, supplierSource.source, supplierSource.rationale, layoutSupplierNameItem);
+  // P2 E1: occurrence evidence over EVERY candidate source of the name, so the
+  // first text item matched above (which may be an unrelated native line such as
+  // "Printed on …") cannot hide an OCR or file-name origin.
+  const supplierEntry = fields.supplier_name !== undefined ? provenance.at(-1) : undefined;
+  if (supplierEntry && fields.supplier_name !== undefined) {
+    const supplierName = fields.supplier_name;
+    if ((textItems ?? []).some(item => item.confidence !== undefined && textItemContainsStringValue(item, supplierName))) {
+      supplierEntry.ocr_occurrence = true;
+    }
+    const fileToken = normalizeProvenanceSearchValue(normalizeFilenameToken(fileName).replace(/-/g, " "));
+    if (fileToken.length > 0 && fileToken === normalizeProvenanceSearchValue(supplierName)) {
+      supplierEntry.filename_occurrence = true;
+    }
+  }
   pushString(
     "supplier_reg_code",
     identifiers.supplier_reg_code,

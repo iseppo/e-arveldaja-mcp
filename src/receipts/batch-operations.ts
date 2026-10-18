@@ -11,6 +11,8 @@ import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
 import {
+  ADVISORY_TEXT_HAZARD_SIGNALS,
+  ADVISORY_TEXT_HAZARD_WARNINGS,
   type ExtractionConfidenceSignals,
   type InvoiceExtractionFallback,
   summarizeInvoiceExtraction,
@@ -365,6 +367,9 @@ async function processSingleReceipt(
       ownCompanyRegistryCode: options.ownCompanyRegistryCode,
     });
     Object.assign(signals, textHazards);
+    for (const signal of ADVISORY_TEXT_HAZARD_SIGNALS) {
+      if (signals[signal]) notes.push(`${signal}: ${ADVISORY_TEXT_HAZARD_WARNINGS[signal]}`);
+    }
     const selfVatDetected = signals.self_vat_detected === true;
     const selfRegCodeDetected = signals.self_reg_code_detected === true;
     // #1: an echo-only supplier identifier (rationale coordinate_confirmed_echo)

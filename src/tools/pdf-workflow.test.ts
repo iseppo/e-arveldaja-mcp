@@ -1838,6 +1838,11 @@ describe("P2 E0: text hazards on the extract_pdf_invoice parse", () => {
       const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", { clients: { listAll: vi.fn().mockResolvedValue([]) } });
       const response = await handler({ file_path: "/tmp/hazard.pdf" });
       expect(response.isError).toBeFalsy();
+      // What the caller returns: the signal in its summary and a warning naming it.
+      const [signal] = Object.keys(TEXT_HAZARD_EXPECTED[kind]);
+      const payload = parseMcpResponse(response.content[0]!.text) as any;
+      expect(payload.llm_fallback.confidence_signals).toContain(signal);
+      expect(payload.extracted.warnings.some((w: string) => w.startsWith(`${signal}:`))).toBe(true);
       expect(mockedParseDocument).toHaveBeenCalledTimes(1);
       expect(textHazardSignals).toHaveBeenCalledTimes(1);
       expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
