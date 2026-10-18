@@ -65,6 +65,11 @@ export interface SupplierResolution {
    * must create NEITHER the supplier NOR the invoice.
    */
   code?: "legal_entity_identity_required" | "supplier_name_unverified";
+  /**
+   * Set with supplier_name_unverified: what this call's registry lookup returned
+   * (never the name, which may be the text-derived fallback).
+   */
+  registry_lookup?: { found: boolean; status?: string };
 }
 
 export interface SupplierResolutionOptions {
@@ -312,6 +317,7 @@ export async function resolveSupplierInternal(
       created: false,
       code: "supplier_name_unverified",
       reason: "A new supplier is created only under the name the business registry returns for its registry code; the registry did not confirm a name. Confirm the supplier name before creating it.",
+      registry_lookup: registryData ? { found: true, status: registryData.status } : { found: false },
       ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }

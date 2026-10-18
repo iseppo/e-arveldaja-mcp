@@ -8,7 +8,7 @@ import { resolveFileInput } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import { prepareInvoiceDocumentUpload, registerPdfWorkflowTools, validateInvoiceData } from "./pdf-workflow.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
-import { parseMcpResponse, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
+import { parseMcpResponse, wrapUntrustedOcr, MAX_UNTRUSTED_TEXT_CHARS, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
@@ -1771,6 +1771,75 @@ describe("resolve_supplier external-text display matrix (P07)", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+// P2 E1: resolve_supplier creates a new client under a name the registry did
+// not confirm only with an explicit user-approved confirmed_supplier_name.
+describe("resolve_supplier name confirmation (P2 E1)", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  function setup() {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 901 });
+    const tool = setupPdfWorkflowTool("resolve_supplier", {
+      clients: { listAll: vi.fn().mockResolvedValue([]), create, get: vi.fn().mockResolvedValue({ id: 901 }) },
+      readonly: { getVatInfo: vi.fn().mockResolvedValue({ vat_number: "EE123456789" }) },
+    });
+    return { ...tool, create };
+  }
+
+  it("Codex probe: sandbox-wrapped OCR 'PRINT' with auto_create and the registry down creates nothing", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("registry down")));
+    const { handler, create } = setup();
+    const res = parseMcpResponse((await handler({
+      name: wrapUntrustedOcr("PRINT"), reg_code: "17133416", auto_create: true,
+    })).content[0]!.text) as any;
+    expect(res.code).toBe("needs_name_confirmation");
+    expect(res.created).toBe(false);
+    expect(res.proposed_name).toContain(UNTRUSTED_OCR_START_PREFIX);
+    expect(res.proposed_name).toContain("PRINT");
+    expect(res.registry_status).toContain("no registry name");
+    expect(res.proposed_name_source).toContain("not confirmed by the business registry");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a confirmed name that differs from the proposed name is refused before any read or write", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("registry down")));
+    const { handler, create, api } = setup();
+    const res = parseMcpResponse((await handler({
+      name: "PRINT", reg_code: "17133416", auto_create: true, confirmed_supplier_name: "Print OÜ",
+    })).content[0]!.text) as any;
+    expect(res.code).toBe("confirmed_supplier_name_mismatch");
+    expect(res.created).toBe(false);
+    expect(api.clients.listAll).not.toHaveBeenCalled();
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a confirmed name equal to the proposed name (after trimming) creates the client under it", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("registry down")));
+    const { handler, create } = setup();
+    const res = parseMcpResponse((await handler({
+      name: "Print Shop OÜ ", reg_code: "17133416", auto_create: true, confirmed_supplier_name: "  Print Shop OÜ",
+    })).content[0]!.text) as any;
+    expect(res.created).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((create.mock.calls[0]![0] as { name: string }).name).toBe("Print Shop OÜ");
+  });
+
+  it("a registry-named supplier is created under the registry name without a confirmation, as before", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => "128" },
+      text: () => Promise.resolve(JSON.stringify({
+        status: "OK", data: [{ reg_code: 17133416, name: "Registry Name AS", legal_address: "Tallinn", status: "R" }],
+      })),
+    }));
+    const { handler, create } = setup();
+    const res = parseMcpResponse((await handler({
+      name: "PRINT", reg_code: "17133416", auto_create: true,
+    })).content[0]!.text) as any;
+    expect(res.created).toBe(true);
+    expect((create.mock.calls[0]![0] as { name: string }).name).toBe("Registry Name AS");
   });
 });
 

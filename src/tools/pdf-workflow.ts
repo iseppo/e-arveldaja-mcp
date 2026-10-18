@@ -603,9 +603,29 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
       country: z.string().optional().describe("Country code for auto-create (default EST)"),
       is_physical_entity: z.boolean().optional().describe("Natural person (default false = legal entity)"),
       foreign_identity_attested: z.boolean().optional().describe("Operator accountant-attestation that a FOREIGN (country != EST) legal entity's identity has been verified. Required to auto-create a foreign legal entity. Must be an explicit operator input — never set it from the extracted/OCR invoice fields."),
+      confirmed_supplier_name: z.string().optional().describe("Set only after the user approved this exact name. Must equal `name` exactly (after trimming). Needed to create a new supplier whose name the business registry did not confirm; the client is created under this name."),
     },
     { ...create, title: "Find or Create Supplier" },
-    async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity, foreign_identity_attested }) => {
+    async ({ name, reg_code, vat_no, iban, auto_create, country, is_physical_entity, foreign_identity_attested, confirmed_supplier_name }) => {
+      // P2 E1: a name the registry did not confirm is created only under an
+      // explicit user-approved name equal to the proposed one. A mismatch is
+      // refused before any read or write.
+      const proposedName = name !== undefined ? desandboxText(name).trim() : "";
+      const confirmedName = confirmed_supplier_name?.trim();
+      if (confirmedName !== undefined && (proposedName === "" || confirmedName !== proposedName)) {
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              found: false,
+              created: false,
+              code: "confirmed_supplier_name_mismatch",
+              suggestion: "confirmed_supplier_name must equal name exactly (after trimming). Nothing was created. Show the user the exact name and pass it in both fields only after the user approves it.",
+            }),
+          }],
+        };
+      }
+      const nameConfirmed = confirmedName !== undefined;
       // auto_create gates a write: a client created meanwhile in the UI or by
       // another flow must be found, not duplicated — bypass the 120 s list cache.
       if (auto_create === true) api.clients.invalidateListCache();
@@ -620,7 +640,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
         api,
         allClients,
         {
-          supplier_name: name,
+          supplier_name: nameConfirmed ? confirmedName : name,
           supplier_reg_code: reg_code,
           supplier_vat_no: vat_no,
           supplier_iban: iban,
@@ -630,7 +650,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
           ownCompanyVat,
           ownCompanyRegistryCode,
           ownIbans,
-          operatorSuppliedName: true,
+          operatorSuppliedName: nameConfirmed,
           _resolveSupplierOverrides: { country: country ?? "EST", is_physical_entity, foreign_identity_attested },
         },
       );
@@ -665,6 +685,26 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext): vo
               self_match_blocked: true,
               suggestion:
                 "The supplied registry code / VAT number matches the active company's own identifiers — refusing to resolve or create a supplier that is the buyer itself. Re-check the supplier fields extracted from the invoice header before booking.",
+            }),
+          }],
+        };
+      }
+
+      if (resolution.code === "supplier_name_unverified") {
+        return {
+          content: [{
+            type: "text",
+            text: toMcpJson({
+              found: false,
+              created: false,
+              code: "needs_name_confirmation",
+              proposed_name: wrapUntrustedOcr(proposedName) ?? proposedName,
+              proposed_name_source: "name argument (not confirmed by the business registry)",
+              registry_status: resolution.registry_lookup?.found === true
+                ? `entry found without a name (status ${resolution.registry_lookup.status ?? "unknown"})`
+                : "no registry name (lookup unavailable, no entry, or no Estonian registry code)",
+              reason: resolution.reason,
+              suggestion: "Nothing was created. Ask the user to approve the exact supplier name; only after approval call resolve_supplier again with auto_create=true and confirmed_supplier_name set to that exact name.",
             }),
           }],
         };

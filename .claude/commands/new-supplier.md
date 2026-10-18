@@ -71,6 +71,8 @@ Call `resolve_supplier`:
 
 For Estonian registry codes, the tool queries the business registry (äriregister.rik.ee) for the official company name and address. Show this data to the user for review. There is no registry lookup for foreign suppliers — use the details the user or the invoice provides, and remember the foreign identity attestation above.
 
+If `resolve_supplier` returns `needs_name_confirmation`, the registry did not confirm the name: show the user the exact `proposed_name` and use it in step 6 only after the user approves that exact name (or gives the correct one).
+
 A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for the VAT number separately when needed.
 
 ## Step 4: Gather additional information

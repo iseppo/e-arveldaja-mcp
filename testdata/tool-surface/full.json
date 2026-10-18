@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 147,
-    "toolsListBytes": 168353,
+    "toolsListBytes": 168628,
     "descriptionsBytes": 23711,
-    "inputSchemasBytes": 109150,
+    "inputSchemasBytes": 109425,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5134
@@ -3574,6 +3574,10 @@
           "auto_create": {
             "description": "Create client if not found (default false)",
             "type": "boolean"
+          },
+          "confirmed_supplier_name": {
+            "description": "Set only after the user approved this exact name. Must equal `name` exactly (after trimming). Needed to create a new supplier whose name the business registry did not confirm; the client is created under this name.",
+            "type": "string"
           },
           "country": {
             "description": "Country code for auto-create (default EST)",

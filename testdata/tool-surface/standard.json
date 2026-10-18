@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 127,
-    "toolsListBytes": 135954,
+    "toolsListBytes": 136229,
     "descriptionsBytes": 18438,
-    "inputSchemasBytes": 86938,
+    "inputSchemasBytes": 87213,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 4390
@@ -3444,6 +3444,10 @@
           "auto_create": {
             "description": "Create client if not found (default false)",
             "type": "boolean"
+          },
+          "confirmed_supplier_name": {
+            "description": "Set only after the user approved this exact name. Must equal `name` exactly (after trimming). Needed to create a new supplier whose name the business registry did not confirm; the client is created under this name.",
+            "type": "string"
           },
           "country": {
             "description": "Country code for auto-create (default EST)",

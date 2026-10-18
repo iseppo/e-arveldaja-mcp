@@ -228,6 +228,12 @@ If step 4 did not return `found=true`, call `resolve_supplier` with the same ide
 - For a foreign registration (`country` != `EST`), also pass
   `foreign_identity_attested: true` — but only when the operator has verified the
   foreign entity's identity; never derive it from the extracted invoice fields.
+- If `resolve_supplier` returns `needs_name_confirmation`, NOTHING was created:
+  the business registry did not confirm the name. Show the user the exact
+  `proposed_name` and ask them to approve it (or give the correct name). Only
+  after the user approves that exact name, call `resolve_supplier` again with
+  `auto_create: true`, `name` and `confirmed_supplier_name` both set to it. Never
+  set `confirmed_supplier_name` without that approval.
 - Use `api_response.created_object_id` as `supplier_client_id`. If no client ID is returned, stop and report the failure.
 - If `resolve_supplier` returns `legal_entity_identity_required`, NOTHING was
   created — neither the supplier nor the invoice. Do not create the purchase
