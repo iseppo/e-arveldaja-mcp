@@ -238,9 +238,11 @@ export async function resolveSupplierInternal(
   // is incorporated AFTER the top-of-function field canonicalization, so strip
   // markers from it too before it becomes a persisted client name. supplier_name
   // is already marker-free from the entry canonicalization (no-op here).
-  const rawClientName = registryData?.name ?? fields.supplier_name;
+  // Only the registry's own name may replace the caller's: a nameless entry's
+  // value (blank, whitespace, NBSP) never overrides a confirmed name (P2 E1).
+  const rawClientName = registryData?.name_source === "registry" ? registryData.name : fields.supplier_name;
   const clientName = rawClientName !== undefined ? desandboxText(rawClientName) : undefined;
-  if (!clientName) {
+  if (!clientName || clientName.trim() === "") {
     return {
       found: false,
       created: false,

@@ -906,6 +906,30 @@ describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-cr
     expect(create.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
   });
 
+  it("a confirmed operator name is persisted when the registry entry's name is whitespace/NBSP", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => "128" },
+      text: () => Promise.resolve(JSON.stringify({ status: "OK", data: [{ reg_code: 10234957, name: "\u00A0  ", legal_address: "Tallinn", status: "R" }] })),
+    }));
+    const { api, create } = recordingApi();
+    const result = await resolveSupplierInternal(api, [], { supplier_name: "PRINT", supplier_reg_code: "10234957" }, true,
+      { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.created).toBe(true);
+    expect(create.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
+  });
+
+  it("a blank or whitespace-only operator name is never created", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
+    const { api, create } = recordingApi();
+    for (const supplier_name of ["   ", "\u00A0", "\t\n"]) {
+      const result = await resolveSupplierInternal(api, [], { supplier_name, supplier_reg_code: "10234957" }, true,
+        { operatorSuppliedName: true, _resolveSupplierOverrides: { country: "EST" } });
+      expect(result.created).toBe(false);
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("an existing client match is unaffected (no registry lookup, no create)", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
