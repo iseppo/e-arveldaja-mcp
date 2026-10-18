@@ -2,7 +2,11 @@
 // criteria on the after file. Private output under <data>/p2-batch/.
 //
 // Usage: npx tsx scripts/reading-p2/batch-report.ts --before <name> --after <name> [--ceiling] → p2-batch/<after>.report.md
-//   --ceiling: the E4 stop rule (plan §2 E4): newly held auto-creates over today's (before) auto-creates, > 10% stops.
+//   --ceiling: the E4 stop rule (plan §2 E4): newly held auto-creates over today's (before) auto-creates, > 10% stops,
+//   per signal and for the union of both signals.
+// Truth: the frozen truth record (booking), except the invoice number, whose truth is the number printed on the
+// document (owner) where the booking used another: <data>/p2-batch/printed-invoice-numbers.json ({doc: number}).
+// A write on a document without truth is listed as unscored, never counted as right.
 
 import { existsSync, writeFileSync } from "node:fs";
 import { CREDIT_WORDS } from "../../src/document-reading-check.js";
@@ -11,10 +15,10 @@ import { normalizeInvoiceNumberForComparison } from "../../src/purchase-invoice-
 import type { PacketFile } from "../reading-p1/build-packets.js";
 import { argValue, dataPath, hasFlag, readJson } from "../reading-p1/common.js";
 
-interface Row {
+export interface Row {
   doc: string;
   scope: string;
-  registry: "down" | "up";
+  registry: string;
   mode: "create" | "create_and_confirm";
   packet_digest_match: boolean | null;
   dry_status: string | null;
@@ -23,7 +27,7 @@ interface Row {
   notes: string[];
   supplier_resolution_code: string | null;
   writes: Array<{ method: string; fields?: Record<string, unknown> }>;
-  truth: { invoice_number?: string; invoice_date?: string; gross?: number; currency?: string; supplier_client_id?: number; supplier_name?: string } | null;
+  truth: { invoice_number?: string; invoice_date?: string; gross?: number; currency?: string; supplier_client_id?: number; supplier_name?: string; supplier_reg?: string | null } | null;
   error?: string;
 }
 
@@ -31,20 +35,26 @@ const key = (row: Row) => `${row.doc}|${row.registry}|${row.mode}`;
 const createsInvoice = (row: Row) => row.writes.some((write) => write.method === "purchaseInvoices.createAndSetTotals");
 const createsClient = (row: Row) => row.writes.some((write) => write.method === "clients.create");
 
+export type PrintedNumbers = Record<string, string>;
+const sameName = (a: unknown, b: unknown) => String(a ?? "").replace(/\s+/g, " ").trim().toLowerCase() === String(b ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+const invoiceWrite = (row: Row) => row.writes.find((entry) => entry.method === "purchaseInvoices.createAndSetTotals");
+const clientWrites = (row: Row) => row.writes.filter((entry) => entry.method === "clients.create");
+
 /** Fields of an invoice write that differ from truth (truth-available documents only). */
-function wrongFields(row: Row): string[] {
-  const write = row.writes.find((entry) => entry.method === "purchaseInvoices.createAndSetTotals");
+export function wrongFields(row: Row, printed: PrintedNumbers = {}): string[] {
+  const write = invoiceWrite(row);
   if (!write?.fields || !row.truth) return [];
   const fields = write.fields;
   const wrong: string[] = [];
-  // Invoice-number truth is the printed number (owner): a written number printed on the document as a whole
-  // token is right even where the booking used another reference.
-  if (row.truth.invoice_number !== undefined && normalizeInvoiceNumberForComparison(String(fields.number ?? "")) !== normalizeInvoiceNumberForComparison(row.truth.invoice_number) &&
-    !printedToken(row.doc, String(fields.number ?? ""))) wrong.push("number");
+  const number = printed[row.doc] ?? row.truth.invoice_number;
+  if (number !== undefined && normalizeInvoiceNumberForComparison(String(fields.number ?? "")) !== normalizeInvoiceNumberForComparison(number)) wrong.push("number");
   if (row.truth.invoice_date !== undefined && fields.create_date !== row.truth.invoice_date) wrong.push("date");
   if (typeof row.truth.gross === "number" && typeof fields.gross_price === "number" && Math.abs(fields.gross_price - row.truth.gross) > 0.005) wrong.push("gross");
-  if (fields.cl_currencies_id !== "EUR") wrong.push("currency");
-  if (row.truth.supplier_client_id !== undefined && !createsClient(row) && fields.clients_id !== row.truth.supplier_client_id) wrong.push("supplier");
+  if (String(fields.cl_currencies_id ?? "EUR").toUpperCase() !== (row.truth.currency ?? "EUR").toUpperCase()) wrong.push("currency");
+  // The booked supplier: the client this run created, else the truth client.
+  const createdIds = clientWrites(row).map((entry) => entry.fields?.id);
+  const supplierRight = createdIds.length > 0 ? createdIds.includes(fields.clients_id) : row.truth.supplier_client_id === undefined || fields.clients_id === row.truth.supplier_client_id;
+  if (!supplierRight) wrong.push("supplier");
   // A generated description names the booked client only (E1b): any other "Expense from X" is an unverified name.
   for (const title of (fields.titles as unknown[] | undefined) ?? []) {
     const match = /^Expense from (.*)$/.exec(String(title));
@@ -53,10 +63,41 @@ function wrongFields(row: Row): string[] {
   return wrong;
 }
 
-function printedToken(doc: string, value: string): boolean {
-  const path = dataPath("packets", `${doc}.json`);
-  if (!value || !existsSync(path)) return false;
-  return readJson<PacketFile>(path).packet.lines.some((line) => line.text.split(/[\s¦]+/).includes(value));
+/** Client creates checked on their own, with or without an invoice write: name and registry code against truth. */
+export function clientWriteErrors(row: Row): string[] {
+  const errors: string[] = [];
+  for (const entry of clientWrites(row)) {
+    if (!row.truth) continue;
+    if (!sameName(entry.fields?.name, row.truth.supplier_name)) errors.push("client_name");
+    if (row.truth.supplier_reg && String(entry.fields?.code ?? "") !== String(row.truth.supplier_reg)) errors.push("client_code");
+  }
+  return errors;
+}
+
+/** A write the truth cannot score (no truth record for the document). */
+export const unscoredWrite = (row: Row) => row.truth === null && (invoiceWrite(row) !== undefined || clientWrites(row).length > 0);
+
+/** E4 ceiling lines: per signal and for the union, over today's auto-creates (before file, registry up). */
+export function ceilingLines(before: Row[], after: Row[], signals: readonly string[]): string[] {
+  const today = before.filter((row) => row.registry === "up" && createsInvoice(row));
+  const heldBy = (held: readonly string[]) => today.filter((row) => {
+    const now = after.find((entry) => key(entry) === key(row));
+    return now !== undefined && !createsInvoice(now) && now.signals.some((signal) => held.includes(signal));
+  });
+  const lines: string[] = [];
+  for (const [label, held] of [...signals.map((signal) => [signal, [signal]] as const), [`union(${signals.join(",")})`, signals] as const]) {
+    const rows = heldBy(held);
+    const share = today.length ? rows.length / today.length : 0;
+    lines.push(`- ${label}: ${rows.length}/${today.length} = ${(share * 100).toFixed(1)}% ${share > 0.1 ? "**OVER the 10% ceiling: STOP**" : "(under the ceiling)"}`);
+    for (const row of rows) lines.push(`  - #${row.doc} ${row.mode}`);
+  }
+  return lines;
+}
+
+/** A result file: { provenance, rows }, or a legacy bare row array (no provenance). */
+function readResult(name: string): { provenance: Record<string, unknown> | null; rows: Row[] } {
+  const data = readJson<Row[] | { provenance: Record<string, unknown>; rows: Row[] }>(dataPath("p2-batch", `${name}.json`));
+  return Array.isArray(data) ? { provenance: null, rows: data } : data;
 }
 
 function creditWordLines(doc: string): Array<{ line: string; hits: string[]; footer_watch: boolean }> {
@@ -83,10 +124,16 @@ if (process.argv[1]?.endsWith("/batch-report.ts")) {
   const beforeName = argValue(argv, "--before");
   const afterName = argValue(argv, "--after");
   if (!beforeName || !afterName) throw new Error("--before <name> --after <name> required");
-  const before = readJson<Row[]>(dataPath("p2-batch", `${beforeName}.json`));
-  const after = readJson<Row[]>(dataPath("p2-batch", `${afterName}.json`));
+  const beforeFile = readResult(beforeName);
+  const afterFile = readResult(afterName);
+  const before = beforeFile.rows;
+  const after = afterFile.rows;
+  const printedPath = dataPath("p2-batch", "printed-invoice-numbers.json");
+  const printed = existsSync(printedPath) ? readJson<PrintedNumbers>(printedPath) : {};
   const beforeByKey = new Map(before.map((row) => [key(row), row]));
   const lines: string[] = [`# P2 batch replay: ${beforeName} → ${afterName}`, ""];
+  const provenanceOf = (file: { provenance: Record<string, unknown> | null }) => file.provenance ? `${String(file.provenance.commit).slice(0, 10)}${file.provenance.dirty ? " (dirty)" : ""}` : "unknown (legacy file)";
+  lines.push(`- before ${beforeName}: commit ${provenanceOf(beforeFile)}; after ${afterName}: commit ${provenanceOf(afterFile)}`);
 
   const docs = [...new Set(after.map((row) => row.doc))];
   lines.push(`- documents ${docs.length}; rows ${after.length}; errors ${after.filter((row) => row.error).length}`);
@@ -96,8 +143,12 @@ if (process.argv[1]?.endsWith("/batch-report.ts")) {
   // Auto-creates before/after, per registry state and mode.
   lines.push("", "## Auto-creates (invoice create attempted)", "", "| registry | mode | before | after | newly held | newly created |", "|---|---|---|---|---|---|");
   const changes: string[] = [];
-  for (const registry of ["down", "up"] as const) for (const mode of ["create", "create_and_confirm"] as const) {
+  for (const registry of [...new Set(after.map((row) => row.registry))]) for (const mode of ["create", "create_and_confirm"] as const) {
     const rowsAfter = after.filter((row) => row.registry === registry && row.mode === mode);
+    if (!before.some((row) => row.registry === registry)) {
+      lines.push(`| ${registry} | ${mode} | n/a | ${rowsAfter.filter(createsInvoice).length} | n/a | n/a |`);
+      continue;
+    }
     const createdBefore = rowsAfter.filter((row) => beforeByKey.get(key(row)) && createsInvoice(beforeByKey.get(key(row))!));
     const createdAfter = rowsAfter.filter(createsInvoice);
     const newlyHeld = createdBefore.filter((row) => !createsInvoice(row));
@@ -110,32 +161,27 @@ if (process.argv[1]?.endsWith("/batch-report.ts")) {
 
   // Pass criteria on the after file.
   lines.push("", "## Writes with a wrong field (after)", "");
-  const wrongRows = after.filter((row) => wrongFields(row).length > 0);
-  for (const row of wrongRows) lines.push(`- #${row.doc} ${row.registry}/${row.mode}: ${wrongFields(row).join(",")} ${JSON.stringify(row.writes.find((write) => write.method === "purchaseInvoices.createAndSetTotals")?.fields)} truth ${JSON.stringify(row.truth)}`);
+  const wrongOf = (row: Row) => [...wrongFields(row, printed), ...clientWriteErrors(row)];
+  const wrongRows = after.filter((row) => wrongOf(row).length > 0);
+  for (const row of wrongRows) lines.push(`- #${row.doc} ${row.registry}/${row.mode}: ${wrongOf(row).join(",")} ${JSON.stringify(row.writes.map((write) => write.fields ?? write.method))} truth ${JSON.stringify(row.truth)}`);
   if (wrongRows.length === 0) lines.push("- none");
+  lines.push("", "## Unscored writes (no truth for the document)", "");
+  const unscored = after.filter(unscoredWrite);
+  for (const row of unscored) lines.push(`- #${row.doc} ${row.registry}/${row.mode}: ${JSON.stringify(row.writes.map((write) => write.fields ?? write.method))}`);
+  if (unscored.length === 0) lines.push("- none");
   lines.push("", "## Client creates (after)", "");
   const clientRows = after.filter(createsClient);
-  for (const row of clientRows) lines.push(`- #${row.doc} ${row.registry}/${row.mode}: ${JSON.stringify(row.writes.find((write) => write.method === "clients.create")?.fields)} truth ${row.truth?.supplier_name ?? "-"}`);
+  for (const row of clientRows) lines.push(`- #${row.doc} ${row.registry}/${row.mode}: ${JSON.stringify(clientWrites(row).map((write) => write.fields))} truth ${row.truth?.supplier_name ?? "-"} ${row.truth?.supplier_reg ?? "-"}`);
   if (clientRows.length === 0) lines.push("- none");
   lines.push("", "## Named documents (#11, #27, h17, h19)", "");
   for (const doc of ["11", "27", "h17", "h19"]) {
-    for (const row of after.filter((entry) => entry.doc === doc)) lines.push(`- #${doc} ${row.registry}/${row.mode}: ${row.run_status}; writes ${row.writes.map((write) => write.method).join(",") || "none"}; wrong ${wrongFields(row).join(",") || "none"}`);
+    for (const row of after.filter((entry) => entry.doc === doc)) lines.push(`- #${doc} ${row.registry}/${row.mode}: ${row.run_status}; writes ${row.writes.map((write) => write.method).join(",") || "none"}; wrong ${wrongOf(row).join(",") || "none"}`);
   }
 
   if (hasFlag(argv, "--ceiling")) {
     // Plan §2 E4: today's auto-creates = the before file's invoice creates, registry up (the working registry).
-    const today = before.filter((row) => row.registry === "up" && createsInvoice(row));
-    const heldBy = (signal: string) => today.filter((row) => {
-      const now = after.find((entry) => key(entry) === key(row));
-      return now !== undefined && !createsInvoice(now) && now.signals.includes(signal);
-    });
     lines.push("", "## E4 ceiling (newly held / today's auto-creates, registry up, both modes)", "");
-    for (const signal of ["credit_word_present", "signed_amount_present"]) {
-      const held = heldBy(signal);
-      const share = today.length ? held.length / today.length : 0;
-      lines.push(`- ${signal}: ${held.length}/${today.length} = ${(share * 100).toFixed(1)}% ${share > 0.1 ? "**OVER the 10% ceiling: STOP**" : "(under the ceiling)"}`);
-      for (const row of held) lines.push(`  - #${row.doc} ${row.mode}`);
-    }
+    lines.push(...ceilingLines(before, after, ["credit_word_present", "signed_amount_present"]));
     lines.push("", "## Credit-word hits by line (footer watch: tagastus / hüvitis in the last 40% of lines)", "");
     for (const doc of docs) for (const hit of creditWordLines(doc)) lines.push(`- #${doc} ${hit.footer_watch ? "**FOOTER WATCH** " : ""}[${hit.hits.join(",")}] ${hit.line}`);
     lines.push("", "## Signed-amount lines", "");

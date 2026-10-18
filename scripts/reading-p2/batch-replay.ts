@@ -8,10 +8,13 @@
 // signals. The packet digest of the fresh parse is checked against the frozen packet (same liteparse build).
 //
 // Usage: npx tsx --import ./scripts/reading-p2/register.mjs scripts/reading-p2/batch-replay.ts --out <name>
-//          [--only 10,h25] [--modes create,create_and_confirm] [--no-digest]
+//          [--only 10,h25] [--modes create,create_and_confirm] [--registries down,up,up-down,down-up,error] [--no-digest]
+// Registry states: down (no answer), up (the truth supplier's name), up-down / down-up (one state in the dry run, the
+// other in the approved run: a transition between preview and execute), error (every lookup throws).
 // register.mjs serves every parse from the frozen-parse cache (cached-parser.ts): one real parse per file.
 //   → <data>/p2-batch/<name>.json (private data dir, gitignored)
 
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -26,24 +29,30 @@ import type { TruthRecord } from "../reading-p1/truth.js";
 
 type Mode = "create" | "create_and_confirm";
 const DIGEST = !process.argv.includes("--no-digest");
-type Registry = "down" | "up";
+const REGISTRIES = ["down", "up", "up-down", "down-up", "error"] as const;
+type Registry = typeof REGISTRIES[number];
+type Phase = "dry" | "run";
+/** The registry answer a state gives in a phase. */
+const registryIn = (registry: Registry, phase: Phase): "down" | "up" | "error" =>
+  registry === "up-down" ? (phase === "dry" ? "up" : "down") : registry === "down-up" ? (phase === "dry" ? "down" : "up") : registry;
 
-interface Write { method: string; payload: unknown }
+interface Write { method: string; payload: unknown; result?: unknown }
 
 /** Reads come from the snapshot; every other call is a write: recorded, answered locally. */
 function recordingApi(snapshot: Snapshot, writes: Write[], ownVat: string | null) {
   const clients: Client[] = snapshot.clients.map((client) => ({ ...client }));
   const created = new Map<number, PurchaseInvoice>();
   let nextId = 9_000_000;
-  const record = (method: string, payload: unknown) => writes.push({ method, payload: JSON.parse(JSON.stringify(payload ?? null)) });
+  const record = (method: string, payload: unknown, result: unknown) => writes.push({ method, payload: JSON.parse(JSON.stringify(payload ?? null)), result: JSON.parse(JSON.stringify(result ?? null)) });
   const noop = async () => undefined;
   const journals = async () => {
     if (snapshot.journals === "unavailable") throw new Error("journals unavailable in the snapshot");
     return snapshot.journals;
   };
   const write = (method: string, answer: (payload: unknown) => unknown) => async (...args: unknown[]) => {
-    record(method, args);
-    return answer(args[0]);
+    const result = answer(args[0]);
+    record(method, args, result);
+    return result;
   };
   return {
     clients: {
@@ -96,9 +105,11 @@ function readSnapshotFile<T>(company: string, name: string): T | undefined {
   return existsSync(path) ? readJson<T>(path) : undefined;
 }
 
-/** Registry stub: "down" answers nothing; "up" returns the truth supplier's own name for its registry code only. */
-function stubRegistry(registry: Registry, truth: TruthRecord | undefined, snapshot: Snapshot): { lookups: string[] } {
+/** Registry stub: "down" answers nothing; "up" returns the truth supplier's own name for its registry code only;
+ * "error" throws. The phase (dry run, approved run) is set by the caller. */
+function stubRegistry(registry: Registry, truth: TruthRecord | undefined, snapshot: Snapshot): { lookups: string[]; setPhase: (phase: Phase) => void } {
   const lookups: string[] = [];
+  let phase: Phase = "dry";
   const known = truth?.status === "available" && truth.supplier_reg
     ? { reg: String(truth.supplier_reg), name: snapshot.clients.find((client) => client.id === truth.supplier_client_id)?.name ?? truth.supplier_name }
     : undefined;
@@ -106,14 +117,16 @@ function stubRegistry(registry: Registry, truth: TruthRecord | undefined, snapsh
     const url = String(input);
     const code = /[?&]q=([^&]+)/.exec(url)?.[1] ?? "";
     lookups.push(decodeURIComponent(code));
-    if (registry === "down") return { ok: false, headers: { get: () => "0" }, text: async () => "" };
+    const state = registryIn(registry, phase);
+    if (state === "error") throw new TypeError("fetch failed");
+    if (state === "down") return { ok: false, headers: { get: () => "0" }, text: async () => "" };
     const data = known && decodeURIComponent(code) === known.reg && known.name
       ? [{ reg_code: Number(known.reg), name: known.name, legal_address: "", status: "R" }]
       : [];
     const text = JSON.stringify({ status: "OK", data });
     return { ok: true, headers: { get: () => String(text.length) }, text: async () => text };
   }) as unknown as typeof fetch;
-  return { lookups };
+  return { lookups, setPhase: (next) => { phase = next; } };
 }
 
 interface ResultRow {
@@ -146,7 +159,7 @@ function invoiceFields(args: unknown): Record<string, unknown> {
   };
 }
 
-async function replayDocument(scope: Scope, id: string, path: string, modes: Mode[]): Promise<ResultRow[]> {
+async function replayDocument(scope: Scope, id: string, path: string, modes: Mode[], registries: readonly Registry[]): Promise<ResultRow[]> {
   const own = readJson<Record<string, OwnIds>>(dataPath(scope, "own.json"))[id];
   const truthPath = dataPath(scope, "truth.json");
   const truth = existsSync(truthPath) ? readJson<Record<string, TruthRecord>>(truthPath)[id] : undefined;
@@ -161,9 +174,9 @@ async function replayDocument(scope: Scope, id: string, path: string, modes: Mod
   const snapshotKind = loadSnapshot(company) ? "frozen" : "empty";
   const rows: ResultRow[] = [];
   const truthView = truth?.status === "available"
-    ? { invoice_number: truth.invoice_number, invoice_date: truth.invoice_date, gross: truth.gross, currency: truth.currency, supplier_client_id: truth.supplier_client_id, supplier_name: truth.supplier_name }
+    ? { invoice_number: truth.invoice_number, invoice_date: truth.invoice_date, gross: truth.gross, currency: truth.currency, supplier_client_id: truth.supplier_client_id, supplier_name: truth.supplier_name, supplier_reg: truth.supplier_reg }
     : null;
-  if (!snapshot) return [{ doc: id, scope, registry: "down", mode: modes[0]!, packet_digest_match: null, dry_status: null, run_status: null, signals: [], notes: [], supplier_resolution_code: null, writes: [], registry_lookups: 0, truth: truthView, error: "no_snapshot" }];
+  if (!snapshot) return [{ doc: id, scope, registry: registries[0]!, mode: modes[0]!, packet_digest_match: null, dry_status: null, run_status: null, signals: [], notes: [], supplier_resolution_code: null, writes: [], registry_lookups: 0, truth: truthView, error: "no_snapshot" }];
   const base = withoutOwnBooking(snapshot, truth).snapshot;
   const ownSnapshot = readSnapshotFile<{ ownCompanyName?: string }>(snapshot.company, "own");
 
@@ -178,14 +191,14 @@ async function replayDocument(scope: Scope, id: string, path: string, modes: Mod
     digestMatch = buildReadingPacket(packetInputFromParse(parsed, sha256Hex(readFileSync(path)), PARSER_VERSION)).packet_digest === frozen.packet.packet_digest;
   }
 
-  for (const registry of ["down", "up"] as const) for (const mode of modes) {
+  for (const registry of registries) for (const mode of modes) {
     const folder = mkdtempSync(join(tmpdir(), "p2-batch-"));
     try {
       copyFileSync(path, join(folder, basename(path)));
       process.env.EARVELDAJA_ALLOWED_PATHS = folder;
       const writes: Write[] = [];
       const api = recordingApi(base, writes, own?.vat ?? null);
-      const { lookups } = stubRegistry(registry, truth, base);
+      const { lookups, setPhase } = stubRegistry(registry, truth, base);
       const ops = createReceiptBatchOperations(api as never, createTestRuntimeSafetyContext());
       const input = {
         resolvedFolderPath: folder, accountsDimensionsId: base.accountDimensions[0]?.id ?? 0, legacyExecuteCreate: false, directoryAccessOptions: {},
@@ -194,6 +207,7 @@ async function replayDocument(scope: Scope, id: string, path: string, modes: Mod
       const dry = await ops.runBatch({ ...input, executionMode: "dry_run", dryRun: true } as never);
       if (!dry.ok) throw new Error(`dry run failed: ${JSON.stringify(dry).slice(0, 300)}`);
       const preview = dry.value.results[0];
+      setPhase("run");
       const run = dry.value.planHandles
         ? await ops.runBatch({ ...input, executionMode: mode, dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles[mode] } as never)
         : undefined;
@@ -208,7 +222,7 @@ async function replayDocument(scope: Scope, id: string, path: string, modes: Mod
         writes: writes.map((entry) => entry.method === "purchaseInvoices.createAndSetTotals"
           ? { method: entry.method, fields: invoiceFields(entry.payload) }
           : entry.method === "clients.create"
-            ? { method: entry.method, fields: { name: (entry.payload as Client[])[0]!.name, code: (entry.payload as Client[])[0]!.code } }
+            ? { method: entry.method, fields: { name: (entry.payload as Client[])[0]!.name, code: (entry.payload as Client[])[0]!.code, id: (entry.result as { created_object_id?: number } | null)?.created_object_id } }
             : { method: entry.method }),
         registry_lookups: lookups.length,
         truth: truthView,
@@ -228,17 +242,22 @@ if (process.argv[1]?.endsWith("/batch-replay.ts")) {
   if (!out || !/^[a-z0-9][a-z0-9-]{0,40}$/.test(out)) throw new Error("--out <name> required (lower-case, digits, -)");
   const only = argValue(argv, "--only")?.split(",");
   const modes = (argValue(argv, "--modes")?.split(",") ?? ["create", "create_and_confirm"]) as Mode[];
+  const registries = (argValue(argv, "--registries")?.split(",") ?? [...REGISTRIES]) as Registry[];
+  for (const registry of registries) if (!(REGISTRIES as readonly string[]).includes(registry)) throw new Error(`unknown registry state ${registry}`);
   const realFetch = globalThis.fetch;
   const rows: ResultRow[] = [];
   for (const scope of SCOPES) {
     for (const entry of manifest(scope)) {
       if (only && !only.includes(entry.id)) continue;
       process.stderr.write(`${scope} ${entry.id}\n`);
-      rows.push(...await replayDocument(scope, entry.id, entry.path, modes));
+      rows.push(...await replayDocument(scope, entry.id, entry.path, modes, registries));
     }
   }
   globalThis.fetch = realFetch;
   mkdirSync(dataPath("p2-batch"), { recursive: true, mode: 0o700 });
-  writeJson(dataPath("p2-batch", `${out}.json`), rows);
+  // Provenance: the commit the replay ran on, and whether the tree had uncommitted tracked changes.
+  const git = (...args: string[]) => execFileSync("git", args, { encoding: "utf8" }).trim();
+  const provenance = { commit: git("rev-parse", "HEAD"), dirty: git("status", "--porcelain", "--untracked-files=no") !== "", generated_at: new Date().toISOString(), argv };
+  writeJson(dataPath("p2-batch", `${out}.json`), { provenance, rows });
   process.stdout.write(`${rows.length} rows → p2-batch/${out}.json\n`);
 }
