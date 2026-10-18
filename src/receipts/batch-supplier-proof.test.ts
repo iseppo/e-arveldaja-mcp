@@ -532,3 +532,40 @@ describe("P2 E0: credit and signed-amount hazards are advisory on the real recei
     expect(run.value.results[0]!.notes.some(note => note.startsWith("credit_word_present:"))).toBe(true);
   });
 });
+
+describe("P2 E2: a value lost under a dot leader holds the receipt in every mode", () => {
+  const LABELLED = ["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1)];
+  const signalsOf = (result: { llm_fallback?: { confidence_signals?: string[] } }) => result.llm_fallback?.confidence_signals ?? [];
+  // h25 shape (Google): the date and number cells are only grey leaders; the period line prints other dates.
+  const H25 = [
+    ...LABELLED,
+    "Arve number    ....................",
+    "Arve kuupäev    ....................    Kogusumma (EUR)    1,87 €",
+    "Konto ID    ....................    Kokkuvõte - 1. sept 2026 - 30. sept 2026",
+  ];
+
+  it("h25 shape: dry run, create and create_and_confirm write nothing", async () => {
+    vi.mocked(parseDocument).mockResolvedValue(parsed(H25));
+    for (const mode of ["create", "create_and_confirm"] as const) {
+      stubRegistry([true]);
+      const { api, rec } = makeApi();
+      const { dry, run } = await runMode(api, mode);
+      expect(dry.results[0]!.status).toBe("needs_review");
+      expect(signalsOf(dry.results[0]!)).toContain("text_layer_value_lost");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(rec.confirm).not.toHaveBeenCalled();
+    }
+  });
+
+  it("the same receipt without a leader-only cell is created", async () => {
+    stubRegistry([true]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed(LABELLED));
+    const { api, rec } = makeApi();
+    const { dry, run } = await runMode(api, "create");
+    expect(signalsOf(dry.results[0]!)).not.toContain("text_layer_value_lost");
+    expect(run.ok && run.value.results[0]!.status).toBe("created");
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+  });
+});

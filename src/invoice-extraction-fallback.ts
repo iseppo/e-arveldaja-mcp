@@ -172,6 +172,11 @@ export interface ExtractionConfidenceSignals {
    * Gated from automatic creation in every mode.
    */
   foreign_currency_marker?: boolean;
+  /**
+   * A table cell of the text layer is only a dot leader: the value printed
+   * over it was lost (C1's packet hold; P2 E2). Gated in every mode.
+   */
+  text_layer_value_lost?: boolean;
 }
 
 /**
@@ -191,6 +196,7 @@ export const CREATION_GATING_EXTRACTION_SIGNALS = [
   "supplier_identifier_ambiguous",
   "invoice_date_unlabelled",
   "foreign_currency_marker",
+  "text_layer_value_lost",
 ] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
 
 /** Operator-facing review warning per creation-gating extraction signal. */
@@ -207,6 +213,7 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   supplier_identifier_ambiguous: "The document labels two or more different supplier registry codes or VAT numbers (one may be the buyer's); verify the supplier before booking.",
   invoice_date_unlabelled: "No invoice-date label was found; the date is the first date on the page. Verify the invoice date before booking.",
   foreign_currency_marker: "The document is read as EUR but prints another currency's code or symbol next to an amount; verify the currency before booking.",
+  text_layer_value_lost: "The PDF text layer shows only a dotted line where a value (for example the invoice date or number) is printed; the value was not read. Type it from the document before booking.",
 };
 
 /**

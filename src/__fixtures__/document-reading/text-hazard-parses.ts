@@ -17,8 +17,14 @@ export const TEXT_HAZARD_EXPECTED: Record<TextHazardFixture, ExtractionConfidenc
   foreign_marker: { foreign_currency_marker: true },
 };
 
+/** P2 E2: a Google-shape page whose date cell is only a dot leader (C1's text_layer_value_lost). */
+export const LEADER_CELL_LINES = ["Näidis OÜ", "Arve kuupäev    ....................    Kogusumma (EUR)    10,00 €", "Kokku 10,00 €"];
+
 export function textHazardParse(kind: TextHazardFixture): ParsedDocument {
-  const lines = LINES[kind];
+  return parseOfLines(LINES[kind]);
+}
+
+export function parseOfLines(lines: string[]): ParsedDocument {
   const text = lines.join("\n");
   return {
     text,

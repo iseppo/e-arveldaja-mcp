@@ -599,7 +599,7 @@ describe("signal classes (§1.4)", () => {
     const all = [...READING_HAZARD_SIGNALS, ...READING_HEURISTIC_PICK_SIGNALS, ...READING_BOOKING_SIDE_SIGNALS, ...READING_UNATTENDED_GATE_SIGNALS];
     expect(new Set(all).size).toBe(all.length);
     expect(all.length).toBe(Object.keys(READING_SIGNAL_CLASS).length);
-    expect(READING_HAZARD_SIGNALS).toHaveLength(18);
+    expect(READING_HAZARD_SIGNALS).toHaveLength(19);
     for (const hazard of READING_HAZARD_SIGNALS) expect(hazard in HOLD_CODES, hazard).toBe(true);
     expect("supplier_ambiguous" in READING_SIGNAL_CLASS).toBe(false);
   });

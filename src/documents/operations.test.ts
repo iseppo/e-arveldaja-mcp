@@ -10,7 +10,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
-import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
+import { LEADER_CELL_LINES, TEXT_HAZARD_EXPECTED, parseOfLines, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -1099,5 +1099,17 @@ describe("P2 E3: a foreign-currency marker on an EUR reading is a guided prepare
     if (!outcome.ok) throw new Error("prepare failed");
     expect(outcome.value.warnings.some(w => w.code === "foreign_currency_marker")).toBe(true);
     expect(outcome.value.blockers.some(b => b.code === "foreign_currency_marker")).toBe(false);
+  });
+});
+
+describe("P2 E2: a value lost under a dot leader is a guided prepare warning", () => {
+  it("warns text_layer_value_lost (a warning, not a blocker)", async () => {
+    mockedParseDocument.mockResolvedValue(parseOfLines(LEADER_CELL_LINES));
+    const { path } = writeTempPdf();
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    if (!outcome.ok) throw new Error("prepare failed");
+    expect(outcome.value.warnings.some(w => w.code === "text_layer_value_lost")).toBe(true);
+    expect(outcome.value.blockers.some(b => b.code === "text_layer_value_lost")).toBe(false);
   });
 });

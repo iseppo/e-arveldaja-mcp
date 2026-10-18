@@ -191,6 +191,7 @@ export const READING_SIGNAL_CLASS = {
   credit_word_present: "hazard",
   signed_amount_present: "hazard",
   foreign_currency_marker: "hazard",
+  text_layer_value_lost: "hazard",
   gross_unlabelled: "heuristic_pick",
   invoice_number_ambiguous: "heuristic_pick",
   labelled_amount_over_max: "heuristic_pick",

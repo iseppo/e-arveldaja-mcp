@@ -48,6 +48,12 @@ describe("textHazardSignals (tool-side adapter)", () => {
     expect(textHazardSignals(parsed, "SEK")).toEqual({});
   });
 
+  it("P2 E2: a leader-only table cell raises text_layer_value_lost; a leader inside a text cell does not", () => {
+    const page = (text: string) => ({ text, pageCount: 1, result: { pages: [{ pageNum: 1, text, width: 600, height: 800, textItems: [] }], totalPages: 1 } }) as never;
+    expect(textHazardSignals(page("Arve kuupäev    ....................    Kogusumma (EUR)    1,87 €"), "EUR")).toEqual({ text_layer_value_lost: true });
+    expect(textHazardSignals(page("Total ........ 13,60"), "EUR")).toEqual({});
+  });
+
   it("raises nothing on a parse with no pages", () => {
     expect(textHazardSignals({ text: "Kreeditarve", pageCount: 0 } as never, undefined)).toEqual({});
   });

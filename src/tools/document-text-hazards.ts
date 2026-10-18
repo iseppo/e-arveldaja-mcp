@@ -49,5 +49,6 @@ export function textHazardSignals(parsed: ParsedDocument, currency: string | und
   if (hazards.credit_word_present) signals.credit_word_present = true;
   if (hazards.signed_amount_present) signals.signed_amount_present = true;
   if (hazards.foreign_currency_marker && (currency ?? "EUR").toUpperCase() === "EUR") signals.foreign_currency_marker = true;
+  if (packet.holds.some((hold) => hold.code === "text_layer_value_lost")) signals.text_layer_value_lost = true;
   return signals;
 }

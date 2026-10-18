@@ -13,7 +13,7 @@ import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { ARIREGISTER_AUTOCOMPLETE_TELIA } from "../__fixtures__/ariregister-autocomplete.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { textHazardSignals } from "./document-text-hazards.js";
-import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
+import { LEADER_CELL_LINES, TEXT_HAZARD_EXPECTED, parseOfLines, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 vi.mock("../file-validation.js", async () => ({
   ...await vi.importActual<typeof import("../file-validation.js")>("../file-validation.js"),
@@ -1928,5 +1928,16 @@ describe("P2 E3: a foreign-currency marker on an EUR reading is a preview warnin
     const payload = parseMcpResponse((await handler({ file_path: "/tmp/kr.pdf" })).content[0]!.text) as any;
     expect(payload.extracted.warnings.some((w: string) => w.startsWith("foreign_currency_marker:"))).toBe(true);
     expect(payload.llm_fallback.confidence_signals).toContain("foreign_currency_marker");
+  });
+});
+
+describe("P2 E2: a value lost under a dot leader is a preview warning", () => {
+  it("extract_pdf_invoice warns text_layer_value_lost", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("leader.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue(parseOfLines(LEADER_CELL_LINES));
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", { clients: { listAll: vi.fn().mockResolvedValue([]) } });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/leader.pdf" })).content[0]!.text) as any;
+    expect(payload.extracted.warnings.some((w: string) => w.startsWith("text_layer_value_lost:"))).toBe(true);
+    expect(payload.llm_fallback.confidence_signals).toContain("text_layer_value_lost");
   });
 });
