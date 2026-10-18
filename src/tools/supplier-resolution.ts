@@ -28,7 +28,7 @@ export {
   type SupplierRef,
 } from "../resolution/supplier-default-resolution.js";
 
-export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name" | "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "raw_text">;
+export type SupplierIdentityFields = Pick<ExtractedReceiptFields, "supplier_name" | "supplier_reg_code" | "supplier_vat_no" | "supplier_iban" | "raw_text" | "field_provenance">;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,7 +64,7 @@ export interface SupplierResolution {
    * operator attestation for a foreign registration. When present the caller
    * must create NEITHER the supplier NOR the invoice.
    */
-  code?: "legal_entity_identity_required";
+  code?: "legal_entity_identity_required" | "supplier_name_unverified";
 }
 
 export interface SupplierResolutionOptions {
@@ -146,6 +146,9 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
       candidate !== null && typeof candidate === "object" && String((candidate as Record<string, unknown>).reg_code) === regCode);
     if (!entry) return null;
 
+    // name_source records whether the name is the registry's own (P2 E1): the
+    // fallback substitution is display only and never proves a supplier name.
+    const nameSource = typeof entry.name === "string" && entry.name.trim() !== "" ? "registry" : "fallback";
     const name = entry.name ?? fallbackName ?? "";
     const address = entry.legal_address ?? "";
     // Register status code: R registered, L in liquidation, N bankrupt, K deleted.
@@ -157,10 +160,26 @@ export async function fetchRegistryData(regCode?: string, country = "EST", fallb
       reg_code: regCode,
       address: typeof address === "string" ? address : String(address),
       status,
+      name_source: nameSource,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * P2 E1: a supplier name read from the file name, from a bare top line, or from
+ * an OCR text item is never proof of the supplier. Such a name may name a new
+ * client only when this call's own registry lookup returned the registry's name.
+ * A name from a supplier label or the layout keeps today's behaviour, and so do
+ * operator-entered names (no field provenance).
+ */
+function supplierNameNeedsRegistryProof(provenance: SupplierIdentityFields["field_provenance"]): boolean {
+  const entry = provenance?.find(candidate => candidate.field === "supplier_name");
+  if (!entry) return false;
+  return (entry.source === "fallback" && entry.rationale === "filename_token") ||
+    (entry.source === "ocr" && entry.rationale === "top_line") ||
+    entry.confidence !== undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +219,7 @@ export async function resolveSupplierInternal(
       reason: matchOutcome.reason,
     };
   }
+  const nameNeedsRegistryProof = supplierNameNeedsRegistryProof(fields.field_provenance);
   // no_match — proceed to the create/persist path with the desandboxed fields.
   // self_match_blocked flags a suspect result (none found, or only the
   // previewed-new path is left); it is never propagated onto a found:true
@@ -285,6 +305,21 @@ export async function resolveSupplierInternal(
       registry_data: registryData,
       requires_manual_review: true,
       reason: `Registry code ${registryData.reg_code} belongs to a company deleted from the Estonian business register (status K). Verify the supplier before creating it or booking against it.`,
+      ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
+    };
+  }
+
+  // P2 E1: decided on THIS call's registry lookup (at execute, the one made right
+  // before api.clients.create), never on an earlier preview's. The same check at
+  // preview makes a dry run show the hold. No preview client is returned, so no
+  // caller can go on to create one.
+  if (nameNeedsRegistryProof && registryData?.name_source !== "registry") {
+    return {
+      found: false,
+      created: false,
+      code: "supplier_name_unverified",
+      reason: "The supplier name was read from the file name or OCR text, not from a supplier label, and the business registry did not return its own name for the supplier's registry code. Verify the supplier before creating it.",
+      registry_data: registryData,
       ...(selfMatchBlocked ? { self_match_blocked: true } : {}),
     };
   }

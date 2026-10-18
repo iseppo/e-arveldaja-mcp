@@ -456,6 +456,14 @@ async function processSingleReceipt(
       );
     }
     if (!supplierResolution.found) signals.supplier_resolution_failed = true;
+    if (supplierResolution.code === "supplier_name_unverified") {
+      notes.push(`Supplier auto-create refused (supplier_name_unverified): ${supplierResolution.reason} Manual review required before booking.`);
+      const fallback = summarize();
+      maybeAddLlmFallbackNote(notes, fallback);
+      return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
+        supplier_resolution: supplierResolution,
+      });
+    }
     if (!supplierResolution.client && !supplierResolution.preview_client) {
       const fallback = summarize();
       notes.push("Supplier could not be resolved or prepared for creation.");
@@ -707,9 +715,17 @@ async function processSingleReceipt(
     // (no verified Estonian registry code, no explicit natural person, and no
     // operator attestation for a foreign registration). Create NEITHER the
     // supplier NOR the invoice — route to manual review.
-    if (materializedSupplierResolution.code === "legal_entity_identity_required" && !materializedSupplierResolution.found) {
+    // P2 E1: the persistence-time registry lookup did not prove a file-name /
+    // top-line / OCR supplier name (whatever the preview's lookup returned).
+    if (
+      (materializedSupplierResolution.code === "legal_entity_identity_required" ||
+        materializedSupplierResolution.code === "supplier_name_unverified") &&
+      !materializedSupplierResolution.found
+    ) {
       notes.push(
-        `Supplier auto-create refused: ${materializedSupplierResolution.reason ?? "a verified legal-entity identity is required"} Manual review required before booking.`,
+        materializedSupplierResolution.code === "supplier_name_unverified"
+          ? `Supplier auto-create refused (supplier_name_unverified): ${materializedSupplierResolution.reason} Manual review required before booking.`
+          : `Supplier auto-create refused: ${materializedSupplierResolution.reason ?? "a verified legal-entity identity is required"} Manual review required before booking.`,
       );
       const fallback = summarize();
       return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {

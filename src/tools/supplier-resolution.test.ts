@@ -782,7 +782,16 @@ describe("fetchRegistryData — live ariregister autocomplete shape (finding 8)"
       reg_code: "10234957",
       address: "Harju maakond, Tallinn, Kristiine linnaosa, Mustamäe tee 3",
       status: "R",
+      name_source: "registry",
     });
+  });
+
+  it("P2 E1: marks a name substituted for a missing registry name as fallback, never registry", async () => {
+    const { name: _name, ...nameless } = ARIREGISTER_AUTOCOMPLETE_TELIA.data[0];
+    stubBody({ status: "OK", data: [nameless] });
+    await expect(fetchRegistryData("10234957", "EST", "PRINT")).resolves.toMatchObject({ name: "PRINT", name_source: "fallback" });
+    stubBody({ status: "OK", data: [{ ...nameless, name: "  " }] });
+    await expect(fetchRegistryData("10234957", "EST", "PRINT")).resolves.toMatchObject({ name_source: "fallback" });
   });
 
   it("skips non-exact prefix hits and flags a deleted company (status K)", async () => {
@@ -819,5 +828,74 @@ describe("resolveSupplierInternal — tied supplier names (finding 9)", () => {
     expect(result.requires_manual_review).toBe(true);
     expect(result.client).toBeUndefined();
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-create boundary", () => {
+  const REGISTRY_OK = (() => {
+    const text = JSON.stringify(ARIREGISTER_AUTOCOMPLETE_TELIA);
+    return { ok: true, headers: { get: () => String(text.length) }, text: () => Promise.resolve(text) };
+  })();
+  const REGISTRY_DOWN = { ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") };
+  const provenance = (source: string, rationale?: string, confidence?: number) => [{
+    field: "supplier_name" as const, value: "PRINT", source: source as never,
+    ...(rationale ? { rationale } : {}), ...(confidence !== undefined ? { confidence } : {}),
+  }];
+  function recordingApi() {
+    const create = vi.fn().mockResolvedValue({ created_object_id: 77 });
+    const get = vi.fn().mockImplementation(async (id: number) => makeClient({ id, name: String(create.mock.calls.at(-1)?.[0]?.name) }));
+    return { api: { clients: { listAll: () => Promise.resolve([]), create, get } } as unknown as ApiContext, create };
+  }
+  const fields = (field_provenance: ReturnType<typeof provenance>) => ({ supplier_name: "PRINT", supplier_reg_code: "10234957", field_provenance });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it.each([
+    ["filename token", provenance("fallback", "filename_token")],
+    ["top line", provenance("ocr", "top_line")],
+    ["OCR text item", provenance("coordinate", "layout", 0.9)],
+  ])("%s name, registry lookup failed: refused at execute and at preview, zero writes", async (_label, field_provenance) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
+    const { api, create } = recordingApi();
+    for (const execute of [false, true]) {
+      const result = await resolveSupplierInternal(api, [], fields(field_provenance), execute, { _resolveSupplierOverrides: { country: "EST" } });
+      expect(result).toMatchObject({ found: false, created: false, code: "supplier_name_unverified" });
+      expect(result.preview_client).toBeUndefined();
+    }
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a top-line name whose registry entry has no name of its own is refused (the fallback name is display only)", async () => {
+    const { name: _name, ...nameless } = ARIREGISTER_AUTOCOMPLETE_TELIA.data[0];
+    const text = JSON.stringify({ status: "OK", data: [nameless] });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, headers: { get: () => String(text.length) }, text: () => Promise.resolve(text) }));
+    const { api, create } = recordingApi();
+    const result = await resolveSupplierInternal(api, [], fields(provenance("ocr", "top_line")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.code).toBe("supplier_name_unverified");
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("a top-line name with the registry's own name creates one client, named by the registry", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_OK));
+    const { api, create } = recordingApi();
+    const result = await resolveSupplierInternal(api, [], fields(provenance("ocr", "top_line")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.created).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0]![0]).toMatchObject({ name: "Telia Eesti AS", code: "10234957" });
+  });
+
+  it("a label-provenance name with no registry name is created as today, with the extracted name", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
+    const { api, create } = recordingApi();
+    const result = await resolveSupplierInternal(api, [], fields(provenance("label", "labeled")), true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.created).toBe(true);
+    expect(create.mock.calls[0]![0]).toMatchObject({ name: "PRINT" });
+  });
+
+  it("an operator-entered name (no provenance) is created as today", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(REGISTRY_DOWN));
+    const { api, create } = recordingApi();
+    const result = await resolveSupplierInternal(api, [], { supplier_name: "PRINT", supplier_reg_code: "10234957" }, true, { _resolveSupplierOverrides: { country: "EST" } });
+    expect(result.created).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
