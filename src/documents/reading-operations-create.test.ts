@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { createReadingDocumentOperations, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
@@ -188,7 +188,10 @@ describe("reading create", () => {
     });
     expect(verify.status).toBe("ready");
     const outcome = await create(w, file, verify.planHandle!, { "r:net": { value: 50 }, "r:vat": { value: 12 }, "r:gross": { value: 62 } });
-    expect(heldCodes(outcome)).toContain("duplicate_same_amount_date");
+    const codes = heldCodes(outcome);
+    expect(codes).toContain("duplicate_same_amount_date");
+    // The reviewed booking showed 124: owner-typed amounts are never booked without a new review.
+    expect(codes).toContain("reading_booking_drift");
     expect(w.createAndSetTotals).not.toHaveBeenCalled();
   });
 
@@ -222,6 +225,53 @@ describe("reading create", () => {
     expect(verify.card!.rows.map((row) => row.id)).toEqual(["r:invoice_date"]);
     expect(heldCodes(await create(w, file, verify.planHandle!, { "r:invoice_date": { value: "2026-05-01" } }))).toEqual(["invoice_date_out_of_window"]);
     expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a booking that changed after review (here the supplier's live name) holds reading_booking_drift, 0 writes", async () => {
+    const w = world();
+    const file = writePdf("%PDF drift");
+    const verify = await verified(w, file);
+    w.api.clients.get.mockImplementation(async (id: number) => ({ ...(await readingApi().clients.get(id)), name: "Teine Nimi OÜ" }));
+    expect(heldCodes(await create(w, file, verify.planHandle!))).toEqual(["reading_booking_drift"]);
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("an owner-typed invoice number may change only the number in the reviewed booking: it creates", async () => {
+    const w = world();
+    const file = writePdf("%PDF typed number");
+    const verify = await verified(w, file, { evidence: { invoice_number: { line: "p1:001", quote: "Arve A-17" } } });
+    expect(verify.card!.rows.map((row) => row.id)).toEqual(["r:invoice_number"]);
+    const outcome = await create(w, file, verify.planHandle!, { "r:invoice_number": { value: "A-17/1" } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_number"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ number: "A-17/1" });
+  });
+
+  it("a reading without a gross is never given a create handle (no booking review exists)", async () => {
+    const w = world();
+    const file = writePdf("%PDF no gross");
+    // A page with no amounts at all: the only amount hold is the typed gross row.
+    const lines = [...BASE_LINES.slice(0, 4), "Valuuta EUR"];
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const verify = await verified(w, file, {
+      values: { net: null, vat: null, gross: null },
+      evidence: { net: undefined, vat: undefined, gross: undefined, currency: { line: "p1:005", quote: "Valuuta EUR" } },
+      labels: { gross: null },
+    }, lines);
+    expect(verify.status).toBe("blocked");
+    expect(verify.holds).toEqual([{ code: "required_field_missing", field: "gross" }]);
+    expect(verify.planHandle).toBeUndefined();
+  });
+
+  it("a draft read back after create that differs from the approved model gets no confirm handle", async () => {
+    const w = world();
+    const file = writePdf("%PDF readback");
+    const verify = await verified(w, file);
+    w.createAndSetTotals.mockImplementationOnce(async (data: Record<string, unknown>, vat?: number, gross?: number) =>
+      ({ id: w.commit({ ...data, number: "NOT-APPROVED", paid_in_cash: true, cash_accounts_id: 1000 }, vat, gross) }));
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(outcome.value.confirmPlan).toBeUndefined();
+    expect(outcome.value.readbackMismatch).toEqual(expect.arrayContaining(["number", "paid_in_cash", "cash_accounts_id"]));
   });
 
   it("a wrong-company signal on the document holds at create, 0 writes", async () => {
@@ -351,10 +401,10 @@ describe("reading confirm (§5.5)", () => {
   it("an unchanged draft is registered once", async () => {
     const w = world();
     const plan = await createdDraft(w);
-    const outcome = await w.ops.confirm(plan);
+    const outcome = await w.ops.confirm({ ...plan, clientName: "smoke-client" });
     expect(outcome).toMatchObject({ ok: true, value: { status: "confirmed", confirmedInvoiceId: plan.invoiceId, gross: 124, currency: "EUR" } });
     expect(w.confirm).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({ action: "CONFIRMED", details: { reading_path: true, draft_fingerprint_verified: true } }));
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({ action: "CONFIRMED", details: { reading_path: true, draft_fingerprint_verified: true, client_name: "smoke-client" } }));
   });
 
   it("a draft edited between create and confirm is draft_changed, 0 registers", async () => {
@@ -380,6 +430,16 @@ describe("reading confirm (§5.5)", () => {
     }
   });
 
+  it.each([
+    ["paid_in_cash", true], ["cash_accounts_id", 1000], ["cash_accounts_dimensions_id", 5], ["cash_payment_date", "2026-03-20"], ["a_field_added_later", "x"],
+  ])("a draft whose %s changed after create is draft_changed, 0 registers", async (field, value) => {
+    const w = world();
+    const plan = await createdDraft(w);
+    w.details[plan.invoiceId]![field] = value;
+    expect(await w.ops.confirm(plan)).toMatchObject({ ok: false, error: { code: "draft_changed" } });
+    expect(w.confirm).not.toHaveBeenCalled();
+  });
+
   it("a connection switch between create and confirm refuses, 0 registers", async () => {
     const w = world();
     const plan = await createdDraft(w);
@@ -396,5 +456,28 @@ describe("reading confirm (§5.5)", () => {
     expect(await create(w, file, plan.planHandle)).toMatchObject({ ok: false, error: { code: "plan_domain_mismatch" } });
     expect(await w.ops.confirm({ planHandle: verify.planHandle!, invoiceId: plan.invoiceId })).toMatchObject({ ok: false, error: { code: "plan_domain_mismatch" } });
     expect(w.confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe("bookingDrift", () => {
+  const reviewed = {
+    supplier_client_id: 4242, supplier_name: "Näidis OÜ", invoice_number: "A-17", invoice_date: "2026-03-15", journal_date: "2026-03-15", term_days: 0,
+    items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, vat_accounts_id: 1510, cl_vat_articles_id: 1, total_net_price: 100 }],
+    vat_price: 24, gross_price: 124, liability_accounts_id: 2310,
+  };
+  const withItem = (patch: Record<string, unknown>) => ({ ...reviewed, items: [{ ...reviewed.items[0]!, ...patch }] });
+
+  it("any change of accounts, VAT account or article, dimension or amount is drift", () => {
+    for (const patch of [{ vat_accounts_id: 1520 }, { purchase_accounts_id: 5001 }, { cl_vat_articles_id: 2 }, { purchase_accounts_dimensions_id: 9 }, { total_net_price: 50 }]) {
+      expect(bookingDrift(reviewed, withItem(patch), ["gross", "net", "vat", "invoice_number", "invoice_date"]), JSON.stringify(patch)).toBe(true);
+    }
+    expect(bookingDrift(reviewed, { ...reviewed, liability_accounts_id: 2311 }, [])).toBe(true);
+  });
+
+  it("only the keys a corrected number or date derive may change", () => {
+    expect(bookingDrift(reviewed, { ...reviewed, invoice_number: "A-18" }, ["invoice_number"])).toBe(false);
+    expect(bookingDrift(reviewed, { ...reviewed, invoice_number: "A-18" }, [])).toBe(true);
+    expect(bookingDrift(reviewed, { ...reviewed, invoice_date: "2026-03-14", journal_date: "2026-03-14", term_days: 1 }, ["invoice_date"])).toBe(false);
+    expect(bookingDrift(reviewed, { ...reviewed, gross_price: 62 }, ["gross"])).toBe(true);
   });
 });

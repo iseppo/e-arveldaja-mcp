@@ -65,7 +65,7 @@ import { uploadSourceDocumentOrInvalidate } from "../tools/pdf-workflow.js";
 import { assertFileInputSnapshotIdentity, FileInputSnapshotError } from "../file-input-snapshot.js";
 import { todayInTallinn } from "../local-date.js";
 import { parseStrictDate } from "../strict-date.js";
-import type { Client, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
+import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, materializeSnapshot, MAX_INVOICE_DOCUMENT_SIZE, wrongCompanySignal, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
 import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
@@ -143,8 +143,8 @@ export interface ReadingPlan {
   supplier_client_id: number;
   items_source: PlanRecord;
   booking_input: PlanRecord;
-  /** The booking computed on the reading's values; null when the owner still types the gross. */
-  booking: PlanRecord | null;
+  /** The booking the owner reviewed (computed on the reading's values). */
+  booking: PlanRecord;
   heuristic_keys: { invoiceNumber: string | null; supplierClientId: number | null };
   vat_zero_note_proven: boolean;
   reverse_charge_note_present: boolean;
@@ -417,40 +417,75 @@ function markerMatches(marker: IndeterminateMarker, key: Partial<MarkerKey>): bo
   return days === undefined || Math.abs(days) <= 7;
 }
 
+/**
+ * Invoice fields that may differ between the reviewed draft and the one registered: the status and the payment and
+ * ledger links register itself fills in. Every other field, known or new (payment fields, cash account and its
+ * dimension, dates, items, notes, document id, …), is part of the fingerprint (§5.5).
+ */
+const DRAFT_FIELDS_ALLOWED_TO_DIFFER: ReadonlySet<string> = new Set(["status", "payment_status", "journals", "settlements", "transactions"]);
+
 /** sha256 of the canonical created draft (§5.5): what the owner approved and confirm compares before register. */
 export function draftFingerprint(invoice: PurchaseInvoice): string {
-  const canonical = stripUndefinedDeep({
-    clients_id: invoice.clients_id,
-    number: invoice.number,
-    create_date: invoice.create_date,
-    journal_date: invoice.journal_date,
-    term_days: invoice.term_days,
-    cl_currencies_id: invoice.cl_currencies_id,
-    currency_rate: invoice.currency_rate ?? null,
-    net_price: invoice.net_price ?? null,
-    vat_price: invoice.vat_price ?? null,
-    gross_price: invoice.gross_price ?? null,
-    base_net_price: invoice.base_net_price ?? null,
-    base_vat_price: invoice.base_vat_price ?? null,
-    base_gross_price: invoice.base_gross_price ?? null,
-    liability_accounts_id: invoice.liability_accounts_id ?? null,
-    liability_accounts_dimensions_id: invoice.liability_accounts_dimensions_id ?? null,
-    bank_account_no: invoice.bank_account_no ?? null,
-    items: (invoice.items ?? []).map((item) => ({
-      cl_purchase_articles_id: item.cl_purchase_articles_id ?? null,
-      purchase_accounts_id: item.purchase_accounts_id ?? null,
-      purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id ?? null,
-      amount: item.amount ?? null,
-      total_net_price: item.total_net_price ?? null,
-      cl_vat_articles_id: item.cl_vat_articles_id ?? null,
-      vat_accounts_id: item.vat_accounts_id ?? null,
-      vat_accounts_dimensions_id: item.vat_accounts_dimensions_id ?? null,
-      vat_rate_dropdown: item.vat_rate_dropdown ?? null,
-      vat_amount: item.vat_amount ?? null,
-      reversed_vat_id: item.reversed_vat_id ?? null,
-    })),
-  });
-  return createHash("sha256").update(canonicalPlanJson(canonical)).digest("hex");
+  const material = Object.fromEntries(Object.entries(invoice).filter(([key]) => !DRAFT_FIELDS_ALLOWED_TO_DIFFER.has(key)));
+  return createHash("sha256").update(canonicalPlanJson(stripUndefinedDeep(material))).digest("hex");
+}
+
+const sameScalar = (expected: unknown, actual: unknown) =>
+  typeof expected === "number" && typeof actual === "number" ? Math.abs(expected - actual) < 0.005 : expected === actual;
+
+/**
+ * §5.5: the fields of the created draft, as read back, that differ from the approved write model. Only the model's
+ * defined fields are compared (the API fills in derived ones); the payment fields must be absent: the reading path
+ * never books a cash payment.
+ */
+export function draftReadbackMismatches(draft: PurchaseInvoice, model: CreatePurchaseInvoiceData, totals: { vatPrice?: number; grossPrice?: number }): string[] {
+  const fields: string[] = [];
+  const draftRecord = draft as unknown as Record<string, unknown>;
+  for (const [key, expected] of Object.entries(model)) {
+    if (key === "items" || key === "client_name" || expected === undefined || expected === null) continue;
+    if (!sameScalar(expected, draftRecord[key])) fields.push(key);
+  }
+  if (totals.grossPrice !== undefined && !sameScalar(totals.grossPrice, draft.gross_price)) fields.push("gross_price");
+  if (totals.vatPrice !== undefined && !sameScalar(totals.vatPrice, draft.vat_price ?? 0)) fields.push("vat_price");
+  if (draft.paid_in_cash === true) fields.push("paid_in_cash");
+  for (const key of ["cash_accounts_id", "cash_accounts_dimensions_id", "cash_payment_date"] as const) {
+    if (draft[key] !== undefined && draft[key] !== null) fields.push(key);
+  }
+  const items = draft.items ?? [];
+  if (items.length !== model.items.length) {
+    fields.push("items");
+  } else {
+    model.items.forEach((item, index) => {
+      const actual = items[index] as unknown as Record<string, unknown>;
+      for (const key of ["custom_title", "cl_purchase_articles_id", "purchase_accounts_id", "purchase_accounts_dimensions_id", "vat_accounts_id",
+        "vat_accounts_dimensions_id", "cl_vat_articles_id", "vat_rate_dropdown", "reversed_vat_id", "total_net_price", "amount"] as const) {
+        const expected = (item as unknown as Record<string, unknown>)[key];
+        if (expected === undefined || expected === null) continue;
+        if (!sameScalar(expected, actual[key])) fields.push(`items[${index}].${key}`);
+      }
+    });
+  }
+  return fields;
+}
+
+/** Booking fingerprint keys a corrected reading field may change; everything else must equal the reviewed booking. */
+const BOOKING_KEYS_BY_CORRECTED_FIELD: Partial<Record<string, readonly string[]>> = {
+  invoice_number: ["invoice_number"],
+  invoice_date: ["invoice_date", "journal_date", "term_days"],
+  due_date: ["term_days"],
+  supplier_iban: ["bank_account_no"],
+};
+
+/**
+ * §5.2 step 3: the booking recomputed at create against the one the owner reviewed at verify. Accounts, VAT account
+ * and article, dimensions, item titles, liability account, supplier name and amounts must be identical; only the
+ * keys a corrected number, date or IBAN derive may differ. An owner-corrected amount is drift too: the reviewed
+ * booking showed other amounts, so the owner verifies again (a false hold, never a write nobody reviewed).
+ */
+export function bookingDrift(reviewed: PlanRecord, recomputed: PlanRecord, correctedFields: readonly string[]): boolean {
+  const allowed = new Set(correctedFields.flatMap((field) => BOOKING_KEYS_BY_CORRECTED_FIELD[field] ?? []));
+  const strip = (record: PlanRecord) => Object.fromEntries(Object.entries(record).filter(([key]) => !allowed.has(key)));
+  return canonicalPlanJson(strip(reviewed)) !== canonicalPlanJson(strip(recomputed));
 }
 
 export interface CreateReadingInput {
@@ -458,6 +493,8 @@ export interface CreateReadingInput {
   snapshot?: FileInputSnapshot;
   planHandle: string;
   ownerAnswers: unknown;
+  /** The MCP client's name (clientInfo.name), for the audit (§5.6). */
+  clientName?: string;
 }
 
 export type CreateReadingResult =
@@ -467,11 +504,13 @@ export type CreateReadingResult =
       createdInvoiceId: number;
       documentUploaded: true;
       correctedFields: string[];
-      /** Absent when the fresh draft read failed: the owner confirms in e-arveldaja after checking the draft. */
+      /** Absent when the fresh draft read failed or differs from the approved model: the owner checks it in e-arveldaja. */
       confirmPlan?: { planHandle: string; invoiceId: number };
+      /** Fields of the read-back draft that differ from the approved write model (no confirm handle then). */
+      readbackMismatch?: string[];
     };
 
-export interface ConfirmReadingInput { planHandle: string; invoiceId: number }
+export interface ConfirmReadingInput { planHandle: string; invoiceId: number; clientName?: string }
 export type ConfirmReadingResult =
   | { status: "held"; holds: ReadingHold[] }
   | { status: "confirmed"; confirmedInvoiceId: number; supplierName: string; gross: number | null; currency: string };
@@ -668,7 +707,10 @@ class ReadingDocumentOperations {
       };
       if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
       if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
-      if (values.gross !== null && !booking?.effective) return ok(result);
+      // A booking the owner has not seen is never created: no gross, no booking review, no handle.
+      if (!booking?.effective) {
+        return ok(values.gross === null ? { ...result, holds: [{ code: "required_field_missing", field: "gross" }] } : result);
+      }
       const card = cardOutcome.card;
 
       const scope = this.runtimeSafetyContext.getActiveScope();
@@ -685,7 +727,7 @@ class ReadingDocumentOperations {
           ...(input.booking?.journalDate !== undefined ? { journalDate: input.booking.journalDate } : {}),
           ...(input.booking?.termDays !== undefined ? { termDays: input.booking.termDays } : {}),
         },
-        booking: booking?.effective?.fingerprint ?? null,
+        booking: booking.effective.fingerprint,
         heuristic_keys: heuristicKeys,
         vat_zero_note_proven: check.vat_zero_note_proven,
         reverse_charge_note_present: check.reverse_charge_note_present,
@@ -697,7 +739,7 @@ class ReadingDocumentOperations {
         sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
         liveSnapshot: { source_sha256: packet.source_sha256, packet_digest: packet.packet_digest },
         commands: [
-          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: booking?.effective?.fingerprint ?? { deferred: true } },
+          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: booking.effective.fingerprint },
           { id: "reading-document-upload", category: "purchase_invoice_upload", reviewProjection: { file_name: material.fileName, source_sha256: material.source_sha256 } },
         ],
         counts: { rows: card.rows.length },
@@ -801,6 +843,9 @@ class ReadingDocumentOperations {
         }
         // Every §3.6 scan on the final values with every list cache dropped; journal references fail closed.
         holds.push(...(await readingDuplicateHolds(this.api, final, plan.supplier_client_id, plan.heuristic_keys, { uncached: true })).map(holdOf));
+        if (booking?.effective && bookingDrift(plan.booking, booking.effective.fingerprint, answered.correctedFields)) {
+          holds.push({ code: "reading_booking_drift" });
+        }
         if (holds.length > 0 || !booking?.effective) return ok<CreateReadingResult>({ status: "held", holds });
 
         const { invoiceData } = booking.effective;
@@ -847,14 +892,21 @@ class ReadingDocumentOperations {
             invoice_date: invoiceData.create_date,
             total_gross: booking.grossPrice,
             file_name: material.fileName,
+            client_name: input.clientName ?? null,
           },
         });
 
         // §5.5: the confirm handle binds the draft as read back fresh, not as requested.
         let confirmPlan: { planHandle: string; invoiceId: number } | undefined;
+        let readbackMismatch: string[] | undefined;
         try {
           this.api.purchaseInvoices.invalidateListCache();
           const draft = await this.api.purchaseInvoices.get(created.id);
+          const mismatches = draftReadbackMismatches(draft, invoiceData, booking);
+          if (mismatches.length > 0) {
+            readbackMismatch = mismatches;
+            throw new Error("draft_readback_mismatch");
+          }
           const planHandle = this.runtimeSafetyContext.planStore.issue(READING_CONFIRM_DOMAIN, {
             normalizedArgs: {
               invoice_id: created.id,
@@ -882,6 +934,7 @@ class ReadingDocumentOperations {
           documentUploaded: true,
           correctedFields: answered.correctedFields,
           ...(confirmPlan ? { confirmPlan } : {}),
+          ...(readbackMismatch ? { readbackMismatch } : {}),
         });
       } finally {
         await material.cleanup();
@@ -918,7 +971,7 @@ class ReadingDocumentOperations {
       logAudit({
         tool: "process_accounting_document", action: "CONFIRMED", entity_type: "purchase_invoice", entity_id: input.invoiceId,
         summary: `Confirmed purchase invoice ${input.invoiceId} from a verified reading`,
-        details: { reading_path: true, draft_fingerprint_verified: true },
+        details: { reading_path: true, draft_fingerprint_verified: true, client_name: input.clientName ?? null },
       });
       return ok<ConfirmReadingResult>({
         status: "confirmed",

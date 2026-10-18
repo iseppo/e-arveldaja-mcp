@@ -40,7 +40,7 @@ const codesOf = (disposition: string) => ALL_CARD_HOLD_CODES.filter((code) => DI
 
 describe("DISPOSITION", () => {
   it("covers every checker hold code and the reading path's own codes, and nothing else", () => {
-    expect(new Set(Object.keys(DISPOSITION))).toEqual(new Set([...Object.keys(HOLD_CODES), "buyer_attestation_mismatch", "reading_create_indeterminate"]));
+    expect(new Set(Object.keys(DISPOSITION))).toEqual(new Set([...Object.keys(HOLD_CODES), "buyer_attestation_mismatch", "reading_create_indeterminate", "reading_booking_drift"]));
   });
 
   it("pins the released codes (§5.4); every other code blocks", () => {

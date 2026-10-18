@@ -251,6 +251,19 @@ function renderReadingValues(values: Record<string, unknown>): Record<string, un
 
 const wrapText = (value: unknown) => (typeof value === "string" ? wrapUntrustedOcr(value) : value);
 
+// booking_review keys whose strings are server-made codes, dates or digests; every other string in it (supplier
+// name, file name, item titles from the supplier's history, number, notes, bank account) is external text, wrapped.
+const BOOKING_REVIEW_SAFE_KEYS: ReadonlySet<string> = new Set(["currency", "invoice_date", "journal_date", "source_sha256", "vat_rate_dropdown", "commands"]);
+function wrapBookingReview(value: unknown, key?: string): unknown {
+  if (key !== undefined && BOOKING_REVIEW_SAFE_KEYS.has(key)) return value;
+  if (typeof value === "string") return wrapUntrustedOcr(value);
+  if (Array.isArray(value)) return value.map((entry) => wrapBookingReview(entry));
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([entryKey, entry]) => [entryKey, wrapBookingReview(entry, entryKey)]));
+  }
+  return value;
+}
+
 // Card lines, printed tokens and reading strings are document text: every one is wrapped here.
 function renderCard(card: ReadingCard) {
   return {
@@ -287,7 +300,7 @@ function renderVerify(result: VerifyDocumentResult) {
     holds: result.holds,
     ...(result.values ? { values: renderReadingValues(result.values as unknown as Record<string, unknown>) } : {}),
     ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
-    ...(result.booking ? { booking_review: result.booking } : {}),
+    ...(result.booking ? { booking_review: wrapBookingReview(result.booking) } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),
@@ -301,6 +314,12 @@ function renderVerify(result: VerifyDocumentResult) {
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
     mutation_occurred: false,
   };
+}
+
+/** The connected MCP client's name (clientInfo.name) for the reading-path audit (§5.6), when the server knows it. */
+function clientNameOf(server: McpServer): { clientName?: string } {
+  const name = (server as { server?: { getClientVersion?: () => { name?: string } | undefined } }).server?.getClientVersion?.()?.name;
+  return typeof name === "string" ? { clientName: name } : {};
 }
 
 export function registerProcessAccountingDocumentTool(
@@ -371,7 +390,7 @@ export function registerProcessAccountingDocumentTool(
         if (args.invoice_id === undefined) {
           return textResult({ error: "Missing required fields for mode='confirm': invoice_id", category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
         }
-        const outcome = await readingOperations.confirm({ planHandle: args.plan_handle!, invoiceId: args.invoice_id });
+        const outcome = await readingOperations.confirm({ planHandle: args.plan_handle!, invoiceId: args.invoice_id, ...clientNameOf(server) });
         if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
         if (outcome.value.status === "held") {
           return textResult({ status: "held", category: "reading_confirm_held", holds: outcome.value.holds, next_step: "The draft is not registered: review it and the holds in e-arveldaja.", mutation_occurred: false }, true);
@@ -465,7 +484,7 @@ export function registerProcessAccountingDocumentTool(
         if (refused.length > 0) {
           return textResult({ error: `mode='create' on a verified reading takes only the file, plan_handle and owner_answers; refused: ${refused.join(", ")}`, category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
         }
-        const outcome = await readingOperations.create({ source, snapshot, planHandle: args.plan_handle!, ownerAnswers: args.owner_answers });
+        const outcome = await readingOperations.create({ source, snapshot, planHandle: args.plan_handle!, ownerAnswers: args.owner_answers, ...clientNameOf(server) });
         if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
         if (outcome.value.status === "held") {
           return textResult({
@@ -478,7 +497,10 @@ export function registerProcessAccountingDocumentTool(
         return textResult({
           result: { created_invoice_id: created.createdInvoiceId, document_uploaded: created.documentUploaded, status: "PROJECT" },
           corrected_fields: created.correctedFields,
-          note: created.confirmPlan
+          ...(created.readbackMismatch ? { draft_readback_mismatch: created.readbackMismatch } : {}),
+          note: created.readbackMismatch
+            ? "Purchase invoice created as DRAFT, but the draft read back differs from the approved booking in the fields listed in draft_readback_mismatch, so no confirm handle was issued: review the draft in e-arveldaja."
+            : created.confirmPlan
             ? "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. When the owner's approval covers confirmation, call mode='confirm' with confirm_plan; confirm registers only if the draft is unchanged."
             : "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. The draft could not be read back, so no confirm handle was issued: review and confirm it in e-arveldaja.",
           ...(created.confirmPlan ? { confirm_plan: { plan_handle: created.confirmPlan.planHandle, invoice_id: created.confirmPlan.invoiceId } } : {}),
