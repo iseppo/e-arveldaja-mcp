@@ -263,6 +263,15 @@ function envFlagEnabled(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+/**
+ * P2 D: the verified-draft document-reading modes (`read` / `verify`) on
+ * process_accounting_document. Not a tool-exposure flag: it adds no tool, so the
+ * profile stays what it is (guided stays 19 tools). Off by default.
+ */
+export function documentReadingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return envFlagEnabled(env.EARVELDAJA_DOCUMENT_READING);
+}
+
 /** Resolve the tool-exposure policy from environment variables. */
 export function getToolExposureConfig(env: NodeJS.ProcessEnv = process.env): ToolExposureConfig {
   return {

@@ -84,12 +84,12 @@ export const ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN = "accounting_document_confirm";
 // Extraction signals that withhold the create plan: the document is addressed
 // to another company (or to this one AND another), or to a company that cannot
 // be verified as this one.
-const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous", "buyer_ownership_unverified"] as const;
+export const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous", "buyer_ownership_unverified"] as const;
 
 const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 
-interface MaterializedSnapshot {
+export interface MaterializedSnapshot {
   readonly path: string;
   readonly fileName: string;
   readonly contentsBase64: string;
@@ -103,7 +103,7 @@ interface MaterializedSnapshot {
 // the snapshot's own digest, so a swapped file cannot slip past prepare→create.
 // `fileName` (the upload name) is the source's sanitized basename when a local
 // path or file_ref names it, else `document<ext>` (inline base64).
-async function materializeSnapshot(
+export async function materializeSnapshot(
   snapshot: FileInputSnapshot,
   source: FileInputSource,
   runtimeSafetyContext: RuntimeSafetyContext,
@@ -142,7 +142,7 @@ async function materializeSnapshot(
   };
 }
 
-async function loadSnapshot(
+export async function loadSnapshot(
   source: FileInputSource,
   runtimeSafetyContext: RuntimeSafetyContext,
   provided?: FileInputSnapshot,
@@ -159,7 +159,7 @@ async function loadSnapshot(
 /** The canonical effective write model shared by prepare (bind) and create
  * (recompute + compare). Everything here is post-desandbox, post-default,
  * post-validation — the ACTUAL write model, never the raw caller payload. */
-interface EffectiveBookingModel {
+export interface EffectiveBookingModel {
   readonly fingerprint: PlanRecord;
   readonly invoiceData: CreatePurchaseInvoiceData;
   readonly isVatReg: boolean;
@@ -170,137 +170,166 @@ interface EffectiveBookingModel {
   readonly grossAmountEur?: number;
 }
 
+// P0-1: compute the canonical effective booking model. Called IDENTICALLY at
+// prepare (to bind the fingerprint into the plan) and at create (to recompute
+// fresh and drift-compare) so the plan proves the exact effect the operator
+// reviewed: supplier canonical name is read from the server, items go through
+// parse → desandbox → VAT defaults → dimension validation, and every default
+// (currency, liability account, block_on_duplicate) is applied BEFORE the
+// fingerprint — an omitted default and its explicit value never drift apart.
+export async function computeEffectiveBooking(
+  api: ApiContext,
+  booking: AccountingDocumentBookingFields,
+  sourceSha256: string,
+  fileName: string,
+): Promise<OperationOutcome<EffectiveBookingModel>> {
+  const supplier = await api.clients.get(booking.supplierClientId);
+  const supplierName = desandboxText(supplier.name);
+  const isVatReg = await isCompanyVatRegistered(api);
+  const purchaseArticles = await getPurchaseArticlesWithVat(api);
+  const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(booking.items));
+  // Same guard as create_purchase_invoice and create_purchase_invoice_from_pdf:
+  // a non-VAT company must not book deductible VAT fields
+  // (applyPurchaseVatDefaults would silently strip them).
+  if (!isVatReg) {
+    const details = collectNonVatItemErrors(rawItems);
+    if (details.length > 0) {
+      return fail(
+        "manual_review_required",
+        `Non-VAT purchase invoice contains deductible VAT fields: ${details.join("; ")}. ` +
+          "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
+        "never",
+      );
+    }
+  }
+  const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(api, purchaseArticles, rawItems, isVatReg);
+  if (dimErrors.length > 0) {
+    return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
+  }
+
+  const currencyCode = (booking.currency ?? "EUR").toUpperCase();
+  if (currencyCode !== "EUR" && (booking.currencyRate === undefined || booking.currencyRate === null)) {
+    return fail("currency_rate_required", `currency_rate is required when currency="${currencyCode}".`, "never");
+  }
+
+  // Write-boundary canonicalization of every free-text field (matches the
+  // former inline create logic): only defined strings are desandboxed.
+  const invoiceNumber = desandboxText(booking.invoiceNumber);
+  const refNumber = booking.refNumber === undefined ? undefined : desandboxText(booking.refNumber);
+  const bankAccountNo = booking.bankAccountNo === undefined ? undefined : desandboxText(booking.bankAccountNo);
+  const notes = booking.notes === undefined ? undefined : desandboxText(booking.notes);
+  const liabilityAccountsId = booking.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT;
+  const blockOnDuplicate = booking.blockOnDuplicate === true;
+  const allowDuplicateInvoiceNumber = booking.allowDuplicateInvoiceNumber === true;
+  // The actual settled EUR gross when known, else the nominal gross only for
+  // an EUR-native invoice — never a guessed conversion.
+  const grossAmountEur = booking.baseGrossPrice ?? (currencyCode === "EUR" ? booking.grossPrice : undefined);
+
+  const invoiceData: CreatePurchaseInvoiceData = {
+    clients_id: booking.supplierClientId,
+    client_name: supplierName,
+    number: invoiceNumber,
+    create_date: booking.invoiceDate,
+    journal_date: booking.journalDate,
+    term_days: booking.termDays,
+    cl_currencies_id: currencyCode,
+    currency_rate: booking.currencyRate,
+    base_net_price: booking.baseNetPrice,
+    base_vat_price: booking.baseVatPrice,
+    base_gross_price: booking.baseGrossPrice,
+    liability_accounts_id: liabilityAccountsId,
+    bank_ref_number: refNumber,
+    bank_account_no: bankAccountNo,
+    notes: tagNotes(notes),
+    items,
+  };
+
+  // createAndSetTotals' own totals rules, on predicted item amounts, before
+  // the fingerprint: prepare refuses, and so does a create whose stored plan
+  // predates this check (create recomputes this model before any write).
+  const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg);
+  if (!totalsPreview.ok) return fail(totalsPreview.code, totalsPreview.message, "never");
+
+  // Every material write value is bound: source identity, supplier id +
+  // canonical name, number, dates, term, EFFECTIVE items (accounts,
+  // dimensions, VAT config), exact totals, currency/rate/base amounts,
+  // liability account, reference/bank/notes, duplicate policy, and the
+  // create + upload command pair. stripUndefinedDeep sorts keys and drops
+  // undefined so the JSON form is stable for canonicalPlanJson comparison.
+  const fingerprint = stripUndefinedDeep({
+    source_sha256: sourceSha256,
+    file_name: fileName,
+    supplier_client_id: booking.supplierClientId,
+    supplier_name: supplierName,
+    invoice_number: invoiceNumber,
+    invoice_date: booking.invoiceDate,
+    journal_date: booking.journalDate,
+    term_days: booking.termDays,
+    items,
+    vat_price: booking.vatPrice,
+    gross_price: booking.grossPrice,
+    currency: currencyCode,
+    currency_rate: booking.currencyRate,
+    base_net_price: booking.baseNetPrice,
+    base_vat_price: booking.baseVatPrice,
+    base_gross_price: booking.baseGrossPrice,
+    liability_accounts_id: liabilityAccountsId,
+    ref_number: refNumber,
+    bank_account_no: bankAccountNo,
+    notes,
+    block_on_duplicate: blockOnDuplicate,
+    allow_duplicate_invoice_number: allowDuplicateInvoiceNumber,
+    // Explicit bind: isVatReg already shapes the effective items/totals, but
+    // binding it directly keeps it covered even if a future refactor stops
+    // feeding it into the item defaults.
+    vat_registered: isVatReg,
+    commands: ["purchase_invoice_create", "purchase_invoice_upload_document"],
+  }) as PlanRecord;
+
+  return ok({
+    fingerprint,
+    invoiceData,
+    isVatReg,
+    supplierName,
+    currencyCode,
+    blockOnDuplicate,
+    allowDuplicateInvoiceNumber,
+    ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
+  });
+}
+
+/** The wrong-company signal the document raises for the active company, if any. */
+export async function wrongCompanySignal(api: ApiContext, path: string, fileName: string): Promise<typeof WRONG_COMPANY_SIGNALS[number] | undefined> {
+  const parsedDocument = await parseDocument(path);
+  const allClients = await api.clients.listAll().catch(() => []);
+  let own: Awaited<ReturnType<typeof resolveOwnCompanyIdentifiers>> | undefined;
+  try {
+    own = await resolveOwnCompanyIdentifiers(api, allClients);
+  } catch {
+    // Offline / unconfigured — nothing known to compare the buyer against.
+  }
+  const extracted = extractReceiptFieldsFromText(parsedDocument.text, fileName, {
+    textItems: textItemsWithPageNums(parsedDocument.result?.pages),
+    ownCompanyVat: own?.ownCompanyVat,
+    ownCompanyRegistryCode: own?.ownCompanyRegistryCode,
+    ownIbans: own?.ownIbans,
+    ownCompanyName: own?.ownCompanyName,
+  });
+  return WRONG_COMPANY_SIGNALS.find(signal => extracted[signal] === true);
+}
+
 class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
   constructor(
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
   ) {}
 
-  // P0-1: compute the canonical effective booking model. Called IDENTICALLY at
-  // prepare (to bind the fingerprint into the plan) and at create (to recompute
-  // fresh and drift-compare) so the plan proves the exact effect the operator
-  // reviewed: supplier canonical name is read from the server, items go through
-  // parse → desandbox → VAT defaults → dimension validation, and every default
-  // (currency, liability account, block_on_duplicate) is applied BEFORE the
-  // fingerprint — an omitted default and its explicit value never drift apart.
-  private async computeEffectiveBooking(
+  private computeEffectiveBooking(
     booking: AccountingDocumentBookingFields,
     sourceSha256: string,
     fileName: string,
   ): Promise<OperationOutcome<EffectiveBookingModel>> {
-    const supplier = await this.api.clients.get(booking.supplierClientId);
-    const supplierName = desandboxText(supplier.name);
-    const isVatReg = await isCompanyVatRegistered(this.api);
-    const purchaseArticles = await getPurchaseArticlesWithVat(this.api);
-    const rawItems = desandboxAllStrings(parsePurchaseInvoiceItems(booking.items));
-    // Same guard as create_purchase_invoice and create_purchase_invoice_from_pdf:
-    // a non-VAT company must not book deductible VAT fields
-    // (applyPurchaseVatDefaults would silently strip them).
-    if (!isVatReg) {
-      const details = collectNonVatItemErrors(rawItems);
-      if (details.length > 0) {
-        return fail(
-          "manual_review_required",
-          `Non-VAT purchase invoice contains deductible VAT fields: ${details.join("; ")}. ` +
-            "Remove deductible VAT fields or use article 11 and rate \"-\", then review and retry.",
-          "never",
-        );
-      }
-    }
-    const { items, dimErrors } = await applyPurchaseVatDefaultsAndValidateDimensions(this.api, purchaseArticles, rawItems, isVatReg);
-    if (dimErrors.length > 0) {
-      return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`, "never");
-    }
-
-    const currencyCode = (booking.currency ?? "EUR").toUpperCase();
-    if (currencyCode !== "EUR" && (booking.currencyRate === undefined || booking.currencyRate === null)) {
-      return fail("currency_rate_required", `currency_rate is required when currency="${currencyCode}".`, "never");
-    }
-
-    // Write-boundary canonicalization of every free-text field (matches the
-    // former inline create logic): only defined strings are desandboxed.
-    const invoiceNumber = desandboxText(booking.invoiceNumber);
-    const refNumber = booking.refNumber === undefined ? undefined : desandboxText(booking.refNumber);
-    const bankAccountNo = booking.bankAccountNo === undefined ? undefined : desandboxText(booking.bankAccountNo);
-    const notes = booking.notes === undefined ? undefined : desandboxText(booking.notes);
-    const liabilityAccountsId = booking.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT;
-    const blockOnDuplicate = booking.blockOnDuplicate === true;
-    const allowDuplicateInvoiceNumber = booking.allowDuplicateInvoiceNumber === true;
-    // The actual settled EUR gross when known, else the nominal gross only for
-    // an EUR-native invoice — never a guessed conversion.
-    const grossAmountEur = booking.baseGrossPrice ?? (currencyCode === "EUR" ? booking.grossPrice : undefined);
-
-    const invoiceData: CreatePurchaseInvoiceData = {
-      clients_id: booking.supplierClientId,
-      client_name: supplierName,
-      number: invoiceNumber,
-      create_date: booking.invoiceDate,
-      journal_date: booking.journalDate,
-      term_days: booking.termDays,
-      cl_currencies_id: currencyCode,
-      currency_rate: booking.currencyRate,
-      base_net_price: booking.baseNetPrice,
-      base_vat_price: booking.baseVatPrice,
-      base_gross_price: booking.baseGrossPrice,
-      liability_accounts_id: liabilityAccountsId,
-      bank_ref_number: refNumber,
-      bank_account_no: bankAccountNo,
-      notes: tagNotes(notes),
-      items,
-    };
-
-    // createAndSetTotals' own totals rules, on predicted item amounts, before
-    // the fingerprint: prepare refuses, and so does a create whose stored plan
-    // predates this check (create recomputes this model before any write).
-    const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, booking.vatPrice, booking.grossPrice, isVatReg);
-    if (!totalsPreview.ok) return fail(totalsPreview.code, totalsPreview.message, "never");
-
-    // Every material write value is bound: source identity, supplier id +
-    // canonical name, number, dates, term, EFFECTIVE items (accounts,
-    // dimensions, VAT config), exact totals, currency/rate/base amounts,
-    // liability account, reference/bank/notes, duplicate policy, and the
-    // create + upload command pair. stripUndefinedDeep sorts keys and drops
-    // undefined so the JSON form is stable for canonicalPlanJson comparison.
-    const fingerprint = stripUndefinedDeep({
-      source_sha256: sourceSha256,
-      file_name: fileName,
-      supplier_client_id: booking.supplierClientId,
-      supplier_name: supplierName,
-      invoice_number: invoiceNumber,
-      invoice_date: booking.invoiceDate,
-      journal_date: booking.journalDate,
-      term_days: booking.termDays,
-      items,
-      vat_price: booking.vatPrice,
-      gross_price: booking.grossPrice,
-      currency: currencyCode,
-      currency_rate: booking.currencyRate,
-      base_net_price: booking.baseNetPrice,
-      base_vat_price: booking.baseVatPrice,
-      base_gross_price: booking.baseGrossPrice,
-      liability_accounts_id: liabilityAccountsId,
-      ref_number: refNumber,
-      bank_account_no: bankAccountNo,
-      notes,
-      block_on_duplicate: blockOnDuplicate,
-      allow_duplicate_invoice_number: allowDuplicateInvoiceNumber,
-      // Explicit bind: isVatReg already shapes the effective items/totals, but
-      // binding it directly keeps it covered even if a future refactor stops
-      // feeding it into the item defaults.
-      vat_registered: isVatReg,
-      commands: ["purchase_invoice_create", "purchase_invoice_upload_document"],
-    }) as PlanRecord;
-
-    return ok({
-      fingerprint,
-      invoiceData,
-      isVatReg,
-      supplierName,
-      currencyCode,
-      blockOnDuplicate,
-      allowDuplicateInvoiceNumber,
-      ...(grossAmountEur !== undefined ? { grossAmountEur } : {}),
-    });
+    return computeEffectiveBooking(this.api, booking, sourceSha256, fileName);
   }
 
   async prepare(input: PrepareAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentPreview>> {
@@ -608,23 +637,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
   }
 
   /** The wrong-company signal the document raises for the active company, if any. */
-  private async wrongCompanySignal(path: string, fileName: string): Promise<typeof WRONG_COMPANY_SIGNALS[number] | undefined> {
-    const parsedDocument = await parseDocument(path);
-    const allClients = await this.api.clients.listAll().catch(() => []);
-    let own: Awaited<ReturnType<typeof resolveOwnCompanyIdentifiers>> | undefined;
-    try {
-      own = await resolveOwnCompanyIdentifiers(this.api, allClients);
-    } catch {
-      // Offline / unconfigured — nothing known to compare the buyer against.
-    }
-    const extracted = extractReceiptFieldsFromText(parsedDocument.text, fileName, {
-      textItems: textItemsWithPageNums(parsedDocument.result?.pages),
-      ownCompanyVat: own?.ownCompanyVat,
-      ownCompanyRegistryCode: own?.ownCompanyRegistryCode,
-      ownIbans: own?.ownIbans,
-      ownCompanyName: own?.ownCompanyName,
-    });
-    return WRONG_COMPANY_SIGNALS.find(signal => extracted[signal] === true);
+  private wrongCompanySignal(path: string, fileName: string): Promise<typeof WRONG_COMPANY_SIGNALS[number] | undefined> {
+    return wrongCompanySignal(this.api, path, fileName);
   }
 
   async create(input: ExecuteAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentExecution>> {

@@ -22,6 +22,10 @@ import type { AccountingDocumentPreview } from "../documents/types.js";
 import type { Resolution } from "../resolution/types.js";
 import type { SupplierRef } from "../resolution/supplier-default-resolution.js";
 import type { Elicitor } from "../elicitation.js";
+import { documentReadingEnabled } from "../config.js";
+import { jsonObjectInput } from "../tools/crud/shared.js";
+import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../document-reading-check.js";
+import { createReadingDocumentOperations, type VerifyDocumentResult } from "../documents/reading-operations.js";
 
 // GUIDED FAÇADE. `process_accounting_document` unifies the single-document
 // purchase-invoice booking flow (extract → validate → resolve supplier → check
@@ -187,7 +191,9 @@ function renderPreview(preview: AccountingDocumentPreview) {
 }
 
 interface DocArgs {
-  mode?: "prepare" | "create" | "confirm";
+  mode?: "prepare" | "create" | "confirm" | "read" | "verify";
+  document_reading?: unknown;
+  proof?: unknown;
   file_ref?: string;
   file_path?: string;
   plan_handle?: string;
@@ -217,6 +223,44 @@ interface DocArgs {
 export interface ProcessAccountingDocumentDeps {
   /** Capability-aware elicitor. Absent (tests) ⇒ text needs_input only. */
   elicit?: Elicitor;
+  /** P2 D: the verified-draft reading modes; default EARVELDAJA_DOCUMENT_READING. */
+  documentReading?: boolean;
+}
+
+const LEGACY_DESCRIPTION = "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.";
+
+const READING_DESCRIPTION = " Verified reading (you read the document yourself): (a) mode='read' with the file → the text packet, reading instructions and proof questions; (b) mode='verify' with the file, document_reading and proof → the server checks every value against the printed text and returns a review card and, when nothing blocks, the create plan_handle.";
+
+// Booking arguments the reading path never takes: the reading supplies the values,
+// and currency conversions are refused (EUR documents only).
+const READING_REFUSED_ARGS = [
+  "supplier_client_id", "invoice_number", "invoice_date", "vat_price", "gross_price", "currency", "currency_rate",
+  "base_net_price", "base_vat_price", "base_gross_price", "bank_account_no", "ref_number", "notes", "allow_duplicate_invoice_number",
+] as const;
+
+// Reading values come from a client reading of untrusted document text: every string is wrapped at this boundary.
+function renderReadingValues(values: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, typeof value === "string" && key !== "doc_type" && key !== "currency" && !key.endsWith("_date") ? wrapUntrustedOcr(value) : value]));
+}
+
+function renderVerify(result: VerifyDocumentResult) {
+  return {
+    status: result.status,
+    source_sha256: result.sourceSha256,
+    packet_digest: result.packetDigest,
+    holds: result.holds,
+    ...(result.values ? { values: renderReadingValues(result.values as unknown as Record<string, unknown>) } : {}),
+    ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
+    ...(result.booking ? { booking_review: result.booking } : {}),
+    ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
+    ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
+    next_step: result.status === "ready"
+      ? "Show the values, supplier and booking_review to the operator. After explicit approval, call mode='create' with this plan_handle and the same file."
+      : result.bookingItemsRequired
+        ? "The server has no booking history to suggest the expense account: call mode='verify' again with items (accounts, dimensions, VAT settings)."
+        : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
+    mutation_occurred: false,
+  };
 }
 
 export function registerProcessAccountingDocumentTool(
@@ -228,12 +272,20 @@ export function registerProcessAccountingDocumentTool(
   assertRuntimeSafetyContext(runtimeSafetyContext);
   const { elicit } = deps;
   const operations = createAccountingDocumentOperations(api, runtimeSafetyContext);
+  const reading = deps.documentReading ?? documentReadingEnabled();
+  const readingOperations = reading ? createReadingDocumentOperations(api, runtimeSafetyContext) : undefined;
+  const readingShape: Record<string, z.ZodTypeAny> = reading
+    ? {
+        document_reading: jsonObjectInput.optional().describe("mode='verify': the document_reading JSON object from your reading of the mode='read' packet."),
+        proof: jsonObjectInput.optional().describe("mode='verify': the proof JSON object answering the proof questions for your reading."),
+      }
+    : {};
 
   registerTool(server,
     "process_accounting_document",
-    "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.",
+    reading ? LEGACY_DESCRIPTION + READING_DESCRIPTION : LEGACY_DESCRIPTION,
     {
-      mode: z.enum(["prepare", "create", "confirm"]).optional().describe("Workflow phase. Defaults to prepare (preview)."),
+      mode: (reading ? z.enum(["prepare", "create", "confirm", "read", "verify"]) : z.enum(["prepare", "create", "confirm"])).optional().describe("Workflow phase. Defaults to prepare (preview)."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox receipt_input file reference. Provide exactly one of file_ref or file_path."),
       file_path: z.string().optional().describe("Advanced: absolute path / base64 input to the invoice document. Provide exactly one of file_ref or file_path."),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed booking-binding mode='prepare' (the prepare that included the final booking fields). REQUIRED for mode='create': the handle binds the full canonical write model — consume-once, scope-bound, and drift-checked field by field at create. (For mode='confirm', pass the confirm_plan handle returned by create.)"),
@@ -258,6 +310,7 @@ export function registerProcessAccountingDocumentTool(
       base_gross_price: z.number().optional().describe("mode='create': actual settled EUR gross total."),
       block_on_duplicate: z.boolean().optional().describe("mode='create': refuse creation when the cash outflow looks like an already-booked duplicate (default false: warn only)."),
       allow_duplicate_invoice_number: z.boolean().optional().describe("Booking-binding prepare + mode='create': explicit acknowledgement that the supplier reuses this invoice number (e.g. across years) — an existing live invoice with the same supplier and number becomes a warning instead of a blocker (default false). Bound into the plan; pass the SAME value at create."),
+      ...readingShape,
     },
     { ...createAnnotation, ...batch, openWorldHint: true, title: "Process Accounting Document" },
     async (args: DocArgs) => {
@@ -341,6 +394,56 @@ export function registerProcessAccountingDocumentTool(
           return textResult({ error: error.message, category: error.code, retry: fileInputSnapshotRetry(error.code), mutation_occurred: false }, true);
         }
         throw error;
+      }
+
+      if (readingOperations && (mode === "read" || mode === "verify")) {
+        if (mode === "read") {
+          const outcome = await readingOperations.read({ source, snapshot });
+          if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
+          const result = outcome.value;
+          if (result.packetText === undefined) {
+            return textResult({
+              status: "blocked",
+              source_sha256: result.sourceSha256,
+              packet_holds: result.packetHolds,
+              next_step: "This document cannot be read on the verified path (see packet_holds). Book it with mode='prepare' instead.",
+              mutation_occurred: false,
+            });
+          }
+          return textResult({
+            status: "ready_to_read",
+            source_sha256: result.sourceSha256,
+            packet_digest: result.packetDigest,
+            packet_holds: result.packetHolds,
+            packet: wrapUntrustedOcr(result.packetText),
+            reading_instructions: `${READING_INSTRUCTIONS}\n${JSON_OUTPUT_FORMAT}`,
+            proof_questions: `${PROOF_QUESTIONS}\n${JSON_OUTPUT_FORMAT}`,
+            next_step: "Read the packet and return document_reading, then answer the proof questions and return proof; call mode='verify' with the same file and both objects.",
+            mutation_occurred: false,
+          });
+        }
+        const refused = READING_REFUSED_ARGS.filter(key => args[key] !== undefined);
+        const missing = [args.document_reading === undefined ? "document_reading" : undefined, args.proof === undefined ? "proof" : undefined].filter((key): key is string => key !== undefined);
+        if (refused.length > 0) {
+          return textResult({ error: `mode='verify' takes its values from document_reading; refused: ${refused.join(", ")}`, category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
+        }
+        if (missing.length > 0) {
+          return textResult({ error: `Missing required fields for mode='verify': ${missing.join(", ")}`, category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
+        }
+        const outcome = await readingOperations.verify({
+          source,
+          snapshot,
+          reading: args.document_reading,
+          proof: args.proof,
+          booking: {
+            ...(args.items !== undefined ? { items: args.items } : {}),
+            ...(args.liability_accounts_id !== undefined ? { liabilityAccountsId: args.liability_accounts_id } : {}),
+            ...(args.journal_date !== undefined ? { journalDate: args.journal_date } : {}),
+            ...(args.term_days !== undefined ? { termDays: args.term_days } : {}),
+          },
+        });
+        if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
+        return textResult(renderVerify(outcome.value));
       }
 
       if (mode === "prepare") {
