@@ -138,3 +138,61 @@ describe("process_accounting_document reading modes: read and verify", () => {
     expect(body.card.answer_format).toContain("owner_answers");
   });
 });
+
+describe("process_accounting_document reading modes: create and confirm", () => {
+  function setupWrites() {
+    let draft: Record<string, unknown> | undefined;
+    const createAndSetTotals = vi.fn(async (data: Record<string, unknown>, vat?: number, gross?: number) => {
+      draft = { ...data, id: 900, status: "PROJECT", vat_price: vat, gross_price: gross };
+      return { id: 900 };
+    });
+    const setup = setupReading(true, { createAndSetTotals });
+    const get = setup.api.purchaseInvoices.get.getMockImplementation()!;
+    setup.api.purchaseInvoices.get.mockImplementation(async (id: number) => (id === 900 && draft ? { ...draft } : get(id)));
+    const confirm = vi.fn().mockResolvedValue({});
+    (setup.api.purchaseInvoices as Record<string, unknown>).confirm = confirm;
+    return { ...setup, confirm };
+  }
+
+  it("verify → create → confirm on the reading domain: one draft, then one register", async () => {
+    const { handler, createAndSetTotals, confirm } = setupWrites();
+    const file = writePdf();
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const verify = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    const created = parse(await handler({ mode: "create", file_path: file.path, plan_handle: verify.plan_handle, owner_answers: {} }));
+    expect(created.result).toEqual({ created_invoice_id: 900, document_uploaded: true, status: "PROJECT" });
+    expect(created.mutation_occurred).toBe(true);
+    expect(createAndSetTotals).toHaveBeenCalledTimes(1);
+    const confirmed = parse(await handler({ mode: "confirm", plan_handle: created.confirm_plan.plan_handle, invoice_id: 900 }));
+    expect(confirmed.result).toMatchObject({ confirmed_invoice_id: 900, status: "CONFIRMED", total_gross: 124, currency: "EUR" });
+    expect(confirmed.result.supplier_name).toMatch(/^<<UNTRUSTED_OCR_START:/);
+    expect(confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("create on a reading handle refuses booking arguments, 0 writes", async () => {
+    const { handler, createAndSetTotals } = setupWrites();
+    const file = writePdf();
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const verify = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    for (const extra of [{ items: [] }, { gross_price: 124 }, { supplier_client_id: 4242 }]) {
+      const result = await handler({ mode: "create", file_path: file.path, plan_handle: verify.plan_handle, owner_answers: {}, ...extra });
+      expect(parse(result).category).toBe("reading_args_refused");
+    }
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a held create is an error result naming only codes, 0 writes", async () => {
+    const { handler, createAndSetTotals } = setupWrites();
+    const file = writePdf();
+    const { reading, proof } = readingFor(packetFor(file.sha256), { evidence: { gross: { line: "p1:007", quote: "Kokku 124,00" } } });
+    const verify = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    const result = await handler({ mode: "create", file_path: file.path, plan_handle: verify.plan_handle, owner_answers: { "r:gross": { value: 125 } } });
+    expect(result.isError).toBe(true);
+    const body = parse(result);
+    expect(body.category).toBe("reading_create_held");
+    expect(body.holds.map((hold: { code: string }) => hold.code)).toContain("arithmetic_mismatch");
+    expect(JSON.stringify(body.holds)).not.toContain("125");
+    expect(createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
+

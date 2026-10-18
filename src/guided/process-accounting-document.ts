@@ -195,6 +195,8 @@ interface DocArgs {
   mode?: "prepare" | "create" | "confirm" | "read" | "verify";
   document_reading?: unknown;
   proof?: unknown;
+  owner_answers?: unknown;
+  release_indeterminate?: string;
   file_ref?: string;
   file_path?: string;
   plan_handle?: string;
@@ -238,6 +240,9 @@ const READING_REFUSED_ARGS = [
   "supplier_client_id", "invoice_number", "invoice_date", "vat_price", "gross_price", "currency", "currency_rate",
   "base_net_price", "base_vat_price", "base_gross_price", "bank_account_no", "ref_number", "notes", "allow_duplicate_invoice_number",
 ] as const;
+
+// mode='create' on a verified reading: the booking was bound at verify; a booking argument here is refused.
+const READING_CREATE_REFUSED_ARGS = ["items", "journal_date", "term_days", "liability_accounts_id", "block_on_duplicate", "document_reading", "proof", "release_indeterminate"] as const;
 
 // Reading values come from a client reading of untrusted document text: every string is wrapped at this boundary.
 function renderReadingValues(values: Record<string, unknown>): Record<string, unknown> {
@@ -285,10 +290,13 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.booking ? { booking_review: result.booking } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
+    ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
     next_step: result.status === "ready"
       ? "Show the card (look_here rows and every row) and booking_review to the operator and ask each row's question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
-      : result.bookingItemsRequired
+      : result.indeterminateMarker
+        ? "An earlier create of a matching document may still complete. Check e-arveldaja: when the invoice is not there, the owner may release the marker by calling mode='verify' again with release_indeterminate set to indeterminate_marker; when it is there, nothing more is needed."
+        : result.bookingItemsRequired
         ? "The server has no booking history to suggest the expense account: call mode='verify' again with items (accounts, dimensions, VAT settings)."
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
     mutation_occurred: false,
@@ -310,6 +318,8 @@ export function registerProcessAccountingDocumentTool(
     ? {
         document_reading: jsonObjectInput.optional().describe("mode='verify': the document_reading JSON object from your reading of the mode='read' packet."),
         proof: jsonObjectInput.optional().describe("mode='verify': the proof JSON object answering the proof questions for your reading."),
+        owner_answers: jsonObjectInput.optional().describe("mode='create' with a verified-reading plan_handle: the owner's answer to every card row, keyed by row id (an empty object when the card has no rows)."),
+        release_indeterminate: z.string().optional().describe("mode='verify': the owner's explicit release of an indeterminate-create marker (its id), only after checking in e-arveldaja that the earlier create did not book the invoice."),
       }
     : {};
 
@@ -357,6 +367,28 @@ export function registerProcessAccountingDocumentTool(
       // confirm_plan handle minted by mode='create' and registers the DRAFT
       // invoice — it operates purely on the reviewed invoice id and needs NO
       // document, so it routes BEFORE any source capture / snapshot read.
+      if (mode === "confirm" && readingOperations?.ownsHandle(args.plan_handle)) {
+        if (args.invoice_id === undefined) {
+          return textResult({ error: "Missing required fields for mode='confirm': invoice_id", category: "missing_required_fields", retry: "never", mutation_occurred: false }, true);
+        }
+        const outcome = await readingOperations.confirm({ planHandle: args.plan_handle!, invoiceId: args.invoice_id });
+        if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
+        if (outcome.value.status === "held") {
+          return textResult({ status: "held", category: "reading_confirm_held", holds: outcome.value.holds, next_step: "The draft is not registered: review it and the holds in e-arveldaja.", mutation_occurred: false }, true);
+        }
+        return textResult({
+          result: {
+            confirmed_invoice_id: outcome.value.confirmedInvoiceId,
+            status: "CONFIRMED",
+            supplier_name: wrapUntrustedOcr(outcome.value.supplierName),
+            total_gross: outcome.value.gross,
+            currency: outcome.value.currency,
+          },
+          note: "Purchase invoice confirmed (registered) into the ledger: the draft was read back unchanged since create, and the duplicate and journal-reference scans were re-run.",
+          mutation_occurred: true,
+        });
+      }
+
       if (mode === "confirm") {
         const missing: string[] = [];
         if (args.invoice_id === undefined) missing.push("invoice_id");
@@ -428,6 +460,32 @@ export function registerProcessAccountingDocumentTool(
         throw error;
       }
 
+      if (mode === "create" && readingOperations?.ownsHandle(args.plan_handle)) {
+        const refused = [...READING_REFUSED_ARGS, ...READING_CREATE_REFUSED_ARGS].filter(key => args[key] !== undefined);
+        if (refused.length > 0) {
+          return textResult({ error: `mode='create' on a verified reading takes only the file, plan_handle and owner_answers; refused: ${refused.join(", ")}`, category: "reading_args_refused", retry: "never", mutation_occurred: false }, true);
+        }
+        const outcome = await readingOperations.create({ source, snapshot, planHandle: args.plan_handle!, ownerAnswers: args.owner_answers });
+        if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
+        if (outcome.value.status === "held") {
+          return textResult({
+            status: "held", category: "reading_create_held", holds: outcome.value.holds,
+            next_step: "Nothing was created: the final values hold on the codes above. Book the document with mode='prepare' instead, or run mode='verify' again when a hold can change.",
+            mutation_occurred: false,
+          }, true);
+        }
+        const created = outcome.value;
+        return textResult({
+          result: { created_invoice_id: created.createdInvoiceId, document_uploaded: created.documentUploaded, status: "PROJECT" },
+          corrected_fields: created.correctedFields,
+          note: created.confirmPlan
+            ? "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. When the owner's approval covers confirmation, call mode='confirm' with confirm_plan; confirm registers only if the draft is unchanged."
+            : "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. The draft could not be read back, so no confirm handle was issued: review and confirm it in e-arveldaja.",
+          ...(created.confirmPlan ? { confirm_plan: { plan_handle: created.confirmPlan.planHandle, invoice_id: created.confirmPlan.invoiceId } } : {}),
+          mutation_occurred: true,
+        });
+      }
+
       if (readingOperations && (mode === "read" || mode === "verify")) {
         if (mode === "read") {
           const outcome = await readingOperations.read({ source, snapshot });
@@ -467,6 +525,7 @@ export function registerProcessAccountingDocumentTool(
           snapshot,
           reading: args.document_reading,
           proof: args.proof,
+          ...(args.release_indeterminate !== undefined ? { releaseIndeterminate: args.release_indeterminate } : {}),
           booking: {
             ...(args.items !== undefined ? { items: args.items } : {}),
             ...(args.liability_accounts_id !== undefined ? { liabilityAccountsId: args.liability_accounts_id } : {}),

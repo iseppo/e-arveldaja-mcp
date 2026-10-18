@@ -86,8 +86,8 @@ export const ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN = "accounting_document_confirm";
 // be verified as this one.
 export const WRONG_COMPANY_SIGNALS = ["buyer_not_active_company", "buyer_ambiguous", "buyer_ownership_unverified"] as const;
 
-const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
-const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
+export const INVOICE_DOCUMENT_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"] as const;
+export const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export interface MaterializedSnapshot {
   readonly path: string;
