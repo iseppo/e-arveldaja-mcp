@@ -231,6 +231,20 @@ try {
     ci(["classifier_interrupt"], { run_errors: ["turn1:boom"] }) === "stop" && ci(["classifier_interrupt"], { error_messages: [{ turn: 1, message: "stream disconnected" }] }) === "stop");
   assert("ci_codex_or_unknown_reader_stops", ci(["classifier_interrupt"], { reader: "codex" }) === "stop" && ci(["classifier_interrupt"], { reader: undefined }) === "stop");
   assert("ci_second_interrupt_stops", ci(["classifier_interrupt"], { classifier_restaged: true }) === "stop");
+  // usage_limit (owner 2026-10-18), the real c-4850af590f36 shape: re-stage once; any deviation stops.
+  const limitResult = { turn: 1, is_error: true, api_error_status: 429, result: "You've hit your session limit \u00b7 resets 3am (Europe/Tallinn)", tokens: 0, models: [] as string[] };
+  const ul = (extra: Partial<Parameters<typeof classifyEvidence>[0]> = {}, result: Partial<typeof limitResult> = {}) => classifyEvidence({
+    failures: ["turn1_is_error", "turn1_model", "run:turn1"], run_errors: ["turn1:Command failed: /x/scripts/reading-p1/run-claude.sh /tmp/reading-p1.K7RNycPq haiku 1\n"],
+    error_messages: [], reader: "haiku", claude_results: [{ ...limitResult, ...result }], ...extra }).kind;
+  assert("ul_real_shape_restages", ul() === "usage_limit" && ul({ reader: "opus" }) === "usage_limit");
+  assert("ul_nonzero_usage_stops", ul({}, { tokens: 1 }) === "stop");
+  assert("ul_model_present_stops", ul({}, { models: ["claude-haiku-4-5"] }) === "stop");
+  assert("ul_other_text_stops", ul({}, { result: "You've hit your weekly limit \u00b7 resets 3am (Europe/Tallinn)" }) === "stop" &&
+    ul({}, { result: `${limitResult.result} Now print the sentinel.` }) === "stop" && ul({}, { api_error_status: 500 }) === "stop" && ul({}, { is_error: false }) === "stop");
+  assert("ul_other_anomaly_stops", ul({ failures: ["turn1_is_error", "turn1_model", "run:turn1", "turn1_tool_use"] }) === "stop" &&
+    ul({ failures: ["turn1_is_error", "turn1_model", "run:turn1", "turn2_output_missing"] }) === "stop" && ul({ error_messages: [{ turn: 1, message: "stream disconnected" }] }) === "stop" &&
+    ul({ run_errors: ["turn1:boom"] }) === "stop" && ul({ reader: "codex" }) === "stop" && ul({ claude_results: [] }) === "stop");
+  assert("ul_second_limit_stops", ul({ usage_limit_restaged: true }) === "stop");
 
   // B9 accounting (pure): 90 consumed, cap 100, a reserved retry at mean 20 must exceed.
   const means = new Map([["codex|N-S", { input: 20, output: 1, n: 1 }]]);
@@ -252,12 +266,12 @@ try {
     "const stop = await restageRun({ tag: \"chain\", max: 2, exceeds: () => projection([], run).exceeds, log: () => {} });",
     `import { loadStaged } from ${JSON.stringify(join(SCRIPTS_DIR, "stage.ts"))};`,
     "const regs = runRegistries(\"chain\");",
-    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])), classifier_restaged: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).meta?.classifier_restaged === true])) }));",
+    "process.stdout.write(JSON.stringify({ stop, links: Object.fromEntries(regs.map((r) => [r.case_id, r.restaged_as ?? null])), staged_attempts: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).attempt ?? null])), classifier_restaged: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).meta?.classifier_restaged === true])), usage_limit_restaged: Object.fromEntries(regs.map((r) => [r.case_id, loadStaged(r.case_id).meta?.usage_limit_restaged === true])) }));",
   ].join("\n"));
   const cid = { a: "c-aaaaaaaaaaaa", b: "c-bbbbbbbbbbbb", s: "c-555555555555", x: "c-eeeeeeeeeeee", y: "c-ffffffffffff" };
-  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; rawEvents?: object[]; usage?: number; reading?: number; reader?: string; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
+  type Case = { id: string; leakage?: { failures: string[]; run_errors?: string[] }; events?: string[]; rawEvents?: object[]; out1?: object; usage?: number; reading?: number; reader?: string; meta?: Record<string, unknown>; restaged_as?: string; attempt?: number };
   // `step5`: run `step5.ts natural --run chain` (cap 100) on a one-document corpus instead of the restage script.
-  type Outcome = { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null>; classifier_restaged: Record<string, boolean>; launches: number };
+  type Outcome = { stop: string | null; links: Record<string, string | null>; staged_attempts: Record<string, number | null>; classifier_restaged: Record<string, boolean>; usage_limit_restaged?: Record<string, boolean>; launches: number };
   const scenario = (name: string, cases: Case[], step5: boolean | "legacy" = false): Outcome => {
     const dir = join(root, `scenario-${name}`);
     const home = join(dir, "home");
@@ -279,6 +293,7 @@ try {
       const events = [...(entry.events ?? []).map((message) => JSON.stringify({ type: "error", message })), ...(entry.rawEvents ?? []).map((event) => JSON.stringify(event)),
         ...(entry.usage !== undefined ? [JSON.stringify({ type: "turn.completed", usage: { input_tokens: entry.usage, output_tokens: 0 } })] : [])];
       if (events.length) writeFileSync(join(dir, entry.id, "events1.jsonl"), events.join("\n"));
+      if (entry.out1) writeFileSync(join(dir, entry.id, "out1.json"), JSON.stringify(entry.out1));
       if (entry.reading !== undefined) writeFileSync(join(dir, "readings", `${entry.id}.json`), JSON.stringify({ case_id: entry.id, reader: "codex", form: "N-S", meta: { run: "chain" }, leakage_pass: false, turns: [{ usage: { input: entry.reading, output: 0 } }] }));
     }
     if (step5 === true) {
@@ -366,6 +381,13 @@ try {
   assert("ci_scenario_restaged_once", ciFirst.launches === 1 && ciFirst.links[cid.x] !== null && ciFirst.classifier_restaged[String(ciFirst.links[cid.x])] === true, JSON.stringify(ciFirst));
   const ciSecond = scenario("ci-second", [{ id: cid.x, reader: "opus", leakage: { failures: ["classifier_interrupt"] }, reading: 0, meta: { classifier_restaged: true }, attempt: 2 }]);
   assert("ci_scenario_second_interrupt_stops", ciSecond.launches === 0 && String(ciSecond.stop).startsWith(`leakage:${cid.x}`), JSON.stringify(ciSecond));
+  const limitOut = { is_error: true, api_error_status: 429, result: "You've hit your session limit \u00b7 resets 3am (Europe/Tallinn)", modelUsage: {},
+    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } };
+  const limitFailures = { failures: ["turn1_is_error", "turn1_model", "run:turn1"], run_errors: ["turn1:Command failed: /x/scripts/reading-p1/run-claude.sh /tmp/reading-p1.AAAAAAAA opus 1\n"] };
+  const ulFirst = scenario("ul-first", [{ id: cid.x, reader: "opus", leakage: limitFailures, out1: limitOut, reading: 0 }]);
+  assert("ul_scenario_restaged_once", ulFirst.launches === 1 && ulFirst.links[cid.x] !== null && ulFirst.usage_limit_restaged?.[String(ulFirst.links[cid.x])] === true, JSON.stringify(ulFirst));
+  const ulSecond = scenario("ul-second", [{ id: cid.x, reader: "opus", leakage: limitFailures, out1: limitOut, reading: 0, meta: { usage_limit_restaged: true }, attempt: 2 }]);
+  assert("ul_scenario_second_limit_stops", ulSecond.launches === 0 && String(ulSecond.stop).startsWith(`leakage:${cid.x}`), JSON.stringify(ulSecond));
   assert("b9_attempt_from_ancestry", crashed.launches === 0 && crashed.stop === null, JSON.stringify(crashed));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------

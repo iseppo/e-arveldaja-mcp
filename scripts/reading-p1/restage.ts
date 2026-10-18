@@ -7,6 +7,10 @@
 //   - classifier_interrupt (owner 2026-10-17): a Claude case whose only audit finding is the CLI's
 //     safety-classifier meta message is discarded (never scored, its usage stays in the ledger) and re-staged
 //     fresh at most once per chain (meta.classifier_restaged); a second interrupt stops the run;
+//   - usage_limit (owner 2026-10-18): a Claude case whose turn was refused by the account's session limit (the
+//     CLI result is the session-limit text, HTTP 429, zero usage, no model) and whose only failures are that
+//     turn's is_error/model/run is discarded (never scored, its zero spend in the ledger) and re-staged at most
+//     once per chain (meta.usage_limit_restaged); anything else stops;
 //   - the cap callback runs before the round and before each launch; the projection reserves the pending and
 //     in-flight replacements (step5.ts reservedKeys), so retries count against the same run-tag caps;
 //   - the original records `restaged_as` only after its replacement has run; a replacement found without that
@@ -61,8 +65,39 @@ export interface FailureEvidence {
   reader?: string;
   /** The case (or an ancestor) was already re-staged once for a classifier interrupt. */
   classifier_restaged?: boolean;
+  /** Claude path: each turn's CLI result (out<turn>.json), for the usage_limit class. */
+  claude_results?: ClaudeTurnResult[];
+  /** The case (or an ancestor) was already re-staged once for a usage limit. */
+  usage_limit_restaged?: boolean;
 }
-export type FailureKind = "transport" | "classifier_interrupt" | "stop";
+export interface ClaudeTurnResult { turn: number; is_error: boolean; api_error_status: number | null; result: string; tokens: number; models: string[] }
+export type FailureKind = "transport" | "classifier_interrupt" | "usage_limit" | "stop";
+
+/** The CLI's session-limit result text; only the reset time varies. */
+export const SESSION_LIMIT_RE = /^You've hit your session limit \u00b7 resets [0-9:apm]{1,8} \([A-Za-z_/]{1,40}\)$/;
+const CLAUDE_WRAPPER_RE = /^Command failed: \S*\/run-claude\.sh \S+ (?:opus|haiku) (\d)\s*$/;
+
+/** usage_limit: exactly one turn, refused before any model ran, with only that refusal's own consequences. */
+function usageLimitTurn(evidence: FailureEvidence): number | null {
+  if (evidence.reader === undefined || evidence.reader === "codex" || evidence.error_messages.length > 0) return null;
+  const turns = new Set<number>();
+  for (const failure of evidence.failures) {
+    const match = /^(?:turn(\d)_is_error|turn(\d)_model|run:turn(\d))$/.exec(failure);
+    if (!match) return null;
+    turns.add(Number(match[1] ?? match[2] ?? match[3]));
+  }
+  if (turns.size !== 1) return null;
+  const turn = [...turns][0]!;
+  if (!evidence.failures.includes(`turn${turn}_is_error`)) return null;
+  for (const error of evidence.run_errors) {
+    const match = /^turn(\d):([\s\S]*)$/.exec(error);
+    if (!match || Number(match[1]) !== turn || CLAUDE_WRAPPER_RE.exec(match[2]!)?.[1] !== String(turn)) return null;
+  }
+  const result = (evidence.claude_results ?? []).filter((entry) => entry.turn === turn);
+  if (result.length !== 1) return null;
+  const { is_error, api_error_status, result: text, tokens, models } = result[0]!;
+  return is_error && api_error_status === 429 && SESSION_LIMIT_RE.test(text) && tokens === 0 && models.length === 0 ? turn : null;
+}
 
 /**
  * B7: "transport" only on positive evidence, per turn: every failure entry is a transport consequence of its
@@ -87,6 +122,10 @@ export function classifyEvidence(evidence: FailureEvidence): { kind: FailureKind
   if (evidence.failures.includes("classifier_interrupt")) {
     const only = evidence.failures.length === 1 && messages.length === 0 && evidence.reader !== undefined && evidence.reader !== "codex";
     return only && !evidence.classifier_restaged ? { kind: "classifier_interrupt", evidence: ["classifier_interrupt"] } : stop;
+  }
+  const limited = usageLimitTurn(evidence);
+  if (limited !== null) {
+    return evidence.usage_limit_restaged ? stop : { kind: "usage_limit", evidence: [`usage_limit:turn${limited}: ${evidence.claude_results!.find((entry) => entry.turn === limited)!.result}`] };
   }
   if (evidence.failures.some((failure) => LEAK_RE.test(failure))) return stop;
   if (messages.length === 0 || !messages.every((entry) => TRANSPORT_RE.test(entry.message))) return stop;
@@ -121,8 +160,24 @@ export function failureEvidence(caseId: string): FailureEvidence {
       else if (event.type === "turn.failed") messages.push({ turn, message: event.error?.message ?? "turn.failed without error message" });
     }
   }
+  const claudeResults: ClaudeTurnResult[] = [];
+  if (staged.reader !== "codex") {
+    for (const turn of [1, 2]) {
+      const path = join(staged.dir, `out${turn}.json`);
+      if (!existsSync(path)) continue;
+      try {
+        const out = JSON.parse(readFileSync(path, "utf8")) as { is_error?: unknown; api_error_status?: unknown; result?: unknown; usage?: Record<string, unknown>; modelUsage?: Record<string, unknown> };
+        const usage = out.usage ?? {};
+        const tokens = ["input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce((acc, key) => acc + (typeof usage[key] === "number" ? (usage[key] as number) : 1), 0);
+        claudeResults.push({ turn, is_error: out.is_error === true, api_error_status: typeof out.api_error_status === "number" ? out.api_error_status : null,
+          result: typeof out.result === "string" ? out.result : "", tokens, models: Object.keys(out.modelUsage ?? { unknown: true }) });
+      } catch {
+        // An unreadable result is no usage_limit evidence.
+      }
+    }
+  }
   return { failures: leakage.failures ?? [], run_errors: leakage.run_errors ?? [], error_messages: messages, reader: staged.reader,
-    classifier_restaged: staged.meta?.classifier_restaged === true };
+    classifier_restaged: staged.meta?.classifier_restaged === true, claude_results: claudeResults, usage_limit_restaged: staged.meta?.usage_limit_restaged === true };
 }
 
 export function classifyFailure(caseId: string): FailureKind {
@@ -223,7 +278,8 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
         .map((path) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
       const { dir: _dir, prompt_sha256: _hash, turn2_sha256: _turn2, staged_at: _at, restaged_as: _as, restage_evidence: _ev, abandoned: _ab, attempt, ...rest } = staged;
       const spec: CaseSpec = { ...rest, case_id: newCaseId(), prompt: readFileSync(join(staged.dir, "PROMPT.md"), "utf8"), ...(schemas.length ? { schemas } : {}),
-        meta: { ...rest.meta, restaged_from: staged.case_id, ...(verdicts.get(staged.case_id)!.kind === "classifier_interrupt" ? { classifier_restaged: true } : {}) },
+        meta: { ...rest.meta, restaged_from: staged.case_id, ...(verdicts.get(staged.case_id)!.kind === "classifier_interrupt" ? { classifier_restaged: true } : {}),
+          ...(verdicts.get(staged.case_id)!.kind === "usage_limit" ? { usage_limit_restaged: true } : {}) },
         attempt: (attempt ?? 1) + 1 };
       return { original: staged, spec, packet: staged.doc_id && staged.form === "N-T" ? loadPacketFile(staged.doc_id).packet : undefined };
     });
@@ -245,7 +301,7 @@ export async function restageRun(opts: RestageOptions): Promise<string | null> {
 
 if (process.argv[1]?.endsWith("/restage.ts")) {
   // Not a top-level await: step5.ts imports this module, so awaiting its import here would deadlock the cycle.
-  void import("./step5.js").then(async ({ parseRunArgs, projection, allPlanned }) => {
+  void import("./step5.js").then(async ({ parseRunArgs, projection, allPlanned, scoped }) => {
     const argv = process.argv.slice(2);
     const run = parseRunArgs(argv);
     if ("error" in run) {
@@ -253,7 +309,7 @@ if (process.argv[1]?.endsWith("/restage.ts")) {
       process.exitCode = 1;
       return;
     }
-    const planned = allPlanned(run.tag);
+    const planned = scoped(allPlanned(run.tag), run);
     const stop = await restageRun({ tag: run.tag, max: Number(argValue(argv, "--max") ?? String(MAX_RESTAGE_ROUNDS)), exceeds: () => projection(planned, run).exceeds });
     if (stop) {
       process.stdout.write(`STOP: ${stop}\n`);
