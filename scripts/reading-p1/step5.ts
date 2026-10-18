@@ -1,6 +1,6 @@
-// Reader runs on the corpus (plan step 5; throughput round T5 as run `step5b`): N-S and N-T × 3 readers over
-// every corpus document, then I-S and I-T × 3 readers over family (a) with 1:1 clean controls. The held-out set
-// is never touched here.
+// Reader runs (plan step 5; throughput round T5 as run `step5b`): N-S and N-T × 3 readers over every corpus
+// document, then I-S and I-T × 3 readers over family (a) with 1:1 clean controls. The held-out set is touched
+// only by a tag bound to `--scope heldout` (step 6: natural only).
 // Guards:
 //   - B9 (throughput round): every run has its own tag (`--run`, required; `step5` is refused, it is frozen) and
 //     its own caps (`--cap-input/--cap-output`, required, at most the OQ-P1-9 ceiling 30M / 4M). Accounting counts
@@ -13,24 +13,26 @@
 //   - Leakage (B7): a failed case is re-staged only on positive transport evidence (restage.ts classifyEvidence),
 //     checked before every retry; any other failure stops the run.
 // Re-running a mode skips cases already staged under the same tag (key in the registry meta).
+// Step 6: `--scope heldout` binds a new tag to the held-out manifest (natural only; runs/<tag>.scope); a bound tag
+// never changes scope, and its accounting, preflight and re-stages see only its own scope's rows.
 // A sub-run (`--doc <id>`, `--form <form>`) plans, runs and projects only that slice under its own tag and caps.
-// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--concurrency 6]
+// Usage: npx tsx scripts/reading-p1/step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--scope corpus|heldout] [--concurrency 6]
 
 import { existsSync } from "node:fs";
 import { formCase, loadFamilyA, READERS, type CaseItem } from "./cases.js";
 import type { CollectedCase } from "./collect.js";
-import { argValue, dataPath, manifest, readJson, writeJson } from "./common.js";
+import { SCOPES, argValue, dataPath, manifest, readJson, writeJson, type Scope } from "./common.js";
 import { rng, shuffle, type FamilyA } from "./mutate.js";
 import { MAX_RESTAGE_ROUNDS, classifyFailure, preflightRun, restageRun, retryEligible, runRegistries, withAttempts, type Registry } from "./restage.js";
 import { runCases, type CaseOutcome } from "./run-cases.js";
-import { corpusRunIndex, loadStaged, registryPath } from "./stage.js";
+import { bindRunScope, loadStaged, registryPath, scopedRunIndex } from "./stage.js";
 
 /** The frozen step-5 tag: its readings seed the per-case means of a new run, never its accounting. */
 export const FROZEN_TAG = "step5";
 const CEILING = { input: 30_000_000, output: 4_000_000 };
 export const LEGACY = { input: 150_000, output: 50_000 };
 
-export interface RunArgs { tag: string; caps: { input: number; output: number }; only?: { doc?: string; form?: string; injectedReader?: string } }
+export interface RunArgs { tag: string; caps: { input: number; output: number }; scope: Scope; only?: { doc?: string; form?: string; injectedReader?: string } }
 
 /**
  * A sub-run (`--doc`, `--form`, `--injected-reader`) plans, runs and projects only its slice of the cases;
@@ -50,6 +52,7 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
   let doc: string | undefined;
   let form: string | undefined;
   let injectedReader: string | undefined;
+  let scope: string | undefined;
   try {
     tag = argValue(argv, "--run");
     capInput = argValue(argv, "--cap-input");
@@ -57,6 +60,7 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
     doc = argValue(argv, "--doc");
     form = argValue(argv, "--form");
     injectedReader = argValue(argv, "--injected-reader");
+    scope = argValue(argv, "--scope");
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) };
   }
@@ -71,24 +75,26 @@ export function parseRunArgs(argv: readonly string[]): RunArgs | { error: string
   if (form !== undefined && !["N-S", "N-T", "I-S", "I-T"].includes(form)) return { error: `--form ${form}: N-S, N-T, I-S or I-T` };
   if (injectedReader !== undefined && !(READERS as readonly string[]).includes(injectedReader)) return { error: `--injected-reader ${injectedReader}: one of ${READERS.join(", ")}` };
   const only = { ...(doc ? { doc } : {}), ...(form ? { form } : {}), ...(injectedReader ? { injectedReader } : {}) };
-  return { tag, caps: { input, output }, ...(Object.keys(only).length ? { only } : {}) };
+  if (scope !== undefined && !(SCOPES as readonly string[]).includes(scope)) return { error: `--scope ${scope}: one of ${SCOPES.join(", ")}` };
+  return { tag, caps: { input, output }, scope: (scope ?? "corpus") as Scope, ...(Object.keys(only).length ? { only } : {}) };
 }
 
 /** The run's registries, from the corpus rows of its run index only (no other case record is opened). */
 function registries(tag: string): Registry[] {
-  return withAttempts(corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
+  return withAttempts(scopedRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
 }
 
 const readingPath = (caseId: string) => dataPath("readings", `${caseId}.json`);
 
 function readingsOf(tag: string): CollectedCase[] {
-  return corpusRunIndex(tag).filter((entry) => existsSync(readingPath(entry.case_id))).map((entry) => readJson<CollectedCase>(readingPath(entry.case_id)));
+  return scopedRunIndex(tag).filter((entry) => existsSync(readingPath(entry.case_id))).map((entry) => readJson<CollectedCase>(readingPath(entry.case_id)));
 }
 
 const sumUsage = (reading: CollectedCase) => reading.turns.reduce((acc, turn) => ({ input: acc.input + (turn.usage?.input ?? 0), output: acc.output + (turn.usage?.output ?? 0) }), { input: 0, output: 0 });
 
-export function naturalItems(tag: string): CaseItem[] {
-  const docs = manifest("corpus").map((entry) => entry.id);
+/** N-S and N-T × 3 readers over every document of the scope's manifest (the held-out scope: step 6). */
+export function naturalItems(tag: string, scope: Scope = "corpus"): CaseItem[] {
+  const docs = manifest(scope).map((entry) => entry.id);
   const items: CaseItem[] = [];
   for (const reader of READERS) for (const form of ["N-S", "N-T"] as const) for (const doc of docs) {
     const item = formCase(reader, form, doc, undefined, null, tag);
@@ -113,7 +119,9 @@ export function injectedItems(tag: string, family: FamilyA = loadFamilyA()): Cas
   return shuffle(items, rng(6));
 }
 
-export function allPlanned(tag: string): CaseItem[] {
+/** The held-out scope is natural only: family (a) is built from the corpus. */
+export function allPlanned(tag: string, scope: Scope = "corpus"): CaseItem[] {
+  if (scope !== "corpus") return naturalItems(tag, scope);
   return [...naturalItems(tag), ...(existsSync(dataPath("mutations", "a.json")) ? injectedItems(tag) : [])];
 }
 
@@ -204,6 +212,12 @@ async function runSuite(name: string, planned: CaseItem[], run: RunArgs, concurr
     writeJson(dataPath(run.tag, `stop-${name}.json`), { stop, at: new Date().toISOString() });
     process.exitCode = 3;
   };
+  // The tag is bound to its scope before anything of it is read or staged.
+  const bound = bindRunScope(run.tag, run.scope);
+  if (bound) {
+    writeStop(bound);
+    return;
+  }
   // The pre-launch rule runs before the todo list and the projection are computed, so both see the ledger.
   const preflight = preflightRun(run.tag);
   if (preflight) {
@@ -211,7 +225,7 @@ async function runSuite(name: string, planned: CaseItem[], run: RunArgs, concurr
     return;
   }
   const todo = todoItems(scoped(planned, run), registries(run.tag), run.tag);
-  const all = scoped(allPlanned(run.tag), run);
+  const all = scoped(allPlanned(run.tag, run.scope), run);
   const start = projection(all, run);
   process.stdout.write(`${name}: ${todo.length} to run; projection ${JSON.stringify(start)}\n`);
   if (start.exceeds) {
@@ -260,9 +274,12 @@ if (process.argv[1]?.endsWith("/step5.ts")) {
   const concurrency = Number(argValue(rest, "--concurrency") ?? "6");
   const run = parseRunArgs(rest);
   if ("error" in run || !["natural", "injected", "status"].includes(mode ?? "")) {
-    process.stderr.write(`${"error" in run ? `${run.error}\n` : ""}usage: step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--concurrency 6]\n`);
+    process.stderr.write(`${"error" in run ? `${run.error}\n` : ""}usage: step5.ts natural|injected|status --run <tag> --cap-input <n> --cap-output <n> [--doc <id>] [--form <form>] [--injected-reader <reader>] [--scope corpus|heldout] [--concurrency 6]\n`);
     process.exitCode = 1;
-  } else if (mode === "natural") await runSuite("natural", naturalItems(run.tag), run, concurrency);
+  } else if (mode === "injected" && run.scope !== "corpus") {
+    process.stderr.write(`injected cases are corpus only (family (a)); --scope ${run.scope} runs natural only\n`);
+    process.exitCode = 1;
+  } else if (mode === "natural") await runSuite("natural", naturalItems(run.tag, run.scope), run, concurrency);
   else if (mode === "injected") await runSuite("injected", injectedItems(run.tag), run, concurrency);
-  else process.stdout.write(`${JSON.stringify(projection(scoped(allPlanned(run.tag), run), run), null, 2)}\n`);
+  else process.stdout.write(`${JSON.stringify(projection(scoped(allPlanned(run.tag, run.scope), run), run), null, 2)}\n`);
 }

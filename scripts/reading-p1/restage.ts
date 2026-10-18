@@ -32,7 +32,7 @@ import { join } from "node:path";
 import { loadPacketFile } from "./cases.js";
 import { argValue, dataPath, readJson, writeJson } from "./common.js";
 import { newCaseId, runCases } from "./run-cases.js";
-import { corpusRunIndex, loadStaged, registryPath, type CaseSpec, type StagedCase } from "./stage.js";
+import { loadStaged, registryPath, runScope, scopedRunIndex, type CaseSpec, type StagedCase } from "./stage.js";
 
 export type Registry = StagedCase & { restaged_as?: string; attempt?: number; restage_evidence?: string[]; restage_class?: FailureKind; abandoned?: boolean };
 
@@ -207,7 +207,7 @@ const launched = (entry: Registry) => !existsSync(entry.dir) || readdirSync(entr
  * Returns the stop reason, or null when every active case's usage is in the ledger.
  */
 export function preflightRun(tag: string, inFlight: ReadonlySet<string> = new Set()): string | null {
-  const regs = corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
+  const regs = scopedRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry);
   for (const entry of regs) {
     if (inFlight.has(entry.case_id) || entry.abandoned || existsSync(dataPath("readings", `${entry.case_id}.json`))) continue;
     if (existsSync(dataPath("leakage", `${entry.case_id}.json`))) {
@@ -226,7 +226,7 @@ export function preflightRun(tag: string, inFlight: ReadonlySet<string> = new Se
 
 /** The run's registries (corpus rows of its index only), with replacement links repaired (see header). */
 export function runRegistries(tag: string): Registry[] {
-  const regs = withAttempts(corpusRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
+  const regs = withAttempts(scopedRunIndex(tag).filter((entry) => existsSync(registryPath(entry.case_id))).map((entry) => loadStaged(entry.case_id) as Registry));
   const live = regs.filter((entry) => !entry.abandoned);
   const byId = new Map(live.map((entry) => [entry.case_id, entry]));
   for (const entry of regs) {
@@ -309,7 +309,8 @@ if (process.argv[1]?.endsWith("/restage.ts")) {
       process.exitCode = 1;
       return;
     }
-    const planned = scoped(allPlanned(run.tag), run);
+    // The tag's bound scope, not the argument: a re-stage never plans another scope's cases.
+    const planned = scoped(allPlanned(run.tag, runScope(run.tag)), run);
     const stop = await restageRun({ tag: run.tag, max: Number(argValue(argv, "--max") ?? String(MAX_RESTAGE_ROUNDS)), exceeds: () => projection(planned, run).exceeds });
     if (stop) {
       process.stdout.write(`STOP: ${stop}\n`);

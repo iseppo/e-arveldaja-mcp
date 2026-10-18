@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { REPO_ROOT, argValue, dataPath, readJson, scopeIds, sentinel, sha256Hex, writeJson } from "./common.js";
+import { REPO_ROOT, SCOPES, argValue, dataPath, readJson, scopeIds, sentinel, sha256Hex, writeJson, writePrivate, type Scope } from "./common.js";
 import type { Form } from "./prompts.js";
 
 export type Reader = "opus" | "haiku" | "codex";
@@ -75,6 +75,36 @@ export function runIndex(tag: string, opts: { optional?: boolean } = {}): RunInd
 export function corpusRunIndex(tag: string): RunIndexEntry[] {
   const ids = scopeIds("corpus");
   return runIndex(tag, { optional: true }).filter((entry) => entry.doc_id === null || ids.has(entry.doc_id));
+}
+
+const runScopePath = (tag: string) => dataPath("runs", `${tag}.scope`);
+
+/** A run tag's scope: runs/<tag>.scope when bound, corpus otherwise (every tag before step 6). */
+export function runScope(tag: string): Scope {
+  if (!existsSync(runScopePath(tag))) return "corpus";
+  const scope = readFileSync(runScopePath(tag), "utf8").trim() as Scope;
+  if (!SCOPES.includes(scope)) throw new Error(`run ${tag}: unknown scope ${scope}`);
+  return scope;
+}
+
+/** Binds a tag to a scope before its first case: a bound tag never changes scope, and a tag with rows stays corpus. */
+export function bindRunScope(tag: string, scope: Scope): string | null {
+  if (existsSync(runScopePath(tag))) return runScope(tag) === scope ? null : `run ${tag} is bound to scope ${runScope(tag)}, not ${scope}`;
+  if (scope === "corpus") return null;
+  if (runIndex(tag, { optional: true }).length > 0) return `run ${tag} already holds corpus cases; use a new tag for scope ${scope}`;
+  writePrivate(runScopePath(tag), `${scope}\n`);
+  return null;
+}
+
+/**
+ * The run's index rows of its own scope's documents (corpus rows for a corpus tag, held-out rows for a held-out
+ * tag; document-less rows only in the corpus scope), filtered before any case record is opened.
+ */
+export function scopedRunIndex(tag: string): RunIndexEntry[] {
+  const scope = runScope(tag);
+  if (scope === "corpus") return corpusRunIndex(tag);
+  const ids = scopeIds(scope);
+  return runIndex(tag, { optional: true }).filter((entry) => entry.doc_id !== null && ids.has(entry.doc_id));
 }
 
 const FORBIDDEN_ROOTS = [resolve(REPO_ROOT), resolve(homedir(), "Dokumendid")];

@@ -64,14 +64,21 @@ export function manifest(set: SetName): ManifestEntry[] {
   });
 }
 
-/** Throughput round B8: the only report/replay scope this round. Paths derive from the scope's manifest ids. */
-export type Scope = "corpus";
-export const SCOPES: readonly Scope[] = ["corpus"];
+/**
+ * Throughput round B8: a run, replay or report has exactly one scope, and every path derives from that scope's
+ * manifest ids. Step 6 adds the held-out scope; the two id shapes are disjoint ("01" vs "h01"), so a packet,
+ * run-index row or reading of one scope is never taken for the other.
+ */
+export type Scope = SetName;
+export const SCOPES: readonly Scope[] = ["corpus", "heldout"];
+export const SCOPE_ID_SHAPE: Record<Scope, RegExp> = { corpus: /^\d{2,}$/, heldout: /^h\d{2,}$/ };
 
-/** The document ids a scope may touch, from its own manifest only. */
+/** The document ids a scope may touch, from its own manifest only (an id of the other scope's shape refuses). */
 export function scopeIds(scope: Scope): Set<string> {
-  if (scope !== "corpus") throw new Error(`unknown scope ${String(scope)}`);
-  return new Set(manifest("corpus").map((entry) => entry.id));
+  if (!SCOPES.includes(scope)) throw new Error(`unknown scope ${String(scope)}`);
+  const ids = manifest(scope).map((entry) => entry.id);
+  for (const id of ids) if (!SCOPE_ID_SHAPE[scope].test(id)) throw new Error(`manifest ${scope}: id ${id} is not of the ${scope} shape`);
+  return new Set(ids);
 }
 
 export function manifestId(set: SetName, index: number): string {

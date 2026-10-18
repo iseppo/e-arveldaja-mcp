@@ -388,6 +388,83 @@ try {
   assert("ul_scenario_restaged_once", ulFirst.launches === 1 && ulFirst.links[cid.x] !== null && ulFirst.usage_limit_restaged?.[String(ulFirst.links[cid.x])] === true, JSON.stringify(ulFirst));
   const ulSecond = scenario("ul-second", [{ id: cid.x, reader: "opus", leakage: limitFailures, out1: limitOut, reading: 0, meta: { usage_limit_restaged: true }, attempt: 2 }]);
   assert("ul_scenario_second_limit_stops", ulSecond.launches === 0 && String(ulSecond.stop).startsWith(`leakage:${cid.x}`), JSON.stringify(ulSecond));
+
+  // ---- Step 6: the held-out scope (synthetic manifests and packets only; no real held-out file is read) -------
+  {
+    const dir = join(root, "scope-split");
+    const home = join(dir, "home");
+    for (const sub of ["staging", "leakage", "readings", "runs", "legacy", "corpus", "heldout", "packets", home]) mkdirSync(sub.startsWith("/") ? sub : join(dir, sub), { recursive: true });
+    writeFileSync(join(dir, "SENTINEL.txt"), `${"0".repeat(32)}\n`);
+    writeFileSync(join(dir, "legacy", "review_own_B_codex.json"), "[]");
+    for (const [set, ids] of [["corpus", ["01", "02"]], ["heldout", ["h01", "h02", "h03"]]] as const) {
+      writeFileSync(join(dir, set, "files.txt"), ids.map((id) => `${set}-${id}.pdf`).join("\n") + "\n");
+      writeFileSync(join(dir, set, "sha256.txt"), ids.map((id) => `${"a".repeat(64)}  ${set}-${id}.pdf`).join("\n") + "\n");
+      for (const id of ids) writeFileSync(join(dir, "packets", `${id}.json`), JSON.stringify({ id, path: `${set}-${id}.pdf`, packet: makePacket([`Arve ${id}`]), heuristic: {}, heuristic_fields: {} }));
+    }
+    // Prior means for every natural reader × form (frozen step5), so the projection is estimated.
+    READERS.forEach((reader, r) => (["N-S", "N-T"] as const).forEach((form, f) => {
+      const id = `c-00000000${r}${f}99`;
+      writeFileSync(join(dir, "runs", "step5.tsv"), `${id}\t01\n`, { flag: "a" });
+      writeFileSync(join(dir, "readings", `${id}.json`), JSON.stringify({ case_id: id, reader, form, meta: { run: "step5" }, leakage_pass: true, turns: [{ usage: { input: 1, output: 0 } }] }));
+    }));
+    // A legacy-style tag holding rows of both scopes and a document-less row.
+    writeFileSync(join(dir, "runs", "mix.tsv"), "c-111111111111\t01\nc-222222222222\th01\nc-333333333333\t\n");
+    writeFileSync(join(dir, "runs", "ho.tsv"), "c-444444444444\t02\nc-555555555555\th02\n");
+    const probe = join(root, "scope-probe.mts");
+    writeFileSync(probe, [
+      `import { bindRunScope, scopedRunIndex, runScope } from ${JSON.stringify(join(SCRIPTS_DIR, "stage.ts"))};`,
+      `import { naturalItems, allPlanned, parseRunArgs } from ${JSON.stringify(join(SCRIPTS_DIR, "step5.ts"))};`,
+      `import { SCOPE_ID_SHAPE, scopeIds } from ${JSON.stringify(join(SCRIPTS_DIR, "common.ts"))};`,
+      `import { replayRun } from ${JSON.stringify(join(SCRIPTS_DIR, "replay.ts"))};`,
+      "const ids = (rows) => rows.map((row) => row.doc_id);",
+      "const out = { corpusOfMix: ids(scopedRunIndex(\"mix\")) };",
+      "out.bindMixHeldout = bindRunScope(\"mix\", \"heldout\");",
+      "out.mixScope = runScope(\"mix\");",
+      "out.bindNew = bindRunScope(\"ho-new\", \"heldout\");",
+      "out.rebind = bindRunScope(\"ho-new\", \"corpus\");",
+      // Bind \"ho\" by writing the scope file as a run would have before its first case.
+      `(await import("node:fs")).writeFileSync(${JSON.stringify(join(dir, "runs", "ho.scope"))}, "heldout\\n");`,
+      "out.heldoutOfHo = ids(scopedRunIndex(\"ho\"));",
+      "out.planHeldout = [...new Set(naturalItems(\"x\", \"heldout\").map((item) => item.spec.doc_id))].sort();",
+      "out.planCorpus = [...new Set(naturalItems(\"x\", \"corpus\").map((item) => item.spec.doc_id))].sort();",
+      "out.allHeldoutForms = [...new Set(allPlanned(\"x\", \"heldout\").map((item) => item.spec.form))].sort();",
+      "out.scopeArg = (parseRunArgs([\"--run\", \"y\", \"--cap-input\", \"1\", \"--cap-output\", \"1\", \"--scope\", \"heldout\"])).scope;",
+      "out.badScope = \"error\" in parseRunArgs([\"--run\", \"y\", \"--cap-input\", \"1\", \"--cap-output\", \"1\", \"--scope\", \"all\"]);",
+      "out.shapes = { corpusIsNotHeldout: !SCOPE_ID_SHAPE.heldout.test(\"01\"), heldoutIsNotCorpus: !SCOPE_ID_SHAPE.corpus.test(\"h01\") };",
+      "out.heldoutIds = [...scopeIds(\"heldout\")].sort();",
+      "try { await replayRun(\"mix\", { today: \"2026-10-18\", pipeline: false, scope: \"heldout\" }); out.replayMismatch = null; } catch (error) { out.replayMismatch = String(error); }",
+      "process.stdout.write(JSON.stringify(out));",
+    ].join("\n"));
+    const env = { READING_P1_DATA_DIR: dir, HOME: home, PATH: "/usr/bin:/bin" };
+    const tsx = join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs");
+    let scope: Record<string, unknown> = {};
+    try {
+      scope = JSON.parse(execFileSync(process.execPath, [tsx, probe], { encoding: "utf8", env })) as Record<string, unknown>;
+    } catch (error) {
+      scope = { error: String((error as { stdout?: string; stderr?: string }).stderr ?? error) };
+    }
+    const show = JSON.stringify(scope);
+    assert("s6_corpus_run_never_sees_heldout_rows", JSON.stringify(scope.corpusOfMix) === JSON.stringify(["01", null]), show);
+    assert("s6_heldout_run_never_sees_corpus_rows", JSON.stringify(scope.heldoutOfHo) === JSON.stringify(["h02"]), show);
+    assert("s6_scope_binding", typeof scope.bindMixHeldout === "string" && scope.mixScope === "corpus" && scope.bindNew === null && typeof scope.rebind === "string", show);
+    assert("s6_plans_by_scope", JSON.stringify(scope.planHeldout) === JSON.stringify(["h01", "h02", "h03"]) && JSON.stringify(scope.planCorpus) === JSON.stringify(["01", "02"]) &&
+      JSON.stringify(scope.allHeldoutForms) === JSON.stringify(["N-S", "N-T"]), show);
+    assert("s6_scope_args_and_shapes", scope.scopeArg === "heldout" && scope.badScope === true && JSON.stringify(scope.shapes) === JSON.stringify({ corpusIsNotHeldout: true, heldoutIsNotCorpus: true }) &&
+      JSON.stringify(scope.heldoutIds) === JSON.stringify(["h01", "h02", "h03"]), show);
+    assert("s6_replay_refuses_other_scope", String(scope.replayMismatch).includes("bound to scope corpus, not heldout"), show);
+    // End to end: a held-out run (reader stub) stages only held-out documents, and binds its tag first.
+    const stubLog = join(dir, "launches.log");
+    try {
+      execFileSync(process.execPath, [tsx, join(SCRIPTS_DIR, "step5.ts"), "natural", "--run", "s6", "--scope", "heldout", "--cap-input", "1000000", "--cap-output", "1000000", "--concurrency", "1"],
+        { encoding: "utf8", env: { ...env, READING_P1_READER_STUB: stubLog } });
+    } catch {
+      // The stub fails every launch (non-transport): the run stops after the first case, as intended.
+    }
+    for (const line of existsSync(stubLog) ? readFileSync(stubLog, "utf8").split("\n").filter(Boolean) : []) rmSync(line.split("\t")[2]!, { recursive: true, force: true });
+    const rows = existsSync(join(dir, "runs", "s6.tsv")) ? readFileSync(join(dir, "runs", "s6.tsv"), "utf8").split("\n").filter(Boolean).map((line) => line.split("\t")[1]) : [];
+    const bound = existsSync(join(dir, "runs", "s6.scope")) ? readFileSync(join(dir, "runs", "s6.scope"), "utf8").trim() : null;
+    assert("s6_heldout_run_stages_heldout_only", bound === "heldout" && rows.length > 0 && rows.every((doc) => /^h\d{2}$/.test(doc ?? "")), JSON.stringify({ bound, rows }));
+  }
   assert("b9_attempt_from_ancestry", crashed.launches === 0 && crashed.stop === null, JSON.stringify(crashed));
 
   // ---- B9: run isolation and caps -----------------------------------------------------------------------------

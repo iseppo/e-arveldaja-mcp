@@ -1,9 +1,9 @@
 // checkReading (+ the full pipeline) over collected reader cases → results/<run>.json (plan §5.1, §5.7).
 // Two passes: real (--today, default the run date) and as-of (truth.invoice_date + 30 days, from truth).
-// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--readings <tag>] [--scope corpus] [--today YYYY-MM-DD] [--pipeline]
+// Usage: npx tsx scripts/reading-p1/replay.ts --run <tag> [--readings <tag>] [--scope corpus|heldout] [--today YYYY-MM-DD] [--pipeline]
 // --readings rescores the readings of another run under --run (e.g. step5 → step5-rescored, zero reader cost).
-// Scope (throughput round B8): "corpus" is the only scope; a reading of a document outside the corpus manifest is
-// skipped before its packet, own ids or truth are read.
+// Scope (throughput round B8; held-out added for step 6): the scope must be the run tag's bound scope; a reading of
+// a document outside that scope's manifest is skipped before its packet, own ids or truth are read.
 
 import { existsSync } from "node:fs";
 import { normalizeVatValue } from "../../src/document-identifiers.js";
@@ -14,7 +14,7 @@ import type { CollectedCase } from "./collect.js";
 import { SCOPES, addDays, argValue, dataPath, hasFlag, readJson, scopeIds, todayIso, writeJson, type Scope, type SetName } from "./common.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
 import { checkContext } from "./synth-proof.js";
-import { runIndex } from "./stage.js";
+import { runIndex, runScope } from "./stage.js";
 import { companyOf, type TruthRecord } from "./truth.js";
 
 export const SCORED_FIELDS = ["invoice_date", "invoice_number", "due_date", "supplier_reg", "supplier_vat", "supplier_iban", "currency", "net", "vat", "gross"] as const;
@@ -127,6 +127,8 @@ async function evaluatePass(collected: CollectedCase, file: PacketFile, own: Own
 }
 
 export async function replayRun(tag: string, opts: { today: string; pipeline: boolean; scope: Scope; readings?: string }): Promise<CaseResult[]> {
+  const source = opts.readings ?? tag;
+  if (runScope(source) !== opts.scope) throw new Error(`run ${source} is bound to scope ${runScope(source)}, not ${opts.scope}`);
   const ids = scopeIds(opts.scope);
   const results: CaseResult[] = [];
   // The run index names each case's document, so a reading outside the scope is never opened.
