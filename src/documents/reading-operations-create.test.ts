@@ -12,6 +12,7 @@ import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches,
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
+  served,
 } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -39,7 +40,7 @@ function world() {
   let nextId = 900;
   const commit = (data: Record<string, unknown>, vat?: number, gross?: number) => {
     const id = nextId++;
-    const draft = { ...data, id, status: "PROJECT", vat_price: vat, gross_price: gross };
+    const draft = { ...data, id, status: "PROJECT", vat_price: vat, gross_price: gross, ...served(data, vat, gross) };
     rows.push(draft);
     details[id] = draft;
     return id;
@@ -508,7 +509,7 @@ describe("draftReadbackMismatches", () => {
   const readback = (items: Array<Record<string, unknown>>) => ({
     ...twoItems, id: 900, status: "PROJECT", net_price: 100, vat_price: 24, gross_price: 124,
     base_net_price: 100, base_vat_price: 24, base_gross_price: 124,
-    items: twoItems.items.map((item, index) => ({ ...item, id: 70 + index, vat_rate: 24, unit_net_price: 50, base_total_net_price: 50, vat_amount: 12, ...items[index] })),
+    items: twoItems.items.map((item, index) => ({ ...item, id: 70 + index, amount: 1, cl_fringe_benefits_id: 1, vat_rate: 24, unit_net_price: 50, base_total_net_price: 50, vat_amount: 12, ...items[index] })),
   });
   const totals = { vatPrice: 24, grossPrice: 124 };
 
@@ -523,6 +524,35 @@ describe("draftReadbackMismatches", () => {
     expect(mismatches).toEqual(expect.arrayContaining([
       "items[0].project_no_vat_gross_price", "items[0].vat_amount", "items[1].project_no_vat_gross_price", "items[1].vat_amount",
     ]));
+  });
+
+  const noOverride = { ...twoItems, items: twoItems.items.map(({ project_no_vat_gross_price: _gross, ...item }) => ({ ...item, cl_fringe_benefits_id: 1 })) };
+  const omitting = (keys: string[], patch: Array<Record<string, unknown>> = []) => {
+    const draft = readback(patch) as Record<string, any>;
+    draft.items = draft.items.map((item: Record<string, unknown>, index: number) => {
+      const { project_no_vat_gross_price: _gross, ...rest } = item;
+      const copy: Record<string, unknown> = { ...rest, ...patch[index] };
+      for (const key of keys) delete copy[key];
+      return copy;
+    });
+    return draft;
+  };
+
+  it("a GET that omits the item VAT and gross override cannot hide a 74/50 + 24/0 reallocation: the omitted VAT fails closed", () => {
+    expect(draftReadbackMismatches(omitting(["vat_amount"]) as never, noOverride as never, totals, true))
+      .toEqual(["items[0].vat_amount", "items[1].vat_amount"]);
+  });
+
+  it("an approved fringe benefit the GET omits fails closed, so a 1→2 change cannot pass unseen", () => {
+    expect(draftReadbackMismatches(omitting(["cl_fringe_benefits_id"]) as never, noOverride as never, totals, true))
+      .toEqual(["items[0].cl_fringe_benefits_id", "items[1].cl_fringe_benefits_id"]);
+    expect(draftReadbackMismatches(omitting([], [{ cl_fringe_benefits_id: 2 }]) as never, noOverride as never, totals, true))
+      .toEqual(["items[0].cl_fringe_benefits_id"]);
+  });
+
+  it("a numeric string matches its number, and a returned null counts as absent", () => {
+    expect(draftReadbackMismatches(omitting([], [{ vat_amount: "12.00" }, { vat_amount: "12" }]) as never, noOverride as never, totals, true)).toEqual([]);
+    expect(draftReadbackMismatches({ ...omitting([]), net_price: null } as never, noOverride as never, totals, true)).toEqual(["net_price"]);
   });
 
   it("a server-computed item VAT alone that differs from the predicted VAT is a mismatch", () => {

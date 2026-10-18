@@ -13,7 +13,7 @@ import { documentReadingEnabled } from "../config.js";
 import { logAudit } from "../audit-log.js";
 import { isToolVisibleForProfile, parseToolProfile } from "../tool-profile.js";
 import { TOOL_CATALOG } from "../tool-catalog.js";
-import { FIXTURE_NOW, HISTORY_DETAIL, ownClient, packetFor, readingApi, readingFor, readingParse, supplierClient, type ReadingApiOptions } from "../__fixtures__/document-reading/verified-draft.js";
+import { FIXTURE_NOW, HISTORY_DETAIL, ownClient, packetFor, readingApi, readingFor, readingParse, served, supplierClient, type ReadingApiOptions } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -144,7 +144,7 @@ describe("process_accounting_document reading modes: create and confirm", () => 
   function setupWrites(clientName?: string) {
     let draft: Record<string, unknown> | undefined;
     const createAndSetTotals = vi.fn(async (data: Record<string, unknown>, vat?: number, gross?: number) => {
-      draft = { ...data, id: 900, status: "PROJECT", vat_price: vat, gross_price: gross };
+      draft = { ...data, id: 900, status: "PROJECT", vat_price: vat, gross_price: gross, ...served(data, vat, gross) };
       return { id: 900 };
     });
     const setup = setupReading(true, { createAndSetTotals }, clientName);

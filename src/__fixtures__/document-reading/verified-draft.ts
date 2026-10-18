@@ -11,6 +11,8 @@ import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../a
 import { BASE_EVIDENCE, BASE_LABELS, BASE_LINES, BASE_VALUES } from "./invoice.js";
 import { makeAnswer, makeProof, makeReading } from "./readings.js";
 import { parseOfLines } from "./text-hazard-parses.js";
+import { predictPurchaseItemAmounts } from "../../api/purchase-invoices.api.js";
+import { parseVatRateDropdown } from "../../money.js";
 
 export { BASE_LINES };
 export const OWN_CLIENT_ID = 1;
@@ -103,4 +105,22 @@ export function readingApi(options: ReadingApiOptions = {}) {
       getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Ostja AS" }),
     },
   } as never);
+}
+
+/**
+ * The fields the live GET computes and returns (live presence check 2026-10-18), on top of what was written: the
+ * invoice net and base amounts, and per item the VAT, VAT rate, unit and base net and the #62 structural defaults.
+ * Fields the write already set are kept.
+ */
+export function served(data: Record<string, any>, vat?: number, gross?: number) {
+  const items = (data.items ?? []) as Array<Record<string, any>>;
+  const amounts = predictPurchaseItemAmounts(items as never);
+  const net = Math.round(amounts.reduce((sum, entry) => sum + entry.net, 0) * 100) / 100;
+  return {
+    net_price: data.net_price ?? net, base_net_price: data.base_net_price ?? net, base_vat_price: data.base_vat_price ?? vat, base_gross_price: data.base_gross_price ?? gross,
+    items: items.map((item, index) => ({
+      amount: 1, cl_fringe_benefits_id: 1, vat_amount: amounts[index]!.vat, vat_rate: parseVatRateDropdown(item.vat_rate_dropdown),
+      unit_net_price: amounts[index]!.net, base_total_net_price: amounts[index]!.net, ...item,
+    })),
+  };
 }
