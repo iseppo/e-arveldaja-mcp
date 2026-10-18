@@ -120,7 +120,7 @@ export function served(data: Record<string, any>, vat?: number, gross?: number) 
     net_price: data.net_price ?? net, base_net_price: data.base_net_price ?? net, base_vat_price: data.base_vat_price ?? vat, base_gross_price: data.base_gross_price ?? gross,
     items: items.map((item, index) => ({
       amount: 1, cl_fringe_benefits_id: 1, vat_amount: amounts[index]!.vat, vat_rate: parseVatRateDropdown(item.vat_rate_dropdown),
-      unit_net_price: amounts[index]!.net, base_total_net_price: amounts[index]!.net, ...item,
+      unit_net_price: null, base_total_net_price: amounts[index]!.net, ...item,
     })),
   };
 }

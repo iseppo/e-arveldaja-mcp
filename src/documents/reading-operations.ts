@@ -553,11 +553,11 @@ export function draftReadbackMismatches(
     const expected: Record<string, unknown> = {
       ...item, total_net_price: net, vat_amount: vat,
       vat_rate: item.vat_rate ?? parseVatRateDropdown(item.vat_rate_dropdown),
-      unit_net_price: item.unit_net_price ?? roundMoney(net / (item.amount ?? 1)),
       base_total_net_price: item.base_total_net_price ?? roundMoney(net / rate),
     };
-    // No override written: the API leaves it empty or echoes the predicted gross.
-    const defaults = (field: string) => (field === "project_no_vat_gross_price" ? [roundMoney(net + vat)] : []);
+    // Not sent: the API leaves it empty or echoes the predicted value (live 2026-10-18: unit_net_price reads back null).
+    const defaults = (field: string) => (field === "project_no_vat_gross_price" ? [roundMoney(net + vat)]
+      : field === "unit_net_price" ? [roundMoney(net / (item.amount ?? 1))] : []);
     const actual = items[index] as unknown as Record<string, unknown>;
     for (const key of recordMismatches(expected, actual, READBACK_ITEM_ALLOWED_TO_DIFFER, defaults)) fields.push(`items[${index}].${key}`);
   });

@@ -632,6 +632,12 @@ describe("draftReadbackMismatches", () => {
     expect(draftReadbackMismatches({ ...omitting([]), payment_type: "Sularaha" } as never, model as never, totals, true)).toEqual(["payment_type"]);
   });
 
+  it("an unsent unit_net_price may read back empty (as live) or as the predicted unit price, never as another value", () => {
+    expect(draftReadbackMismatches(readback([{ unit_net_price: null }, { unit_net_price: null }]) as never, twoItems as never, totals, true)).toEqual([]);
+    expect(draftReadbackMismatches(omitting(["unit_net_price"]) as never, noOverride as never, totals, true)).toEqual([]);
+    expect(draftReadbackMismatches(readback([{ unit_net_price: 60 }]) as never, twoItems as never, totals, true)).toEqual(["items[0].unit_net_price"]);
+  });
+
   it("a server-computed item VAT alone that differs from the predicted VAT is a mismatch", () => {
     expect(draftReadbackMismatches(readback([{ vat_amount: 24 }, { vat_amount: 0 }]) as never, twoItems as never, totals, true))
       .toEqual(["items[0].vat_amount", "items[1].vat_amount"]);
