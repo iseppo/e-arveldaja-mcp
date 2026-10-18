@@ -142,6 +142,8 @@ The tool list is sent into the model's context on every session, so it is a fixe
 
 A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 86 tools instead of the standard 127. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 147-tool catalog.
 
+`EARVELDAJA_DOCUMENT_READING=1` (opt-in, off by default) lets your assistant read a single invoice itself: `process_accounting_document` gains `mode='read'` and `mode='verify'`, every value is checked against the printed text, and only the questions the server cannot settle are put to you before the draft is created. It adds no tool, so the tool counts above do not change.
+
 Confirmed supplier history still wins over local rules for purchase booking defaults.
 
 <details>
