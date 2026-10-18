@@ -166,7 +166,11 @@ export interface ExtractionConfidenceSignals {
   credit_word_present?: boolean;
   /** An amount is printed with a minus sign or in parentheses. */
   signed_amount_present?: boolean;
-  /** A non-EUR currency code, symbol or letter symbol next to an amount appears in the text. */
+  /**
+   * A non-EUR ISO code, a non-€ symbol or a letter symbol next to an amount
+   * appears in the text of a document read (or defaulted) as EUR (P2 E3).
+   * Gated from automatic creation in every mode.
+   */
   foreign_currency_marker?: boolean;
 }
 
@@ -186,6 +190,7 @@ export const CREATION_GATING_EXTRACTION_SIGNALS = [
   "supplier_from_footer_block",
   "supplier_identifier_ambiguous",
   "invoice_date_unlabelled",
+  "foreign_currency_marker",
 ] as const satisfies ReadonlyArray<keyof ExtractionConfidenceSignals>;
 
 /** Operator-facing review warning per creation-gating extraction signal. */
@@ -201,6 +206,7 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   supplier_from_footer_block: "The supplier was read only from a footer identity block (name, registry code, VAT); it is a suggestion — verify the supplier before booking.",
   supplier_identifier_ambiguous: "The document labels two or more different supplier registry codes or VAT numbers (one may be the buyer's); verify the supplier before booking.",
   invoice_date_unlabelled: "No invoice-date label was found; the date is the first date on the page. Verify the invoice date before booking.",
+  foreign_currency_marker: "The document is read as EUR but prints another currency's code or symbol next to an amount; verify the currency before booking.",
 };
 
 export interface InvoiceExtractionFallback {

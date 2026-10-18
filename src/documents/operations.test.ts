@@ -1085,3 +1085,15 @@ describe("P2 E0: text hazards on the guided prepare parse", () => {
     },
   );
 });
+
+describe("P2 E3: a foreign-currency marker on an EUR reading is a guided prepare warning", () => {
+  it("warns foreign_currency_marker (a warning, not a blocker)", async () => {
+    mockedParseDocument.mockResolvedValue(textHazardParse("foreign_marker"));
+    const { path } = writeTempPdf();
+    const { ops } = setup({ clientRows: [], purchaseInvoiceRows: [] });
+    const outcome = await ops.prepare({ source: { file_path: path } });
+    if (!outcome.ok) throw new Error("prepare failed");
+    expect(outcome.value.warnings.some(w => w.code === "foreign_currency_marker")).toBe(true);
+    expect(outcome.value.blockers.some(b => b.code === "foreign_currency_marker")).toBe(false);
+  });
+});

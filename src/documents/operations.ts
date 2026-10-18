@@ -338,7 +338,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ownCompanyVat,
         ownCompanyRegistryCode,
       });
-      Object.assign(signals, textHazardSignals(parsedDocument));
+      Object.assign(signals, textHazardSignals(parsedDocument, extracted.currency));
       let llmFallback = summarizeInvoiceExtraction(extracted, signals, "advanced_detail.raw_text", inferSupplierCountry(extracted));
 
       const extractionWarnings: string[] = [];

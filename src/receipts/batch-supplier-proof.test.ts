@@ -339,3 +339,52 @@ describe("P2 E1b: a generated description is booked with the bound client's name
     });
   });
 });
+
+describe("P2 E3: a receipt read as EUR that prints another currency is held in every mode", () => {
+  const LABELLED = ["Müüja: Näidis Trükk OÜ", ...PRINT_RECEIPT.slice(1, -1)];
+  const signalsOf = (result: { llm_fallback?: { confidence_signals?: string[] } }) => result.llm_fallback?.confidence_signals ?? [];
+
+  it.each([
+    ["the extractor reads EUR (Kokku 124,00 EUR) and the page prints kr", [...LABELLED, "Kokku 124,00 EUR", "Att betala 1 250,00 kr"]],
+    ["Att betala 1 250,00 kr", [...LABELLED, "Att betala 1 250,00 kr"]],
+  ])("%s: dry run, create and create_and_confirm write nothing", async (_label, lines) => {
+    vi.mocked(parseDocument).mockResolvedValue(parsed(lines as string[]));
+    for (const mode of ["create", "create_and_confirm"] as const) {
+      stubRegistry([true]);
+      const { api, rec } = makeApi();
+      const { dry, run } = await runMode(api, mode);
+      expect(dry.results[0]!.status).toBe("needs_review");
+      expect(signalsOf(dry.results[0]!)).toContain("foreign_currency_marker");
+      expect(run.ok && run.value.results[0]!.status).toBe("needs_review");
+      expect(rec.clientsCreate).not.toHaveBeenCalled();
+      expect(rec.invoicesCreate).not.toHaveBeenCalled();
+      expect(rec.confirm).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a BIC branch code XXX next to a stated EUR is no marker: the receipt is created", async () => {
+    stubRegistry([true]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed([...LABELLED, "Kokku 124,00 €", "BIC: TRWIBEB1XXX"]));
+    const { api, rec } = makeApi();
+    const { dry, run } = await runMode(api, "create");
+    expect(signalsOf(dry.results[0]!)).not.toContain("foreign_currency_marker");
+    expect(run.ok && run.value.results[0]!.status).toBe("created");
+    expect(rec.invoicesCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("h30 shape (a USD reading) still stops at booking as a non-EUR receipt, not on the marker", async () => {
+    stubRegistry([true]);
+    vi.mocked(parseDocument).mockResolvedValue(parsed([...LABELLED, "Total 124,00 USD"]));
+    const { api, rec } = makeApi([{
+      id: 7, name: "Näidis Trükk OÜ", code: REG_CODE, is_supplier: true, is_client: false, cl_code_country: "EST",
+      is_member: false, send_invoice_to_email: false, send_invoice_to_accounting_email: false,
+    }]);
+    const { dry, run } = await runMode(api, "create");
+    expect(dry.results[0]!.extracted?.currency).toBe("USD");
+    expect(signalsOf(dry.results[0]!)).not.toContain("foreign_currency_marker");
+    if (!run.ok) throw new Error("run failed");
+    expect(run.value.results[0]!.status).toBe("needs_review");
+    expect(run.value.results[0]!.notes.join(" ")).toContain("Non-EUR receipt currency USD");
+    expect(rec.invoicesCreate).not.toHaveBeenCalled();
+  });
+});

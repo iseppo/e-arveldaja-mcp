@@ -1845,3 +1845,14 @@ describe("P2 E0: text hazards on the extract_pdf_invoice parse", () => {
     },
   );
 });
+
+describe("P2 E3: a foreign-currency marker on an EUR reading is a preview warning", () => {
+  it("extract_pdf_invoice warns foreign_currency_marker", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: createTempInvoiceFile("kr.pdf", "%PDF-1.4") });
+    mockedParseDocument.mockResolvedValue(textHazardParse("foreign_marker"));
+    const { handler } = setupPdfWorkflowTool("extract_pdf_invoice", { clients: { listAll: vi.fn().mockResolvedValue([]) } });
+    const payload = parseMcpResponse((await handler({ file_path: "/tmp/kr.pdf" })).content[0]!.text) as any;
+    expect(payload.extracted.warnings.some((w: string) => w.startsWith("foreign_currency_marker:"))).toBe(true);
+    expect(payload.llm_fallback.confidence_signals).toContain("foreign_currency_marker");
+  });
+});

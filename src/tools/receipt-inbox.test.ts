@@ -1878,8 +1878,12 @@ describe("shouldGateCreation — document-scope and amount-evidence holds (WP1)"
     raw_text: "Invoice content",
   };
 
-  it.each(CREATION_GATING_EXTRACTION_SIGNALS)("maps the extracted %s flag to its signal", signal => {
+  it.each(CREATION_GATING_EXTRACTION_SIGNALS.filter(signal => signal !== "foreign_currency_marker"))("maps the extracted %s flag to its signal", signal => {
     expect(buildExtractionConfidenceSignals({ [signal]: true }, {})).toEqual({ [signal]: true });
+  });
+
+  it("foreign_currency_marker is never an extraction flag: only textHazardSignals raises it (P2 E3)", () => {
+    expect(buildExtractionConfidenceSignals({ foreign_currency_marker: true } as never, {})).toEqual({});
   });
 
   it.each(CREATION_GATING_EXTRACTION_SIGNALS.flatMap(signal =>

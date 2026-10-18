@@ -324,7 +324,7 @@ async function extractReceiptFields(
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
   });
-  return { extracted, textHazards: textHazardSignals(parsedDocument) };
+  return { extracted, textHazards: textHazardSignals(parsedDocument, extracted.currency) };
 }
 
 interface ProcessSingleReceiptOptions {

@@ -36,14 +36,18 @@ export function packetInputFromParse(parsed: ParsedDocument, sourceSha256: strin
   };
 }
 
-/** The checker's text hazards on the caller's parse, as extraction confidence signals (only the raised ones). */
-export function textHazardSignals(parsed: ParsedDocument): ExtractionConfidenceSignals {
+/**
+ * The checker's text hazards on the caller's parse, as extraction confidence signals (only the raised ones).
+ * `currency` is the extracted currency: a foreign-currency marker counts only on a reading that is, or
+ * defaults to, EUR (a non-EUR reading already stops at booking).
+ */
+export function textHazardSignals(parsed: ParsedDocument, currency: string | undefined): ExtractionConfidenceSignals {
   // The digest is never read here: the packet only normalizes the lines exactly as the checker sees them.
   const packet: ReadingPacket = buildReadingPacket(packetInputFromParse(parsed, "", ""));
   const hazards = documentTextHazards(packet.lines);
   const signals: ExtractionConfidenceSignals = {};
   if (hazards.credit_word_present) signals.credit_word_present = true;
   if (hazards.signed_amount_present) signals.signed_amount_present = true;
-  if (hazards.foreign_currency_marker) signals.foreign_currency_marker = true;
+  if (hazards.foreign_currency_marker && (currency ?? "EUR").toUpperCase() === "EUR") signals.foreign_currency_marker = true;
   return signals;
 }

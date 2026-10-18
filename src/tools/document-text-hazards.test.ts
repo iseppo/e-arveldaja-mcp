@@ -37,11 +37,19 @@ describe("documentTextHazards (P2 E0 shared producer)", () => {
 
 describe("textHazardSignals (tool-side adapter)", () => {
   it.each(FIXTURES)("maps the %s fixture to exactly its signal", (kind) => {
-    expect(textHazardSignals(textHazardParse(kind))).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+    expect(textHazardSignals(textHazardParse(kind), undefined)).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+  });
+
+  it("P2 E3: a foreign-currency marker counts only on a reading that is, or defaults to, EUR", () => {
+    const parsed = textHazardParse("foreign_marker");
+    expect(textHazardSignals(parsed, "EUR")).toEqual({ foreign_currency_marker: true });
+    expect(textHazardSignals(parsed, "eur")).toEqual({ foreign_currency_marker: true });
+    expect(textHazardSignals(parsed, undefined)).toEqual({ foreign_currency_marker: true });
+    expect(textHazardSignals(parsed, "SEK")).toEqual({});
   });
 
   it("raises nothing on a parse with no pages", () => {
-    expect(textHazardSignals({ text: "Kreeditarve", pageCount: 0 } as never)).toEqual({});
+    expect(textHazardSignals({ text: "Kreeditarve", pageCount: 0 } as never, undefined)).toEqual({});
   });
 
   it("builds the packet from the parse pages exactly as the reading harness does", () => {

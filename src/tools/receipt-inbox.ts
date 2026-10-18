@@ -761,7 +761,8 @@ export function buildExtractionConfidenceSignals(
   if (amountIssues.some(code => code !== "vat_rate_implausible")) signals.amounts_inconsistent = true;
   if (amountIssues.includes("vat_rate_implausible")) signals.vat_rate_implausible = true;
   for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
-    if (extracted[signal]) signals[signal] = true;
+    // foreign_currency_marker comes from the caller's textHazardSignals, not from the extraction.
+    if (signal !== "foreign_currency_marker" && extracted[signal]) signals[signal] = true;
   }
   if (
     extracted.reg_code_rationale === "coordinate_confirmed_echo" ||
