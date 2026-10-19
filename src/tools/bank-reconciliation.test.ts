@@ -7,6 +7,7 @@ import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 import { getComparableBaseInvoiceAmount } from "../banking/reconciliation/invoice-index.js";
+import { runWithToolProfile } from "../tool-profile.js";
 
 /**
  * Re-sign a fixture's CAMT marker with a real checksum. Reconciliation excludes
@@ -786,6 +787,84 @@ function setupAutoConfirmTool(options: {
     api,
   };
 }
+
+describe("emitted reconciliation approval calls are executable", () => {
+  it.each(["dry_run_auto_confirm", "inter_account_dry_run"])("%s cannot advertise an executable approval when preparation fails", async mode => {
+    const { handler, api } = setupAutoConfirmTool({ toolName: "reconcile_bank_transactions" });
+    api.transactions.listAll.mockRejectedValue(new Error("read unavailable"));
+    // A failed source read rejects preparation; it emits no approval payload.
+    await expect(handler({ mode, plan_handle: "old-owner-handle" })).rejects.toThrow("read unavailable");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+  it.each(["dry_run_auto_confirm", "inter_account_dry_run"])("%s replaces a supplied old handle with the newly issued plan", async mode => {
+    const { handler, api } = setupAutoConfirmTool({ toolName: "reconcile_bank_transactions" });
+    const dry = parseMcpResponse((await handler({ mode, plan_handle: "old-owner-handle" })).content[0].text) as any;
+    expect(dry.result.plan_handle).toEqual(expect.any(String));
+    expect(dry.workflow.approval_previews).toEqual([]);
+    expect(JSON.stringify(dry)).not.toContain("old-owner-handle");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+  for (const profile of ["standard", "full"] as const) {
+    for (const view of ["recommended_next_action", "approval_previews"] as const) {
+      it(`${profile} exact ${view} carries its fresh handle through the public facade`, async () => {
+        const api = createAutoConfirmApi({
+          transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: 20, ref_number: "RF1" }],
+          sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
+        });
+        const server = { registerTool: vi.fn() } as any;
+        registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), { ...EXPOSE_GRANULAR, exposeGranularTools: false });
+        expect(server.registerTool.mock.calls.some(([name]: [string]) => name === "auto_confirm_exact_matches")).toBe(false);
+        const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions")!;
+        const invoke = (args: Record<string, unknown>) => runWithToolProfile(profile, () => registration[2](args));
+        const dry = parseMcpResponse((await invoke({ mode: "dry_run_auto_confirm", min_confidence: 95, block_on_duplicate: false })).content[0].text) as any;
+        const action = view === "recommended_next_action" ? dry.workflow.recommended_next_action : dry.workflow.approval_previews[0];
+        const args = view === "recommended_next_action" ? action.args : action.execute_args;
+        expect(view === "recommended_next_action" ? action.tool : action.execute_tool).toBe("reconcile_bank_transactions");
+        expect(args).toEqual({ mode: "execute_auto_confirm", min_confidence: 95, block_on_duplicate: false, plan_handle: dry.result.plan_handle });
+        expect(action.approval_required).toBe(true);
+        expect(z.object(registration[1].inputSchema).strict().safeParse(args).success).toBe(true);
+        const done = parseMcpResponse((await invoke(args)).content[0].text) as any;
+        expect(done.result.mode).toBe("EXECUTED");
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+        const replay = parseMcpResponse((await invoke(args)).content[0].text) as any;
+        expect(replay.result.category).toBe("plan_handle_consumed");
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      });
+
+      it(`${profile} inter-account ${view} carries its fresh handle and filters`, async () => {
+        const { api } = setupInterAccountTool({
+          transactions: [
+            { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: null },
+            camtSigned({ id: 41, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: null }),
+          ], bankAccounts: [
+            { id: 1, account_name_est: "LHV", account_no: "EE111", iban_code: "EE111", accounts_dimensions_id: 100 },
+            { id: 2, account_name_est: "Wise", account_no: "EE222", iban_code: "EE222", accounts_dimensions_id: 200 },
+          ],
+        });
+        const server = { registerTool: vi.fn() } as any;
+        registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), { ...EXPOSE_GRANULAR, exposeGranularTools: false });
+        const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions")!;
+        const invoke = (args: Record<string, unknown>) => runWithToolProfile(profile, () => registration[2](args));
+        const dry = parseMcpResponse((await invoke({ mode: "inter_account_dry_run", max_date_gap: 2, target_accounts_dimensions_id: 200 })).content[0].text) as any;
+        const action = view === "recommended_next_action" ? dry.workflow.recommended_next_action : dry.workflow.approval_previews[0];
+        const args = view === "recommended_next_action" ? action.args : action.execute_args;
+        const target = view === "recommended_next_action" ? action.tool : action.execute_tool;
+        expect(target).toBe("reconcile_inter_account_transfers");
+        expect(args).toEqual({ execute: true, max_date_gap: 2, target_accounts_dimensions_id: 200, plan_handle: dry.result.plan_handle });
+        expect(action.approval_required).toBe(true);
+        const executeRegistration = server.registerTool.mock.calls.find(([name]: [string]) => name === target)!;
+        expect(z.object(executeRegistration[1].inputSchema).strict().safeParse(args).success).toBe(true);
+        const execute = () => runWithToolProfile(profile, () => executeRegistration[2](args));
+        const done = parseMcpResponse((await execute()).content[0].text) as any;
+        expect(done.mode).toBe("EXECUTED");
+        expect(done.execution.execution_report.status).toBe("completed");
+        const replay = parseMcpResponse((await execute()).content[0].text) as any;
+        expect(replay.category).toBe("plan_handle_consumed");
+        expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      });
+    }
+  }
+});
 
 // Dry-run to issue a bank_reconciliation plan handle, then execute exactly that
 // reviewed plan. Mirrors the plan-bound contract: execute REQUIRES the handle.

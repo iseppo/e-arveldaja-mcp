@@ -4,6 +4,18 @@ import { registerPrompt, registerResource, registerTool } from "./mcp-compat.js"
 import { toolMeta } from "./tool-catalog.js";
 
 describe("mcp-compat", () => {
+  it("restores the public handler registration method if prompt registration fails", () => {
+    const setRequestHandler = vi.fn();
+    const server = {
+      server: { setRequestHandler },
+      registerPrompt: vi.fn(() => { throw new Error("duplicate prompt"); }),
+    } as any;
+
+    expect(() => registerPrompt(server, "duplicate", "Duplicate", async () => ({})))
+      .toThrow("duplicate prompt");
+    expect(server.server.setRequestHandler).toBe(setRequestHandler);
+  });
+
   it("maps legacy tool registrations to registerTool with first-class title", () => {
     const server = { registerTool: vi.fn() } as any;
     const callback = vi.fn();
@@ -42,7 +54,7 @@ describe("mcp-compat", () => {
   });
 
   it("derives prompt titles when the legacy signature has none", () => {
-    const server = { registerPrompt: vi.fn() } as any;
+    const server = { registerPrompt: vi.fn(), server: { setRequestHandler: vi.fn() } } as any;
     const callback = vi.fn();
     const argsSchema = { file_path: z.string() };
 

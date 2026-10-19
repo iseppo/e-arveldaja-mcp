@@ -11,7 +11,7 @@ function setupPromptServer(options: {
   toolProfile?: ToolProfile;
   toolExposure?: ToolExposureConfig;
 } = {}) {
-  const server = { registerPrompt: vi.fn() } as any;
+  const server = { registerPrompt: vi.fn(), server: { setRequestHandler: vi.fn() } } as any;
   registerPrompts(server, options);
   return server;
 }
@@ -602,7 +602,7 @@ describe("registerPrompts", () => {
     expect(text).toContain('`process_camt053` with `mode: "dry_run"`');
     expect(text).toContain('`mode: "execute"`');
     expect(text).toContain("`accounts_dimensions_id` is REQUIRED");
-    expect(text).toContain("top-level `plan_handle`");
+    expect(text).toContain("`result.plan_handle`");
     expect(text).not.toContain("process_bank_input");
     expect(text).not.toContain("parse_camt053");
     expect(text).not.toContain("import_camt053");
@@ -1197,7 +1197,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("get_operation_result_page");
     expect(text).toContain("plan_drift");
     expect(text).toContain("`plan_handle`: the `summary.plan_handle` from the reviewed preview");
-    expect(text).toContain("`plan_handle`: the top-level `plan_handle` from the reviewed dry run");
+    expect(text).toContain("`plan_handle`: the `result.plan_handle` from the reviewed dry run");
     expect(text).toContain("The plan handle is not approval");
     expect(text).toContain("summary.status");
   });

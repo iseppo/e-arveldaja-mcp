@@ -386,7 +386,14 @@ export function registerBankReconciliationTools(
             dry_run_steps: [{
               tool: delegatedTool,
               summary: workflowSummary,
-              suggested_args: delegatedArgs,
+              suggested_args: {
+                ...delegatedArgs,
+                // Use only the handle actually issued by this preparation.
+                // The approval builder and public-tool remapper retain it in
+                // both the recommended call and approval preview arguments.
+                ...(typeof result.plan_handle === "string" && result.plan_handle.length > 0
+                  ? { plan_handle: result.plan_handle } : {}),
+              },
               preview: resultSummary,
             }],
           })

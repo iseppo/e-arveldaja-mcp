@@ -12,7 +12,7 @@ import { decodeApiResponseCritical, decodeInvoiceStatusCritical } from "../api/c
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import { validateOptionalStrictDateRange } from "../strict-date.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
-import { parseSaleInvoiceItems, tagNotes, validateUpdateFields } from "../tools/crud/shared.js";
+import { parseSaleInvoiceItems, prepareSaleInvoiceItemsForHeaderUpdate, tagNotes, validateUpdateFields } from "../tools/crud/shared.js";
 import { logAudit } from "../audit-log.js";
 import { classifyMutationFailure } from "../mutation-outcome.js";
 import {
@@ -380,6 +380,10 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     if (input.action === "create") {
       const conflict = clientInputConflict(input.payload);
       if (conflict) return conflict;
+    }
+    if (input.action === "update" && input.payload?.items !== undefined) {
+      try { parseSaleInvoiceItems(input.payload.items); }
+      catch (error) { return fail("invalid_sale_invoice_items", error instanceof Error ? error.message : String(error)); }
     }
     // Bind the DESANDBOXED payload fingerprint for create/update/send so the
     // execute-time drift check rejects a changed payload (amounts, line items,
@@ -829,6 +833,20 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
       });
       if (updateErrors.length > 0) {
         return fail("invoice_status_unverified", `Sale invoice ${input.id!} is not a PROJECT draft; ledger-bearing fields cannot be edited. ${updateErrors.join(" ")}`);
+      }
+    }
+    if (status === "PROJECT") {
+      if (parsed.items !== undefined) {
+        let items;
+        try { items = desandboxAllStrings(parseSaleInvoiceItems(parsed.items)); }
+        catch (error) { return fail("invalid_sale_invoice_items", error instanceof Error ? error.message : String(error)); }
+        const [accounts, dimensions] = await Promise.all([this.api.readonly.getAccounts(), this.api.readonly.getAccountDimensions()]);
+        const errors = validateSaleInvoiceItemDimensions(items, accounts, dimensions);
+        if (errors.length) return fail("account_validation_failed", `Account validation failed: ${errors.join("; ")}`);
+        parsed.items = items;
+      } else if (current.items !== undefined) {
+        try { parsed.items = prepareSaleInvoiceItemsForHeaderUpdate(desandboxAllStrings(current.items)); }
+        catch (error) { return fail("sale_row_rounding_requires_review", `${error instanceof Error ? error.message : String(error)}. Provide explicitly reviewed items with the intended absolute discount_amount; no update was sent.`); }
       }
     }
     const result = await this.api.saleInvoices.update(input.id!, parsed as never);

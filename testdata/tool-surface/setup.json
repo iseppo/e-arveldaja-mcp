@@ -2,9 +2,9 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 129,
-    "toolsListBytes": 138769,
-    "descriptionsBytes": 18584,
-    "inputSchemasBytes": 89123,
+    "toolsListBytes": 139355,
+    "descriptionsBytes": 18705,
+    "inputSchemasBytes": 89588,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4606
@@ -803,7 +803,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Create a new product/service",
+      "description": "Create a product/service with a sales or purchase article. Account IDs are read-only; use article IDs from list_sale_articles/list_purchase_articles.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -818,7 +818,7 @@
             "type": "integer"
           },
           "cl_sale_accounts_dimensions_id": {
-            "description": "Sales account dimension ID",
+            "description": "Legacy alias for sale_accounts_dimensions_id; supply only one value",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
@@ -830,11 +830,13 @@
             "type": "integer"
           },
           "code": {
-            "description": "Product code",
+            "description": "Product code (max 20 characters)",
+            "maxLength": 20,
             "type": "string"
           },
           "name": {
-            "description": "Product name",
+            "description": "Product name (max 1000 characters)",
+            "maxLength": 1000,
             "type": "string"
           },
           "purchase_accounts_dimensions_id": {
@@ -844,7 +846,7 @@
             "type": "integer"
           },
           "purchase_accounts_id": {
-            "description": "Purchase account ID",
+            "description": "Unsupported read-only field; provide cl_purchase_articles_id instead",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
@@ -856,7 +858,7 @@
             "type": "integer"
           },
           "sale_accounts_id": {
-            "description": "Sales account ID",
+            "description": "Unsupported read-only field; provide cl_sale_articles_id instead",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
@@ -866,7 +868,8 @@
             "type": "number"
           },
           "unit": {
-            "description": "Unit (e.g. tk, h, km)",
+            "description": "Unit (e.g. tk, h, km; max 10 characters)",
+            "maxLength": 10,
             "type": "string"
           }
         },
@@ -1929,7 +1932,7 @@
                 "type": "string"
               }
             ],
-            "description": "Invoice items [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions. Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
+            "description": "Invoice items [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions. To apply a percentage discount, provide unit_net_price so the server can derive the absolute line discount_amount; an explicit discount_amount is preserved. total_net_price alone does not apply the discount in the API. Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
           },
           "journal_date": {
             "description": "Turnover date (YYYY-MM-DD)",

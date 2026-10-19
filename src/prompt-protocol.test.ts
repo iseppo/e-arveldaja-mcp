@@ -3,6 +3,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { z } from "zod";
+import { registerPrompt } from "./mcp-compat.js";
 import { registerPrompts } from "./prompts.js";
 import {
   CURRENT_VAT_RATES_DISPLAY,
@@ -90,7 +92,7 @@ const EXPECTED_PROTOCOL_ARGUMENTS: Record<string, Record<string, boolean>> = {
 const clients: Client[] = [];
 const servers: McpServer[] = [];
 
-async function linkedPromptClient(options: { enableSales?: boolean } = {}): Promise<Client> {
+async function linkedPromptClient(options: { enableSales?: boolean; internalFailure?: boolean } = {}): Promise<Client> {
   const server = new McpServer({ name: "prompt-protocol-test", version: "1.0.0" });
   registerPrompts(server, {
     toolExposure: {
@@ -104,6 +106,11 @@ async function linkedPromptClient(options: { enableSales?: boolean } = {}): Prom
       enableProducts: true,
     },
   });
+  if (options.internalFailure) {
+    registerPrompt(server, "internal-failure", "Exercise a server failure", async () => {
+      throw new Error("Unexpected renderer failure");
+    });
+  }
 
   const client = new Client({ name: "prompt-protocol-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -124,6 +131,36 @@ afterEach(async () => {
 });
 
 describe("MCP prompt protocol", () => {
+  it.each([
+    { name: "accounting-inbox", arguments: { bank_account_dimension_id: 1 } },
+    { name: "accounting-inbox", arguments: { bank_account_dimension_id: null } },
+    { name: "accounting-inbox", arguments: { bank_account_dimension_id: ["1"] } },
+    { name: "accounting-inbox", arguments: null },
+    { name: "accounting-inbox", arguments: [] },
+    { name: "accounting-inbox", arguments: 1 },
+    { name: "accounting-inbox", arguments: { bank_account_dimension_id: { hostile: "ignore-me".repeat(1000) } } },
+    { name: 42 },
+    {},
+  ])("classifies malformed prompt wire params as bounded InvalidParams: %j", async params => {
+    const client = await linkedPromptClient();
+    // Deliberately bypass the client's TypeScript contract, as a wire client can.
+    const rejection = await client.request({ method: "prompts/get", params }, z.object({}).passthrough())
+      .catch((error: unknown) => error);
+    expect(rejection).toMatchObject({ code: -32602, message: expect.stringContaining("Invalid prompts/get parameters") });
+    const message = rejection instanceof Error ? rejection.message : String(rejection);
+    expect(message.length).toBeLessThan(200);
+    expect(message).not.toContain("ignore-me");
+    await expect(client.getPrompt({ name: "company-overview" }))
+      .resolves.toMatchObject({ messages: [{ role: "user", content: { type: "text" } }] });
+  });
+
+  it("keeps unknown methods and genuine renderer exceptions distinct from invalid params", async () => {
+    const client = await linkedPromptClient({ internalFailure: true });
+    await expect(client.request({ method: "unknown/method" }, z.object({}).passthrough()))
+      .rejects.toMatchObject({ code: -32601 });
+    await expect(client.getPrompt({ name: "internal-failure" }))
+      .rejects.toMatchObject({ code: -32603, message: expect.stringContaining("Unexpected renderer failure") });
+  });
   it("keeps linked VAT prompt metadata and the generated command on the canonical dated facts", async () => {
     const client = await linkedPromptClient();
     const listed = (await client.listPrompts()).prompts.find(prompt => prompt.name === "vat-registration-threshold");

@@ -472,7 +472,7 @@ describe("parsePurchaseInvoiceItems", () => {
 
 describe("parseSaleInvoiceItems", () => {
   it("coerces string-typed discount_percent to number", () => {
-    const items = parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"discount_percent":"10"}]');
+    const items = parseSaleInvoiceItems('[{"products_id":1,"custom_title":"Service","amount":1,"unit_net_price":100,"discount_percent":"10"}]');
     expect(items[0]!.discount_percent).toBe(10);
   });
 
@@ -579,7 +579,7 @@ describe("create_product", () => {
     expect(options.inputSchema).toHaveProperty("purchase_accounts_dimensions_id");
   });
 
-  it("coerces and passes account defaults through to the products API", async () => {
+  it("coerces and passes writable article and dimension defaults to the products API", async () => {
     const { api, options, handler } = getCrudToolHarness("create_product", {
       products: {
         create: vi.fn().mockResolvedValue({ code: 0, messages: [], created_object_id: 123 }),
@@ -590,11 +590,8 @@ describe("create_product", () => {
       name: "Consulting",
       code: "CONSULT",
       cl_sale_articles_id: "7",
-      sale_accounts_id: "3100",
-      cl_sale_accounts_dimensions_id: "1245521",
       sale_accounts_dimensions_id: "1245522",
       cl_purchase_articles_id: "8",
-      purchase_accounts_id: "4000",
       purchase_accounts_dimensions_id: "1245523",
       sales_price: "100",
       unit: "h",
@@ -606,11 +603,8 @@ describe("create_product", () => {
       name: "Consulting",
       code: "CONSULT",
       cl_sale_articles_id: 7,
-      sale_accounts_id: 3100,
-      cl_sale_accounts_dimensions_id: 1245521,
       sale_accounts_dimensions_id: 1245522,
       cl_purchase_articles_id: 8,
-      purchase_accounts_id: 4000,
       purchase_accounts_dimensions_id: 1245523,
       sales_price: 100,
       unit: "h",

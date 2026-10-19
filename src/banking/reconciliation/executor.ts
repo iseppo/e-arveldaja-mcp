@@ -365,6 +365,19 @@ export async function runSuggestMatches(
 
 // === Exact-match confirm =====================================================
 
+/** Lists identify work; only pending or unclassified rows need detail reads. */
+async function loadPendingTransactions(api: ApiContext, listed: Transaction[]): Promise<Transaction[]> {
+  const candidates = listed.filter(tx => !tx.is_deleted && tx.status !== "CONFIRMED" && tx.status !== "VOID");
+  const detailed = await Promise.all(candidates.map(async tx => {
+    const row = await api.transactions.get(tx.id!);
+    if (!row || typeof row.status !== "string" || !["PROJECT", "CONFIRMED", "VOID"].includes(row.status)) {
+      throw new Error(`Transaction ${tx.id} has an unresolved status; pending bank work cannot be determined.`);
+    }
+    return row;
+  }));
+  return detailed.filter(isProjectTransaction);
+}
+
 /**
  * Cross-mechanism duplicate guard for the exact-match confirm flow (Task 3).
  * Runs identically in the dry-run and execute paths so the re-derived execute
@@ -695,11 +708,13 @@ async function loadExactMatchProjection(
   api.saleInvoices.invalidateListCache();
   api.purchaseInvoices.invalidateListCache();
   const allTx = await api.transactions.listAll();
-  const unconfirmed = await Promise.all(allTx.filter(isProjectTransaction).map(async tx => {
-    return api.transactions.get(tx.id!);
-  }));
+  const unconfirmed = await loadPendingTransactions(api, allTx);
   const total = unconfirmed.length;
   for (let i = 0; i < total; i++) await reportProgress(i, total);
+
+  if (total === 0) {
+    return { projection: computeExactMatchProjection([], [], [], threshold), threshold };
+  }
 
   // Same fail-closed decode as the read-only suggest path above. A raw read is
   // not merely inconsistent here, it is unsafe in the dangerous direction: a
@@ -784,15 +799,17 @@ export async function runInterAccountMatching(
 
   const confirmActions: InterAccountConfirmAction[] = [];
 
+  // Selection now relies on list status, so do not reuse a cached CONFIRMED
+  // row after it has been invalidated back to PROJECT in another session.
+  api.transactions.invalidateListCache();
   const [listedTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
     api.transactions.listAll(),
     api.readonly.getBankAccounts({fresh:true}),
     api.readonly.getAccountDimensions({fresh:true}),
     api.readonly.getInvoiceInfo(),
   ]);
-  api.transactions.invalidateListCache();
-  const allTx = await Promise.all(listedTx.map(tx => api.transactions.get(tx.id!)));
-  const unconfirmed = allTx.filter(isProjectTransaction);
+  const unconfirmed = await loadPendingTransactions(api, listedTx);
+  const allTx = new Map(unconfirmed.map(tx => [tx.id!, tx]));
   const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
   const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
@@ -827,6 +844,23 @@ export async function runInterAccountMatching(
   const errors: InterAccountErrorRow[] = [];
   const consumedTxIds = new Set<number>();
   const blockedOneSidedTxIds = new Set<number>();
+
+  function finish(companyClientsId: number | null): InterAccountMatchResult {
+    const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId);
+    const normalizedArgs = stripUndefinedDeep({ max_date_gap: maxGap, target_accounts_dimensions_id }) as PlanRecord;
+    const fingerprint = interAccountFingerprint({ normalizedArgs, planCommandProjections, skippedAlreadyHandled,
+      ambiguousPairs, ambiguousRefless, crossCurrencyPairs });
+    const companyLegalName = (invoiceInfo.invoice_company_name ?? "").trim();
+    const warnings = companyLegalName && !sameCompanyIdentity(companyLegalName, companyLegalName)
+      ? ["Company name has no legal form; own-transfer detection relies on IBANs only."] : [];
+    return { totalUnconfirmed: unconfirmed.length, invoiceInfo, dimensionToIban, dimensionToTitle,
+      dimensionToAccountsId, matchedPairs, matchedOneSided, ambiguousPairs, skippedAlreadyHandled,
+      ambiguousRefless, crossCurrencyPairs, errors, confirmActions, companyClientsId, normalizedArgs,
+      fingerprint, ...(warnings.length > 0 ? { warnings } : {}) };
+  }
+
+  // With no pending bank rows there is nothing to pair, deduplicate or confirm.
+  if (unconfirmed.length === 0) return finish(null);
 
   // Load one BookingGuard snapshot of existing confirmed inter-account journals.
   const guard = await BookingGuard.load(api, { ownDimensionIds });
@@ -1444,10 +1478,16 @@ export async function runInterAccountMatching(
   // Report-only: the operator resolves a proposal with delete_transaction.
   const isPlainEur = (row: Transaction) =>
     row.cl_currencies_id === "EUR" && (row.base_amount == null || sameAmountToTheCent(row.base_amount, row.amount));
-  function mirrorProposalFor(tx: Transaction, targetDimension: number, journalId: number): NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> | undefined {
+  async function mirrorProposalFor(tx: Transaction, targetDimension: number, journalId: number): Promise<NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> | undefined> {
     const journal = guard.journals.find(j => j.id === journalId);
     if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION") return undefined;
-    const counterpart = journal.operations_id != null ? allTx.find(row => row.id === journal.operations_id) : undefined;
+    // Only a matched registration journal needs a historical counterpart's
+    // detail. Unrelated confirmed transaction history cannot affect this proof.
+    if (journal.operations_id != null && !allTx.has(journal.operations_id)
+      && listedTx.some(row => row.id === journal.operations_id)) {
+      allTx.set(journal.operations_id, await api.transactions.get(journal.operations_id));
+    }
+    const counterpart = journal.operations_id != null ? allTx.get(journal.operations_id) : undefined;
     if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED") return undefined;
     if (counterpart.accounts_dimensions_id !== targetDimension || !sameAmountToTheCent(counterpart.amount, tx.amount)) return undefined;
     if (!isPlainEur(tx) || !isPlainEur(counterpart)) return undefined;
@@ -1583,7 +1623,7 @@ export async function runInterAccountMatching(
         reason: "Already journalized from the other account side",
       };
       skippedAlreadyHandled.push(row);
-      const proposal = mirrorProposalFor(tx, targetDimension, resolution.journal_id);
+      const proposal = await mirrorProposalFor(tx, targetDimension, resolution.journal_id);
       if (proposal) mirrorProposals.push({ row, proposal });
       continue;
     }
@@ -1635,8 +1675,8 @@ export async function runInterAccountMatching(
 
   const companyClientsId = await resolveCompanyClientsId();
   for (const action of confirmActions) {
-    const source = allTx.find(tx => tx.id === action.confirmedTxId)!;
-    const mirror = allTx.find(tx => tx.id === action.deleteTxId);
+    const source = allTx.get(action.confirmedTxId)!;
+    const mirror = action.deleteTxId == null ? undefined : allTx.get(action.deleteTxId);
     action.sourceMaterial = snapshotBankTransaction(source);
     if (mirror) action.mirrorMaterial = snapshotBankTransaction(mirror);
     action.mappingMaterial = transferMappingMaterial(bankAccounts, accountDimensions);
@@ -1646,46 +1686,7 @@ export async function runInterAccountMatching(
     action.pairEvidence = {kind: pair ? reasons.some(reason => reason.startsWith("same_type_")) ? "same_type" : "reciprocal" : "one_sided",
       reasons, maxDateGap: maxGap, sourceSide: action.sourceMaterial.trusted_direction === "incoming" ? "D" : "C"};
   }
-  const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId);
-  const normalizedArgs = stripUndefinedDeep({
-    max_date_gap: maxGap,
-    target_accounts_dimensions_id,
-  }) as PlanRecord;
-  const fingerprint = interAccountFingerprint({
-    normalizedArgs,
-    planCommandProjections,
-    skippedAlreadyHandled,
-    ambiguousPairs,
-    ambiguousRefless,
-    crossCurrencyPairs,
-  });
-
-  // sameCompanyIdentity needs a legal form on both sides, so a company name
-  // without one ("Seppo AI") never yields name-based own-origin evidence.
-  const companyLegalName = (invoiceInfo.invoice_company_name ?? "").trim();
-  const warnings = companyLegalName && !sameCompanyIdentity(companyLegalName, companyLegalName)
-    ? ["Company name has no legal form; own-transfer detection relies on IBANs only."]
-    : [];
-
-  return {
-    totalUnconfirmed: unconfirmed.length,
-    invoiceInfo,
-    dimensionToIban,
-    dimensionToTitle,
-    dimensionToAccountsId,
-    matchedPairs,
-    matchedOneSided,
-    ambiguousPairs,
-    skippedAlreadyHandled,
-    ambiguousRefless,
-    crossCurrencyPairs,
-    errors,
-    confirmActions,
-    companyClientsId,
-    normalizedArgs,
-    fingerprint,
-    ...(warnings.length > 0 ? { warnings } : {}),
-  };
+  return finish(companyClientsId);
 }
 
 // Helper to build the account distribution used by inter-account confirms.

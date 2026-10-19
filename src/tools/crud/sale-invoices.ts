@@ -22,6 +22,7 @@ import {
   pageParam,
   parseJsonObject,
   parseSaleInvoiceItems,
+  prepareSaleInvoiceItemsForHeaderUpdate,
   tagNotes,
   validateUpdateFields,
 } from "./shared.js";
@@ -64,6 +65,7 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
       items: jsonObjectArrayInput.describe(
         "Invoice items [{products_id, custom_title, amount, unit_net_price, sale_accounts_id?, sale_accounts_dimensions_id?, vat_accounts_id?, cl_sale_articles_id?, discount_percent?, projects_project_id?, projects_location_id?, projects_person_id?}]. " +
       "sale_accounts_dimensions_id is REQUIRED when the revenue account has dimensions. " +
+      "To apply a percentage discount, provide unit_net_price so the server can derive the absolute line discount_amount; an explicit discount_amount is preserved. total_net_price alone does not apply the discount in the API. " +
       "Note: SaleInvoicesItems schema has no vat_accounts_dimensions_id field — only the purchase side does."
     ),
     notes: z.string().optional().describe("Internal notes"),
@@ -164,6 +166,20 @@ export function registerSaleInvoiceTools(server: McpServer, api: ApiContext): vo
         return toolError({ error: "Account validation failed", details: dimErrors });
       }
       parsed.items = items;
+    }
+    // The API requires the complete item list for header-only draft updates.
+    // Only PROJECT evidence permits sending ledger-bearing rows; confirmed or
+    // unverified states retain their existing metadata-only policy.
+    if (isDraft && parsed.items === undefined && current.items !== undefined) {
+      try {
+        parsed.items = prepareSaleInvoiceItemsForHeaderUpdate(desandboxAllStrings(current.items));
+      } catch (error) {
+        return toolError({
+          category: "sale_row_rounding_requires_review",
+          error: error instanceof Error ? error.message : String(error),
+          next_action: "Provide explicitly reviewed invoice items with their intended absolute discount_amount; no update was sent because replaying the rounded API rows would change the financial totals.",
+        });
+      }
     }
     const result = await api.saleInvoices.update(id, parsed);
     logAudit({

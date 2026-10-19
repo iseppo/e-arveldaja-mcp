@@ -181,16 +181,105 @@ export function parseTransactionDistributions(input: unknown): TransactionDistri
   return distributions as unknown as TransactionDistribution[];
 }
 
+function decimalFraction(value: number): [bigint, bigint] {
+  const [coefficient, exponent = "0"] = String(value).split("e");
+  const decimals = coefficient!.split(".")[1]?.length ?? 0;
+  const integer = BigInt(coefficient!.replace(".", ""));
+  const scale = decimals - Number(exponent);
+  return scale < 0 ? [integer * 10n ** BigInt(-scale), 1n] : [integer, 10n ** BigInt(scale)];
+}
+
+function roundedFraction(numerator: bigint, denominator: bigint): number {
+  const magnitude = numerator < 0n ? -numerator : numerator;
+  const cents = (200n * magnitude + denominator) / (2n * denominator);
+  if (cents > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Discounted total_net_price exceeds exact cent precision; provide an explicit reviewed discount_amount");
+  const result = Number(cents) / 100;
+  return numerator < 0n && result !== 0 ? -result : result;
+}
+
+function decimalFractionNumber(numerator: bigint, denominator: bigint): number {
+  // These denominators are powers of ten, so an exact finite decimal exists.
+  const scale = denominator.toString().length - 1;
+  const digits = (numerator < 0n ? -numerator : numerator).toString().padStart(scale + 1, "0");
+  const decimal = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits;
+  const value = Number(`${numerator < 0n ? "-" : ""}${decimal}`);
+  if (!Number.isFinite(value)) throw new Error("Derived discount_amount is not finite");
+  return value || 0;
+}
+
+function lineDiscount(amount: number, unitPrice: number, percent: number) {
+  const [quantity, quantityScale] = decimalFraction(amount);
+  const [price, priceScale] = decimalFraction(unitPrice);
+  const [discount, discountScale] = decimalFraction(percent);
+  const denominator = quantityScale * priceScale * discountScale * 100n;
+  const discountNumerator = quantity * price * discount;
+  const result = {
+    amount: decimalFractionNumber(discountNumerator, denominator),
+    roundedAmount: roundedFraction(discountNumerator, denominator),
+    total: roundedFraction(quantity * price * 100n * discountScale - discountNumerator, denominator),
+  };
+  if (totalWithAbsoluteDiscount(amount, unitPrice, result.amount) !== result.total) {
+    throw new Error("Derived discount_amount cannot retain the intended cents at JSON number precision; provide an explicit reviewed discount_amount");
+  }
+  return result;
+}
+
+function totalWithAbsoluteDiscount(amount: number, unitPrice: number, absoluteDiscount: number): number {
+  const [quantity, quantityScale] = decimalFraction(amount);
+  const [price, priceScale] = decimalFraction(unitPrice);
+  const [discount, discountScale] = decimalFraction(absoluteDiscount);
+  return roundedFraction(quantity * price * discountScale - discount * quantityScale * priceScale, quantityScale * priceScale * discountScale);
+}
+
+/** The API rounds discount_amount on GET, but recalculates totals on PATCH. */
+export function prepareSaleInvoiceItemsForHeaderUpdate(items: SaleInvoiceItem[]): SaleInvoiceItem[] {
+  return items.map((original, index) => {
+    const item = { ...original };
+    const { amount, unit_net_price: price, discount_amount: absoluteDiscount, total_net_price: total } = item;
+    if (![amount, price, absoluteDiscount, total].every(value => typeof value === "number" && Number.isFinite(value))) return item;
+    if (totalWithAbsoluteDiscount(amount, price!, absoluteDiscount!) === total) return item;
+    const percent = item.discount_percent;
+    if (typeof percent === "number" && Number.isFinite(percent)) {
+      const reconstructed = lineDiscount(amount, price!, percent);
+      if (reconstructed.total === total && reconstructed.roundedAmount === absoluteDiscount) {
+        item.discount_amount = reconstructed.amount;
+        return item;
+      }
+    }
+    throw new Error(`Draft sales-invoice item ${index + 1} has a rounded discount that cannot reproduce its stored total safely`);
+  });
+}
+
 export function parseSaleInvoiceItems(input: unknown): SaleInvoiceItem[] {
-  const items = parseJsonObjectArray(input, "items");
+  const items = parseJsonObjectArray(input, "items").map(item => ({ ...item }));
   requireFields(items, "items", ["products_id", "custom_title", "amount"]);
   requireNumericFields(items, "items", [
-    "products_id", "amount", "unit_net_price", "discount_percent",
+    "products_id", "amount", "unit_net_price", "discount_percent", "discount_amount", "total_net_price",
     "vat_accounts_id",
     "sale_accounts_id", "sale_accounts_dimensions_id",
     "cl_sale_articles_id",
     "projects_project_id", "projects_location_id", "projects_person_id",
   ]);
+  items.forEach((item, index) => {
+    // The API applies absolute LINE discount_amount; percentage and explicit
+    // total_net_price alone are only stored/ignored. Preserve an explicit
+    // discount amount, including zero. Do not round sub-cent discounts here:
+    // .135 from .15 at 90% must produce a .02 net, not .01 from .14.
+    if (item.discount_percent == null || item.discount_percent === 0 ||
+        item.discount_amount != null) return;
+    const percent = item.discount_percent as number;
+    if (percent > 1000) {
+      throw new Error(`"items" item ${index + 1} discount_percent exceeds the API maximum 1000`);
+    }
+    if (item.unit_net_price == null) {
+      throw new Error(`"items" item ${index + 1} needs unit_net_price or an explicit discount_amount to apply discount_percent; total_net_price alone is ignored by the API`);
+    }
+    const derived = lineDiscount(item.amount as number, item.unit_net_price as number, percent);
+    if (item.total_net_price != null && item.total_net_price !== derived.total) {
+      throw new Error(`"items" item ${index + 1} total_net_price conflicts with discount_percent; supply a consistent total or an explicit reviewed discount_amount`);
+    }
+    item.discount_amount = derived.amount;
+  });
   return items as unknown as SaleInvoiceItem[];
 }
 

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.32.1] - 2026-10-19
+
+### Fixed
+
+- **Bank approval calls carry their issued plan, and batch instructions require the complete effects before approval.** Details: reconciliation next actions retain the fresh consume-once handle through public-tool remapping; CAMT guidance reads the actual response envelope. Incomplete compact previews page every full command, exclusion and review using profile-supported arguments, while complete inline reviews and existing approval for unchanged effects need no repeated review. Wise guidance discloses the read-only bank reference instead of promising an ignored repair.
+- **Percentage discounts reduce draft sales-invoice totals correctly, and editing notes preserves their rounding.** Details: create and explicit row updates derive the missing absolute line discount without prematurely rounding sub-cent amounts; the API ignores a percentage or row total alone. Explicit discount amounts remain authoritative, and contradictory percentage/row-total inputs receive guidance. When a notes-only update would change totals because the API rounded its stored discount, a matching percentage and stored total prove the precise amount to replay; an unprovable conflict is refused before the financial PATCH.
+- **Product names and draft sales-invoice notes can be updated without rebuilding the record by hand.** Product updates read fresh writable article/dimension selectors required by the API; draft invoice header updates preserve fresh existing rows. Server-managed fields and non-draft invoice protections remain enforced. Product inputs now explain the article-based API contract, reject read-only account fields locally, and enforce product code/name/unit limits.
+- **Empty bank previews avoid historical detail walks.** Exact-match previews stop before loading invoice history when no pending transactions exist; inter-account previews load only pending/unknown-status rows and any specific confirmed counterpart required for mirror evidence. Empty inbox dry runs benefit from the same path while retaining pending-bank-work detection.
+- **Malformed prompt request parameters return `InvalidParams`.** Wrong wire argument types receive MCP `-32602`; genuine handler failures retain `InternalError` and unknown methods retain `MethodNotFound`.
+
 ## [0.32.0] - 2026-10-19
 
 ### Changed

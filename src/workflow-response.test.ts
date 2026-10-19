@@ -615,6 +615,21 @@ describe("hidden-granular → merged entry-point remap", () => {
     }
   });
 
+  it.each(["standard", "guided"] as const)("%s remapping retains the issued handle and company pin in both approval views", profile => {
+    for (const tool of ["auto_confirm_exact_matches", "reconcile_inter_account_transfers"]) {
+      const args = { execute: true, plan_handle: "H".repeat(43), connection: "owner-company" };
+      const original = { recommended_next_action: { tool, args, approval_required: true }, approval_previews: [{ source_tool: tool, execute_tool: tool, execute_args: args, approval_required: true }] };
+      const remapped = runWithToolProfile(profile, () => remapHiddenGranularWorkflowEnvelope(original)) as any;
+      for (const next of [remapped.recommended_next_action.args, remapped.approval_previews[0].execute_args]) {
+        expect(next.plan_handle).toBe(args.plan_handle);
+        expect(next.connection).toBe(args.connection);
+      }
+      expect(remapped.recommended_next_action.approval_required).toBe(true);
+      expect(remapped.approval_previews[0].approval_required).toBe(true);
+      expect(original.recommended_next_action.args).toEqual(args);
+    }
+  });
+
   it("returns non-envelope values unchanged", () => {
     expect(remapHiddenGranularWorkflowEnvelope(undefined)).toBeUndefined();
     expect(remapHiddenGranularWorkflowEnvelope("not an envelope")).toBe("not an envelope");

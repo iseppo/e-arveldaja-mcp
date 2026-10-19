@@ -551,6 +551,37 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    {stored:0.14,total:0.02,expected:0.135},
+    {stored:0.14,total:0.01,expected:0.14},
+  ])("guided notes-only update safely preserves API-rounded discounts: %j",async({stored,total,expected})=>{
+    const items=[{id:91,products_id:51,custom_title:'Service',amount:1,unit_net_price:0.15,total_net_price:total,discount_percent:90,discount_amount:stored}];
+    const update=vi.fn().mockResolvedValue({}),api=makeApi({update,get:vi.fn().mockResolvedValue({id:4,status:'PROJECT',items})}),ops=createSaleInvoiceOperations(api,createTestRuntimeSafetyContext());
+    const prepared=await ops.run({mode:'prepare',action:'update',id:4,payload:{notes:'Changed'}});if(!prepared.ok||prepared.value.mode!=='prepare')throw Error('prepare failed');
+    const result=await ops.run({mode:'execute',action:'update',id:4,payload:{notes:'Changed'},planHandle:prepared.value.planHandle});expect(result.ok).toBe(true);
+    expect(update).toHaveBeenCalledWith(4,{notes:'Changed',items:[{...items[0],discount_amount:expected}]});
+  });
+
+  it('guided explicit rows derive the reviewed percentage and validate dimensions',async()=>{
+    const update=vi.fn().mockResolvedValue({}),api=makeApi({update}),ops=createSaleInvoiceOperations(api,createTestRuntimeSafetyContext());
+    const payload={items:[{products_id:51,custom_title:'Service',amount:2,unit_net_price:0.10,discount_percent:25}]};
+    const prepared=await ops.run({mode:'prepare',action:'update',id:4,payload});if(!prepared.ok||prepared.value.mode!=='prepare')throw Error('prepare failed');
+    const result=await ops.run({mode:'execute',action:'update',id:4,payload,planHandle:prepared.value.planHandle});expect(result.ok).toBe(true);
+    expect(update).toHaveBeenCalledWith(4,{items:[{...payload.items[0],discount_amount:0.05}]});expect(api.readonly.getAccounts).toHaveBeenCalled();expect(api.readonly.getAccountDimensions).toHaveBeenCalled();
+  });
+
+  it('guided ambiguous rounded rows refuse before PATCH',async()=>{
+    const update=vi.fn(),api=makeApi({update,get:vi.fn().mockResolvedValue({id:4,status:'PROJECT',items:[{products_id:51,custom_title:'Service',amount:1,unit_net_price:0.15,total_net_price:0.02,discount_percent:90,discount_amount:0.12}]})}),ops=createSaleInvoiceOperations(api,createTestRuntimeSafetyContext());
+    const prepared=await ops.run({mode:'prepare',action:'update',id:4,payload:{notes:'Changed'}});if(!prepared.ok||prepared.value.mode!=='prepare')throw Error('prepare failed');
+    const result=await ops.run({mode:'execute',action:'update',id:4,payload:{notes:'Changed'},planHandle:prepared.value.planHandle});expect(result.ok).toBe(false);expect(update).not.toHaveBeenCalled();
+  });
+
+  it('guided inconsistent explicit percentages receive no approval plan',async()=>{
+    const api=makeApi(),ops=createSaleInvoiceOperations(api,createTestRuntimeSafetyContext());
+    const result=await ops.run({mode:'prepare',action:'update',id:4,payload:{items:[{products_id:51,custom_title:'Service',amount:2,unit_net_price:0.10,discount_percent:25,total_net_price:0.17}]}});
+    expect(result.ok).toBe(false);expect(api.saleInvoices.update).not.toHaveBeenCalled();
+  });
+
   describe("update requires positive PROJECT evidence for ledger-bearing fields", () => {
     async function runUpdate(invoice: Record<string, unknown>, payload: Record<string, unknown>) {
       const update = vi.fn().mockResolvedValue({});

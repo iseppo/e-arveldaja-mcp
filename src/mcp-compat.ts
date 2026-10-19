@@ -1,5 +1,5 @@
 import type { McpServer, ResourceMetadata, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, GetPromptRequestSchema, McpError, type ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { toolMeta, type ToolMeta } from "./tool-catalog.js";
 
@@ -8,6 +8,22 @@ type LegacyToolCallback<Args extends z.ZodRawShape> = (args: z.infer<z.ZodObject
 type LegacyPromptCallback<Args extends z.ZodRawShape> = (args: z.infer<z.ZodObject<Args>>, extra: unknown) => unknown;
 type StaticResourceCallback = (uri: URL, extra: unknown) => unknown;
 type DynamicResourceCallback = (uri: URL, params: Record<string, string>, extra: unknown) => unknown;
+
+// SDK 1.x validates this envelope before invoking its prompt handler, but a
+// plain schema failure becomes InternalError. Classify only wire parameters;
+// renderer failures must still reach the SDK's normal internal-error handling.
+const promptWireRequestSchema = GetPromptRequestSchema.extend({
+  params: z.unknown().transform(params => {
+    const parsed = GetPromptRequestSchema.shape.params.safeParse(params);
+    if (!parsed.success) {
+      throw new McpError(
+        ErrorCode.InvalidParams,
+        "Invalid prompts/get parameters: name must be a string and arguments must be an object of strings",
+      );
+    }
+    return parsed.data;
+  }),
+});
 
 const TOOL_ANNOTATION_KEYS = new Set([
   "title",
@@ -137,12 +153,27 @@ export function registerPrompt(server: McpServer, name: string, ...rest: unknown
     throw new Error(`Invalid prompt registration for ${name}: unsupported legacy signature`);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (server.registerPrompt as any)(name, {
-    title: humanizeName(name),
-    description,
-    ...(argsSchema !== undefined ? { argsSchema } : {}),
-  }, callback);
+  // McpServer installs its shared prompt handlers synchronously on the first
+  // registration. Use its public registration seam, then restore it even when
+  // registration fails; no private handler table or transport hooks are needed.
+  const originalSetRequestHandler = server.server.setRequestHandler;
+  const setRequestHandler = originalSetRequestHandler.bind(server.server);
+  server.server.setRequestHandler = (schema, handler) => {
+    setRequestHandler(
+      (schema as unknown) === GetPromptRequestSchema ? promptWireRequestSchema as unknown as typeof schema : schema,
+      handler,
+    );
+  };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (server.registerPrompt as any)(name, {
+      title: humanizeName(name),
+      description,
+      ...(argsSchema !== undefined ? { argsSchema } : {}),
+    }, callback);
+  } finally {
+    server.server.setRequestHandler = originalSetRequestHandler;
+  }
 }
 
 export function registerResource(
