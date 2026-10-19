@@ -12,13 +12,79 @@ import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { OPENING_BALANCE_ACTIONABLE_WARNING } from "../opening-balance-limitations.js";
-import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
+
+// API-only fixture: the values below become normalized rows returned by the mock server.
+let apiOpeningFixture: Journal | null = null;
+function resetApiOpening() { apiOpeningFixture = null; }
+beforeEach(resetApiOpening);
+function seedApiOpening(data: { openingDate: string; accounts: Array<{ code: string; debit: number; credit: number; [key: string]: unknown }>; [key: string]: unknown }, _timestamp?: string) {
+  apiOpeningFixture = {
+    id: 88001, operation_type: "INITIAL", effective_date: data.openingDate,
+    registered: true, is_deleted: false, clients_id: null,
+    postings: data.accounts.flatMap(row => [
+      ...(row.debit ? [{ accounts_id: Number(row.code), type: "D", amount: row.debit, base_amount: row.debit, accounts_dimensions_id: null }] : []),
+      ...(row.credit ? [{ accounts_id: Number(row.code), type: "C", amount: row.credit, base_amount: row.credit, accounts_dimensions_id: null }] : []),
+    ]) as Journal["postings"],
+  };
+}
+function withApiOpening(journals: Journal[]): Journal[] {
+  return apiOpeningFixture && !journals.some(j => j.operation_type === "INITIAL") ? [apiOpeningFixture, ...journals] : journals;
+}
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 import { logAudit } from "../audit-log.js";
 
 const ORIGINAL_RULES_FILE = process.env.EARVELDAJA_RULES_FILE;
+
+describe("bounded cash evidence public annual report",()=>{
+  const asset=(id:number)=>makeAccount({id,balance_type:"D",account_type_est:"Varad",account_type_eng:"Assets",name_est:"Synthetic investment",name_eng:"Synthetic investment"});
+  const result=(id:number,expense=false)=>makeAccount({id,balance_type:expense?"D":"C",account_type_est:expense?"Kulud":"Tulud",account_type_eng:expense?"Expenses":"Income",name_est:"Valuutakursi tulemus",name_eng:"Exchange result"});
+  it.each([
+    {name:"FX sale",rows:[makePosting(1020,"D",130),makePosting(1100,"C",100),makePosting(8500,"C",30)],net:130,review:false},
+    {name:"FX acquisition",rows:[makePosting(1100,"D",100),makePosting(7310,"D",5),makePosting(1020,"C",105)],net:-105,review:false},
+    {name:"wrong direction",rows:[makePosting(1020,"D",70),makePosting(1100,"D",30),makePosting(8330,"C",100)],net:0,review:true},
+    {name:"multiple fees",rows:[makePosting(1100,"D",100),makePosting(8335,"D",2),makePosting(8335,"D",3),makePosting(1020,"C",105)],net:-105,review:false},
+  ])("preserves financial buckets and status for $name",async({rows,net,review})=>{
+    const opening=makeJournal("2025-01-01",[makePosting(1020,"D",200),makePosting(1100,"D",100),makePosting(2900,"C",300)],{id:400,operation_type:"INITIAL"});
+    const report=await buildAnnualReportData(createApi([opening,makeJournal("2026-06-01",rows,{id:401})],{extraAccounts:[asset(1100),result(8500),result(7310,true),result(8330),result(8335,true)]}),2026);
+    const cf=report.cash_flow_statement as any;
+    expect(cf.status).toBe(review?"requires_review":"complete");expect(cf.cash_journal_classification.investing).toBe(net);expect(cf.cash_journal_classification.financing).toBe(0);expect(cf.exchange_rate_effect_on_cash).toBe(0);
+    expect(cf.operating_bridge.adjusted_total).toBe(0);expect(cf.unresolved_cash.count).toBe(review?1:0);
+    if(review)expect(cf.unresolved_cash.receipt_total).toBe(70);
+    else expect(cf.cash_movements.items[0]).toMatchObject({receipt_total:Math.max(net,0),payment_total:Math.max(-net,0)});
+  });
+  it("exposes known cash gross despite a malformed noncash counterpart",async()=>{
+    const report=await buildAnnualReportData(createApi([makeJournal("2026-06-01",[makePosting(1020,"D",95),makePosting(5990,"C",108,undefined,{cl_currencies_id:"USD"})],{id:401})]),2026);
+    expect(report.cash_flow_statement).toMatchObject({status:"requires_review",unresolved_cash:{receipt_total:95,payment_total:0,net:95},evidence_coverage:{unvalued_cash_posting_count:0}});
+  });
+  it.each([60,100])("handles gross fixed asset with accumulated depreciation %s through annual adapter",async depreciation=>{
+    const contra=makeAccount({id:1890,balance_type:"C",account_type_est:"Varad",account_type_eng:"Assets",name_est:"Akumuleeritud kulum",name_eng:"Accumulated depreciation"});
+    const opening=makeJournal("2025-01-01",[makePosting(1020,"D",200),makePosting(1820,"D",100),makePosting(1890,"C",depreciation),makePosting(2900,"C",300-depreciation)],{id:400,operation_type:"INITIAL"});
+    const sale=makeJournal("2026-06-01",[makePosting(1020,"D",50),makePosting(1820,"C",100),makePosting(1890,"D",depreciation),makePosting(3820,"C",depreciation-50)],{id:401});
+    const cf=(await buildAnnualReportData(createApi([opening,sale],{extraAccounts:[asset(1820),contra,result(3820)]}),2026)).cash_flow_statement as any;
+    expect(cf.status).toBe("complete");expect(cf.cash_journal_classification).toMatchObject({operating:0,investing:50,financing:0});
+    expect(cf.exchange_rate_effect_on_cash).toBe(0);expect(cf.operating_bridge).toMatchObject({adjusted_total:0,non_operating_adjustments:50-depreciation,difference:0});
+  });
+  it.each([false,true])("checks capital dimension through annual adapter mismatch=%s",async mismatch=>{
+    const opening=makeJournal("2025-01-01",[makePosting(1020,"D",200),makePosting(2900,"C",200)],{id:400,operation_type:"INITIAL"});
+    const invoice=makeJournal("2026-06-01",[makePosting(1820,"D",100),makePosting(2310,"C",100,undefined,{accounts_dimensions_id:11})],{id:401,operation_type:"PURCHASE_INVOICE",operations_id:1});
+    const payment=makeJournal("2026-06-02",[makePosting(2310,"D",100,undefined,{accounts_dimensions_id:mismatch?22:11}),makePosting(1020,"C",100,undefined,{accounts_dimensions_id:101})],{id:402,operation_type:"TRANSACTION",operations_id:2});
+    const api=createApi([opening,invoice,payment],{extraAccounts:[asset(1820),makeAccount({id:2310,balance_type:"C",account_type_est:"Kohustused",account_type_eng:"Liabilities",name_est:"Tarnijad",name_eng:"Supplier",allows_dimensions:true})]});
+    api.transactions.get=vi.fn().mockResolvedValue({id:2,status:"CONFIRMED",date:"2026-06-02",amount:100,base_amount:100,cl_currencies_id:"EUR",accounts_id:1020,accounts_dimensions_id:101,
+      items:[{id:1,accounts_id:2310,accounts_dimensions_id:11,relation_table:"purchase_invoices",relation_id:1,amount:100,base_amount:100,cl_currencies_id:"EUR"}]});
+    const cf=(await buildAnnualReportData(api,2026)).cash_flow_statement as any;
+    expect(cf.status).toBe(mismatch?"requires_review":"complete");expect(cf.cash_journal_classification.investing).toBe(mismatch?0:-100);
+    expect(cf.unresolved_cash.payment_total).toBe(mismatch?100:0);expect(cf.operating_bridge.difference).toBe(0);
+  });
+});
+
+it("does not create 7000 EUR operating cash from a noncash dividend declaration", async () => {
+  const journals = [makeJournal("2026-05-01", [makePosting(2960,"D",7000), makePosting(2650,"C",7000)], { id: 3859174 })];
+  const report = await buildAnnualReportData(createApi(journals, { extraAccounts: [
+    makeAccount({ id:2650,balance_type:"C",account_type_est:"Kohustused",account_type_eng:"Liabilities",name_est:"Dividendivõlad",name_eng:"Dividend payable" }),
+  ] }), 2026);
+  expect((report.cash_flow_statement as any).operating_activities.net_cash_from_operating_activities).toBe(0);
+});
 
 afterEach(() => {
   if (ORIGINAL_RULES_FILE === undefined) {
@@ -171,7 +237,7 @@ function createApi(
       listAll: async () => options.transactions ?? [],
     },
     journals: {
-      listAllWithPostings: async () => journals,
+      listAllWithPostings: async () => withApiOpening(journals),
       invalidateListCache: vi.fn(),
       ...(options.journalsCreate !== undefined ? { create: options.journalsCreate } : {}),
     },
@@ -337,33 +403,31 @@ describe("buildAnnualReportData", () => {
     beforeEach(() => {
       dir = mkdtempSync(join(tmpdir(), "ob-annual-report-"));
       process.env.EARVELDAJA_RULES_DIR = dir;
-      resetOpeningBalanceCache();
+      resetApiOpening();
     });
 
     afterEach(() => {
       delete process.env.EARVELDAJA_RULES_DIR;
-      resetOpeningBalanceCache();
+      resetApiOpening();
       rmSync(dir, { recursive: true, force: true });
     });
 
-    it("adds annual opening-balance disclosure after the account 999 warning (actionable, nothing captured)", async () => {
+    it("preserves unrelated warnings without inventing an opening-balance limitation", async () => {
       const report = await buildAccount999Report();
 
-      expect(report.opening_balance_status).toBe("api_incomplete");
-      expect(report.balance_scope).toBe("journal_api_visible_entries_only");
+      expect(report.opening_balance_status).toBe("not_present");
+      expect(report.balance_scope).toBe("complete_balance");
+      expect((report.cash_flow_statement as any).status).toBe("requires_review");
       expect(report.warnings).toEqual([
         ACCOUNT_999_WARNING,
+        expect.stringContaining("Cash-flow attribution requires review"),
         CASH_FLOW_999_WARNING,
-        OPENING_BALANCE_ACTIONABLE_WARNING,
       ]);
       expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
-      expect((report.warnings as string[]).filter(
-        (warning) => warning === OPENING_BALANCE_ACTIONABLE_WARNING,
-      )).toHaveLength(1);
     });
 
-    it("reports a complete annual opening-balance scope with the applied-note when a stored algbilanss is captured", async () => {
-      writeOpeningBalances(
+    it("reports a complete annual opening-balance scope with the applied-note when a API INITIAL is captured", async () => {
+      seedApiOpening(
         {
           openingDate: "2024-12-01",
           accounts: [
@@ -371,7 +435,6 @@ describe("buildAnnualReportData", () => {
             { code: "2900", name: "Osakapital", debit: 0, credit: 200 },
           ],
           totals: { debit: 200, credit: 200 },
-          rawText: "n/a",
         },
         "2024-12-01T00:00:00.000Z",
       );
@@ -382,15 +445,16 @@ describe("buildAnnualReportData", () => {
       expect(report.balance_scope).toBe("complete_balance");
       expect(report.warnings).toEqual([
         ACCOUNT_999_WARNING,
+        expect.stringContaining("Cash-flow attribution requires review"),
         CASH_FLOW_999_WARNING,
-        expect.stringContaining("Opening balances applied from the stored algbilanss"),
+        expect.stringContaining("Opening balances applied from API INITIAL"),
       ]);
       expect((report.warnings as string[]).filter((warning) => warning === ACCOUNT_999_WARNING)).toHaveLength(1);
-      expect(report.warnings).not.toContain(OPENING_BALANCE_ACTIONABLE_WARNING);
+      expect((report.warnings as string[]).join(" ")).not.toMatch(/import_opening_balances|fallback/i);
     });
 
-    it("does not call a stored algbilanss dated after the report year 'applied'", async () => {
-      writeOpeningBalances(
+    it("does not call a API INITIAL dated after the report year 'applied'", async () => {
+      seedApiOpening(
         {
           openingDate: "2026-03-01",
           accounts: [
@@ -398,7 +462,6 @@ describe("buildAnnualReportData", () => {
             { code: "2900", name: "Osakapital", debit: 0, credit: 200 },
           ],
           totals: { debit: 200, credit: 200 },
-          rawText: "n/a",
         },
         "2026-03-01T00:00:00.000Z",
       );
@@ -406,7 +469,7 @@ describe("buildAnnualReportData", () => {
       const report = await buildAnnualReportData(createApi(baseJournals), 2025);
       const warnings = report.warnings as string[];
 
-      expect(warnings.some((w) => w.includes("fall outside this date range"))).toBe(true);
+      expect(warnings.some((w) => w.includes("outside this date range"))).toBe(true);
       expect(warnings.some((w) => w.includes("Opening balances applied"))).toBe(false);
     });
   });
@@ -417,18 +480,18 @@ describe("buildAnnualReportData", () => {
     beforeEach(() => {
       dir = mkdtempSync(join(tmpdir(), "ob-annual-report-cashflow-"));
       process.env.EARVELDAJA_RULES_DIR = dir;
-      resetOpeningBalanceCache();
+      resetApiOpening();
     });
 
     afterEach(() => {
       delete process.env.EARVELDAJA_RULES_DIR;
-      resetOpeningBalanceCache();
+      resetApiOpening();
       rmSync(dir, { recursive: true, force: true });
     });
 
     // A single in-year cash journal — the report year (2025) also contains
     // the opening date used below, so without the FIX 2 exclusion the
-    // synthetic opening journal's cash posting would be mis-classified as a
+    // API INITIAL journal's cash posting would be mis-classified as a
     // current-year financing inflow.
     const journalsForYear: Journal[] = [
       makeJournal("2025-06-01", [
@@ -440,7 +503,7 @@ describe("buildAnnualReportData", () => {
     it("does not include the opening journal's postings in the cash-flow statement", async () => {
       const reportWithoutOpening = await buildAnnualReportData(createApi(journalsForYear), 2025);
 
-      writeOpeningBalances(
+      seedApiOpening(
         {
           openingDate: "2025-01-01", // inside the report year (2025-01-01..2025-12-31)
           accounts: [
@@ -448,7 +511,6 @@ describe("buildAnnualReportData", () => {
             { code: "2900", name: "Osakapital", debit: 0, credit: 200 },
           ],
           totals: { debit: 200, credit: 200 },
-          rawText: "n/a",
         },
         "2025-01-01T00:00:00.000Z",
       );
@@ -474,8 +536,20 @@ describe("buildAnnualReportData", () => {
       expect(cashFlowWith.financing_activities.net_cash_from_financing_activities).toBe(0);
     });
 
+    it("uses the real API INITIAL as first-year cash and equity once", async () => {
+      const initial = makeJournal("2025-01-01", [makePosting(1020, "D", 200), makePosting(2900, "C", 200)], { id: 800, operation_type: "INITIAL" });
+      const report = await buildAnnualReportData(createApi([initial, ...journalsForYear]), 2025);
+      expect(report.cash_flow_statement).toMatchObject({
+        opening_cash: 200, closing_cash: 260, net_change_in_cash: 60,
+        reconciliation: { difference: 0 },
+        financing_activities: { net_cash_from_financing_activities: 0 },
+      });
+      expect((report.key_ratios as { roe: number }).roe).toBe(0.2609);
+      expect(report.opening_balance_source).toBe("api");
+    });
+
     it("M4 treats an in-year opening balance as the start-of-period position for cash flow and ROE", async () => {
-      writeOpeningBalances(
+      seedApiOpening(
         {
           openingDate: "2025-01-01", // first year on e-arveldaja: opening dated inside the report year
           accounts: [
@@ -483,7 +557,6 @@ describe("buildAnnualReportData", () => {
             { code: "2900", name: "Osakapital", debit: 0, credit: 200 },
           ],
           totals: { debit: 200, credit: 200 },
-          rawText: "n/a",
         },
         "2025-01-01T00:00:00.000Z",
       );
@@ -1339,6 +1412,17 @@ describe("RIK year-end close (Äriühingu majandusaasta lõpetamiskanded e-arvel
     const handler = setupTool("prepare_year_end_close", { journals });
     return parseMcpResponse((await handler({ year: 2025, ...args })).content[0]!.text) as Record<string, any>;
   }
+
+  it("does not mistake an INITIAL result-shaped entry for the year-end close", async () => {
+    const payload = await prepare([...profitYear(), handResult({ operation_type: "INITIAL" })]);
+    expect(docNumbers(payload)).toContain("YEC-RESULT-2025");
+    expect(payload.current_year_result.net_profit).toBe(50);
+  });
+
+  it("does not mistake an INITIAL transfer-shaped entry for the next-year transfer", async () => {
+    const payload = await prepare([...profitYear(), handResult(), handTransfer({ operation_type: "INITIAL" })]);
+    expect(docNumbers(payload)).toContain("YEC-RETAINED-2025");
+  });
 
   it("loss year: D 2970 / K 9000 on Dec 31, D 2960 / K 2970 on Jan 1", async () => {
     const payload = await prepare(lossYear());

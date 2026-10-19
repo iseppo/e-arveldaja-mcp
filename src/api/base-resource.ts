@@ -37,8 +37,8 @@ export interface ListParams {
   page?: number;
   modified_since?: string;
   // Server-side filters supported by some list endpoints (see the OpenAPI spec).
-  // Not every endpoint honours every field: e.g. /journals supports only the
-  // date range, while /purchase_invoices, /sale_invoices and /transactions also
+  // Not every endpoint honours every field: /journals supports the
+  // date range and operation_type, while /purchase_invoices, /sale_invoices and /transactions also
   // support status / clients_id (and transactions additionally `type`). Unknown
   // query params are ignored by the API, but callers should pass only the fields
   // the target endpoint documents. start_date/end_date are inclusive bounds whose
@@ -49,6 +49,7 @@ export interface ListParams {
   payment_status?: string;
   clients_id?: number;
   type?: string;
+  operation_type?: string;
 }
 
 function sortedListParams(params?: ListParams): string {

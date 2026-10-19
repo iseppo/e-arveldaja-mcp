@@ -2,7 +2,7 @@
 
 [![npm](https://img.shields.io/npm/v/e-arveldaja-mcp)](https://www.npmjs.com/package/e-arveldaja-mcp)
 
-MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools on the compatibility-preserving standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
+MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 126 tools on the standard profile, 16 workflow prompts, 15 resources. Works with any MCP client — Claude Code, Codex CLI, Gemini CLI, Cursor, Windsurf, Cline, and others.
 
 > **Year-end close now follows RIK's method (0.26.0, behaviour change).** `execute_year_end_close` no longer zeroes revenue and expense accounts into 2970 (that broke e-arveldaja's own income statement). It books RIK's two entries from the guide "Äriühingu majandusaasta lõpetamiskanded e-arveldajas": D 9000 "Arvestuslik koondtulemus" / K 2970 on 31 December and D 2970 / K 2960 (optionally part to reserve capital) on 1 January. Entries you already booked by hand — under any document number, on 1 January or later in the next year, plus the old `YECL-YYYY` closes — are detected and never booked twice; a partial, reversed, duplicate or mismatched entry is reported for manual review. Also in 0.26.0: the month-end checklist evaluates overdue invoices as of today while the month is open, `attach_document` refuses to replace an existing source document unless `replace_existing: true`, Lightyear sells book the cash the statement shows, and Wise import no longer changes confirmed purchase invoices. See the [changelog](CHANGELOG.md) for full details.
 >
@@ -14,7 +14,7 @@ MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API. 127 tools o
 >
 > **Guided workflow actions.** `recommend_workflow` suggests the safest accounting flow for a natural-language goal, and key workflow/batch tools return a `workflow_action_v1` envelope with `recommended_next_action`, review questions, and approval previews. `accounting_inbox` is the preferred merged entry point for workspace triage, `continue_accounting_workflow` is the preferred merged continuation tool, `receipt_batch` and `process_camt053` are the preferred mode-based import/batch entry points, and bank work has `reconcile_bank_transactions` plus `classify_bank_transactions` as mode-based entry points. Older focused tools such as `resolve_accounting_review_item`, `prepare_accounting_review_action`, `scan_receipt_folder`, `process_receipt_batch`, `parse_camt053`, `import_camt053`, `reconcile_transactions`, and `apply_transaction_classifications` are hidden from the tool list by default to keep the per-session token cost down (the merged tools route to the same internals); set `EARVELDAJA_EXPOSE_GRANULAR_TOOLS=1` to register them again. See the [changelog](CHANGELOG.md) for full details.
 >
-> **Opening balances (algbilanss).** e-arveldaja's own "Algbilansi kanded" (opening-balance) register isn't exposed by the REST API, so the server was otherwise blind to it. The new `import_opening_balances` tool lets you paste that register once — it's parsed, checked that total debit equals total credit, and previewed (`dry_run=true` by default) before you confirm with `dry_run=false`. Once stored per company, account balances, trial balance, the balance sheet, P&L, the annual report, and the dividend §157 legality checks all fold the opening balances in automatically. Entirely optional — without it everything still works, just without opening-balance amounts folded in. See the [changelog](CHANGELOG.md) for full details.
+> **Opening balances (algbilanss).** Balances and reports use the API's `INITIAL` journals automatically, with their original dates, clients and dimensions. No local import is needed. Draft, deleted or empty API openings are disclosed; multiple active openings require review. See the [changelog](CHANGELOG.md) for details.
 >
 > **Active development.** This package is under active development and has not seen extensive real-world testing yet. If you encounter a bug or unexpected behaviour, please let me know via [GitHub Issues](https://github.com/iseppo/e-arveldaja-mcp/issues) or email at indrek.seppo@gmail.com.
 
@@ -115,17 +115,15 @@ By default these rules are stored as an [Open Knowledge Format](https://github.c
 
 The bundle is also browsable as MCP resources under `earveldaja://accounting_knowledge`. When several MCP clients share one bundle directory, concurrent rule writes are serialized with a lock file so the index never drifts out of sync with the concepts.
 
-### 4. Optional: import opening balances (algbilanss)
+### 4. Opening balances (algbilanss)
 
-e-arveldaja's own "Algbilansi kanded" (opening-balance) register isn't exposed by the REST API, so the MCP server can't see it unless you paste it in once. Copy the register from the e-arveldaja UI and ask your AI assistant:
+Opening balances come directly from e-arveldaja as `operation_type=INITIAL`. Account balances, statements, annual reports and dividend checks include registered, non-deleted opening postings with their original dates, clients and dimensions. If no INITIAL exists, calculations use the remaining API journals normally. Annual cash flow excludes the opening position.
 
-> "Import these opening balances into e-arveldaja-mcp" (paste the Algbilansi kanded text)
-
-The `import_opening_balances` tool parses the pasted register, checks that total debit equals total credit, and previews the result (`dry_run=true` by default) before you confirm with `dry_run=false`. Once stored, account balances, trial balance, the balance sheet, P&L, the annual report, and the dividend §157 legality checks all fold the opening balances in automatically. This step is entirely optional — without it, everything still works, just without opening-balance amounts folded in.
+The former `import_opening_balances` tool and local opening-register support have been removed. Existing local `opening-balances.json` files are left untouched and are no longer read. Manage opening balances in e-arveldaja.
 
 ### Trimming the tool surface
 
-Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 19-tool daily-bookkeeping surface; `guided-sales` adds the `manage_sale_invoice` sales façade (20 tools) — reads invoices and runs the full sale-invoice lifecycle (create/update/delete/confirm/invalidate/send/recurring, plus inline resolve-or-create customer) behind the two-call prepare/execute approval gate; `standard` is the absent-variable compatibility default (127 tools); and `full` exposes all 147 tools, including granular and configured-mode credential administration. Every non-guided surface also carries `get_server_status`, a compact read-only report of the running version, active profile, and any active point-of-use release notices.
+Choose one explicit surface with `EARVELDAJA_PROFILE`: `guided` is the opt-in 19-tool daily-bookkeeping surface; `guided-sales` adds the `manage_sale_invoice` sales façade (20 tools) — reads invoices and runs the full sale-invoice lifecycle (create/update/delete/confirm/invalidate/send/recurring, plus inline resolve-or-create customer) behind the two-call prepare/execute approval gate; `standard` is the absent-variable compatibility default (126 tools); and `full` exposes all 146 tools, including granular and configured-mode credential administration. Every non-guided surface also carries `get_server_status`, a compact read-only report of the running version, active profile, and any active point-of-use release notices.
 
 The setup choices map exactly: **Daily bookkeeping** → `guided`; **Daily bookkeeping plus sales invoices** → `guided-sales`; **Bookkeeping plus investments** → `standard` with Lightyear enabled; **Full advanced toolset** → `full`. Guided profiles are opt-in in this release, not the recommended/default daily surface. After changing profiles, restart and run fresh previews; an old proposal or plan handle is never approval under the new profile.
 
@@ -140,7 +138,7 @@ The tool list is sent into the model's context on every session, so it is a fixe
 - `EARVELDAJA_DISABLE_SALES=1` — drops the sales-invoicing side: the 11 sale-invoice tools, `create_recurring_sale_invoices`, and receivables aging (`compute_receivables_aging`). Payables aging and all purchase-invoice tools stay. Use it for purchase-side-only bookkeeping.
 - `EARVELDAJA_DISABLE_PRODUCTS=1` — drops the product-catalog tools (`list/get/create/update/deactivate/reactivate/delete_product`). Products are chiefly the sale-invoice line-item catalog (purchase items key on `cl_purchase_articles_id`, though they can also carry an optional `products_id`), so a `DISABLE_SALES` deployment usually sets this too. It only removes catalog management — creating either invoice type still works — so the flags stay independent.
 
-A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 86 tools instead of the standard 127. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 147-tool catalog.
+A lean purchase-side-only custom deployment with every disable flag set (incl. Lightyear) has 85 tools instead of the standard 126. Conversely, `EARVELDAJA_PROFILE=full` exposes the complete 146-tool catalog.
 
 `EARVELDAJA_DOCUMENT_READING=1` (opt-in, off by default) lets your assistant read a single invoice itself: `process_accounting_document` gains `mode='read'` and `mode='verify'`, every value is checked against the printed text, and only the questions the server cannot settle are put to you before the draft is created. It adds no tool, so the tool counts above do not change.
 

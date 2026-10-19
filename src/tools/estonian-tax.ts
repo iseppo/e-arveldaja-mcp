@@ -25,8 +25,8 @@ import { logAudit } from "../audit-log.js";
 import { desandboxText } from "../external-text-renderer.js";
 import { validateAccounts } from "../account-validation.js";
 import { toolError } from "../tool-error.js";
-import { withOpeningBalanceStatus } from "../opening-balance-limitations.js";
-import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
+import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
+import { loadJournalsWithOpeningBalance } from "../opening-balance-journal.js";
 import { BookingGuard, companyLedgerLockScope, formatDocNumber, withBookingKeyLock, type DocKey } from "../booking-guard.js";
 import { INCOME_TAX_EXPENSE_ACCOUNT, DEFAULT_VAT_ACCOUNT, DEFAULT_OWNER_PAYABLE_ACCOUNT } from "../accounting-defaults.js";
 import {
@@ -783,12 +783,11 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       // (lock order: this per-connection lock, then createJournalOnce's per-key lock).
       const checkAndBook = async () => {
         // Preload journals once for the duplicate pre-check and both legality
-        // checks. Prepend the synthetic opening-balance journal (clients_id: null)
-        // exactly once here — both checks compute account-level equity with no
+        // checks. Load API journals including INITIAL exactly once here;
+        // both checks compute account-level equity with no
         // client filter, so the opening balance correctly feeds the lg1 ceiling
         // and the lg2 net-assets floor.
-        const opening = await loadOpeningBalanceJournal(api);
-        const allJournals = [...(opening ? [opening.journal] : []), ...(await api.journals.listAllWithPostings())];
+        const { opening, journals: allJournals } = await loadJournalsWithOpeningBalance(api);
 
         // Duplicate pre-check BEFORE the legality checks: once a dividend is
         // booked, the ledger already reflects it, so re-running the § 157 checks
@@ -897,18 +896,38 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         const equityOrPlAccountIds = new Set(accounts
           .filter(a => a.account_type_est === "Omakapital" || a.account_type_est === "Tulud" || a.account_type_est === "Kulud")
           .map(a => a.id));
+        const pendingDividendDraftAnomalies: Array<{
+          journal_id: number;
+          document_number: string | null;
+          effective_date: string;
+          raw_retained_earnings_reduction: number;
+          raw_net_assets_reduction: number;
+        }> = [];
         const pendingDividendDrafts = allJournals
           .filter(j =>
-            j.id != null && !j.is_deleted && j.registered !== true && j.document_number !== documentNumber &&
+            j.operation_type !== "INITIAL" && j.id != null && !j.is_deleted && j.registered !== true && j.document_number !== documentNumber &&
             ((j.document_number ?? "").startsWith("DIV-") ||
               (j.postings ?? []).some(p => !p.is_deleted && p.accounts_id === payableAccount && p.type === "C")))
-          .map(j => ({
-            journal_id: j.id!,
-            document_number: j.document_number ?? null,
-            effective_date: j.effective_date,
-            retained_earnings_reduction: roundMoney(-sumCreditMinusDebit([j], id => lg1Accounts.has(id), () => true)),
-            net_assets_reduction: roundMoney(-sumCreditMinusDebit([j], id => equityOrPlAccountIds.has(id), () => true)),
-          }))
+          .map(j => {
+            const rawRetainedReduction = roundMoney(-sumCreditMinusDebit([j], id => lg1Accounts.has(id), () => true));
+            const rawNetAssetsReduction = roundMoney(-sumCreditMinusDebit([j], id => equityOrPlAccountIds.has(id), () => true));
+            const identity = { journal_id: j.id!, document_number: j.document_number ?? null, effective_date: j.effective_date };
+            // Clamp each component before aggregation: one draft must never
+            // restore another's reservation. Keep raw anomalies independently,
+            // including drafts whose two clamped reservations are both zero.
+            if (rawRetainedReduction < 0 || rawNetAssetsReduction < 0) {
+              pendingDividendDraftAnomalies.push({
+                ...identity,
+                raw_retained_earnings_reduction: rawRetainedReduction,
+                raw_net_assets_reduction: rawNetAssetsReduction,
+              });
+            }
+            return {
+              ...identity,
+              retained_earnings_reduction: Math.max(0, rawRetainedReduction),
+              net_assets_reduction: Math.max(0, rawNetAssetsReduction),
+            };
+          })
           .filter(d => d.retained_earnings_reduction !== 0 || d.net_assets_reduction !== 0);
         const pendingRetainedReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.retained_earnings_reduction, 0));
         const pendingNetAssetsReduction = roundMoney(pendingDividendDrafts.reduce((s, d) => s + d.net_assets_reduction, 0));
@@ -926,6 +945,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             `${distributionYear} P&L is excluded (no approved annual report yet).`,
         };
         const warnings: string[] = [];
+        if (pendingDividendDraftAnomalies.length > 0) {
+          warnings.push(
+            `Pending dividend drafts require review: ${pendingDividendDraftAnomalies.map(d =>
+              `journal ${d.journal_id} (raw retained reduction ${d.raw_retained_earnings_reduction} EUR, ` +
+              `raw net-assets reduction ${d.raw_net_assets_reduction} EUR)`).join(", ")}. ` +
+            "Negative components cannot increase dividend headroom; force=true does not override this review hold."
+          );
+        }
         if (pendingDividendDrafts.length > 0) {
           warnings.push(
             `Pending unconfirmed dividend drafts counted: ${pendingDividendDrafts
@@ -1068,16 +1095,9 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
         };
 
         // Opening-balance status: share capital and retained earnings are commonly
-        // entered as "Algbilansi kanded" (opening-balance entries). When a stored
-        // algbilanss is captured, it was folded into allJournals above and this
-        // reports what was applied; otherwise it's the actionable "paste it"
-        // warning, since the § 157 / retained-earnings checks would otherwise run
-        // on incomplete data.
-        warnings.push(...withOpeningBalanceStatus([], {
-          captured: opening !== null,
-          openingDate: opening?.openingDate,
-          unmappedCodes: opening?.unmappedCodes,
-        }));
+        // entered as INITIAL opening-balance entries. Disclose the selected
+        // source and any registration/date exclusion from the §157 figures.
+        warnings.push(...withOpeningBalanceJournalStatus([], opening, undefined, effective_date));
 
         // Transparency: when reservkapital was auto-detected (no explicit override)
         // and carries a balance, tell the operator the floor was raised above bare
@@ -1097,12 +1117,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           );
         }
         const violations: string[] = [];
+        if (pendingDividendDraftAnomalies.length > 0) violations.push("Pending dividend drafts require review");
         if (ledgerImbalance) violations.push("Ledger is imbalanced — legality checks cannot be trusted");
         if (retainedShortfall) violations.push("Insufficient retained earnings");
         if (netAssetsBreach) violations.push("ÄS § 157 net assets breach");
 
-        // force overrides the two § 157 clauses only — never a ledger imbalance.
-        if (ledgerImbalance || (violations.length > 0 && !force)) {
+        // force overrides only known § 157 shortfalls, never uncertain draft
+        // reservations or a ledger imbalance. This gate protects preview and create.
+        if (pendingDividendDraftAnomalies.length > 0 || ledgerImbalance || (violations.length > 0 && !force)) {
           // Report every triggered legality violation in one response so the
           // operator sees the full picture. ÄS § 157 is explicitly the
           // framework for retained-earnings distribution legality, so a
@@ -1110,6 +1132,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
           // check covers the separate share-capital clause.
           return toolError({
             error: violations.join("; "),
+            ...(pendingDividendDraftAnomalies.length > 0 && {
+              error_code: "pending_dividend_draft_requires_review",
+              pending_dividend_draft_anomalies: pendingDividendDraftAnomalies,
+            }),
             ...(retainedShortfall && {
               retained_earnings_check: {
                 balance: distributableProfit,
@@ -1137,12 +1163,14 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
             calculation,
             // Surface non-blocking warnings (esp. the opening-balance caveat) on the
             // blocked path too: a "0 retained earnings" block is often exactly the
-            // symptom of opening balances the /journals API omits, so the operator
+            // symptom of missing opening coverage, so the operator
             // must see that the check may have run on incomplete data.
             ...(warnings.length > 0 && { warnings }),
             compliance_notes: complianceNotes,
             hint:
-              ledgerImbalance
+              pendingDividendDraftAnomalies.length > 0
+                ? `Review and correct the existing pending dividend draft(s): ${pendingDividendDraftAnomalies.map(d => `journal ${d.journal_id}`).join(", ")}, then re-run. Negative reservation components require review; force=true does not override this hold.`
+                : ledgerImbalance
                 ? "The ledger is imbalanced (Assets − Liabilities ≠ Equity + P&L); force=true does not override this. Find and fix the unbalanced or partially-deleted journals, then re-run."
                 : retainedShortfall && netAssetsBreach
                   ? `Both retained-earnings and § 157 net-assets clauses fail (max lawful net dividend: ${maxNetDividend} EUR). Reduce the dividend, register a capital reduction first, or set force=true to override (unlawful absent additional action).`

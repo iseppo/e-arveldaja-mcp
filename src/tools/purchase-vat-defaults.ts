@@ -334,9 +334,10 @@ export async function getPurchaseArticlesWithVat(api: ApiContext): Promise<Purch
 }
 
 /**
- * Structural item defaults the API requires on every PATCH/POST row but does
- * not echo back on GET: `cl_fringe_benefits_id` (NOT NULL in the API schema;
- * 1 = no fringe benefit) and `amount` (1). A `null` counts as missing so an
+ * Compatible structural defaults for PATCH/POST rows: `cl_fringe_benefits_id`
+ * (1 = no fringe benefit) and `amount` (1). RIK now handles a missing fringe
+ * classifier without HTTP 500; keep the existing default and preserve explicit
+ * values, including values returned by newer GET responses. A `null` counts as missing so an
  * item read back from the API can be re-sent unchanged.
  */
 export function applyPurchaseItemStructuralDefaults(item: PurchaseInvoiceItem): PurchaseInvoiceItem {

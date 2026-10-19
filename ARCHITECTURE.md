@@ -147,34 +147,27 @@ The decomposition is strictly behavior-preserving: the tool surface, schemas,
 instruction text, and responses are byte-for-byte unchanged
 (`npm run measure:surface` / `measure:responses` show +0 on every profile).
 
-## Opening-balance folding
+## Opening balances
 
-e-arveldaja's `/journals` API does not expose the "Algbilansi kanded"
-(opening-balance entries) section, so account balances, statements, and the
-dividend legality checks would otherwise silently run on incomplete data. The
-operator can close that gap once by pasting the register through the
-`import_opening_balances` tool, which flows through three stages:
+e-arveldaja's `/journals` API exposes opening balances as `operation_type=INITIAL`.
+`loadJournalsWithOpeningBalance()` returns the original complete API journal set
+and identifies its opening journal for status reporting. It never reads a local
+opening register or prepends a synthetic journal. All financial reports,
+statement comparisons and dividend checks share this loader. Annual cash flows
+and closing detection exclude INITIAL journals as starting positions.
 
-1. **Parse — `src/opening-balance-parse.ts`.** Parses the pasted register text
-   into per-account debit/credit lines plus an opening date, and validates
-   that total debit equals total credit.
-2. **Store — `src/opening-balance-store.ts`.** Persists the parsed result as
-   `opening-balances.json` inside the same accounting-rules OKF bundle used
-   for booking rules (see `src/accounting-rules.ts`), guarded by the bundle's
-   existing lock file. Only available in bundle mode; not supported under
-   `EARVELDAJA_RULES_FILE` single-file mode.
-3. **Synthetic-journal injection — `src/opening-balance-journal.ts`.** At
-   compute time, `loadOpeningBalanceJournal()` reads the stored balances and
-   builds one synthetic `Journal` dated at the opening date, which is
-   prepended to the journal list each consumer already reads. Account
-   balances, trial balance, balance sheet, P&L, the annual report, and the
-   ÄS §157 dividend checks all consume this same synthetic journal, so they
-   fold in opening balances without any consumer-specific logic.
+The selected journal retains its IDs, effective date, clients and dimensions.
+Normal registration/deletion/date/client filters determine which amounts enter
+figures. Draft, deleted or empty openings are disclosed; multiple active INITIALs
+or malformed D/C amounts stop calculation for review. Nonzero opening postings
+without a dimension remain in account totals and the unassigned dimension row,
+while dimension reports disclose partial attribution and statement comparisons
+skip the tolerance check. No INITIAL is a normal absence, not incomplete API
+coverage.
 
-With nothing imported, all consumers behave exactly as before this feature,
-and surface an actionable warning pointing at `import_opening_balances`
-(`src/opening-balance-limitations.ts`) instead of a blind "verify in the UI"
-warning.
+The local parser, store and import tool are removed. Existing user
+`opening-balances.json` files are neither read nor deleted. The independent
+`statement-balances.json` store remains in the accounting-rules bundle.
 
 ## Workflow prompt pipeline
 

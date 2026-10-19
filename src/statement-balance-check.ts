@@ -3,7 +3,8 @@ import type { Transaction } from "./types/api.js";
 import { roundMoney } from "./money.js";
 import { eurosWithinTolerance } from "./money-cents.js";
 import { listAccountDimensionPostings } from "./account-postings.js";
-import { loadOpeningBalanceJournal } from "./opening-balance-journal.js";
+import { loadJournalsWithOpeningBalance } from "./opening-balance-journal.js";
+import { withOpeningBalanceJournalStatus } from "./opening-balance-limitations.js";
 import { bankTransactionDirection } from "./bank-transaction-direction.js";
 import { isProjectTransaction } from "./transaction-status.js";
 
@@ -65,9 +66,7 @@ export async function checkStatementClosingBalance(
 
   // Booked side: opening fold + confirmed postings on the account, filtered to
   // the dimension, D-account signed, raw-accumulated then rounded once.
-  const opening = await loadOpeningBalanceJournal(api);
-  const journals = await api.journals.listAllWithPostings();
-  const allJournals = opening ? [opening.journal, ...journals] : journals;
+  const { opening, journals: allJournals } = await loadJournalsWithOpeningBalance(api);
   const rows = listAccountDimensionPostings(allJournals, input.accountId, { dateTo: balanceDate })
     .filter(row => row.accounts_dimensions_id === input.dimensionId);
   let bookedRaw = 0;
@@ -102,7 +101,7 @@ export async function checkStatementClosingBalance(
   const difference = roundMoney(expectedBalance - statementClosing);
 
   const warnings: string[] = [];
-  const notes: string[] = [];
+  const notes: string[] = withOpeningBalanceJournalStatus([], opening, undefined, balanceDate);
 
   if (excludedIndeterminateDirection > 0) {
     notes.push(
@@ -112,8 +111,8 @@ export async function checkStatementClosingBalance(
     );
   }
 
-  // This account's opening balance could not be attributed to a dimension (the
-  // fold posted it under a null dimension), so the per-dimension booked side is
+  // This account's API opening balance has postings without a dimension, so
+  // the per-dimension booked side is
   // known-incomplete: the expected balance may omit the opening amount that
   // really belongs to this dimension. Comparing it would trip the tolerance on
   // a figure we already know is partial, so surface it as a note and suppress
@@ -122,10 +121,11 @@ export async function checkStatementClosingBalance(
   // opening carries no resolved dimension (that is why it is unmapped), so we
   // cannot tell whether it belongs to the dimension under review. Suppressing
   // account-wide is the safe choice — it may over-suppress a sibling
-  // dimension's genuine breach, but the note guides the operator to re-import
-  // with matching labels, which re-activates the exact check.
+  // dimension's genuine breach, but the note guides the operator to correct
+  // the INITIAL posting dimensions in e-arveldaja.
   const openingDimensionUnmapped =
-    opening?.unmappedDimensions.some(u => u.startsWith(`${input.accountId}:`)) ?? false;
+    !!opening && opening.journal.registered && !opening.journal.is_deleted && opening.openingDate <= balanceDate &&
+      opening.journal.postings.some(p => !p.is_deleted && p.accounts_id === input.accountId && p.accounts_dimensions_id == null && (p.base_amount ?? p.amount) !== 0);
 
   // The booked balance is in the EUR base currency; a non-EUR closing balance
   // is in the account currency, so comparing them would trip the tolerance on
@@ -150,7 +150,7 @@ export async function checkStatementClosingBalance(
     notes.push(
       `The opening balance for account ${input.accountId} has an unresolved dimension, so it was folded in ` +
       `under a null dimension and is omitted from this dimension's expected balance; the tolerance check is ` +
-      `skipped to avoid a false mismatch. Re-import the opening balances with a matching dimension label to reconcile.`,
+      `skipped to avoid a false mismatch. Correct the INITIAL posting dimensions in e-arveldaja to reconcile.`,
     );
   } else if (!withinTolerance) {
     warnings.push(

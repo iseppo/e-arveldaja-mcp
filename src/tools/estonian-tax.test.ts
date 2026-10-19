@@ -9,11 +9,28 @@ import { roundMoney } from "../money.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
-import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
+// API-only fixture: the values below become normalized rows returned by the mock server.
+let apiOpeningFixture: Journal | null = null;
+function resetApiOpening() { apiOpeningFixture = null; }
+beforeEach(resetApiOpening);
+function seedApiOpening(data: { openingDate: string; accounts: Array<{ code: string; debit: number; credit: number; [key: string]: unknown }>; [key: string]: unknown }, _timestamp?: string) {
+  apiOpeningFixture = {
+    id: 88001, operation_type: "INITIAL", effective_date: data.openingDate,
+    registered: true, is_deleted: false, clients_id: null,
+    postings: data.accounts.flatMap(row => [
+      ...(row.debit ? [{ accounts_id: Number(row.code), type: "D", amount: row.debit, base_amount: row.debit, accounts_dimensions_id: null }] : []),
+      ...(row.credit ? [{ accounts_id: Number(row.code), type: "C", amount: row.credit, base_amount: row.credit, accounts_dimensions_id: null }] : []),
+    ]) as Journal["postings"],
+  };
+}
+function withApiOpening(journals: Journal[]): Journal[] {
+  return apiOpeningFixture && !journals.some(j => j.operation_type === "INITIAL") ? [apiOpeningFixture, ...journals] : journals;
+}
+
 vi.mock("../audit-log.js", () => ({ logAudit: mockedLogAudit }));
 
 // Standard chart of accounts used across tests
@@ -109,7 +126,7 @@ function makeApi(
       connectionFingerprint: "estonian-tax-test-connection",
       invalidateListCache: vi.fn(),
       listAll: vi.fn(async () => bookingJournals),
-      listAllWithPostings: vi.fn(async () => journals),
+      listAllWithPostings: vi.fn(async () => withApiOpening(journals)),
       get: vi.fn(async (id: number) => bookingJournals.find(item => item.id === id)),
       create: vi.fn(async (data: Partial<Journal>) => {
         bookingJournals.push({ ...data, id: 42, registered: false, is_deleted: false } as Journal);
@@ -1099,7 +1116,7 @@ describe("prepare_dividend_package", () => {
     expect(isError(result)).toBe(false);
     const data = parseResult(result);
     const warnings = (data.warnings ?? []) as string[];
-    expect(warnings.some(w => w.includes("Algbilansi kanded"))).toBe(true);
+    expect(warnings).toEqual([]);
   });
 
   it("errors when an explicit restricted_reserve_accounts entry does not exist in the chart", async () => {
@@ -1142,7 +1159,7 @@ describe("prepare_dividend_package", () => {
     const data = parseResult(result);
     expect(String(data.error)).toContain("Insufficient retained earnings");
     const warnings = (data.warnings ?? []) as string[];
-    expect(warnings.some(w => w.includes("Algbilansi kanded"))).toBe(true);
+    expect(warnings).toEqual([]);
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
@@ -1434,13 +1451,28 @@ describe("prepare_dividend_package", () => {
     beforeEach(() => {
       dir = mkdtempSync(join(tmpdir(), "ob-estonian-tax-"));
       process.env.EARVELDAJA_RULES_DIR = dir;
-      resetOpeningBalanceCache();
+      resetApiOpening();
     });
 
     afterEach(() => {
       delete process.env.EARVELDAJA_RULES_DIR;
-      resetOpeningBalanceCache();
+      resetApiOpening();
       rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("uses API retained earnings once", async () => {
+      const accounts = [...makeStandardAccounts(), makeAccount(4000, "C", "Tulud", "Müügitulu", "Sales revenue")];
+      const journals = [
+        makeJournal("2022-01-01", [makePosting(1000, "D", 5000), makePosting(2960, "C", 5000)], { id: 800, operation_type: "INITIAL" }),
+        makeJournal("2023-01-01", [makePosting(1000, "D", 2500), makePosting(2900, "C", 2500)]),
+        makeJournal("2024-01-01", [makePosting(1000, "D", 1000), makePosting(2960, "C", 1000)]),
+        makeJournal("2026-02-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]),
+      ];
+      const fixture = makeMockServer();
+      registerEstonianTaxTools(fixture.server, makeApi(journals, accounts));
+      const result = await fixture.tools.get("prepare_dividend_package")!({ net_dividend: 3000, shareholder_client_id: 1, effective_date: "2026-06-01" });
+      expect(isError(result)).toBe(false);
+      expect(parseResult(result).retained_earnings_check).toMatchObject({ balance_before: 6000, sufficient: true });
     });
 
     it("raising retained earnings via a captured opening balance flips a § 157 lg1 FAIL to PASS", async () => {
@@ -1457,7 +1489,7 @@ describe("prepare_dividend_package", () => {
         makeJournal("2026-02-01", [makePosting(1000, "D", 20000), makePosting(4000, "C", 20000)]),
       ];
 
-      // 1) Without a stored algbilanss: net dividend 3 000 exceeds the 1 000
+      // 1) Without an INITIAL: net dividend 3 000 exceeds the 1 000
       //    ledger-only retained earnings — blocked (lg1).
       const apiBefore = makeApi(journals, accounts);
       const before = makeMockServer();
@@ -1475,13 +1507,11 @@ describe("prepare_dividend_package", () => {
       expect(checkBefore.balance).toBe(1000);
       expect(checkBefore.shortfall).toBe(2000);
       const warningsBefore = (dataBefore.warnings ?? []) as string[];
-      expect(warningsBefore).toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
-      );
+      expect(warningsBefore).toEqual([]);
 
-      // 2) A stored algbilanss (dated before the ledger) adds 5 000 credit to
+      // 2) An API INITIAL (dated before the ledger) adds 5 000 credit to
       //    retained earnings — 1 000 + 5 000 = 6 000 ≥ 3 000, now sufficient.
-      writeOpeningBalances(
+      seedApiOpening(
         {
           openingDate: "2022-01-01",
           accounts: [
@@ -1510,7 +1540,7 @@ describe("prepare_dividend_package", () => {
       expect(checkAfter.sufficient).toBe(true);
       const warningsAfter = (dataAfter.warnings ?? []) as string[];
       expect(warningsAfter).toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from API INITIAL")]),
       );
     });
 
@@ -1526,7 +1556,7 @@ describe("prepare_dividend_package", () => {
         makeJournal("2024-01-01", [makePosting(1000, "D", 5000), makePosting(2960, "C", 5000)]),
       ];
 
-      // 1) Without a stored algbilanss: passes both clauses.
+      // 1) Without an INITIAL: passes both clauses.
       const apiBefore = makeApi(journals, accounts);
       const before = makeMockServer();
       registerEstonianTaxTools(before.server, apiBefore);
@@ -1540,13 +1570,13 @@ describe("prepare_dividend_package", () => {
       const netCheckBefore = dataBefore.net_assets_check as { sufficient: boolean };
       expect(netCheckBefore.sufficient).toBe(true);
 
-      // 2) A stored algbilanss (dated before the ledger) reveals a 2 000
+      // 2) An API INITIAL (dated before the ledger) reveals a 2 000
       //    expense/liability pair that wasn't previously booked — net assets
       //    drop by 2 000 (10 000 → 8 000), pushing the post-distribution
       //    figure (8 000 − 3 846.15 = 4 153.85) below the 5 000 share-capital
       //    floor. Retained earnings (2 000) is untouched, so lg1 stays clear —
       //    isolating the lg2 (net-assets) flip.
-      writeOpeningBalances(
+      seedApiOpening(
         {
           openingDate: "2022-01-01",
           accounts: [
@@ -1589,7 +1619,7 @@ describe("prepare_dividend_package", () => {
       expect(dataAfter.error).toBe("ÄS § 157 net assets breach");
       const warningsAfter = (dataAfter.warnings ?? []) as string[];
       expect(warningsAfter).toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
+        expect.arrayContaining([expect.stringContaining("Opening balances applied from API INITIAL")]),
       );
     });
   });
@@ -1727,6 +1757,110 @@ describe("prepare_dividend_package remediation", () => {
     ], { id, registered, is_deleted: false, document_number: `DIV-${date}-${clientId}` });
 
   // ---- M1: unconfirmed dividend drafts reduce both § 157 headrooms ----------
+
+  const repairRequest = { net_dividend: 100, shareholder_client_id: 2, effective_date: "2026-06-01" };
+  const draftOpening = (): Journal => makeJournal("2024-01-01", [
+    makePosting(1000, "D", 6000), makePosting(2900, "C", 1000),
+    makePosting(2960, "C", 4000), makePosting(2650, "C", 1000),
+  ], { id: 901, operation_type: "INITIAL", registered: false });
+
+  it.each([true, false])("excludes a payable-credit draft INITIAL from capacity on dry_run=%s", async dry_run => {
+    const ledger = [makeJournal("2023-01-01", [makePosting(1000, "D", 1000), makePosting(2900, "C", 1000)])];
+    const { api, cb } = setup([...ledger, draftOpening()]);
+    const result = await cb({ ...repairRequest, dry_run });
+    expect(isError(result)).toBe(true);
+    const data = parseResult(result);
+    expect(data.maximum_distributable).toMatchObject({ max_net_dividend: 0, max_net_by_retained_earnings: 0, max_net_by_net_assets: 0 });
+    expect((data.maximum_distributable as Record<string, unknown>).pending_unconfirmed_dividend_drafts).toBeUndefined();
+    expect(data.pending_dividend_draft_anomalies).toBeUndefined();
+    expect((data.warnings as string[]).some(w => w.includes("unregistered") && w.includes("not included"))).toBe(true);
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("excluded draft INITIAL preserves ordinary force behavior on dry_run=%s", async dry_run => {
+    const ledger = base(0);
+    const without = setup(ledger);
+    const withOpening = setup([...ledger, draftOpening()]);
+    const plain = parseResult(await without.cb({ ...repairRequest, dry_run, force: true }));
+    const result = await withOpening.cb({ ...repairRequest, dry_run, force: true });
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    for (const field of ["maximum_distributable", "retained_earnings_check", "net_assets_check"]) expect(data[field]).toEqual(plain[field]);
+    expect(withOpening.api.journals.create).toHaveBeenCalledTimes(dry_run ? 0 : 1);
+    expect(withOpening.api.journals.confirm).not.toHaveBeenCalled();
+  });
+
+  const anomalyCases = [
+    { name: "negative retained only", postings: [makePosting(5000, "D", 250), makePosting(2960, "C", 200), makePosting(2650, "C", 50)], rawRetained: -200, rawNetAssets: 50, retained: 0, netAssets: 50 },
+    { name: "negative net assets only", postings: [makePosting(2960, "D", 50), makePosting(2650, "D", 100), makePosting(5000, "C", 150)], rawRetained: 50, rawNetAssets: -100, retained: 50, netAssets: 0 },
+    { name: "both negative", postings: [makePosting(2650, "D", 200), makePosting(2960, "C", 100), makePosting(5000, "C", 100)], rawRetained: -100, rawNetAssets: -200, retained: 0, netAssets: 0 },
+  ];
+  const anomalyDraft = (postings: Posting[]): Journal => makeJournal("2026-05-01", postings,
+    { id: 902, registered: false, document_number: "DIV-anomalous-existing" });
+
+  for (const candidate of anomalyCases) {
+    for (const dry_run of [true, false]) {
+      for (const force of [false, true]) {
+        for (const withNormal of [false, true]) {
+          it(`holds ${candidate.name} with dry_run=${dry_run}, force=${force}, ordinary draft=${withNormal}`, async () => {
+            const normal = withNormal ? [dividendDraft(903, "2026-05-01", 3, 1000, 282.05)] : [];
+            const ledger = [...base(100000), ...normal];
+            const plain = parseResult(await setup(ledger).cb({ ...repairRequest, dry_run: true }));
+            const { api, cb } = setup([...ledger, anomalyDraft(candidate.postings)]);
+            const result = await cb({ ...repairRequest, dry_run, force });
+            expect(isError(result)).toBe(true);
+            const data = parseResult(result);
+            expect(data.error_code).toBe("pending_dividend_draft_requires_review");
+            expect(data.pending_dividend_draft_anomalies).toEqual([expect.objectContaining({
+              journal_id: 902, raw_retained_earnings_reduction: candidate.rawRetained, raw_net_assets_reduction: candidate.rawNetAssets,
+            })]);
+            const maximum = data.maximum_distributable as Record<string, unknown>;
+            const baseline = plain.maximum_distributable as Record<string, number>;
+            expect(maximum.max_net_by_retained_earnings).toBe(100000 - (withNormal ? 1000 : 0) - candidate.retained);
+            expect(maximum.max_net_by_net_assets).toBeLessThanOrEqual(baseline.max_net_by_net_assets!);
+            expect(maximum.max_net_dividend).toBeLessThanOrEqual(baseline.max_net_dividend!);
+            const reservations = (maximum.pending_unconfirmed_dividend_drafts ?? []) as Array<Record<string, unknown>>;
+            if (candidate.retained || candidate.netAssets) expect(reservations).toContainEqual(expect.objectContaining({
+              journal_id: 902, retained_earnings_reduction: candidate.retained, net_assets_reduction: candidate.netAssets,
+            }));
+            if (withNormal) expect(reservations).toContainEqual(expect.objectContaining({ journal_id: 903, retained_earnings_reduction: 1000, net_assets_reduction: 1282.05 }));
+            expect(String(data.hint)).toContain("902");
+            expect((data.warnings as string[]).some(w => w.includes("902") && w.includes("review"))).toBe(true);
+            expect(api.journals.create).not.toHaveBeenCalled();
+          });
+        }
+      }
+    }
+  }
+
+  it("fresh execute read holds an anomalous draft introduced after a sufficient preview", async () => {
+    const ledger = base(100000);
+    const { api, cb } = setup(ledger);
+    expect(isError(await cb({ ...repairRequest, dry_run: true }))).toBe(false);
+    vi.mocked(api.journals.listAllWithPostings).mockResolvedValue([...ledger, anomalyDraft(anomalyCases[2]!.postings)]);
+    const result = await cb({ ...repairRequest, dry_run: false, force: true });
+    expect(isError(result)).toBe(true);
+    expect(parseResult(result).error_code).toBe("pending_dividend_draft_requires_review");
+    expect(api.journals.invalidateListCache).toHaveBeenCalled();
+    expect(api.journals.listAllWithPostings).toHaveBeenCalledTimes(2);
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("counts registered INITIAL and ordinary draft reservations exactly once on dry_run=%s", async dry_run => {
+    const opening = makeJournal("2024-01-01", [makePosting(1000, "D", 102500), makePosting(2900, "C", 2500), makePosting(2960, "C", 100000)],
+      { id: 904, operation_type: "INITIAL", registered: true });
+    const { api, cb } = setup([opening, dividendDraft(905, "2026-05-01", 3, 1000, 282.05)]);
+    const result = await cb({ ...repairRequest, dry_run });
+    expect(isError(result)).toBe(false);
+    const data = parseResult(result);
+    expect(data.retained_earnings_check).toMatchObject({ balance_before: 99000 });
+    expect(data.net_assets_check).toMatchObject({ net_assets_before_distribution: 102500, pending_unconfirmed_dividends: 1282.05 });
+    expect((data.maximum_distributable as Record<string, unknown>).pending_unconfirmed_dividend_drafts).toEqual([
+      expect.objectContaining({ journal_id: 905, retained_earnings_reduction: 1000, net_assets_reduction: 1282.05 }),
+    ]);
+    expect(api.journals.create).toHaveBeenCalledTimes(dry_run ? 0 : 1);
+    expect(api.journals.confirm).not.toHaveBeenCalled();
+  });
 
   it("M1 counts a pending unconfirmed DIV draft against lg 1: two 60 000 dividends cannot both pass on 100 000 retained", async () => {
     const { api, cb } = setup([...base(100000), dividendDraft(501, "2026-06-01", 1, 60000, 16923.08)]);

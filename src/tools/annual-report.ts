@@ -22,7 +22,9 @@ import {
   resolveRetainedEarningsAccount,
 } from "../account-resolution.js";
 import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
-import { loadOpeningBalanceJournal } from "../opening-balance-journal.js";
+import { isOpeningBalanceJournal, loadJournalsWithOpeningBalance } from "../opening-balance-journal.js";
+import { calculateAnnualCashFlow, isCashFlowCashAccount } from "../reporting/annual-cash-flow.js";
+import { loadCashFlowEvidence } from "../reporting/cash-flow-evidence.js";
 import {
   isYearEndClosingJournal,
   isNumberedForOtherYear,
@@ -35,7 +37,6 @@ import {
 } from "../year-end-closing-journal.js";
 
 type PostingType = "D" | "C";
-type CashFlowClass = "operating" | "investing" | "financing" | "unclassified";
 type LiabilityClass = "current" | "non_current" | "manual_review";
 
 interface PostingPreview {
@@ -466,9 +467,9 @@ interface ExistingCloseJournals {
 }
 
 // Live (not deleted; registered OR draft) closing journals for `year`. The
-// synthetic opening-balance journal (id -1) is never a close.
+// API INITIAL opening journals are never closing entries.
 function findExistingCloseJournals(allJournals: Journal[], year: number, ids: CloseAccounts): ExistingCloseJournals {
-  const live = allJournals.filter((journal) => !journal.is_deleted && journal.id !== -1);
+  const live = allJournals.filter((journal) => !journal.is_deleted && !isOpeningBalanceJournal(journal));
   // A legacy close zeroed P&L INTO 2970 — a title-only look-alike that never
   // touches 2970 is not a close (it stays excluded from the P&L, though).
   const legacy = live.filter((journal) => isYearEndClosingJournal(journal, year) &&
@@ -530,7 +531,7 @@ function buildCalculatedResultWarnings(
     );
   }
   const resultEntries = allJournals.filter((journal) =>
-    !journal.is_deleted && journal.id !== -1 && isCloseResultEntry(journal, year, ids),
+    !journal.is_deleted && !isOpeningBalanceJournal(journal) && isCloseResultEntry(journal, year, ids),
   );
   if (resultEntries.length > 0) {
     const booked = netCredit(resultEntries, ids.currentYearProfit);
@@ -693,15 +694,13 @@ async function analyzeYearEndClose(
 ): Promise<YearEndCloseAnalysis | { error: string; details: string[] }> {
   const { from, to } = getYearBounds(year);
 
-  const [accounts, opening, journalsFromApi, allTransactions, allSales, allPurchases] = await Promise.all([
+  const [accounts, { opening, journals: allJournals }, allTransactions, allSales, allPurchases] = await Promise.all([
     api.readonly.getAccounts(),
-    loadOpeningBalanceJournal(api),
-    api.journals.listAllWithPostings(),
+    loadJournalsWithOpeningBalance(api),
     api.transactions.listAll(),
     api.saleInvoices.listAll(),
     api.purchaseInvoices.listAll(),
   ]);
-  const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
   const [yearEndBalances, yearProfitAndLossBalances] = await Promise.all([
     computeAllBalances(api, undefined, to, { preloadedAccounts: accounts, preloadedJournals: allJournals }),
     computeAllBalances(api, from, to, {
@@ -795,7 +794,7 @@ async function analyzeYearEndClose(
   };
   const sameYearEndAmbiguous: Journal[] = [];
   const offDateCandidates = allJournals.filter((journal) => {
-    if (journal.is_deleted || journal.id === -1 || existing.transfer.includes(journal) || isNumberedForOtherYear(journal, year)) return false;
+    if (journal.is_deleted || isOpeningBalanceJournal(journal) || existing.transfer.includes(journal) || isNumberedForOtherYear(journal, year)) return false;
     if (journal.document_number === transferDocumentNumber) return true;
     if (!(journal.effective_date.startsWith(`${year + 1}-`) || journal.effective_date === sameYearEnd) ||
       !isRetainedTransferShape(journal, transferAccounts)) return false;
@@ -1081,92 +1080,25 @@ function getRelatedPartyFlags(client: Client): string[] {
   ].filter((flag): flag is string => flag !== null);
 }
 
-function classifyCashFlowCategory(account: Account | undefined): CashFlowClass {
-  if (!account) return "unclassified";
-  const configured = getCashFlowCategoryRule(account.id);
-  if (configured) return configured;
-  if (inRange(account.id, 1100, 1199) && account.account_type_est === "Varad") return "investing";
-  if ((account.is_fixed_asset || inRange(account.id, 1700, 1999)) && account.account_type_est === "Varad") return "investing";
-  if (account.account_type_est === "Omakapital") return "financing";
-  if (account.account_type_est === "Kohustused" && inRange(account.id, 2000, 2199)) return "financing";
-  return "operating";
-}
-
-function computeCashFlowClassification(
-  allJournals: Journal[],
-  accountsById: Map<number, Account>,
-  dateFrom: string,
-  dateTo: string,
-): Record<CashFlowClass, number> {
-  const totals: Record<CashFlowClass, number> = {
-    operating: 0,
-    investing: 0,
-    financing: 0,
-    unclassified: 0,
-  };
-
-  for (const journal of allJournals) {
-    if (journal.is_deleted || !journal.registered) continue;
-    if (journal.effective_date < dateFrom || journal.effective_date > dateTo) continue;
-    if (!journal.postings || journal.postings.length === 0) continue;
-
-    const activePostings = journal.postings.filter((posting) =>
-      !posting.is_deleted &&
-      (posting.type === "D" || posting.type === "C"),
-    );
-
-    if (activePostings.length === 0) continue;
-
-    const cashPostings = activePostings.filter((posting) => hasPrefix(posting.accounts_id, "10"));
-    if (cashPostings.length === 0) continue;
-
-    const netCash = roundMoney(cashPostings.reduce((sum, posting) => {
-      const amount = posting.base_amount ?? posting.amount;
-      return sum + (posting.type === "D" ? amount : -amount);
-    }, 0));
-
-    if (Math.abs(netCash) < 0.005) continue;
-
-    const counterpartPostings = activePostings.filter((posting) => !hasPrefix(posting.accounts_id, "10"));
-    if (counterpartPostings.length === 0) {
-      totals.unclassified = roundMoney(totals.unclassified + netCash);
-      continue;
-    }
-
-    const categories = new Set(counterpartPostings.map((posting) => classifyCashFlowCategory(accountsById.get(posting.accounts_id))));
-    if (categories.size === 1 && !categories.has("unclassified")) {
-      const [category] = [...categories];
-      totals[category!] = roundMoney(totals[category!] + netCash);
-      continue;
-    }
-
-    totals.unclassified = roundMoney(totals.unclassified + netCash);
-  }
-
-  return totals;
-}
-
 export async function buildAnnualReportData(api: ApiContext, year: number): Promise<Record<string, unknown>> {
   const { from, to, priorTo } = getYearBounds(year);
 
-  const [accounts, opening, invoiceInfo, vatInfo, allClients, allSales, allPurchases, journalsFromApi] = await Promise.all([
+  const [accounts, { opening, journals: allJournals }, invoiceInfo, vatInfo, allClients, allSales, allPurchases] = await Promise.all([
     api.readonly.getAccounts(),
-    loadOpeningBalanceJournal(api),
+    loadJournalsWithOpeningBalance(api),
     api.readonly.getInvoiceInfo(),
     api.readonly.getVatInfo(),
     api.clients.listAll(),
     api.saleInvoices.listAll(),
     api.purchaseInvoices.listAll(),
-    api.journals.listAllWithPostings(),
   ]);
-  const allJournals = [...(opening ? [opening.journal] : []), ...journalsFromApi];
 
   const preloaded = { preloadedAccounts: accounts, preloadedJournals: allJournals };
   // Start-of-period position for the cash flow's working-capital deltas and
   // opening equity (ROE). Normally the balances at the prior year-end; but when
-  // the stored algbilanss is dated INSIDE the report year (first year on
-  // e-arveldaja, e.g. opening date = 1 January), that synthetic opening journal
-  // (sentinel id -1) IS the starting position — without it opening cash/equity
+  // the selected opening balance is dated INSIDE the report year (first year on
+  // e-arveldaja, e.g. opening date = 1 January), the selected opening journal
+  // IS the starting position — without it opening cash/equity
   // read as zero and the whole opening position shows up as a period movement.
   const openingInsideYear = opening !== null && opening.openingDate >= from && opening.openingDate <= to;
   const [yearEndBalances, priorYearEndBalances, yearProfitAndLossBalances] = await Promise.all([
@@ -1174,7 +1106,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     openingInsideYear
       ? computeAllBalances(api, undefined, to, {
         ...preloaded,
-        journalFilter: (journal) => journal.effective_date <= priorTo || journal.id === -1,
+        journalFilter: (journal) => journal.effective_date <= priorTo || isOpeningBalanceJournal(journal),
       })
       : computeAllBalances(api, undefined, priorTo, preloaded),
     computeAllBalances(api, from, to, {
@@ -1184,6 +1116,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   ]);
 
   const accountsById = new Map(accounts.map((account) => [account.id, account]));
+  const cashAccountIds = new Set(accounts.filter(isCashFlowCashAccount).map(account => account.id));
   const closeAccounts = resolveCloseAccounts(accounts);
   const currentYearProfitAccountId = closeAccounts.currentYearProfit;
   const calculatedResultAccountId = closeAccounts.calculatedResult;
@@ -1386,10 +1319,10 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   }
 
   const openingCash = sumStatementBalances(priorYearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "10"),
+    cashAccountIds.has(balance.account_id),
   );
   const closingCash = sumStatementBalances(yearEndBalances, (balance) =>
-    balance.account_type_est === "Varad" && hasPrefix(balance.account_id, "10"),
+    cashAccountIds.has(balance.account_id),
   );
   const cashChange = roundMoney(closingCash - openingCash);
 
@@ -1461,7 +1394,7 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   const accruedLiabilitiesAdjustment = roundMoney(closingAccruedLiabilities - openingAccruedLiabilities);
   const shortTermInvestmentsAdjustment = roundMoney(openingShortTermInvestments - closingShortTermInvestments);
   const shortTermLiabilitiesAdjustment = roundMoney(closingShortTermLiabilities - openingShortTermLiabilities);
-  const netCashFromOperatingActivities = roundMoney(
+  const baseCashFromOperatingActivities = roundMoney(
     netProfit +
     depreciationLine.amount +
     receivablesAdjustment +
@@ -1473,36 +1406,32 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     accruedLiabilitiesAdjustment,
   );
 
-  // Opening balances are a starting position captured as of the opening
-  // date, not a current-period cash flow — exclude the synthetic opening
-  // journal (sentinel id -1) from cash-flow classification specifically.
-  // Balance-sheet / P&L / §157 sections above still see it via `allJournals`;
-  // only the cash-flow statement, which is period-movement based, must not.
-  const cashFlowJournals = allJournals.filter((journal) => journal.id !== -1);
-  const cashFlowClassification = computeCashFlowClassification(cashFlowJournals, accountsById, from, to);
-  const netCashFromInvestingActivities = roundMoney(cashFlowClassification.investing);
-  const netCashFromFinancingActivities = roundMoney(cashFlowClassification.financing);
-  const statementCashChange = roundMoney(
-    netCashFromOperatingActivities +
-    netCashFromInvestingActivities +
-    netCashFromFinancingActivities,
-  );
-  const statementCashChangeWithUnclassified = roundMoney(statementCashChange + cashFlowClassification.unclassified);
-  if (Math.abs(shortTermInvestmentsAdjustment) >= 0.01) {
-    warnings.push("Changes in short-term investments were excluded from operating cash flow and should be reviewed in investing activities.");
-  }
-  if (Math.abs(shortTermLiabilitiesAdjustment) >= 0.01) {
-    warnings.push("Changes in financing liabilities were excluded from operating cash flow and should be reviewed in financing activities.");
-  }
+  const cashFlowEvidence = await loadCashFlowEvidence(api, allJournals, cashAccountIds, from, to);
+  const cashFlow = calculateAnnualCashFlow({
+    accounts, journals: allJournals, dateFrom: from, dateTo: to,
+    baseOperating: baseCashFromOperatingActivities, calculatedResultAccount: calculatedResultAccountId,
+    categoryRule: getCashFlowCategoryRule, evidence: cashFlowEvidence,
+  });
+  const netCashFromOperatingActivities = cashFlow.operating_bridge.adjusted_total;
+  const netCashFromInvestingActivities = cashFlow.investing.net;
+  const netCashFromFinancingActivities = cashFlow.financing.net;
+  const cashFlowClassification = {
+    operating: cashFlow.operating_bridge.direct_operating_cash,
+    investing: cashFlow.investing.net, financing: cashFlow.financing.net,
+    unclassified: cashFlow.unresolved_cash.net,
+  };
+  const statementCashChange = roundMoney(netCashFromOperatingActivities + netCashFromInvestingActivities +
+    netCashFromFinancingActivities + cashFlow.exchange_rate_effect_on_cash);
+  const statementCashChangeWithUnclassified = roundMoney(statementCashChange + cashFlow.unresolved_cash.net);
   const cashFlowReconciliationDifference = roundMoney(cashChange - statementCashChange);
-  if (Math.abs(cashFlowReconciliationDifference) >= 0.01) {
-    warnings.push(
-      `Cash-flow statement does not reconcile to the balance-sheet cash change: difference ${cashFlowReconciliationDifference} EUR ` +
-      `(balance sheet ${cashChange} EUR, statement ${statementCashChange} EUR). Review cash_journal_classification and the excluded operating adjustments.`,
-    );
+  if (cashFlow.status === "requires_review") {
+    warnings.push("Cash-flow attribution requires review: unresolved source evidence, currency valuation or an indirect operating bridge difference remains. A zero net reconciliation does not establish complete classification.");
   }
-  if (Math.abs(cashFlowClassification.unclassified) >= 0.01) {
-    warnings.push("Some cash journals touched multiple non-cash categories and were left unclassified instead of being proportionally allocated. Review accounting-rules.md cash_flow_category overrides if needed.");
+  if (Math.abs(cashFlow.operating_bridge.difference) >= 0.01) {
+    warnings.push(`Indirect operating cash differs from the independently classified direct operating cash by ${cashFlow.operating_bridge.difference} EUR; no balancing adjustment was made.`);
+  }
+  if (Math.abs(cashFlowReconciliationDifference) >= 0.01) {
+    warnings.push(`Cash-flow statement does not reconcile to the balance-sheet cash change: difference ${cashFlowReconciliationDifference} EUR (balance sheet ${cashChange} EUR, statement ${statementCashChange} EUR). Review the source adjustments and unresolved cash movements.`);
   }
 
   const relatedPartyClients = allClients.filter((client) => !client.is_deleted && getRelatedPartyFlags(client).length > 0);
@@ -1541,15 +1470,14 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
   );
   const closingEquity = totalEquity;
   const averageEquity = roundMoney((openingEquity + closingEquity) / 2);
-  const openingBalanceApiIncomplete = opening === null;
+  const openingBalanceApiIncomplete = opening !== null && (!opening.journal.registered || opening.journal.is_deleted || !opening.journal.postings?.some(p => !p.is_deleted) || opening.openingDate > to);
   const finalWarnings = withOpeningBalanceJournalStatus(warnings, opening, undefined, to);
 
   return {
     year,
     fiscal_period: { from, to },
-    opening_balance_status: openingBalanceApiIncomplete
-      ? "api_incomplete"
-      : "complete",
+    opening_balance_status: opening === null ? "not_present" : openingBalanceApiIncomplete ? "incomplete" : "complete",
+    opening_balance_source: opening?.source ?? null,
     balance_scope: openingBalanceApiIncomplete
       ? "journal_api_visible_entries_only"
       : "complete_balance",
@@ -1642,6 +1570,18 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
     },
     cash_flow_statement: {
       method: "indirect",
+      calculation_version: cashFlow.calculation_version,
+      status: cashFlow.status === "complete" && Math.abs(roundMoney(cashChange - statementCashChangeWithUnclassified)) < 0.01 ? "complete" : "requires_review",
+      exchange_rate_effect_on_cash: cashFlow.exchange_rate_effect_on_cash,
+      operating_bridge: {
+        ...cashFlow.operating_bridge,
+        source_rows: cashFlow.operating_bridge.source_rows.slice(0, 500),
+        source_row_count: cashFlow.operating_bridge.source_rows.length,
+        source_rows_truncated: cashFlow.operating_bridge.source_rows.length > 500,
+      },
+      unresolved_cash: { ...cashFlow.unresolved_cash, items: cashFlow.unresolved_cash.items.slice(0, 500), truncated: cashFlow.unresolved_cash.items.length > 500 },
+      cash_movements: { count: cashFlow.cash_movements.length, items: cashFlow.cash_movements.slice(0, 500), truncated: cashFlow.cash_movements.length > 500 },
+      evidence_coverage: cashFlow.evidence_coverage,
       opening_cash: openingCash,
       closing_cash: closingCash,
       net_change_in_cash: cashChange,
@@ -1655,6 +1595,10 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         change_in_payables: payablesAdjustment,
         change_in_tax_liabilities: taxLiabilitiesAdjustment,
         change_in_accrued_liabilities: accruedLiabilitiesAdjustment,
+        non_cash_adjustments: cashFlow.operating_bridge.non_cash_adjustments,
+        non_operating_adjustments: cashFlow.operating_bridge.non_operating_adjustments,
+        unresolved_bridge_exclusions: cashFlow.operating_bridge.unresolved_exclusions,
+        opening_position_adjustments: cashFlow.operating_bridge.opening_position_adjustments,
         net_cash_from_operating_activities: netCashFromOperatingActivities,
         excluded_from_operating_adjustments: {
           change_in_short_term_investments: shortTermInvestmentsAdjustment,
@@ -1662,9 +1606,13 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         },
       },
       investing_activities: {
+        cash_receipts: cashFlow.investing.cash_receipts,
+        cash_payments: cashFlow.investing.cash_payments,
         net_cash_from_investing_activities: netCashFromInvestingActivities,
       },
       financing_activities: {
+        cash_receipts: cashFlow.financing.cash_receipts,
+        cash_payments: cashFlow.financing.cash_payments,
         net_cash_from_financing_activities: netCashFromFinancingActivities,
       },
       cash_journal_classification: {
@@ -1698,6 +1646,8 @@ export async function buildAnnualReportData(api: ApiContext, year: number): Prom
         vat_registered: Boolean(vatInfo.vat_number),
         assumptions: [
           "Line mapping follows the e-arveldaja standard chart-of-accounts ranges; accounts outside them are listed under kaardistamata_tulud_ja_kulud.",
+          "Cash flows use the indirect method. Proven received interest and dividends follow the operating default unless an explicit account rule overrides it; an ambiguous financial-result account alone does not prove dividend or disposal proceeds and requires review.",
+          "An exactly linked homogeneous capital invoice payment is classified as investing at its gross cash amount, including VAT; mixed invoices require a full, source-exact split without shared VAT, otherwise attribution requires review.",
           "Company-specific accounting policy wording should be reviewed before filing.",
         ],
       },

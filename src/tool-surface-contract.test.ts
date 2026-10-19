@@ -34,6 +34,11 @@ describe("MCP tool-surface contract", () => {
     expect(await captureToolSurface(profile)).toEqual(snapshots.get(profile));
   });
 
+  it.each(TOOL_SURFACE_PROFILES)("never exposes retired local opening import in %s", (profile) => {
+    expect(snapshots.get(profile)!.tools.map(tool => tool.name)).not.toContain("import_opening_balances");
+    expect(TOOL_CATALOG.map(tool => tool.name)).not.toContain("import_opening_balances");
+  });
+
   it("lists every granular constituent only when granular tools are exposed", () => {
     const granular = TOOL_CATALOG.filter((entry) => entry.granular_of).map((entry) => entry.name);
     expect(granular.every(isGranularTool)).toBe(true);

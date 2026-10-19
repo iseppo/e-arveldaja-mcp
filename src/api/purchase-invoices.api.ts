@@ -590,15 +590,23 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       const invoice = await this.get(id);
       const apiItems = invoice.items;
 
-      // Merge API-returned item IDs back into our original items (preserving
-      // cl_fringe_benefits_id and other fields the API GET doesn't return).
+      // A changed/missing row set cannot be matched back to the intended
+      // nondefault fringe treatment. Never PATCH a default over that intent.
+      // The standard follow-up failure path invalidates and retains the draft ID.
+      if (apiItems?.length !== normalizedItems.length &&
+        normalizedItems.some(item => item.cl_fringe_benefits_id != null && item.cl_fringe_benefits_id !== 1)) {
+        throw new Error("Purchase invoice row count changed: cannot preserve the intended fringe-benefit classifiers without a proven row mapping.");
+      }
+
+      // Merge API-returned IDs into our original items, retaining explicit
+      // caller fringe intent and any classifier supplied by newer GET responses.
       // If the API items have different count (shouldn't happen), fall back to API items.
-      // Both branches go through the #62 structural defaults: the API requires
-      // cl_fringe_benefits_id/amount on every PATCH row but does not echo them.
+      // Both branches retain #62 defaults for compatibility with older servers.
       const patchItems = (apiItems && apiItems.length === normalizedItems.length
         ? normalizedItems.map((orig, idx) => ({
             ...orig,
             id: apiItems[idx]!.id,
+            cl_fringe_benefits_id: orig.cl_fringe_benefits_id ?? apiItems[idx]!.cl_fringe_benefits_id,
             // Let the API recompute vat_amount from our fields
           }))
         : apiItems)?.map(applyPurchaseItemStructuralDefaults);

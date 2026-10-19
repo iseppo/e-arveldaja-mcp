@@ -1,14 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
 import type { Account, Journal, Posting, SaleInvoice, PurchaseInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { computeAllBalances, loadMonthEndScan, monthEndSummary, registerFinancialStatementTools } from "./financial-statements.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { clearRuntimeCaches } from "../cache-control.js";
-import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import type { ToolExposureConfig } from "../config.js";
 import { createReportingOperations } from "../reporting/operations.js";
 
@@ -254,52 +250,30 @@ describe("computeAllBalances", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Opening balance folding — stored algbilanss prepended as a synthetic journal
+// API opening journals participate in the same accounting and date filters.
 // ---------------------------------------------------------------------------
 
 describe("opening balance folding", () => {
   const BANK_ACCOUNT_ID = 1020;
   const CAPITAL_ACCOUNT_ID = 2900;
 
-  let dir: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ob-fin-stmt-"));
-    process.env.EARVELDAJA_RULES_DIR = dir;
-    resetOpeningBalanceCache();
-  });
-
-  afterEach(() => {
-    delete process.env.EARVELDAJA_RULES_DIR;
-    resetOpeningBalanceCache();
-    rmSync(dir, { recursive: true, force: true });
-  });
-
   const CHART = [
     makeAccount(BANK_ACCOUNT_ID, "D", "Varad", "Pank", "Bank"),
     makeAccount(CAPITAL_ACCOUNT_ID, "C", "Omakapital", "Kapital", "Capital"),
   ];
 
-  function storeOpeningBalances() {
-    writeOpeningBalances(
-      {
-        openingDate: "2024-12-12",
-        accounts: [
-          { code: String(BANK_ACCOUNT_ID), name: "Pank", debit: 1000, credit: 0 },
-          { code: String(CAPITAL_ACCOUNT_ID), name: "Kapital", debit: 0, credit: 1000 },
-        ],
-        totals: { debit: 1000, credit: 1000 },
-        rawText: "n/a",
-      },
-      "2024-12-12T00:00:00.000Z",
-    );
+  function openingJournal(): Journal {
+    return makeJournal("2024-12-12", [
+      makePosting(BANK_ACCOUNT_ID, "D", 1000),
+      makePosting(CAPITAL_ACCOUNT_ID, "C", 1000),
+    ], { id: 800, operation_type: "INITIAL" });
   }
 
-  it("folds a stored opening balance into compute_trial_balance", async () => {
-    storeOpeningBalances();
+  it("includes API INITIAL once in compute_trial_balance", async () => {
     const handler = setupTool("compute_trial_balance", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -326,11 +300,11 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("shows the out-of-window note for compute_trial_balance when date_from excludes the stored algbilanss", async () => {
-    storeOpeningBalances();
+  it("shows the out-of-window note for compute_trial_balance when date_from excludes API INITIAL", async () => {
     const handler = setupTool("compute_trial_balance", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -349,7 +323,7 @@ describe("opening balance folding", () => {
     // opening journal is excluded — only the in-window 500 is counted.
     expect(bankRow.debit_total).toBe(500);
     expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+      expect.arrayContaining([expect.stringContaining("outside this date range")]),
     );
     expect(payload.warnings).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
@@ -359,7 +333,7 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("leaves compute_trial_balance unchanged without a stored algbilanss", async () => {
+  it("leaves compute_trial_balance unchanged without API INITIAL", async () => {
     const handler = setupTool("compute_trial_balance", {
       accounts: CHART,
       journals: [
@@ -378,16 +352,14 @@ describe("opening balance folding", () => {
     const bankRow = payload.accounts.find(a => a.account_id === BANK_ACCOUNT_ID)!;
 
     expect(bankRow.debit_total).toBe(500);
-    expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
-    );
+    expect(payload.warnings).toEqual([]);
   });
 
-  it("folds a stored opening balance into compute_balance_sheet", async () => {
-    storeOpeningBalances();
+  it("includes API INITIAL once in compute_balance_sheet", async () => {
     const handler = setupTool("compute_balance_sheet", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -409,11 +381,11 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("shows the out-of-window note for compute_balance_sheet when date_to is before the stored algbilanss date", async () => {
-    storeOpeningBalances();
+  it("shows the out-of-window note for compute_balance_sheet when date_to precedes API INITIAL", async () => {
     const handler = setupTool("compute_balance_sheet", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -432,7 +404,7 @@ describe("opening balance folding", () => {
     // is about the warning, not the (zero) figure.
     expect(payload.assets.total).toBe(0);
     expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+      expect.arrayContaining([expect.stringContaining("outside this date range")]),
     );
     expect(payload.warnings).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
@@ -442,7 +414,7 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("leaves compute_balance_sheet unchanged without a stored algbilanss", async () => {
+  it("leaves compute_balance_sheet unchanged without API INITIAL", async () => {
     const handler = setupTool("compute_balance_sheet", {
       accounts: CHART,
       journals: [
@@ -462,16 +434,14 @@ describe("opening balance folding", () => {
 
     expect(payload.assets.total).toBe(500);
     expect(payload.equity.total).toBe(500);
-    expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
-    );
+    expect(payload.warnings).toEqual([]);
   });
 
   it("shows the out-of-window note for compute_profit_and_loss when the opening date is outside the period", async () => {
-    storeOpeningBalances();
     const handler = setupTool("compute_profit_and_loss", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -485,12 +455,10 @@ describe("opening balance folding", () => {
     };
 
     // Opening balance is dated 2024-12-12, outside this P&L period
-    // (2025-01-01..2025-01-31) — the stored algbilanss is excluded from
-    // these figures, so the note must reflect out-of-window, not "applied",
-    // and it must NOT show the actionable "paste it" warning either (it IS
-    // captured, just not in this window).
+    // (2025-01-01..2025-01-31) — API INITIAL is excluded from
+    // these figures, so the note must reflect out-of-window, not "applied".
     expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+      expect.arrayContaining([expect.stringContaining("outside this date range")]),
     );
     expect(payload.warnings).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
@@ -500,11 +468,11 @@ describe("opening balance folding", () => {
     );
   });
 
-  it("folds a stored opening balance into compute_profit_and_loss when the period includes the opening date", async () => {
-    storeOpeningBalances();
+  it("includes API INITIAL in compute_profit_and_loss when its date is in the period", async () => {
     const handler = setupTool("compute_profit_and_loss", {
       accounts: CHART,
       journals: [
+        openingJournal(),
         makeJournal("2025-01-10", [
           makePosting(BANK_ACCOUNT_ID, "D", 500),
           makePosting(CAPITAL_ACCOUNT_ID, "C", 500),
@@ -527,11 +495,11 @@ describe("opening balance folding", () => {
       expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
     );
     expect(payload.warnings).not.toEqual(
-      expect.arrayContaining([expect.stringContaining("fall outside this date range")]),
+      expect.arrayContaining([expect.stringContaining("outside this date range")]),
     );
   });
 
-  it("leaves compute_profit_and_loss unchanged without a stored algbilanss", async () => {
+  it("leaves compute_profit_and_loss unchanged without API INITIAL", async () => {
     const handler = setupTool("compute_profit_and_loss", {
       accounts: CHART,
       journals: [
@@ -547,9 +515,7 @@ describe("opening balance folding", () => {
       warnings: string[];
     };
 
-    expect(payload.warnings).toEqual(
-      expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
-    );
+    expect(payload.warnings).toEqual([]);
   });
 });
 
@@ -578,9 +544,7 @@ describe("compute_trial_balance", () => {
     expect(payload.totals.debit).toBe(1000);
     expect(payload.totals.credit).toBe(1000);
     expect(payload.totals.difference).toBe(0);
-    expect(payload.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("Algbilansi kanded"),
-    ]));
+    expect(payload.warnings).toEqual([]);
   });
 
   it("passes date range through to the output", async () => {
@@ -688,9 +652,7 @@ describe("compute_balance_sheet", () => {
     expect(payload.check.balanced).toBe(true);
     expect(payload.check.assets).toBe(10000);
     expect(payload.check.liabilities_plus_equity).toBe(10000);
-    expect(payload.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("Algbilansi kanded"),
-    ]));
+    expect(payload.warnings).toEqual([]);
   });
 
   it("includes current-year P&L in equity for balance check", async () => {
@@ -771,9 +733,7 @@ describe("compute_profit_and_loss", () => {
     expect(payload.revenue.total).toBe(20000);
     expect(payload.expenses.total).toBe(10000);
     expect(payload.net_profit).toBe(10000);
-    expect(payload.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("Algbilansi kanded"),
-    ]));
+    expect(payload.warnings).toEqual([]);
   });
 
   it("net profit is negative when expenses exceed revenue (loss)", async () => {
@@ -1491,44 +1451,18 @@ describe("statement date defaults and validation", () => {
 });
 
 describe("opening-balance warning parity (standalone tools vs run_accounting_report ops)", () => {
-  let dir: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ob-parity-"));
-    process.env.EARVELDAJA_RULES_DIR = dir;
-    resetOpeningBalanceCache();
-    writeOpeningBalances(
-      {
-        openingDate: "2024-12-12",
-        accounts: [
-          { code: "1020", name: "Pank", debit: 1000, credit: 0, dimension: ["Unknown bank"] },
-          { code: "9999", name: "Missing", debit: 0, credit: 0 },
-          { code: "2900", name: "Kapital", debit: 0, credit: 1000 },
-        ],
-        totals: { debit: 1000, credit: 1000 },
-        rawText: "n/a",
-      },
-      "2024-12-12T00:00:00.000Z",
-    );
-  });
-
   afterEach(() => {
-    delete process.env.EARVELDAJA_RULES_DIR;
-    resetOpeningBalanceCache();
-    rmSync(dir, { recursive: true, force: true });
     vi.useRealTimers();
   });
 
   function parityApi(): ApiContext {
     const api = createApi({
       accounts: [makeAccount(1020, "D", "Varad", "Pank"), makeAccount(2900, "C", "Omakapital", "Kapital")],
-      journals: [],
+      journals: [makeJournal("2024-12-12", [
+        makePosting(1020, "D", 1000),
+        makePosting(2900, "C", 1000),
+      ], { id: 800, operation_type: "INITIAL" })],
     });
-    // Two dimensions on 1020, neither matching "Unknown bank" → unmappedDimensions.
-    (api.readonly as unknown as { getAccountDimensions: unknown }).getAccountDimensions = vi.fn().mockResolvedValue([
-      { id: 1, accounts_id: 1020, title_est: "LHV" },
-      { id: 2, accounts_id: 1020, title_est: "Wise" },
-    ]);
     return api;
   }
 
@@ -1560,10 +1494,7 @@ describe("opening-balance warning parity (standalone tools vs run_accounting_rep
     // The sandbox markers carry a per-call random nonce; compare text modulo it.
     const stripNonce = (ws: readonly string[]) => ws.map(w => w.replace(/[0-9a-f]{32}/g, "<nonce>"));
     expect(stripNonce(outcome.value.warnings)).toEqual(stripNonce(expected));
-    expect(expected.some(w => w.startsWith("Opening balances"))).toBe(true);
-    // The dimension warning can fire now that unmappedDimensions is passed through.
-    expect(expected.some(w => w.includes("dimension label could not be resolved"))).toBe(true);
-    expect(expected.some(w => w.includes("not in the chart were skipped: 9999"))).toBe(true);
+    expect(expected.some(w => w.includes("INITIAL"))).toBe(true);
   });
 });
 

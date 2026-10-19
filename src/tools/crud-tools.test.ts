@@ -27,7 +27,6 @@ import {
   PurchaseInvoiceTotalsCorrectionError,
   type PurchaseInvoiceTotalsCorrectionCode,
 } from "../api/purchase-invoices.api.js";
-import { writeOpeningBalances, resetOpeningBalanceCache } from "../opening-balance-store.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
@@ -630,7 +629,7 @@ describe("create_product", () => {
 });
 
 describe("list_journals", () => {
-  it("warns that opening balance entries may be absent from journal API results", async () => {
+  it("states that a journal page alone does not establish opening-balance coverage", async () => {
     const { handler } = getCrudToolHarness("list_journals", {
       journals: {
         list: vi.fn().mockResolvedValue({
@@ -644,9 +643,7 @@ describe("list_journals", () => {
     const result = await handler({}) as { content: Array<{ text: string }> };
     const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
 
-    expect(payload.warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining("Algbilansi kanded"),
-    ]));
+    expect(payload.warnings ?? []).toEqual([]);
     // The native/server path emits the same superset envelope as the client-side path.
     expect(payload).toMatchObject({
       current_page: 1,
@@ -657,79 +654,6 @@ describe("list_journals", () => {
     });
     expect(payload).toHaveProperty("total_items");
     expect(payload).toHaveProperty("per_page");
-  });
-
-  describe("opening-balance warning swap", () => {
-    let dir: string;
-
-    beforeEach(() => {
-      dir = mkdtempSync(join(tmpdir(), "ob-crud-journals-"));
-      process.env.EARVELDAJA_RULES_DIR = dir;
-      resetOpeningBalanceCache();
-    });
-
-    afterEach(() => {
-      delete process.env.EARVELDAJA_RULES_DIR;
-      resetOpeningBalanceCache();
-      rmSync(dir, { recursive: true, force: true });
-    });
-
-    it("reports the applied-note (not the actionable warning) once a stored algbilanss is captured, unfiltered path", async () => {
-      writeOpeningBalances(
-        {
-          openingDate: "2024-12-01",
-          accounts: [{ code: "1000", name: "Pangakonto", debit: 200, credit: 0 }],
-          totals: { debit: 200, credit: 0 },
-          rawText: "n/a",
-        },
-        "2024-12-01T00:00:00.000Z",
-      );
-
-      const { handler } = getCrudToolHarness("list_journals", {
-        journals: {
-          list: vi.fn().mockResolvedValue({
-            current_page: 1,
-            total_pages: 1,
-            items: [],
-          }),
-        },
-      });
-
-      const result = await handler({}) as { content: Array<{ text: string }> };
-      const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
-
-      expect(payload.warnings).toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
-      );
-      expect(payload.warnings).not.toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances are not captured")]),
-      );
-    });
-
-    it("reports the applied-note on the client-side-filtered path too", async () => {
-      writeOpeningBalances(
-        {
-          openingDate: "2024-12-01",
-          accounts: [{ code: "1000", name: "Pangakonto", debit: 200, credit: 0 }],
-          totals: { debit: 200, credit: 0 },
-          rawText: "n/a",
-        },
-        "2024-12-01T00:00:00.000Z",
-      );
-
-      const { handler } = getCrudToolHarness("list_journals", {
-        journals: {
-          listAll: vi.fn().mockResolvedValue([]),
-        },
-      });
-
-      const result = await handler({ date_from: "2025-01-01" }) as { content: Array<{ text: string }> };
-      const payload = parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
-
-      expect(payload.warnings).toEqual(
-        expect.arrayContaining([expect.stringContaining("Opening balances applied from the stored algbilanss")]),
-      );
-    });
   });
 });
 
@@ -917,6 +841,24 @@ describe("server-side list filters", () => {
     expect(api.journals.listAll).toHaveBeenCalledTimes(1);
     expect((api.journals.listAll as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({ modified_since: "2026-01-01T00:00:00Z" });
     expect(api.journals.listAllCached).not.toHaveBeenCalled();
+  });
+
+  it("list_journals forwards INITIAL with dates and defensively applies the remaining filters", async () => {
+    const row = { id: 800, operation_type: "INITIAL", effective_date: "2026-01-01", registered: true, clients_id: 42, document_number: "OPEN", postings: [] };
+    const { api, handler } = getCrudToolHarness("list_journals", { journals: {
+      list: vi.fn(), listAll: vi.fn().mockResolvedValue([
+        row,
+        { ...row, id: 801, operation_type: "MANUAL" },
+        { ...row, id: 802, registered: false },
+        { ...row, id: 803, clients_id: 99 },
+        { ...row, id: 804, document_number: "OTHER" },
+      ]), listAllCached: vi.fn(),
+    } });
+    const result = await handler({ operation_type: "INITIAL", date_from: "2026-01-01", registered: true, clients_id: 42, document_number_contains: "OPEN" });
+    expect(api.journals.listAll).toHaveBeenCalledWith(expect.objectContaining({ operation_type: "INITIAL", start_date: "2026-01-01" }));
+    expect(api.journals.listAllCached).not.toHaveBeenCalled();
+    const data = parseMcpResponse((result as any).content[0].text) as any;
+    expect(data.items.map((item: any) => item.id)).toEqual([800]);
   });
 
   it("list_journals narrows server-side by effective-date range, then filters client-side", async () => {
@@ -1727,6 +1669,16 @@ describe("update_* post-confirmation audit lock", () => {
     const patch = updateMock.mock.calls[0]![1] as { items: Array<Record<string, unknown>> };
     expect(patch.items[0]).toMatchObject({ cl_fringe_benefits_id: 1, amount: 1, total_net_price: 90 });
     expect(patch.items[1]).toMatchObject({ cl_fringe_benefits_id: 2, amount: 3 });
+  });
+
+  it("update_purchase_invoice preserves a nondefault fringe classifier on a header-only PATCH", async () => {
+    const update = vi.fn().mockResolvedValue({ code: 200, messages: [] });
+    const existingItems = [{ id: 11, custom_title: "Benefit", amount: 1, total_net_price: 100, cl_fringe_benefits_id: 7 }];
+    const { handler } = getCrudToolHarness("update_purchase_invoice", { purchaseInvoices: {
+      get: vi.fn().mockResolvedValue({ id: 7, status: "PROJECT", items: existingItems }), update,
+    } });
+    await handler({ id: 7, data: { notes: "header only" } });
+    expect(update).toHaveBeenCalledWith(7, expect.objectContaining({ notes: "header only", items: existingItems }));
   });
 
   it("update_purchase_invoice fills cl_fringe_benefits_id on re-sent items the API GET returned without it", async () => {

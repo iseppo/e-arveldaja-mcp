@@ -28,7 +28,7 @@ type PersistedStatementBalanceRecord = StatementBalanceRecord & { connectionIden
 
 const LABEL = "statement closing balances (statement-balances.json)";
 
-// Mirrors opening-balance-store's cache/null/bundle-lock contracts. `null`
+// Connection-scoped bundle storage with cached reads and locked writes. `null`
 // signals the feature is unavailable (single-file EARVELDAJA_RULES_FILE mode);
 // in bundle mode an absent log reads as an empty history (`[]`).
 let cache: { key: string; value: StatementBalanceRecord[] | null; warning: string | null } | undefined;

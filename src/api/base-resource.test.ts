@@ -1330,6 +1330,22 @@ describe("BaseResource", () => {
 });
 
 describe("JournalsApi title boundary", () => {
+  it("keeps filtered INITIAL lists separate from the unfiltered posting cache", async () => {
+    cache.invalidate();
+    const client = makeClient("initial-cache-regression");
+    const initial = { id: 8, operation_type: "INITIAL", postings: [{ accounts_id: 1020, type: "D", amount: 100 }] };
+    const ordinary = { id: 9, operation_type: "ENTRY", postings: [{ accounts_id: 1020, type: "D", amount: 20 }] };
+    vi.mocked(client.get).mockImplementation(async (_path, params) => ({
+      current_page: 1, total_pages: 1, items: (params as any)?.operation_type === "INITIAL" ? [initial] : [initial, ordinary],
+    }) as any);
+    const api = new JournalsApi(client);
+    expect(await api.listAll({ operation_type: "INITIAL" })).toEqual([initial]);
+    expect(await api.listAllWithPostings()).toEqual([initial, ordinary]);
+    expect(await api.listAllWithPostings()).toEqual([initial, ordinary]);
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(client.get).toHaveBeenNthCalledWith(1, "/journals", { operation_type: "INITIAL", page: 1 });
+    expect(client.get).toHaveBeenNthCalledWith(2, "/journals", { page: 1 });
+  });
   it.each([
     ["create", (api: JournalsApi) => api.create({ title: "x".repeat(101), effective_date: "2026-01-01", postings: [] } as any), "post"],
     ["update", (api: JournalsApi) => api.update(5, { title: "x".repeat(101) } as any), "patch"],

@@ -15,7 +15,6 @@ import { registerRecurringInvoiceTools } from "../tools/recurring-invoices.js";
 import { registerEstonianTaxTools } from "../tools/estonian-tax.js";
 import { registerAnnualReportTools } from "../tools/annual-report.js";
 import { registerDocumentAuditTools } from "../tools/document-audit.js";
-import { registerOpeningBalanceTools } from "../tools/opening-balance-import.js";
 import { registerReceiptInboxTools } from "../tools/receipt-inbox.js";
 import { registerLightyearTools } from "../tools/lightyear-investments.js";
 import { registerWiseImportTools } from "../tools/wise-import.js";
@@ -76,7 +75,6 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   if (toolExposure.enableTaxTools) registerEstonianTaxTools(publicServer, api);
   if (toolExposure.enableAnnualReport) registerAnnualReportTools(publicServer, api);
   registerDocumentAuditTools(publicServer, api);
-  registerOpeningBalanceTools(publicServer, api);
   registerReceiptInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
   if (toolExposure.enableLightyear) registerLightyearTools(publicServer, api, runtimeSafetyContext);
   registerWiseImportTools(publicServer, api, runtimeSafetyContext);

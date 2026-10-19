@@ -1,120 +1,35 @@
 import type { ApiContext } from "./tools/crud-tools.js";
-import type { Account, AccountDimension, Journal, Posting } from "./types/api.js";
-import { readOpeningBalances, type StoredOpeningBalances } from "./opening-balance-store.js";
+import type { Journal } from "./types/api.js";
 
 export interface OpeningBalanceJournal {
+  source: "api";
   journal: Journal;
   openingDate: string;
-  unmappedCodes: string[];
-  unmappedDimensions: string[];
 }
 
-function resolveDimensionId(dims: AccountDimension[], candidates: string[] | undefined): number | undefined {
-  if (!candidates || candidates.length === 0) return undefined;
-  // Compare case-insensitively: a pasted label differing only in case (e.g.
-  // "wise" vs the chart's "Wise") should still resolve. Ambiguity handling is
-  // unchanged — a case-insensitive tie stays unresolved.
-  const lowered = candidates.map(c => c.toLowerCase());
-  const exact = dims.filter(d => d.id !== undefined && lowered.includes(d.title_est?.toLowerCase() ?? ""));
-  if (exact.length > 0) return exact.length === 1 ? exact[0]!.id : undefined; // ambiguous exact → caller warns
-  const joined = candidates.join(" ").toLowerCase();   // distinctive title as substring
-  const hits = dims.filter(d => d.id !== undefined && d.title_est && joined.includes(d.title_est.toLowerCase()));
-  return hits.length === 1 ? hits[0]!.id : undefined;  // zero or ambiguous → caller warns
+export function isOpeningBalanceJournal(journal: Journal): boolean {
+  return journal.operation_type === "INITIAL";
 }
 
-export function buildOpeningBalanceJournal(
-  accounts: Account[],
-  dimensions: AccountDimension[],
-  stored: StoredOpeningBalances | null,
-): OpeningBalanceJournal | null {
-  if (!stored || !Array.isArray(stored.accounts) || stored.accounts.length === 0) return null;
-
-  // Account.id doubles as the human-readable account number/code in this
-  // codebase's chart-of-accounts model (see src/account-resolution.ts:
-  // resolved constants like 2960 are compared against a.id directly) — the
-  // API's Account type has no separate `code` field.
-  const idByCode = new Map<string, number>();
-  for (const a of accounts) idByCode.set(String(a.id), a.id);
-
-  const dimsByAccount = new Map<number, AccountDimension[]>();
-  for (const d of dimensions) {
-    if (d.is_deleted || d.id === undefined) continue;
-    const arr = dimsByAccount.get(d.accounts_id) ?? [];
-    arr.push(d);
-    dimsByAccount.set(d.accounts_id, arr);
-  }
-
-  const postings: Posting[] = [];
-  const unmappedCodes: string[] = [];
-  const unmappedDimensions: string[] = [];
-  for (const acc of stored.accounts) {
-    const accountsId = idByCode.get(acc.code);
-    if (accountsId === undefined) { unmappedCodes.push(acc.code); continue; }
-
-    const dims = dimsByAccount.get(accountsId) ?? [];
-    let dimensionId: number | undefined;
-    if (dims.length === 1) {
-      dimensionId = dims[0]!.id;
-    } else if (dims.length > 1) {
-      dimensionId = resolveDimensionId(dims, acc.dimension);
-      if (dimensionId === undefined) {
-        unmappedDimensions.push(`${acc.code}: ${(acc.dimension ?? []).join(" | ") || "(no label)"}`);
-      }
-    }
-
-    if (acc.debit !== 0) {
-      postings.push({ accounts_id: accountsId, accounts_dimensions_id: dimensionId ?? null, type: "D", amount: acc.debit, base_amount: acc.debit, is_deleted: false });
-    }
-    if (acc.credit !== 0) {
-      postings.push({ accounts_id: accountsId, accounts_dimensions_id: dimensionId ?? null, type: "C", amount: acc.credit, base_amount: acc.credit, is_deleted: false });
+export function openingFromApi(journals: Journal[]): OpeningBalanceJournal | null {
+  const initial = journals.filter(isOpeningBalanceJournal);
+  const active = initial.filter(j => !j.is_deleted);
+  if (active.length > 1) throw new Error("Multiple active INITIAL journals: opening balances require manual review.");
+  const journal = active[0] ?? initial[0];
+  for (const posting of journal?.postings ?? []) {
+    if (posting.is_deleted) continue;
+    if ((posting.type !== "D" && posting.type !== "C") || !Number.isFinite(posting.amount) || posting.amount < 0 ||
+      (posting.base_amount != null && (!Number.isFinite(posting.base_amount) || posting.base_amount < 0))) {
+      throw new Error("Malformed INITIAL posting: expected D/C and finite nonnegative amounts; opening balances require manual review.");
     }
   }
-
-  const journal: Journal = {
-    id: -1,                              // sentinel: synthetic, never a real ledger id
-    clients_id: null,
-    title: "Algbilansi kanded (imported)",
-    effective_date: stored.openingDate,
-    registered: true,
-    is_deleted: false,
-    postings,
-  };
-
-  return { journal, openingDate: stored.openingDate, unmappedCodes, unmappedDimensions };
+  return journal ? { source: "api", journal, openingDate: journal.effective_date } : null;
 }
 
-export async function loadOpeningBalanceJournal(api: ApiContext): Promise<OpeningBalanceJournal | null> {
-  const stored = readOpeningBalances();
-  if (!stored || stored.accounts.length === 0) return null;
-  // Accounts are fundamental — a failure there should still surface. A
-  // dimensions-fetch failure only degrades per-dimension attribution, so
-  // fall back to an empty dimensions array: the journal is still built at
-  // ACCOUNT level (with no dimensions known, every posting lands under a null
-  // dimension — the multi-dim branch never runs, so nothing is added to
-  // unmappedDimensions) so account totals stay correct rather than dropping
-  // opening balances entirely.
-  const accounts = await api.readonly.getAccounts();
-  let dimensions: AccountDimension[] = [];
-  try {
-    dimensions = await api.readonly.getAccountDimensions();
-  } catch {
-    dimensions = [];
-  }
-  return buildOpeningBalanceJournal(accounts, dimensions, stored);
-}
-
-/**
- * The API journals (with postings) with the stored opening-balance journal,
- * when there is one, prepended. Both are loaded concurrently. `journalsFromApi`
- * is the API list alone (e.g. for draft scans that must not see the synthetic
- * journal).
- */
+/** Preserve the complete API journal set; INITIAL is identified, never prepended. */
 export async function loadJournalsWithOpeningBalance(
   api: ApiContext,
 ): Promise<{ journals: Journal[]; journalsFromApi: Journal[]; opening: OpeningBalanceJournal | null }> {
-  const [opening, journalsFromApi] = await Promise.all([
-    loadOpeningBalanceJournal(api),
-    api.journals.listAllWithPostings(),
-  ]);
-  return { journals: [...(opening ? [opening.journal] : []), ...journalsFromApi], journalsFromApi, opening };
+  const journals = await api.journals.listAllWithPostings();
+  return { journals, journalsFromApi: journals, opening: openingFromApi(journals) };
 }

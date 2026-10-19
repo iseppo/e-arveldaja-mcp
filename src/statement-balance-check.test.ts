@@ -6,9 +6,33 @@ import {
   checkStatementClosingBalance,
   STATEMENT_BALANCE_TOLERANCE_EUR,
 } from "./statement-balance-check.js";
-import { resetOpeningBalanceCache, writeOpeningBalances } from "./opening-balance-store.js";
-import { createAccountingWorkflowApi, fixtureTransaction } from "./__fixtures__/accounting-workflow.js";
+import { createAccountingWorkflowApi as baseCreateAccountingWorkflowApi, fixtureTransaction } from "./__fixtures__/accounting-workflow.js";
 import type { Journal } from "./types/api.js";
+
+// API-only fixture: the values below become normalized rows returned by the mock server.
+let apiOpeningFixture: Journal | null = null;
+function resetApiOpening() { apiOpeningFixture = null; }
+beforeEach(resetApiOpening);
+function seedApiOpening(data: { openingDate: string; accounts: Array<{ code: string; debit: number; credit: number; [key: string]: unknown }>; [key: string]: unknown }, _timestamp?: string) {
+  apiOpeningFixture = {
+    id: 88001, operation_type: "INITIAL", effective_date: data.openingDate,
+    registered: true, is_deleted: false, clients_id: null,
+    postings: data.accounts.flatMap(row => [
+      ...(row.debit ? [{ accounts_id: Number(row.code), type: "D", amount: row.debit, base_amount: row.debit, accounts_dimensions_id: null }] : []),
+      ...(row.credit ? [{ accounts_id: Number(row.code), type: "C", amount: row.credit, base_amount: row.credit, accounts_dimensions_id: null }] : []),
+    ]) as Journal["postings"],
+  };
+}
+function withApiOpening(journals: Journal[]): Journal[] {
+  return apiOpeningFixture && !journals.some(j => j.operation_type === "INITIAL") ? [apiOpeningFixture, ...journals] : journals;
+}
+
+function createAccountingWorkflowApi(options: Parameters<typeof baseCreateAccountingWorkflowApi>[0]) {
+  const context = baseCreateAccountingWorkflowApi(options);
+  const original = context.journals.listAllWithPostings.bind(context.journals);
+  context.journals.listAllWithPostings = vi.fn(async () => withApiOpening(await original()));
+  return context;
+}
 
 const ACCOUNT_ID = 1020;
 const DIMENSION_ID = 101;
@@ -35,11 +59,33 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "sb-check-"));
   process.env.EARVELDAJA_RULES_DIR = dir;
-  resetOpeningBalanceCache();
+  resetApiOpening();
 });
 afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; rmSync(dir, { recursive: true, force: true }); });
 
 describe("checkStatementClosingBalance", () => {
+  it.each([101, null])("uses API INITIAL once with dimension %s and discloses incomplete dimension coverage", async (dimension) => {
+    const initial = confirmedJournal("D", 1000, { id: 800, effective_date: "2026-01-01", operation_type: "INITIAL", postings: [
+      { accounts_id: ACCOUNT_ID, accounts_dimensions_id: dimension, type: "D", amount: 1000, base_amount: 1000, is_deleted: false },
+    ] });
+    const api = createAccountingWorkflowApi({ journals: { listAllWithPostings: vi.fn().mockResolvedValue([initial, confirmedJournal("D", 170)]) } });
+    const result = await checkStatementClosingBalance(api, {
+      dimensionId: DIMENSION_ID, accountId: ACCOUNT_ID,
+      closing: { amount: 1170, direction: "CRDT", date: BALANCE_DATE, currency: "EUR" }, fallbackDate: BALANCE_DATE,
+    });
+    expect(result.booked_balance).toBe(dimension === null ? 170 : 1170);
+    expect(result.expected_balance).toBe(dimension === null ? 170 : 1170);
+    if (dimension === null) {
+      expect(result.notes.join(" ")).toMatch(/dimension.*skipped|skipped.*dimension/is);
+      expect(result.notes.join(" ")).toContain("INITIAL");
+      expect(result.notes.join(" ")).not.toMatch(/re-import|paste/i);
+      expect(result.warnings.join(" ")).not.toMatch(/exceeds.*tolerance/i);
+    } else {
+      expect(result.difference).toBe(0);
+      expect(result.within_tolerance).toBe(true);
+    }
+  });
+
   it("exports the locked 0.10 EUR tolerance", () => {
     expect(STATEMENT_BALANCE_TOLERANCE_EUR).toBe(0.10);
   });
@@ -193,7 +239,7 @@ describe("checkStatementClosingBalance", () => {
     // per-dimension booked balance omits it. Comparing that partial booked side
     // to a statement that DOES include the opening amount would trip the
     // tolerance — a spurious warning the tripwire must suppress.
-    writeOpeningBalances({
+    seedApiOpening({
       openingDate: "2025-12-31",
       accounts: [{ code: String(ACCOUNT_ID), name: "Pank", debit: 500, credit: 0, dimension: ["Nonexistent label"] }],
       totals: { debit: 500, credit: 0 },

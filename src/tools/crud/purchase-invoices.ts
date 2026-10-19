@@ -265,12 +265,10 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext,
       // common (already-clean) path.
       parsed.items = desandboxAllStrings(current.items.map(item => ({ ...item })));
     }
-    // PATCH replaces the whole item list and the API's NOT NULL constraint on
-    // cl_fringe_benefits_id is enforced on every row it receives — yet the API
-    // GET omits the field, and create_purchase_invoice defaults it to 1. Apply
-    // the same structural defaults here so an item list that was accepted on
-    // create (or read back from the API) is accepted on update instead of
-    // surfacing as a raw 500 (GitHub #62).
+    // PATCH replaces the whole item list. Preserve explicit fringe classifiers
+    // from caller or readback, with the compatible default 1 for missing/null.
+    // RIK fixed the missing-classifier 500, but older deployments still benefit
+    // from the structural defaults (GitHub #62).
     if (Array.isArray(parsed.items)) {
       parsed.items = parsed.items.map(item => applyPurchaseItemStructuralDefaults(item as PurchaseInvoiceItem));
     }

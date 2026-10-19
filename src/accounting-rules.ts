@@ -172,8 +172,8 @@ export function initAccountingRulesConnection(
 /**
  * The active connection's stable identity (the same connection fingerprint the
  * plan store scopes by) plus the configured connection count. Company-specific
- * data files stored in the bundle (opening-balances.json,
- * statement-balances.json) stamp this identity, because a bundle is NOT always
+ * data files stored in the bundle (statement-balances.json) stamp this identity,
+ * because a bundle is NOT always
  * per-connection: `EARVELDAJA_RULES_DIR` and the kept-in-place project/global
  * bundle are shared by every connection of the server.
  */
@@ -893,12 +893,6 @@ export function getAccountingRulesPath(): string {
   if (bundleHasConcepts(storage.dir)) return storage.dir;
   if (existsSync(storage.legacyFile)) return storage.legacyFile;
   return storage.dir;
-}
-
-export function resolveOpeningBalanceStorePath(): string | null {
-  const storage = resolveStorage();
-  if (storage.mode === "file") return null;           // single-file legacy mode has no bundle dir
-  return resolve(storage.dir, "opening-balances.json");
 }
 
 /**

@@ -1,179 +1,72 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { buildOpeningBalanceJournal, loadJournalsWithOpeningBalance, loadOpeningBalanceJournal } from "./opening-balance-journal.js";
-import type { Account } from "./types/api.js";
-import { writeOpeningBalances, resetOpeningBalanceCache, type StoredOpeningBalances } from "./opening-balance-store.js";
+import { isOpeningBalanceJournal, loadJournalsWithOpeningBalance } from "./opening-balance-journal.js";
 import { createAccountingWorkflowApi } from "./__fixtures__/accounting-workflow.js";
+import type { Journal } from "./types/api.js";
 
-const ACCOUNTS = [
-  { id: 1020, code: 1020, name_est: "Pank", balance_type: "D" },
-  { id: 2900, code: 2900, name_est: "Kapital", balance_type: "C" },
-] as unknown as Account[];
-
-const STORED: StoredOpeningBalances = {
-  openingDate: "2024-12-12",
-  accounts: [{ code: "1020", name: "Pank", debit: 1000, credit: 0 },
-             { code: "2900", name: "Kapital", debit: 0, credit: 1000 }],
-  totals: { debit: 1000, credit: 1000 },
-  rawText: "…", parsedAt: "2026-07-19T00:00:00Z", source: "algbilanss_paste",
-};
-
-describe("buildOpeningBalanceJournal", () => {
-  it("returns null when nothing is stored", () => {
-    expect(buildOpeningBalanceJournal(ACCOUNTS, [], null)).toBeNull();
-  });
-  it("emits a registered synthetic journal with D/C postings at the opening date", () => {
-    const r = buildOpeningBalanceJournal(ACCOUNTS, [], STORED)!;
-    expect(r.journal.effective_date).toBe("2024-12-12");
-    expect(r.journal.registered).toBe(true);
-    expect(r.journal.is_deleted).toBe(false);
-    expect(r.journal.postings).toEqual([
-      expect.objectContaining({ accounts_id: 1020, type: "D", amount: 1000, base_amount: 1000 }),
-      expect.objectContaining({ accounts_id: 2900, type: "C", amount: 1000, base_amount: 1000 }),
-    ]);
-    expect(r.unmappedCodes).toEqual([]);
-  });
-  it("collects codes missing from the chart instead of dropping them silently", () => {
-    const stored = { ...STORED, accounts: [...STORED.accounts, { code: "9999", name: "Ghost", debit: 0, credit: 5 }] };
-    const r = buildOpeningBalanceJournal(ACCOUNTS, [], stored)!;
-    expect(r.unmappedCodes).toEqual(["9999"]);
-    expect(r.journal.postings.some(p => p.accounts_id === 9999)).toBe(false);
-  });
-  it("emits both a D and a C posting for an account with nonzero debit and credit", () => {
-    const stored = { ...STORED, accounts: [{ code: "1020", name: "Pank", debit: 400, credit: 150 }] };
-    const r = buildOpeningBalanceJournal(ACCOUNTS, [], stored)!;
-    expect(r.journal.postings).toEqual([
-      expect.objectContaining({ accounts_id: 1020, type: "D", amount: 400, base_amount: 400 }),
-      expect.objectContaining({ accounts_id: 1020, type: "C", amount: 150, base_amount: 150 }),
-    ]);
-  });
-
-  const acc = (id: number) => ({ id, balance_type: "D", name_est: "", name_eng: "" } as any);
-  const dim = (id: number, accounts_id: number, title_est: string) => ({ id, accounts_id, title_est } as any);
-  const stored = (accounts: any[]) => ({ openingDate: "2024-12-31", accounts, totals: { debit: 0, credit: 0 }, rawText: "", parsedAt: "", source: "algbilanss_paste" } as any);
-
-  it("attributes the sole dimension automatically", () => {
-    const r = buildOpeningBalanceJournal([acc(1010)], [dim(12637391, 1010, "Sularaha kassas")],
-      stored([{ code: "1010", name: "", debit: 100, credit: 0, dimension: [] }]))!;
-    expect(r.journal.postings!.every(p => p.accounts_dimensions_id === 12637391)).toBe(true);
-    expect(r.unmappedDimensions).toEqual([]);
-  });
-
-  it("matches a multi-dimension label exactly", () => {
-    const dims = [dim(12637392, 1020, "AS LHV Pank EE637700771011212909"), dim(13172505, 1020, "WISE BE08905767222113")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "AS LHV Pank EE637700771011212909", debit: 1000, credit: 0, dimension: ["AS LHV Pank EE637700771011212909"] }]))!;
-    const d = r.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_dimensions_id).toBe(12637392);
-    expect(r.unmappedDimensions).toEqual([]);
-  });
-
-  it("books without a dimension and warns when a multi-dimension label does not match", () => {
-    const dims = [dim(12637392, 1020, "AS LHV Pank EE637700771011212909"), dim(13172505, 1020, "WISE BE08905767222113")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "Arvelduskontod", debit: 1000, credit: 0, dimension: ["Arvelduskontod"] }]))!;
-    const d = r.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_dimensions_id ?? null).toBeNull();
-    expect(r.unmappedDimensions).toHaveLength(1);
-  });
-
-  it("does not silently first-pick when two active dims share an identical title (exact-match ambiguity)", () => {
-    const dims = [dim(12637392, 1020, "Arvelduskonto"), dim(13172505, 1020, "Arvelduskonto")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "Arvelduskonto", debit: 1000, credit: 0, dimension: ["Arvelduskonto"] }]))!;
-    const d = r.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_dimensions_id ?? null).toBeNull();
-    expect(r.unmappedDimensions).toHaveLength(1);
-  });
-
-  it("loads legacy stored data without a dimension field (single-dim resolves, multi-dim warns)", () => {
-    const dims = [dim(12637392, 1020, "AS LHV Pank EE637700771011212909"), dim(13172505, 1020, "WISE BE08905767222113")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "", debit: 1000, credit: 0 } as any]))!;
-    expect(r.journal.postings!.find(p => p.type === "D")!.accounts_dimensions_id ?? null).toBeNull();
-    expect(r.unmappedDimensions).toHaveLength(1);
-  });
-
-  it("resolves a multi-dimension label case-insensitively (pasted 'wise' vs chart 'Wise')", () => {
-    const dims = [dim(200, 1020, "Wise"), dim(201, 1020, "AS LHV Pank")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "wise", debit: 1000, credit: 0, dimension: ["wise"] }]))!;
-    const d = r.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_dimensions_id).toBe(200);
-    expect(r.unmappedDimensions).toEqual([]);
-  });
-
-  it("keeps a genuinely case-insensitive-ambiguous label unresolved (control)", () => {
-    const dims = [dim(200, 1020, "Wise"), dim(201, 1020, "WISE")];
-    const r = buildOpeningBalanceJournal([acc(1020)], dims,
-      stored([{ code: "1020", name: "wise", debit: 1000, credit: 0, dimension: ["wise"] }]))!;
-    const d = r.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_dimensions_id ?? null).toBeNull();
-    expect(r.unmappedDimensions).toHaveLength(1);
-  });
-});
-
-describe("loadOpeningBalanceJournal fail-safe dimensions fetch", () => {
+const ordinary: Journal = { id: 7, effective_date: "2025-02-01", registered: true, is_deleted: false, postings: [] };
+const initial: Journal = { ...ordinary, id: 88, operation_type: "INITIAL", effective_date: "2025-01-01", clients_id: 9,
+  postings: [{ accounts_id: 1020, accounts_dimensions_id: 101, type: "D", amount: 1000, base_amount: 1000 },
+    { accounts_id: 2900, type: "C", amount: 1000, base_amount: 1000 }] };
+function api(journals: Journal[]) {
+  return createAccountingWorkflowApi({ journals: { listAllWithPostings: vi.fn().mockResolvedValue(journals) } });
+}
+describe("API-only opening journals", () => {
   let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ob-load-"));
-    process.env.EARVELDAJA_RULES_DIR = dir;
-    resetOpeningBalanceCache();
-  });
-  afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; rmSync(dir, { recursive: true, force: true }); });
+  const oldDir = process.env.EARVELDAJA_RULES_DIR;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "api-opening-only-")); process.env.EARVELDAJA_RULES_DIR = dir; });
+  afterEach(() => { if (oldDir === undefined) delete process.env.EARVELDAJA_RULES_DIR; else process.env.EARVELDAJA_RULES_DIR = oldDir; rmSync(dir, { recursive: true, force: true }); });
 
-  it("degrades a dimensions-fetch failure to an account-level journal instead of rejecting", async () => {
-    writeOpeningBalances({
-      openingDate: "2024-12-31",
-      accounts: [{ code: "1020", name: "Pank", debit: 1000, credit: 0, dimension: [] }],
-      totals: { debit: 1000, credit: 0 },
-      rawText: "",
-    }, "2026-07-20T00:00:00Z");
-    const api = createAccountingWorkflowApi({
-      accounts: [{ id: 1020, balance_type: "D", name_est: "Pank" }],
-      readonly: {
-        getAccountDimensions: vi.fn().mockRejectedValue(new Error("dimensions unavailable")),
-      },
+  it("retains API identity, client, dimensions and amounts exactly once", async () => {
+    const context = api([initial, ordinary]);
+    const result = await loadJournalsWithOpeningBalance(context);
+    expect(result.journals).toEqual([initial, ordinary]);
+    expect(result.journalsFromApi).toEqual([initial, ordinary]);
+    expect(result.opening).toEqual({ source: "api", openingDate: "2025-01-01", journal: initial });
+    expect(result.opening!.journal).toBe(initial);
+    expect(context.readonly.getAccounts).not.toHaveBeenCalled();
+    expect(context.readonly.getAccountDimensions).not.toHaveBeenCalled();
+  });
+  it.each(["broken JSON", JSON.stringify({ openingDate: "2025-01-01", accounts: [{ code: "1020", debit: 9000, credit: 0 }] })])(
+    "ignores a legacy file even when the API contains no INITIAL: %s", async contents => {
+      writeFileSync(join(dir, "opening-balances.json"), contents);
+      const result = await loadJournalsWithOpeningBalance(api([ordinary]));
+      expect(result.opening).toBeNull();
+      expect(result.journals).toEqual([ordinary]);
+      expect(result.journalsFromApi).toEqual([ordinary]);
     });
-    const r = await loadOpeningBalanceJournal(api);
-    expect(r).not.toBeNull();
-    const d = r!.journal.postings!.find(p => p.type === "D")!;
-    expect(d.accounts_id).toBe(1020);
-    expect(d.amount).toBe(1000);          // account total preserved
-    expect(d.accounts_dimensions_id ?? null).toBeNull();  // per-dimension attribution degraded
+  it("ignores a corrupt local register when an API opening exists too", async () => {
+    writeFileSync(join(dir, "opening-balances.json"), "broken JSON");
+    expect((await loadJournalsWithOpeningBalance(api([initial]))).journals).toEqual([initial]);
   });
-});
-
-describe("loadJournalsWithOpeningBalance", () => {
-  let dir: string;
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "ob-ledger-"));
-    process.env.EARVELDAJA_RULES_DIR = dir;
-    resetOpeningBalanceCache();
+  it.each([{ registered: false }, { is_deleted: true }, { postings: [] }])("retains incomplete API metadata: %j", async state => {
+    const entry = { ...initial, ...state };
+    const result = await loadJournalsWithOpeningBalance(api([entry, ordinary]));
+    expect(result.opening!.journal).toEqual(entry);
+    expect(result.journals).toEqual([entry, ordinary]);
   });
-  afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; resetOpeningBalanceCache(); rmSync(dir, { recursive: true, force: true }); });
-
-  const apiJournal = { id: 7, effective_date: "2025-02-01", registered: true, is_deleted: false, postings: [] };
-  const api = () => ({
-    readonly: { getAccounts: vi.fn().mockResolvedValue(ACCOUNTS), getAccountDimensions: vi.fn().mockResolvedValue([]) },
-    journals: { listAllWithPostings: vi.fn().mockResolvedValue([apiJournal]) },
-  }) as never;
-
-  it("returns the API journals unchanged and opening=null when nothing is stored", async () => {
-    const r = await loadJournalsWithOpeningBalance(api());
-    expect(r.opening).toBeNull();
-    expect(r.journals).toEqual([apiJournal]);
-    expect(r.journalsFromApi).toEqual([apiJournal]);
+  it("refuses multiple active INITIAL journals", async () => {
+    await expect(loadJournalsWithOpeningBalance(api([initial, { ...initial, id: 89 }]))).rejects.toThrow(/multiple.*INITIAL/i);
   });
-
-  it("prepends the synthetic opening journal but keeps journalsFromApi API-only", async () => {
-    writeOpeningBalances(STORED, "2026-07-20T00:00:00Z");
-    const r = await loadJournalsWithOpeningBalance(api());
-    expect(r.opening?.openingDate).toBe("2024-12-12");
-    expect(r.journals.map(j => j.id)).toEqual([-1, 7]);
-    expect(r.journals[0]).toBe(r.opening!.journal);
-    expect(r.journalsFromApi.map(j => j.id)).toEqual([7]);
+  it("allows deleted history alongside one active INITIAL", async () => {
+    const deleted = { ...initial, id: 89, is_deleted: true };
+    const result = await loadJournalsWithOpeningBalance(api([deleted, initial]));
+    expect(result.opening!.journal).toEqual(initial);
+    expect(result.journals).toEqual([deleted, initial]);
+  });
+  it.each([{ type: "I", amount: 1 }, { type: "D", amount: -1 }, { type: "C", amount: NaN }])("refuses malformed INITIAL postings: %j", posting => {
+    return expect(loadJournalsWithOpeningBalance(api([{ ...initial, postings: [{ accounts_id: 1020, ...posting }] } as Journal]))).rejects.toThrow(/Malformed INITIAL/);
+  });
+  it("propagates API failures rather than loading a local file", async () => {
+    writeFileSync(join(dir, "opening-balances.json"), "broken JSON");
+    const context = api([]);
+    vi.mocked(context.journals.listAllWithPostings).mockRejectedValue(new Error("API unavailable"));
+    await expect(loadJournalsWithOpeningBalance(context)).rejects.toThrow("API unavailable");
+  });
+  it("recognizes INITIAL rather than the retired synthetic ID", () => {
+    expect(isOpeningBalanceJournal(initial)).toBe(true);
+    expect(isOpeningBalanceJournal({ ...ordinary, id: -1 })).toBe(false);
   });
 });

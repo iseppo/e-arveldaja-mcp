@@ -154,7 +154,7 @@ export function sumCategory(accounts: AccountBalance[], normalType: "D" | "C"): 
 // Shared report cores: compute_trial_balance / compute_balance_sheet /
 // compute_profit_and_loss and the run_accounting_report ops both route through
 // these (journals via loadJournalsWithOpeningBalance), so journal loading, the
-// opening-balance (algbilanss) fold + status warnings, date defaults and the
+// API INITIAL identification + status warnings, date defaults and the
 // year-end-close exclusion cannot drift.
 /** Trial balance. With no `dateTo` every posting counts, future-dated ones included (labelled "unbounded"). */
 export async function computeTrialBalanceReport(

@@ -10,8 +10,6 @@ import { toolResponse } from "../../tool-response.js";
 import { lifecycleHandler } from "./lifecycle-handler.js";
 import { isNotFoundHttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
-import { withOpeningBalanceStatus } from "../../opening-balance-limitations.js";
-import { readOpeningBalances } from "../../opening-balance-store.js";
 import { validatePostingDimensions } from "../../account-validation.js";
 import {
   findDuplicateBankPostings,
@@ -63,7 +61,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
       date_from: isoDateString("Only journals with effective_date >= this (YYYY-MM-DD). Filters by effective_date; narrowed server-side.").optional(),
       date_to: isoDateString("Only journals with effective_date <= this (YYYY-MM-DD). Filters by effective_date; narrowed server-side.").optional(),
       registered: z.boolean().optional().describe("Only registered (true) or unregistered (false) journals"),
-      operation_type: z.string().optional().describe("Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
+      operation_type: z.string().optional().describe("Filter by operation_type (e.g. INITIAL for UI-managed opening balances, ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)"),
       document_number_contains: z.string().optional().describe("Case-insensitive substring match on document_number"),
       clients_id: z.number().int().positive().optional().describe("Filter by clients_id"),
       per_page: z.number().int().min(1).max(500).optional().describe("Items per page when filtering (default 100, max 500)"),
@@ -92,21 +90,23 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
           items: renderExternalEntity("journal", applyListView("journal", stripped, params.view)),
           filtered_client_side: false,
           out_of_range: false,
-          warnings: withOpeningBalanceStatus([], { captured: readOpeningBalances() !== null }),
+          warnings: [],
         };
         return { content: [{ type: "text", text: toMcpJson(compact) }] };
       }
-      // The /journals endpoint supports only a server-side effective-date range
-      // (no status / client filter); registered / operation_type / clients_id /
+      // The /journals endpoint supports effective-date and operation_type filters;
+      // registered / clients_id /
       // document_number are applied client-side below over the narrowed set.
       const hasServerFilter = params.modified_since !== undefined
         || params.date_from !== undefined
-        || params.date_to !== undefined;
+        || params.date_to !== undefined
+        || params.operation_type !== undefined;
       const all = hasServerFilter
         ? await api.journals.listAll({
             modified_since: params.modified_since,
             start_date: params.date_from,
             end_date: params.date_to,
+            operation_type: params.operation_type,
           })
         : await api.journals.listAllCached();
       const docContains = params.document_number_contains?.toLowerCase();
@@ -142,7 +142,7 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
             filtered_client_side: true,
             out_of_range: outOfRange,
             items,
-            warnings: withOpeningBalanceStatus([], { captured: readOpeningBalances() !== null }),
+            warnings: [],
           }),
         }],
       };

@@ -1,10 +1,10 @@
 {
   "profile": "custom",
   "measurement": {
-    "toolCount": 86,
-    "toolsListBytes": 91775,
-    "descriptionsBytes": 12340,
-    "inputSchemasBytes": 58782,
+    "toolCount": 85,
+    "toolsListBytes": 90779,
+    "descriptionsBytes": 11937,
+    "inputSchemasBytes": 58448,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
       "bytes": 4606
@@ -639,7 +639,7 @@
             "type": "string"
           },
           "operation_type": {
-            "description": "Filter by operation_type (e.g. ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)",
+            "description": "Filter by operation_type (e.g. INITIAL for UI-managed opening balances, ENTRY, TRANSACTION, SALE_INVOICE, PURCHASE_INVOICE)",
             "type": "string"
           },
           "page": {
@@ -2091,7 +2091,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including any stored opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
+      "description": "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -3036,38 +3036,6 @@
       },
       "name": "detect_duplicate_purchase_invoice",
       "title": "Detect Duplicate Purchase Invoices"
-    },
-    {
-      "annotations": {
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-        "readOnlyHint": false
-      },
-      "description": "Capture the e-arveldaja 'Algbilansi kanded' (opening-balance) register — which the RIK API omits — so account balances, trial balance, P&L, annual report, and the dividend §157 checks fold it in. Paste the copied register text. dry_run (default true) previews the parsed per-account balances and the debit=credit check without saving; set dry_run=false to persist. Re-import replaces the stored set.",
-      "execution": {
-        "taskSupport": "forbidden"
-      },
-      "inputSchema": {
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "additionalProperties": false,
-        "properties": {
-          "dry_run": {
-            "description": "Preview only, do not persist (default true).",
-            "type": "boolean"
-          },
-          "pasted_text": {
-            "description": "The copied 'Algbilansi kanded' register text (Nr / Kuupäev / Konto / Deebet / Kreedit columns).",
-            "type": "string"
-          }
-        },
-        "required": [
-          "pasted_text"
-        ],
-        "type": "object"
-      },
-      "name": "import_opening_balances",
-      "title": "Import Opening Balances (Algbilanss)"
     },
     {
       "annotations": {

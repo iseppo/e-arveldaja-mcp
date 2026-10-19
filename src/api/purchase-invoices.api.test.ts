@@ -504,6 +504,41 @@ describe("PurchaseInvoicesApi.createAndSetTotals totals/base/item regressions", 
     }
   });
 
+  it.each([
+    { supplied: undefined, returned: 7, expected: 7 },
+    { supplied: 7, returned: 8, expected: 7 },
+    { supplied: undefined, returned: undefined, expected: 1 },
+    { supplied: undefined, returned: null, expected: 1 },
+  ])("preserves fringe intent through totals PATCH (supplied $supplied, returned $returned)", async ({ supplied, returned, expected }) => {
+    const { api, patch } = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24, cl_fringe_benefits_id: returned }]);
+    await api.createAndSetTotals({
+      ...baseData, cl_currencies_id: "EUR",
+      items: [{ custom_title: "Benefit", amount: 1, total_net_price: 100, vat_rate_dropdown: "24", cl_fringe_benefits_id: supplied }],
+    } as any, 24, 124, true);
+    expect(totalsPatch(patch).items[0].cl_fringe_benefits_id).toBe(expected);
+  });
+
+  it.each([undefined, null, 1, 8])("refuses count-mismatch readback before resetting intended fringe 7 to %s", async returned => {
+    const { api, patch } = makeCreateApi([
+      { id: 1, total_net_price: 50, vat_amount: 12, cl_fringe_benefits_id: returned },
+      { id: 2, total_net_price: 50, vat_amount: 12, cl_fringe_benefits_id: returned },
+    ]);
+    await expect(api.createAndSetTotals({ ...baseData, items: [
+      { custom_title: "Benefit", amount: 1, total_net_price: 100, cl_fringe_benefits_id: 7 },
+    ] } as any, undefined, undefined, true)).rejects.toMatchObject({ invoiceId: 21, cleanup: "invalidated" });
+    expect(totalsPatch(patch)).toBeUndefined();
+    expect(patch).toHaveBeenCalledWith("/purchase_invoices/21/invalidate", {});
+  });
+
+  it.each([{ items: undefined }, { items: [] }])("holds missing or empty readback rows with intended nondefault fringe: %j", async ({ items }) => {
+    const { api, patch } = makeCreateApi(items as any);
+    await expect(api.createAndSetTotals({ ...baseData, items: [
+      { custom_title: "Benefit", amount: 1, total_net_price: 100, cl_fringe_benefits_id: 7 },
+    ] } as any, undefined, undefined, true)).rejects.toMatchObject({ invoiceId: 21, cleanup: "invalidated" });
+    expect(totalsPatch(patch)).toBeUndefined();
+    expect(patch).toHaveBeenCalledWith("/purchase_invoices/21/invalidate", {});
+  });
+
   it("absorbs a per-item rounding residue but refuses a larger VAT mismatch before create", async () => {
     const ok = makeCreateApi([{ id: 1, total_net_price: 100, vat_amount: 24 }]);
     await ok.api.createAndSetTotals({

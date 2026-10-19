@@ -1,7 +1,7 @@
 # e-arveldaja MCP Server
 
 TypeScript MCP server for the Estonian e-arveldaja (RIK e-Financials) REST API.
-127 tools by default on the compatibility-preserving `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 147. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
+126 tools by default on the `standard` profile; opt-in `guided` / `guided-sales` expose 19 / 20 tools, and `full` exposes all 146. The prompt registry holds 16 workflow prompts (guided profiles register fewer — a prompt whose required tools are all absent is not registered) and there are 15 resources across 12 modules. Supports multiple companies/accounts.
 
 ## Quick Start
 
@@ -77,32 +77,75 @@ serialized with an `O_EXCL` lock file at `<dir>.lock` (`withBundleLock()`).
 
 ### Opening balances (algbilanss)
 
-e-arveldaja's REST API omits the "Algbilansi kanded" (opening-balance entries)
-section, so the MCP server is otherwise blind to opening balances. The operator
-can paste that register once via the `import_opening_balances` tool
-(`src/tools/opening-balance-import.ts`): it parses the pasted text
-(`src/opening-balance-parse.ts`), checks that debit equals credit, previews
-the result under `dry_run` (default `true`), and on `dry_run=false` persists
-it as `opening-balances.json` in the same accounting-rules bundle described
-above (`src/opening-balance-store.ts`; requires bundle mode — not available
-under `EARVELDAJA_RULES_FILE` single-file mode). Because a bundle can be shared
-by several connections (`EARVELDAJA_RULES_DIR`, or a kept-in-place project/global
-bundle), the record — like each `statement-balances.json` record — is stamped with
-the active connection fingerprint and ignored (with a warning) on another
-connection; a legacy unstamped record applies only when exactly one connection is
-configured. Both files are written atomically 0600 and reads are capped at 1 MB. At compute time the stored
-balances are folded in as one synthetic journal dated at the opening date
-(`src/opening-balance-journal.ts`), so `compute_account_balance`,
-`compute_trial_balance`, `compute_balance_sheet`, `compute_profit_and_loss`,
-`generate_annual_report_data`, and the ÄS §157 dividend legality checks in
-`prepare_dividend_package` all include it automatically. The feature is
-**optional**: with nothing stored, everything behaves exactly as before,
-except the old blind "verify in the UI" warning becomes an actionable prompt
-pointing at `import_opening_balances` (`src/opening-balance-limitations.ts`).
-The `compute_account_dimension_balances` tool (`src/tools/account-balance.ts`)
-returns a per-dimension balance breakdown for one account (e.g. the LHV/Wise/
-Lightyear dimensions of account 1020), with the folded opening balances
-attributed per dimension; its `total` reconciles to `compute_account_balance`.
+e-arveldaja's REST API exposes "Algbilansi kanded" as `operation_type=INITIAL`.
+`loadJournalsWithOpeningBalance` identifies the opening journal in the original
+API journal set, preserving IDs, dates, clients, postings and dimensions. It never
+synthesizes or prepends a second journal. All balances, statements, annual reports
+and dividend checks use that same API data. INITIAL journals are starting
+positions, never cash flows or year-end close candidates.
+
+Registration, deletion, date, client and dimension filters still apply. A draft,
+deleted or empty opening is disclosed without applying its amounts; multiple
+non-deleted INITIAL journals or malformed D/C amounts fail for manual review.
+Missing dimension attribution is disclosed without dropping account-level totals.
+If no INITIAL exists after a complete API read, there is simply no opening entry;
+this is not an API coverage failure.
+
+The local parser, store and `import_opening_balances` tool have been removed.
+Existing `opening-balances.json` user files are untouched and no longer read.
+
+### Cash-flow report
+
+The annual report retains the indirect method (`indirect-evidence-v2`). Its
+per-journal profit, depreciation and working-capital bridge removes proved
+noncash and nonoperating components exactly once. Investing and financing use
+actual cash receipts/payments, with FX shown separately. A complete result needs
+both the bridge and independently classified cash movements to agree; unresolved
+amounts remain visible with gross totals and `requires_review`, never a plug.
+
+Supplier/customer invoice chains require exact transaction item references to
+registered invoice journals and matching transaction/posting amounts, direction,
+accounts and dimensions. A homogeneous operating source proves the cash-flow
+purpose even when the invoice was booked after payment or historical invoice
+capacity is unavailable; classification does not certify the invoice's open
+balance. Invoice-capacity safeguards still apply to capital and mixed sources.
+An unrelated customer's clearing cannot veto a proved operating payment.
+Exact invoice plus direct operating-account distributions are supported when
+their signed amounts and account/dimension slices cover the registered cash
+movement completely. Realized FX within an operating payment follows that
+payment rather than becoming a separate cash revaluation.
+
+Reads are selective and bounded to 500 transaction details, including exact
+internal-cash plus external distributions. Proven internal cash legs are
+eliminated; only the external portion contributes to cash flows. Partial mixed
+capital invoices, shared VAT allocation and missing evidence remain unresolved.
+Homogeneous capital payments include VAT in gross investing cash; a proved
+investment-principal/FX-result bundle uses actual cash without a duplicate FX
+effect. Principal/result proof requires a genuine nonzero asset principal,
+compatible asset/result family and the correct signed cash direction. It
+preserves securities acquisition fees and conventional fixed-asset disposals,
+including chart-proved accumulated-depreciation reversals and zero book value.
+An increasing asset plus income does not establish sale proceeds. Rejected
+bundles cannot fall through into a generic complete classification. Unsupported
+financing-principal/FX bundles require review; ordinary operating interest and
+fees retain their category. Capital-invoice evidence must bind source, item and
+payment to the same account/dimension and signed slice; an unsupported single
+invoice with multiple settlement dimensions remains unresolved.
+
+Malformed evidence keeps review status but retains every independently valued
+cash receipt/payment and identifies unvalued cash separately. Foreign raw units
+are never substituted for EUR, and INITIAL never becomes an external movement.
+Proven received interest/dividends use the operating
+default; ambiguous result-only accounts (3820/7100/7110/8330/8335) require review
+without principal evidence or an explicit account rule. Standard 1420/1430
+receivables retain their operating default. Explicit account rules take
+precedence. Public provenance lists are capped at
+500 rows with full counts/totals; pure calculation evidence remains uncapped.
+
+The pinned standard for 2018–2026 is [RTJ 2](https://www.fin.ee/sites/default/files/documents/2020-10/RTJ%202%20N%C3%95UDED%20INFORMATSIOONI%20ESITUSVIISILE%20RAAMATUPIDAMISE%20AASTAARUANDES.pdf),
+paragraphs 37–44 (indirect corrections, gross investing/financing and cash FX).
+Opening balances are maintained in e-arveldaja. Statement-closing snapshots
+(`statement-balances.json`) retain their separate connection-scoped bundle store.
 
 ### Tool exposure (per-session token cost)
 
@@ -110,7 +153,7 @@ attributed per dimension; its `total` reconciles to `compute_account_balance`.
 surface is a fixed per-session token cost. Eight env flags control optional
 parts of the surface (see `getToolExposureConfig()` in `src/config.ts`):
 
-`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 127), or `full` (all 147, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
+`EARVELDAJA_PROFILE` provides one-choice surfaces: `guided` (19 merged daily-bookkeeping tools), `guided-sales` (those 19 plus the `manage_sale_invoice` sales façade — read plus the full prepare/execute mutation lifecycle: create/update/delete/confirm/invalidate/send/recurring and inline resolve-or-create customer, 20 total), `standard` (the absent-variable compatibility default, 126), or `full` (all 146, including granular/setup tools and the workflow-state paging tool `get_workflow_page`). Guided profiles are opt-in for this release. Any explicitly present legacy exposure flag forces the normalized profile to `custom` and preserves the flag combination below. Profile and catalog fingerprint are part of plan/file-reference scope: restart and obtain a fresh preview after changing them.
 
 The guided surface is sized for routing clarity, not token cost (per-tool measurement shows no cost cliff at 20). The **≤ 20** figure is a target, not a hard wall: 21–24 is a deliberate-exception band (allowed only with a recorded `CHANGELOG` rationale when no existing tool can absorb the capability), and 24 is the hard backstop above which the surface must be redesigned by merging tools rather than adding. Before adding any guided tool, apply the add/don't-add criteria in [`docs/guided-tool-policy.md`](docs/guided-tool-policy.md) — prefer a new `mode` on an existing façade, a `continue_accounting_workflow` continuation, or `standard`/`full` placement (as with `get_server_status`) over growing the daily surface.
 
@@ -186,13 +229,13 @@ without changing the default:
   `DISABLE_SALES` deployment usually sets this too — but the flags are
   independent. Saves ≈1.3k tokens (7 tools).
 
-The standard surface is 127 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 122.
+The standard surface is 126 tools; `DISABLE_LIGHTYEAR` in a custom profile drops it to 121.
 `EXPOSE_GRANULAR_TOOLS` adds the 10 granular tools, `EXPOSE_SETUP_TOOLS` the 3
-credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 147. The five opt-out
+credential tools; enabling both (with `full`'s `get_workflow_page`) raises it to the full 146. The five opt-out
 group flags trim the default further — `DISABLE_TAX_TOOLS` (−4),
 `DISABLE_REFERENCE_ADMIN` (−9), `DISABLE_ANNUAL_REPORT` (−3), `DISABLE_SALES`
 (−13), `DISABLE_PRODUCTS` (−7) — so a lean purchase-side-only deployment with
-every disable flag set (incl. Lightyear) lands at 86 tools. (The former
+every disable flag set (incl. Lightyear) lands at 85 tools. (The former
 `prepare_accounting_inbox` / `run_accounting_inbox_dry_runs` tools were
 exact aliases of `accounting_inbox` `mode="scan"` / `mode="dry_run"` and have
 been removed — use `accounting_inbox` with the matching `mode`.)
@@ -242,7 +285,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - Each distribution: `{related_table, amount, related_id?, related_sub_id?}`
 - `related_table` values: `"accounts"` (book to a GL account), `"purchase_invoices"`, `"sale_invoices"`
 - Example (purchase invoice): `PATCH /transactions/{id}/register` with body `[{"related_table":"purchase_invoices","related_id":123,"amount":59.94}]`
-- Example (account with dimensions): `[{"related_table":"accounts","related_id":1360,"related_sub_id":12637323,"amount":1620.70}]`
+- Synthetic example (account with dimensions): `[{"related_table":"accounts","related_id":1360,"related_sub_id":42,"amount":100.00}]`
 - **`related_sub_id` is REQUIRED when `related_table="accounts"` and the account has dimensions.** Pass the dimension ID there. Without it, the API rejects with `"Entry cannot be made directly to the account <code> since it has dimensions"`. Common case: account 1360 "Arveldused aruandvate isikutega" with one sub-account per reporting person.
 - **Do NOT pass the dimension ID into `related_id`.** That makes the API try to interpret it as an account ID and produces confusing errors like `"Dimension ID=<truncated> not found"`.
 - The dimension ID is the integer `id` value returned by `list_account_dimensions` (NOT a sub-account code or label). `related_id` is the integer account ID, `related_sub_id` is the integer dimension ID — both are the database IDs, not the human-readable account/dimension codes.
@@ -292,7 +335,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **`status: "PROJECT"`** — unconfirmed/draft
 - **`status: "VOID"`** — invalidated
 - **To delete**: invalidate a confirmed transaction first, then re-read before deleting. The live API returned `PROJECT` after invalidation on 2026-10-18; do not require a `VOID` readback to recognize a successful invalidation.
-- **Native GL distribution readback**: a confirmed transaction item may carry `relation_table: "accounts"`, explicit `accounts_id` / `accounts_dimensions_id`, and a composite `relation_id` formed from those two IDs (observed live: `1020`, `12762251`, `102012762251`). Accept that native shape only by exact equality with the explicit valid IDs, the reviewed target mapping and the actual unique registration journal. Never split a composite to infer missing IDs, and never send it as the request's `related_id`; write requests still use separate account and dimension fields.
+- **Native GL distribution readback**: a confirmed transaction item may carry `relation_table: "accounts"`, explicit `accounts_id` / `accounts_dimensions_id`, and a composite `relation_id` formed from those two IDs (synthetic example: `1020`, `42`, `102042`). Accept that native shape only by exact equality with the explicit valid IDs, the reviewed target mapping and the actual unique registration journal. Never split a composite to infer missing IDs, and never send it as the request's `related_id`; write requests still use separate account and dimension fields.
 
 ### Purchase invoice creation
 - **Always pass invoice-level `gross_price` and `vat_price`** — confirm fails without them ("Gross sum and net sum with taxes differ")
@@ -301,7 +344,7 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - `client_name` is required on creation (API field `client_name2`)
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`
 - **VAT-registered items with VAT need `vat_rate_dropdown`**: `createAndSetTotals` predicts item VAT as net × rate before the create; without a rate the item VAT is 0, so an explicit `vat_price` is refused pre-create (`purchase_totals_mismatch`, nothing written)
-- Non-VAT companies have two purchase forms: folded VAT (no VAT account, rate `"-"`, invoice `vat_price: 0`, gross in `project_no_vat_gross_price`) and non-deductible VAT (VAT account and dimension equal the item's cost account and dimension, article 11, one document rate, invoice `vat_price` equal to document VAT). Read back on 2026-10-18: Seppo OÜ invoice 5208707, account 7910 / dimension 942283, net 11.92 + VAT 1.07 = gross 12.99, rate 9. The latter is EUR-only and requires the chart account's `is_vat_account === false`; never use input-VAT account 1510. The same proof checks intended rows, both create read-backs and the fresh draft/chart before registration. Unproven drafts are held, never corrected automatically; edit rows in the UI or recreate the draft. Receipt batches and auto-classification keep folding.
+- Non-VAT companies have two purchase forms: folded VAT (no VAT account, rate `"-"`, invoice `vat_price: 0`, gross in `project_no_vat_gross_price`) and non-deductible VAT (VAT account and dimension equal the item's cost account and dimension, article 11, one document rate, invoice `vat_price` equal to document VAT). Synthetic example: cost account 7910 / dimension 42, net 10.00 + VAT 0.90 = gross 10.90 at rate 9. Exact source readback evidence is retained outside the repository. The latter is EUR-only and requires the chart account's `is_vat_account === false`; never use input-VAT account 1510. The same proof checks intended rows, both create read-backs and the fresh draft/chart before registration. Unproven drafts are held, never corrected automatically; edit rows in the UI or recreate the draft. Receipt batches and auto-classification keep folding.
 - **PATCH requires `items`** — updating invoice fields without including items fails with "Products/services are missing"
 - **Accounts with dimensions**: If an expense account (e.g. 5120) has dimensions (sub-accounts), you MUST pass both `purchase_accounts_id` (the account ID) AND `purchase_accounts_dimensions_id` (the dimension ID) on each item. Passing only one fails with "Entry must be made to account's dimension." Use `list_account_dimensions` to find dimension IDs for an account.
 
@@ -601,6 +644,7 @@ API data remains raw.
 - **Dividend booking (net vs. gross)**: `prepare_dividend_package` debits **only the net dividend** to retained earnings (Jaotamata kasum; account resolved by name against the company chart, standard 2960, override with `retained_earnings_account`). The CIT is a current-period **income-tax expense** (the P&L "Tulumaks" line), booked to an 8900-series Kulud account (auto-detected via `resolveIncomeTaxExpenseAccount`, override with `income_tax_expense_account`, default 8900), NOT a second debit to retained earnings. Per Estonian GAAP / RTJ the dividend income tax (TuMS § 50) is charged against current-year profit, not equity directly. All equity/liability accounts (retained earnings, dividend payable → standard 2650, dividend income-tax payable → standard 2656, share capital → standard 2900) are **name-resolved** against the actual chart via `src/account-resolution.ts`, with the standard number as fallback.
 - **ÄS § 157 legality checks are split by clause**: the **lg 1 ceiling is NET-based** — the ENTIRE lg 1 distributable profit (retained earnings 2960 + closed prior-year result on "Aruandeaasta kasum" 2970, name-resolved + unclosed prior-year P&L; never the distribution year's own result) is distributable as net dividend, since the CIT is not part of the payout; the **lg 2 net-assets floor is GROSS-based** (net assets fall by dividend payable + tax liability) at share capital **+ non-distributable reserves** (reservkapital, name-detected in the chart, standard 2940; override with `restricted_reserve_accounts`). Live unconfirmed dividend drafts (`DIV-…` or crediting dividend payable) are subtracted from both headrooms, since the tool books drafts and balances read only confirmed journals. The tool hard-blocks violations of either clause unless `force=true` (use only alongside a legitimate action such as a capital reduction; `force` never overrides the ledger-imbalance block), and always reports `maximum_distributable.max_net_dividend` = min(lg 1 distributable profit, (net assets − floor) × den/(den+num)), both net of pending drafts. One journal per shareholder+date: an identical retry returns `duplicate`, a different amount `dividend_key_conflict`.
 - **Year-end close (RIK method, calendar year).** e-arveldaja has no native closing; RIK's guide "Äriühingu majandusaasta lõpetamiskanded e-arveldajas" prescribes two manual entries, which `prepare_year_end_close` / `execute_year_end_close` propose and book as drafts: (1) Dec 31 profit D 9000 "Arvestuslik koondtulemus" / K 2970 "Aruandeaasta kasum" (loss reversed), document `YEC-RESULT-YYYY`; (2) Jan 1 of the next year D 2970 / K 2960 (optional `reserve_capital_amount` to 2940), document `YEC-RETAINED-YYYY`. Revenue/expense accounts are NOT zeroed and 9000 is not part of the income statement: every P&L surface (`compute_profit_and_loss`, `run_accounting_report`, `generate_annual_report_data`, prepare's result) excludes it, while the balance sheet keeps it in open P&L so equity balances. Existing entries are detected structurally (date + accounts touched, any document number, drafts included); legacy `YECL-YYYY` journals (the old zero-all-P&L close, `src/year-end-closing-journal.ts`) that post to 2970 count as entry 1 — never book either twice. Entry 2 is 2970 against 2960 and/or reserve accounts only (an all-to-reserve D 2970 / K 2940 counts); it is also recognised on any date of the next year when its amount matches (operators often transfer on another day), and by its `YEC-RETAINED-YYYY` number on any date; a journal numbered `YEC-RETAINED-`/`YEC-RESULT-` of another year is never this year's, not even on this year's 31 Dec / next 1 Jan; an unnumbered transfer-shaped journal on 31 Dec of the close year is dropped as an earlier year's late transfer when it moves exactly the earlier years' 2970 residual (ambiguous if it also equals this year's result), otherwise it needs manual review. Both entries are checked for direction and amount; a mismatch is reported as `mismatch`/`partially_closed` in `blocked_entries` and blocks booking — `allow_additional_transfer` acknowledges only a smaller same-direction 1 January transfer (the remainder is booked); an off-date, ambiguous, over- or reversed transfer and a wrong entry 1 always need manual correction. The dividend §157 lg 1 unclosed-P&L sum must INCLUDE 9000 (it cancels the still-open P&L once entry 1 exists).
+- **Pending dividend drafts:** INITIAL journals are excluded from this reservation scan. Reserve each candidate's retained-earnings and net-assets reductions separately at no less than zero, before summing. Negative raw components are disclosed as `pending_dividend_draft_anomalies` and stop both preview and create with `pending_dividend_draft_requires_review`; `force` cannot bypass uncertain draft reservations. Ordinary positive reservations, registered opening equity, duplicate handling and the fresh-ledger execute check remain in place.
 - **Dividend dry run**: `prepare_dividend_package` defaults to `dry_run=true` (preview only); call again with `dry_run=false` only after the user explicitly approves the previewed journal.
 - **Dividend statutory prerequisites** are echoed as `compliance_notes` on every path: ÄS § 157 lg 1 requires an APPROVED annual report + profit-distribution decision (attach the decision via `attach_document`), and the CIT is declared on TSD annex 7 by the 10th of the month after payout (TuMS § 54).
 - **Capital gains (company)**: securities gains are ordinary income in the P&L (Lightyear sells: gain balancing to 8330/8335); there is no tax at realisation — Estonian CIT is deferred until profit is distributed (dividend / TuMS § 50)
@@ -643,5 +687,5 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const transport = new StdioClientTransport({ command: "node", args: ["dist/index.js"] });
 const client = new Client({ name: "test", version: "1.0.0" });
 await client.connect(transport);
-const { tools } = await client.listTools(); // 127 tools (standard profile)
+const { tools } = await client.listTools(); // 126 tools (standard profile)
 ```

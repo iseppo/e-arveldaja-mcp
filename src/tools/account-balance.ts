@@ -7,7 +7,7 @@ import type { Journal } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { readOnly } from "../annotations.js";
 import { DEFAULT_DEBT_CHECK_ACCOUNTS } from "../accounting-defaults.js";
-import { withOpeningBalanceJournalStatus, withOpeningBalanceStatus } from "../opening-balance-limitations.js";
+import { withOpeningBalanceJournalStatus } from "../opening-balance-limitations.js";
 import { loadJournalsWithOpeningBalance, type OpeningBalanceJournal } from "../opening-balance-journal.js";
 import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import { listAccountDimensionPostings } from "../account-postings.js";
@@ -187,32 +187,23 @@ function unregisteredDraftsOutput(drafts: UnregisteredDrafts): { unregistered_dr
   };
 }
 
-// The synthetic opening-balance journal is always account-level
-// (`clients_id: null`) — it carries no client attribution. Whenever a caller
-// filters by `clients_id`, `computeAccountBalance`'s
-// `journal.clients_id !== clientId` check drops it from the figure, so a
-// client-scoped result must never claim the opening balance was "applied".
-// This mirrors `withOpeningBalanceStatus`'s captured/not-captured split but
-// adds the third, client-scoped-exclusion state without touching that
-// function's existing two-state contract (other consumers depend on it).
+// API INITIAL journals retain their header client. Report application only when
+// the same client/date filters include it.
 function clientScopedOpeningBalanceWarnings(
   warnings: string[],
   opening: OpeningBalanceJournal | null,
+  clientId?: number,
+  dateFrom?: string,
+  dateTo?: string,
 ): string[] {
   if (opening === null) {
-    return withOpeningBalanceStatus(warnings, { captured: false });
+    return [...warnings];
   }
-  const out = [...warnings];
-  out.push(
-    `Opening balances are stored (as of ${opening.openingDate}) but are account-level (no client attribution) and are excluded from this client-scoped figure.`
-  );
-  if (opening.unmappedCodes.length > 0) {
-    out.push(`Opening-balance accounts not in the chart were skipped: ${opening.unmappedCodes.join(", ")}. Re-check these account codes.`);
-  }
-  return out;
+  if (opening.journal.clients_id === clientId) return withOpeningBalanceJournalStatus(warnings, opening, dateFrom, dateTo);
+  return [...warnings, `API INITIAL opening balance (as of ${opening.openingDate}) has ${opening.journal.clients_id == null ? "no client attribution" : "another header client"} and is excluded from this client-scoped figure.`];
 }
 
-// A stored opening balance whose dimension label did not resolve is folded in
+// An opening balance without a resolved dimension is folded in
 // without a dimension (account totals stay right), so a dimension-scoped figure
 // leaves it out. Say so instead of letting "opening balance applied" stand.
 function unattributedOpeningBalanceWarning(
@@ -221,15 +212,14 @@ function unattributedOpeningBalanceWarning(
   dateFrom: string | undefined,
   dateTo: string | undefined,
 ): string | undefined {
-  if (!opening) return undefined;
+  if (!opening || !opening.journal.registered || opening.journal.is_deleted) return undefined;
   const date = opening.journal.effective_date;
   if ((dateFrom && date < dateFrom) || (dateTo && date > dateTo)) return undefined;
-  const unattributed = (opening.journal.postings ?? []).filter(p => p.accounts_id === accountId && p.accounts_dimensions_id == null);
+  const unattributed = (opening.journal.postings ?? []).filter(p => !p.is_deleted && p.accounts_id === accountId && p.accounts_dimensions_id == null && (p.base_amount ?? p.amount) !== 0);
   if (unattributed.length === 0) return undefined;
   let net = 0;
   for (const p of unattributed) net += p.type === "D" ? (p.base_amount ?? p.amount) : -(p.base_amount ?? p.amount);
-  return `The stored opening balance of account ${accountId} (as of ${opening.openingDate}) includes ${roundMoney(net).toFixed(2)} EUR (debit minus credit) that could not be attributed to a dimension, so it is NOT in this dimension-scoped figure. ` +
-    "Compare with compute_account_dimension_balances (row \"(määramata)\") and re-import the opening balances with dimension labels matching list_account_dimensions.";
+  return `The API INITIAL opening balance of account ${accountId} (as of ${opening.openingDate}) includes ${roundMoney(net).toFixed(2)} EUR (debit minus credit) that could not be attributed to a dimension, so it is NOT in this dimension-scoped figure. Correct the INITIAL posting dimensions in e-arveldaja.`;
 }
 
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
@@ -295,7 +285,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         warnings: clients_id === undefined
           ? withOpeningBalanceJournalStatus(baseWarnings, opening, date_from, date_to)
-          : clientScopedOpeningBalanceWarnings(baseWarnings, opening),
+          : clientScopedOpeningBalanceWarnings(baseWarnings, opening, clients_id, date_from, date_to),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
@@ -303,7 +293,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   );
 
   registerTool(server, "compute_account_dimension_balances",
-    "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including any stored opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
+    "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
     {
       account_id: coerceId.describe("Account id (e.g. 1020). Required. In the RIK chart the id is the account number."),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
@@ -364,6 +354,19 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       // rationale as computeAccountBalance above).
       const total = roundMoney(balanceType === "D" ? rawDebit - rawCredit : rawCredit - rawDebit);
 
+      const dimensionWarnings = drafts.warning ? [drafts.warning] : [];
+      if (opening) {
+        const unattributedWarning = unattributedOpeningBalanceWarning(opening, account_id, date_from, date_to);
+        if (unattributedWarning) {
+          let unattributedRaw = 0;
+          for (const p of opening.journal.postings) {
+            if (p.is_deleted || p.accounts_id !== account_id || p.accounts_dimensions_id != null) continue;
+            unattributedRaw += (p.type === "D" ? 1 : -1) * (p.base_amount ?? p.amount);
+          }
+          dimensionWarnings.push(`Partial dimension attribution: API INITIAL includes ${roundMoney(unattributedRaw).toFixed(2)} EUR (debit minus credit) without a dimension. This amount is included in the total and the "(määramata)" row; named dimension balances may be incomplete. Correct the INITIAL posting dimensions in e-arveldaja.`);
+        }
+      }
+
       const summary = {
         account_id,
         account_name: account ? `${account.name_est} / ${account.name_eng}` : "Unknown",
@@ -374,7 +377,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
         ...cacheClearMetadata(cacheClear),
-        warnings: withOpeningBalanceJournalStatus(drafts.warning ? [drafts.warning] : [], opening, date_from, date_to),
+        warnings: withOpeningBalanceJournalStatus(dimensionWarnings, opening, date_from, date_to),
       };
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
     }
@@ -403,14 +406,14 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         const r = await computeAccountBalance(
           api, accountId, clients_id, undefined, undefined, allJournals
         );
-        // Same journal set as compute_account_balance (opening balance folded
-        // in), so account_balance_all_clients matches that tool's figure.
+        // Same API journal set as compute_account_balance, so
+        // account_balance_all_clients matches that tool's figure.
         const whole = await computeAccountBalance(
           api, accountId, undefined, undefined, undefined, allJournals
         );
         // Header-client entries only: the client-less opening balance is
         // reported by opening_balance_status, not counted as another client.
-        const openingEntries = opening
+        const openingEntries = opening && opening.journal.clients_id == null
           ? whole.entries.filter(entry => entry.journal_id === opening.journal.id).length
           : 0;
         const otherClientEntries = whole.entries.length - openingEntries - r.entries.length;
@@ -438,10 +441,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         .filter(r => r.balance_type === "D") // asset accounts
         .reduce((sum, r) => sum + r.balance, 0);
 
-      // clients_id is mandatory here, so the account-level, client-less
-      // opening-balance journal is ALWAYS excluded from these figures (see
-      // clientScopedOpeningBalanceWarnings) — never report "complete".
-      const openingBalanceWarnings = clientScopedOpeningBalanceWarnings([], opening);
+      const openingAppliedToClient = opening !== null && opening.journal.clients_id === clients_id &&
+        opening.journal.registered && !opening.journal.is_deleted && opening.journal.postings.some(p => !p.is_deleted);
+      const openingBalanceWarnings = clientScopedOpeningBalanceWarnings([], opening, clients_id);
       const scopeWarnings = partialAccounts.length > 0
         ? [
             `Accounts ${partialAccounts.join(", ")} also carry entries under other header clients. This figure filters by the journal header client only: ` +
@@ -464,11 +466,11 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
               ...(partialAccounts.length > 0 ? { net_position_status: "requires_counterpart_review" } : {}),
             },
             opening_balance_status: opening !== null
-              ? "excluded_client_scoped"
-              : "api_incomplete",
+              ? openingAppliedToClient ? "api_client_scoped" : "excluded_client_scoped"
+              : "not_present",
             balance_scope: opening !== null
-              ? "client_scoped_excludes_opening_balance"
-              : "journal_api_visible_entries_only",
+              ? openingAppliedToClient ? "client_scoped_includes_opening_balance" : "client_scoped_excludes_opening_balance"
+              : "journal_header_client",
             warnings: [...scopeWarnings, ...openingBalanceWarnings],
             ...cacheClearMetadata(cacheClear),
           }),

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Investment cash flow no longer becomes operating cash merely because a realized currency result uses another standard account.** Details: proved principal/result bundles use actual cash with consistent signed asset and result-family checks, retain acquisition fees and conventional accumulated-depreciation disposals, and hold unsupported combinations before generic fallbacks. Capital invoice slices must match account, dimension and direction. Malformed evidence preserves known cash gross amounts while retaining review status.
+- **An unregistered opening or reversal-shaped dividend draft cannot create dividend headroom.** Details: INITIAL is excluded from pending distributions; negative draft components cannot cancel valid reservations and now stop preview/create for review even with `force`. Ordinary pending distributions and registered opening equity retain their existing treatment. No accounting records are changed by these calculation fixes.
+
+- **Proved operating payments no longer require an unrelated invoice-balance audit.** Exact invoice links can classify prepayments and prior-year service settlements without a historical-capacity veto. Mixed invoice/direct operating distributions preserve their exact signed account/dimension slices; unrelated customer offsets no longer block them. Exact internal cash transfers with an external component and investment-principal/FX-result bundles are supported. Capital/mixed-invoice safeguards and unresolved result-only or FX evidence remain in place; no accounting entries are changed.
+
+- **Annual cash-flow reports separate noncash changes from actual receipts and payments.** Details: the indirect operating bridge now shows journal-level corrections for dividend declarations, loan offsets and other noncash changes, plus source-backed investing/financing reclassifications. Exact transaction-to-invoice links support capital payments; investment sales use actual cash proceeds rather than carrying value. Gross receipts/payments, separately proved FX effects, source IDs and unresolved counts remain visible. Missing or inconsistent evidence, unresolved gross movements or an indirect-versus-direct operating difference keep the report in `requires_review`; no reconciliation residual is assigned to operating cash. The declared method remains indirect. Evidence reads are selective, memoized and limited to 500 transaction details per report; no accounting data is written.
+
+- **Opening balances now come directly from e-arveldaja, with no separate local import.** Details: reporting, statement comparisons and dividend checks use API `INITIAL` journals exactly once. The local parser, store and `import_opening_balances` tool are removed; existing user files are untouched and no longer read. Draft, deleted or empty API openings are disclosed; multiple active openings stop calculation for review. No INITIAL is a normal absence. Annual starting positions include the opening balance while cash flows and year-end closing detection exclude it. Client and dimension attribution follow the original API postings. The standard/full surfaces now expose 126/146 tools; guided profiles remain 19/20. `list_journals` forwards its existing `operation_type` filter. Purchase-row fringe-benefit defaults and explicit values remain preserved; an ambiguous readback row mapping with nondefault fringe intent stops before the totals PATCH and uses the existing draft invalidation/error path.
+
 ## [0.31.0] - 2026-10-19
 
 ### Fixed
