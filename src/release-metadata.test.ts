@@ -49,7 +49,7 @@ const validServer = {
   ],
 };
 
-const receiptBatchRegistry = [{ name: "receipt-batch", slug: "receipt-batch" }] as const;
+const receiptBatchRegistry = [{ name: "receipt-batch", slug: "receipt-batch", requiredTools: ["receipt_batch"] }] as const;
 
 function writeReceiptBatchReadme(root: string): void {
   writeFileSync(join(root, "README.md"), `# Fixture

@@ -144,7 +144,8 @@ export class ReferenceDataApi {
   }
 
   // Account dimensions
-  async getAccountDimensions(): Promise<AccountDimension[]> {
+  async getAccountDimensions(options: {fresh?: boolean} = {}): Promise<AccountDimension[]> {
+    if (options.fresh) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/account_dimensions:all"));
     return readonlyCachedGetAll<AccountDimension>(this.client, "/account_dimensions");
   }
 

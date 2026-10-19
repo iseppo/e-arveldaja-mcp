@@ -10,6 +10,8 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { createAccountingDocumentOperations, ACCOUNTING_DOCUMENT_PLAN_DOMAIN, ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN } from "./operations.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
+import { installLegacyDraftReadback } from "../__fixtures__/document-reading/legacy-draft.js";
+import { draftFingerprint } from "./purchase-draft-verification.js";
 import { LEADER_CELL_LINES, TEXT_HAZARD_EXPECTED, parseOfLines, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -334,6 +336,7 @@ describe("AccountingDocumentOperations.create", () => {
     });
     const runtime = createTestRuntimeSafetyContext();
     const ops = createAccountingDocumentOperations(api, runtime);
+    installLegacyDraftReadback(api);
     return { path, sha256, api, runtime, ops };
   }
 
@@ -681,7 +684,8 @@ describe("AccountingDocumentOperations.create", () => {
     expect(outcome.ok).toBe(true);
     expect(invalidateListCache.mock.invocationCallOrder.length).toBeGreaterThan(0);
     // The last supplier+number lookup before the write must follow a cache drop.
-    expect(invalidateListCache.mock.invocationCallOrder.at(-1)!).toBeLessThan(listAll.mock.invocationCallOrder.at(-1)!);
+    const lastScan = listAll.mock.invocationCallOrder.at(-1)!;
+    expect(invalidateListCache.mock.invocationCallOrder.filter(order => order < lastScan).length).toBeGreaterThan(0);
   });
 
   it("drops the journal cache right before the create-time intake cash-duplicate scan (prepare stays cached)", async () => {
@@ -955,12 +959,14 @@ describe("AccountingDocumentOperations.create", () => {
 });
 
 describe("AccountingDocumentOperations.confirmDraft", () => {
+  const reviewedDraft = { id: 90_001, status: "PROJECT", clients_id: 4242, number: "INV-1", gross_price: 12, vat_price: 2, items: [{ purchase_accounts_id: 5000, total_net_price: 10, vat_rate_dropdown: "20" }] };
   function confirmSetup() {
     const api = createAccountingWorkflowApi({
       clientRows: [],
       purchaseInvoiceRows: [],
       purchaseInvoices: {
         confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
+        get: vi.fn().mockResolvedValue(reviewedDraft),
       },
     });
     const runtime = createTestRuntimeSafetyContext();
@@ -972,7 +978,7 @@ describe("AccountingDocumentOperations.confirmDraft", () => {
   // (ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, normalizedArgs { invoice_id }).
   function mintConfirmPlan(runtime: ReturnType<typeof createTestRuntimeSafetyContext>, invoiceId: number) {
     return runtime.planStore.issue(ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, {
-      normalizedArgs: { invoice_id: invoiceId },
+      normalizedArgs: { invoice_id: invoiceId, draft_fingerprint: draftFingerprint({ ...reviewedDraft, id: invoiceId }) },
       sourceIdentities: [],
       liveSnapshot: { invoice_id: invoiceId },
       commands: [{ id: "accounting-document-confirm", category: "purchase_invoice_confirm", reviewProjection: { invoice_id: invoiceId } }],
@@ -1027,7 +1033,7 @@ describe("AccountingDocumentOperations.confirmDraft", () => {
       purchaseInvoiceRows: [],
       purchaseInvoices: {
         confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
-        get: vi.fn().mockResolvedValue({ client_name: "Acme OÜ", gross_price: 100, cl_currencies_id: "USD", base_gross_price: 92.5 }),
+        get: vi.fn().mockResolvedValue({ client_name: "Acme OÜ", gross_price: 100, cl_currencies_id: "USD", base_gross_price: 92.5 }).mockResolvedValueOnce(reviewedDraft).mockResolvedValueOnce(reviewedDraft),
       },
     });
     const runtime = createTestRuntimeSafetyContext();
@@ -1049,7 +1055,7 @@ describe("AccountingDocumentOperations.confirmDraft", () => {
       purchaseInvoiceRows: [],
       purchaseInvoices: {
         confirm: vi.fn().mockResolvedValue({ code: 0, messages: [] }),
-        get: vi.fn().mockRejectedValue(new Error("read-back unavailable")),
+        get: vi.fn().mockRejectedValue(new Error("read-back unavailable")).mockResolvedValueOnce(reviewedDraft).mockResolvedValueOnce(reviewedDraft),
       },
     });
     const runtime = createTestRuntimeSafetyContext();

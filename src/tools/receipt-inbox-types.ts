@@ -135,6 +135,17 @@ export interface ReceiptBatchFileResult {
     document_number: string | null;
     title: string | null;
   }>;
+  bank_partial?: ReceiptBankPartial;
+  /** Known POST with failed follow-up, or POST with unknown commitment. Never authorizes retry. */
+  creation_partial?: {
+    created_invoice_id?: number;
+    mutation_occurred?: true;
+    mutation_may_have_occurred?: true;
+    automatic_retry_forbidden: true;
+    cleanup: "invalidated" | "failed" | "unknown";
+    follow_up: import("../mutation-outcome.js").MutationCause & { upstream_detail?: string };
+    cleanup_error?: import("../mutation-outcome.js").MutationCause & { upstream_detail?: string };
+  };
   created_invoice?: {
     id?: number;
     number: string;
@@ -143,6 +154,9 @@ export interface ReceiptBatchFileResult {
     uploaded_document?: boolean;
   };
   bank_match?: {
+    ambiguous?: boolean;
+    top_confidence?: number;
+    tied_count?: number;
     candidate?: TransactionMatchCandidate;
     linked?: boolean;
     confirmed_transaction_id?: number;
@@ -174,4 +188,16 @@ export interface ReceiptBatchSummary {
   /** needs_review rows held because a live journal already references the invoice number. */
   referenced_by_journal_review: number;
   dry_run_preview: number;
+}
+export interface ReceiptBankPartial {
+  transaction_id: number;
+  category: "transaction_material_drift" | "mutation_indeterminate";
+  register_attempted: false;
+  mutation_occurred: boolean;
+  mutation_may_have_occurred?: true;
+  changed_fields: readonly string[];
+  known_objects: readonly { entity_type: "transaction"; entity_id: number; outcome: "updated" }[];
+  client_update: { from: number | null; to: number; outcome: "updated" } | null;
+  automatic_retry_forbidden: true;
+  fresh_preview_required: true;
 }

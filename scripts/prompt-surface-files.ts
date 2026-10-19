@@ -25,7 +25,7 @@ import {
 import { renderVatMetadataTokens } from "../src/estonian-tax-rules.js";
 
 export type PromptSurfaceRegistryEntry = Pick<PromptDefinition, "name" | "slug"> &
-  Partial<Pick<PromptDefinition, "argsSchema" | "variants">>;
+  Partial<Pick<PromptDefinition, "argsSchema" | "variants" | "requiredTools">>;
 
 export interface SyncWorkflowPromptOptions {
   /** Test seam for proving rollback after the existing command set is moved aside. */
@@ -128,12 +128,14 @@ export function generatedClaudeCommandText(
   slug: string,
   workflowText: string,
   variants = PROMPT_REGISTRY.find(definition => definition.slug === slug)?.variants ?? [],
+  requiredTools: readonly string[] = PROMPT_REGISTRY.find(definition => definition.slug === slug)?.requiredTools ?? [],
 ): string {
   const renderedWorkflow = renderStaticFeatureSections(
     renderVatMetadataTokens(workflowText.trimEnd()),
     variants,
   );
-  const trustedBody = `Canonical workflow source: workflows/${slug}.md\n\n${renderedWorkflow}\n`;
+  const availability = requiredTools.length === 0 ? "" : `Workflow availability: inspect the connected MCP server's advertised tool list before starting this workflow. Continue only when at least one of these tools is advertised: ${requiredTools.map(tool => `\`${tool}\``).join(", ")}. If none is advertised, stop this workflow and explain that it requires a compatible profile or feature configuration. Never call a missing tool to probe capability.\n\n`;
+  const trustedBody = `${availability}Canonical workflow source: workflows/${slug}.md\n\n${renderedWorkflow}\n`;
   const commandText = `<!-- Generated from workflows/${slug}.md. Edit that source file, then run npm run sync:workflow-prompts. -->\n\n${renderStaticPromptSurface(trustedBody).trimEnd()}\n`;
   if (commandText.length > PROMPT_SURFACE_LIMIT) {
     throw new Error("Generated prompt surface exceeds the maximum length");
@@ -283,7 +285,7 @@ export async function validateWorkflowPromptSurfaces(
     let expected: string;
     try {
       const definition = safeRegistry.find(entry => entry.slug === slug)!;
-      expected = generatedClaudeCommandText(slug, workflowText, definition.variants ?? []);
+      expected = generatedClaudeCommandText(slug, workflowText, definition.variants ?? [], definition.requiredTools ?? []);
     } catch (error) {
       errors.push(`cannot render generated command ${slug}: ${(error as Error).message}`);
       continue;
@@ -427,7 +429,7 @@ export async function syncWorkflowPromptSurfaces(
     const workflowText = await readFile(containedMarkdownPath(workflowsDir, definition.slug), "utf8");
     plannedWrites.push({
       fileName: `${definition.slug}.md`,
-      text: generatedClaudeCommandText(definition.slug, workflowText, definition.variants ?? []),
+      text: generatedClaudeCommandText(definition.slug, workflowText, definition.variants ?? [], definition.requiredTools ?? []),
     });
   }
 

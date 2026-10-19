@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
+import { draftFingerprint } from "../purchase-invoice-draft-fingerprint.js";
+import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { readFile } from "fs/promises";
 import { validateFilePath } from "../file-validation.js";
 import {
@@ -454,6 +457,8 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
   });
 
   function buildCreateConfirmArgs(bankTransactions: any[]) {
+    bankTransactions = bankTransactions.map(tx => tx.description?.includes("sig=abc123abc123abcd")
+      ? withSignedCamtMarker({...tx,description:"Payment"},"DBIT") : tx);
     const createdInvoice = {
       id: 900,
       number: "INV-EUR",
@@ -465,16 +470,29 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       base_gross_price: 100,
       bank_ref_number: "REF1",
       status: "PROJECT",
+      base_document_files_id: null as number | null,
     };
+    let uploadedDocument: { name: string; contents: string } | undefined;
     const api = {
       purchaseInvoices: {
-        createAndSetTotals: vi.fn().mockResolvedValue(createdInvoice),
-        uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
-        confirmWithTotals: vi.fn().mockResolvedValue({ ok: true }),
+        invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]),
+        createAndSetTotals: vi.fn(async(body:any,vat:number,gross:number)=>structuredClone(Object.assign(createdInvoice,fixturePurchaseReadback(body,vat,gross,true,900)))),
+        get: vi.fn(async()=>structuredClone(createdInvoice)),
+        uploadDocument: vi.fn(async (_id: number, name: string, contents: string) => {
+          uploadedDocument = { name, contents };
+          createdInvoice.base_document_files_id = 1900;
+          return { ok: true };
+        }),
+        getDocument: vi.fn(async () => {
+          if (!uploadedDocument) throw new Error("No source document was uploaded");
+          return { ...uploadedDocument };
+        }),
+        confirmWithTotals: vi.fn(async()=>{createdInvoice.status="CONFIRMED";return {ok:true};}),
         invalidate: vi.fn(),
       },
       journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
       transactions: {
+        invalidateListCache: vi.fn(),
         get: vi.fn().mockImplementation((id: number) =>
           Promise.resolve(bankTransactions.find(t => t.id === id) ?? { id, status: "PROJECT" })),
         confirm: vi.fn().mockResolvedValue({ created_object_id: 1 }),
@@ -526,9 +544,9 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     expect(result.bank_match?.linked ?? false).toBe(false);
     // The foreign-currency transaction must not be confirmed against the invoice.
     expect(api.transactions.confirm).not.toHaveBeenCalled();
-    expect(result.notes).toEqual(expect.arrayContaining([
-      expect.stringContaining("cross-currency match"),
-    ]));
+    // The pre-create draft has no foreign-currency base-only match to approve;
+    // a candidate found only after creation cannot silently become executable.
+    expect(result.bank_match).toBeUndefined();
   });
 
   it("still auto-links a same-currency exact-amount transaction match", async () => {
@@ -541,12 +559,22 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     const result = await call();
 
     expect(result.status).toBe("matched");
+    expect((await api.purchaseInvoices.createAndSetTotals.mock.results[0]!.value).base_document_files_id).toBeNull();
+    const verifiedDraft = await api.purchaseInvoices.get.mock.results[0]!.value;
+    expect(verifiedDraft.base_document_files_id).toBe(1900);
+    expect(api.purchaseInvoices.getDocument).toHaveBeenCalledWith(900);
+    expect(await api.purchaseInvoices.getDocument.mock.results[0]!.value).toEqual({
+      name: "receipt.pdf", contents: Buffer.from("bytes").toString("base64"),
+    });
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(900, true, {
+      expectedDraftFingerprint: draftFingerprint(verifiedDraft),
+    });
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm.mock.calls[0]![1][0].amount).toBe(100);
     // The invoice was created from the receipt for its own supplier, while the
     // matched transaction's client came from bank counterparty resolution — the
     // confirm must carry the reassignment approval or it would be refused.
-    expect(api.transactions.confirm.mock.calls[0]![2]).toEqual({ reassignClientToInvoice: true });
+    expect(api.transactions.confirm.mock.calls[0]![2]).toMatchObject({ reassignClientToInvoice: false, expectedTransaction: {id:502,trusted_direction:"outgoing"}, expectedLinkedInvoices:{"purchase_invoices:900":{id:900,status:"CONFIRMED",clients_id:7}} });
   });
 
   // The API reads every type back as "C": an unsigned match could be a
@@ -560,9 +588,10 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
 
     const result = await call();
 
-    expect(result.status).toBe("created");
+    expect(result.status).toBe("needs_review");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
-    expect(result.notes.join(" ")).toContain("no signed outgoing direction");
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(result.notes.join(" ")).toContain("trusted_direction");
   });
 
   it("uploads the exact immutable receipt snapshot bytes", async () => {
@@ -580,6 +609,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
     const createdInvoice = { id: 900, number: "INV-1", status: "PROJECT" };
     const api = {
       purchaseInvoices: {
+        invalidateListCache: vi.fn(),listAll:vi.fn().mockResolvedValue([]),
         createAndSetTotals: vi.fn().mockResolvedValue(createdInvoice),
         uploadDocument: vi.fn().mockResolvedValue({ ok: true }),
         invalidate: vi.fn(),

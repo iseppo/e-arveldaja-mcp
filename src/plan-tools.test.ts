@@ -98,23 +98,37 @@ describe("execution plan page tool", () => {
     runtime.planStore.consume(handle, "test");
     expect((await handler({ plan_handle: handle } as any)).isError).toBe(true);
   });
-  it("enforces the hard budget on the fixed standard/full page instead of emitting an over-budget response (§11)", async () => {
+  it("pages standard/full large review projections without omissions or budget overflow", async () => {
     const runtime = createTestRuntimeSafetyContext();
-    // 50 commands whose combined review projections exceed the 32 KiB hard
-    // budget. The standard/full pager is fixed-stride (50 per page) and cannot
-    // shrink, so it must surface a structured response_budget_exceeded error.
+    // A complete 50-row page exceeds the hard budget; each row is readable.
     const base = plan(50);
     const handle = runtime.planStore.issue("test", {
       ...base,
       commands: base.commands.map((command, i) => ({ ...command, reviewProjection: { i, text: "x".repeat(1_000) } })),
     });
     const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET });
-    const result = await handler({ plan_handle: handle });
-    expect(result.isError).toBe(true);
-    const decoded = parseMcpResponse(result.content[0]!.text) as any;
-    expect(decoded.error.code).toBe("response_budget_exceeded");
-    // The plan is untouched — a budget rejection never consumes it.
+    const first = await page(handler, { plan_handle: handle });
+    expect(first.commands.length).toBeGreaterThan(0);
+    expect(first.commands.length).toBeLessThan(50);
+    expect(mcpPayloadBytes(first)).toBeLessThanOrEqual(RESPONSE_BUDGETS.detail.hard);
+    const second = await page(handler, { plan_handle: handle, cursor: first.next_cursor });
+    expect(second.range.from).toBe(first.range.to + 1);
+    expect([...first.commands, ...second.commands].map(row => row.command_id)).toEqual(base.commands.map(row => row.id));
+    const tampered = first.next_cursor.replace(/^p1\.\d+\./, `p1.${first.range.to + 1}.`);
+    expect((await handler({ plan_handle: handle, cursor: tampered })).isError).toBe(true);
+    expect((await handler({ plan_handle: handle, section: "reviews", cursor: first.next_cursor })).isError).toBe(true);
     expect(runtime.planStore.consume(handle, "test").commands).toHaveLength(50);
+  });
+
+  it("still rejects one indivisible oversized row without consuming its plan", async () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const base = plan(1);
+    // Below the per-value character cap, above the UTF-8 byte budget.
+    const handle = runtime.planStore.issue("test", { ...base, reviews: [{ text: "界".repeat(12_000) }] });
+    const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET });
+    const result = await page(handler, { plan_handle: handle, section: "reviews" });
+    expect(result.error.code).toBe("response_budget_exceeded");
+    expect(runtime.planStore.consume(handle, "test").reviews).toHaveLength(1);
   });
 
   it("returns deterministic 50/50/1 pages with totals on every page", async () => {

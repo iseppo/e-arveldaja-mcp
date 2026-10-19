@@ -129,5 +129,16 @@ export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): 
     next = { ...next, error: wrapUntrustedOcr(next.error) ?? next.error };
   }
 
+  if (next.creation_partial !== undefined) {
+    const safeCause = (cause: NonNullable<ReceiptBatchFileResult["creation_partial"]>["follow_up"]) => ({
+      ...cause, name: capThenWrap(cause.name) ?? "", message: capThenWrap(cause.message) ?? "",
+      // HttpClient.upstream_detail is already bounded and sandboxed.
+    });
+    next = { ...next, creation_partial: { ...next.creation_partial,
+      follow_up: safeCause(next.creation_partial.follow_up),
+      ...(next.creation_partial.cleanup_error ? { cleanup_error: safeCause(next.creation_partial.cleanup_error) } : {}),
+    } };
+  }
+
   return next;
 }

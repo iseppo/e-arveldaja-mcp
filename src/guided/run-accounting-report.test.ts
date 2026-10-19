@@ -27,6 +27,25 @@ function setup(api: ApiContext, enableSales = true): Handler {
 const parse = (r: { content: Array<{ text: string }> }) => parseMcpResponse(r.content[0]!.text) as any;
 
 describe("run_accounting_report façade", () => {
+  it.each(["compact","full"])("historical aging warning parity in %s, including AP-only",async detail=>{
+    vi.useFakeTimers();vi.setSystemTime(new Date("2026-10-18T12:00:00Z"));
+    try {
+      const paid={id:1,status:"CONFIRMED",payment_status:"PAID",create_date:"2026-09-01",gross_price:124,clients_id:7};
+      for(const enableSales of [true,false]) {
+        const api=makeApi({saleInvoices:{listAll:vi.fn().mockResolvedValue([paid])},purchaseInvoices:{listAll:vi.fn().mockResolvedValue([paid])}});
+        const handler=setup(api,enableSales);
+        const historical=parse(await handler({report:"aging",as_of_date:"2026-09-30",detail}));
+        expect(historical.payables.total_unpaid_face_value).toBe(0);
+        expect(historical.payables.warnings.join(" ")).toContain("CURRENT state");
+        if(enableSales)expect(historical.receivables.warnings).toEqual(historical.payables.warnings);
+        else expect(historical.receivables).toBeUndefined();
+        for(const as_of_date of [undefined,"2026-10-18"]) {
+          const current=parse(await handler({report:"aging",as_of_date,detail}));
+          expect((current.payables.warnings ?? []).join(" ")).not.toContain("CURRENT state");
+        }
+      }
+    } finally {vi.useRealTimers();}
+  });
   it("runs trial_balance without a delegated tool name or MCP-response parsing", async () => {
     const api = makeApi({
       readonly: { getAccounts: vi.fn().mockResolvedValue([{ id: 1020, name_est: "Pank", name_eng: "Bank", balance_type: "D", account_type_est: "Varad" }]) },

@@ -16,6 +16,8 @@ import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { HttpError } from "../http-client.js";
+import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
+import { draftFingerprint } from "../purchase-invoice-draft-fingerprint.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 
 // Behavior tests exercise the granular constituent tools directly, so register
@@ -185,6 +187,7 @@ function createReceiptBatchApi(options: {
     transactions: {
       invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      get: vi.fn(async (id: number) => (options.transactions as any[] | undefined)?.find(tx => tx.id === id)),
       ...options.transactionMethods,
     },
   } as any;
@@ -571,7 +574,10 @@ describe("process_receipt_batch rollback handling", () => {
     });
   });
 
-  it("invalidates the created invoice when document upload fails", async () => {
+  it.each([
+    { label: "definitive upload rejection", error: new HttpError("upload failed", 409, "PUT", "/purchase_invoices/9001/document_user"), indeterminate: false },
+    { label: "indeterminate upload failure", error: new Error("upload failed"), indeterminate: true },
+  ])("handles $label without confusing rejection and uncertainty", async ({ error, indeterminate }) => {
     mockReceiptFolder();
 
     vi.mocked(parseDocument).mockResolvedValue({
@@ -614,7 +620,7 @@ describe("process_receipt_batch rollback handling", () => {
       purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
         createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice()),
-        uploadDocument: vi.fn().mockRejectedValue(new Error("upload failed")),
+        uploadDocument: vi.fn().mockRejectedValue(error),
         confirmWithTotals: vi.fn().mockResolvedValue({}),
         invalidate: vi.fn().mockResolvedValue({}),
       },
@@ -629,6 +635,21 @@ describe("process_receipt_batch rollback handling", () => {
       plan_handle: approval.plan_handles.create,
     });
     const payload = parseMcpResponse(result.content[0]!.text);
+
+    if (indeterminate) {
+      expect(payload.summary).toMatchObject({ failed: 0, created: 0, matched: 0, needs_review: 1 });
+      expect(payload.results[0]).toMatchObject({
+        status: "needs_review",
+        creation_partial: { created_invoice_id: 9001, mutation_occurred: true, automatic_retry_forbidden: true, cleanup: "unknown" },
+        created_invoice: { id: 9001, status: "PROJECT", confirmed: false },
+      });
+      expect(payload.results[0].created_invoice).not.toHaveProperty("uploaded_document");
+      expect(payload.results[0].notes.join(" ")).toContain("source_document_upload_unknown");
+      expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledTimes(1);
+      expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
+      expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+      return;
+    }
 
     expect(payload.summary.failed).toBe(1);
     expect(payload.summary.created).toBe(0);
@@ -783,14 +804,31 @@ describe("process_receipt_batch rollback handling", () => {
     } as any);
     mockResolvedSupplier();
 
+    let storedInvoice: any;
+    let uploadedDocument: { name: string; contents: string } | undefined;
     const api = createReceiptBatchApi({
       clients: [supplierClient()],
       accounts: [SOFTWARE_ACCOUNT],
       purchaseArticles: [SOFTWARE_ARTICLE],
       purchaseInvoices: {
-        createAndSetTotals: vi.fn().mockResolvedValue(createdDraftInvoice()),
-        uploadDocument: vi.fn().mockResolvedValue({}),
-        confirmWithTotals: vi.fn().mockResolvedValue({}),
+        createAndSetTotals: vi.fn(async (body: any, vat: number | undefined, gross: number | undefined) => {
+          storedInvoice = { ...fixturePurchaseReadback(body, vat, gross, true, 9001), base_document_files_id: null };
+          return structuredClone(storedInvoice);
+        }),
+        get: vi.fn(async () => structuredClone(storedInvoice)),
+        uploadDocument: vi.fn(async (_id: number, name: string, contents: string) => {
+          uploadedDocument = { name, contents };
+          storedInvoice.base_document_files_id = 19001;
+          return {};
+        }),
+        getDocument: vi.fn(async () => {
+          if (!uploadedDocument) throw new Error("No source document was uploaded");
+          return { ...uploadedDocument };
+        }),
+        confirmWithTotals: vi.fn(async () => {
+          storedInvoice.status = "CONFIRMED";
+          return {};
+        }),
         invalidate: vi.fn().mockResolvedValue({}),
       },
       transactionMethods: { get: vi.fn(), confirm: vi.fn() },
@@ -817,7 +855,13 @@ describe("process_receipt_batch rollback handling", () => {
       confirmed: true,
       uploaded_document: true,
     }));
-    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true);
+    expect((await api.purchaseInvoices.createAndSetTotals.mock.results[0]!.value).base_document_files_id).toBeNull();
+    expect((await api.purchaseInvoices.get.mock.results[0]!.value).base_document_files_id).toBe(19001);
+    expect(api.purchaseInvoices.getDocument).toHaveBeenCalledWith(9001);
+    expect(uploadedDocument?.contents).toBe(Buffer.from("receipt pdf").toString("base64"));
+    expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true, {
+      expectedDraftFingerprint: draftFingerprint(storedInvoice),
+    });
   });
 
   it("preserves supplier-history VAT metadata when OCR misses invoice VAT totals", async () => {

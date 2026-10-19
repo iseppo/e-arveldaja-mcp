@@ -179,8 +179,14 @@ describe("MCP prompt protocol", () => {
     expect(disabledOverviewText).toContain("purchase-side financial overview");
 
     expect(disabledMonthEndText).not.toContain("confirm_sale_invoice");
-    expect(disabledMonthEndText).not.toContain("Unconfirmed sale invoices");
-    expect(disabledMonthEndText).not.toContain("Overdue receivables");
+    // Coverage comes from the report's returned fields, independently of the
+    // profile's mutation tools. Even a sales-disabled prompt must not hide an
+    // unexpected returned blocker or describe purchase-only coverage as full.
+    expect(disabledMonthEndText).toContain("Unconfirmed sale invoices, whenever returned");
+    expect(disabledMonthEndText).toContain("PRESENCE of `unconfirmed_sale_invoices`, even when its count is zero");
+    expect(disabledMonthEndText).toContain("absence means a purchase-side check only");
+    expect(disabledMonthEndText).toContain("A returned `ready_to_close: false` always means HAS BLOCKERS");
+    expect(disabledMonthEndText).toContain("Show overdue receivables as a warning whenever returned");
     expect(disabledMonthEndText).toContain("Unconfirmed purchase invoices");
     expect(disabledMonthEndText).toContain("Overdue payables");
     expect(disabledMonthEndText).toContain("compute_trial_balance");
@@ -189,7 +195,7 @@ describe("MCP prompt protocol", () => {
     expect(enabledOverviewText).toContain("Receivables needing attention");
     expect(enabledMonthEndText).toContain("confirm_sale_invoice");
     expect(enabledMonthEndText).toContain("Unconfirmed sale invoices");
-    expect(enabledMonthEndText).toContain("Overdue receivables");
+    expect(enabledMonthEndText).toContain("Show overdue receivables as a warning whenever returned");
   });
 
   it("advertises every prompt argument description and required flag through Client.listPrompts", async () => {

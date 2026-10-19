@@ -4,6 +4,19 @@ import type { Transaction, TransactionDistribution, PurchaseInvoice, SaleInvoice
 import type { CreateBankTransactionPayload, UpdateBankTransactionRequest } from "../types/mutations.js";
 import { classifyMutationFailure, isMutationIndeterminate, MutationIndeterminateError } from "../mutation-outcome.js";
 import { BaseResource, cache } from "./base-resource.js";
+import {
+  compareBankTransactionMaterial, changedLinkedInvoiceFields, TransactionMaterialDriftError,
+  type BankTransactionMaterialSnapshot, type ExpectedLinkedInvoices, type InvoiceTable,
+} from "../banking/transaction-material-snapshot.js";
+export { TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
+
+export interface TransactionConfirmOptions {
+  autoFixClientsId?: boolean;
+  reassignClientToInvoice?: boolean;
+  expectedTransaction?: BankTransactionMaterialSnapshot;
+  expectedLinkedInvoices?: ExpectedLinkedInvoices;
+  approvedClientTransition?: { readonly from: number | null; readonly to: number };
+}
 
 function isHttpMethod(value: unknown): value is HttpMethod {
   return value === "GET" || value === "POST" || value === "PUT" ||
@@ -198,7 +211,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
   async confirm(
     id: number,
     distributions?: TransactionDistribution[],
-    options?: { autoFixClientsId?: boolean; reassignClientToInvoice?: boolean },
+    options?: TransactionConfirmOptions,
   ): Promise<ApiResponse> {
     const lockKey = this.cacheKey(`${this.basePath}:${id}`);
     const previous = confirmLocks.get(lockKey) ?? Promise.resolve();
@@ -244,7 +257,7 @@ export class TransactionsApi extends BaseResource<Transaction> {
   private async confirmUnlocked(
     id: number,
     distributions?: TransactionDistribution[],
-    options?: { autoFixClientsId?: boolean; reassignClientToInvoice?: boolean },
+    options?: TransactionConfirmOptions,
   ): Promise<ApiResponse> {
     const body = distributions ?? [];
     const autoFixClientsId = options?.autoFixClientsId !== false;
@@ -255,6 +268,13 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Value to restore if the register call fails after we touched clients_id
     // (`undefined` = we did not touch it, so there is nothing to roll back).
     let clientsIdRollbackValue: number | null | undefined;
+    let reviewedClientWrite: { from: number | null; to: number } | undefined;
+    if (options?.expectedTransaction) {
+      reviewedClientWrite = await this.prepareReviewedConfirm(id, body, options);
+      clientsIdRollbackValue = reviewedClientWrite?.from;
+    } else if (options?.expectedLinkedInvoices || options?.approvedClientTransition) {
+      throw new TransactionMaterialDriftError(id, ["expectedTransaction"]);
+    }
     // The client guard below gates registration on tx.clients_id: read it live,
     // not from the 120s per-id cache (RIK copies the live client into the journal).
     // It also gates registering at all: a confirm queued behind one that just
@@ -262,7 +282,9 @@ export class TransactionsApi extends BaseResource<Transaction> {
     // Only CONFIRMED is refused: the invalidate -> confirm repair cycle registers
     // the row again from its post-invalidate status (VOID or PROJECT).
     cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
-    const tx = await this.get(id);
+    // The reviewed branch's final GET must be the last await before register;
+    // its status/material checks already ran inside prepareReviewedConfirm.
+    const tx = options?.expectedTransaction ? undefined : await this.get(id);
     if (tx?.status === "CONFIRMED") {
       throw new Error(
         `Transaction ${id} is ${tx.status}, not PROJECT; refusing to register it again. ` +
@@ -386,8 +408,15 @@ export class TransactionsApi extends BaseResource<Transaction> {
 
       if (clientsIdRollbackValue !== undefined) {
         try {
+          if (options?.expectedTransaction && reviewedClientWrite) {
+            cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
+            const fresh = await this.get(id);
+            const comparison = compareBankTransactionMaterial(options.expectedTransaction, fresh, { client: reviewedClientWrite });
+            if (!comparison.ok) throw new TransactionMaterialDriftError(id, comparison.changedFields, null, reviewedClientWrite);
+          }
           await this.update(id, { clients_id: clientsIdRollbackValue });
         } catch (rollbackErr) {
+          if (rollbackErr instanceof TransactionMaterialDriftError) throw rollbackErr;
           // A well-formed indeterminate cleanup outcome (network, 5xx, 408 —
           // raw, or wrapped by update()) means the clients_id restore may or
           // may not have committed. Malformed ambiguity falls through to the
@@ -420,6 +449,72 @@ export class TransactionsApi extends BaseResource<Transaction> {
           );
         }
       }
+      throw error;
+    }
+  }
+
+  /** Final locked guard for an already reviewed event. No inferred client target. */
+  private async prepareReviewedConfirm(
+    id: number, body: TransactionDistribution[], options: TransactionConfirmOptions,
+  ): Promise<{ from: number | null; to: number } | undefined> {
+    const expected = options.expectedTransaction!;
+    let written: { from: number | null; to: number } | undefined;
+    const drift = (fields: readonly string[], key: `${InvoiceTable}:${number}` | null = null): never => {
+      throw new TransactionMaterialDriftError(id, fields, key, written);
+    };
+    const readTx = async (): Promise<Transaction> => {
+      cache.invalidateExact(this.cacheKey(`${this.basePath}:${id}`));
+      const fresh = await this.get(id);
+      if (!fresh) return drift(["transaction_missing"]);
+      const comparison = compareBankTransactionMaterial(expected, fresh, written ? { client: written } : {});
+      if (!comparison.ok) return drift(comparison.changedFields);
+      if (fresh.status !== "PROJECT" || fresh.is_deleted) return drift(["status"]);
+      return fresh;
+    };
+    const links = new Map<`${InvoiceTable}:${number}`, { table: InvoiceTable; id: number }>();
+    for (const row of body) {
+      if (row.related_table !== "sale_invoices" && row.related_table !== "purchase_invoices") continue;
+      if (!row.related_id) return drift(["invoice_link"]);
+      links.set(`${row.related_table}:${row.related_id}`, { table: row.related_table, id: row.related_id });
+    }
+    const approvedInvoices = options.expectedLinkedInvoices;
+    if (!approvedInvoices || Object.keys(approvedInvoices).length !== links.size) return drift(["expectedLinkedInvoices"]);
+    const readInvoices = async (): Promise<number[]> => {
+      const clients = new Set<number>();
+      for (const [key, link] of links) {
+        const approved = approvedInvoices[key];
+        if (!approved || approved.table !== link.table || approved.id !== link.id) return drift(["expectedLinkedInvoices"], key);
+        const fresh = await this.client.get<PurchaseInvoice | SaleInvoice>(`/${link.table}/${link.id}`);
+        if (!fresh) return drift(["invoice_missing"], key);
+        const changed = changedLinkedInvoiceFields(approved, fresh);
+        if (changed.length) return drift(changed, key);
+        if (typeof fresh.clients_id !== "number") return drift(["clients_id"], key);
+        clients.add(fresh.clients_id);
+      }
+      if (clients.size > 1) return drift(["invoice_clients_ambiguous"]);
+      return [...clients];
+    };
+    try {
+      const initial = await readTx();
+      const [invoiceClient] = await readInvoices();
+      if (invoiceClient !== undefined && (initial.clients_id ?? null) !== invoiceClient) {
+        const approved = options.approvedClientTransition;
+        if (!approved || approved.from !== (initial.clients_id ?? null) || approved.to !== invoiceClient
+          || (approved.from === null ? options.autoFixClientsId === false : options.reassignClientToInvoice !== true)) {
+          return drift(["approvedClientTransition"]);
+        }
+        await readTx(); // Invoice reads may have awaited an external correction.
+        await this.update(id, { clients_id: approved.to });
+        written = { from: approved.from, to: approved.to };
+        await readTx(); // The entire row, not just the client written above.
+      }
+      await readInvoices();
+      await readTx(); // Last awaited read immediately before register in caller.
+      return written;
+    } catch (error) {
+      if (error instanceof TransactionMaterialDriftError || error instanceof MutationIndeterminateError) throw error;
+      // A known own write must remain visible even when a later read fails.
+      if (written) return drift(["material_read_unavailable"]);
       throw error;
     }
   }

@@ -39,6 +39,16 @@ const writeCases: WriteCase[] = [
 ];
 
 describe("ReferenceDataApi writes use the shared mutation-outcome classifier", () => {
+  it("fresh account dimensions bypass a previously cached ownership mapping",async()=>{
+    readonlyCache.invalidate();const client=makeClient();
+    vi.mocked(client.get).mockResolvedValueOnce([{id:9,accounts_id:1020}]).mockResolvedValueOnce([{id:9,accounts_id:1021}]);
+    const api=new ReferenceDataApi(client);
+    expect(await api.getAccountDimensions()).toEqual([{id:9,accounts_id:1020}]);
+    expect(await api.getAccountDimensions()).toEqual([{id:9,accounts_id:1020}]);
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(await api.getAccountDimensions({fresh:true})).toEqual([{id:9,accounts_id:1021}]);
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
   beforeEach(() => {
     readonlyCache.invalidate();
   });

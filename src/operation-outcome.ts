@@ -20,6 +20,13 @@ export interface MutatedObject {
   readonly id: number;
 }
 
+export interface OperationRecoveryContext {
+  readonly operation: string;
+  readonly marker: string;
+  readonly business_key: string;
+  readonly related_objects: readonly MutatedObject[];
+}
+
 export interface OperationFailure {
   readonly code: string;
   readonly message: string;
@@ -42,6 +49,7 @@ export interface OperationFailure {
   /** True when a write was attempted but its outcome could not be established. */
   readonly mutationMayHaveOccurred?: boolean;
   readonly mutatedObjects?: readonly MutatedObject[];
+  readonly recovery?: OperationRecoveryContext;
 }
 
 export type OperationOutcome<T> =
@@ -60,6 +68,7 @@ export function failureResponsePayload(error: OperationFailure): Record<string, 
     retry: error.retry,
     mutation_occurred: error.mutationOccurred === true ? true : error.mutationMayHaveOccurred === true ? null : false,
     ...(error.mutationMayHaveOccurred === true ? { mutation_may_have_occurred: true } : {}),
+    ...(error.recovery ? { recovery: error.recovery } : {}),
     ...(error.mutatedObjects !== undefined && error.mutatedObjects.length > 0
       ? { mutated_objects: error.mutatedObjects.map(object => ({ type: object.type, id: object.id })) }
       : {}),
@@ -85,7 +94,7 @@ export function plainFailureOutcome<T>(
   code: string,
   message: string,
   retry: "never" | "safe" | "unknown" = "never",
-  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext }>,
 ): OperationOutcome<T> {
   return {
     ok: false,
@@ -95,6 +104,7 @@ export function plainFailureOutcome<T>(
       retry,
       ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
       ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
+      ...(mutation?.recovery ? { recovery: mutation.recovery } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
     },
     blockers: [],
@@ -114,7 +124,7 @@ export function failureOutcome<T = never>(
   message: string,
   retry: "never" | "safe" | "unknown",
   blockers: readonly CompactReviewItem[] = [],
-  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[] }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext }>,
 ): OperationOutcome<T> {
   return cloneAndFreezePlanData({
     ok: false,
@@ -124,6 +134,7 @@ export function failureOutcome<T = never>(
       retry,
       ...(mutation?.mutationOccurred ? { mutationOccurred: true } : {}),
       ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
+      ...(mutation?.recovery ? { recovery: mutation.recovery } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
     },
     blockers,

@@ -90,6 +90,13 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
         invoice_number: descriptor.invoiceNumber,
         amount: descriptor.amount,
         currency: descriptor.currency,
+        date: descriptor.date,
+        accounts_id: descriptor.transactionMaterial?.accounts_id,
+        accounts_dimensions_id: descriptor.accountsDimensionsId,
+        payer_name: descriptor.transactionMaterial?.bank_account_name,
+        bank_account_no: descriptor.transactionMaterial?.bank_account_no,
+        ref_number: descriptor.transactionMaterial?.ref_number,
+        bank_ref_number: descriptor.transactionMaterial?.bank_ref_number,
         confidence: descriptor.confidence,
         ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
         ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
@@ -198,7 +205,7 @@ export function renderExactMatchPayload(input: {
     });
   }
 
-  const errors: Array<{ transaction_id?: number; reason: string }> = projection.skipped.map(row => ({ ...row }));
+  const errors: Array<{ transaction_id?: number; reason: string; journal_id?: number; mutation_occurred?: boolean; automatic_retry_forbidden?: boolean; accounting_status?: string }> = projection.skipped.map(row => ({ ...row }));
   if (!dryRun && input.executionReport) {
     for (const descriptor of projection.confirms) {
       if (!completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId))) {
@@ -212,9 +219,13 @@ export function renderExactMatchPayload(input: {
   for (const failure of input.ledgerChecks?.failures ?? []) {
     errors.push({
       transaction_id: failure.transaction_id,
+      journal_id: failure.journal_id,
+      mutation_occurred: true,
+      automatic_retry_forbidden: true,
+      accounting_status: "needs_review",
       reason: `Post-confirm ledger check ${failure.code} for transaction ${failure.transaction_id}`
         + `${failure.journal_id !== undefined ? ` (journal ${failure.journal_id})` : ""}`
-        + ". The transaction IS confirmed; invalidate_transaction it, then confirm_transaction with reassign_client_to_invoice: true.",
+        + (failure.code === "ledger_client_mismatch" ? ". The transaction IS confirmed; review controlled client reassignment and correction." : ". The transaction IS confirmed; manually review the statement and journal direction before correction. Automatic retry is forbidden."),
     });
   }
 
@@ -243,6 +254,7 @@ export function renderExactMatchPayload(input: {
     errors,
     third_party_payer_reviews: thirdPartyPayerReviews,
     ...(input.ledgerChecks !== undefined ? { ledger_checks: input.ledgerChecks } : {}),
+    ...(input.ledgerChecks?.failures.length ? {accounting_status: "needs_review", mutation_occurred: true, automatic_retry_forbidden: true} : input.ledgerChecks?.unverified?.length || input.ledgerChecks?.warnings?.length ? {accounting_status: "unverified", automatic_retry_forbidden: true} : {}),
     execution: buildBatchExecutionContract({
       mode,
       summary,
@@ -618,6 +630,9 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
   for (const warning of input.ledgerChecks?.warnings ?? []) {
     warnings.push({ code: "ledger_check_unavailable", message: warning });
   }
+  for (const row of input.ledgerChecks?.unverified ?? []) {
+    warnings.push({code: "ledger_check_unverified", message: `Transaction ${row.transaction_id}${row.journal_id != null ? ` journal ${row.journal_id}` : ""} remains unverified: ${row.reasons.join("; ")}`});
+  }
 
   // Execution errors (indeterminate / failed confirms) surface as blockers —
   // never hidden.
@@ -630,7 +645,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
       item_id: String(failure.transaction_id),
       code: failure.code,
       message: `Transaction ${failure.transaction_id} IS confirmed but its registration journal failed the receipt `
-        + `ledger check (${failure.code}). ${ledgerRepairInstruction(failure.transaction_id)}`,
+        + `ledger check (${failure.code}). ${failure.code === "ledger_client_mismatch" ? ledgerRepairInstruction(failure.transaction_id) : "Review statement and journal direction manually before correction; automatic retry is forbidden."}`,
       severity: "blocker",
     });
   }
@@ -675,7 +690,7 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): { summar
 
   const status = dryRun
     ? "ready_for_approval" as const
-    : (errorCount > 0 ? "partial" as const : "completed" as const);
+    : (errorCount > 0 ? "partial" as const : (input.ledgerChecks?.unverified?.length || input.ledgerChecks?.warnings?.length) ? "needs_review" as const : "completed" as const);
 
   const details = !dryRun && input.operationHandle !== undefined
     ? {

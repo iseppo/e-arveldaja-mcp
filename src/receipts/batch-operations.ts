@@ -7,6 +7,7 @@ import type { Account, PurchaseInvoiceItem, Transaction } from "../types/api.js"
 import { reportProgress } from "../progress.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { snapshotBankTransaction } from "../banking/transaction-material-snapshot.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import { parseDocument } from "../document-parser.js";
@@ -782,6 +783,8 @@ async function processSingleReceipt(
       supplier_resolution: materializedSupplierResolution,
       booking_suggestion: bookingSuggestion,
       created_invoice: created.created_invoice,
+      creation_partial: created.creation_partial,
+      bank_partial: created.bank_partial,
       bank_match: created.bank_match,
       ...(created.possible_duplicate_journal_ids || created.referencing_journal_ids || created.journal_reference_scan_unavailable
         ? {
@@ -885,10 +888,12 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       );
       const ownIbans = await loadOwnIbans(this.api);
       const allTransactions = await this.api.transactions.listAll();
-      const bankTransactions = selectBatchBankTransactions(allTransactions, input.accountsDimensionsId, {
+      const selectedTransactions = selectBatchBankTransactions(allTransactions, input.accountsDimensionsId, {
         ...(input.transactionDateFrom ? { transaction_date_from: input.transactionDateFrom } : {}),
         ...(input.transactionDateTo ? { transaction_date_to: input.transactionDateTo } : {}),
       });
+
+      const bankTransactions = await Promise.all(selectedTransactions.map(tx => this.api.transactions.get(tx.id!)));
 
       // One per-file pass. In dry_run / projection mode it is side-effect-free
       // (createAndMaybeMatchPurchaseInvoice returns a preview before any write),
@@ -946,6 +951,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         const results = await runLoop("dry_run", true, false);
         const mintHandle = (effect: ReceiptBatchExecutionMode): string => {
           const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect);
+          const reviews = receiptEffectReviews(fingerprint);
           const planInput: ExecutionPlanInput = {
             normalizedArgs: fingerprint,
             sourceIdentities: snapshot.manifest.map(entry => ({ relative_path: entry.relative_path, sha256: entry.sha256 })),
@@ -955,11 +961,11 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
               files: snapshot.manifest.length,
               bank_transactions: bankTransactions.length,
             },
-            commands: [{ id: `receipt-batch-${effect}`, category: `receipt_batch_${effect}`, reviewProjection: { execution_effect: effect, files: snapshot.manifest.length } }],
+            commands: [{ id: `receipt-batch-${effect}`, category: `receipt_batch_${effect}`, reviewProjection: { execution_effect: effect, files: snapshot.manifest.length, receipt_effects_section: "reviews", receipt_effects_count: reviews.length } }],
             counts: { files: snapshot.manifest.length },
             totals: {},
             exclusions: [],
-            reviews: [],
+            reviews,
             privatePayload: { schema: "receipt_batch_v1", execution_effect: effect },
           };
           return this.runtimeSafetyContext.planStore.issue(RECEIPT_BATCH_PLAN_DOMAIN, planInput);
@@ -1018,37 +1024,64 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
 function computeBatchFingerprint(
   results: ReceiptBatchFileResult[],
   input: ReceiptBatchRunInput,
-  snapshot: { manifest: { relative_path: string; sha256: string }[] },
+  snapshot: { manifest: { relative_path: string; sha256: string }[]; files: ReceiptFileSnapshot[] },
   bankTransactions: Transaction[],
   effect: ReceiptBatchExecutionMode,
 ): PlanRecord {
-  const files: PlanData[] = results.map(result => stripUndefinedDeep({
-    file: result.file.name,
-    classification: result.classification,
-    status: result.status,
-    supplier_client_id: result.supplier_resolution?.client?.id ?? null,
-    supplier_name: result.supplier_resolution?.client?.name
-      ?? result.supplier_resolution?.preview_client?.name
-      ?? null,
-    booking: result.booking_suggestion
-      ? {
-          article_id: result.booking_suggestion.item?.cl_purchase_articles_id ?? null,
-          account_id: result.booking_suggestion.item?.purchase_accounts_id ?? null,
-          dimension_id: result.booking_suggestion.item?.purchase_accounts_dimensions_id ?? null,
-          liability_account_id: result.booking_suggestion.suggested_liability_account_id ?? null,
-          vat_rate_dropdown: result.booking_suggestion.item?.vat_rate_dropdown ?? null,
-          reversed_vat_id: result.booking_suggestion.item?.reversed_vat_id ?? null,
-        }
-      : null,
-  }));
-  const bankTx: PlanData[] = bankTransactions.map(tx => stripUndefinedDeep({
-    id: tx.id ?? null,
-    status: tx.status ?? null,
-    amount: tx.amount ?? null,
-    base_amount: tx.base_amount ?? null,
-    date: tx.date ?? null,
-    accounts_dimensions_id: tx.accounts_dimensions_id ?? null,
-  }));
+  const files: PlanData[] = results.map((result, index) => {
+    // Bind the row to the actual snapshotted path, never a basename or sorted
+    // manifest position (the manifest and processing order need not agree).
+    const source = snapshot.files.find(entry => entry.file.path === result.file.path);
+    if (!source || !snapshot.manifest.some(entry => entry.relative_path === source.relative_path && entry.sha256 === source.sha256)) {
+      throw new Error("Receipt result has no matching source snapshot");
+    }
+    const supplier = result.supplier_resolution?.client ?? result.supplier_resolution?.preview_client;
+    return stripUndefinedDeep({
+      file_index: index,
+      relative_path: source.relative_path,
+      source_sha256: source.sha256,
+      invoice_number: result.extracted?.invoice_number ?? null,
+      gross_amount: result.extracted?.total_gross ?? null,
+      currency: result.extracted?.currency ?? "EUR",
+      supplier_identity: supplier ? {
+        name: supplier.name ?? null, code: supplier.code ?? null,
+        invoice_vat_no: supplier.invoice_vat_no ?? null,
+        cl_code_country: supplier.cl_code_country ?? null,
+        is_physical_entity: supplier.is_physical_entity ?? null,
+      } : null,
+      file: result.file.name,
+      classification: result.classification,
+      status: result.status,
+      supplier_client_id: result.supplier_resolution?.client?.id ?? null,
+      supplier_name: result.supplier_resolution?.client?.name
+        ?? result.supplier_resolution?.preview_client?.name
+        ?? null,
+      bank_match: result.bank_match ? {
+        transaction_id: result.bank_match.candidate?.transaction_id ?? null,
+        confidence: result.bank_match.candidate?.confidence ?? null,
+        reasons: result.bank_match.candidate?.reasons ?? [],
+        ambiguous: result.bank_match.ambiguous ?? false,
+        top_confidence: result.bank_match.top_confidence ?? null,
+        tied_count: result.bank_match.tied_count ?? 0,
+        cross_currency: result.bank_match.candidate?.reasons.includes("exact_base_amount") && !result.bank_match.candidate.reasons.includes("exact_amount"),
+      } : null,
+      approved_client_transition: result.bank_match?.candidate ? {
+        from: bankTransactions.find(tx => tx.id === result.bank_match!.candidate!.transaction_id)?.clients_id ?? null,
+        to: result.supplier_resolution?.client?.id ?? null,
+      } : null,
+      booking: result.booking_suggestion
+        ? {
+            article_id: result.booking_suggestion.item?.cl_purchase_articles_id ?? null,
+            account_id: result.booking_suggestion.item?.purchase_accounts_id ?? null,
+            dimension_id: result.booking_suggestion.item?.purchase_accounts_dimensions_id ?? null,
+            liability_account_id: result.booking_suggestion.suggested_liability_account_id ?? null,
+            vat_rate_dropdown: result.booking_suggestion.item?.vat_rate_dropdown ?? null,
+            reversed_vat_id: result.booking_suggestion.item?.reversed_vat_id ?? null,
+          }
+        : null,
+    });
+  });
+  const bankTx: PlanData[] = bankTransactions.map(tx => stripUndefinedDeep(snapshotBankTransaction(tx)) as unknown as PlanData);
   return stripUndefinedDeep({
     schema: "receipt_batch_v1",
     execution_effect: effect,
@@ -1065,6 +1098,31 @@ function computeBatchFingerprint(
     files,
     bank_transactions: bankTx,
   }) as PlanRecord;
+}
+
+/** Public approval rows use ONLY the exact values bound into the plan. */
+function receiptEffectReviews(fingerprint: PlanRecord): PlanData[] {
+  const confirm = fingerprint.execution_effect === "create_and_confirm";
+  const banks = fingerprint.bank_transactions as PlanRecord[];
+  return (fingerprint.files as PlanRecord[]).filter(file => file.status === "dry_run_preview").map((file): PlanData => {
+    const invoiceReference = `receipt:${file.file_index}:future_purchase_invoice`;
+    const supplierReference = file.supplier_client_id === null ? `receipt:${file.file_index}:future_supplier` : null;
+    const match = file.bank_match as PlanRecord | null;
+    const bank = match ? banks.find(tx => tx.id === match.transaction_id) : undefined;
+    const eligible = confirm && match && match.ambiguous === false && typeof match.confidence === "number" && match.confidence >= 90 && !match.cross_currency && bank?.status === "PROJECT" && bank.is_deleted === false && bank.trusted_direction === "outgoing" && Array.isArray(bank.invalid) && bank.invalid.length === 0;
+    return {
+      kind: "planned_receipt_effect", file_index: file.file_index!, relative_path: file.relative_path!, source_sha256: file.source_sha256!,
+      invoice_reference: invoiceReference, invoice_number: file.invoice_number!,
+      supplier_client_id: file.supplier_client_id!, supplier_identity: file.supplier_identity!,
+      create_supplier: supplierReference !== null, supplier_reference: supplierReference,
+      gross_amount: file.gross_amount!, currency: file.currency!, create_invoice: true, upload_document: true, confirm_invoice: confirm,
+      bank_confirmation: eligible ? {
+        transaction_id: bank.id!, distribution: { related_table: "purchase_invoices", invoice_reference: invoiceReference, amount: file.gross_amount! },
+        client_transition: supplierReference !== null ? { from: bank.clients_id!, to_supplier_reference: supplierReference }
+          : bank.clients_id === file.supplier_client_id ? null : { from: bank.clients_id!, to: file.supplier_client_id! },
+      } : null,
+    };
+  });
 }
 
 export function createReceiptBatchOperations(

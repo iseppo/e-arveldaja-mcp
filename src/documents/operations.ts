@@ -53,7 +53,9 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Account, CreatePurchaseInvoiceData } from "../types/api.js";
+import type { Account, CreatePurchaseInvoiceData, PurchaseInvoice } from "../types/api.js";
+import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
+import { scanPurchaseIntakeDuplicates, withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
 import type {
   AccountingDocumentBookingFields,
   AccountingDocumentConfirmation,
@@ -696,6 +698,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
     }
     const material = await materializeSnapshot(snapshot, input.source, this.runtimeSafetyContext);
     try {
+      return await withPurchaseInvoiceLock<OperationOutcome<AccountingDocumentExecution>>(this.api, async () => {
       // P0-1 drift gate: recompute the canonical effective model FRESH (live
       // supplier name, live VAT defaults, live dimension validation) and
       // compare it byte-for-byte against the model the operator reviewed at
@@ -723,12 +726,17 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       // Re-check the reviewed supplier+number against FRESH live invoices: one
       // may have been booked between prepare and create — here, in the UI or
       // by another process — so bypass the 120 s list cache.
-      this.api.purchaseInvoices.invalidateListCache();
-      const freshDuplicates = exactLiveSupplierNumberMatches(
-        await this.api.purchaseInvoices.listAll(), invoiceData.clients_id, invoiceNumber,
-      );
-      if (freshDuplicates.length > 0 && !allowDuplicateInvoiceNumber) {
-        return fail("duplicate_purchase_invoice", `A live purchase invoice with the same supplier and invoice number already exists (id ${freshDuplicates.join(", ")}).`, "never");
+      const duplicates = await scanPurchaseIntakeDuplicates(this.api, {
+        supplierClientId: invoiceData.clients_id, invoiceNumber,
+        grossPrice: input.grossPrice, invoiceDate: input.invoiceDate, currency: invoiceData.cl_currencies_id,
+      });
+      if (duplicates.comparisonUnavailable) {
+        return fail("purchase_duplicate_comparison_required",
+          `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}. Supply the original document values and prepare again.`, "never");
+      }
+      if (duplicates.invoiceIds.length > 0 && !(duplicates.kind === "number" && allowDuplicateInvoiceNumber)) {
+        return fail(duplicates.kind === "number" ? "duplicate_purchase_invoice" : "possible_duplicate_purchase_invoice",
+          `A live purchase invoice matches this supplier and ${duplicates.kind === "number" ? "invoice number" : "amount/date"} (id ${duplicates.invoiceIds.join(", ")}).`, "never");
       }
 
       // Cross-mechanism intake duplicate guard — BEFORE any invoice/document
@@ -804,38 +812,54 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         accountId: -1, dimensionId: null, amount: grossAmountEur ?? 0, direction: "C", date: input.invoiceDate,
       };
 
-      // SECOND plan (Step 3): a fresh handle bound to {invoiceId} for the
-      // SEPARATE confirm/link step. The op NEVER confirms/registers here.
+      // Approval two reviews the actual uploaded draft. Never mint authority
+      // from a POST echo or a draft whose readback differs from the write model.
       let confirmPlanHandle: string | undefined;
+      let readbackMismatch: string[] | undefined;
+      let draftReadbackUnavailable = false;
+      let actualDraft: PurchaseInvoice | undefined;
       try {
-        confirmPlanHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, {
-          normalizedArgs: { invoice_id: result.id },
+        this.api.purchaseInvoices.invalidateListCache();
+        actualDraft = await this.api.purchaseInvoices.get(result.id);
+        readbackMismatch = draftReadbackMismatches(actualDraft, invoiceData,
+          { vatPrice: input.vatPrice, grossPrice: input.grossPrice }, isVatReg, accounts);
+        if (actualDraft.id !== result.id) readbackMismatch.push("id");
+        if (actualDraft.status !== "PROJECT") readbackMismatch.push("status");
+        if (readbackMismatch.length === 0) {
+          const confirmArgs = { invoice_id: result.id, draft_fingerprint: draftFingerprint(actualDraft) };
+          confirmPlanHandle = this.runtimeSafetyContext.planStore.issue(ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN, {
+          normalizedArgs: confirmArgs,
           sourceIdentities: [],
           liveSnapshot: { invoice_id: result.id },
-          commands: [{ id: "accounting-document-confirm", category: "purchase_invoice_confirm", reviewProjection: { invoice_id: result.id } }],
+          commands: [{ id: "accounting-document-confirm", category: "purchase_invoice_confirm", reviewProjection: confirmArgs }],
           counts: {},
           totals: {},
           exclusions: [],
           reviews: [],
           privatePayload: { invoice_id: result.id },
         });
+        }
       } catch {
         // Fail-safe: the invoice already exists; a plan-mint failure degrades to
         // no confirm handle rather than failing a completed mutation.
         confirmPlanHandle = undefined;
+        draftReadbackUnavailable = actualDraft === undefined;
       }
 
       const execution: AccountingDocumentExecution = {
         createdInvoiceId: result.id,
         documentUploaded: true,
-        result,
+        result: actualDraft ?? result,
         duplicateScan,
         duplicateCandidate,
         ...(duplicateScan.suspects.length > 0 ? { possibleDuplicatePostings: duplicateScan.suspects } : {}),
         journalReferenceScan,
         ...(confirmPlanHandle ? { confirmPlan: { planHandle: confirmPlanHandle, invoiceId: result.id } } : {}),
+        ...(readbackMismatch?.length ? { readbackMismatch } : {}),
+        ...(draftReadbackUnavailable ? { draftReadbackUnavailable: true as const } : {}),
       };
       return ok(execution);
+      });
     } finally {
       await material.cleanup();
     }
@@ -843,9 +867,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
 
   // Step 3 — the SEPARATE confirm/link step. Consumes the confirm plan minted by
   // create (ACCOUNTING_DOCUMENT_CONFIRM_DOMAIN) and registers the DRAFT invoice.
-  // Confirm operates purely on the reviewed invoice id: it NEVER re-reads the
-  // source or re-runs extraction. Mirrors the consume-once + plan-drift-binding
-  // template in src/sales/invoice-operations.ts execute().
+  // Confirm compares the reviewed actual draft with fresh reads. It never
+  // re-reads the source or re-runs extraction.
   async confirmDraft(input: ConfirmAccountingDocumentInput): Promise<OperationOutcome<AccountingDocumentConfirmation>> {
     // Consume the reviewed confirm plan (consume-once). A missing/replayed/invalid
     // handle is a HARD fail-closed error — the plan handle is NOT itself approval.
@@ -860,19 +883,25 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       return fail(code, "The reviewed confirm plan could not be consumed.", "never");
     }
 
-    // Plan-drift binding: the confirm plan's normalizedArgs is { invoice_id }.
-    // Bind the consumed plan to the requested invoice_id — without this, one
-    // approved create's confirm handle could confirm an arbitrary invoice id.
-    // Rejected with ZERO API side effect BEFORE any register call.
-    if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson({ invoice_id: input.invoiceId })) {
+    const planned = storedPlan.normalizedArgs;
+    if (planned.invoice_id !== input.invoiceId || typeof planned.draft_fingerprint !== "string") {
       return fail("plan_drift", "The reviewed confirm plan no longer matches the requested invoice_id.", "never");
     }
+
+    return withPurchaseInvoiceLock<OperationOutcome<AccountingDocumentConfirmation>>(this.api, async () => {
+    const readReviewedDraft = async (): Promise<PurchaseInvoice | undefined> => {
+      this.api.purchaseInvoices.invalidateListCache();
+      try {
+        const draft = await this.api.purchaseInvoices.get(input.invoiceId);
+        return draft.id === input.invoiceId && draft.status === "PROJECT" && draftFingerprint(draft) === planned.draft_fingerprint ? draft : undefined;
+      } catch { return undefined; }
+    };
+    const draft = await readReviewedDraft();
+    if (!draft) return fail("draft_changed", "The reviewed draft changed or could not be read. Review the existing invoice in e-arveldaja or use get_purchase_invoice and explicitly confirm it after a new review; do not create it again.", "never");
 
     // GitHub #63 (P4): a non-VAT draft is read fresh; one carrying a VAT account
     // registers only when the non-deductible proof accepts it on a fresh chart.
     if (!(await isCompanyVatRegistered(this.api))) {
-      this.api.purchaseInvoices.invalidateListCache();
-      const draft = await this.api.purchaseInvoices.get(input.invoiceId);
       if ((draft.items ?? []).some(hasVatAccountFields)) {
         const refusal = nonVatRegisterRefusal(draft, await this.api.readonly.getAccounts({ fresh: true }));
         if (refusal !== undefined) {
@@ -883,6 +912,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
     }
 
+    // Prerequisite lookups may await: compare once more at the register boundary.
+    if (!(await readReviewedDraft())) return fail("draft_changed", "The draft changed after the confirmation review or could not be read; review the existing draft again before confirming it.", "never");
     // Register via the same API confirm_purchase_invoice uses (PATCH .../register).
     const result = await this.api.purchaseInvoices.confirm(input.invoiceId);
     logAudit({
@@ -922,6 +953,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       ...(echoedGross !== undefined ? { echoedGross } : {}),
       ...(echoedCurrency !== undefined ? { echoedCurrency } : {}),
       ...(echoedBaseGross !== undefined ? { echoedBaseGross } : {}),
+    });
     });
   }
 }

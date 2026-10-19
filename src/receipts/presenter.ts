@@ -168,7 +168,9 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
     ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
     ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
     ...(row.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),
-    ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "confirmed"]) } : {}),
+    ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "status", "confirmed"]) } : {}),
+    ...(row.bank_partial !== undefined ? { bank_partial: row.bank_partial } : {}),
+    ...(row.creation_partial !== undefined ? { creation_partial: row.creation_partial } : {}),
     ...(totals !== undefined && Object.keys(totals).length > 0 ? { extracted: totals } : {}),
   };
 }
@@ -406,9 +408,10 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
   // where confirmation was attempted. In plain `create` mode leaving invoices
   // unconfirmed is by design (creation and confirmation are separate approvals),
   // so it is never counted as a partial mutation.
-  const partialMutations = !dryRun && executionMode === "create_and_confirm"
-    ? results.filter(row => row.created_invoice !== undefined && row.created_invoice.confirmed !== true).length
-    : 0;
+  const partialCreations = !dryRun ? results.filter(row => row.creation_partial !== undefined).length : 0;
+  const unconfirmed = !dryRun && executionMode === "create_and_confirm"
+    ? results.filter(row => !row.creation_partial && row.created_invoice !== undefined && row.created_invoice.confirmed !== true).length : 0;
+  const partialMutations = partialCreations + unconfirmed;
 
   const counts: Record<string, number> = {
     scanned: summary.scanned_files,
@@ -503,20 +506,37 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
 
   // Blockers are NEVER hidden: processing failures and (for create_and_confirm)
   // created-but-not-confirmed invoices both surface here.
-  const blockers: CompactReviewItem[] = [];
+  const blockers: Array<CompactReviewItem & { creation_partial?: ReceiptBatchFileResult["creation_partial"] }> = [];
+  for (const [index, row] of results.entries()) {
+    if (!row.creation_partial) continue;
+    const partial = sanitizeReceiptResultForOutput(row).creation_partial!;
+    blockers.push({ item_id: partial.created_invoice_id !== undefined ? `invoice-${partial.created_invoice_id}` : `receipt-creation-${index}`, code: "receipt_creation_partial", severity: "blocker",
+      message: partial.created_invoice_id !== undefined
+        ? `Invoice ${partial.created_invoice_id} was created but follow-up failed; cleanup ${partial.cleanup}. Inspect this known invoice before any new preview. Automatic retry is forbidden.`
+        : "Receipt creation may have committed, but no invoice ID is known. Reconcile supplier, invoice number, date and gross against live invoices before a new preview. Automatic retry is forbidden.",
+      creation_partial: partial,
+    });
+  }
+  for (const row of results) {
+    if (!row.bank_partial) continue;
+    const partial = row.bank_partial;
+    blockers.push({ item_id: `invoice-${row.created_invoice?.id}`, code: partial.category, severity: "blocker",
+      message: `Invoice ${row.created_invoice?.id} retained unlinked; transaction ${partial.transaction_id} held (${partial.changed_fields.join(", ")}). ${partial.client_update ? `Client changed from ${partial.client_update.from} to ${partial.client_update.to}.` : partial.mutation_may_have_occurred ? "Client update may have occurred." : "No bank client update occurred."} Fresh review required; do not retry automatically.` });
+  }
   if (!dryRun && summary.failed > 0) {
     blockers.push({
       item_id: "receipt-batch",
       code: "receipt_processing_failed",
-      message: `${summary.failed} receipt(s) failed to process. Re-preview before retrying; a prior preview is not approval.`,
+      message: partialCreations > 0 ? `${summary.failed} receipt(s) failed to process. Inspect known created invoice IDs and cleanup outcomes; do not recreate automatically.`
+        : `${summary.failed} receipt(s) failed to process. Re-preview before retrying; a prior preview is not approval.`,
       severity: "blocker",
     });
   }
-  if (partialMutations > 0) {
+  if (unconfirmed > 0) {
     blockers.push({
       item_id: "receipt-batch-partial",
       code: "created_not_confirmed",
-      message: `${partialMutations} invoice(s) were created but not confirmed. Confirm them separately — creation and confirmation are distinct approvals.`,
+      message: `${unconfirmed} invoice(s) were created but not confirmed. Confirm them separately — creation and confirmation are distinct approvals.`,
       severity: "blocker",
     });
   }

@@ -13,7 +13,7 @@ User-facing phases:
 Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: the unconfirmed (PROJECT) records surfaced as blockers below are not yet in the ledger, so the computed statements do not reflect them until they are confirmed.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
-If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` once before Step 1 (or pass `fresh: true` to each report tool below).
+If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, call `clear_cache` once before Step 1.
 <!-- E_ARVELDAJA_FEATURE_END:standard -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
 Reports read through a short-lived cache (a few minutes): if the user just changed data in the e-arveldaja web UI, say the figures may lag those edits briefly.
@@ -36,6 +36,9 @@ Present in priority order:
 1. Unconfirmed purchase invoices — not registered in the ledger
 2. Unconfirmed journal entries — adjustments not posted
 3. Unconfirmed bank transactions — cash not reconciled
+4. Unconfirmed sale invoices, whenever returned — revenue not recorded
+
+Report ALL returned blocker lists, including `unconfirmed_sale_invoices`, regardless of which confirmation actions this profile exposes. Determine sales coverage by the PRESENCE of `unconfirmed_sale_invoices`, even when its count is zero; absence means a purchase-side check only. A returned `ready_to_close: false` always means HAS BLOCKERS. Never convert it to READY because a blocker lacks an available action. Show overdue receivables as a warning whenever returned.
 
 For blockers, show ID, date, amount/title, then offer concrete inline actions. If there are many blockers of the same low-risk type, show the first 10 plus counts and ask for one batch approval with exceptions instead of one yes/no question per item. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
 
@@ -48,6 +51,7 @@ Inline actions per blocker type:
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
 - Transactions: run the **Reconcile Bank** workflow (`reconcile_bank_transactions`), and the **Classify Unmatched** workflow for rows with no invoice match
 - Purchase-invoice and journal drafts: this profile cannot confirm or delete an existing draft outside the document flow that created it. List them with their IDs and tell the user that the `standard` or `full` profile (`EARVELDAJA_PROFILE`) confirms them inline; the web UI is the fallback.
+- If sales blockers are returned and no sales confirmation action is available, still show their IDs, dates and amounts; suggest a new review on `guided-sales`, `standard` or `full`.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 **WARNINGS (review but may not block close):**
@@ -56,15 +60,11 @@ Inline actions per blocker type:
 
 <!-- E_ARVELDAJA_FEATURE_START:sales -->
 **Sales-side extension:**
-- Treat **Unconfirmed sale invoices** as blockers because revenue is not recorded.
 - Show each sale-invoice ID, date, and amount, and offer `confirm_sale_invoice` as the inline action.
-- Report **Overdue receivables** as a warning that may need follow-up or a doubtful-debt provision.
 <!-- E_ARVELDAJA_FEATURE_END:sales -->
 <!-- E_ARVELDAJA_FEATURE_START:guided-sales -->
 **Sales-side extension:**
-- Treat **Unconfirmed sale invoices** as blockers because revenue is not recorded.
 - Show each sale-invoice ID, date, and amount, and offer to confirm it with `manage_sale_invoice` (`action: "confirm"`: `mode: "prepare"` first, then `mode: "execute"` with the returned `plan_handle` after explicit approval).
-- Report **Overdue receivables** as a warning that may need follow-up or a doubtful-debt provision.
 <!-- E_ARVELDAJA_FEATURE_END:guided-sales -->
 
 ## Step 3: Check for missing documents
@@ -123,6 +123,7 @@ Verify balanced (assets = liabilities + equity).
 Month-End Close: YYYY-MM
 ================================
 Blockers:        X issues
+Coverage:        Purchase-side only / Purchases and sales read
 Warnings:        X items
 Missing docs:    X records
 Duplicates:      X found (or "not checked" when Step 4 did not run)
@@ -131,7 +132,7 @@ Trial Balance:   BALANCED / IMBALANCED by X EUR
 Balance Sheet:   BALANCED / IMBALANCED
 YTD Net Profit:  X.XX EUR
 
-Status: READY TO CLOSE / HAS BLOCKERS
+Status: READY TO CLOSE (within the checked coverage) / HAS BLOCKERS
 ```
 
 If blockers exist, list specific actions needed. Offer to help fix them.

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PurchaseInvoicesApi, previewPurchaseInvoiceTotals } from "./purchase-invoices.api.js";
 import { cache } from "./base-resource.js";
 import { HttpError, type HttpClient } from "../http-client.js";
+import { draftFingerprint } from "../documents/purchase-draft-verification.js";
 
 vi.mock("../logger.js", () => ({ log: vi.fn() }));
 vi.mock("../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
@@ -56,6 +57,55 @@ function h05Api(get: ReturnType<typeof vi.fn>) {
   } as any);
   return { api, patch };
 }
+
+describe("reviewed PDF draft register guard", () => {
+  beforeEach(() => cache.invalidate());
+  it.each([
+    { clients_id: 99 }, { notes: "changed" }, { gross_price: 777 },
+    { currency_rate: 2 }, { future_material_field: "changed" },
+    { status: "CONFIRMED" }, { id: 2 },
+    { items: [{ ...h05Invoice().items[0], purchase_accounts_id: 999 }] },
+    { items: [{ ...h05Invoice().items[0], purchase_accounts_dimensions_id: 123 }] },
+  ])("refuses material drift %j without register", async change => {
+    const draft = h05Invoice();
+    const { api, patch } = h05Api(vi.fn().mockResolvedValue({ ...draft, ...change }));
+    await expect(api.confirmWithTotals(1, true, { expectedDraftFingerprint: draftFingerprint(draft as any) } as any))
+      .rejects.toMatchObject({ code: "draft_changed" });
+    expect(patch).not.toHaveBeenCalled();
+  });
+  it("reads fresh before register, ignoring a stale per-ID cache", async () => {
+    const draft = h05Invoice();
+    const get = vi.fn().mockResolvedValue(draft);
+    const { api, patch } = h05Api(get);
+    await api.get(1);
+    get.mockResolvedValue({ ...draft, notes: "backend drift" });
+    await expect(api.confirmWithTotals(1, true, { expectedDraftFingerprint: draftFingerprint(draft as any) } as any))
+      .rejects.toMatchObject({ code: "draft_changed" });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(patch).not.toHaveBeenCalled();
+  });
+  it("registers the unchanged actual draft once", async () => {
+    const draft = h05Invoice();
+    const { api, patch } = h05Api(vi.fn().mockResolvedValue(draft));
+    await api.confirmWithTotals(1, true, { expectedDraftFingerprint: draftFingerprint(draft as any) } as any);
+    expect(patch).toHaveBeenCalledExactlyOnceWith("/purchase_invoices/1/register", {});
+  });
+  it("classifies read failure before register", async () => {
+    const { api, patch } = h05Api(vi.fn().mockRejectedValue(new Error("read unavailable")));
+    await expect(api.confirmWithTotals(1, true, { expectedDraftFingerprint: "a".repeat(64) } as any))
+      .rejects.toMatchObject({ code: "draft_readback_unavailable" });
+    expect(patch).not.toHaveBeenCalled();
+  });
+  it("invalidateListCache also invalidates cached individual invoices", async () => {
+    const get = vi.fn().mockResolvedValue(h05Invoice());
+    const { api } = h05Api(get);
+    await api.get(1);
+    get.mockResolvedValue(h05Invoice({ notes: "fresh" }));
+    api.invalidateListCache();
+    expect(await api.get(1)).toMatchObject({ notes: "fresh" });
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+});
 
 describe("H05 default preservation", () => {
   beforeEach(() => cache.invalidate());

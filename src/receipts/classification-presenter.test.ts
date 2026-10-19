@@ -235,6 +235,18 @@ describe("classification apply compact", () => {
     expect(compact.summary.blockers![0]!.severity).toBe("blocker");
     expect(compact.summary.counts!.partial_mutations).toBe(1);
   });
+  it("preserves drift fields, held status and exact client write in full/compact output",()=>{
+    const result=baseApply();
+    const partial=result.results[0]!.partial_mutations![0]!;
+    partial.category="mutation_failed";partial.failed_stage="transaction_drift";partial.changed_fields=["ref_number"];
+    partial.bank_partial={transaction_id:1,category:"transaction_material_drift",register_attempted:false,mutation_occurred:true,changed_fields:["ref_number"],known_objects:[{entity_type:"transaction",entity_id:1,outcome:"updated"}],client_update:{from:99,to:7,outcome:"updated"},automatic_retry_forbidden:true,fresh_preview_required:true};
+    const compact=renderApplyClassificationsCompact({result,classificationsJson:{groups:[]}});
+    expect(compact.summary.blockers![0]!.message).toContain("CONFIRMED");
+    expect(compact.summary.blockers![0]!.message).toContain("ref_number");
+    expect(compact.summary.blockers![0]!.message).toContain("Client changed from 99 to 7");
+    const full=renderApplyClassificationsFull({result,classificationsJson:{groups:[]}}) as any;
+    expect(full.results[0].partial_mutations[0]).toEqual(partial);
+  });
 
   it("partial-mutation blocker wording is profile-correct (guided names only registered tools)", async () => {
     const render = () => renderApplyClassificationsCompact({ result: baseApply(), classificationsJson: { groups: [] } })

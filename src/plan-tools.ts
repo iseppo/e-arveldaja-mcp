@@ -61,7 +61,7 @@ function decodeCursor(secret: Buffer, handle: string, section: PlanPageSection, 
   const match = CURSOR_PATTERN.exec(cursor);
   if (!match) throw new PlanCursorError();
   const offset = Number(match[1]);
-  if (!Number.isSafeInteger(offset) || offset <= 0 || offset % EXECUTION_PLAN_PAGE_SIZE !== 0 || offset >= total) {
+  if (!Number.isSafeInteger(offset) || offset <= 0 || offset >= total) {
     throw new PlanCursorError();
   }
   const received = Buffer.from(match[2]!, "base64url");
@@ -182,9 +182,9 @@ export function createExecutionPlanPageHandler(
       const sectionValues = section === "commands" ? plan.commands : plan[section];
       const sectionTotal = sectionValues.length;
       const offset = decodeCursor(cursorSecret, plan_handle, section, cursor, sectionTotal);
-      const end = Math.min(offset + EXECUTION_PLAN_PAGE_SIZE, sectionTotal);
+      const maximumEnd = Math.min(offset + EXECUTION_PLAN_PAGE_SIZE, sectionTotal);
       const commands = section === "commands"
-        ? plan.commands.slice(offset, end).map(command => Object.freeze({
+        ? plan.commands.slice(offset, maximumEnd).map(command => Object.freeze({
           command_id: command.id,
           category: command.category,
           review_data: sandboxExternalText(canonicalJson(command.reviewProjection ?? null)),
@@ -192,10 +192,11 @@ export function createExecutionPlanPageHandler(
         : undefined;
       const items = section === "commands"
         ? undefined
-        : plan[section].slice(offset, end).map(item => Object.freeze({
+        : plan[section].slice(offset, maximumEnd).map(item => Object.freeze({
           review_data: sandboxExternalText(canonicalJson(item)),
         }));
-      const payload = Object.freeze({
+      let end = maximumEnd;
+      const build = () => Object.freeze({
         contract: "execution_plan_page_v1" as const,
         plan_handle,
         plan_schema: plan.schema,
@@ -224,14 +225,17 @@ export function createExecutionPlanPageHandler(
             }),
           }),
         }),
-        ...(commands ? { commands: Object.freeze(commands) } : {}),
-        ...(items ? { items: Object.freeze(items) } : {}),
+        ...(commands ? { commands: Object.freeze(commands.slice(0, end - offset)) } : {}),
+        ...(items ? { items: Object.freeze(items.slice(0, end - offset)) } : {}),
       });
-      // Every profile's pager must enforce the hard budget. The standard/full
-      // pager is fixed-stride (50 per page, cursor offsets are multiples of the
-      // page size), so it cannot shrink a page the way the guided pager does;
-      // an oversized fixed page is a structured `response_budget_exceeded` error
-      // rather than a silently over-budget response.
+      // Keep existing 50-row pages whenever they fit. A signed cursor binds the
+      // actual end offset, so large approval rows can shrink without omissions.
+      // An indivisible oversized row still fails closed.
+      let payload = build();
+      while (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard && end > offset + 1) {
+        end -= 1;
+        payload = build();
+      }
       if (mcpPayloadBytes(payload) > RESPONSE_BUDGETS.detail.hard) throw new ResponseBudgetError();
       return { content: [{ type: "text", text: toMcpJson(payload) }] };
     } catch (error) {
@@ -246,7 +250,7 @@ export function registerPlanTools(server: McpServer, runtimeSafetyContext: Runti
   const guided = profile === "guided" || profile === "guided-sales";
   const description = guided
     ? "Retrieve one bounded, caller-sized, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval."
-    : "Retrieve one fixed-size, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.";
+    : "Retrieve one bounded, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.";
   const standardSchema = {
       plan_handle: z.string().regex(HANDLE_PATTERN).describe("Canonical opaque server-issued execution plan handle"),
       section: z.enum(["commands", "exclusions", "reviews"]).optional()

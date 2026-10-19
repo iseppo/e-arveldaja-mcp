@@ -66,7 +66,7 @@ function setupReconciliationTool(options: {
     journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
-
+  for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices]) resource.get = vi.fn(async (id: number) => (await resource.listAll()).find((row: any) => row.id === id));
   registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === (options.toolName ?? "reconcile_transactions"));
@@ -107,16 +107,29 @@ function setupInterAccountTool(options: {
   toolName?: string;
 } = {}) {
   const server = { registerTool: vi.fn() } as any;
+  const rows = (options.transactions ?? []).map((tx: any) => ({accounts_id:1020, ...tx}));
+  const updated = new Map<number, Record<string, unknown>>();
+  const confirmed = new Map<number, any[]>();
+  const actualJournals: any[] = [];
   const api = {
     transactions: {
       invalidateListCache: vi.fn(),
-      listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
+      listAll: vi.fn().mockResolvedValue(rows),
       get: vi.fn().mockImplementation(async (id: number) => {
-        const tx = (options.transactions ?? []).find((t: any) => t.id === id) as any;
-        return tx ?? { id, clients_id: null };
+        const tx = rows.find((t: any) => t.id === id) as any;
+        return {...tx, ...updated.get(id), ...(confirmed.has(id) ? {status:"CONFIRMED",items:confirmed.get(id)} : {})};
       }),
-      update: vi.fn().mockResolvedValue({}),
-      confirm: vi.fn().mockResolvedValue({}),
+      update: vi.fn(async (id: number, body: any) => {updated.set(id, body); return {};}),
+      confirm: vi.fn(async (id: number, distributions: any[]) => {
+        const tx = rows.find((row: any) => row.id === id)!;
+        confirmed.set(id, distributions.map(row => ({accounts_id:row.related_id, accounts_dimensions_id:row.related_sub_id, amount:row.amount, base_amount:row.amount, cl_currencies_id:"EUR"})));
+        const incoming = /(?:dir|d)=CRDT/.test(String(tx.description));
+        actualJournals.push({id:900000+id,operation_type:"TRANSACTION",operations_id:id,registered:true,is_deleted:false,postings:[
+          {accounts_id:tx.accounts_id,accounts_dimensions_id:tx.accounts_dimensions_id,type:incoming?"D":"C",amount:distributions[0]!.amount},
+          {accounts_id:distributions[0]!.related_id,accounts_dimensions_id:distributions[0]!.related_sub_id,type:incoming?"C":"D",amount:distributions[0]!.amount},
+        ]});
+        return {};
+      }),
       delete: vi.fn().mockResolvedValue({}),
     },
     saleInvoices: {
@@ -129,7 +142,7 @@ function setupInterAccountTool(options: {
     },
     journals: {
       invalidateListCache: vi.fn(),
-      listAllWithPostings: vi.fn().mockResolvedValue(options.journals ?? []),
+      listAllWithPostings: vi.fn(async () => [...(options.journals ?? []),...actualJournals]),
     },
     clients: {
       findByName: vi.fn().mockResolvedValue([{ id: 99, name: options.companyName ?? "Test OÜ" }]),
@@ -364,7 +377,7 @@ describe("reconcile_transactions", () => {
       expect(payload.result.mode).toBe("EXECUTED");
       expect(api.transactions.confirm).toHaveBeenCalledWith(3, [
         { related_table: "sale_invoices", related_id: 12, amount: 200 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     });
 
     it("runs inter-account transfer detection in dry-run mode", async () => {
@@ -714,7 +727,7 @@ function createAutoConfirmApi(rawOptions: {
     sales: withLiveCurrency(rawOptions.sales),
     purchases: withLiveCurrency(rawOptions.purchases),
   };
-  return {
+  const api: any = {
     transactions: {
       invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.transactions ?? []),
@@ -741,6 +754,14 @@ function createAutoConfirmApi(rawOptions: {
     journals: { invalidateListCache: vi.fn(), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
+  for (const resource of [api.saleInvoices, api.purchaseInvoices]) resource.get = vi.fn(async (id: number) => (await resource.listAll()).find((row: any) => row.id === id));
+  const clientUpdates = new Map<number, number>();
+  api.transactions.get.mockImplementation(async (id: number) => {
+    const row = (await api.transactions.listAll()).find((tx: any) => tx.id === id);
+    return clientUpdates.has(id) ? {...row, clients_id: clientUpdates.get(id)} : row;
+  });
+  api.transactions.update.mockImplementation(async (id: number, body: any) => {clientUpdates.set(id, body.clients_id); return {};});
+  return api;
 }
 
 function setupAutoConfirmTool(options: {
@@ -907,7 +928,7 @@ describe("auto_confirm_exact_matches", () => {
     });
     expect(api.transactions.confirm).toHaveBeenCalledWith(2, [
       { related_table: "sale_invoices", related_id: 11, amount: 200 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
   });
 
   it("skips partially paid invoices", async () => {
@@ -961,7 +982,7 @@ describe("auto_confirm_exact_matches", () => {
     expect(payload.results[0]!.status).toBe("confirmed");
     expect(api.transactions.confirm).toHaveBeenCalledWith(7, [
       { related_table: "sale_invoices", related_id: 16, amount: 150 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
   });
 
   it("does not auto-confirm explicit incoming transactions against purchase invoices", async () => {
@@ -1135,6 +1156,7 @@ describe("bank_reconciliation plan binding", () => {
     api.saleInvoices.listAll
       .mockResolvedValueOnce([{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }])
       .mockResolvedValue([]);
+    api.saleInvoices.get.mockResolvedValue({id:10,status:"CONFIRMED",payment_status:"NOT_PAID",number:"ARV-10",clients_id:20,gross_price:100,bank_ref_number:"RF1",cl_currencies_id:"EUR"});
     const handle = await issueAutoConfirmPlanHandle(handler, {});
     const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
     expect(res.category).toBe("plan_drift");
@@ -1153,7 +1175,7 @@ describe("bank_reconciliation plan binding", () => {
     expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 55 });
     expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
       { related_table: "sale_invoices", related_id: 10, amount: 100 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     const completedIds = res.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
     expect(completedIds).toContain("recon-update-client-tx-1");
     expect(completedIds).toContain("recon-confirm-invoice-tx-1");
@@ -1168,12 +1190,12 @@ describe("bank_reconciliation plan binding", () => {
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
     // The transaction is confirmed out from under the reviewed plan before its mutate.
-    api.transactions.get.mockResolvedValue({ ...tx, status: "CONFIRMED" });
     const handle = await issueAutoConfirmPlanHandle(handler, {});
+    api.transactions.get.mockResolvedValueOnce({...tx, cl_currencies_id:"EUR"}).mockResolvedValue({ ...tx, cl_currencies_id:"EUR", status: "CONFIRMED" });
     const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
 
     expect(res.execution.execution_report.status).toBe("plan_drift");
-    expect(res.execution.execution_report.stop_reason.code).toBe("transaction_not_project");
+    expect(res.execution.execution_report.stop_reason.code).toBe("transaction_material_drift");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
@@ -1226,7 +1248,7 @@ describe("bank_reconciliation plan binding", () => {
     const out = done.pairs[0].outgoing_transaction_id as number;
     const inc = done.pairs[0].incoming_transaction_id as number;
     expect(api.transactions.update).toHaveBeenCalledWith(out, { clients_id: 99 });
-    expect(api.transactions.confirm).toHaveBeenCalledWith(out, expect.any(Array), { autoFixClientsId: false });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(out, expect.any(Array), expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     expect(api.transactions.delete).toHaveBeenCalledWith(inc);
     const completedIds = done.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
     expect(completedIds).toContain(`recon-update-client-tx-${out}`);
@@ -1471,7 +1493,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(111, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     expect(api.transactions.delete).toHaveBeenCalledTimes(1);
     expect(api.transactions.delete).toHaveBeenCalledWith(112);
   });
@@ -1749,7 +1771,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(api.transactions.confirm).toHaveBeenCalledWith(131, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 500 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(api.transactions.delete).toHaveBeenCalledWith(132);
     });
   });
@@ -1766,7 +1788,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.matched_pairs).toBe(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(141, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 92 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
   });
 
   it("does not pair or one-side-match reciprocal same-type transfers when base amounts conflict", async () => {
@@ -2158,7 +2180,7 @@ describe("reconcile_inter_account_transfers", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(11, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 750 },
-    ], { autoFixClientsId: false });
+    ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     // Incoming deleted (NOT confirmed) — exactly one delete call on the mirror.
     expect(api.transactions.delete).toHaveBeenCalledTimes(1);
     expect(api.transactions.delete).toHaveBeenCalledWith(12);
@@ -2179,12 +2201,12 @@ describe("reconcile_inter_account_transfers", () => {
 
     expect(payload.pairs[0]!.status).toBe("confirmed");
     expect(payload.pairs[0]!.incoming_action).toBe("orphan");
-    expect(payload.pairs[0]!.incoming_note).toMatch(/Manually delete 22/);
+    expect(payload.pairs[0]!.incoming_note).toMatch(/row 22 was retained/);
     expect(payload.errors).toHaveLength(1);
     expect(payload.summary.error_count).toBe(1);
     // Outgoing stays confirmed — no rollback on delete failure; the journal is correct.
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
-    expect(api.transactions.confirm).toHaveBeenCalledWith(21, expect.any(Array), { autoFixClientsId: false });
+    expect(api.transactions.confirm).toHaveBeenCalledWith(21, expect.any(Array), expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
   });
 
   it("does not double-match a transaction", async () => {
@@ -2542,7 +2564,7 @@ describe("reconcile_inter_account_transfers", () => {
 
       expect(api.transactions.confirm).toHaveBeenCalledWith(24, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 750 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     });
 
     it("skips one-sided transfer when already journalized from other side", async () => {
@@ -2813,7 +2835,7 @@ describe("reconcile_inter_account_transfers", () => {
         target_account: "LHV", target_dimension_id: 100, status: "would_confirm",
       });
       expect(dryPayload.execution.results[0]).toMatchObject(dryPayload.one_sided[0]);
-      expect(dry.api.transactions.get).not.toHaveBeenCalled();
+      expect(dry.api.transactions.get).toHaveBeenCalled();
       expect(dry.api.transactions.update).not.toHaveBeenCalled();
       expect(dry.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -2828,7 +2850,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
       expect(execute.api.transactions.confirm).toHaveBeenCalledWith(8101, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 90 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
         summary: "Confirmed one-sided inter-account transfer 90 EUR (Wise -> LHV)",
         details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-10" },
@@ -2855,7 +2877,7 @@ describe("reconcile_inter_account_transfers", () => {
         source_account: "Wise", source_dimension_id: 300,
         target_account: "LHV", target_dimension_id: 100,
       });
-      expect(handled.api.transactions.get).not.toHaveBeenCalled();
+      expect(handled.api.transactions.get).toHaveBeenCalled();
       expect(handled.api.transactions.update).not.toHaveBeenCalled();
       expect(handled.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -2874,7 +2896,7 @@ describe("reconcile_inter_account_transfers", () => {
         source_dimension_id: 300, target_dimension_id: 100,
       });
       expect(mergedPayload.result.execution.results[0]).toMatchObject(mergedPayload.result.one_sided[0]);
-      expect(merged.api.transactions.get).not.toHaveBeenCalled();
+      expect(merged.api.transactions.get).toHaveBeenCalled();
       expect(merged.api.transactions.update).not.toHaveBeenCalled();
       expect(merged.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -2905,7 +2927,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
       expect(execute.api.transactions.confirm).toHaveBeenCalledWith(8201, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 300, amount: 90 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
         summary: "Confirmed one-sided inter-account transfer 90 EUR (LHV -> Wise)",
         details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-11" },
@@ -2932,7 +2954,7 @@ describe("reconcile_inter_account_transfers", () => {
         source_account: "LHV", source_dimension_id: 100,
         target_account: "Wise", target_dimension_id: 300,
       });
-      expect(handled.api.transactions.get).not.toHaveBeenCalled();
+      expect(handled.api.transactions.get).toHaveBeenCalled();
       expect(handled.api.transactions.update).not.toHaveBeenCalled();
       expect(handled.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -2974,7 +2996,7 @@ describe("reconcile_inter_account_transfers", () => {
         expect(executePayload.execution.results[0]).toMatchObject(executePayload.one_sided[0]);
         expect(execute.api.transactions.confirm).toHaveBeenCalledWith(direction.id, [
           { related_table: "accounts", related_id: 1020, related_sub_id: direction.target, amount: 90 },
-        ], { autoFixClientsId: false });
+        ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
         expect(mockedLogAudit).toHaveBeenCalledWith(expect.objectContaining({
           summary: `Confirmed one-sided inter-account transfer 90 EUR (${direction.sourceTitle} -> ${direction.targetTitle})`,
           details: { amount: 100, currency: "USD", amount_eur: 90, date: "2026-07-12" },
@@ -3023,7 +3045,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(run.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.confirm).toHaveBeenCalledWith(8401, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 90 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(payload.one_sided[0]).toMatchObject({
         transaction_id: 8401, amount: 100, currency: "USD", amount_eur: 90, status: "confirmed",
       });
@@ -3101,14 +3123,14 @@ describe("reconcile_inter_account_transfers", () => {
       );
       // Plan model: the client-update and the confirm each recheck the tx
       // against a fresh read immediately before their own mutate.
-      expect(smallOneCent.api.transactions.get).toHaveBeenCalledTimes(2);
+      expect(smallOneCent.api.transactions.get.mock.calls.length).toBeGreaterThanOrEqual(4);
       expect(smallOneCent.api.transactions.get).toHaveBeenCalledWith(8404);
       expect(smallOneCent.api.transactions.update).toHaveBeenCalledTimes(1);
       expect(smallOneCent.api.transactions.update).toHaveBeenCalledWith(8404, { clients_id: 99 });
       expect(smallOneCent.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(smallOneCent.api.transactions.confirm).toHaveBeenCalledWith(8404, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 0.07 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(smallAuditCalls).toHaveLength(1);
       expect(smallAuditCalls[0]![0].summary).toBe(
         "Confirmed one-sided inter-account transfer 0.07 EUR (Wise -> LHV)",
@@ -3126,7 +3148,7 @@ describe("reconcile_inter_account_transfers", () => {
         transaction_ids: [8406], code: "one_sided_eur_amount_conflict",
         reason: "The one-sided transfer EUR amount evidence conflicts by more than one cent.",
       }]);
-      expect(smallTwoCent.api.transactions.get).not.toHaveBeenCalled();
+      expect(smallTwoCent.api.transactions.get).toHaveBeenCalled();
       expect(smallTwoCent.api.transactions.update).not.toHaveBeenCalled();
       expect(smallTwoCent.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -3205,7 +3227,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.execution.skipped).toEqual(expect.arrayContaining([
         expect.objectContaining({ transaction_id: 8502, amount: 100, currency: "USD", amount_eur: 90 }),
       ]));
-      expect(run.api.transactions.get).not.toHaveBeenCalled();
+      expect(run.api.transactions.get).toHaveBeenCalled();
       expect(run.api.transactions.update).not.toHaveBeenCalled();
       expect(run.api.transactions.confirm).not.toHaveBeenCalled();
 
@@ -3220,7 +3242,7 @@ describe("reconcile_inter_account_transfers", () => {
         expect(hugePayload.already_handled).toEqual([]);
         expect(hugePayload.ambiguous_refless).toEqual([]);
         expect(hugePayload.one_sided).toEqual([]);
-        expect(hugeRun.api.transactions.get).not.toHaveBeenCalled();
+        expect(hugeRun.api.transactions.get).toHaveBeenCalled();
         expect(hugeRun.api.transactions.update).not.toHaveBeenCalled();
         expect(hugeRun.api.transactions.confirm).not.toHaveBeenCalled();
       }
@@ -3243,7 +3265,7 @@ describe("reconcile_inter_account_transfers", () => {
         transaction_ids: [8601], code: "one_sided_eur_amount_conflict",
         reason: "The one-sided transfer EUR amount evidence conflicts by more than one cent.",
       }]);
-      expect(run.api.transactions.get).not.toHaveBeenCalled();
+      expect(run.api.transactions.get).toHaveBeenCalled();
       expect(run.api.transactions.update).not.toHaveBeenCalled();
       expect(run.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -3296,7 +3318,7 @@ describe("reconcile_inter_account_transfers", () => {
           reason: outcome.testCase.reason,
         });
         expect(error.reason).not.toContain(String(outcome.testCase.raw));
-        expect(outcome.api.transactions.get).not.toHaveBeenCalled();
+        expect(outcome.api.transactions.get).toHaveBeenCalled();
         expect(outcome.api.transactions.update).not.toHaveBeenCalled();
         expect(outcome.api.transactions.confirm).not.toHaveBeenCalled();
         expect(outcome.auditCalls).toBe(0);
@@ -3330,7 +3352,7 @@ describe("reconcile_inter_account_transfers", () => {
         const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
         expect(payload.matched_one_sided).toBe(0);
         expect(payload.errors).toEqual([{ transaction_ids: [testCase.id], code: testCase.code, reason: testCase.reason }]);
-        expect(run.api.transactions.get).not.toHaveBeenCalled();
+        expect(run.api.transactions.get).toHaveBeenCalled();
         expect(run.api.transactions.update).not.toHaveBeenCalled();
         expect(run.api.transactions.confirm).not.toHaveBeenCalled();
         expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -3371,10 +3393,10 @@ describe("reconcile_inter_account_transfers", () => {
         result: { errors: [expectedError], execution: { contract: "batch_execution_v1", mode: "DRY_RUN", errors: [expectedError] } },
       });
       expect(mergedText).not.toContain(unsafeCurrency);
-      expect(granular.api.transactions.get).not.toHaveBeenCalled();
+      expect(granular.api.transactions.get).toHaveBeenCalled();
       expect(granular.api.transactions.update).not.toHaveBeenCalled();
       expect(granular.api.transactions.confirm).not.toHaveBeenCalled();
-      expect(merged.api.transactions.get).not.toHaveBeenCalled();
+      expect(merged.api.transactions.get).toHaveBeenCalled();
       expect(merged.api.transactions.update).not.toHaveBeenCalled();
       expect(merged.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -3400,7 +3422,7 @@ describe("reconcile_inter_account_transfers", () => {
         });
         expect(run.api.transactions.confirm).toHaveBeenCalledWith(direction.id, [
           { related_table: "accounts", related_id: 1020, related_sub_id: direction.target, amount: 75 },
-        ], { autoFixClientsId: false });
+        ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       }
     });
 
@@ -3424,7 +3446,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(run.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.confirm).toHaveBeenCalledWith(9101, [
         { related_table: "accounts", related_id: 1020, related_sub_id: 300, amount: 75 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
       expect(run.api.transactions.delete).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.delete).toHaveBeenCalledWith(9102);
     });
@@ -3954,7 +3976,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
       expect(payload.auto_confirmed).toBe(1);
       expect(api.transactions.confirm).toHaveBeenCalledWith(901, [
         { related_table: "purchase_invoices", related_id: 5487, amount: 290.03 },
-      ], { autoFixClientsId: false });
+      ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     });
 
     it("routes a third-party payer to review instead of confirming", async () => {

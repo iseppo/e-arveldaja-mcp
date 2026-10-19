@@ -8,6 +8,7 @@ import {
   type ReceiptLedgerApi,
 } from "./receipt-ledger-check.js";
 import type { Journal, Transaction } from "../types/api.js";
+import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 
 const BANK_ACCOUNT_ID = 1020;
 const BANK_DIMENSION_ID = 500;
@@ -30,6 +31,8 @@ function makeTransaction(overrides: Partial<Transaction> = {}): Transaction {
 }
 
 const SALE_INVOICE: LinkedReceiptInvoice = {
+  gross_price: 1488,
+  sale_invoice_type: "INVOICE",
   table: "sale_invoices",
   id: 77,
   clients_id: 2327264,
@@ -77,6 +80,74 @@ describe("findRegistrationJournal", () => {
 });
 
 describe("checkReceiptLedger", () => {
+  it("B1 refuses foreign journal nominal values without proven EUR base",()=>{
+    const tx=withSignedCamtMarker(makeTransaction({amount:1600,base_amount:1488,cl_currencies_id:"USD"}),"CRDT");
+    const journal=makeRegistrationJournal({cl_currencies_id:"USD",postings:[
+      {accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"D",amount:1488,cl_currencies_id:"USD"},
+      {accounts_id:RECEIVABLE_ACCOUNT_ID,type:"C",amount:1488,cl_currencies_id:"USD"},
+    ]});
+    expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[journal]})).toMatchObject({ok:false,code:"ledger_posting_mismatch",details:{transaction_id:4001,journal_id:28013080}});
+  });
+  it("B1 refuses negative postings instead of erasing their sign",()=>{
+    const journal=makeRegistrationJournal({postings:[
+      {accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"D",amount:-1488},
+      {accounts_id:RECEIVABLE_ACCOUNT_ID,type:"C",amount:-1488},
+    ]});
+    expect(checkReceiptLedger({tx:makeTransaction(),invoices:[SALE_INVOICE],journals:[journal]})).toMatchObject({ok:false,code:"ledger_posting_mismatch",details:{transaction_id:4001,journal_id:28013080}});
+  });
+  it("B1 preserves explicit USD108/base EUR100/rate1.08 journal proof",()=>{
+    const tx=withSignedCamtMarker(makeTransaction({amount:108,base_amount:100,currency_rate:1.08,cl_currencies_id:"USD"}),"CRDT");
+    const journal=makeRegistrationJournal({cl_currencies_id:"USD",postings:[
+      {accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"D",amount:108,base_amount:100,currency_rate:1.08},
+      {accounts_id:RECEIVABLE_ACCOUNT_ID,type:"C",amount:108,base_amount:100,currency_rate:1.08},
+    ]});
+    expect(checkReceiptLedger({tx,invoices:[{...SALE_INVOICE,amount:100}],journals:[journal]})).toEqual({ok:true,journal_id:28013080});
+  });
+  it("derives normal unsigned sale direction independently of native GET type C",()=>{
+    expect(checkReceiptLedger({tx:makeTransaction({type:"C"}),invoices:[SALE_INVOICE],journals:[makeRegistrationJournal()]})).toEqual({ok:true,journal_id:28013080});
+  });
+  it("derives positive ordinary purchase direction without a statement marker",()=>{
+    const invoice:LinkedReceiptInvoice={...SALE_INVOICE,table:"purchase_invoices",ledger_accounts_id:2310};
+    const journal=makeRegistrationJournal({postings:[{accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"C",amount:1488},{accounts_id:2310,type:"D",amount:1488}]});
+    expect(checkReceiptLedger({tx:makeTransaction({type:"C"}),invoices:[invoice],journals:[journal]})).toEqual({ok:true,journal_id:28013080});
+  });
+  it("accepts explicit Wise importer provenance while refusing reversed cash direction",()=>{
+    const tx=makeTransaction({type:"C",description:"WISE:TRANSFER-4001 payer reference [source_direction=IN]"});
+    expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[makeRegistrationJournal()]})).toEqual({ok:true,journal_id:28013080});
+    const reversed=makeRegistrationJournal({postings:[{accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"C",amount:1488},{accounts_id:RECEIVABLE_ACCOUNT_ID,type:"D",amount:1488}]});
+    expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[reversed]})).toMatchObject({ok:false,details:{expected_type:"D",expectation_source:"wise_importer_marker"}});
+  });
+  it.each(["CRDT","DBIT"] as const)("checks %s direction independently of actual posting sides", direction => {
+    const incoming=direction==="CRDT";
+    const tx=withSignedCamtMarker(makeTransaction({type:"C"}),direction);
+    const invoices: LinkedReceiptInvoice[]=[incoming?SALE_INVOICE:{...SALE_INVOICE,table:"purchase_invoices",ledger_accounts_id:2310}];
+    const good=makeRegistrationJournal({postings:[
+      {accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:incoming?"D":"C",amount:1488},
+      {accounts_id:incoming?RECEIVABLE_ACCOUNT_ID:2310,type:incoming?"C":"D",amount:1488},
+    ]});
+    expect(checkReceiptLedger({tx,invoices,journals:[good]})).toEqual({ok:true,journal_id:28013080});
+    const reversed={...good,postings:good.postings!.map(row=>({...row,type:row.type==="D"?"C":"D"}))};
+    expect(checkReceiptLedger({tx,invoices,journals:[reversed]})).toMatchObject({ok:false,code:"ledger_posting_mismatch",details:{transaction_id:4001,journal_id:28013080,leg:"bank",expected_type:incoming?"D":"C",expectation_source:"camt_checksum"}});
+  });
+  it.each([
+    {...SALE_INVOICE,sale_invoice_type:"CREDIT_INVOICE"},
+    {...SALE_INVOICE,credit_sale_invoices_id:19},
+    {...SALE_INVOICE,gross_price:-1488},
+    {...SALE_INVOICE,gross_price:undefined},
+  ])("leaves incomplete or credit/refund semantics unverified: %j", invoice=>{
+    const result=checkReceiptLedger({tx:makeTransaction({type:"C"}),invoices:[invoice],journals:[makeRegistrationJournal()]});
+    expect(result).toMatchObject({ok:true,unverified:expect.arrayContaining([expect.stringMatching(/^direction:/)])});
+  });
+  it("leaves mixed sale and purchase semantics unverified without a signed source",()=>{
+    const result=checkReceiptLedger({tx:makeTransaction({type:"C"}),invoices:[{...SALE_INVOICE,amount:744},{...SALE_INVOICE,table:"purchase_invoices",amount:744}],journals:[makeRegistrationJournal()]});
+    expect(result).toMatchObject({ok:true,unverified:expect.arrayContaining([expect.stringMatching(/^direction:/)])});
+  });
+  it("never falls back to ordinary invoice direction after a CAMT checksum fails",()=>{
+    const signed=withSignedCamtMarker(makeTransaction(),"CRDT");
+    const tx={...signed,description:signed.description!.replace("CRDT","DBIT")};
+    const result=checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[makeRegistrationJournal()]});
+    expect(result).toMatchObject({ok:true,unverified:expect.arrayContaining([expect.stringMatching(/^direction:/)])});
+  });
   it("passes a journal booked to the invoice client with both legs posted", () => {
     const result = checkReceiptLedger({
       tx: makeTransaction(),
@@ -200,7 +271,7 @@ describe("checkReceiptLedger", () => {
     expect(result).toMatchObject({
       ok: false,
       code: "ledger_posting_mismatch",
-      details: { leg: "invoice", expected_type: "C", posted_amount: 0 },
+      details: { leg: "invoice", expected_type: "C", posted_amount: 1488, posted_types:["D"] },
     });
   });
 
@@ -331,6 +402,7 @@ describe("invoiceLinksFromTransaction", () => {
 
   it("prefers the EUR base amount and reports an unknown amount as null", () => {
     const tx = makeTransaction({
+      amount:1600,base_amount:1488,cl_currencies_id:"USD",
       items: [
         { accounts_id: 1, relation_table: "sale_invoices", relation_id: 77, amount: 1600, base_amount: 1488 },
         { accounts_id: 1, relation_table: "purchase_invoices", relation_id: 88 },
@@ -355,7 +427,7 @@ describe("verifyInvoiceReceiptLedger", () => {
       transactions: { get: vi.fn().mockResolvedValue(overrides.tx ?? makeTransaction()) },
       saleInvoices: {
         get: vi.fn().mockResolvedValue(overrides.saleInvoice
-          ?? { id: 77, clients_id: 2327264, receivable_accounts_id: RECEIVABLE_ACCOUNT_ID }),
+          ?? { id: 77, clients_id: 2327264, receivable_accounts_id: RECEIVABLE_ACCOUNT_ID, gross_price: 1488, sale_invoice_type: "INVOICE" }),
       },
       purchaseInvoices: { get: vi.fn().mockResolvedValue({ id: 88, clients_id: 5, liability_accounts_id: 2310 }) },
       journals: {

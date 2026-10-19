@@ -2,12 +2,12 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 130,
-    "toolsListBytes": 139529,
-    "descriptionsBytes": 18990,
-    "inputSchemasBytes": 89218,
+    "toolsListBytes": 139765,
+    "descriptionsBytes": 18987,
+    "inputSchemasBytes": 89457,
     "largestTool": {
       "name": "create_purchase_invoice_from_pdf",
-      "bytes": 4431
+      "bytes": 4606
     },
     "serverInstructionsBytes": 765,
     "promptMetadataBytes": 11702,
@@ -2644,6 +2644,10 @@
             "maximum": 9007199254740991,
             "type": "integer"
           },
+          "plan_handle": {
+            "pattern": "^[A-Za-z0-9_-]{43}$",
+            "type": "string"
+          },
           "recalculate_totals": {
             "type": "boolean"
           }
@@ -3752,6 +3756,10 @@
           "ref_number": {
             "description": "Reference number",
             "type": "string"
+          },
+          "require_confirm_plan": {
+            "description": "Read back the actual uploaded draft and issue a single-use confirmation plan; default false for legacy direct calls.",
+            "type": "boolean"
           },
           "source_sha256": {
             "description": "SHA-256 of the document returned by extract_pdf_invoice; binds this booking to the exact reviewed bytes.",
@@ -5845,7 +5853,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Retrieve one fixed-size, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.",
+      "description": "Retrieve one bounded, read-only review page from a server-issued execution plan. This does not consume or extend the plan and does not record or imply user approval.",
       "execution": {
         "taskSupport": "forbidden"
       },

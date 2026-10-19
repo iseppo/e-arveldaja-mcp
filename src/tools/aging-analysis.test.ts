@@ -2,6 +2,15 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { SaleInvoice } from "../types/api.js";
 
+it("historical caveat formatter is pure and absent for current or omitted dates", async () => {
+  const { historicalAgingWarnings } = await import("./aging-analysis.js");
+  expect(historicalAgingWarnings(undefined, "2026-10-18")).toEqual([]);
+  expect(historicalAgingWarnings("2026-10-18", "2026-10-18")).toEqual([]);
+  expect(historicalAgingWarnings("2026-09-30", "2026-10-18")).toEqual([
+    "as_of_date=2026-09-30 excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after 2026-09-30 may be under-counted as still outstanding since the API does not expose historical payment state.",
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // Capture tool handlers registered by the module under test
 // ---------------------------------------------------------------------------

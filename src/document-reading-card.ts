@@ -18,7 +18,7 @@ import { vatRatesInForceOn } from "./estonian-tax-rules.js";
 import { isStrictDate } from "./strict-date.js";
 
 /** Hold codes the reading path adds beyond the checker's (§5.4, rev. 2.1). */
-export const READING_PATH_HOLD_CODES = ["buyer_attestation_mismatch", "reading_create_indeterminate", "reading_booking_drift"] as const;
+export const READING_PATH_HOLD_CODES = ["buyer_attestation_mismatch", "reading_create_indeterminate", "reading_booking_drift", "reading_dimension_choice_required"] as const;
 export type ReadingPathHoldCode = typeof READING_PATH_HOLD_CODES[number];
 export type CardHoldCode = HoldCode | ReadingPathHoldCode;
 
@@ -70,6 +70,7 @@ export const DISPOSITION = {
   buyer_attestation_mismatch: B, reading_create_indeterminate: B,
   // the booking recomputed at create differs from the reviewed one
   reading_booking_drift: B,
+  reading_dimension_choice_required: B,
 } as const satisfies Record<CardHoldCode, Disposition>;
 
 /** Every code DISPOSITION must cover: the checker's codes and the reading path's own. */

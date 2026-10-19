@@ -8,6 +8,7 @@ import { registerSaleInvoiceTools } from "./crud/sale-invoices.js";
 import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
 import type { ApiContext } from "./crud/shared.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
+import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 
 export * from "./crud/shared.js";
 
@@ -15,12 +16,13 @@ export function registerCrudTools(
   server: McpServer,
   api: ApiContext,
   exposure: ToolExposureConfig = getToolExposureConfig(),
+  runtimeSafetyContext?: RuntimeSafetyContext,
 ): void {
   registerClientTools(server, api);
   if (exposure.enableProducts) registerProductTools(server, api);
   registerJournalTools(server, api);
   registerTransactionTools(server, api);
   if (exposure.enableSales) registerSaleInvoiceTools(server, api);
-  registerPurchaseInvoiceTools(server, api);
+  registerPurchaseInvoiceTools(server, api, runtimeSafetyContext);
   registerReferenceDataTools(server, api, exposure);
 }

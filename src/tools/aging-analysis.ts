@@ -238,6 +238,13 @@ export function agingComputationWarnings(c: AgingComputation, unmatchedAdvice: s
   return warnings;
 }
 
+/** The cutoff does not reconstruct historical settlement state in the API. */
+export function historicalAgingWarnings(asOfDate: string | undefined, actualToday: string): string[] {
+  return asOfDate && asOfDate !== actualToday
+    ? [`as_of_date=${asOfDate} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${asOfDate} may be under-counted as still outstanding since the API does not expose historical payment state.`]
+    : [];
+}
+
 /** compute_receivables_aging ("client"/"debtor") and compute_payables_aging ("supplier"/"creditor") differ only in these names. */
 interface StandaloneAgingSide {
   party: "client" | "supplier";
@@ -262,9 +269,7 @@ async function standaloneAgingResponse(
     computed,
     `Reported under unmatched_${side.party}_invoices; investigate and link to a ${side.party} for accurate ${side.role} reports.`,
   );
-  if (as_of_date && as_of_date !== actualToday) {
-    warnings.push(`as_of_date=${as_of_date} excludes invoices issued after that date and affects day-counting, but payment_status still reflects the CURRENT state — invoices settled after ${as_of_date} may be under-counted as still outstanding since the API does not expose historical payment state.`);
-  }
+  warnings.push(...historicalAgingWarnings(as_of_date, actualToday));
   return {
     content: [{
       type: "text" as const,

@@ -14,6 +14,11 @@ import { validateOptionalStrictDateRange } from "../strict-date.js";
 import { validateSaleInvoiceItemDimensions } from "../account-validation.js";
 import { parseSaleInvoiceItems, tagNotes, validateUpdateFields } from "../tools/crud/shared.js";
 import { logAudit } from "../audit-log.js";
+import { classifyMutationFailure } from "../mutation-outcome.js";
+import {
+  captureSaleCreateScope, saleCreateRecoveryFor, saleCreateIntent,
+  type SaleCreateIntent, type SaleCreateRecoveryMarker, type SaleCreateRecoverySession,
+} from "./create-recovery.js";
 import type { SaleInvoiceDeliveryRequest } from "../types/api.js";
 import {
   SALE_INVOICE_PLAN_DOMAIN,
@@ -196,6 +201,8 @@ function saleMutationFingerprint(
     const rest = { ...p };
     delete rest.client;
     delete rest.view;
+    delete rest.release_indeterminate;
+    delete rest.releaseIndeterminate;
     applyCreateDefaults(rest);
     const clientInput = parseClientInput(p);
     return stripUndefinedDeep({
@@ -302,6 +309,68 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
   }
 
   private async prepare(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
+    if (input.releaseIndeterminate !== undefined && input.action !== "create") {
+      return fail("invalid_recovery_release", "release_indeterminate is accepted only for prepare create.");
+    }
+    if (input.action !== "create") return this.prepareReviewed(input);
+    const scope = captureSaleCreateScope(this.runtimeSafetyContext);
+    return saleCreateRecoveryFor(this.runtimeSafetyContext).withLock(scope, async recovery => {
+      const intent = saleCreateIntent(saleMutationFingerprint("create", undefined, input.payload));
+      const held = await this.checkCreateRecovery(recovery, intent, input.releaseIndeterminate);
+      if (held) return held;
+      return this.prepareReviewed(input);
+    });
+  }
+
+  /** A fresh empty list never releases an uncertain POST without the owner's marker. */
+  private async checkCreateRecovery(
+    recovery: SaleCreateRecoverySession, intent: SaleCreateIntent, release?: string,
+  ): Promise<OperationOutcome<SaleInvoiceOperationResult> | undefined> {
+    const marker = recovery.findPending(intent);
+    const retainedEvidence = marker ?? recovery.findReleased(intent);
+    if (release !== undefined && (!marker || marker.publicContext.marker !== release)) {
+      return fail("invalid_recovery_release", "The marker does not belong to this connection and invoice intent.");
+    }
+    if (!marker && !recovery.requiresFreshScan(intent)) return undefined;
+    const related = retainedEvidence ? [...retainedEvidence.publicContext.related_objects] : [];
+    let complete = true;
+    try {
+      this.api.saleInvoices.invalidateListCache();
+      const rows = await this.api.saleInvoices.listAll();
+      if (!Array.isArray(rows)) throw new Error("Invoice list is unavailable.");
+      const clientId = retainedEvidence?.clientsId ?? intent.clientsId;
+      for (const row of rows) {
+        if (clientId !== undefined && row.clients_id != null && row.clients_id !== clientId) continue;
+        if (Object.entries(intent.invoicePayload).some(([field, value]) =>
+          ["create_date", "sale_invoice_type", "cl_currencies_id", "gross_price"].includes(field)
+          && value != null && (row as unknown as Record<string, unknown>)[field] != null
+          && (row as unknown as Record<string, unknown>)[field] !== value)) continue;
+        if (!Number.isSafeInteger(row.id) || row.id! <= 0) { complete = false; continue; }
+        // Candidate identity is deliberately conservative. Partial detail cannot
+        // prove absence; a possible persisted invoice holds with its ID too.
+        await this.api.saleInvoices.get(row.id!);
+        related.push({ type: "sale_invoice", id: row.id! });
+      }
+    } catch { complete = false; }
+    const invoiceFound = related.some(object => object.type === "sale_invoice");
+    if (release !== undefined && complete && !invoiceFound && recovery.release(release, intent)) {
+      logAudit({ tool: "manage_sale_invoice", action: "RECOVERY_RELEASED", entity_type: "sale_invoice",
+        summary: "Owner released an indeterminate invoice-create marker after a fresh absence check",
+        details: { marker: release, business_key: intent.intentSha256 } });
+      return ok({ mode: "recovery", action: "create", status: "released", releasedMarker: release });
+    }
+    if (!marker && complete && !invoiceFound) return undefined;
+    return fail("sale_invoice_create_indeterminate",
+      invoiceFound ? "An earlier matching invoice exists; use its recorded ID instead of creating another invoice."
+        : !complete ? "Invoice existence could not be established. Keep the client active and do not repeat the POST."
+          : "The earlier invoice POST may still complete. Only after checking that it cannot complete and no invoice exists may the owner release this marker using prepare create release_indeterminate; that call issues no plan.",
+      "never", { mutationMayHaveOccurred: true,
+        ...(retainedEvidence?.createdClientId !== undefined ? { mutationOccurred: true, mutatedObjects: [{ type: "client", id: retainedEvidence.createdClientId }] } : {}),
+        ...(retainedEvidence ? { recovery: { ...retainedEvidence.publicContext, related_objects: related } } : {}),
+      });
+  }
+
+  private async prepareReviewed(input: SaleInvoicePrepareInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     if (!MUTATION_ACTIONS.has(input.action)) return fail("invalid_action", `Unknown action "${String(input.action)}".`);
     if (input.action === "recurring") return this.prepareRecurring(input);
     if (input.action !== "create" && input.id === undefined) {
@@ -578,6 +647,16 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
   }
 
   private async executeCreate(input: SaleInvoiceExecuteInput): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
+    const scope = captureSaleCreateScope(this.runtimeSafetyContext);
+    return saleCreateRecoveryFor(this.runtimeSafetyContext).withLock(scope, async recovery => {
+      const intent = saleCreateIntent(saleMutationFingerprint("create", undefined, input.payload));
+      const held = await this.checkCreateRecovery(recovery, intent);
+      if (held) return held;
+      return this.executeCreateGuarded(input, recovery, intent);
+    });
+  }
+
+  private async executeCreateGuarded(input: SaleInvoiceExecuteInput, recovery: SaleCreateRecoverySession, intent: SaleCreateIntent): Promise<OperationOutcome<SaleInvoiceOperationResult>> {
     const raw = input.payload ?? {};
     const params = desandboxAllStrings(raw) as Record<string, unknown>;
     // Inline resolve-or-create customer: create requires EITHER clients_id OR a
@@ -602,18 +681,26 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     ]);
     const dimErrors = validateSaleInvoiceItemDimensions(items, accounts, accountDimensions);
     if (dimErrors.length > 0) return fail("account_validation_failed", `Account validation failed: ${dimErrors.join("; ")}`);
+    // Reserve capacity before even creating inline master data. The namespace
+    // was captured before entering this connection's FIFO.
+    let reservation: ReturnType<SaleCreateRecoverySession["reserve"]>;
+    try { reservation = recovery.reserve(intent); }
+    catch { return fail("sale_invoice_create_recovery_unavailable", "The recovery guard cannot safely reserve this invoice create. No client or invoice was created; do not retry automatically.", "never"); }
     // Only after validation passes: resolve-or-create the inline customer.
     // Track whether the customer was CREATED here (vs. an existing match) so a
     // later invoice-create failure can compensate the orphaned master-data row.
     let resolvedClientsId: number | undefined;
     let createdClientId: number | undefined;
     if (!hasClientsId && clientInput !== undefined) {
-      const resolved = await this.resolveInvoiceClient(clientInput, true);
+      let resolved: InvoiceClientResolution;
+      try { resolved = await this.resolveInvoiceClient(clientInput, true); }
+      catch (error) { recovery.abandonDefinitive(reservation); throw error; }
       if (resolved.status !== "existing" && resolved.status !== "created") {
         // needs_input (P17 refusal) — or, defensively, an unexpected would_create
         // on the execute path. Create NEITHER the client NOR the invoice.
         const code = resolved.status === "needs_input" ? resolved.code : "client_unresolved";
         const message = resolved.status === "needs_input" ? resolved.message : "Could not resolve or create the customer.";
+        recovery.abandonDefinitive(reservation);
         return fail(code, message);
       }
       resolvedClientsId = resolved.clients_id;
@@ -624,18 +711,46 @@ class SaleInvoiceOperationsImpl implements SaleInvoiceOperations {
     // plan fingerprint bound (saleMutationFingerprint drops `view` too).
     delete params.client;
     delete params.view;
+    delete params.release_indeterminate;
+    delete params.releaseIndeterminate;
     if (resolvedClientsId !== undefined) params.clients_id = resolvedClientsId;
     // Apply the SAME defaults saleMutationFingerprint bound, so the API write and
     // the drift fingerprint agree on every effective field.
     applyCreateDefaults(params);
     let result: unknown;
+    try { recovery.bindResolvedClient(reservation, Number(params.clients_id)); }
+    catch {
+      if (createdClientId !== undefined) {
+        const marker = recovery.markIndeterminate(reservation, { intent, clientsId: createdClientId, createdClientId });
+        return fail("sale_invoice_create_indeterminate", `Customer ${createdClientId} was created but its resolved invoice identity is held. No invoice POST was issued; keep the customer and inspect existing recovery evidence.`, "never", {
+          mutationOccurred: true, mutatedObjects: [{ type: "client", id: createdClientId }], recovery: marker.publicContext,
+        });
+      }
+      recovery.abandonDefinitive(reservation);
+      return fail("sale_invoice_create_indeterminate", "The resolved customer identity has an earlier pending create. No new invoice POST was issued; prepare again to inspect the retained recovery marker.", "never");
+    }
     try {
       result = await this.api.saleInvoices.create({
         ...params,
         notes: tagNotes(params.notes as string | undefined),
         items,
       } as never);
+      const createdId = decodeApiResponseCritical(result).created_object_id;
+      if (!Number.isSafeInteger(createdId) || createdId! <= 0) throw new Error("Sale invoice POST returned no positive safe-integer invoice ID.");
+      recovery.complete(reservation, createdId!);
     } catch (createError) {
+      if (classifyMutationFailure(createError) === "indeterminate") {
+        const marker = recovery.markIndeterminate(reservation, {
+          clientsId: Number(params.clients_id), createdClientId, intent,
+        });
+        return fail("sale_invoice_create_indeterminate",
+          `The invoice POST may have persisted. Keep client ${String(params.clients_id)} active; re-read this invoice intent before any further create.`,
+          "never", { mutationMayHaveOccurred: true,
+            ...(createdClientId !== undefined ? { mutationOccurred: true, mutatedObjects: [{ type: "client", id: createdClientId }] } : {}),
+            recovery: marker.publicContext,
+          });
+      }
+      recovery.abandonDefinitive(reservation);
       // Compensating cleanup: the inline customer we JUST created is now orphaned
       // master data (the invoice it was created for did not persist). An existing
       // client is never touched. Deactivate the new client to roll it back.

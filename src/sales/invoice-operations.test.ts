@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createSaleInvoiceOperations } from "./invoice-operations.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import type { ApiContext } from "../tools/crud/shared.js";
+import { HttpError } from "../http-client.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -825,7 +826,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+      const saleCreate = vi.fn().mockRejectedValue(new HttpError("invoice boom", 400, "POST", "/sale_invoices"));
       const deactivate = vi.fn().mockResolvedValue({});
       const api = newClientCreateApi({ saleCreate, deactivate });
       const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
@@ -846,7 +847,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, headers: { get: () => "0" }, text: () => Promise.resolve("") });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+      const saleCreate = vi.fn().mockRejectedValue(new HttpError("invoice boom", 400, "POST", "/sale_invoices"));
       const deactivate = vi.fn().mockRejectedValue(new Error("network down"));
       const api = newClientCreateApi({ saleCreate, deactivate });
       const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());
@@ -865,7 +866,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
   });
 
   it("P2 §9: EXISTING client + invoice create fails → NO cleanup (the pre-existing client is never deactivated)", async () => {
-    const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+    const saleCreate = vi.fn().mockRejectedValue(new HttpError("invoice boom", 400, "POST", "/sale_invoices"));
     const deactivate = vi.fn();
     const api = makeApi(
       { create: saleCreate },
@@ -885,7 +886,7 @@ describe("SaleInvoiceOperations plan-handle two-call gate", () => {
   });
 
   it("P2 §9: clients_id path + invoice create fails → NO cleanup", async () => {
-    const saleCreate = vi.fn().mockRejectedValue(new Error("invoice boom"));
+    const saleCreate = vi.fn().mockRejectedValue(new HttpError("invoice boom", 400, "POST", "/sale_invoices"));
     const deactivate = vi.fn();
     const api = makeApi({ create: saleCreate }, {}, { listAll: vi.fn().mockResolvedValue([]), deactivate });
     const ops = createSaleInvoiceOperations(api, createTestRuntimeSafetyContext());

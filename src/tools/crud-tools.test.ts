@@ -3156,6 +3156,19 @@ describe("confirm_transaction receipt-client alignment", () => {
     expect(vi.mocked(logAudit)).not.toHaveBeenCalled();
   });
 
+  it.each(["foreign_missing_base","negative"])("B1 CRUD reports committed ledger proof failure for %s with actual IDs and no retry",async scenario=>{
+    const journal=registrationJournal({cl_currencies_id:scenario==="negative"?"EUR":"USD",postings:[
+      {accounts_id:1020,accounts_dimensions_id:500,type:"D",amount:scenario==="negative"?-1488:1488,cl_currencies_id:scenario==="negative"?"EUR":"USD"},
+      {accounts_id:1210,type:"C",amount:scenario==="negative"?-1488:1488,cl_currencies_id:scenario==="negative"?"EUR":"USD"},
+    ]});
+    const confirm=vi.fn().mockResolvedValue({code:200,messages:[]});
+    const {handler}=alignmentHarness({journals:[journal],confirm});
+    const result=await handler({id:1,distributions:SALE_DISTRIBUTION}) as {isError?:boolean;content:Array<{text:string}>};
+    expect(confirm).toHaveBeenCalledTimes(1);expect(result.isError).toBe(true);
+    expect(parseMcpResponse(result.content[0]!.text)).toMatchObject({category:"ledger_posting_mismatch",mutation_occurred:true,automatic_retry_forbidden:true,accounting_status:"needs_review",transaction_id:1,journal_id:28013080,
+      details:{amount_proof_reason:scenario==="negative"?"nominal_amount_nonpositive_or_invalid":"foreign_eur_base_unavailable"}});
+  });
+
   it("passes the reassignment approval through and audits the client change", async () => {
     const { api, handler } = alignmentHarness();
 

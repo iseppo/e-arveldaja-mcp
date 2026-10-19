@@ -7,13 +7,18 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { roundMoney } from "../money.js";
 import { REDUCED_VAT_RATES, STANDARD_VAT_RATE_TIMELINE, standardVatRateOn, vatRatesInForceOn } from "../estonian-tax-rules.js";
 import { isProjectTransaction } from "../transaction-status.js";
-import { bankTransactionDirection } from "../bank-transaction-direction.js";
+import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinkedInvoice, TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
+import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
+import { draftFingerprint, draftReadbackMismatches } from "../documents/purchase-draft-verification.js";
+import { MutationIndeterminateError, describeMutationCause, classifyMutationFailure } from "../mutation-outcome.js";
+import { HttpError } from "../http-client.js";
 import type { CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { amountConsistencyIssues, computeTermDays, snapVatRate } from "./receipt-extraction.js";
-import { previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
+import { InvoiceCreationError, PurchaseInvoiceDraftVerificationError, PurchaseInvoiceTotalsCorrectionError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
+import { sha256Hex } from "./receipt-inbox-files.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import type {
@@ -183,7 +188,9 @@ export function prepareReceiptInvoiceItem(
   const item = buildSyntheticItem(
     bookingSuggestion,
     description,
-    itemNetAmount,
+    // Fold non-deductible source VAT into the expense cost. A rate "-"
+    // row has no computed VAT: its accounting net must equal payable gross.
+    context.isVatRegistered ? itemNetAmount : extracted.total_gross,
     context.purchaseArticlesWithVat,
     context.isVatRegistered,
     vatRate.rate,
@@ -214,7 +221,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   executionMode: ReceiptBatchExecutionMode,
   legacyExecuteCreate: boolean,
   consumedTransactionIds: Set<number>,
-): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "bank_match" | "notes" | "status" | "error" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "referencing_journals" | "journal_reference_scan_unavailable">> {
+): Promise<Pick<ReceiptBatchFileResult, "created_invoice" | "creation_partial" | "bank_match" | "bank_partial" | "notes" | "status" | "error" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "referencing_journals" | "journal_reference_scan_unavailable">> {
   const file = snapshot.file;
   // The inbox dir-entry name is untrusted (control chars, odd bytes): upload and
   // audit it only in sanitized form.
@@ -369,10 +376,12 @@ export async function createAndMaybeMatchPurchaseInvoice(
     if (held) return held;
   }
 
-  const dryRunMatch = dryRun
-    ? findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds)
-    : undefined;
+  const dryRunMatch = findBestTransactionMatch(bankTransactions, invoiceDraft, consumedTransactionIds);
   const candidate = dryRunMatch?.candidate;
+  const approvedTransaction = candidate ? bankTransactions.find(tx => tx.id === candidate.transaction_id) : undefined;
+  const approvedSnapshot = approvedTransaction ? snapshotBankTransaction(approvedTransaction) : undefined;
+  const approvedClientTransition = approvedSnapshot && supplierId !== undefined && approvedSnapshot.clients_id !== supplierId
+    ? { from: approvedSnapshot.clients_id, to: supplierId } : undefined;
 
   if (dryRun) {
     if (candidate) {
@@ -398,7 +407,8 @@ export async function createAndMaybeMatchPurchaseInvoice(
       notes,
       status: "dry_run_preview",
       created_invoice: buildDryRunCreatedInvoicePreview(extracted.invoice_number),
-      bank_match: candidate ? { candidate, linked: false } : undefined,
+      bank_match: candidate || dryRunMatch.ambiguous ? { candidate, linked: false, ambiguous: dryRunMatch.ambiguous,
+        top_confidence: dryRunMatch.topConfidence, tied_count: dryRunMatch.tiedCount } : undefined,
     };
   }
 
@@ -409,54 +419,38 @@ export async function createAndMaybeMatchPurchaseInvoice(
 
   // Uncached, right before the create: the execute projection pass refilled
   // the journal list cache, and a payment booked since then must be seen.
-  api.journals.invalidateListCache();
-  const held = await holdIfAlreadyBooked();
-  if (held) return held;
-
   if (legacyExecuteCreate) {
     notes.push('Legacy execute=true maps to execution_mode="create"; invoice will be created and uploaded but left unconfirmed (#19).');
   }
 
-  let createdInvoice: PurchaseInvoice;
-  try {
-    createdInvoice = await api.purchaseInvoices.createAndSetTotals(
-      {
-        clients_id: supplierId,
-        client_name: supplier.name,
-        number: extracted.invoice_number,
-        create_date: extracted.invoice_date,
-        journal_date: extracted.invoice_date,
-        term_days: computeTermDays(extracted.invoice_date, extracted.due_date),
-        cl_currencies_id: invoiceCurrency,
-        liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-        bank_ref_number: extracted.ref_number,
-        bank_account_no: extracted.supplier_iban,
-        notes: tagNotes(invoiceNotes),
-        items: [item],
-      },
-      extracted.total_vat,
-      extracted.total_gross,
-      context.isVatRegistered,
-    );
-    logAudit({
-      tool: "process_receipt_batch", action: "CREATED", entity_type: "purchase_invoice",
-      entity_id: createdInvoice.id,
-      summary: `Receipt batch: created invoice "${extracted.invoice_number}" from ${supplier.name}`,
-      details: {
-        supplier_name: supplier.name, invoice_number: extracted.invoice_number,
-        invoice_date: extracted.invoice_date, total_vat: extracted.total_vat, total_gross: extracted.total_gross,
-        file_name: uploadFileName,
-      },
-    });
-  } catch (error) {
-    return {
-      notes,
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-
+  let createdInvoice!: PurchaseInvoice;
+  let preUploadInvoice!: PurchaseInvoice;
+  const invoiceModel: CreatePurchaseInvoiceData = {
+    clients_id: supplierId, client_name: supplier.name, number: invoiceNumber,
+    create_date: invoiceDate, journal_date: invoiceDate, term_days: computeTermDays(invoiceDate, extracted.due_date),
+    cl_currencies_id: invoiceCurrency,
+    liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+    bank_ref_number: extracted.ref_number, bank_account_no: extracted.supplier_iban,
+    notes: tagNotes(invoiceNotes), items: [item],
+  };
   let uploadedDocument = false;
+  const describe = (cause: unknown) => {
+    const original = cause instanceof PurchaseInvoiceDraftVerificationError && cause.cause !== undefined ? cause.cause : cause;
+    return { ...(original instanceof MutationIndeterminateError ? original.cause : describeMutationCause(original)),
+      ...(original instanceof HttpError && original.upstream_detail !== undefined ? { upstream_detail: original.upstream_detail } : {}) };
+  };
+  const heldCreated = (changed: readonly string[], error?: unknown, uploadUncertain = false) => {
+    notes.push(`Held purchase invoice ${createdInvoice.id}: material verification failed (${changed.join(", ")}). Reuse this invoice after fresh review; automatic retry is forbidden. No automatic invalidation was attempted.`);
+    context.purchaseInvoices.push(createdInvoice);
+    const creation_partial: NonNullable<ReceiptBatchFileResult["creation_partial"]> = {
+      created_invoice_id: createdInvoice.id, mutation_occurred: true, automatic_retry_forbidden: true, cleanup: "unknown",
+      follow_up: error !== undefined ? describe(error) : { name: "ReceiptVerificationHold", message: changed.join(", ") },
+    };
+    return { notes, status: "needs_review" as const, creation_partial,
+      created_invoice: { id: createdInvoice.id, number: createdInvoice.number, status: createdInvoice.status,
+        confirmed: createdInvoice.status === "CONFIRMED", ...(!uploadUncertain ? { uploaded_document: uploadedDocument } : {}) },
+      bank_match: candidate ? { candidate, linked: false } : undefined };
+  };
   const rollbackCreatedInvoice = async (reason: string, error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     // The API error message is untrusted upstream text; wrap only the
@@ -501,22 +495,75 @@ export async function createAndMaybeMatchPurchaseInvoice(
     };
   };
 
-  if (createdInvoice.id) {
-    try {
-      const contents = snapshot.bytes.toString("base64");
-      await api.purchaseInvoices.uploadDocument(createdInvoice.id, uploadFileName, contents);
-      uploadedDocument = true;
-      notes.push("Uploaded source document to created purchase invoice.");
-      logAudit({
-        tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
-        entity_id: createdInvoice.id,
-        summary: `Uploaded document "${uploadFileName}" to purchase invoice ${createdInvoice.id}`,
-        details: { file_name: uploadFileName },
-      });
-    } catch (error) {
-      return rollbackCreatedInvoice("source document upload failed", error);
+  // Keep duplicate scans, create/readback, upload and upload-failure cleanup in
+  // one FIFO. A waiter must not mistake a soon-to-be-invalidated draft for the
+  // completed intake of the first writer.
+  const creationOutcome = await withPurchaseInvoiceLock(api, async () => {
+    api.journals.invalidateListCache();
+    const held = await holdIfAlreadyBooked();
+    if (held) return held;
+    const duplicates = await scanPurchaseIntakeDuplicates(api, { supplierClientId: supplierId, invoiceNumber, grossPrice: grossTotal, invoiceDate, currency: invoiceCurrency });
+    if (duplicates.comparisonUnavailable?.length) {
+      notes.push(`Held: purchase invoice duplicate comparison requires supplied valid ${duplicates.comparisonUnavailable.join(", ")} when the invoice number is blank. Correct the document data before creating an invoice.`);
+      return { notes, status: "needs_review" as const };
     }
-  }
+    if (duplicates.invoiceIds.length) {
+      notes.push(`Held: existing purchase invoice(s) ${duplicates.invoiceIds.join(", ")} match this receipt. Reuse the existing invoice.`);
+      return { notes, status: "needs_review" as const };
+    }
+    try {
+      createdInvoice = await api.purchaseInvoices.createAndSetTotals(invoiceModel, extracted.total_vat, extracted.total_gross, context.isVatRegistered);
+      preUploadInvoice = structuredClone(createdInvoice);
+      logAudit({ tool: "process_receipt_batch", action: "CREATED", entity_type: "purchase_invoice", entity_id: createdInvoice.id,
+        summary: `Receipt batch: created invoice "${invoiceNumber}" from ${supplier.name}`,
+        details: { supplier_name: supplier.name, invoice_number: invoiceNumber, invoice_date: invoiceDate, total_vat: extracted.total_vat, total_gross: extracted.total_gross, file_name: uploadFileName } });
+    } catch (error) {
+      if (error instanceof InvoiceCreationError) {
+        const creation_partial: NonNullable<ReceiptBatchFileResult["creation_partial"]> = {
+          created_invoice_id: error.invoiceId, mutation_occurred: true, automatic_retry_forbidden: true,
+          cleanup: error.cleanup,
+          follow_up: describe(error.cause),
+          ...(error.cleanupError !== undefined ? { cleanup_error: describe(error.cleanupError) } : {}),
+        };
+        logAudit({ tool: "process_receipt_batch", action: "CREATED", entity_type: "purchase_invoice", entity_id: error.invoiceId,
+          summary: `Receipt invoice created; follow-up failed; cleanup ${error.cleanup}. Review the known invoice before any retry.`,
+          details: { invoice_number: invoiceNumber, file_name: uploadFileName, follow_up_failed: true, cleanup: error.cleanup,
+            automatic_retry_forbidden: true } });
+        if (error.cleanup === "invalidated") logAudit({ tool: "process_receipt_batch", action: "INVALIDATED", entity_type: "purchase_invoice", entity_id: error.invoiceId,
+          summary: "Created receipt draft invalidated after failed follow-up.", details: { follow_up_failed: true } });
+        return { notes, status: "failed" as const, error: error.message, creation_partial,
+          created_invoice: { id: error.invoiceId, number: invoiceNumber, confirmed: false, uploaded_document: false } };
+      }
+      if (error instanceof MutationIndeterminateError) {
+        logAudit({ tool: "process_receipt_batch", action: "MUTATION_INDETERMINATE", entity_type: "purchase_invoice",
+          summary: "Receipt creation outcome unknown. Reconcile the source and invoice business key before any retry.",
+          details: { invoice_number: invoiceNumber, supplier_client_id: supplierId, total_gross: extracted.total_gross,
+            automatic_retry_forbidden: true } });
+        return { notes, status: "failed" as const, error: error.message,
+          creation_partial: { mutation_may_have_occurred: true, automatic_retry_forbidden: true, cleanup: "unknown", follow_up: describe(error) } as const };
+      }
+      return { notes, status: "failed" as const, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (createdInvoice.id) {
+      try {
+        const contents = snapshot.bytes.toString("base64");
+        await api.purchaseInvoices.uploadDocument(createdInvoice.id, uploadFileName, contents);
+        uploadedDocument = true;
+        notes.push("Uploaded source document to created purchase invoice.");
+        logAudit({
+          tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
+          entity_id: createdInvoice.id,
+          summary: `Uploaded document "${uploadFileName}" to purchase invoice ${createdInvoice.id}`,
+          details: { file_name: uploadFileName },
+        });
+      } catch (error) {
+        if (classifyMutationFailure(error) === "indeterminate") return heldCreated(["source_document_upload_unknown"], error, true);
+        return rollbackCreatedInvoice("source document upload failed", error);
+      }
+    }
+    return undefined;
+  });
+  if (creationOutcome) return creationOutcome;
 
   if (!shouldConfirm) {
     notes.push("Created purchase invoice was left unconfirmed. Review it and call confirm_purchase_invoice after approval (#19).");
@@ -534,9 +581,58 @@ export async function createAndMaybeMatchPurchaseInvoice(
     };
   }
 
+  const checkApprovedBank = async () => {
+    if (!candidate || !approvedSnapshot) return undefined;
+    api.transactions.invalidateListCache();
+    const fresh = await api.transactions.get(candidate.transaction_id);
+    const comparison = compareBankTransactionMaterial(approvedSnapshot, fresh);
+    const score = findBestTransactionMatch([fresh], { ...invoiceDraft, ...createdInvoice }, new Set());
+    if (!comparison.ok) return comparison.changedFields;
+    if (!isProjectTransaction(fresh) || comparison.snapshot.trusted_direction !== "outgoing") return ["status", "trusted_direction"];
+    if (!score.candidate || score.ambiguous || score.candidate.confidence < EXACT_MATCH_THRESHOLD ||
+      (score.candidate.reasons.includes("exact_base_amount") && !score.candidate.reasons.includes("exact_amount"))) return ["match_score"];
+    return undefined;
+  };
+  if (candidate) {
+    try { const drift = await checkApprovedBank(); if (drift) return heldCreated(drift); }
+    catch { return heldCreated(["transaction_read_unavailable"]); }
+  }
   if (createdInvoice.id) {
     try {
-      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered);
+      api.purchaseInvoices.invalidateListCache();
+      const freshDraft = await api.purchaseInvoices.get(createdInvoice.id);
+      const mismatches = draftReadbackMismatches(freshDraft, invoiceModel, { vatPrice: extracted.total_vat, grossPrice: extracted.total_gross }, context.isVatRegistered, context.accounts);
+      if (freshDraft.id !== createdInvoice.id || freshDraft.status !== "PROJECT" || mismatches.length) {
+        createdInvoice = { ...createdInvoice, status: freshDraft.status };
+        return heldCreated(["purchase_invoice_material", ...mismatches]);
+      }
+      const fileId = freshDraft.base_document_files_id;
+      if (preUploadInvoice.base_document_files_id != null || !Number.isInteger(fileId) || fileId! <= 0 ||
+          draftFingerprint({ ...preUploadInvoice, base_document_files_id: fileId }) !== draftFingerprint(freshDraft)) {
+        return heldCreated(["purchase_invoice_upload_transition"]);
+      }
+      const document = await api.purchaseInvoices.getDocument(createdInvoice.id);
+      const encodedLimit = Math.ceil(snapshot.bytes.length / 3) * 4;
+      if (typeof document?.contents !== "string" || document.contents.length > encodedLimit + 1024) return heldCreated(["source_document_readback_mismatch"]);
+      const encoded = document.contents.replace(/\s/g, "");
+      if (encoded.length !== encodedLimit) return heldCreated(["source_document_readback_mismatch"]);
+      const bytes = Buffer.from(encoded, "base64");
+      if (bytes.length !== snapshot.bytes.length || bytes.toString("base64") !== encoded || sha256Hex(bytes) !== snapshot.sha256) return heldCreated(["source_document_readback_mismatch"]);
+      api.purchaseInvoices.invalidateListCache();
+      const verifiedDraft = await api.purchaseInvoices.get(createdInvoice.id);
+      if (verifiedDraft.id !== createdInvoice.id || verifiedDraft.status !== "PROJECT" || draftFingerprint(verifiedDraft) !== draftFingerprint(freshDraft)) return heldCreated(["source_document_attachment_changed"]);
+      createdInvoice = verifiedDraft;
+    } catch (error) { return heldCreated(["purchase_invoice_or_document_read_unavailable"], error); }
+  }
+  const intendedInvoiceFingerprint = draftFingerprint(createdInvoice);
+  if (candidate) {
+    try { const drift = await checkApprovedBank(); if (drift) return heldCreated(drift); }
+    catch (error) { return heldCreated(["transaction_read_unavailable"], error); }
+  }
+
+  if (createdInvoice.id) {
+    try {
+      await api.purchaseInvoices.confirmWithTotals(createdInvoice.id, context.isVatRegistered, { expectedDraftFingerprint: intendedInvoiceFingerprint });
       createdInvoice = {
         ...createdInvoice,
         status: "CONFIRMED",
@@ -549,6 +645,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
         details: { invoice_number: createdInvoice.number, file_name: uploadFileName },
       });
     } catch (error) {
+      if (error instanceof PurchaseInvoiceDraftVerificationError || error instanceof PurchaseInvoiceTotalsCorrectionError) {
+        return heldCreated([error.code], error);
+      }
       return rollbackCreatedInvoice("invoice confirmation failed", error);
     }
   }
@@ -565,7 +664,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     bank_ref_number: createdInvoice.bank_ref_number,
   };
   const matchResult = findBestTransactionMatch(bankTransactions, matchedInvoice, consumedTransactionIds);
-  const matchedCandidate = matchResult.candidate;
+  const matchedCandidate = candidate;
   // Cross-currency guard: when the match survived only on base-currency evidence
   // (base amounts equal but nominal amounts differ), the transaction amount is
   // in a different currency than the invoice gross. Auto-confirming would post
@@ -589,11 +688,18 @@ export async function createAndMaybeMatchPurchaseInvoice(
   if (createdInvoice.id && matchedCandidate && canAutoLink) {
     try {
       const freshMatch = await api.transactions.get(matchedCandidate.transaction_id);
+      const drift = await checkApprovedBank();
+      if (drift) return heldCreated(drift);
+      const freshInvoice = await api.purchaseInvoices.get(createdInvoice.id);
+      if (freshInvoice.status !== "CONFIRMED" || draftFingerprint(freshInvoice) !== intendedInvoiceFingerprint) {
+        createdInvoice = { ...createdInvoice, status: freshInvoice.status };
+        return heldCreated(["purchase_invoice_material"]);
+      }
       // Confirming books a payment, so it needs a proven outgoing row. Without
       // a signed statement marker the direction is unknown (the API reads every
       // type back as "C") — a same-amount supplier refund must not be booked
       // as the payment.
-      const matchDirection = bankTransactionDirection(freshMatch);
+      const matchDirection = snapshotBankTransaction(freshMatch).trusted_direction;
       if (isProjectTransaction(freshMatch) && matchDirection !== "outgoing") {
         notes.push(`Matched transaction ${matchedCandidate.transaction_id} has no signed outgoing direction (direction: ${matchDirection}); invoice was created without bank link — confirm the payment after checking it.`);
       } else if (isProjectTransaction(freshMatch)) {
@@ -607,7 +713,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
           related_table: "purchase_invoices",
           related_id: createdInvoice.id,
           amount: createdInvoice.base_gross_price ?? createdInvoice.gross_price ?? matchedCandidate.amount,
-        }], { reassignClientToInvoice: true });
+        }], { reassignClientToInvoice: approvedClientTransition !== undefined, approvedClientTransition,
+          expectedTransaction: approvedSnapshot,
+          expectedLinkedInvoices: { [`purchase_invoices:${createdInvoice.id}`]: snapshotLinkedInvoice("purchase_invoices", freshInvoice) } });
         logAudit({
           tool: "process_receipt_batch", action: "CONFIRMED", entity_type: "transaction",
           entity_id: matchedCandidate.transaction_id,
@@ -631,6 +739,19 @@ export async function createAndMaybeMatchPurchaseInvoice(
         notes.push(`Matched transaction ${matchedCandidate.transaction_id} is no longer bookable (status ${freshMatch.status ?? "UNKNOWN"}); invoice was created without bank link.`);
       }
     } catch (error) {
+      if (error instanceof TransactionMaterialDriftError) return { ...heldCreated(error.changed_fields), bank_partial: {
+        transaction_id: error.transaction_id, category: error.category, register_attempted: false,
+        mutation_occurred: error.mutation_occurred, changed_fields: error.changed_fields,
+        known_objects: error.known_objects, client_update: error.client_update,
+        automatic_retry_forbidden: true, fresh_preview_required: true,
+      } };
+      if (error instanceof MutationIndeterminateError && error.entity === "transaction" && error.operation === "update") return {
+        ...heldCreated(["client_update_indeterminate"]), bank_partial: {
+          transaction_id: matchedCandidate.transaction_id, category: "mutation_indeterminate", register_attempted: false,
+          mutation_occurred: false, mutation_may_have_occurred: true, changed_fields: ["clients_id"], known_objects: [], client_update: null,
+          automatic_retry_forbidden: true, fresh_preview_required: true,
+        },
+      };
       const message = error instanceof Error ? error.message : String(error);
       // Wrap the untrusted API-error fragment interpolated into this note (#9).
       notes.push(`Could not link matched transaction ${matchedCandidate.transaction_id} to purchase invoice ${createdInvoice.id}: ${wrapUntrustedOcr(message) ?? message}. Invoice was kept without bank link.`);

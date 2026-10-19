@@ -1,4 +1,5 @@
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
+import { snapshotBankTransaction, snapshotLinkedInvoice } from "../transaction-material-snapshot.js";
 import { bankPostingSideForInvoiceMatch, bankTransactionDirection } from "../../bank-transaction-direction.js";
 import { buildInvoiceIndex, getIndexedCandidates, type InvoiceIndex } from "./invoice-index.js";
 import {
@@ -329,6 +330,8 @@ export function computeExactMatchProjection(
 
     const clientResolution: ExactConfirmClientResolution = clientsId == null ? "set_missing" : "unchanged";
     confirms.push({
+      transactionMaterial: snapshotBankTransaction(tx),
+      invoiceMaterial: invoice ? snapshotLinkedInvoice(match.type === "sale_invoice" ? "sale_invoices" : "purchase_invoices", invoice) : undefined,
       transactionId: tx.id!,
       date: tx.date,
       amount: tx.amount,

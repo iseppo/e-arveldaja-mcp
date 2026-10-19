@@ -116,7 +116,7 @@ Call `reconcile_bank_transactions` with `mode: "suggest"` and `min_confidence: 0
 - If no `distribution` key is present, inspect the invoice first and prepare the distribution manually instead of reusing `match.distribution`.
 <!-- E_ARVELDAJA_FEATURE_END:standard -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
-- If the match is an exact >= 90 match or is flagged `auto_confirm_rule: "ref_number_exact"`, confirm it through the Auto mode plan; otherwise present it as in Review mode.
+- A suggestion for one transaction ID does NOT filter the Auto mode batch. For an exact >= 90 match or `auto_confirm_rule: "ref_number_exact"`, inspect ALL mutation commands on ALL pages of the Auto preview before approval. Execute for this single-ID task only when every mutation concerns that requested transaction ID and its reviewed related effects. If any other transaction is included, do not execute the batch or broaden approval: show the exact proposed distribution and use the `standard` or `full` profile for a single-transaction confirmation. Otherwise present the match as in Review mode.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
 ## Step 4: Inter-account transfers

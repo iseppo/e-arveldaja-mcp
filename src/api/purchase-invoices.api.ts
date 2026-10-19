@@ -3,7 +3,9 @@ import type { HttpClient } from "../http-client.js";
 import type { Account, PurchaseInvoice, PurchaseInvoiceItem, CreatePurchaseInvoiceData, ApiResponse } from "../types/api.js";
 import type { CreatePurchaseInvoiceRequest, UpdatePurchaseInvoiceRequest } from "../types/mutations.js";
 import { BaseResource } from "./base-resource.js";
+import { draftFingerprint } from "../purchase-invoice-draft-fingerprint.js";
 import { roundMoney, parseVatRateDropdown } from "../money.js";
+import { classifyMutationFailure } from "../mutation-outcome.js";
 import {
   applyPurchaseItemStructuralDefaults,
   classifyNonVatInvoiceForm,
@@ -14,9 +16,13 @@ import {
 } from "../tools/purchase-vat-defaults.js";
 
 export class InvoiceCreationError extends Error {
-  constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions) {
+  readonly cleanup: "invalidated" | "failed" | "unknown";
+  readonly cleanupError?: unknown;
+  constructor(message: string, public readonly invoiceId: number, options?: ErrorOptions & { cleanup?: "invalidated" | "failed" | "unknown"; cleanupError?: unknown }) {
     super(message, options);
     this.name = "InvoiceCreationError";
+    this.cleanup = options?.cleanup ?? "unknown";
+    this.cleanupError = options?.cleanupError;
   }
 }
 
@@ -31,7 +37,15 @@ export interface PurchaseInvoiceTotalsCorrectionPreview {
   approval_digest: string;
 }
 
+export class PurchaseInvoiceDraftVerificationError extends Error {
+  constructor(public readonly code: "draft_changed" | "draft_readback_unavailable", options?: ErrorOptions) {
+    super(code === "draft_changed" ? "The purchase invoice differs from the reviewed PROJECT draft." : "The reviewed purchase invoice could not be read fresh.", options);
+    this.name = "PurchaseInvoiceDraftVerificationError";
+  }
+}
+
 interface ConfirmPurchaseInvoiceOptions {
+  expectedDraftFingerprint?: string;
   recalculateTotals?: boolean;
   approvedCorrection?: PurchaseInvoiceTotalsCorrectionPreview;
   /** Fresh chart for the non-VAT register proof (GitHub #63); a non-VAT draft with a VAT-account item is held without it. */
@@ -637,12 +651,14 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         `Purchase invoice ${id} was created but follow-up failed: ${followUpMessage}. ` +
         `Automatic invalidation also failed: ${invalidateMessage}`,
         id,
+        { cause: error, cleanup: classifyMutationFailure(invalidateError) === "indeterminate" ? "unknown" : "failed", cleanupError: invalidateError },
       );
     }
 
     throw new InvoiceCreationError(
       `Purchase invoice ${id} was created but follow-up failed and the draft was invalidated: ${followUpMessage}`,
       id,
+      { cause: error, cleanup: "invalidated" },
     );
   }
 
@@ -801,10 +817,16 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
       if (options.approvedCorrection !== undefined) {
         throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_mismatch");
       }
-      if (!isVatRegistered && nonVatRegisterRefusal(await this.getFreshInvoice(id), options.accounts) !== undefined) {
-        throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
+      if (!isVatRegistered) {
+        let draft: PurchaseInvoice;
+        try { draft = await this.getFreshInvoice(id); }
+        catch (error) {
+          if (options.expectedDraftFingerprint !== undefined) throw new PurchaseInvoiceDraftVerificationError("draft_readback_unavailable", { cause: error });
+          throw error;
+        }
+        if (nonVatRegisterRefusal(draft, options.accounts) !== undefined) throw new PurchaseInvoiceTotalsCorrectionError("correction_nonvat_form_unproven");
       }
-      return this.confirm(id);
+      return this.confirm(id, { expectedDraftFingerprint: options.expectedDraftFingerprint });
     }
     if (options.approvedCorrection === undefined) {
       throw new PurchaseInvoiceTotalsCorrectionError("correction_preview_required");
@@ -826,10 +848,18 @@ export class PurchaseInvoicesApi extends BaseResource<PurchaseInvoice> {
         items: invoice.items?.map(applyPurchaseItemStructuralDefaults),
       });
     }
-    return this.confirm(id);
+    return this.confirm(id, { expectedDraftFingerprint: options.expectedDraftFingerprint });
   }
 
-  async confirm(id: number): Promise<ApiResponse> {
+  async confirm(id: number, options: { expectedDraftFingerprint?: string } = {}): Promise<ApiResponse> {
+    if (options.expectedDraftFingerprint !== undefined) {
+      let draft: PurchaseInvoice;
+      try { draft = await this.getFreshInvoice(id); }
+      catch { throw new PurchaseInvoiceDraftVerificationError("draft_readback_unavailable"); }
+      if (draft.id !== id || draft.status !== "PROJECT" || draftFingerprint(draft) !== options.expectedDraftFingerprint) {
+        throw new PurchaseInvoiceDraftVerificationError("draft_changed");
+      }
+    }
     // Registering a purchase invoice creates a journal server-side and can
     // flip payment_status on any linked transaction — bust both caches.
     return this.mutate(

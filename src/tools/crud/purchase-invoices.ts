@@ -21,9 +21,14 @@ import {
 import type { CreatePurchaseInvoiceData, PurchaseInvoiceItem } from "../../types/api.js";
 import {
   PurchaseInvoiceTotalsCorrectionError,
+  PurchaseInvoiceDraftVerificationError,
   type PurchaseInvoiceTotalsCorrectionPreview,
 } from "../../api/purchase-invoices.api.js";
 import type { ApiContext } from "./shared.js";
+import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
+import { PURCHASE_INVOICE_PDF_CONFIRM_DOMAIN } from "../../purchase-invoice-confirm-plan.js";
+import { PlanStoreError } from "../../plan-store.js";
+import { withPurchaseInvoiceLock } from "../../documents/purchase-invoice-lock.js";
 import {
   coerceId,
   idParam,
@@ -59,7 +64,7 @@ function totalsCorrectionToolError(error: PurchaseInvoiceTotalsCorrectionError) 
   });
 }
 
-export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext): void {
+export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext, runtimeSafetyContext?: RuntimeSafetyContext): void {
   // =====================
   // PURCHASE INVOICES
   // =====================
@@ -318,9 +323,27 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
     "Confirm and lock a purchase invoice without changing approved totals. Totals correction requires a fresh approved preview.",
     {
       ...idParam.shape,
+      plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional(),
       recalculate_totals: z.boolean().optional(),
       approved_correction: purchaseInvoiceTotalsCorrectionApprovalSchema.optional(),
-    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, recalculate_totals, approved_correction }) => {
+    }, { ...destructive, title: "Confirm Purchase Invoice" }, async ({ id, plan_handle, recalculate_totals, approved_correction }) => {
+      let expectedDraftFingerprint: string | undefined;
+      if (plan_handle !== undefined) {
+        if (!runtimeSafetyContext) return toolError({ category: "runtime_safety_context_required", error: "Confirmation plan runtime unavailable.", mutation_occurred: false });
+        try {
+          const plan = runtimeSafetyContext.planStore.consume(plan_handle, PURCHASE_INVOICE_PDF_CONFIRM_DOMAIN);
+          const args = plan.normalizedArgs;
+          if (args.invoice_id !== id || typeof args.draft_fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(args.draft_fingerprint)
+            || recalculate_totals === true || approved_correction !== undefined) {
+            return toolError({ category: "confirmation_plan_mismatch", error: "Consumed plan does not authorize this invoice or a totals correction.", mutation_occurred: false });
+          }
+          expectedDraftFingerprint = args.draft_fingerprint;
+        } catch (error) {
+          if (error instanceof PlanStoreError) return toolError({ category: error.code, error: error.message, mutation_occurred: false });
+          throw error;
+        }
+      }
+      const run = async () => {
       const hasApprovedCorrection = approved_correction !== undefined;
       if ((recalculate_totals === true && !hasApprovedCorrection) ||
           (recalculate_totals !== true && hasApprovedCorrection)) {
@@ -341,9 +364,14 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
               ...chart,
             })
           : isVatReg
-            ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg)
-            : await api.purchaseInvoices.confirmWithTotals(id, isVatReg, chart);
+            ? expectedDraftFingerprint === undefined
+              ? await api.purchaseInvoices.confirmWithTotals(id, isVatReg)
+              : await api.purchaseInvoices.confirmWithTotals(id, isVatReg, { expectedDraftFingerprint })
+            : await api.purchaseInvoices.confirmWithTotals(id, isVatReg, { ...chart, ...(expectedDraftFingerprint === undefined ? {} : { expectedDraftFingerprint }) });
       } catch (error) {
+        if (error instanceof PurchaseInvoiceDraftVerificationError) {
+          return toolError({ category: error.code, error: error.message, mutation_occurred: false, automatic_retry_forbidden: true, created_invoice_id: id });
+        }
         if (error instanceof PurchaseInvoiceTotalsCorrectionError) {
           return totalsCorrectionToolError(error);
         }
@@ -363,6 +391,8 @@ export function registerPurchaseInvoiceTools(server: McpServer, api: ApiContext)
         message: `Confirmed purchase invoice ${id}.`,
         raw: result,
       });
+      };
+      return expectedDraftFingerprint === undefined ? run() : withPurchaseInvoiceLock(api, run);
     });
 
   registerTool(server, "invalidate_purchase_invoice",

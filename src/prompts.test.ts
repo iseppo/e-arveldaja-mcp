@@ -732,10 +732,9 @@ describe("registerPrompts", () => {
     expect(text).toContain("the receivables side when the result includes one");
     expect(text).toContain("as_of_date: the selected reporting date");
     expect(text).toContain("`compute_receivables_aging` with `as_of_date`: the selected reporting date");
-    // The single-cutoff intent is spelled out, not left implicit.
-    expect(text).toContain("one consistent cutoff");
-    // The aging snapshot must never silently fall back to today's date.
-    expect(text).toContain("silently defaulting to today");
+    expect(text).toContain("SAME operator-selected reporting date to every report");
+    expect(text).toContain("Historical aging uses current payment status");
+    expect(text).toContain("paid after the cutoff may be absent");
   });
 
   it("lets common bank workflows discover account dimensions before asking the user", async () => {
@@ -829,7 +828,7 @@ describe("registerPrompts", () => {
     expect(text).not.toContain("VAT number if any");
   });
 
-  it("keeps the Lightyear workflow explicit that portfolio value means accounting cost basis", async () => {
+  it("distinguishes the Lightyear analytical WAC estimate from FIFO ledger cost", async () => {
     const server = setupPromptServer();
     const text = await getPromptText(server, "lightyear-booking", {
       file_path: "/tmp/statement.csv",
@@ -854,8 +853,8 @@ describe("registerPrompts", () => {
     expect(text).toContain('"fee_account": <trade_fee_account>');
     expect(text).toContain('"fee_account": <distribution_fee_account>');
     expect(text).toContain("If there are distributions in the statement and no `income_account` is known, ask the user for an income_account number");
-    expect(text).toContain("current accounting carrying value / cost basis");
-    expect(text).toContain("Current portfolio carrying value / remaining cost basis");
+    expect(text).toContain("NOT the FIFO carrying amount in the ledger");
+    expect(text).toContain("Analytical weighted-average-cost (WAC) estimate from step 3");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
     expect(text).not.toContain("Current portfolio value (from step 3)");
   });
@@ -877,7 +876,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("income_account");
     expect(text).toContain("ask the user for an income_account number");
     expect(text).toContain("tax_account");
-    expect(text).toContain("current accounting carrying value / cost basis");
+    expect(text).toContain("NOT the FIFO carrying amount in the ledger");
     expect(text).toContain(EXTERNAL_FILE_DATA_RAIL);
     expect(text).not.toContain("Call `book_lightyear_distributions` with `dry_run: true`.");
     // M25: both parse tools take `file_path`; the runbook must show the explicit

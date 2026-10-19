@@ -4,8 +4,12 @@ import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-t
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Client, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
+import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
+import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinkedInvoice, TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
+import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
+import { draftFingerprint, draftReadbackMismatches } from "../documents/purchase-draft-verification.js";
+import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { reportProgress } from "../progress.js";
 import { logAudit } from "../audit-log.js";
 import { isProjectTransaction } from "../transaction-status.js";
@@ -538,6 +542,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         // execute drifts the whole command (invariant: the reviewed aggregate
         // effect cannot silently change).
         const liveState: PlanData = {
+          material: stripUndefinedDeep(snapshotBankTransaction(transaction)) as unknown as PlanData,
           id: transaction.id ?? stub.id,
           status: transaction.status ?? null,
           amount: transaction.amount ?? null,
@@ -982,7 +987,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           // A classification group may still carry an incoming row (refund,
           // chargeback) — never book it as a purchase invoice and confirm it.
           // Only a checksum-verified marker proves the direction (a flipped dir=).
-          const direction = trustedDirection(transaction) ?? "unknown";
+          const approvedSnapshot = snapshotBankTransaction(transaction);
+          const direction = approvedSnapshot.trusted_direction;
           if (direction !== "outgoing") {
             notes.push(`Transaction ${transaction.id} is not an outgoing payment (direction: ${direction}); skipped — only outgoing payments are booked as purchase invoices.`);
             continue;
@@ -1094,24 +1100,42 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             continue;
           }
 
-          const invoice = await api.purchaseInvoices.createAndSetTotals(
-            {
-              clients_id: supplierId,
-              client_name: supplier.name,
-              number: `AUTO-TX-${transaction.id}`,
-              create_date: transaction.date,
-              journal_date: transaction.date,
-              term_days: 0,
-              cl_currencies_id: transactionCurrency,
-              ...(transactionCurrency !== "EUR" ? { currency_rate: transactionCurrencyRate } : {}),
-              liability_accounts_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
-              notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`),
-              items: [purchaseItem],
-            },
+          const invoiceModel: CreatePurchaseInvoiceData = {
+            clients_id: supplierId, client_name: supplier.name, number: `AUTO-TX-${transaction.id}`,
+            create_date: transaction.date, journal_date: transaction.date, term_days: 0,
+            cl_currencies_id: transactionCurrency,
+            ...(transactionCurrency !== "EUR" ? { currency_rate: transactionCurrencyRate } : {}),
+            liability_accounts_id: resolved.suggestion.liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
+            notes: tagNotes(`Auto-created from classified bank transaction ${transaction.id}`), items: [purchaseItem],
+          };
+          const invoice = await withPurchaseInvoiceLock(api, async () => {
+            const duplicates = await scanPurchaseIntakeDuplicates(api, { supplierClientId: supplierId,
+              invoiceNumber: `AUTO-TX-${transaction.id}`, grossPrice: grossAmount, invoiceDate: transaction.date, currency: transactionCurrency });
+            if (duplicates.invoiceIds.length) {
+              notes.push(`Transaction ${transaction.id} held: existing purchase invoice(s) ${duplicates.invoiceIds.join(", ")}; reuse the existing invoice.`);
+              return undefined;
+            }
+            api.journals.invalidateListCache();
+            api.transactions.invalidateListCache();
+            const ledger = await loadLedgerContext(api);
+            const ledgerRows = ledger ? await api.transactions.listAll() : undefined;
+            if (!ledger || !ledgerRows || typeof transaction.accounts_dimensions_id !== "number") {
+              notes.push(`Transaction ${transaction.id} held: fresh ledger scan unavailable after waiting.`);
+              return undefined;
+            }
+            const partition = partitionByLedgerContext(api, [transaction], ledgerRows, ledger, transaction.accounts_dimensions_id);
+            if (typeof partition === "string" || partition.alreadyBooked.length || partition.ownTransfers.length || partition.possibleDuplicates.length) {
+              notes.push(`Transaction ${transaction.id} held by fresh ledger coverage scan after waiting.`);
+              return undefined;
+            }
+            return api.purchaseInvoices.createAndSetTotals(
+            invoiceModel,
             deriveAutoBookedVatPrice(grossAmount, vatConfig),
             grossAmount,
             isVatRegistered,
-          );
+            );
+          });
+          if (!invoice) continue;
           const invoiceId = invoice.id;
           if (!invoiceId) {
             throw new Error("createAndSetTotals resolved without a purchase invoice ID");
@@ -1119,32 +1143,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           attemptedCreateCount += 1;
           createdInvoiceIds.push(invoiceId);
           let observedInvoiceStatus = invoiceClassificationStatus(invoice.status);
+          const intendedInvoiceFingerprint = draftFingerprint(invoice);
+          const approvedClientTransition = approvedSnapshot.clients_id !== supplierId ? { from: approvedSnapshot.clients_id, to: supplierId } : undefined;
           logAudit({
             tool: "apply_transaction_classifications", action: "CREATED", entity_type: "purchase_invoice",
             entity_id: invoiceId,
             summary: `Auto-booked purchase invoice from transaction ${transaction.id} (${transactionGroup.display_counterparty})`,
             details: { supplier_name: supplier.name, invoice_number: `AUTO-TX-${transaction.id}`, date: transaction.date, total_gross: grossAmount },
           });
-
-          type InvoiceInvalidationOutcome =
-            | { ok: true }
-            | { ok: false; error: unknown };
-
-          const invalidateAutoCreatedInvoice = async (
-            reason: string,
-          ): Promise<InvoiceInvalidationOutcome> => {
-            try {
-              await api.purchaseInvoices.invalidate(invoiceId);
-              notes.push(`Invalidated auto-created purchase invoice ${invoiceId} because ${reason}.`);
-              return { ok: true };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              notes.push(
-                `Auto-created purchase invoice ${invoiceId} could not be kept because ${reason}, and invalidation also failed: ${wrapUntrustedText(message) ?? message}.`,
-              );
-              return { ok: false, error };
-            }
-          };
 
           const recordPostCreateFailure = (
             error: unknown,
@@ -1159,8 +1165,19 @@ class ClassificationOperationsImpl implements ClassificationOperations {
                 ? `Freshly read existing purchase invoice ${invoiceId} before any further action, then continue only after explicit approval.`
                 : failedStage === "invoice_confirmation"
                   ? `Use existing purchase invoice ${invoiceId}. Freshly read that invoice and transaction ${transaction.id}, then continue only after explicit approval.`
-                  : `Use existing confirmed purchase invoice ${invoiceId}. Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
+                  : `Use existing ${createdInvoiceStatus === "CONFIRMED" ? "confirmed " : ""}purchase invoice ${invoiceId} (status ${createdInvoiceStatus}). Freshly read transaction ${transaction.id}, then continue only after explicit approval.`;
             partialMutations.push({
+              ...(error instanceof MutationIndeterminateError && error.entity === "transaction" && error.operation === "update" ? { bank_partial: {
+                transaction_id: transaction.id!, category: "mutation_indeterminate" as const, register_attempted: false as const,
+                mutation_occurred: false, mutation_may_have_occurred: true as const, changed_fields: ["clients_id"], known_objects: [], client_update: null,
+                automatic_retry_forbidden: true as const, fresh_preview_required: true as const,
+              } } : {}),
+              ...(error instanceof TransactionMaterialDriftError ? { changed_fields: error.changed_fields, bank_partial: {
+                transaction_id: error.transaction_id, category: error.category, register_attempted: false as const,
+                mutation_occurred: error.mutation_occurred, changed_fields: error.changed_fields,
+                known_objects: error.known_objects, client_update: error.client_update,
+                automatic_retry_forbidden: true as const, fresh_preview_required: true as const,
+              } } : {}),
               category: ambiguous ? "mutation_indeterminate" : "mutation_failed",
               mutation_may_have_occurred: true,
               failed_stage: failedStage,
@@ -1184,25 +1201,26 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             continue;
           }
 
-          if (!isProjectTransaction(freshTransaction)) {
-            const invalidation = await invalidateAutoCreatedInvoice(
-              `transaction ${transaction.id} is no longer bookable (status ${freshTransaction.status ?? "UNKNOWN"})`,
-            );
-            if (invalidation.ok) {
-              const createdIndex = createdInvoiceIds.lastIndexOf(invoiceId);
-              if (createdIndex >= 0) createdInvoiceIds.splice(createdIndex, 1);
-            } else {
-              recordPostCreateFailure(
-                invalidation.error,
-                "invoice_invalidation",
-                isAmbiguousPostCreateFailure(invalidation.error) ? "UNKNOWN" : observedInvoiceStatus,
-                transactionClassificationStatus(freshTransaction),
-              );
-            }
+          const comparison = compareBankTransactionMaterial(approvedSnapshot, freshTransaction);
+          if (!comparison.ok || !isProjectTransaction(freshTransaction) || comparison.snapshot.trusted_direction !== "outgoing") {
+            recordPostCreateFailure(new TransactionMaterialDriftError(transaction.id!, comparison.ok ? ["trusted_direction", "status"] : comparison.changedFields),
+              "transaction_drift", observedInvoiceStatus, transactionClassificationStatus(freshTransaction));
             continue;
           }
 
           try {
+            const freshDraft = await api.purchaseInvoices.get(invoiceId);
+            observedInvoiceStatus = invoiceClassificationStatus(freshDraft.status);
+            const mismatches = draftReadbackMismatches(freshDraft, invoiceModel, { vatPrice: deriveAutoBookedVatPrice(grossAmount, vatConfig), grossPrice: grossAmount }, isVatRegistered, accounts);
+            if (freshDraft.status !== "PROJECT" || draftFingerprint(freshDraft) !== intendedInvoiceFingerprint || mismatches.length) {
+              throw new TransactionMaterialDriftError(transaction.id!, ["purchase_invoice_material", ...mismatches]);
+            }
+            api.transactions.invalidateListCache();
+            const beforeInvoiceConfirm = await api.transactions.get(transaction.id!);
+            const beforeComparison = compareBankTransactionMaterial(approvedSnapshot, beforeInvoiceConfirm);
+            if (!beforeComparison.ok || !isProjectTransaction(beforeInvoiceConfirm) || beforeComparison.snapshot.trusted_direction !== "outgoing") {
+              throw new TransactionMaterialDriftError(transaction.id!, beforeComparison.ok ? ["trusted_direction", "status"] : beforeComparison.changedFields);
+            }
             await api.purchaseInvoices.confirmWithTotals(invoiceId, isVatRegistered);
             observedInvoiceStatus = "CONFIRMED";
             logAudit({
@@ -1214,7 +1232,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           } catch (error) {
             recordPostCreateFailure(
               error,
-              "invoice_confirmation",
+              error instanceof TransactionMaterialDriftError ? "transaction_drift" : "invoice_confirmation",
               isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : observedInvoiceStatus,
               "PROJECT",
             );
@@ -1228,11 +1246,24 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           const clientReassignedToInvoice =
             freshTransaction.clients_id != null && freshTransaction.clients_id !== supplierId;
           try {
+            api.transactions.invalidateListCache();
+            freshTransaction = await api.transactions.get(transaction.id!);
+            const finalComparison = compareBankTransactionMaterial(approvedSnapshot, freshTransaction);
+            if (!finalComparison.ok || !isProjectTransaction(freshTransaction) || finalComparison.snapshot.trusted_direction !== "outgoing") {
+              throw new TransactionMaterialDriftError(transaction.id!, finalComparison.ok ? ["trusted_direction", "status"] : finalComparison.changedFields);
+            }
+            const freshInvoice = await api.purchaseInvoices.get(invoiceId);
+            observedInvoiceStatus = invoiceClassificationStatus(freshInvoice.status);
+            if (freshInvoice.status !== "CONFIRMED" || draftFingerprint(freshInvoice) !== intendedInvoiceFingerprint) {
+              throw new TransactionMaterialDriftError(transaction.id!, ["purchase_invoice_material"]);
+            }
             await api.transactions.confirm(transaction.id!, [{
               related_table: "purchase_invoices",
               related_id: invoiceId,
               amount: transaction.amount,
-            }], { reassignClientToInvoice: true });
+            }], { reassignClientToInvoice: approvedClientTransition !== undefined, approvedClientTransition,
+              expectedTransaction: approvedSnapshot,
+              expectedLinkedInvoices: { [`purchase_invoices:${invoiceId}`]: snapshotLinkedInvoice("purchase_invoices", freshInvoice) } });
             logAudit({
               tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
               entity_id: transaction.id!,
@@ -1246,8 +1277,8 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           } catch (error) {
             recordPostCreateFailure(
               error,
-              "transaction_confirmation",
-              "CONFIRMED",
+              error instanceof TransactionMaterialDriftError ? "transaction_drift" : "transaction_confirmation",
+              observedInvoiceStatus,
               isAmbiguousPostCreateFailure(error) ? "UNKNOWN" : "PROJECT",
             );
             continue;

@@ -19,8 +19,9 @@ describe("configured server instructions", () => {
   it("carries the six durable invariants semantically (not by exact string)", () => {
     // 1. live-data / mutations-touch-live-accounting warning.
     expect(instructions).toMatch(/live accounting data/i);
-    // 2. preview/dry-run/approval before mutation unless the tool is read-only.
-    expect(instructions).toMatch(/preview\/dry-run or explicit approval/i);
+    // 2. A preview never substitutes for approval of concrete effects.
+    expect(instructions).toMatch(/preview\/dry-run or plan alone never authorizes mutation/i);
+    expect(instructions).toMatch(/explicit user approval of the concrete effects/i);
     expect(instructions).toMatch(/read-only/i);
     // 3. external-text evidence rule.
     expect(instructions).toContain("UNTRUSTED_OCR");
@@ -41,6 +42,14 @@ describe("configured server instructions", () => {
     // 6. currency default.
     expect(instructions).toMatch(/EUR unless/);
     expect(instructions).toContain("cl_currencies_id");
+  });
+
+  it.each(["standard", "guided", "guided-sales", "full"] as const)("preserves scoped approval on %s", (toolProfile) => {
+    const text = buildServerInstructions({ setupMode: false, toolExposure: DEFAULT_EXPOSURE, toolProfile });
+    expect(text).toContain("Prior approval remains valid for unchanged reviewed effects");
+    expect(text).toContain("changed effects require new approval");
+    expect(text).not.toMatch(/preview\/dry-run or explicit approval/i);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(1536);
   });
 
   it("names the guided façades on the guided profiles", () => {

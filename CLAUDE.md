@@ -291,10 +291,12 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
 - **`status: "CONFIRMED"`** — registered/confirmed (not an `is_confirmed` boolean)
 - **`status: "PROJECT"`** — unconfirmed/draft
 - **`status: "VOID"`** — invalidated
-- **To delete**: must `invalidate` confirmed transactions first (CONFIRMED → VOID → delete)
+- **To delete**: invalidate a confirmed transaction first, then re-read before deleting. The live API returned `PROJECT` after invalidation on 2026-10-18; do not require a `VOID` readback to recognize a successful invalidation.
+- **Native GL distribution readback**: a confirmed transaction item may carry `relation_table: "accounts"`, explicit `accounts_id` / `accounts_dimensions_id`, and a composite `relation_id` formed from those two IDs (observed live: `1020`, `12762251`, `102012762251`). Accept that native shape only by exact equality with the explicit valid IDs, the reviewed target mapping and the actual unique registration journal. Never split a composite to infer missing IDs, and never send it as the request's `related_id`; write requests still use separate account and dimension fields.
 
 ### Purchase invoice creation
 - **Always pass invoice-level `gross_price` and `vat_price`** — confirm fails without them ("Gross sum and net sum with taxes differ")
+- **Guarded PDF workflow:** `create_purchase_invoice_from_pdf` with `require_confirm_plan:true` verifies the actual uploaded draft and returns `confirm_plan.plan_handle` only when readback matches. Pass that handle with the exact ID to `confirm_purchase_invoice` after approval of registration. The handle is scoped and single-use; confirmation checks a final fresh draft fingerprint after its other prerequisites. A held result retains the created invoice ID: do not recreate it or fall back to handle-free confirmation. Handle-free calls keep their existing manual workflow. The GET/register pair is not atomic.
 - Do **not** pass item-level `gross_price` for non-VAT companies — the API computes it from `total_net_price`
 - `client_name` is required on creation (API field `client_name2`)
 - For VAT tracking on items: set `vat_rate_dropdown`, `vat_accounts_id`, `cl_vat_articles_id`, `project_no_vat_gross_price`

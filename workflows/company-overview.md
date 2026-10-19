@@ -6,10 +6,10 @@ This workflow is read-only. It should feel like a dashboard, not a ledger export
 
 ## Period selection
 
-- If the user asks for a specific date, use it as the reporting date.
-- If no date is requested, use today's date as the reporting date.
-- If the user asks for a specific period, use its first day as `date_from`.
-- If no period is requested, use the first day of the current year as `date_from`.
+- If the user asks for a specific period, use its first day as `date_from` AND its last day as `date_to` (the reporting date).
+- Otherwise use the requested as-of date, or today's date when absent, as `date_to`; use January 1 of that selected reporting date's year as `date_from`.
+- Examples: as-of 2025-12-31 means 2025-01-01..2025-12-31; 2025 Q4 means 2025-10-01..2025-12-31.
+- Resolve any `date_from > date_to` before calling tools.
 - State the chosen `date_from` and reporting date in the summary.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
@@ -21,7 +21,7 @@ Reports read through a short-lived cache (a few minutes): if the user just chang
 
 Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: unconfirmed (PROJECT) records are not yet in the ledger. If recent activity may still be unconfirmed, say so in the summary rather than presenting the figures as final.
 
-Use the SAME operator-selected reporting date as the single cutoff for every figure, so the whole overview shares one consistent cutoff instead of the aging reports silently defaulting to today.
+Pass the SAME operator-selected reporting date to every report, including `as_of_date` for aging. Historical aging uses current payment status; it does not reconstruct settlements at the historical cutoff. Display this limitation next to historical payables and receivables: an invoice paid after the cutoff may be absent from the historical outstanding list. Do not present historical AP/AR as a fully reconstructed historical balance.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
 1. Call `compute_balance_sheet` with `date_to`: the selected reporting date.

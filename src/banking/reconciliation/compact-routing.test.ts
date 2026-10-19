@@ -18,11 +18,13 @@ const BANK_ACCOUNT_ID = 1020;
 const matchingTx = {
   id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20",
   accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR",
+  accounts_id:BANK_ACCOUNT_ID,
   bank_account_name: "Acme OU", ref_number: "RF123", description: "Payment from Acme",
 };
 const matchingSale = {
   id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10",
   clients_id: 20, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF123", cl_currencies_id: "EUR",
+  sale_invoice_type:"INVOICE", receivable_accounts_id:1210,
 };
 
 function setup() {
@@ -47,6 +49,20 @@ function setup() {
     journals: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]), listAllWithPostings: vi.fn().mockResolvedValue([]) },
     clients: { findByName: vi.fn().mockResolvedValue([]) },
   } as any;
+  api.saleInvoices.get = vi.fn(async (id: number) => (await api.saleInvoices.listAll()).find((row: any) => row.id === id));
+  api.purchaseInvoices.get = vi.fn(async (id: number) => (await api.purchaseInvoices.listAll()).find((row: any) => row.id === id));
+  api.transactions.update.mockImplementation(async (_id: number, body: any) => {
+    api.transactions.get.mockResolvedValue({...matchingTx, ...body});
+    return {};
+  });
+  api.transactions.confirm.mockImplementation(async()=>{
+    api.transactions.get.mockResolvedValue({...matchingTx,clients_id:20,status:"CONFIRMED",items:[{relation_table:"sale_invoices",relation_id:10,amount:100,base_amount:100}]});
+    api.journals.listAllWithPostings.mockResolvedValue([{id:901,operation_type:"TRANSACTION",operations_id:1,registered:true,clients_id:20,postings:[
+      {accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"D",amount:100},
+      {accounts_id:1210,type:"C",amount:100},
+    ]}]);
+    return{};
+  });
   registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
   const handler = (name: string) => {
     const registration = server.registerTool.mock.calls.find(([n]: [string]) => n === name);

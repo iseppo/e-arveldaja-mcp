@@ -169,9 +169,12 @@ export interface ClassifiedTransactionGroupResult {
 export type PartialClassificationStatus = "PROJECT" | "CONFIRMED" | "VOID" | "UNKNOWN";
 
 export interface PartialClassificationMutation {
+  changed_fields?: readonly string[];
+  bank_partial?: import("./receipt-inbox-types.js").ReceiptBankPartial;
   category: "mutation_indeterminate" | "mutation_failed";
   mutation_may_have_occurred: true;
   failed_stage:
+    | "transaction_drift"
     | "transaction_reread"
     | "invoice_invalidation"
     | "invoice_confirmation"

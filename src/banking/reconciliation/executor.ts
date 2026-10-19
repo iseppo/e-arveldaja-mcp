@@ -1,4 +1,8 @@
 import type { ApiContext } from "../../tools/crud/shared.js";
+import { snapshotBankTransaction, compareBankTransactionMaterial, changedLinkedInvoiceFields, TransactionMaterialDriftError } from "../transaction-material-snapshot.js";
+import { findRegistrationJournal } from "../receipt-ledger-check.js";
+import { confirmedDistributionEvidence } from "./confirmed-transfer-proof.js";
+import { positiveEurAmount } from "../eur-amount-proof.js";
 import type { Transaction, SaleInvoice, PurchaseInvoice } from "../../types/api.js";
 import { isProjectTransaction } from "../../transaction-status.js";
 import { roundMoney } from "../../money.js";
@@ -110,6 +114,7 @@ import type {
  * `confirm_failed`.
  */
 function confirmRefusalErrorCode(err: unknown): string {
+  if (err instanceof TransactionMaterialDriftError) return err.category;
   if (err instanceof LinkedInvoiceClientMismatchError
     || err instanceof LinkedInvoiceClientsAmbiguousError) {
     return err.category;
@@ -457,6 +462,21 @@ function issueExactMatchPlan(
 function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjection): ReconciliationExecutionCommand[] {
   const commands: ReconciliationExecutionCommand[] = [];
   for (const descriptor of projection.confirms) {
+    let clientWritten = false;
+    const checkMaterial = async (fresh: Transaction) => {
+      if (!descriptor.transactionMaterial || !descriptor.invoiceMaterial) return false;
+      const comparison = compareBankTransactionMaterial(descriptor.transactionMaterial, fresh,
+        clientWritten && descriptor.invoiceClientsId != null ? { client: {from: descriptor.clientsId, to: descriptor.invoiceClientsId} } : {});
+      if (!comparison.ok) return false;
+      const resource = descriptor.invoiceTable === "sale_invoices" ? api.saleInvoices : api.purchaseInvoices;
+      resource.invalidateListCache();
+      const invoice = await resource.get(descriptor.invoiceId);
+      if (changedLinkedInvoiceFields(descriptor.invoiceMaterial, invoice).length) return false;
+      api.transactions.invalidateListCache();
+      const finalTx=await api.transactions.get(descriptor.transactionId);
+      return compareBankTransactionMaterial(descriptor.transactionMaterial, finalTx,
+        clientWritten && descriptor.invoiceClientsId != null ? {client:{from:descriptor.clientsId,to:descriptor.invoiceClientsId}} : {}).ok;
+    };
     if (descriptor.needsClientUpdate) {
       commands.push({
         id: reconClientUpdateCommandId(descriptor.transactionId),
@@ -464,6 +484,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
         prepare: async () => {
           api.transactions.invalidateListCache(); // uncached: gates the mutation below
           const fresh = await api.transactions.get(descriptor.transactionId);
+          if (!(await checkMaterial(fresh))) return {outcome: "drift", error_code: "transaction_material_drift"};
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
           if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
           return { outcome: "ready" };
@@ -471,6 +492,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
         mutate: async () => {
           try {
             await api.transactions.update(descriptor.transactionId, { clients_id: descriptor.invoiceClientsId ?? undefined });
+            clientWritten = true;
             return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: descriptor.transactionId, outcome: "updated" }] };
           } catch (err) {
             if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
@@ -485,6 +507,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
       prepare: async () => {
         api.transactions.invalidateListCache(); // uncached: gates the mutation below
         const fresh = await api.transactions.get(descriptor.transactionId);
+        if (!(await checkMaterial(fresh))) return {outcome: "drift", error_code: "transaction_material_drift"};
         if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
         if (roundMoney(fresh.amount) !== roundMoney(descriptor.amount)) return { outcome: "drift", error_code: "amount_changed" };
         if (transactionCurrency(fresh) !== descriptor.currency) return { outcome: "drift", error_code: "currency_changed" };
@@ -498,7 +521,10 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
           await api.transactions.confirm(
             descriptor.transactionId,
             [{ related_table: descriptor.invoiceTable, related_id: descriptor.invoiceId, amount: descriptor.amount }],
-            { autoFixClientsId: false },
+            { autoFixClientsId: false,
+              expectedTransaction: descriptor.transactionMaterial && {...descriptor.transactionMaterial, clients_id: clientWritten ? descriptor.invoiceClientsId : descriptor.clientsId},
+              expectedLinkedInvoices: descriptor.invoiceMaterial ? {[`${descriptor.invoiceTable}:${descriptor.invoiceId}`]: descriptor.invoiceMaterial} : {},
+            },
           );
           logAudit({
             tool: "auto_confirm_exact_matches", action: "CONFIRMED", entity_type: "transaction",
@@ -508,6 +534,7 @@ function buildExactMatchCommands(api: ApiContext, projection: ExactMatchProjecti
           });
           return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: descriptor.transactionId, outcome: "confirmed" }] };
         } catch (err) {
+          if (err instanceof TransactionMaterialDriftError) return {outcome: "failed", error_code: err.category, mutation_occurred: err.mutation_occurred, known_objects: err.known_objects};
           if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
           // A differing payer leaves `confirms` as a third-party-payer review,
           // so the api guard should never fire here. Mapped anyway: if the
@@ -545,6 +572,7 @@ async function runPostConfirmLedgerChecks(
   if (confirmed.length === 0) return { checked: 0, ok: 0, failures: [] };
 
   const failures: ExactConfirmLedgerCheckFailure[] = [];
+  const unverified: NonNullable<ExactConfirmLedgerChecks["unverified"]> = [];
   // No cause text is carried on any of these warnings: an upstream body would
   // be untrusted here, and the presenter is the only module allowed to sandbox.
   const warnings: string[] = [];
@@ -573,10 +601,25 @@ async function runPostConfirmLedgerChecks(
       // transaction that carries no invoice link has no invoice client to
       // compare against, so there is nothing to assert.
       const links = invoiceLinksFromTransaction(tx);
-      if (links.length === 0) continue;
+      if (links.length === 0) {
+        checked += 1;
+        const journal = findRegistrationJournal(journals, descriptor.transactionId);
+        unverified.push({transaction_id: descriptor.transactionId, ...(journal.length === 1 && journal[0]!.id != null ? {journal_id:journal[0]!.id} : {}), reasons:["invoice_leg: confirmed GET has no invoice distribution evidence"]});
+        continue;
+      }
       // Counted from here on: this transaction has an invoice leg, so its check
       // was attempted whether or not the reads below succeed.
       checked += 1;
+      if (descriptor.transactionMaterial) {
+        const actual=snapshotBankTransaction(tx);
+        const identity=(row: typeof actual) => {const {items,status,clients_id,...rest}=row;return rest;};
+        if (tx.status!=="CONFIRMED" || actual.clients_id!==descriptor.invoiceClientsId || canonicalPlanJson(identity(actual))!==canonicalPlanJson(identity(descriptor.transactionMaterial))) {
+          const journal=findRegistrationJournal(journals,descriptor.transactionId);
+          const journalId=journal.length===1?journal[0]!.id:undefined;
+          failures.push({transaction_id:descriptor.transactionId,...(journalId!=null?{journal_id:journalId}:{}),code:"ledger_posting_mismatch",details:{transaction_id:descriptor.transactionId,transaction_clients_id:actual.clients_id,invoice_clients_id:descriptor.invoiceClientsId,invoice_table:descriptor.invoiceTable,invoice_id:descriptor.invoiceId,...(journalId!=null?{journal_id:journalId}:{}),leg:"reviewed_source",expected_type:descriptor.direction,expectation_source:"reviewed_material"}});
+          continue;
+        }
+      }
       const invoices: LinkedReceiptInvoice[] = [];
       for (const link of links) {
         if (link.table === "sale_invoices") {
@@ -587,6 +630,8 @@ async function runPostConfirmLedgerChecks(
             amount: link.amount,
             clients_id: invoice?.clients_id ?? null,
             ledger_accounts_id: invoice?.receivable_accounts_id ?? null,
+            gross_price: invoice.gross_price, sale_invoice_type: invoice.sale_invoice_type, credit_sale_invoices_id: invoice.credit_sale_invoices_id,
+            paid_in_cash: invoice.paid_in_cash,
           });
         } else {
           const invoice = await api.purchaseInvoices.get(link.id);
@@ -596,13 +641,16 @@ async function runPostConfirmLedgerChecks(
             amount: link.amount,
             clients_id: invoice?.clients_id ?? null,
             ledger_accounts_id: invoice?.liability_accounts_id ?? null,
+            gross_price: invoice.gross_price,
+            paid_in_cash: invoice.paid_in_cash,
           });
         }
       }
 
       const result = checkReceiptLedger({ tx, invoices, journals });
       if (result.ok) {
-        ok += 1;
+        if (result.unverified?.length) unverified.push({transaction_id: descriptor.transactionId, journal_id: result.journal_id, reasons: result.unverified});
+        else ok += 1;
         continue;
       }
       failures.push({
@@ -625,7 +673,7 @@ async function runPostConfirmLedgerChecks(
         + "It IS confirmed; verify its registration journal with list_journals.");
     }
   }
-  return { checked, ok, failures, ...(warnings.length > 0 ? { warnings } : {}) };
+  return { checked, ok, failures, ...(unverified.length ? {unverified} : {}), ...(warnings.length > 0 ? { warnings } : {}) };
 }
 
 async function loadExactMatchProjection(
@@ -643,8 +691,13 @@ async function loadExactMatchProjection(
     api.purchaseInvoices.invalidateListCache();
     api.journals.invalidateListCache();
   }
+  api.transactions.invalidateListCache();
+  api.saleInvoices.invalidateListCache();
+  api.purchaseInvoices.invalidateListCache();
   const allTx = await api.transactions.listAll();
-  const unconfirmed = allTx.filter(isProjectTransaction);
+  const unconfirmed = await Promise.all(allTx.filter(isProjectTransaction).map(async tx => {
+    return api.transactions.get(tx.id!);
+  }));
   const total = unconfirmed.length;
   for (let i = 0; i < total; i++) await reportProgress(i, total);
 
@@ -654,12 +707,12 @@ async function loadExactMatchProjection(
   // an already-settled invoice would enter the open set and could be
   // auto-confirmed against a transaction a second time. This is the MUTATING
   // path, so it needs the guard at least as much as the advisory one.
-  const allSales = await api.saleInvoices.listAll();
+  const allSales = await Promise.all((await api.saleInvoices.listAll()).map(inv => api.saleInvoices.get(inv.id!)));
   const openSales = allSales.filter((inv: SaleInvoice) => {
     const critical = decodeInvoiceStatusCritical(inv);
     return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
   });
-  const allPurchases = await api.purchaseInvoices.listAll();
+  const allPurchases = await Promise.all((await api.purchaseInvoices.listAll()).map(inv => api.purchaseInvoices.get(inv.id!)));
   const openPurchases = allPurchases.filter((inv: PurchaseInvoice) => {
     const critical = decodeInvoiceStatusCritical(inv);
     return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
@@ -731,13 +784,14 @@ export async function runInterAccountMatching(
 
   const confirmActions: InterAccountConfirmAction[] = [];
 
-  const [allTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
+  const [listedTx, bankAccounts, accountDimensions, invoiceInfo] = await Promise.all([
     api.transactions.listAll(),
-    api.readonly.getBankAccounts(),
-    api.readonly.getAccountDimensions(),
+    api.readonly.getBankAccounts({fresh:true}),
+    api.readonly.getAccountDimensions({fresh:true}),
     api.readonly.getInvoiceInfo(),
   ]);
-
+  api.transactions.invalidateListCache();
+  const allTx = await Promise.all(listedTx.map(tx => api.transactions.get(tx.id!)));
   const unconfirmed = allTx.filter(isProjectTransaction);
   const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
@@ -1580,6 +1634,18 @@ export async function runInterAccountMatching(
   }
 
   const companyClientsId = await resolveCompanyClientsId();
+  for (const action of confirmActions) {
+    const source = allTx.find(tx => tx.id === action.confirmedTxId)!;
+    const mirror = allTx.find(tx => tx.id === action.deleteTxId);
+    action.sourceMaterial = snapshotBankTransaction(source);
+    if (mirror) action.mirrorMaterial = snapshotBankTransaction(mirror);
+    action.mappingMaterial = transferMappingMaterial(bankAccounts, accountDimensions);
+    const pair = matchedPairs.find(row => row.outgoing_transaction_id === action.confirmedTxId);
+    const single = matchedOneSided.find(row => row.transaction_id === action.confirmedTxId);
+    const reasons = pair?.match_reasons ?? single?.match_reasons ?? [];
+    action.pairEvidence = {kind: pair ? reasons.some(reason => reason.startsWith("same_type_")) ? "same_type" : "reciprocal" : "one_sided",
+      reasons, maxDateGap: maxGap, sourceSide: action.sourceMaterial.trusted_direction === "incoming" ? "D" : "C"};
+  }
   const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId);
   const normalizedArgs = stripUndefinedDeep({
     max_date_gap: maxGap,
@@ -1623,6 +1689,13 @@ export async function runInterAccountMatching(
 }
 
 // Helper to build the account distribution used by inter-account confirms.
+function transferMappingMaterial(bankAccounts: Parameters<typeof buildBankAccountLookups>[0], dimensions: Parameters<typeof buildBankAccountLookups>[1]): string {
+  const mapping = buildBankAccountLookups(bankAccounts, dimensions);
+  return canonicalPlanJson({iban: [...mapping.dimensionToIban].sort((a,b)=>a[0]-b[0]),
+    accounts:[...mapping.dimensionToAccountsId].sort((a,b)=>a[0]-b[0]),
+    own:[...mapping.ownIbanToDimension].map(([iban,dims])=>[iban,[...dims].sort((a,b)=>a-b)]).sort()});
+}
+
 function buildAccountDistribution(dimensionToAccountsId: Map<number, number>, targetDimensionId: number, amount: number) {
   const accountsId = dimensionToAccountsId.get(targetDimensionId);
   if (!accountsId) {
@@ -1702,6 +1775,44 @@ export async function executeInterAccount(
   const commands: ReconciliationExecutionCommand[] = [];
   for (const action of match.confirmActions) {
     const needsClientUpdate = action.confirmedClientsId == null && companyClientsId != null;
+    let clientWritten = false;
+    let sourceConfirmed = false;
+    const sourceExpected = () => action.sourceMaterial && ({...action.sourceMaterial,
+      clients_id: clientWritten ? companyClientsId : action.sourceMaterial.clients_id});
+    const verifyPairEvidence = (source: Transaction, mirror: Transaction | undefined, bankAccounts: Parameters<typeof buildBankAccountLookups>[0], accountDimensions: Parameters<typeof buildBankAccountLookups>[1]) => {
+      if (!action.pairEvidence) return false;
+      const mapping = buildBankAccountLookups(bankAccounts, accountDimensions);
+      const lookups: InterAccountMatchLookups = {...mapping, companyName:normalizeCompanyName(match.invoiceInfo.invoice_company_name ?? ""), companyLegalName:match.invoiceInfo.invoice_company_name ?? "", targetAccountsDimensionsId:input.targetAccountsDimensionsId};
+      const sourceInference = inferOneSidedTransfer(source, lookups, new Map());
+      if (!mirror) return sourceInference.targetDimension === action.targetDimensionId && sourceInference.confidence >= 80;
+      const compatibility = getTransferPairCompatibility(source, mirror, action.pairEvidence.maxDateGap);
+      if (!compatibility || compatibility.conflictingComparableAmounts || !sameAmountToTheCent(compatibility.txAComparableAmount, action.distributionAmount)) return false;
+      if (action.pairEvidence.kind === "same_type") return !!getSameTypeReciprocalEvidence(source, mirror, sourceInference, inferOneSidedTransfer(mirror, lookups, new Map()), mapping.dimensionToIban);
+      const mirrorIban = counterpartyIbanOf(mirror);
+      const origin = mirrorIban ? mapping.ownIbanToDimension.get(mirrorIban)?.has(source.accounts_dimensions_id!) : sameCompanyIdentity(mirror.bank_account_name ?? "", lookups.companyLegalName);
+      const sourceIban = counterpartyIbanOf(source);
+      return !!origin && (sourceInference.targetDimension === mirror.accounts_dimensions_id
+        || !!(sourceIban && mapping.ownIbanToDimension.get(sourceIban)?.has(mirror.accounts_dimensions_id!)));
+    };
+    const verifyTransferMaterial = async (source: Transaction) => {
+      const expected = sourceExpected();
+      if (!expected || !compareBankTransactionMaterial(expected, source).ok) return false;
+      let mirror: Transaction | undefined;
+      if (action.deleteTxId != null) {
+        mirror = await api.transactions.get(action.deleteTxId);
+        if (!action.mirrorMaterial || !compareBankTransactionMaterial(action.mirrorMaterial, mirror).ok || !isProjectTransaction(mirror)) return false;
+      }
+      const [bankAccounts, accountDimensions] = await Promise.all([api.readonly.getBankAccounts({fresh:true}), api.readonly.getAccountDimensions({fresh:true})]);
+      if (action.mappingMaterial !== transferMappingMaterial(bankAccounts, accountDimensions)) return false;
+      api.transactions.invalidateListCache();
+      const finalSource=await api.transactions.get(action.confirmedTxId);
+      if (!compareBankTransactionMaterial(expected,finalSource).ok) return false;
+      if (action.deleteTxId!=null) {
+        mirror=await api.transactions.get(action.deleteTxId);
+        if (!action.mirrorMaterial || !compareBankTransactionMaterial(action.mirrorMaterial,mirror).ok || !isProjectTransaction(mirror)) return false;
+      }
+      return verifyPairEvidence(finalSource, mirror, bankAccounts, accountDimensions);
+    };
     if (needsClientUpdate) {
       commands.push({
         id: reconClientUpdateCommandId(action.confirmedTxId),
@@ -1709,6 +1820,7 @@ export async function executeInterAccount(
         prepare: async () => {
           api.transactions.invalidateListCache(); // uncached: gates the mutation below
           const fresh = await api.transactions.get(action.confirmedTxId);
+          if (!(await verifyTransferMaterial(fresh))) return {outcome: "drift", error_code: "transaction_material_drift"};
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
           if (fresh.clients_id != null) return { outcome: "drift", error_code: "client_already_set" };
           return { outcome: "ready" };
@@ -1716,6 +1828,7 @@ export async function executeInterAccount(
         mutate: async () => {
           try {
             await api.transactions.update(action.confirmedTxId, { clients_id: companyClientsId ?? undefined });
+            clientWritten = true;
             return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "updated" }] };
           } catch (err) {
             if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
@@ -1730,6 +1843,7 @@ export async function executeInterAccount(
       prepare: async () => {
         api.transactions.invalidateListCache(); // uncached: gates the mutation below
         const fresh = await api.transactions.get(action.confirmedTxId);
+        if (!(await verifyTransferMaterial(fresh))) return {outcome: "drift", error_code: "transaction_material_drift"};
         if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "transaction_not_project" };
         if (roundMoney(fresh.amount) !== roundMoney(action.confirmedNominalAmount)) return { outcome: "drift", error_code: "amount_changed" };
         if (transactionCurrency(fresh) !== action.confirmedCurrency) return { outcome: "drift", error_code: "currency_changed" };
@@ -1743,7 +1857,8 @@ export async function executeInterAccount(
           return { outcome: "failed", error_code: "distribution_unresolvable", mutation_occurred: false };
         }
         try {
-          await api.transactions.confirm(action.confirmedTxId, [distribution], { autoFixClientsId: false });
+          await api.transactions.confirm(action.confirmedTxId, [distribution], { autoFixClientsId: false, expectedTransaction: sourceExpected(), expectedLinkedInvoices: {} });
+          sourceConfirmed = true;
           logAudit({
             tool: "reconcile_inter_account_transfers", action: "CONFIRMED", entity_type: "transaction",
             entity_id: action.confirmedTxId,
@@ -1752,6 +1867,7 @@ export async function executeInterAccount(
           });
           return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.confirmedTxId, outcome: "confirmed" }] };
         } catch (err) {
+          if (err instanceof TransactionMaterialDriftError) return {outcome: "failed", error_code: err.category, mutation_occurred: err.mutation_occurred, known_objects: err.known_objects};
           if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
           return { outcome: "failed", error_code: confirmRefusalErrorCode(err), mutation_occurred: false };
         }
@@ -1764,8 +1880,41 @@ export async function executeInterAccount(
         category: RECON_DELETE_DUPLICATE_CATEGORY,
         prepare: async () => {
           api.transactions.invalidateListCache(); // uncached: gates the mutation below
-          const fresh = await api.transactions.get(deleteTxId);
+          let fresh = await api.transactions.get(deleteTxId);
           if (!fresh || !isProjectTransaction(fresh)) return { outcome: "drift", error_code: "duplicate_not_project" };
+          if (!sourceConfirmed || !action.mirrorMaterial || !compareBankTransactionMaterial(action.mirrorMaterial, fresh).ok) return {outcome: "drift", error_code: "mirror_material_drift"};
+          let source = await api.transactions.get(action.confirmedTxId);
+          const expected = sourceExpected();
+          if (!expected || source.status !== "CONFIRMED" || source.is_deleted || !compareBankTransactionMaterial(expected, {...source, status: expected.status!, items: []}).ok || expected.items.length) return {outcome: "drift", error_code: "confirmed_source_material_drift"};
+          const [bankAccounts, accountDimensions] = await Promise.all([api.readonly.getBankAccounts({fresh:true}), api.readonly.getAccountDimensions({fresh:true})]);
+          if (action.mappingMaterial !== transferMappingMaterial(bankAccounts, accountDimensions) || !verifyPairEvidence(source, fresh, bankAccounts, accountDimensions)) return {outcome: "drift", error_code: "bank_mapping_drift"};
+          api.journals.invalidateListCache();
+          const journals = findRegistrationJournal(await api.journals.listAllWithPostings(), action.confirmedTxId);
+          if (journals.length !== 1) return {outcome: "drift", error_code: "registration_journal_unproven"};
+          let journal = journals[0]!;
+          if ((journal.postings?.length ?? 0)===0 && journal.id!=null) journal=await api.journals.get(journal.id);
+          if(findRegistrationJournal([journal],action.confirmedTxId).length!==1) return {outcome:"drift",error_code:"registration_journal_unproven"};
+          action.registrationJournalId = journal.id;
+          // Journal/reference reads above may await another actor's correction.
+          // Re-read source and make the reviewed mirror the final awaited read.
+          const [finalBanks,finalDimensions]=await Promise.all([api.readonly.getBankAccounts({fresh:true}),api.readonly.getAccountDimensions({fresh:true})]);
+          if(action.mappingMaterial!==transferMappingMaterial(finalBanks,finalDimensions)) return {outcome:"drift",error_code:"bank_mapping_drift"};
+          api.transactions.invalidateListCache();
+          source=await api.transactions.get(action.confirmedTxId);
+          fresh=await api.transactions.get(deleteTxId);
+          if(!compareBankTransactionMaterial(action.mirrorMaterial,fresh).ok || !isProjectTransaction(fresh)) return {outcome:"drift",error_code:"mirror_material_drift"};
+          if(source.status!=="CONFIRMED" || source.is_deleted || !compareBankTransactionMaterial(expected,{...source,status:expected.status!,items:[]}).ok || !verifyPairEvidence(source,fresh,finalBanks,finalDimensions)) return {outcome:"drift",error_code:"confirmed_source_material_drift"};
+          const postings = (journal.postings ?? []).filter(p => !p.is_deleted);
+          if (postings.some(p=>!positiveEurAmount(p,journal.cl_currencies_id).ok)) return {outcome:"drift",error_code:"registration_eur_unproven"};
+          const targetAccount = dimensionToAccountsId.get(action.targetDimensionId);
+          const sourceSide = action.pairEvidence!.sourceSide;
+          const targetSide = sourceSide === "D" ? "C" : "D";
+          const correct = postings.length === 2 && postings.some(p => p.accounts_id === expected.accounts_id && p.accounts_dimensions_id === expected.accounts_dimensions_id && p.type === sourceSide && sameAmountToTheCent(p.base_amount ?? p.amount, action.distributionAmount))
+            && postings.some(p => p.accounts_id === targetAccount && p.accounts_dimensions_id === action.targetDimensionId && p.type === targetSide && sameAmountToTheCent(p.base_amount ?? p.amount, action.distributionAmount));
+          if (!correct) return {outcome: "drift", error_code: "registration_postings_mismatch"};
+          const distributionProof=confirmedDistributionEvidence(source, [buildAccountDistribution(dimensionToAccountsId, action.targetDimensionId, action.distributionAmount)]);
+          if (!distributionProof.ok) return {outcome: "drift", error_code: "confirmed_distribution_drift"};
+          action.linkageEvidence=distributionProof.linkage_absent?"absent_actual_journal_proves_distribution":"get_distribution";
           return { outcome: "ready" };
         },
         mutate: async () => {
@@ -1790,6 +1939,9 @@ export async function executeInterAccount(
   const executionReport = await executeReconciliationCommands(commands);
   const completedIds = new Set(executionReport.command_partitions.completed.map(item => item.command_id));
   for (const pair of match.matchedPairs) {
+    const action=match.confirmActions.find(action=>action.confirmedTxId===pair.outgoing_transaction_id);
+    if(action?.registrationJournalId!=null)pair.registration_journal_id=action.registrationJournalId;
+    if(action?.linkageEvidence)pair.linkage_evidence=action.linkageEvidence;
     const confirmed = completedIds.has(reconTransferConfirmCommandId(pair.outgoing_transaction_id));
     const deleted = completedIds.has(reconDeleteDuplicateCommandId(pair.incoming_transaction_id));
     pair.status = confirmed ? "confirmed" : "not_confirmed";
@@ -1797,8 +1949,8 @@ export async function executeInterAccount(
       pair.incoming_action = "deleted";
     } else if (confirmed) {
       pair.incoming_action = "orphan";
-      pair.incoming_note = `Transaction ${pair.outgoing_transaction_id} was confirmed, but deleting the duplicate PROJECT row ${pair.incoming_transaction_id} did not complete. Manually delete ${pair.incoming_transaction_id} to avoid double-booking if it is later confirmed. See execution_report for the stop reason.`;
-      match.errors.push({ transaction_ids: [pair.outgoing_transaction_id, pair.incoming_transaction_id], reason: pair.incoming_note });
+      pair.incoming_note = `Transaction ${pair.outgoing_transaction_id} was confirmed; row ${pair.incoming_transaction_id} was retained. Re-read both transactions and the registration journal for manual review before any correction. See execution_report for the stop reason.`;
+      match.errors.push({ transaction_ids: [pair.outgoing_transaction_id, pair.incoming_transaction_id], ...(action?.registrationJournalId!=null?{journal_id:action.registrationJournalId}:{}), reason: pair.incoming_note });
     } else {
       pair.incoming_action = "would_delete_duplicate";
     }

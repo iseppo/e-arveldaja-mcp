@@ -92,6 +92,7 @@ function renderPreview(preview: AccountingDocumentPreview) {
         supplier_id: preview.proposedBooking.supplier_id,
         tax_notes: preview.proposedBooking.tax_notes,
         dimension_notes: preview.proposedBooking.dimension_notes,
+        history_notes: preview.proposedBooking.history_notes.map(note => wrapUntrustedOcr(note)),
         past_invoices: preview.proposedBooking.past_invoices.map(inv => ({
           ...inv,
           items: inv.items?.map(item => ({ ...item, custom_title: wrapUntrustedOcr(item.custom_title ?? undefined) })),
@@ -257,6 +258,14 @@ const wrapText = (value: unknown) => (typeof value === "string" ? wrapUntrustedO
 // name, file name, item titles from the supplier's history, number, notes, bank account) is external text, wrapped.
 const BOOKING_REVIEW_SAFE_KEYS: ReadonlySet<string> = new Set(["currency", "invoice_date", "journal_date", "source_sha256", "vat_rate_dropdown", "commands"]);
 function wrapBookingReview(value: unknown, key?: string): unknown {
+  if (key === "decision_notes") {
+    const notes = value as NonNullable<VerifyDocumentResult["bookingNotes"]>;
+    return {
+      tax_notes: notes.tax_notes.map(note => ({ ...note, title: wrapUntrustedOcr(note.title), detail: wrapUntrustedOcr(note.detail) })),
+      dimension_notes: notes.dimension_notes.map(note => wrapUntrustedOcr(note)),
+      history_notes: notes.history_notes.map(note => wrapUntrustedOcr(note)),
+    };
+  }
   if (key !== undefined && BOOKING_REVIEW_SAFE_KEYS.has(key)) return value;
   if (typeof value === "string") return wrapUntrustedOcr(value);
   if (Array.isArray(value)) return value.map((entry) => wrapBookingReview(entry));
@@ -302,7 +311,8 @@ function renderVerify(result: VerifyDocumentResult) {
     holds: result.holds,
     ...(result.values ? { values: renderReadingValues(result.values as unknown as Record<string, unknown>) } : {}),
     ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
-    ...(result.booking ? { booking_review: wrapBookingReview(result.booking) } : {}),
+    ...(result.booking ? { booking_review: wrapBookingReview({ ...result.booking, ...(result.bookingNotes ? { decision_notes: result.bookingNotes } : {}) } as unknown as Record<string, unknown>) } : {}),
+    ...(result.dimensionChoiceRequired ? { dimension_choice_required: result.dimensionChoiceRequired } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.itemTitleRequired ? { item_title_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
@@ -310,13 +320,13 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.releasedMarker ? { released_marker: result.releasedMarker } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
     next_step: result.status === "ready"
-      ? "Show the card (look_here rows and every row) and booking_review to the operator and ask each row's question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
+      ? "Review all booking_review.decision_notes with the card and exact booking model. Show look_here and every card row to the operator and ask each question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
       : result.releasedMarker
         ? "The marker is released. Call mode='verify' again with the same file and objects, without release_indeterminate: the duplicate scans re-run uncached before a plan_handle is issued."
       : result.indeterminateMarker
         ? "An earlier create of a matching document may still complete. Check e-arveldaja: when the invoice is not there, the owner may release the marker by calling mode='verify' again with release_indeterminate set to indeterminate_marker; when it is there, nothing more is needed."
         : result.bookingItemsRequired
-        ? "The server has no booking history to suggest the expense account: call mode='verify' again with items (accounts, dimensions, VAT settings)."
+        ? "Review the decision notes and dimension_choice_required, use list_account_dimensions or the UI to choose active dimensions on the affected accounts, then repeat mode='verify' with full explicit items (accounts, selected dimensions, VAT settings)."
         : result.itemTitleRequired
         ? "The suggested item title comes from the supplier's previous invoice and carries a date or period that may not fit this document: call mode='verify' again with the same arguments plus item_title, a title for this document (the service and its date or period as this document prints them)."
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
@@ -762,7 +772,12 @@ export function registerProcessAccountingDocumentTool(
             }
           : {}),
         ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
-        note: "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Confirmation is a SEPARATE step — review, then confirm the invoice by calling process_accounting_document with mode='confirm', the invoice_id, and the confirm plan handle below.",
+        note: execution.confirmPlan
+          ? "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Review the actual draft below and obtain APPROVAL TWO before mode='confirm' with this invoice_id and confirm_plan."
+          : "Purchase invoice created and the source document uploaded, but no confirm authority was issued. Review this existing invoice in e-arveldaja or use get_purchase_invoice and explicitly confirm after a fresh review. Do not create it again.",
+        ...(execution.readbackMismatch ? { draft_readback_mismatch: execution.readbackMismatch } : {}),
+        ...(execution.draftReadbackUnavailable ? { draft_readback_unavailable: true } : {}),
+        ...(execution.confirmPlan ? { draft_review: wrapBookingReview(execution.result) } : {}),
         ...(execution.confirmPlan
           ? { confirm_plan: { plan_handle: execution.confirmPlan.planHandle, invoice_id: execution.confirmPlan.invoiceId } }
           : {}),

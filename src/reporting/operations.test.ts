@@ -24,6 +24,19 @@ const journal = (o: Record<string, unknown>) => ({
 });
 
 describe("ReportingOperations.run", () => {
+  it("historical aging preserves AP/AR caveats and existing partial-payment warnings", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-18T12:00:00Z"));
+    try {
+      const invoice={id:1,status:"CONFIRMED",payment_status:"PARTIALLY_PAID",create_date:"2026-09-01",term_days:0,gross_price:124,base_gross_price:124,clients_id:7,client_name:"Party"};
+      const api=makeApi({saleInvoices:{listAll:vi.fn().mockResolvedValue([invoice])},purchaseInvoices:{listAll:vi.fn().mockResolvedValue([invoice])}});
+      const ops=createReportingOperations(api,true);
+      const outcome=await ops.run({report:"aging",asOfDate:"2026-09-30"});
+      if(!outcome.ok||outcome.value.report!=="aging")throw new Error("aging failed");
+      expect(outcome.value.payables.warnings).toEqual(outcome.value.receivables!.warnings);
+      expect(outcome.value.payables.warnings.join(" ")).toContain("CURRENT state");
+      expect(outcome.value.payables.warnings.join(" ")).toMatch(/partial/i);
+    } finally { vi.useRealTimers(); }
+  });
   it("trial_balance reuses computeAllBalances grand totals (raw, not per-account resum)", async () => {
     const api = makeApi({
       readonly: { getAccounts: vi.fn().mockResolvedValue([account({ id: 1020, name_est: "Pank" }), account({ id: 5000, name_est: "Kulu", account_type_est: "Kulud" })]) },

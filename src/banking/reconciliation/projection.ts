@@ -26,6 +26,7 @@ import type {
 export function exactMatchFingerprint(projection: ExactMatchProjection, threshold: number): string {
   return canonicalPlanJson({
     kind: "exact_match_confirm",
+    material_contract: "bank_transaction_material_v1",
     min_confidence: threshold,
     commands: projection.confirms.flatMap(descriptor => [
       ...(descriptor.needsClientUpdate
@@ -39,6 +40,8 @@ export function exactMatchFingerprint(projection: ExactMatchProjection, threshol
         id: reconInvoiceConfirmCommandId(descriptor.transactionId),
         transaction_id: descriptor.transactionId,
         table: descriptor.invoiceTable,
+        transaction_material: descriptor.transactionMaterial,
+        invoice_material: descriptor.invoiceMaterial,
         invoice_id: descriptor.invoiceId,
         amount: descriptor.amount,
         currency: descriptor.currency,
@@ -91,7 +94,7 @@ export function buildInterAccountPlanCommandProjections(
       ...(needsClientUpdate
         ? [{ id: reconClientUpdateCommandId(action.confirmedTxId), category: RECON_UPDATE_CLIENT_CATEGORY, transaction_id: action.confirmedTxId, set_clients_id: companyClientsId }]
         : []),
-      { id: reconTransferConfirmCommandId(action.confirmedTxId), category: RECON_CONFIRM_TRANSFER_CATEGORY, transaction_id: action.confirmedTxId, target_dimension_id: action.targetDimensionId, amount: action.distributionAmount, currency: action.confirmedCurrency },
+      { id: reconTransferConfirmCommandId(action.confirmedTxId), category: RECON_CONFIRM_TRANSFER_CATEGORY, transaction_id: action.confirmedTxId, target_dimension_id: action.targetDimensionId, amount: action.distributionAmount, currency: action.confirmedCurrency, source_material: action.sourceMaterial, mirror_material: action.mirrorMaterial, mapping_material: action.mappingMaterial, pair_evidence: action.pairEvidence },
       ...(action.deleteTxId !== undefined
         ? [{ id: reconDeleteDuplicateCommandId(action.deleteTxId), category: RECON_DELETE_DUPLICATE_CATEGORY, transaction_id: action.deleteTxId }]
         : []),

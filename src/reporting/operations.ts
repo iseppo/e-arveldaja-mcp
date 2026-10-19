@@ -11,7 +11,7 @@ import {
   monthEndSummary,
   monthEndWarnings,
 } from "../tools/financial-statements.js";
-import { agingComputationWarnings, computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
+import { agingComputationWarnings, historicalAgingWarnings, computeAgingBuckets, type AgingInvoiceInput } from "../tools/aging-analysis.js";
 import { computeMissingDocuments } from "../tools/document-audit.js";
 import { computeReceiptClientAlignment } from "./receipt-client-alignment.js";
 import { todayInTallinn } from "../local-date.js";
@@ -28,7 +28,7 @@ import type {
 // The bucketing math lives in ONE place (computeAgingBuckets) so the typed op
 // can never drift from the compute_*_aging granular handlers; here we only add
 // the op's own warnings and AgingSide shape.
-function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string, party: "client" | "supplier"): AgingSide {
+function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string, party: "client" | "supplier", dateWarnings: readonly string[] = []): AgingSide {
   const c = computeAgingBuckets(invoices, today);
   const warnings = agingComputationWarnings(c, `Investigate and link to a ${party} for accurate reports.`);
   return {
@@ -38,7 +38,7 @@ function computeAgingSide(invoices: readonly AgingInvoiceInput[], today: string,
     aging_buckets: c.aging_buckets,
     top_parties: c.top_parties,
     ...(c.unmatched.count > 0 ? { unmatched: c.unmatched } : {}),
-    warnings,
+    warnings: [...warnings, ...dateWarnings],
   };
 }
 
@@ -98,8 +98,9 @@ class ReportingOperationsImpl implements ReportingOperations {
       this.enableSales ? this.api.saleInvoices.listAll() : Promise.resolve([] as SaleInvoice[]),
       this.api.purchaseInvoices.listAll(),
     ]);
-    const payables = computeAgingSide(allPurchases as AgingInvoiceInput[], today, "supplier");
-    const receivables = this.enableSales ? computeAgingSide(allSales as AgingInvoiceInput[], today, "client") : undefined;
+    const dateWarnings = historicalAgingWarnings(input.asOfDate, actualToday);
+    const payables = computeAgingSide(allPurchases as AgingInvoiceInput[], today, "supplier", dateWarnings);
+    const receivables = this.enableSales ? computeAgingSide(allSales as AgingInvoiceInput[], today, "client", dateWarnings) : undefined;
     return ok({
       report: "aging",
       as_of_date: today,

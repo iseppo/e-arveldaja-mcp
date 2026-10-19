@@ -25,7 +25,7 @@ const matchingTx = () => ({
 const matchingSale = () => ({
   id: 501, number: "INV-1", clients_id: 42, gross_price: 100, base_gross_price: 100,
   bank_ref_number: "REF1", payment_status: "NOT_PAID", status: "CONFIRMED", client_name: "Acme",
-  cl_currencies_id: "EUR",
+  cl_currencies_id: "EUR", sale_invoice_type: "INVOICE",
 });
 
 function setup(overrides: Record<string, unknown> = {}) {
@@ -50,6 +50,21 @@ function setup(overrides: Record<string, unknown> = {}) {
     },
     ...overrides,
   } as any;
+  for (const resource of [api.saleInvoices, api.purchaseInvoices]) {
+    resource.get ??= vi.fn(async (id: number) => (await resource.listAll()).find((row: any) => row.id === id));
+  }
+  const originalUpdate = api.transactions.update.getMockImplementation();
+  const clientUpdates = new Map<number, number>();
+  const originalGet = api.transactions.get.getMockImplementation();
+  api.transactions.get.mockImplementation(async (id: number) => {
+    const row = await originalGet(id);
+    return clientUpdates.has(id) ? {...row, clients_id: clientUpdates.get(id)} : row;
+  });
+  api.transactions.update.mockImplementation(async (id: number, body: any) => {
+    const result = await originalUpdate(id, body);
+    if (body.clients_id != null) clientUpdates.set(id, body.clients_id);
+    return result;
+  });
   const runtimeSafetyContext = createTestRuntimeSafetyContext();
   const operations = createBankReconciliationOperations(api, runtimeSafetyContext);
   return { api, operations, confirm, runtimeSafetyContext };
@@ -115,6 +130,7 @@ const registrationJournal = (clientsId: number, txId: number = LEDGER_TX_ID) => 
 const confirmedTxWithInvoiceItem = (txId: number, invoiceId: number) => ({
   ...matchingTx(),
   id: txId,
+  ref_number:txId===1?"REF1":"REF2",
   status: "CONFIRMED",
   accounts_id: BANK_ACCOUNT_ID,
   accounts_dimensions_id: BANK_DIMENSION_ID,
@@ -177,7 +193,8 @@ function setupTwoTxLedgerCheck() {
       invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue([matchingSale(), secondSale()]),
       get: vi.fn().mockImplementation(async (id: number) => {
-        if (id === 501) throw new Error("invoice read failed");
+        if (id === 501 && confirmedIds.has(1)) throw new Error("invoice read failed");
+        if (id === 501) return {...matchingSale(), receivable_accounts_id: RECEIVABLE_ACCOUNT_ID};
         return { ...secondSale(), receivable_accounts_id: RECEIVABLE_ACCOUNT_ID };
       }),
     },
@@ -242,13 +259,12 @@ describe("BankReconciliationOperations", () => {
     expect(mockedLogAudit).toHaveBeenCalled();
   });
 
-  it("executeExactConfirm re-reads transactions/invoices/journals uncached before the gating projection; prepare stays cached", async () => {
+  it("executeExactConfirm re-reads uncached before the gating projection and prepare hydrates transaction material", async () => {
     const { api, operations } = setup();
     const dry = await operations.prepareExactConfirm({ minConfidence: 90, blockOnDuplicate: undefined });
     const planHandle = dry.ok ? dry.value.planHandle : undefined;
-    for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices, api.journals]) {
-      expect(resource.invalidateListCache).not.toHaveBeenCalled();
-    }
+    expect(api.transactions.invalidateListCache).toHaveBeenCalled();
+    for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices, api.journals]) resource.invalidateListCache.mockClear();
 
     const outcome = await operations.executeExactConfirm({ minConfidence: 90, blockOnDuplicate: undefined, planHandle });
     expect(outcome.ok).toBe(true);
@@ -262,7 +278,7 @@ describe("BankReconciliationOperations", () => {
     const lastGetBeforeConfirm = api.transactions.get.mock.invocationCallOrder
       .filter((order: number) => order < api.transactions.confirm.mock.invocationCallOrder[0]).at(-1);
     expect(lastInvalidate).toBeLessThan(lastGetBeforeConfirm);
-    expect(api.transactions.invalidateListCache.mock.invocationCallOrder[1]).toBeGreaterThan(api.transactions.listAll.mock.invocationCallOrder.at(-1));
+    expect(lastInvalidate).toBeGreaterThan(api.transactions.listAll.mock.invocationCallOrder.at(-1));
   });
 
   it("executeInterAccount re-reads transactions and the journal guard snapshot uncached; prepare stays cached", async () => {
@@ -271,12 +287,13 @@ describe("BankReconciliationOperations", () => {
     });
     const prepared = await operations.prepareInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined });
     const planHandle = prepared.ok ? prepared.value.planHandle : undefined;
-    expect(api.transactions.invalidateListCache).not.toHaveBeenCalled();
+    expect(api.transactions.invalidateListCache).toHaveBeenCalled();
+    api.transactions.invalidateListCache.mockClear();
     expect(api.journals.invalidateListCache).not.toHaveBeenCalled();
     const listCallsBefore = api.transactions.listAll.mock.calls.length;
 
     await operations.executeInterAccount({ maxDateGap: undefined, targetAccountsDimensionsId: undefined, planHandle });
-    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(1);
+    expect(api.transactions.invalidateListCache).toHaveBeenCalledTimes(2);
     expect(api.journals.invalidateListCache).toHaveBeenCalledTimes(1);
     const invalidateOrder = api.transactions.invalidateListCache.mock.invocationCallOrder[0];
     expect(invalidateOrder).toBeLessThan(api.transactions.listAll.mock.invocationCallOrder[listCallsBefore]);
@@ -367,7 +384,7 @@ describe("BankReconciliationOperations", () => {
     expect(executed.ok).toBe(true);
     expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 42 });
     expect(api.transactions.confirm).toHaveBeenCalledWith(
-      1, [{ related_table: "sale_invoices", related_id: 501, amount: 100 }], { autoFixClientsId: false },
+      1, [{ related_table: "sale_invoices", related_id: 501, amount: 100 }], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }),
     );
   });
 

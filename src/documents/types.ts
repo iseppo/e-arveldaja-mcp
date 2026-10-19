@@ -132,6 +132,8 @@ export interface AccountingDocumentExecution {
   readonly createdInvoiceId: number;
   readonly documentUploaded: boolean;
   readonly result: PurchaseInvoice;
+  readonly readbackMismatch?: readonly string[];
+  readonly draftReadbackUnavailable?: true;
   /** STRUCTURED, UNWRAPPED duplicate-scan data. The façade formats it into
    * warning lines and wraps the untrusted journal titles with wrapUntrustedOcr
    * (F-RESOLVER-FACADE-WRAP) — the op never embeds a raw title into a string. */
@@ -147,8 +149,8 @@ export interface AccountingDocumentExecution {
   };
 }
 
-/** Input for the SEPARATE confirm/link step (Step 3). Confirm operates purely
- * on the reviewed invoice id — it never re-reads the source or re-extracts. */
+/** Input for the SEPARATE confirm/link step. The handle binds the reviewed
+ * actual draft; confirm reads it fresh without re-extracting the source. */
 export interface ConfirmAccountingDocumentInput {
   /** The confirm plan handle minted at create time. Consume-once; NOT approval. */
   readonly planHandle: string | undefined;

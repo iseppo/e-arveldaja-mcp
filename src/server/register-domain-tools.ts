@@ -64,9 +64,9 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
 
   // Every public tool registration crosses the same profile/catalog boundary;
   // that boundary delegates into the scoped server above.
-  registerCrudTools(publicServer, api, toolExposure);
+  registerCrudTools(publicServer, api, toolExposure, runtimeSafetyContext);
   registerAccountBalanceTools(publicServer, api);
-  registerPdfWorkflowTools(publicServer, api);
+  registerPdfWorkflowTools(publicServer, api, runtimeSafetyContext);
   registerDocumentAttachmentTools(publicServer, api);
   registerCurrencyRoundingTools(publicServer, api);
   registerBankReconciliationTools(publicServer, api, runtimeSafetyContext, toolExposure);

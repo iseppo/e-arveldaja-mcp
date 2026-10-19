@@ -11,6 +11,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
+import { installLegacyDraftReadback } from "../__fixtures__/document-reading/legacy-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -43,6 +44,7 @@ function setup(options: Parameters<typeof createAccountingWorkflowApi>[0] & { de
   const { deps, ...apiOptions } = options;
   const runtime = createTestRuntimeSafetyContext();
   const api = createAccountingWorkflowApi(apiOptions);
+  installLegacyDraftReadback(api);
   const server = { registerTool: vi.fn() } as any;
   registerProcessAccountingDocumentTool(server, api, runtime, deps ?? {});
   const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "process_accounting_document");
@@ -65,6 +67,22 @@ beforeEach(() => mockedParseDocument.mockResolvedValue(docWithRegCode()));
 
 describe("process_accounting_document", () => {
   const supplier = () => fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, is_supplier: true });
+
+  it("prepare displays partial supplier history in the public proposed booking", async () => {
+    const { path } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()], clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoiceRows: [{ id: 501, clients_id: 4242, number: "H-1", status: "CONFIRMED", create_date: "2026-01-10" },
+        { id: 502, clients_id: 4242, number: "H-2", status: "CONFIRMED", create_date: "2026-01-11" }],
+      purchaseInvoices: { get: vi.fn().mockImplementation(async (id: number) => {
+        if (id === 502) throw new Error("history unavailable");
+        return { id: 501, items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, total_net_price: 10 }] };
+      }) },
+    });
+    const preview = parse(await handler({ mode: "prepare", file_path: path }));
+    expect(preview.summary.proposed_booking.history_notes[0]).toContain("supplier_history_partial");
+    expect(preview.summary.proposed_booking.history_notes[0]).toContain("UNTRUSTED_OCR_START");
+  });
 
   // The final reviewed booking fields shared by the booking-binding prepare and create.
   const bookingArgs = () => ({

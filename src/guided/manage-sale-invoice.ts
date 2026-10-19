@@ -58,6 +58,7 @@ interface ManageArgs {
   status?: string;
   payment_status?: string;
   clients_id?: number;
+  release_indeterminate?: string;
 }
 
 export function registerManageSaleInvoiceTool(
@@ -76,6 +77,7 @@ export function registerManageSaleInvoiceTool(
       action: z.string().optional().describe("read: list|get|document|xml|delivery_options. prepare/execute: create|update|delete|confirm|invalidate|send|recurring."),
       id: coerceId.optional().describe("Invoice ID (required for everything except list/create/recurring)."),
       plan_handle: z.string().optional().describe("Execution-plan handle from mode='prepare'. Required for mode='execute'."),
+      release_indeterminate: z.string().optional().describe("prepare create only: explicitly release an uncertain-create marker after the owner checks no invoice exists and the earlier POST can no longer complete. This call issues no plan; prepare again separately."),
       payload: jsonObjectInput.optional().describe("create/update fields, send request ({send_einvoice, send_email, email_addresses, ...}), or recurring params ({source_month:YYYY-MM, target_date:YYYY-MM-DD, target_journal_date:YYYY-MM-DD, invoice_ids?, auto_confirm?}). For create, pass EITHER clients_id OR an inline client to resolve-or-create a customer ({name, reg_code?, vat_no?, iban?, country?}); on any identity conflict the create is refused and neither the client nor the invoice is created."),
       view: z.enum(["brief", "full"]).optional().describe("read=list: brief (default) or full."),
       page: z.number().int().positive().optional().describe("read=list: page number."),
@@ -88,6 +90,9 @@ export function registerManageSaleInvoiceTool(
     { ...batch, title: "Manage Sale Invoice" },
     async (args: ManageArgs) => {
       const mode = args.mode ?? "read";
+      if (args.release_indeterminate !== undefined && (typeof args.release_indeterminate !== "string" || mode !== "prepare" || args.action !== "create" || !args.release_indeterminate.trim())) {
+        return textResult({ error: "release_indeterminate is accepted only for prepare create with a nonempty marker.", category: "invalid_recovery_release" }, true);
+      }
 
       if (mode === "read") {
         const action = (args.action as SaleInvoiceReadAction | undefined) ?? (args.id !== undefined ? "get" : "list");
@@ -118,8 +123,9 @@ export function registerManageSaleInvoiceTool(
       const payload = args.payload !== undefined ? parseJsonObject(args.payload, "payload") : undefined;
 
       if (mode === "prepare") {
-        const outcome = await operations.run({ mode: "prepare", action, ...(args.id !== undefined ? { id: args.id } : {}), ...(payload !== undefined ? { payload } : {}) });
-        if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code }, true);
+        const outcome = await operations.run({ mode: "prepare", action, ...(args.id !== undefined ? { id: args.id } : {}), ...(payload !== undefined ? { payload } : {}), ...(args.release_indeterminate !== undefined ? { releaseIndeterminate: args.release_indeterminate } : {}) });
+        if (!outcome.ok) return textResult(failureResponsePayload(outcome.error), true);
+        if (outcome.value.mode === "recovery") return textResult({ status: "recovery_released", released_marker: outcome.value.releasedMarker, mutation_occurred: false, next_step: "Prepare create again without release_indeterminate; a new uncached existence check runs before issuing a plan." });
         if (outcome.value.mode !== "prepare") return textResult({ error: "unexpected", category: "internal" }, true);
         return textResult({
           status: "ready_for_approval",

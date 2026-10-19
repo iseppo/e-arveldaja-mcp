@@ -238,6 +238,7 @@ Call `create_purchase_invoice_from_pdf`:
 - `notes`: leave empty by default; use it only for genuinely useful context such as assumptions made or manual adjustments. Do NOT put the source document filename here — the document is auto-uploaded and attached via `file_path` below.
 - `file_path`: the original file path (auto-uploads the source document)
 - `source_sha256`: the exact `source_sha256` value returned by `extract_pdf_invoice` in step 2. This binds the booking to the reviewed bytes; if the file changed since extraction the call is rejected before anything is created. Do not recompute or omit it.
+- `require_confirm_plan`: `true`. Show the actual returned draft and its ID, supplier, accounts/dimensions, dates, notes, currency and totals. Require `draft_readback_verified:true` and a `confirm_plan.plan_handle` before confirmation.
 
 Use the exact `vat_price` and `gross_price` from the invoice; do not recalculate them. Omit them only when they are genuinely unknown.
 The totals are checked before anything is created. `purchase_totals_mismatch`: the explicit `vat_price` differs from the VAT the items compute (item net × VAT rate) by more than 1 cent per item; correct the item net amounts or VAT rates, or the totals, to match the document. `purchase_base_sign_mismatch`: a `base_*` EUR amount has the opposite sign of the document-currency amount (for example a positive EUR total on a credit note); fix the `base_*` values.
@@ -247,6 +248,9 @@ If source document upload fails after invoice creation, the draft invoice is inv
 
 Call `confirm_purchase_invoice`:
 - `id`: the invoice ID from step 11
+- `plan_handle`: the exact single-use `confirm_plan.plan_handle` from step 11. Confirm only when the user's approval covers registering this actual reviewed draft; an existing explicit approval for these unchanged effects remains valid across the tool boundary.
+
+If readback is held or the handle is missing, expired, consumed, or refused because the draft changed, stop at the existing invoice ID. Do not create another invoice, retry registration automatically, fall back to ID-only confirmation, or clear approved notes. Report the retained draft and the reason it needs a new review.
 
 Report the result:
 - Supplier name and supplier client ID

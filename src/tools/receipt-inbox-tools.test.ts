@@ -23,6 +23,19 @@ import {
 } from "../__fixtures__/accounting-workflow.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
+import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
+
+const createdInvoices = new WeakMap<object, Map<number, any>>();
+function createdReadback(api:any,id:number,body:any,vat:number|undefined,gross:number|undefined,status="PROJECT") {
+  const invoice={...fixturePurchaseReadback(body,vat,gross,true,id),status};
+  createdInvoices.get(api)!.set(id,invoice);
+  return {...invoice};
+}
+function confirmedReadback(api:any,id:number) {
+  const invoice=createdInvoices.get(api)!.get(id);
+  if(!invoice)throw new Error(`Missing created fixture invoice ${id}`);
+  invoice.status="CONFIRMED";return {};
+}
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 
 vi.mock("../audit-log.js", async (importOriginal) => ({
@@ -127,6 +140,16 @@ function setupReceiptTool(
       : undefined,
   };
   const api = createAccountingWorkflowApi(apiOptions);
+  createdInvoices.set(api,new Map());
+  const priorGet=api.purchaseInvoices.get.getMockImplementation()!;
+  api.purchaseInvoices.get.mockImplementation(async(id:number)=>{
+    const invoice=createdInvoices.get(api)!.get(id);
+    return invoice?structuredClone(invoice):priorGet(id);
+  });
+  if(options.allowWrites) {
+    api.purchaseInvoices.createAndSetTotals.mockImplementation(async(body:any,vat:number,gross:number)=>createdReadback(api,9001,body,vat,gross));
+    api.purchaseInvoices.confirmWithTotals.mockImplementation(async(id:number)=>confirmedReadback(api,id));
+  }
 
   registerReceiptInboxTools(server, api, runtimeSafetyContext, EXPOSE_GRANULAR, options.directoryAccess);
 
@@ -243,7 +266,7 @@ function setupH14Tool(
       account_type_eng: "Expenses",
     }],
   });
-  setup.api.purchaseInvoices.createAndSetTotals.mockResolvedValue(H14_INVOICE);
+  setup.api.purchaseInvoices.createAndSetTotals.mockImplementation(async(body:any,vat:number,gross:number)=>createdReadback(setup.api,701,body,vat,gross));
   return setup;
 }
 
@@ -352,12 +375,12 @@ describe("H14 post-create recovery state", () => {
       transactionConfirmCalls: 0,
     },
     {
-      name: "H14 invoice confirm definite CONFIRMED",
-      createStatus: "CONFIRMED",
+      name: "H14 invoice confirm definite local rejection",
+      createStatus: "PROJECT",
       stage: "invoice_confirmation",
       error: new Error("confirmation rejected"),
       category: "mutation_failed",
-      invoiceStatus: "CONFIRMED",
+      invoiceStatus: "PROJECT",
       transactionStatus: "PROJECT",
       getCalls: 2,
       invoiceConfirmCalls: 1,
@@ -405,10 +428,7 @@ describe("H14 post-create recovery state", () => {
     it(testCase.name, async () => {
       const { handler, api } = setupH14Tool("apply_transaction_classifications", { allowWrites: true });
       const planHandle = await mintApplyHandle(handler, api, [H14_CLASSIFICATION]);
-      api.purchaseInvoices.createAndSetTotals.mockResolvedValue({
-        ...H14_INVOICE,
-        status: testCase.createStatus,
-      });
+      api.purchaseInvoices.createAndSetTotals.mockImplementation(async(body:any,vat:number,gross:number)=>createdReadback(api,701,body,vat,gross,testCase.createStatus));
       if (testCase.stage === "transaction_reread") {
         api.transactions.get
           .mockResolvedValueOnce(H14_TX)
@@ -447,7 +467,7 @@ describe("H14 post-create recovery state", () => {
       expect(nextAction).not.toMatch(/create another|invalidate|retry/i);
       expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
       expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
-      expect(api.transactions.get).toHaveBeenCalledTimes(testCase.getCalls);
+      expect(api.transactions.get).toHaveBeenCalledTimes(testCase.stage === "transaction_reread" ? 2 : testCase.stage === "invoice_confirmation" ? 3 : 4);
       expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(testCase.invoiceConfirmCalls);
       expect(api.transactions.confirm).toHaveBeenCalledTimes(testCase.transactionConfirmCalls);
       expect(payload.execution.errors[0].partial_mutations).toEqual(
@@ -466,11 +486,7 @@ describe("H14 accumulator and invalidation recovery", () => {
   };
 
   function configureDistinctInvoices(api: ReturnType<typeof setupH14Tool>["api"]): void {
-    api.purchaseInvoices.createAndSetTotals.mockImplementation(async ({ number }: { number: string }) => ({
-      ...H14_INVOICE,
-      id: number.endsWith("100") ? 702 : 701,
-      number,
-    }));
+    api.purchaseInvoices.createAndSetTotals.mockImplementation(async (body:any,vat:number,gross:number) => createdReadback(api,body.number.endsWith("100") ? 702 : 701,body,vat,gross));
   }
 
   it("H14 merged wrapper preserves granular partial mutations unchanged", async () => {
@@ -509,7 +525,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     const { handler, api } = setupH14Tool("apply_transaction_classifications");
     const planHandle = await mintApplyHandle(handler, api, [{ ...H14_CLASSIFICATION, transactions: [H14_TX, tx100] }]);
     api.purchaseInvoices.createAndSetTotals
-      .mockResolvedValueOnce(H14_INVOICE)
+      .mockImplementationOnce(async(body:any,vat:number,gross:number)=>createdReadback(api,701,body,vat,gross))
       .mockRejectedValueOnce(new Error("second create rejected"));
     api.purchaseInvoices.confirmWithTotals
       .mockRejectedValueOnce(h14StructuredAmbiguity("invoice_confirmation"));
@@ -544,7 +560,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     configureDistinctInvoices(api);
     api.purchaseInvoices.confirmWithTotals.mockImplementation(async (id: number) => {
       if (id === 701) throw h14StructuredAmbiguity("invoice_confirmation");
-      return {};
+      return confirmedReadback(api,id);
     });
 
     const result = await handler({
@@ -567,7 +583,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(2);
     expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(2);
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
-    expect(api.transactions.get).toHaveBeenCalledTimes(4);
+    expect(api.transactions.get).toHaveBeenCalledTimes(7);
     expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
   });
 
@@ -649,7 +665,7 @@ describe("H14 accumulator and invalidation recovery", () => {
     },
   ] as const;
 
-  describe("H14 failed stale invalidation retains partial recovery state", () => {
+  describe("H14 stale transaction retains invoice without attempting invalidation", () => {
     for (const testCase of invalidationCases) {
       it(testCase.name, async () => {
         const { handler, api } = setupH14Tool("apply_transaction_classifications");
@@ -657,10 +673,7 @@ describe("H14 accumulator and invalidation recovery", () => {
         api.transactions.get
           .mockResolvedValueOnce(H14_TX)
           .mockResolvedValueOnce(testCase.freshTransaction);
-        api.purchaseInvoices.createAndSetTotals.mockResolvedValue({
-          ...H14_INVOICE,
-          status: testCase.createStatus,
-        });
+        api.purchaseInvoices.createAndSetTotals.mockImplementation(async(body:any,vat:number,gross:number)=>createdReadback(api,701,body,vat,gross,testCase.createStatus));
         api.purchaseInvoices.invalidate.mockRejectedValueOnce(testCase.error);
 
         const result = await handler({
@@ -676,31 +689,28 @@ describe("H14 accumulator and invalidation recovery", () => {
           created_invoice_ids: [701],
           linked_transaction_ids: [],
           partial_mutations: [{
-            category: testCase.category,
+            category: "mutation_failed",
             mutation_may_have_occurred: true,
-            failed_stage: "invoice_invalidation",
+            failed_stage: "transaction_drift",
             created_invoice_id: 701,
-            created_invoice_status: testCase.invoiceStatus,
+            created_invoice_status: testCase.createStatus,
             attempted_transaction_id: 99,
             transaction_status: testCase.transactionStatus,
-            next_action: expect.stringContaining("Freshly read existing purchase invoice 701"),
+            next_action: expect.stringContaining("purchase invoice 701"),
           }],
         });
         const nextAction = payload.results[0].partial_mutations[0].next_action;
         expect(nextAction).toContain("explicit approval");
         expect(nextAction).not.toMatch(/create another|invalidate|retry/i);
-        expect(payload.results[0].notes).toEqual(expect.arrayContaining([
-          expect.stringContaining(
-            `Auto-created purchase invoice 701 could not be kept because transaction 99 is no longer bookable (status ${testCase.freshTransaction.status}), and invalidation also failed:`,
-          ),
-        ]));
-        expect(payload.results[0].notes.join("\n")).toContain(testCase.errorNote);
+        expect(payload.results[0].partial_mutations[0].changed_fields).toContain(testCase.freshTransaction.is_deleted ? "is_deleted" : "status");
+        expect(payload.results[0].partial_mutations[0].bank_partial.register_attempted).toBe(false);
+        // Configured cleanup errors cannot obscure retained state: this path
+        // deliberately performs no invalidation or other compensating mutation.
         expect(api.transactions.get).toHaveBeenCalledTimes(2);
         expect(api.transactions.get).toHaveBeenNthCalledWith(1, 99);
         expect(api.transactions.get).toHaveBeenNthCalledWith(2, 99);
         expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
-        expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
-        expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(701);
+        expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
         expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
         expect(api.transactions.confirm).not.toHaveBeenCalled();
       });
@@ -2470,7 +2480,7 @@ describe("receipt inbox tool status handling", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
   });
 
-  it("apply_transaction_classifications reports failed when a draft invoice is invalidated after stale transaction detection", async () => {
+  it("apply_transaction_classifications retains the draft after stale transaction detection", async () => {
     const getImpl = vi.fn()
       // First PROJECT read is consumed by the dry_run_apply plan mint (mintApplyHandle);
       // the second PROJECT is the execute fingerprint pass; the VOID is the post-create
@@ -2609,14 +2619,14 @@ describe("receipt inbox tool status handling", () => {
 
     expect(payload.results).toHaveLength(1);
     expect(payload.results[0]!.status).toBe("failed");
-    expect(payload.results[0]!.created_invoice_ids).toEqual([]);
+    expect(payload.results[0]!.created_invoice_ids).toEqual([9001]);
     expect(payload.results[0]!.linked_transaction_ids).toEqual([]);
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
-      expect.stringContaining("Invalidated auto-created purchase invoice 9001 because transaction 43 is no longer bookable (status VOID)."),
+      expect.stringContaining("Use existing purchase invoice 9001"),
     ]));
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
-    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9001);
+    expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
@@ -2702,9 +2712,7 @@ describe("receipt inbox tool status handling", () => {
       }],
     });
     api.purchaseInvoices.createAndSetTotals.mockImplementation(
-      async ({ number }: { number: string }) => ({
-        id: number === "AUTO-TX-44" ? 9001 : 9002,
-      }),
+      async (body:any,vat:number,gross:number) => createdReadback(api,body.number === "AUTO-TX-44" ? 9001 : 9002,body,vat,gross),
     );
 
     const classificationsJson = JSON.stringify([{
@@ -2761,19 +2769,18 @@ describe("receipt inbox tool status handling", () => {
       failed: 1,
     });
     expect(payload.results[0]!.status).toBe("failed");
-    expect(payload.results[0]!.created_invoice_ids).toEqual([9001]);
+    expect(payload.results[0]!.created_invoice_ids).toEqual([9001,9002]);
     expect(payload.results[0]!.linked_transaction_ids).toEqual([44]);
     expect(payload.results[0]!.notes).toEqual(expect.arrayContaining([
-      expect.stringContaining("Invalidated auto-created purchase invoice 9002 because transaction 45 is no longer bookable (status VOID)."),
+      expect.stringContaining("Use existing purchase invoice 9002"),
       expect.stringContaining("Group reported as failed; the following transactions were already booked successfully and were left in place: 44."),
     ]));
     expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(2);
-    expect(api.transactions.get).toHaveBeenCalledTimes(4);
+    expect(api.transactions.get).toHaveBeenCalledTimes(6);
     expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledTimes(1);
     expect(api.purchaseInvoices.confirmWithTotals).toHaveBeenCalledWith(9001, true);
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
-    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledTimes(1);
-    expect(api.purchaseInvoices.invalidate).toHaveBeenCalledWith(9002);
+    expect(api.purchaseInvoices.invalidate).not.toHaveBeenCalled();
   });
 });
 

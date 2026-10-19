@@ -4,7 +4,7 @@ Book Lightyear investment activity from CSV exports after explicit dry-run revie
 
 User-facing phases:
 1. Parse statements and required capital-gains files.
-2. Show accounting carrying value / cost basis.
+2. Show an analytical weighted-average-cost (WAC) estimate.
 3. Preview trade bookings.
 4. Preview distribution bookings after required accounts are known.
 5. Book only approved categories.
@@ -37,11 +37,11 @@ If sales are present, call `parse_lightyear_capital_gains` for the FIFO capital-
 - If no `capital_gains_path` is available, explain that non-cash-equivalent sells will be skipped.
 - Sell gains/losses and expensed trade fees default to the standard securities account pair (name-resolved): realized **gain → 8330** "Tulu aktsiatelt ja osadelt", realized **loss and expensed Buy/Sell fees → 8335** "Kulu aktsiatelt ja osadelt". (Every fee is expensed to 8335 — a Buy's trade platform fee as well as its FX conversion fee. Nothing is capitalized into the investment cost: Lightyear's FIFO cost basis is fee-exclusive, so capitalizing would strand the fee on the investment account.) Only pass `gain_loss_account` / `loss_account` / `fee_account` to override; you no longer need to ask the user for a gain/loss account before booking sells.
 
-### Step 3: Preview portfolio carrying value
+### Step 3: Preview analytical weighted-average-cost (WAC) estimate
 
 Call `lightyear_portfolio_summary`.
 - Show ticker, quantity, remaining cost EUR, and average cost per share.
-- Treat this as the current accounting carrying value / cost basis, not market value.
+- This helper uses weighted-average cost (WAC). Its remaining-cost figure is NOT the FIFO carrying amount in the ledger. For example, buying one unit at EUR 10 and one at EUR 30 then selling one leaves WAC EUR 20 but FIFO EUR 30. Reconcile the registered investment-account balance with FIFO capital-gains data; do not use WAC as a ledger control total.
 
 ### Step 4: Preview trades
 
@@ -82,5 +82,5 @@ Report:
 - Trades booked
 - Distributions booked
 - Skipped entries and reasons
-- Current portfolio carrying value / remaining cost basis from step 3
+- Analytical weighted-average-cost (WAC) estimate from step 3, separate from the registered FIFO investment-account balance
 - Suggested `compute_account_balance` check for the investment account

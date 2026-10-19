@@ -16,6 +16,7 @@ import {
   LinkedInvoiceClientsAmbiguousError,
 } from "../../api/transactions.api.js";
 import { BookingGuard } from "../../booking-guard.js";
+import { TransactionMaterialDriftError } from "../../banking/transaction-material-snapshot.js";
 import { bankTransactionDirection } from "../../bank-transaction-direction.js";
 import {
   verifyInvoiceReceiptLedger,
@@ -592,6 +593,7 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
         ? await api.transactions.confirm(id, dist, { reassignClientToInvoice: true })
         : await api.transactions.confirm(id, dist);
     } catch (error) {
+      if (error instanceof TransactionMaterialDriftError) return toolError(error);
       if (clientsIdWasSet && !isMutationIndeterminate(error)) {
         try {
           await api.transactions.update(id, { clients_id: null } as Partial<Transaction>);
@@ -674,12 +676,14 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           `(${ledgerCheck.code}). The mutation is committed — reverse it before retrying.`,
         category: ledgerCheck.code,
         mutation_occurred: true,
+        automatic_retry_forbidden: true,
+        accounting_status: "needs_review",
         transaction_id: id,
         ...(typeof details.journal_id === "number" ? { journal_id: details.journal_id } : {}),
         transaction_clients_id: details.transaction_clients_id,
         invoice_clients_id: details.invoice_clients_id,
         details,
-        next_action: `invalidate_transaction ${id}, then confirm_transaction again with reassign_client_to_invoice: true`,
+        next_action: ledgerCheck.code === "ledger_client_mismatch" ? `invalidate_transaction ${id}, then confirm_transaction again with reassign_client_to_invoice: true` : `Review transaction ${id}, the bank statement and actual journal direction manually before correction. Do not automatically retry.`,
       });
     }
     if (ledgerCheck?.ok === true) {
@@ -702,10 +706,12 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
       raw: result,
       ...(warnings.length > 0 ? { warnings } : {}),
       ...(clientsIdChanged || (ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined)
+        || (hadInvoiceDistribution && (!ledgerCheck || ledgerCheck.ok && (ledgerCheck.skipped || ledgerCheck.unverified?.length)))
         || Object.keys(interAccountExtra).length > 0
         ? {
           extra: {
             ...interAccountExtra,
+            ...(hadInvoiceDistribution && (!ledgerCheck || ledgerCheck.ok && (ledgerCheck.skipped || ledgerCheck.unverified?.length)) ? {accounting_status:"unverified",automatic_retry_forbidden:true,...(ledgerCheck?.ok && ledgerCheck.unverified?{unverified:ledgerCheck.unverified}:{})} : {}),
             ...(clientsIdChanged ? { clients_id_before: clientsIdBefore ?? null, clients_id_after: clientsIdAfter } : {}),
             ...(ledgerCheck?.ok === true && ledgerCheck.journal_id !== undefined
               ? { registration_journal_id: ledgerCheck.journal_id }

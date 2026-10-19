@@ -376,7 +376,7 @@ export function renderApplyClassificationsCompact(
       blockers.push({
         item_id: `invoice-${partial.created_invoice_id}`,
         code: partial.category,
-        message: `Transaction ${partial.attempted_transaction_id}: ${partial.failed_stage} left invoice ${partial.created_invoice_id} in an incomplete state. ${partialMutationNextAction(partial)}`,
+        message: `Transaction ${partial.attempted_transaction_id}: ${partial.failed_stage} left invoice ${partial.created_invoice_id} (${partial.created_invoice_status}) in an incomplete state. ${partial.changed_fields?.length ? `Changed: ${partial.changed_fields.join(", ")}. ` : ""}${partial.bank_partial?.client_update ? `Client changed from ${partial.bank_partial.client_update.from} to ${partial.bank_partial.client_update.to}. ` : ""}${partialMutationNextAction(partial)}`,
         severity: "blocker",
       });
     }

@@ -180,7 +180,7 @@ describe("non-deductible VAT through real API entry points", () => {
     if (tamper === "vat") draft.vat_price = 0;
     if (tamper === "account") draft.items[0].vat_accounts_id = 1510;
     const confirmed = await ops.confirmDraft(plan);
-    expect(confirmed).toMatchObject(tamper === "unchanged" ? { ok: true } : { ok: false, error: { code: "nonvat_form_unproven" } });
+    expect(confirmed).toMatchObject(tamper === "unchanged" ? { ok: true } : { ok: false, error: { code: "draft_changed" } });
     expect(w.fake.registers()).toHaveLength(tamper === "unchanged" ? 1 : 0);
   });
 });

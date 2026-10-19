@@ -35,6 +35,8 @@ export interface SaleInvoicePrepareInput {
   readonly id?: number;
   /** create/update payload; send request; forwarded verbatim to execute. */
   readonly payload?: Record<string, unknown>;
+  /** Owner release after checking an earlier uncertain POST cannot still complete. */
+  readonly releaseIndeterminate?: string;
 }
 
 export interface SaleInvoiceExecuteInput {
@@ -65,7 +67,8 @@ export interface SaleInvoiceExecuteResult {
   readonly id?: number;
   readonly result: unknown;
 }
-export type SaleInvoiceOperationResult = SaleInvoiceReadResult | SaleInvoicePrepareResult | SaleInvoiceExecuteResult;
+export type SaleInvoiceOperationResult = SaleInvoiceReadResult | SaleInvoicePrepareResult | SaleInvoiceExecuteResult
+  | Readonly<{ mode: "recovery"; action: "create"; status: "released"; releasedMarker: string }>;
 
 export interface SaleInvoiceOperations {
   run(input: SaleInvoiceOperationInput): Promise<OperationOutcome<SaleInvoiceOperationResult>>;

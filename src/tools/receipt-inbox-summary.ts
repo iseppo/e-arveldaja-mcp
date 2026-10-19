@@ -67,7 +67,10 @@ export function buildReceiptBatchWorkflow(options: {
 }) {
   return buildWorkflowEnvelope({
     summary: options.workflowSummary,
-    needs_review: options.sanitizedResults.filter(result => result.status === "needs_review"),
+    needs_review: options.sanitizedResults.filter(result => result.status === "needs_review" || result.status === "failed")
+      .map(result => result.status === "failed" ? { ...result,
+        recommendation: "Inspect the recorded error, any created invoice ID and cleanup outcome. Do not recreate automatically; resolve the known objects before a fresh preview.",
+      } : result),
     dry_run_steps: options.summary.dry_run
       ? [{
           tool: "process_receipt_batch",

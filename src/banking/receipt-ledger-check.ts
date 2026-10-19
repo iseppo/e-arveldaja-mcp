@@ -1,4 +1,6 @@
 import type { Journal, Posting, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
+import { snapshotBankTransaction } from "./transaction-material-snapshot.js";
+import { positiveEurAmount, type EurAmountRow } from "./eur-amount-proof.js";
 
 /**
  * Post-confirm receipt-ledger invariant.
@@ -32,6 +34,10 @@ export type ReceiptLedgerFailureCode =
 export type InvoiceTable = "sale_invoices" | "purchase_invoices";
 
 export interface LinkedReceiptInvoice {
+  paid_in_cash?: boolean;
+  gross_price?: number;
+  sale_invoice_type?: string;
+  credit_sale_invoices_id?: number | null;
   table: InvoiceTable;
   id: number;
   clients_id: number | null;
@@ -89,22 +95,38 @@ function livePostings(journal: Journal): Posting[] {
 }
 
 /** EUR-equivalent magnitude — postings carry base_amount for multi-currency rows. */
-function eurMagnitude(row: { amount: number; base_amount?: number | null }): number {
-  return Math.abs(row.base_amount ?? row.amount);
+function eurMagnitude(row: EurAmountRow, inheritedCurrency?: string | null): number {
+  const proof=positiveEurAmount(row,inheritedCurrency);
+  return proof.ok?proof.value:NaN;
 }
 
-function sumPostings(postings: readonly Posting[]): number {
-  return postings.reduce((total, p) => total + eurMagnitude(p), 0);
+function sumPostings(postings: readonly Posting[], currency?: string | null): number {
+  return postings.reduce((total, p) => total + eurMagnitude(p,currency), 0);
 }
 
 function uniqueNumbers(values: readonly (number | null | undefined)[]): number[] {
   return [...new Set(values.filter((v): v is number => typeof v === "number"))];
 }
 
+/** Direction evidence comes from the source or constrained invoice semantics, never GET type or postings. */
+export function expectedReceiptBankDirection(tx: Transaction, invoices: readonly LinkedReceiptInvoice[], independent?: {direction:"D"|"C"; source:string}): {direction?:"D"|"C"; source:string} {
+  const material=snapshotBankTransaction(tx);
+  if (material.direction_proof.verified) return {direction:material.trusted_direction==="incoming"?"D":"C",source:"camt_checksum"};
+  if (material.direction_proof.source==="wise_importer_marker" && material.trusted_direction!=="unknown") return {direction:material.trusted_direction==="incoming"?"D":"C",source:"wise_importer_marker"};
+  if (material.direction_proof.marker_present) return {source:"unverified_source_marker"};
+  if (independent) return independent;
+  const ordinary=invoices.length>0 && invoices.every(inv=>typeof inv.gross_price==="number" && Number.isFinite(inv.gross_price) && inv.gross_price>0
+    && inv.paid_in_cash!==true && (inv.table==="purchase_invoices" || inv.sale_invoice_type==="INVOICE" && !inv.credit_sale_invoices_id));
+  if (ordinary && new Set(invoices.map(inv=>inv.table)).size===1) return {direction:invoices[0]!.table==="sale_invoices"?"D":"C",source:"ordinary_invoice"};
+  return {source:"direction_unproven"};
+}
+
 export function checkReceiptLedger(input: {
   tx: Transaction;
   invoices: readonly LinkedReceiptInvoice[];
   journals: readonly Journal[];
+  expectedBankDirection?: "D" | "C";
+  expectationSource?: string;
 }): ReceiptLedgerCheckResult {
   const { tx, invoices, journals } = input;
   const txClientsId = tx.clients_id ?? null;
@@ -151,16 +173,22 @@ export function checkReceiptLedger(input: {
     };
   }
 
-  // The stored transaction `type` is NOT a reliable direction: historically
-  // imported rows carry "C" for incoming payments too (verified live — the
-  // EIS receipt is type "C" with a Dr bank posting; see the direction notes in
-  // CLAUDE.md). The bank leg is therefore identified by account + dimension
-  // only, and its posted side defines the direction the contra leg must
-  // oppose. A bank leg split across both sides is unusable and fails.
+  // GET type is unreliable. Identify the bank account and compare its posted
+  // side against independent source/invoice direction. Both bank sides fail.
   const expected = eurMagnitude(tx);
   const postings = livePostings(journal);
+  const txProof=positiveEurAmount(tx);
+  const invalidPosting=postings.map(posting=>({posting,proof:positiveEurAmount(posting,journal.cl_currencies_id)})).find(row=>!row.proof.ok);
+  if (!txProof.ok || invalidPosting) {
+    return {ok:false,code:"ledger_posting_mismatch",details:{...withJournal,
+      leg:!txProof.ok?"transaction_amount":"posting_amount",
+      amount_proof_reason:!txProof.ok?txProof.reason:invalidPosting!.proof.ok?undefined:invalidPosting!.proof.reason,
+      ...(invalidPosting?{posting_accounts_id:invalidPosting.posting.accounts_id,posting_accounts_dimensions_id:invalidPosting.posting.accounts_dimensions_id??null}:{})}};
+  }
   const unverified: string[] = [];
-  let contraDirection: "D" | "C" | undefined;
+  const {direction:expectedDirection,source:expectationSource}=expectedReceiptBankDirection(tx,invoices,input.expectedBankDirection?{direction:input.expectedBankDirection,source:input.expectationSource??"approved_source"}:undefined);
+  if (!expectedDirection) unverified.push("direction: no independently trusted statement or ordinary invoice direction");
+  const contraDirection = expectedDirection === undefined ? undefined : expectedDirection === "D" ? "C" : "D";
 
   if (tx.accounts_id == null) {
     unverified.push("bank_leg: transaction record carries no accounts_id");
@@ -169,8 +197,8 @@ export function checkReceiptLedger(input: {
       p.accounts_id === tx.accounts_id
       && (tx.accounts_dimensions_id == null || p.accounts_dimensions_id === tx.accounts_dimensions_id));
     const bankSides = [...new Set(bankPostings.map(p => p.type).filter((t): t is "D" | "C" => t === "D" || t === "C"))];
-    const bankTotal = sumPostings(bankPostings);
-    if (bankSides.length !== 1 || Math.abs(bankTotal - expected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
+    const bankTotal = sumPostings(bankPostings,journal.cl_currencies_id);
+    if (bankSides.length !== 1 || !Number.isFinite(bankTotal) || !Number.isFinite(expected) || (expectedDirection !== undefined && bankSides[0] !== expectedDirection) || Math.abs(bankTotal - expected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
       return {
         ok: false,
         code: "ledger_posting_mismatch",
@@ -182,10 +210,11 @@ export function checkReceiptLedger(input: {
           expected_accounts_id: tx.accounts_id,
           expected_accounts_dimensions_id: tx.accounts_dimensions_id ?? null,
           posted_types: bankSides,
+          expected_type: expectedDirection ?? null,
+          expectation_source: expectationSource,
         },
       };
     }
-    contraDirection = bankSides[0] === "D" ? "C" : "D";
   }
 
   // The contra leg answers for the INVOICE rows only. A transaction that also
@@ -193,7 +222,8 @@ export function checkReceiptLedger(input: {
   // separately, posts less to the receivable/payable account than the bank leg
   // moves — comparing against the transaction total would fail those wrongly.
   const ledgerAccountIds = uniqueNumbers(invoices.map(inv => inv.ledger_accounts_id));
-  const contraExpected = invoices.some(inv => inv.amount == null)
+  if (invoices.some(inv => inv.ledger_accounts_id == null)) unverified.push("invoice_leg: some linked invoice accounts are unavailable");
+  const contraExpected = invoices.some(inv => inv.amount == null || !Number.isFinite(inv.amount) || inv.amount <= 0)
     ? null
     : invoices.reduce((total, inv) => total + (inv.amount ?? 0), 0);
   if (ledgerAccountIds.length === 0) {
@@ -202,10 +232,13 @@ export function checkReceiptLedger(input: {
     unverified.push("invoice_leg: the transaction carries no distribution amount for every linked invoice");
   } else {
     const contraPostings = postings.filter(p =>
-      ledgerAccountIds.includes(p.accounts_id)
-      && (contraDirection === undefined || p.type === contraDirection));
-    const contraTotal = sumPostings(contraPostings);
-    if (Math.abs(contraTotal - contraExpected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
+      ledgerAccountIds.includes(p.accounts_id));
+    const contraTotal = sumPostings(contraPostings,journal.cl_currencies_id);
+    const perAccount = ledgerAccountIds.every(id=>{
+      const expectedAmount=invoices.filter(inv=>inv.ledger_accounts_id===id).reduce((sum,inv)=>sum+(inv.amount??0),0);
+      return Math.abs(sumPostings(contraPostings.filter(p=>p.accounts_id===id),journal.cl_currencies_id)-expectedAmount)<=RECEIPT_LEDGER_AMOUNT_TOLERANCE;
+    });
+    if (!Number.isFinite(contraTotal) || (contraDirection !== undefined && contraPostings.some(p=>p.type!==contraDirection)) || !perAccount || Math.abs(contraTotal - contraExpected) > RECEIPT_LEDGER_AMOUNT_TOLERANCE) {
       return {
         ok: false,
         code: "ledger_posting_mismatch",
@@ -216,11 +249,13 @@ export function checkReceiptLedger(input: {
           posted_amount: contraTotal,
           expected_accounts_ids: ledgerAccountIds,
           expected_type: contraDirection ?? null,
+          posted_types: [...new Set(contraPostings.map(p=>p.type))],
+          expectation_source: expectationSource,
         },
       };
     }
   }
-  if (invoiceClientsId === null) {
+  if (invoiceClientsId === null || invoices.some(inv=>inv.clients_id==null)) {
     unverified.push("client_leg: linked invoices carry no single clients_id");
   }
 
@@ -269,13 +304,13 @@ export function invoiceLinksFromTransaction(tx: Transaction): TransactionInvoice
       order.push({ table, id, key });
       sums.set(key, 0);
     }
-    const raw = item.base_amount ?? item.amount;
-    if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    const proof=positiveEurAmount(item,tx.cl_currencies_id);
+    if (!proof.ok) {
       sums.set(key, null);
       continue;
     }
     const running = sums.get(key);
-    if (running !== null && running !== undefined) sums.set(key, running + Math.abs(raw));
+    if (running !== null && running !== undefined) sums.set(key, running + proof.value);
   }
   return order.map(({ table, id, key }) => ({ table, id, amount: sums.get(key) ?? null }));
 }
@@ -305,6 +340,10 @@ export async function verifyInvoiceReceiptLedger(
         clients_id: invoice?.clients_id ?? null,
         ledger_accounts_id: invoice?.receivable_accounts_id ?? null,
         amount: link.amount,
+        gross_price: invoice.gross_price,
+        paid_in_cash: invoice.paid_in_cash,
+        sale_invoice_type: invoice.sale_invoice_type,
+        credit_sale_invoices_id: invoice.credit_sale_invoices_id,
       });
     } else {
       const invoice = await api.purchaseInvoices.get(link.id);
@@ -314,6 +353,8 @@ export async function verifyInvoiceReceiptLedger(
         clients_id: invoice?.clients_id ?? null,
         ledger_accounts_id: invoice?.liability_accounts_id ?? null,
         amount: link.amount,
+        gross_price: invoice.gross_price,
+        paid_in_cash: invoice.paid_in_cash,
       });
     }
   }

@@ -1,4 +1,5 @@
 import type { PlanExecutionReport } from "../../plan-execution.js";
+import type { BankTransactionMaterialSnapshot, LinkedInvoiceMaterialSnapshot } from "../transaction-material-snapshot.js";
 import type {
   DuplicatePostingCandidate,
   DuplicatePostingScanResult,
@@ -49,6 +50,7 @@ export interface ExactConfirmLedgerCheckFailure {
 }
 
 export interface ExactConfirmLedgerChecks {
+  unverified?: Array<{transaction_id: number; journal_id?: number; reasons: string[]}>;
   checked: number;
   ok: number;
   failures: ExactConfirmLedgerCheckFailure[];
@@ -58,6 +60,8 @@ export interface ExactConfirmLedgerChecks {
 }
 
 export interface ExactConfirmDescriptor {
+  transactionMaterial?: BankTransactionMaterialSnapshot;
+  invoiceMaterial?: LinkedInvoiceMaterialSnapshot;
   transactionId: number;
   date?: string;
   amount: number;
@@ -162,6 +166,8 @@ export interface ReconciliationSuggestions {
 // --- Inter-account row shapes ------------------------------------------------
 
 export interface PairResult {
+  registration_journal_id?: number;
+  linkage_evidence?: "get_distribution" | "absent_actual_journal_proves_distribution";
   outgoing_transaction_id: number;
   incoming_transaction_id: number;
   amount: number;
@@ -248,11 +254,18 @@ export interface CrossCurrencyRow {
 }
 
 export interface InterAccountErrorRow {
+  journal_id?: number;
   transaction_ids: number[]; code?: OneSidedEurAmountErrorCode; reason: string;
 }
 
 /** Intended confirm/delete/client-update actions collected during matching. */
 export interface InterAccountConfirmAction {
+  pairEvidence?: {kind: "reciprocal" | "same_type" | "one_sided"; reasons: string[]; maxDateGap: number; sourceSide: "C" | "D"};
+  registrationJournalId?: number;
+  linkageEvidence?: PairResult["linkage_evidence"];
+  sourceMaterial?: BankTransactionMaterialSnapshot;
+  mirrorMaterial?: BankTransactionMaterialSnapshot;
+  mappingMaterial?: string;
   confirmedTxId: number;
   confirmedClientsId: number | null;
   confirmedNominalAmount: number;
