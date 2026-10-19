@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-10-19
+
+### Changed
+
+- **The server and its test tools use updated maintenance releases.** Details: update dotenv to 18.0.8, Zod to 4.6.7 and Vitest to 5.0.5; retain the existing Node.js runtime requirement and other direct dependency versions.
+
 ### Fixed
 
 - **Investment cash flow no longer becomes operating cash merely because a realized currency result uses another standard account.** Details: proved principal/result bundles use actual cash with consistent signed asset and result-family checks, retain acquisition fees and conventional accumulated-depreciation disposals, and hold unsupported combinations before generic fallbacks. Capital invoice slices must match account, dimension and direction. Malformed evidence preserves known cash gross amounts while retaining review status.
