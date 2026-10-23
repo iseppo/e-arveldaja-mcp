@@ -7,7 +7,7 @@ import { clearRuntimeCaches, registerCacheControlTool } from "./cache-control.js
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;
 
 function getRegisteredHandler(server: { registerTool: ReturnType<typeof vi.fn> }, name: string): ToolHandler {
-  const registration = server.registerTool.mock.calls.find(([toolName]: [string]) => toolName === name);
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === name);
   if (!registration) throw new Error(`Tool '${name}' was not registered`);
   return registration[2] as ToolHandler;
 }

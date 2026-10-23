@@ -227,7 +227,7 @@ describe("checkIntakeCashDuplicates", () => {
         getBankAccounts: overrides.getBankAccounts ?? vi.fn().mockResolvedValue(bankAccounts),
         getAccountDimensions: overrides.getAccountDimensions ?? vi.fn().mockResolvedValue(accountDimensions),
       },
-    };
+    } as unknown as Parameters<typeof checkIntakeCashDuplicates>[0];
   }
 
   it("matches a candidate against a manual journal's C posting on ANY bank dimension (dimensionId: null, merged across accounts)", async () => {

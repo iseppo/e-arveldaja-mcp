@@ -56,7 +56,7 @@ describe("canonical prompt registry", () => {
       }
       if (definition.setupOptions) {
         expect(Object.isFrozen(definition.setupOptions), definition.name).toBe(true);
-        if (definition.setupOptions.offlineTools) {
+        if ("offlineTools" in definition.setupOptions && definition.setupOptions.offlineTools) {
           expect(Object.isFrozen(definition.setupOptions.offlineTools), definition.name).toBe(true);
         }
       }
@@ -64,11 +64,11 @@ describe("canonical prompt registry", () => {
 
     const originalNames = [...PROMPT_NAMES];
     const first = PROMPT_REGISTRY[0];
-    const setup = PROMPT_REGISTRY.find(definition => definition.setupOptions?.offlineTools);
+    const setup = PROMPT_REGISTRY.find(definition => (definition.setupOptions as { offlineTools?: readonly string[] } | undefined)?.offlineTools);
     expect(() => ((PROMPT_REGISTRY as unknown as unknown[]).push({}))).toThrow(TypeError);
     expect(() => Object.assign(first, { name: "diverged-name" })).toThrow(TypeError);
     expect(() => Object.assign(first.setupOptions!, { note: "diverged-note" })).toThrow(TypeError);
-    expect(() => ((setup!.setupOptions!.offlineTools as unknown as string[]).push("diverged-tool")))
+    expect(() => (((setup!.setupOptions! as { offlineTools?: readonly string[] }).offlineTools as unknown as string[]).push("diverged-tool")))
       .toThrow(TypeError);
     expect(() => ((first.variants as unknown as unknown[]).push({}))).toThrow(TypeError);
     expect(PROMPT_NAMES).toEqual(originalNames);

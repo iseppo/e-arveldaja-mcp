@@ -60,7 +60,7 @@ describe("document parser", () => {
       outputFormat: "text",
       preserveVerySmallText: true,
     }));
-    const defaultConfig = liteParseConstructor.mock.calls[0]?.[0];
+    const defaultConfig = (liteParseConstructor.mock.calls[0] as unknown[] | undefined)?.[0];
     expect(defaultConfig).not.toHaveProperty("numWorkers");
     expect(defaultConfig).not.toHaveProperty("maxPages");
     expect(parseMock).toHaveBeenCalledWith("/tmp/invoice.pdf");
@@ -137,7 +137,7 @@ describe("document parser", () => {
 
     expect(isComplexMock).toHaveBeenCalledWith("/tmp/native.pdf");
     expect(liteParseConstructor).toHaveBeenCalledTimes(2);
-    expect(liteParseConstructor.mock.calls[1]?.[0]).toEqual(expect.objectContaining({
+    expect((liteParseConstructor.mock.calls[1] as unknown[] | undefined)?.[0]).toEqual(expect.objectContaining({
       ocrEnabled: false,
     }));
     expect(result.complexity).toMatchObject({
@@ -243,7 +243,7 @@ describe("document parser", () => {
     // singleton (from the complexity preflight) and one cached no-OCR singleton.
     expect(liteParseConstructor).toHaveBeenCalledTimes(2);
     const noOcrConstructions = liteParseConstructor.mock.calls.filter(
-      call => (call[0] as { ocrEnabled?: boolean })?.ocrEnabled === false,
+      call => ((call as unknown[])[0] as { ocrEnabled?: boolean } | undefined)?.ocrEnabled === false,
     );
     expect(noOcrConstructions).toHaveLength(1);
   });

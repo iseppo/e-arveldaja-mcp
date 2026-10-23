@@ -650,7 +650,7 @@ describe("audit log labels", () => {
     const actualFs = await vi.importActual<typeof import("fs")>("fs");
     const auditLog = await loadAuditLogModule(tempDir, {
       renameSync: (sourcePath, targetPath) => {
-        if (sourcePath.includes("__audit_tmp__") && targetPath.endsWith("Acme OÜ.audit.md")) {
+        if ((sourcePath as string).includes("__audit_tmp__") && (targetPath as string).endsWith("Acme OÜ.audit.md")) {
           throw new Error("simulated relabel failure");
         }
         return actualFs.renameSync(sourcePath, targetPath);

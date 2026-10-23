@@ -14,6 +14,7 @@ import {
   assertFileInputSnapshotIdentity,
   assertMatchingFileInputSnapshot,
   captureFileInputSnapshot,
+  type CaptureFileInputOptions,
   fileInputSnapshotRetry,
 } from "./file-input-snapshot.js";
 
@@ -108,7 +109,7 @@ describe("captureFileInputSnapshot", () => {
     roots.push(root);
     const path = join(root, "statement.csv");
     await writeFile(path, "first");
-    const read = vi.fn(readFile);
+    const read = vi.fn<(path: string) => Promise<Uint8Array>>(readFile);
 
     const snapshot = await captureFileInputSnapshot({ file_path: path }, csvOptions(), { readFile: read });
     await writeFile(path, "changed");
@@ -310,7 +311,7 @@ describe("captureFileInputSnapshot", () => {
       kind: "directory",
       operation: FILE_REFERENCE_OPERATIONS.wise,
     });
-    const rejection = async (source: { file_ref: string }, options: ReturnType<typeof csvOptions>) => {
+    const rejection = async (source: { file_ref: string }, options: CaptureFileInputOptions) => {
       try {
         await captureFileInputSnapshot(source, options, { readFile: read });
       } catch (error) {

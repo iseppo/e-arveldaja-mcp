@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -128,10 +128,10 @@ describe("installStderrTee", () => {
       { EARVELDAJA_LOG_FILE: path },
       stderrFsOps({
         fchmodSync: () => {},
-        fstatSync: (fd: number) => {
+        fstatSync: ((fd: number) => {
           const real = statSync(path);
-          return { ...real, isFile: () => true, mode: (real.mode & ~0o777) | 0o644 } as ReturnType<typeof statSync>;
-        },
+          return { ...real, isFile: () => true, mode: (real.mode & ~0o777) | 0o644 } as Stats;
+        }) as typeof import("node:fs").fstatSync,
       }),
     );
     process.stderr.write("secret\n");

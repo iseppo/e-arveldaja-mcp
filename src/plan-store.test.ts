@@ -83,7 +83,7 @@ describe("ExecutionPlanStore", () => {
     const mutable = input();
     const handle = runtime.planStore.issue("test", mutable);
     (mutable.normalizedArgs.nested as Record<string, string>).mode = "changed";
-    (mutable.commands as Array<{ id: string }>)[0]!.id = "changed";
+    (mutable.commands as ReadonlyArray<{ id: string }>)[0]!.id = "changed";
 
     const inspected = runtime.planStore.inspect(handle, "test");
     expect(inspected.normalizedArgs).toEqual({ source: "statement.xml", nested: { mode: "preview" } });

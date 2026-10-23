@@ -66,7 +66,7 @@ describe("applyListView", () => {
 
   it("brief output is meaningfully smaller than full when TOON-encoded", () => {
     const fullRow = Object.fromEntries(
-      Array.from({ length: 30 }, (_, i) => [`field_${i}`, `value-${i}`])
+      Array.from({ length: 30 }, (_, i): [string, unknown] => [`field_${i}`, `value-${i}`])
         .concat([
           ["id", 1], ["name", "Alice"], ["code", "C"], ["email", "a@b.c"],
           ["invoice_vat_no", "EE1"], ["is_client", true], ["is_supplier", false],

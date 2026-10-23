@@ -227,7 +227,7 @@ describe("checkReading: H6 rate", () => {
   // Every quote is the line it cites, so a positive case is a full acceptance (Codex P1 MINOR).
   const rateCase = (date: string, printed: string, vat: number, gross: number, today: string, net: number | null = 100) => keysOf({
     // with net null the net line is not printed either, so A4 sees no trio
-    lines: withLines({ 4: `Kuupäev ${printed}`, ...(net === null ? { 5: "Teenus" } : {}), 6: `KM ${vat},00`, 7: `Kokku EUR ${gross},00` }),
+    lines: withLines({ 4: `Kuupäev ${printed}`, ...(net === null ? { 5: "Teenus" } : {}), 6: `KM ${vat},00`, 7: `Kokku EUR ${gross},00` } as Record<number, string>),
     values: { invoice_date: date, vat, gross, net },
     evidence: {
       invoice_date: { line: "p1:004", quote: `Kuupäev ${printed}` },

@@ -10,7 +10,7 @@ function buildOptions(
   return {
     env: {},
     candidateFiles: [],
-    promptForScope: vi.fn(async () => "global"),
+    promptForScope: vi.fn(async () => "global" as const),
     importCredentials: vi.fn(async () => ({
       envFile: "/tmp/.env",
       storageScope: "global",
@@ -20,14 +20,14 @@ function buildOptions(
       action: "created" as const,
       sourceFile: "/tmp/apikey.txt",
       target: "primary" as const,
-    })),
+    })) as unknown as StartupCredentialImportOptions["importCredentials"],
     ...overrides,
   };
 }
 
 describe("maybeImportCredentialsOnStartup", () => {
   it("skips prompting when canonical env credentials already exist", async () => {
-    const promptForScope = vi.fn(async () => "global");
+    const promptForScope = vi.fn(async () => "global" as const);
     const importCredentials = vi.fn();
 
     const result = await maybeImportCredentialsOnStartup(buildOptions({
@@ -47,7 +47,7 @@ describe("maybeImportCredentialsOnStartup", () => {
   });
 
   it("skips prompting when an explicit credential file env var is configured", async () => {
-    const promptForScope = vi.fn(async () => "global");
+    const promptForScope = vi.fn(async () => "global" as const);
     const importCredentials = vi.fn();
 
     const result = await maybeImportCredentialsOnStartup(buildOptions({
@@ -80,7 +80,7 @@ describe("maybeImportCredentialsOnStartup", () => {
     const result = await maybeImportCredentialsOnStartup(buildOptions({
       candidateFiles: ["/tmp/project/apikey.txt"],
       promptForScope,
-      importCredentials,
+      importCredentials: importCredentials as unknown as StartupCredentialImportOptions["importCredentials"],
     }));
 
     expect(result).toEqual({
@@ -122,7 +122,7 @@ describe("maybeImportCredentialsOnStartup", () => {
   });
 
   it("skips automatic import when multiple local apikey files are present", async () => {
-    const promptForScope = vi.fn(async () => "global");
+    const promptForScope = vi.fn(async () => "global" as const);
     const importCredentials = vi.fn();
 
     const result = await maybeImportCredentialsOnStartup(buildOptions({

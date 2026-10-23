@@ -63,9 +63,9 @@ describe("validateLegalEntityIdentity — explicit natural person", () => {
   });
 
   it("passes an explicit natural person regardless of country", () => {
-    expect(
-      validateLegalEntityIdentity({ is_physical_entity: true, country: "USA" }).kind,
-    ).toBe("natural_person");
+    const result = validateLegalEntityIdentity({ is_physical_entity: true, country: "USA" });
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.kind).toBe("natural_person");
   });
 
   it("does NOT treat is_physical_entity false as a natural person", () => {

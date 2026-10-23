@@ -2,18 +2,16 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 12,
-    "TS2339": 9,
-    "TS2345": 21,
-    "TS2352": 8,
+    "TS2322": 4,
+    "TS2339": 2,
+    "TS2345": 13,
+    "TS2352": 4,
     "TS2353": 2,
-    "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
     "TS2571": 8,
     "TS2741": 1,
-    "TS2769": 7,
-    "TS4104": 1
+    "TS2769": 1
   },
   "errors": {
     "src/__integration__/mcp-connection.integration.test.ts": {
@@ -22,18 +20,11 @@
     "src/api/readonly.api.test.ts": {
       "TS2345": 2
     },
-    "src/audit-log.test.ts": {
-      "TS2339": 2
-    },
-    "src/bank-posting-duplicate-guard.test.ts": {
-      "TS2345": 4
-    },
     "src/banking/receipt-ledger-check.test.ts": {
       "TS2322": 1
     },
     "src/cache-control.test.ts": {
-      "TS18046": 5,
-      "TS2769": 1
+      "TS18046": 5
     },
     "src/camt/compact-routing.test.ts": {
       "TS18046": 19
@@ -41,22 +32,8 @@
     "src/camt/journal-coverage.test.ts": {
       "TS2345": 2
     },
-    "src/document-parser.test.ts": {
-      "TS2352": 1,
-      "TS2493": 3
-    },
-    "src/document-reading-check.test.ts": {
-      "TS2345": 1
-    },
     "src/documents/reading-operations-create.test.ts": {
       "TS2352": 1
-    },
-    "src/external-text-renderer.test.ts": {
-      "TS2352": 3
-    },
-    "src/file-input-snapshot.test.ts": {
-      "TS2322": 1,
-      "TS2345": 1
     },
     "src/guided/process-accounting-document-reading.test.ts": {
       "TS2352": 1
@@ -64,21 +41,8 @@
     "src/guided/sales-recovery-regression.test.ts": {
       "TS2556": 1
     },
-    "src/legal-entity-identity.test.ts": {
-      "TS2339": 1
-    },
-    "src/list-views.test.ts": {
-      "TS2769": 5
-    },
-    "src/plan-store.test.ts": {
-      "TS4104": 1
-    },
-    "src/prompt-registry.test.ts": {
-      "TS2339": 4
-    },
     "src/public-tool-registrar.test.ts": {
-      "TS18046": 2,
-      "TS2345": 2
+      "TS18046": 2
     },
     "src/receipts/batch-operations.test.ts": {
       "TS2345": 1,
@@ -89,12 +53,6 @@
     },
     "src/server/strict-tool-input.test.ts": {
       "TS2345": 4
-    },
-    "src/startup-credential-import.test.ts": {
-      "TS2322": 6
-    },
-    "src/stderr-tee.test.ts": {
-      "TS2322": 1
     },
     "src/tools/accounting-inbox.test.ts": {
       "TS2769": 1
@@ -159,6 +117,6 @@
       "TS2352": 1
     }
   },
-  "total": 1016,
+  "total": 979,
   "version": 1
 }

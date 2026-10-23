@@ -21,14 +21,14 @@ describe("renderExternalEntity (read side)", () => {
   });
 
   it("wraps only the scoped import-origin fields, leaving other stored strings raw", () => {
-    const client = renderExternalEntity("client", { id: 1, name: "Acme", code: "12345678", email: "x@y.z" }) as Record<string, string>;
+    const client = renderExternalEntity("client", { id: 1, name: "Acme", code: "12345678", email: "x@y.z" }) as Record<string, unknown>;
     expect(client.name).toContain(UNTRUSTED_OCR_START_PREFIX);
     expect(client.code).toBe("12345678");
     expect(client.email).toBe("x@y.z");
 
     const tx = renderExternalEntity("transaction", {
       id: 2, description: "PAYMENT", bank_account_name: "Bob", bank_ref_number: "REF1", ref_number: "R2",
-    }) as Record<string, string>;
+    }) as Record<string, unknown>;
     expect(tx.description).toContain(UNTRUSTED_OCR_START_PREFIX);
     expect(tx.bank_account_name).toContain(UNTRUSTED_OCR_START_PREFIX);
     expect(tx.bank_ref_number).toBe("REF1");
@@ -39,7 +39,7 @@ describe("renderExternalEntity (read side)", () => {
     const rows = renderExternalEntity("client", [
       { id: 1, name: "One" },
       { id: 2, name: "Two" },
-    ]) as Array<Record<string, string>>;
+    ]) as Array<Record<string, unknown>>;
     expect(rows[0]!.name).toContain(UNTRUSTED_OCR_START_PREFIX);
     expect(rows[1]!.name).toContain(UNTRUSTED_OCR_START_PREFIX);
   });

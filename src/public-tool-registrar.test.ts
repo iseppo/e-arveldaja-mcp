@@ -80,17 +80,17 @@ describe("PublicToolRegistrar", () => {
       get(target, property, receiver) {
         if (property !== "registerTool") return Reflect.get(target, property, receiver);
         return (name: string, config: unknown, callback: () => Promise<void>) =>
-          target.registerTool(name, config as any, async () => {
+          target.registerTool(name, config as any, (async () => {
             events.push("scope-enter");
             await callback();
             events.push("scope-exit");
-          });
+          }) as unknown as Parameters<McpServer["registerTool"]>[2]);
       },
     }) as McpServer;
     const publicServer = createPublicToolRegistrar(scoped, "guided");
-    publicServer.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, async () => {
+    publicServer.registerTool("recommend_workflow", { _meta: { earveldajaTool: toolMeta("recommend_workflow") } }, (async () => {
       events.push(`profile:${currentToolProfile()}`);
-    });
+    }) as unknown as Parameters<McpServer["registerTool"]>[2]);
 
     await registered!();
     expect(events).toEqual(["scope-enter", "profile:guided", "scope-exit"]);
