@@ -2281,7 +2281,7 @@ describe("wise import tool", () => {
     const rejectionOutcomes: Array<{ item: typeof rejectionCases[number]; outcome: Awaited<ReturnType<typeof captureM03Outcome>>; api: any; auditCalls: number }> = [];
 
     for (const item of rejectionCases) {
-      mockedReadFile.mockResolvedValue(buildM03Row({ id: "csvId" in item ? item.csvId : item.id, direction: "IN", sourceName: "Claimed Source", targetName: "Claimed Target" }));
+      mockedReadFile.mockResolvedValue(buildM03Row({ id: item.csvId ?? item.id, direction: "IN", sourceName: "Claimed Source", targetName: "Claimed Target" }));
       const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 9421 }), {
         accountDimensions: configuredTransferDimensions(),
         bankAccounts: configuredTransferBankAccounts(),
@@ -5911,7 +5911,7 @@ describe("createdTransactionMatchesApprovedPayload — over-cap ref precondition
       ? weaveFullRefIntoDescription("WISE:TRANSFER-1 LHV Own Account [source_direction=IN]", canonical.full)
       : "WISE:TRANSFER-1 LHV Own Account [source_direction=IN]",
     clients_id: 55,
-  } as unknown as Parameters<typeof createdTransactionMatchesApprovedPayload>[0];
+  } as unknown as NonNullable<Parameters<typeof createdTransactionMatchesApprovedPayload>[0]>;
 
   it("matches the boundary-canonicalized transaction for an over-cap ref (no stale-precondition throw)", () => {
     // RED before FIX C: the precondition compared the stored (truncated ref +

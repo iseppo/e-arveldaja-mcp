@@ -2183,7 +2183,7 @@ ${entryXml}
       EXPOSE_GRANULAR,
     );
     const saveRegistration = schemaServer.registerTool.mock.calls.find(
-      ([name]: [string]) => name === "save_auto_booking_rule",
+      ([name]: unknown[]) => name === "save_auto_booking_rule",
     );
     if (!saveRegistration) throw new Error("save_auto_booking_rule was not registered");
     expect(() => z.object(saveRegistration[1].inputSchema).parse(payload.proposed_action.args))

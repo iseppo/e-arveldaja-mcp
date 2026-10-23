@@ -39,6 +39,7 @@ function dryRunPreviewResult(signals: string[]): ReceiptBatchFileResult {
     status: "dry_run_preview",
     extracted: { raw_text: RAW_TEXT_SENTINEL.repeat(500) } as ExtractedReceiptFields,
     llm_fallback: { confidence_signals: signals } as InvoiceExtractionFallback,
+    notes: [],
   };
 }
 

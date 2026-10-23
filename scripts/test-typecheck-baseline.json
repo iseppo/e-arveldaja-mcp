@@ -1,15 +1,10 @@
 {
   "by_code": {
     "TS18046": 941,
-    "TS18048": 1,
-    "TS2322": 3,
+    "TS2322": 2,
     "TS2339": 2,
-    "TS2345": 1,
     "TS2352": 2,
-    "TS2353": 2,
-    "TS2571": 8,
-    "TS2741": 1,
-    "TS2769": 1
+    "TS2571": 8
   },
   "errors": {
     "src/__integration__/mcp-connection.integration.test.ts": {
@@ -24,9 +19,6 @@
     "src/public-tool-registrar.test.ts": {
       "TS18046": 2
     },
-    "src/tools/accounting-inbox.test.ts": {
-      "TS2769": 1
-    },
     "src/tools/analyze-unconfirmed.test.ts": {
       "TS18046": 81
     },
@@ -39,7 +31,6 @@
     },
     "src/tools/camt-import-tools.test.ts": {
       "TS18046": 150,
-      "TS2345": 1,
       "TS2571": 5
     },
     "src/tools/document-audit.test.ts": {
@@ -61,23 +52,15 @@
     "src/tools/receipt-inbox-path.test.ts": {
       "TS18046": 3
     },
-    "src/tools/receipt-inbox-summary.test.ts": {
-      "TS2741": 1
-    },
     "src/tools/receipt-inbox-tools.test.ts": {
       "TS18046": 45
-    },
-    "src/tools/receipt-inbox.test.ts": {
-      "TS2353": 2
     },
     "src/tools/recurring-invoices.test.ts": {
       "TS18046": 48,
       "TS2571": 1
     },
     "src/tools/wise-import.test.ts": {
-      "TS18046": 39,
-      "TS18048": 1,
-      "TS2322": 1
+      "TS18046": 39
     },
     "src/wise/presenter.test.ts": {
       "TS2352": 1
@@ -87,6 +70,6 @@
       "TS2352": 1
     }
   },
-  "total": 962,
+  "total": 955,
   "version": 1
 }

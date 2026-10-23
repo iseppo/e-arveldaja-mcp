@@ -107,44 +107,35 @@ describe("buildDryRunCreatedInvoicePreview", () => {
       size_bytes: 100,
       modified_at: "2026-07-08T00:00:00.000Z",
     } satisfies ReceiptBatchFileResult["file"];
+    const result: ReceiptBatchFileResult = {
+      file,
+      classification: "purchase_invoice",
+      status: "dry_run_preview",
+      llm_fallback: {
+        raw_text_available: true,
+        recommended: true,
+        confidence: "medium",
+        confidence_signals: ["partial_ocr_failure"],
+        reason: "Deterministic extraction completed but confidence is medium due to: partial_ocr_failure.",
+        missing_required_fields: [],
+        missing_optional_fields: [],
+        guidance: "Use raw text.",
+      },
+      notes: [],
+    };
     const summary = buildReceiptBatchSummary({
       executionMode: "dry_run",
       legacyExecuteCreate: false,
       dryRun: true,
       scannedFiles: 1,
       skippedInvalidFiles: 0,
-      results: [{
-        file,
-        classification: "purchase_invoice",
-        status: "dry_run_preview",
-        llm_fallback: {
-          method: "parsed_document",
-          confidence: "medium",
-          confidence_signals: ["partial_ocr_failure"],
-        },
-        notes: [],
-      }],
+      results: [result],
     });
 
     const workflow = buildReceiptBatchWorkflow({
       summary,
       workflowSummary: "Receipt dry run would create 1 purchase invoice.",
-      sanitizedResults: [{
-        file,
-        classification: "purchase_invoice",
-        status: "dry_run_preview",
-        llm_fallback: {
-          raw_text_available: true,
-          recommended: true,
-          confidence: "medium",
-          confidence_signals: ["partial_ocr_failure"],
-          reason: "Deterministic extraction completed but confidence is medium due to: partial_ocr_failure.",
-          missing_required_fields: [],
-          missing_optional_fields: [],
-          guidance: "Use raw text.",
-        },
-        notes: [],
-      }],
+      sanitizedResults: [result],
       workflowArgs: {
         folder_path: "/tmp/receipts",
         accounts_dimensions_id: 100,

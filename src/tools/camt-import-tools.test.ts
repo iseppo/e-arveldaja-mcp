@@ -1533,7 +1533,7 @@ describe("camt import tool", () => {
       .mockResolvedValueOnce({ created_object_id: 9101 })
       .mockResolvedValueOnce({ created_object_id: 9102 });
     await executeGranularWithPlan(first.handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
-    const createdPayloads = first.api.transactions.create.mock.calls.map(([payload]: [any]) => payload);
+    const createdPayloads = first.api.transactions.create.mock.calls.map(([payload]: any[]) => payload);
     expect(createdPayloads.map((payload: any) => payload.amount)).toEqual([50, 50]);
 
     // Rerun against a ledger that holds both legs: nothing new.
