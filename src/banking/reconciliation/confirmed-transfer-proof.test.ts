@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { confirmedDistributionEvidence } from "./confirmed-transfer-proof.js";
 import type { Transaction } from "../../types/api.js";
 const reviewed = [{related_table:"accounts", related_id:1020, related_sub_id:200, amount:100}];
-const tx = (items: any[]): Transaction => ({id:1,type:"C",status:"CONFIRMED",date:"2026-10-01",amount:108,base_amount:100,cl_currencies_id:"USD",items});
+const tx = (items: any[]): Transaction => ({id:1,accounts_dimensions_id:100,type:"C",status:"CONFIRMED",date:"2026-10-01",amount:108,base_amount:100,cl_currencies_id:"USD",items});
 const fx = {accounts_id:1020,accounts_dimensions_id:200,amount:108,base_amount:100,currency_rate:1.08,cl_currencies_id:"USD"};
 // Native GET shape observed on the owned temporary transfer, 2026-10-18.
 const nativeItem={id:14310640,accounts_id:1020,accounts_dimensions_id:12762251,relation_table:"accounts",relation_id:102012762251,

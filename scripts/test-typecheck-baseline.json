@@ -2,7 +2,7 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 20,
+    "TS2322": 19,
     "TS2339": 107,
     "TS2345": 24,
     "TS2348": 2,
@@ -14,8 +14,8 @@
     "TS2556": 1,
     "TS2561": 1,
     "TS2571": 14,
-    "TS2739": 4,
-    "TS2741": 3,
+    "TS2739": 3,
+    "TS2741": 2,
     "TS2769": 7,
     "TS2783": 6,
     "TS4104": 1,
@@ -46,9 +46,6 @@
     "src/banking/receipt-ledger-check.test.ts": {
       "TS2322": 1
     },
-    "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
-      "TS2741": 1
-    },
     "src/booking-guard.test.ts": {
       "TS2353": 1
     },
@@ -75,8 +72,7 @@
     },
     "src/documents/operations.test.ts": {
       "TS2345": 1,
-      "TS2353": 5,
-      "TS2739": 1
+      "TS2353": 5
     },
     "src/documents/process-purchase-safety.test.ts": {
       "TS2349": 4
@@ -156,9 +152,6 @@
     },
     "src/startup-credential-import.test.ts": {
       "TS2322": 6
-    },
-    "src/statement-balance-check.test.ts": {
-      "TS2322": 1
     },
     "src/stderr-tee.test.ts": {
       "TS2322": 1
@@ -271,6 +264,6 @@
       "TS2339": 1
     }
   },
-  "total": 1237,
+  "total": 1234,
   "version": 1
 }

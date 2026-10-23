@@ -160,10 +160,10 @@ describe("checkStatementClosingBalance", () => {
     const api = createAccountingWorkflowApi({
       journals: { listAllWithPostings: vi.fn().mockResolvedValue([confirmedJournal("D", 100.00)]) },
       transactionRows: [
-        // Direction unknown: no type and no source-direction marker; in-dimension,
-        // dated on or before the balance date. It skews the expected balance
-        // silently unless surfaced.
-        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: null, description: "", accounts_dimensions_id: DIMENSION_ID }),
+        // Direction unknown: the live readback type "C" carries no direction and
+        // there is no source-direction marker; in-dimension, dated on or before
+        // the balance date. It skews the expected balance silently unless surfaced.
+        fixtureTransaction({ id: 1, amount: 50.00, date: "2026-02-20", type: "C", description: "", accounts_dimensions_id: DIMENSION_ID }),
       ],
     });
     const result = await checkStatementClosingBalance(api, {

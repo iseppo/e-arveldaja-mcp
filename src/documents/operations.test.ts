@@ -962,7 +962,7 @@ describe("AccountingDocumentOperations.create", () => {
 });
 
 describe("AccountingDocumentOperations.confirmDraft", () => {
-  const reviewedDraft = { id: 90_001, status: "PROJECT", clients_id: 4242, number: "INV-1", gross_price: 12, vat_price: 2, items: [{ purchase_accounts_id: 5000, total_net_price: 10, vat_rate_dropdown: "20" }] };
+  const reviewedDraft = { id: 90_001, status: "PROJECT", clients_id: 4242, client_name: "ACME OÜ", number: "INV-1", create_date: "2026-06-15", journal_date: "2026-06-15", term_days: 14, cl_currencies_id: "EUR", gross_price: 12, vat_price: 2, items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, total_net_price: 10, vat_rate_dropdown: "20" }] };
   function confirmSetup() {
     const api = createAccountingWorkflowApi({
       clientRows: [],
