@@ -1,0 +1,309 @@
+{
+  "by_code": {
+    "TS18046": 941,
+    "TS18048": 1,
+    "TS2305": 1,
+    "TS2307": 1,
+    "TS2322": 21,
+    "TS2339": 107,
+    "TS2345": 24,
+    "TS2348": 2,
+    "TS2349": 11,
+    "TS2352": 9,
+    "TS2353": 72,
+    "TS2493": 3,
+    "TS2554": 1,
+    "TS2556": 1,
+    "TS2561": 1,
+    "TS2571": 14,
+    "TS2739": 15,
+    "TS2741": 3,
+    "TS2769": 7,
+    "TS2783": 6,
+    "TS4104": 1,
+    "TS7006": 1,
+    "TS7016": 1,
+    "TS7031": 15
+  },
+  "errors": {
+    "src/__fixtures__/accounting.ts": {
+      "TS2322": 1
+    },
+    "src/__fixtures__/camt-marker-golden.ts": {
+      "TS2307": 1
+    },
+    "src/__integration__/mcp-connection.integration.test.ts": {
+      "TS18046": 35
+    },
+    "src/api/readonly.api.test.ts": {
+      "TS2345": 2
+    },
+    "src/audit-log.test.ts": {
+      "TS2339": 2
+    },
+    "src/bank-posting-duplicate-guard.test.ts": {
+      "TS2345": 4
+    },
+    "src/bank-transaction-create.test.ts": {
+      "TS2353": 1
+    },
+    "src/bank-transaction-direction.test.ts": {
+      "TS2353": 9
+    },
+    "src/banking/receipt-ledger-check.test.ts": {
+      "TS2322": 1,
+      "TS2353": 2
+    },
+    "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
+      "TS2741": 1
+    },
+    "src/banking/reconciliation/inter-account-matcher.test.ts": {
+      "TS2739": 1
+    },
+    "src/banking/reconciliation/presenter.test.ts": {
+      "TS2352": 1
+    },
+    "src/booking-guard.test.ts": {
+      "TS2353": 1
+    },
+    "src/cache-control.test.ts": {
+      "TS18046": 5,
+      "TS2769": 1
+    },
+    "src/camt/compact-routing.test.ts": {
+      "TS18046": 19
+    },
+    "src/camt/journal-coverage.test.ts": {
+      "TS2345": 2
+    },
+    "src/camt/marker-render-v1.test.ts": {
+      "TS2739": 1
+    },
+    "src/camt/marker-v2.test.ts": {
+      "TS2322": 1
+    },
+    "src/camt/presenter.test.ts": {
+      "TS2741": 1
+    },
+    "src/document-parser.test.ts": {
+      "TS2345": 1,
+      "TS2352": 1,
+      "TS2493": 3
+    },
+    "src/document-reading-check.test.ts": {
+      "TS2345": 1
+    },
+    "src/documents/operations.test.ts": {
+      "TS2345": 1,
+      "TS2353": 8,
+      "TS2739": 1
+    },
+    "src/documents/process-purchase-safety.test.ts": {
+      "TS2349": 4
+    },
+    "src/documents/purchase-intake-concurrency.test.ts": {
+      "TS2322": 1,
+      "TS2339": 1
+    },
+    "src/documents/reading-operations-create.test.ts": {
+      "TS2339": 1,
+      "TS2349": 1,
+      "TS2352": 1,
+      "TS2571": 2
+    },
+    "src/estonian-accounting-guidance.test.ts": {
+      "TS2739": 1
+    },
+    "src/external-text-renderer.test.ts": {
+      "TS2352": 3
+    },
+    "src/file-input-snapshot.test.ts": {
+      "TS2322": 1,
+      "TS2345": 1
+    },
+    "src/guided/process-accounting-document-reading.test.ts": {
+      "TS2339": 1,
+      "TS2349": 1,
+      "TS2352": 1
+    },
+    "src/guided/process-accounting-document.test.ts": {
+      "TS2353": 27
+    },
+    "src/guided/sales-recovery-regression.test.ts": {
+      "TS2556": 1
+    },
+    "src/legal-entity-identity.test.ts": {
+      "TS2339": 1
+    },
+    "src/list-views.test.ts": {
+      "TS2769": 5
+    },
+    "src/mutation-audit.test.ts": {
+      "TS2339": 1
+    },
+    "src/operation-result-page.test.ts": {
+      "TS2339": 1
+    },
+    "src/plan-execution.test.ts": {
+      "TS2322": 1
+    },
+    "src/plan-store.test.ts": {
+      "TS4104": 1
+    },
+    "src/plan-tools.test.ts": {
+      "TS2339": 6
+    },
+    "src/prompt-registry.test.ts": {
+      "TS2339": 4
+    },
+    "src/public-tool-registrar.test.ts": {
+      "TS18046": 2,
+      "TS2345": 2
+    },
+    "src/receipts/batch-operations.test.ts": {
+      "TS2339": 4,
+      "TS2345": 1,
+      "TS2554": 1
+    },
+    "src/receipts/classification-operations.test.ts": {
+      "TS2349": 4
+    },
+    "src/receipts/presenter.test.ts": {
+      "TS2305": 1
+    },
+    "src/release-smoke.test.ts": {
+      "TS7006": 1,
+      "TS7016": 1
+    },
+    "src/server/connection-guard.test.ts": {
+      "TS2345": 3
+    },
+    "src/server/strict-tool-input.test.ts": {
+      "TS2345": 4
+    },
+    "src/startup-credential-import.test.ts": {
+      "TS2322": 6
+    },
+    "src/statement-balance-check.test.ts": {
+      "TS2322": 1
+    },
+    "src/stderr-tee.test.ts": {
+      "TS2322": 1
+    },
+    "src/tools/accounting-inbox.test.ts": {
+      "TS2339": 4,
+      "TS2769": 1,
+      "TS7031": 6
+    },
+    "src/tools/analyze-unconfirmed.test.ts": {
+      "TS18046": 81,
+      "TS2739": 3
+    },
+    "src/tools/annual-report.test.ts": {
+      "TS18046": 5,
+      "TS2322": 3,
+      "TS2783": 6
+    },
+    "src/tools/bank-reconciliation.test.ts": {
+      "TS18046": 236,
+      "TS2739": 2,
+      "TS7031": 2
+    },
+    "src/tools/camt-import-tools.test.ts": {
+      "TS18046": 150,
+      "TS2339": 16,
+      "TS2345": 1,
+      "TS2571": 5
+    },
+    "src/tools/credential-tools.test.ts": {
+      "TS2339": 12
+    },
+    "src/tools/crud-tools.test.ts": {
+      "TS2339": 41
+    },
+    "src/tools/document-audit.test.ts": {
+      "TS18046": 15,
+      "TS7031": 1
+    },
+    "src/tools/estonian-tax.test.ts": {
+      "TS18046": 2,
+      "TS2339": 2
+    },
+    "src/tools/file-input-metadata.test.ts": {
+      "TS7031": 1
+    },
+    "src/tools/financial-statements.test.ts": {
+      "TS18046": 113,
+      "TS2571": 2
+    },
+    "src/tools/lightyear-investments.test.ts": {
+      "TS2339": 3,
+      "TS2571": 4,
+      "TS7031": 1
+    },
+    "src/tools/pdf-workflow.test.ts": {
+      "TS18046": 96,
+      "TS7031": 1
+    },
+    "src/tools/purchase-vat-defaults.test.ts": {
+      "TS2345": 1
+    },
+    "src/tools/receipt-batch-failure.test.ts": {
+      "TS18046": 47
+    },
+    "src/tools/receipt-inbox-path.test.ts": {
+      "TS18046": 3
+    },
+    "src/tools/receipt-inbox-summary.test.ts": {
+      "TS2322": 1,
+      "TS2741": 1
+    },
+    "src/tools/receipt-inbox-tools.test.ts": {
+      "TS18046": 45,
+      "TS2339": 1,
+      "TS2348": 1,
+      "TS2349": 1,
+      "TS2739": 1
+    },
+    "src/tools/receipt-inbox.test.ts": {
+      "TS2322": 1,
+      "TS2353": 2
+    },
+    "src/tools/recurring-invoices.test.ts": {
+      "TS18046": 48,
+      "TS2571": 1,
+      "TS7031": 2
+    },
+    "src/tools/wise-import.test.ts": {
+      "TS18046": 39,
+      "TS18048": 1,
+      "TS2322": 1,
+      "TS2339": 2,
+      "TS2348": 1,
+      "TS2739": 3,
+      "TS7031": 1
+    },
+    "src/wise/counterpart.test.ts": {
+      "TS2739": 1
+    },
+    "src/wise/presenter-shared.test.ts": {
+      "TS2339": 1
+    },
+    "src/wise/presenter.test.ts": {
+      "TS2322": 1,
+      "TS2352": 1,
+      "TS2353": 22,
+      "TS2739": 1
+    },
+    "src/wise/projection.test.ts": {
+      "TS2339": 2,
+      "TS2352": 1,
+      "TS2561": 1
+    },
+    "src/workflow-page.test.ts": {
+      "TS2339": 1
+    }
+  },
+  "total": 1259,
+  "version": 1
+}

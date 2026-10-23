@@ -46,6 +46,8 @@
     "measure:surface": "tsx scripts/measure-mcp-surface.ts",
     "measure:responses": "tsx scripts/measure-response-fixtures.ts",
     "validate:release": "tsx scripts/validate-release-metadata.ts",
+    "typecheck:tests": "tsx scripts/check-test-typecheck.ts",
+    "typecheck:tests:update": "tsx scripts/check-test-typecheck.ts --update",
     "smoke:package": "node scripts/smoke-packed-runtime.mjs",
     "prepublishOnly": "npm run validate:release && npm run build && npm run smoke:package",
     "release:check": "npm run validate:release && npm run build && vitest run && vitest run --config vitest.integration.config.ts && npm run smoke:package",
