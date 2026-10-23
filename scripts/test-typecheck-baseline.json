@@ -4,10 +4,9 @@
     "TS18048": 1,
     "TS2322": 3,
     "TS2339": 2,
-    "TS2345": 9,
+    "TS2345": 8,
     "TS2352": 2,
     "TS2353": 2,
-    "TS2554": 1,
     "TS2571": 8,
     "TS2741": 1,
     "TS2769": 1
@@ -24,10 +23,6 @@
     },
     "src/public-tool-registrar.test.ts": {
       "TS18046": 2
-    },
-    "src/receipts/batch-operations.test.ts": {
-      "TS2345": 1,
-      "TS2554": 1
     },
     "src/server/connection-guard.test.ts": {
       "TS2345": 3
@@ -98,6 +93,6 @@
       "TS2352": 1
     }
   },
-  "total": 971,
+  "total": 969,
   "version": 1
 }
