@@ -15,7 +15,6 @@
     "TS2571": 14,
     "TS2741": 1,
     "TS2769": 7,
-    "TS2783": 6,
     "TS4104": 1
   },
   "errors": {
@@ -116,8 +115,7 @@
     },
     "src/tools/annual-report.test.ts": {
       "TS18046": 5,
-      "TS2322": 2,
-      "TS2783": 6
+      "TS2322": 2
     },
     "src/tools/bank-reconciliation.test.ts": {
       "TS18046": 236
@@ -180,6 +178,6 @@
       "TS2352": 1
     }
   },
-  "total": 1044,
+  "total": 1038,
   "version": 1
 }

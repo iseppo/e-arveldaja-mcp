@@ -104,12 +104,6 @@ function makeAccount(overrides: Partial<Account> & Pick<Account,
   "name_eng"
 >): Account {
   return {
-    id: overrides.id,
-    balance_type: overrides.balance_type,
-    account_type_est: overrides.account_type_est,
-    account_type_eng: overrides.account_type_eng,
-    name_est: overrides.name_est,
-    name_eng: overrides.name_eng,
     is_valid: true,
     allows_deactivation: true,
     is_vat_account: false,
