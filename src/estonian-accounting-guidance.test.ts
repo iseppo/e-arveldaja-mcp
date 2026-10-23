@@ -45,6 +45,8 @@ describe("estonian accounting guidance", () => {
       llmFallback: {
         raw_text_available: true,
         recommended: true,
+        confidence: "low",
+        confidence_signals: ["missing_required_fields"],
         reason: "Deterministic extraction left required invoice fields unresolved.",
         missing_required_fields: ["supplier_name", "invoice_number", "invoice_date", "total_gross"],
         missing_optional_fields: [],

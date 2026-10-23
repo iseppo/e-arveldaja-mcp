@@ -14,7 +14,7 @@
     "TS2556": 1,
     "TS2561": 1,
     "TS2571": 14,
-    "TS2739": 3,
+    "TS2739": 2,
     "TS2741": 2,
     "TS2769": 7,
     "TS2783": 6,
@@ -85,9 +85,6 @@
       "TS2349": 1,
       "TS2352": 1,
       "TS2571": 2
-    },
-    "src/estonian-accounting-guidance.test.ts": {
-      "TS2739": 1
     },
     "src/external-text-renderer.test.ts": {
       "TS2352": 3
@@ -262,6 +259,6 @@
       "TS2339": 1
     }
   },
-  "total": 1232,
+  "total": 1231,
   "version": 1
 }
