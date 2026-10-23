@@ -32,7 +32,7 @@ import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
-function getCrudToolHarness(toolName: string, overrides?: {
+interface CrudToolHarnessOverrides {
   transactions?: Record<string, unknown>;
   readonly?: Record<string, unknown>;
   clients?: Record<string, unknown>;
@@ -40,7 +40,10 @@ function getCrudToolHarness(toolName: string, overrides?: {
   journals?: Record<string, unknown>;
   saleInvoices?: Record<string, unknown>;
   purchaseInvoices?: Record<string, unknown>;
-}) {
+}
+
+// Generic so each spread override stays visible on the returned `api` type.
+function getCrudToolHarness<O extends CrudToolHarnessOverrides = {}>(toolName: string, overrides?: O) {
   const api = {
     transactions: {
       get: vi.fn(),
@@ -97,7 +100,7 @@ function getCrudToolHarness(toolName: string, overrides?: {
   if (!call) throw new Error(`${toolName} tool was not registered`);
 
   return {
-    api,
+    api: api as typeof api & O,
     options: call[1] as { description?: string; inputSchema?: Record<string, unknown> },
     handler: call[2] as (args: Record<string, unknown>, extra?: unknown) => Promise<unknown>,
   };
