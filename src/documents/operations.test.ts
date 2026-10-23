@@ -330,6 +330,7 @@ describe("AccountingDocumentOperations.create", () => {
         get: vi.fn(),
         createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
         confirmWithTotals: vi.fn(),
+        confirm: vi.fn(),
         invalidate: vi.fn().mockResolvedValue({}),
         uploadDocument: vi.fn().mockResolvedValue({}),
       },
@@ -383,6 +384,7 @@ describe("AccountingDocumentOperations.create", () => {
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
     expect(api.purchaseInvoices.uploadDocument).not.toHaveBeenCalled();
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   }
 
   // A document addressed to another company would be booked whole into the
@@ -542,6 +544,7 @@ describe("AccountingDocumentOperations.create", () => {
     expect(vi.mocked(api.purchaseInvoices.uploadDocument).mock.calls[0]![1]).toBe("invoice.pdf");
     // NEVER auto-confirms/registers — the op stops at DRAFT + a fresh confirm plan.
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
     expect(outcome.value.confirmPlan).toBeDefined();
     expect(outcome.value.confirmPlan?.invoiceId).toBe(90_001);
     expect(typeof outcome.value.confirmPlan?.planHandle).toBe("string");

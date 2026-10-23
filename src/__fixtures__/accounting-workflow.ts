@@ -35,6 +35,7 @@ export interface MockAccountingWorkflowApi {
     get: ReturnType<typeof vi.fn>;
     createAndSetTotals: ReturnType<typeof vi.fn>;
     confirmWithTotals: ReturnType<typeof vi.fn>;
+    confirm?: ReturnType<typeof vi.fn>;
     invalidate: ReturnType<typeof vi.fn>;
     invalidateListCache: ReturnType<typeof vi.fn>;
   };

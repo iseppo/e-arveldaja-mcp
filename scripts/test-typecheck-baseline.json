@@ -10,7 +10,7 @@
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 9,
-    "TS2353": 72,
+    "TS2353": 69,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
@@ -95,7 +95,7 @@
     },
     "src/documents/operations.test.ts": {
       "TS2345": 1,
-      "TS2353": 8,
+      "TS2353": 5,
       "TS2739": 1
     },
     "src/documents/process-purchase-safety.test.ts": {
@@ -304,6 +304,6 @@
       "TS2339": 1
     }
   },
-  "total": 1259,
+  "total": 1256,
   "version": 1
 }

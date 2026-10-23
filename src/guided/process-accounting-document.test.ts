@@ -283,6 +283,7 @@ describe("process_accounting_document", () => {
         get: vi.fn(),
         createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
         confirmWithTotals: vi.fn(),
+        confirm: vi.fn(),
         invalidate: vi.fn().mockResolvedValue({}),
         uploadDocument: vi.fn().mockResolvedValue({}),
       },
@@ -305,6 +306,7 @@ describe("process_accounting_document", () => {
     expect(created.confirm_plan.invoice_id).toBe(90_001);
     // The op created a DRAFT and did NOT confirm.
     expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   });
 
   it("rejects a create whose booking fields drifted from the reviewed booking-prepare (plan_drift, zero mutation)", async () => {
