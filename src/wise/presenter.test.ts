@@ -204,6 +204,9 @@ describe("renderWiseImportCompact — automatic matches", () => {
       wise_id: `TRANSFER-${1000 + index}`,
       code: "wise_transfer_dimensions_unverified" as const,
       reason: "The Wise transfer between own accounts could not be verified against a bank dimension: the counterpart account is not configured. Book it manually after checking both statements.",
+      source_verified: true,
+      target_verified: true,
+      approval_required: false,
     }));
     data.skipped = Array.from({ length: 4 }, (_, index) => ({
       wise_id: `CARD_TRANSACTION-${index}`,
@@ -383,6 +386,9 @@ describe("renderWiseImportCompact — zero-write preview", () => {
       wise_id: "TRANSFER-77",
       code: "wise_transfer_dimensions_unverified",
       reason: "The Wise transfer between own accounts could not be verified against a bank dimension.",
+      source_verified: true,
+      target_verified: true,
+      approval_required: false,
     }];
     const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
     expect(summary.status).toBe("needs_review");
