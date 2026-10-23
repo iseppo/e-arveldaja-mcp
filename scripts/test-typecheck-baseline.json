@@ -4,7 +4,7 @@
     "TS18048": 1,
     "TS2322": 3,
     "TS2339": 2,
-    "TS2345": 11,
+    "TS2345": 9,
     "TS2352": 4,
     "TS2353": 2,
     "TS2554": 1,
@@ -22,9 +22,6 @@
     },
     "src/camt/compact-routing.test.ts": {
       "TS18046": 19
-    },
-    "src/camt/journal-coverage.test.ts": {
-      "TS2345": 2
     },
     "src/documents/reading-operations-create.test.ts": {
       "TS2352": 1
@@ -111,6 +108,6 @@
       "TS2352": 1
     }
   },
-  "total": 976,
+  "total": 974,
   "version": 1
 }

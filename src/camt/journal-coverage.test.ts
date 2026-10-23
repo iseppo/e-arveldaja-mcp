@@ -545,7 +545,7 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
         interAccountResolver: () => ({ resolveInterAccount: () => ({ status: "none" }), hasOtherLabelledInterAccount: () => false }) },
       dimensionId: DIM, entries, ledgerTransactions: [native()],
     });
-    const review = { kind: "review", code: "camt_journal_posting_review", journal_ids: [9400] } as const;
+    const review = { kind: "review" as const, code: "camt_journal_posting_review" as const, journal_ids: [9400] };
     expect(findCamtNativeImportMatch(outgoing, review, context([outgoing]))).toEqual({ transaction_id: 9300, journal_id: 9400 });
     expect(findCamtNativeImportMatch(outgoing, review, context([outgoing, other]))).toBeUndefined();
   });
