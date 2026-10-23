@@ -842,6 +842,7 @@ describe("AccountingDocumentOperations.create", () => {
     const { path, sha256, api, runtime, ops } = createSetup();
     const handle = await prepareBookingHandle(ops, path);
     const consume = runtime.planStore.consume.bind(runtime.planStore);
+    // @ts-expect-error a malformed stored source identity (locator_sha256 missing) must drift, not mutate
     vi.spyOn(runtime.planStore, "consume").mockImplementation((planHandle, domain) => {
       const plan = consume(planHandle, domain);
       return { ...plan, sourceIdentities: [{ ...plan.sourceIdentities[0], locator_sha256: undefined }] };

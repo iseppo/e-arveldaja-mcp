@@ -2,13 +2,13 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 13,
+    "TS2322": 12,
     "TS2339": 30,
-    "TS2345": 23,
+    "TS2345": 21,
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 8,
-    "TS2353": 13,
+    "TS2353": 2,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
@@ -32,17 +32,8 @@
     "src/bank-posting-duplicate-guard.test.ts": {
       "TS2345": 4
     },
-    "src/bank-transaction-create.test.ts": {
-      "TS2353": 1
-    },
-    "src/bank-transaction-direction.test.ts": {
-      "TS2353": 9
-    },
     "src/banking/receipt-ledger-check.test.ts": {
       "TS2322": 1
-    },
-    "src/booking-guard.test.ts": {
-      "TS2353": 1
     },
     "src/cache-control.test.ts": {
       "TS18046": 5,
@@ -55,14 +46,10 @@
       "TS2345": 2
     },
     "src/document-parser.test.ts": {
-      "TS2345": 1,
       "TS2352": 1,
       "TS2493": 3
     },
     "src/document-reading-check.test.ts": {
-      "TS2345": 1
-    },
-    "src/documents/operations.test.ts": {
       "TS2345": 1
     },
     "src/documents/process-purchase-safety.test.ts": {
@@ -98,9 +85,6 @@
     },
     "src/operation-result-page.test.ts": {
       "TS2339": 1
-    },
-    "src/plan-execution.test.ts": {
-      "TS2322": 1
     },
     "src/plan-store.test.ts": {
       "TS4104": 1
@@ -225,6 +209,6 @@
       "TS2339": 1
     }
   },
-  "total": 1091,
+  "total": 1077,
   "version": 1
 }

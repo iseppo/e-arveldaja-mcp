@@ -214,6 +214,7 @@ describe("runPlanCommands", () => {
     const report = await runPlanCommands({
       commands: [{ id: "valid", category: "create" }],
       prepare: async () => ({ outcome: "ready" }),
+      // @ts-expect-error a malformed known_objects result must be normalized to indeterminate
       mutate: async () => ({ outcome: "completed", known_objects: [{ entity_type: "x".repeat(500), entity_id: "secret" }] }),
     });
     expect(report.command_partitions.indeterminate).toEqual([{ command_id: "valid", category: "create", code: "mutation_result_invalid" }]);

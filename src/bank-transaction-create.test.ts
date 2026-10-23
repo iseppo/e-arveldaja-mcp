@@ -111,6 +111,7 @@ describe("bank transaction create boundary", () => {
 
     await createBankTransaction(api, {
       accounts_dimensions_id: 7,
+      // @ts-expect-error callers cannot pass `type`; the write boundary derives it from the direction
       type: "D",
       amount: 12.34,
       cl_currencies_id: "EUR",

@@ -336,6 +336,7 @@ describe("document parser", () => {
     // started at ^2.0.4, so a tree that resolved below that — a cached npx
     // install, most often — reached a bare "isComplex is not a function" on the
     // first PDF, with nothing pointing at the dependency.
+    // @ts-expect-error a LiteParse build without isComplex (pre-2.2.0) must be named as the cause
     liteParseConstructor.mockImplementationOnce(function OldLiteParse() {
       return { parse: parseMock };
     });

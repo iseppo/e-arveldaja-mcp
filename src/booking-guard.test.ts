@@ -230,6 +230,7 @@ describe("BookingGuard Lane A — createJournalOnce", () => {
 
     const result = await guard.createJournalOnce(
       { ns: "FX", id: "77" },
+      // @ts-expect-error a caller-supplied document_number must be ignored (the guard owns it)
       { effective_date: "2026-02-02", title: "FX", document_number: "IGNORED" as never, postings: [] },
     );
 
