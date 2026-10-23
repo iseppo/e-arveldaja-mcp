@@ -8,11 +8,10 @@
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 8,
-    "TS2353": 35,
+    "TS2353": 13,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
-    "TS2561": 1,
     "TS2571": 14,
     "TS2741": 1,
     "TS2769": 7,
@@ -216,18 +215,16 @@
       "TS2339": 1
     },
     "src/wise/presenter.test.ts": {
-      "TS2352": 1,
-      "TS2353": 22
+      "TS2352": 1
     },
     "src/wise/projection.test.ts": {
       "TS2339": 2,
-      "TS2352": 1,
-      "TS2561": 1
+      "TS2352": 1
     },
     "src/workflow-page.test.ts": {
       "TS2339": 1
     }
   },
-  "total": 1114,
+  "total": 1091,
   "version": 1
 }

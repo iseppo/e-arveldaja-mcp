@@ -98,8 +98,8 @@ function makeData(rows: number, mode: "DRY_RUN" | "EXECUTED" = "DRY_RUN", errorC
 
 describe("renderWiseImportCompact", () => {
   it("stays approximately constant from 100 to 1000 clean rows and under the batch budget", () => {
-    const bytes100 = mcpPayloadBytes(renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(100) }));
-    const bytes1000 = mcpPayloadBytes(renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(1000) }));
+    const bytes100 = mcpPayloadBytes(renderWiseImportCompact({ data: makeData(100) }));
+    const bytes1000 = mcpPayloadBytes(renderWiseImportCompact({ data: makeData(1000) }));
 
     expect(Math.abs(bytes1000 - bytes100)).toBeLessThan(256);
     expect(bytes100).toBeLessThan(RESPONSE_BUDGETS.batch.hard);
@@ -107,7 +107,7 @@ describe("renderWiseImportCompact", () => {
   });
 
   it("inlines at most three samples and surfaces IN/OUT totals + plan handle on dry run", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(500) });
+    const { summary } = renderWiseImportCompact({ data: makeData(500) });
     expect(summary.samples).toHaveLength(3);
     expect(summary.plan_handle).toBe("PLAN-HANDLE-XYZ");
     expect(summary.totals?.out_total).toBe(roundMoney(Array.from({ length: 500 }, (_, i) => 10 + i).reduce((a, b) => a + b, 0)));
@@ -133,14 +133,14 @@ describe("renderWiseImportCompact", () => {
       { ...advisory, result: "advisory" },
       { ...advisory, invoice_id: 701, result: "ambiguous_skipped" },
     ];
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(summary.warnings).toEqual([
       { item_id: "WISE-0", code: "wise_invoice_currency_advisory", message: advisory.proposed_action },
     ]);
   });
 
   it("carries the statement identity: Wise dimension account + OCR-wrapped source file", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(50) });
+    const { summary } = renderWiseImportCompact({ data: makeData(50) });
     const scope = summary.scope as Record<string, unknown>;
     expect(scope.account).toBe("5");
     expect(String((scope.source_documents as string[])[0])).toMatch(/UNTRUSTED_OCR_START/);
@@ -148,7 +148,6 @@ describe("renderWiseImportCompact", () => {
 
   it("never hides blockers: execution errors surface as a blocker and reference the result page", () => {
     const { summary } = renderWiseImportCompact({
-      mode: "EXECUTED",
       data: makeData(300, "EXECUTED", 5),
       operationHandle: "op-handle-123",
     });
@@ -186,7 +185,7 @@ describe("renderWiseImportCompact — automatic matches", () => {
       },
       { wise_id: "TRANSFER-1", reason: "Already imported", kind: "already_imported" },
     ];
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(summary.counts).toMatchObject({ skipped: 7, duplicates: 1, auto_matched: 6, errors: 0 });
     const untagged = summary.warnings?.filter(w => w.code === "wise_untagged_ledger_unique") ?? [];
     expect(untagged.map(w => w.item_id)).toEqual(["CARD_TRANSACTION-0", "CARD_TRANSACTION-1", "CARD_TRANSACTION-2"]);
@@ -215,7 +214,7 @@ describe("renderWiseImportCompact — automatic matches", () => {
       record_id: 500 + index,
       auto_match: { code: "wise_untagged_ledger_unique" as const, transaction_id: 500 + index },
     }));
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(mcpPayloadBytes(summary)).toBeLessThanOrEqual(RESPONSE_BUDGETS.batch.target);
     const codes = summary.warnings?.map(w => w.code) ?? [];
     expect(codes.filter(code => code === "wise_untagged_ledger_unique").length).toBeGreaterThan(0);
@@ -238,7 +237,7 @@ describe("renderWiseImportCompact — totals currency", () => {
   }
 
   it("labels in_total / out_total when every summed row shares a currency", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(3) });
+    const { summary } = renderWiseImportCompact({ data: makeData(3) });
     expect(summary.totals?.currency).toBe("EUR");
     expect((summary.warnings ?? []).some(w => w.code === "mixed_currency_totals")).toBe(false);
   });
@@ -249,7 +248,7 @@ describe("renderWiseImportCompact — totals currency", () => {
   it("does not label a total that adds up more than one currency, and says so", () => {
     const data = makeData(2);
     const mixed = { ...data, created: [...data.created, foreignCreated(99)] };
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: mixed });
+    const { summary } = renderWiseImportCompact({ data: mixed });
 
     expect(summary.totals?.currency).toBeUndefined();
     const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
@@ -277,7 +276,6 @@ describe("renderWiseImportCompact — fee rows vote on the totals currency", () 
       booked_currency: "USD",
     };
     const { summary } = renderWiseImportCompact({
-      mode: "DRY_RUN",
       data: { ...data, created: [...data.created, feeEntry] },
     });
 
@@ -367,7 +365,7 @@ describe("renderWiseImportCompact — zero-write preview", () => {
   }
 
   it("is completed with a nothing-to-approve message, no next_action or plan handle, and a date-narrowing hint for more automatic matches", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: zeroWriteData(5) });
+    const { summary } = renderWiseImportCompact({ data: zeroWriteData(5) });
     expect(summary.status).toBe("completed");
     expect(summary.message).toBe("Nothing to approve: the Wise dry run found no rows to write (6 already booked: 5 already journalized, 1 already imported); no plan handle was issued.");
     expect(summary.next_action).toBeUndefined();
@@ -390,13 +388,13 @@ describe("renderWiseImportCompact — zero-write preview", () => {
       target_verified: true,
       approval_required: false,
     }];
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(summary.status).toBe("needs_review");
     expect(summary.next_action).toBeUndefined();
   });
 
   it("a preview with write commands stays ready_for_approval", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: makeData(1) });
+    const { summary } = renderWiseImportCompact({ data: makeData(1) });
     expect(summary.status).toBe("ready_for_approval");
   });
 });
@@ -423,7 +421,7 @@ describe("renderWiseImportCompact — dry-run status ladder", () => {
         { accounts_dimensions_id: 30, label: "Lightyear" },
       ],
     };
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
 
     expect(summary.status).toBe("needs_review");
     expect(summary.next_action?.args).toMatchObject({ plan_handle: "PLAN-HANDLE-XYZ" });
@@ -443,7 +441,7 @@ describe("renderWiseImportCompact — dry-run status ladder", () => {
   it("write commands plus an open review are needs_review and keep next_action and plan_handle", () => {
     const data = makeData(1);
     data.ownershipReviews = [review("TRANSFER-9", "wise_transfer_journal_ambiguous")];
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
 
     expect(summary.status).toBe("needs_review");
     expect(summary.next_action?.args).toMatchObject({ plan_handle: "PLAN-HANDLE-XYZ" });
@@ -487,7 +485,7 @@ describe("renderWiseImportCompact — disjoint skip counts", () => {
 
   for (const mode of ["DRY_RUN", "EXECUTED"] as const) {
     it(`${mode}: skipped = duplicates + auto_matched + already_journalized`, () => {
-      const { summary } = renderWiseImportCompact({ mode, data: legacyAndLabelledData(mode) });
+      const { summary } = renderWiseImportCompact({ data: legacyAndLabelledData(mode) });
       const counts = summary.counts as Record<string, number>;
       expect(counts).toMatchObject({ skipped: 5, duplicates: 1, auto_matched: 2, already_journalized: 2 });
       expect(counts.duplicates! + counts.auto_matched! + counts.already_journalized!).toBe(counts.skipped);
@@ -526,7 +524,7 @@ describe("already-journalized automatic matches: standard and guided labels", ()
   });
 
   it("guided keeps the disjoint split: 21 already journalized + 10 auto_matched", () => {
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data: data() });
+    const { summary } = renderWiseImportCompact({ data: data() });
     expect(summary.counts).toMatchObject({ already_journalized: 21, auto_matched: 10 });
   });
 });
@@ -538,7 +536,7 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
     const data = makeData(1);
     data.args.acknowledgedJournalHolds = acknowledgement;
     data.acknowledgedHolds = acknowledgement;
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(summary.next_action?.args).toMatchObject({ acknowledged_journal_holds: acknowledgement, plan_handle: "PLAN-HANDLE-XYZ" });
     expect(summary.status).toBe("ready_for_approval");
     expect(summary.warnings).toEqual(expect.arrayContaining([expect.objectContaining({
@@ -564,11 +562,11 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
       { action: "main_create", wise_id: "TRANSFER-ACK" },
       { action: "inter_account", wise_id: "TRANSFER-ACK" },
     ] as unknown as WiseImportCommand[];
-    expect(renderWiseImportCompact({ mode: "DRY_RUN", data }).summary.counts).toMatchObject({ inter_account: 1 });
+    expect(renderWiseImportCompact({ data }).summary.counts).toMatchObject({ inter_account: 1 });
     // Execute: the inter-account results.
     const executed = makeData(1, "EXECUTED");
     executed.interAccountResults = [{ wise_id: "TRANSFER-ACK", amount: 10, status: "confirmed_inter_account", ownership_basis: "verified_endpoints" }] as WiseImportRenderData["interAccountResults"];
-    expect(renderWiseImportCompact({ mode: "EXECUTED", data: executed }).summary.counts).toMatchObject({ inter_account: 1 });
+    expect(renderWiseImportCompact({ data: executed }).summary.counts).toMatchObject({ inter_account: 1 });
   });
 
   it("a held review names the journals to acknowledge, and the ones a short acknowledgement left out, in the compact message", () => {
@@ -577,7 +575,7 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
       wise_id: "TRANSFER-ACK", code: "wise_transfer_journal_existing_elsewhere", reason: "Held.", source_verified: true,
       target_verified: true, approval_required: false, required_acknowledgement_ids: [801, 802], unacknowledged_journal_ids: [802],
     }];
-    const { summary } = renderWiseImportCompact({ mode: "DRY_RUN", data });
+    const { summary } = renderWiseImportCompact({ data });
     expect(summary.warnings).toEqual(expect.arrayContaining([{
       item_id: "TRANSFER-ACK",
       code: "wise_transfer_journal_existing_elsewhere",

@@ -21,7 +21,7 @@ function project(eligible: WiseRow[], existingTx: Transaction[], extra: Partial<
     eligible, allRows: eligible, accountsDimensionsId: WISE, accountDimensions, feeAccountDimensionsId: FEE_DIM, wiseClientId: 7,
     existingTx, transferDecisions: new Map(), postingDimensionsSnapshot: new Map(), bankDimensionIds: new Set(), journalSnapshot: [],
     createInterAccountGuard: () => { throw new Error("no guard expected"); },
-    approvedTransferIds: new Set(), ownCompanyClientId: undefined, ownCompanyClientMatches: [], allPurchaseInvoices: [],
+    approvedTransferIds: new Set(), ownCompanyClientId: undefined, allPurchaseInvoices: [],
     ...extra,
   });
 }
