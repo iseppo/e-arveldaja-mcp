@@ -10,7 +10,7 @@
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 9,
-    "TS2353": 69,
+    "TS2353": 67,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
@@ -51,8 +51,7 @@
       "TS2353": 9
     },
     "src/banking/receipt-ledger-check.test.ts": {
-      "TS2322": 1,
-      "TS2353": 2
+      "TS2322": 1
     },
     "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
       "TS2741": 1
@@ -304,6 +303,6 @@
       "TS2339": 1
     }
   },
-  "total": 1256,
+  "total": 1254,
   "version": 1
 }

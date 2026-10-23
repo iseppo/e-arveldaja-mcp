@@ -112,6 +112,8 @@ export interface Posting {
   type?: "D" | "C";
   amount: number;
   base_amount?: number;
+  /** FOREIGN currency units per 1 EUR (ECB convention, e.g. USD 1.08); EUR = amount / currency_rate. */
+  currency_rate?: number | null;
   cl_currencies_id?: string;
   projects_project_id?: number | null;
   projects_location_id?: number | null;
