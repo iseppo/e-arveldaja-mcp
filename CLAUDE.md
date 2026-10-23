@@ -670,6 +670,7 @@ are not rewritten.
 ```bash
 npx tsc --noEmit      # Type-check without emitting
 npx tsc               # Full build to dist/
+npm run typecheck:tests   # typecheck tests + fixtures against the ratchet baseline
 ```
 
 Unit tests use **vitest**:

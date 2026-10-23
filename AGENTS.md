@@ -32,6 +32,7 @@ For normal code changes, run:
 
 ```bash
 npm test
+npm run typecheck:tests
 npm run build
 npm run test:integration
 ```
