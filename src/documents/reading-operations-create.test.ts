@@ -505,7 +505,7 @@ describe("reading confirm (§5.5)", () => {
   it("a draft edited while the confirm scans run is draft_changed, 0 registers", async () => {
     const w = world();
     const plan = await createdDraft(w);
-    const scan = w.api.journals.listAll.getMockImplementation();
+    const scan = w.api.journals.listAll.getMockImplementation() as ((...args: unknown[]) => Promise<unknown>) | undefined;
     w.api.journals.listAll.mockImplementation(async (...args: unknown[]) => {
       w.details[plan.invoiceId]!.gross_price = 125;
       return scan ? scan(...(args as [])) : [];

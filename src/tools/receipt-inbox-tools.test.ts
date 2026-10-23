@@ -136,12 +136,12 @@ function setupReceiptTool(
     // Apply re-checks the ledger per bank dimension, so dimension 100 must resolve.
     accountDimensions: [{ id: 100, accounts_id: 1020, is_deleted: false }],
     transactions: options.getImpl
-      ? { get: vi.fn(async (...args: unknown[]) => signFixtureMarker(await options.getImpl!(...args))) }
+      ? { get: vi.fn(async (...args: unknown[]) => signFixtureMarker(await (options.getImpl as unknown as (...args: unknown[]) => Promise<unknown>)(...args))) }
       : undefined,
   };
   const api = createAccountingWorkflowApi(apiOptions);
   createdInvoices.set(api,new Map());
-  const priorGet=api.purchaseInvoices.get.getMockImplementation()!;
+  const priorGet=api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
   api.purchaseInvoices.get.mockImplementation(async(id:number)=>{
     const invoice=createdInvoices.get(api)!.get(id);
     return invoice?structuredClone(invoice):priorGet(id);

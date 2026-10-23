@@ -22,6 +22,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";
 import { TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
 import { runWithToolProfile } from "../tool-profile.js";
+import type { PurchaseInvoice } from "../types/api.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 
@@ -31,7 +32,7 @@ function makeOperations(apiOptions: AccountingWorkflowApiOptions = {}) {
   // Model complete create/read/confirm readback for the new final material guard.
   if (apiOptions.allowWrites && !apiOptions.purchaseInvoices?.createAndSetTotals) {
     let created: Record<string, unknown> | undefined;
-    const priorGet = api.purchaseInvoices.get.getMockImplementation()!;
+    const priorGet = api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
     api.purchaseInvoices.createAndSetTotals.mockImplementation(async (body: Record<string, unknown>, vat: number, gross: number) => {
       created = fixturePurchaseReadback(body as any, vat, gross) as unknown as Record<string, unknown>;
       return { ...created };
@@ -305,9 +306,9 @@ describe("M4 material boundary matrix", () => {
       const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
       const handle = await dryRunHandle(operations, [saasGroup()]);
       let stage = "approved";
-      const create = api.purchaseInvoices.createAndSetTotals.getMockImplementation()!;
+      const create = api.purchaseInvoices.createAndSetTotals.getMockImplementation()! as (...args: unknown[]) => Promise<unknown>;
       api.purchaseInvoices.createAndSetTotals.mockImplementation(async (...args: any[]) => { const row = await create(...args); stage = "created"; return row; });
-      const confirm = api.purchaseInvoices.confirmWithTotals.getMockImplementation()!;
+      const confirm = api.purchaseInvoices.confirmWithTotals.getMockImplementation()! as (...args: unknown[]) => Promise<unknown>;
       api.purchaseInvoices.confirmWithTotals.mockImplementation(async (...args: any[]) => { const result = await confirm(...args); stage = "confirmed"; return result; });
       api.transactions.get.mockImplementation(async () => stage === boundary ? change({ ...SAAS_TX }) : { ...SAAS_TX });
       const result = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle: handle });
@@ -337,7 +338,7 @@ describe("M4 material boundary matrix", () => {
   it.each(["created","confirmed"])("holds authored row/tax/header drift after %s",async boundary=>{
     const {operations,api}=makeSaasOperations(SAAS_TX,{allowWrites:true});
     const handle=await dryRunHandle(operations,[saasGroup()]);
-    const get=api.purchaseInvoices.get.getMockImplementation()!;
+    const get=api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<PurchaseInvoice & Required<Pick<PurchaseInvoice, "items">>>;
     api.purchaseInvoices.get.mockImplementation(async(id:number)=>{
       const row=await get(id); if(id!==9001)return row;
       if((boundary==="created"&&row.status==="PROJECT")||(boundary==="confirmed"&&row.status==="CONFIRMED"))return {...row,vat_price:99,items:[{...row.items[0],purchase_accounts_id:999}]};

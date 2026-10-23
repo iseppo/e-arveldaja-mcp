@@ -231,7 +231,7 @@ function setupWiseTool(
   const createSource = createImpl ?? vi.fn().mockImplementation(async () => ({ created_object_id: nextDefaultCreatedId++ }));
   const runtimeCreatedTransactions: unknown[] = [];
   const create = vi.fn().mockImplementation(async (payload: Record<string, unknown>) => {
-    const result = await createSource(payload);
+    const result = await (createSource as unknown as (payload: Record<string, unknown>) => Promise<{ created_object_id?: number } | undefined>)(payload);
     if (result?.created_object_id !== undefined) {
       runtimeCreatedTransactions.push({
         ...payload,

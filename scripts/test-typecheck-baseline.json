@@ -5,8 +5,6 @@
     "TS2322": 12,
     "TS2339": 12,
     "TS2345": 21,
-    "TS2348": 2,
-    "TS2349": 11,
     "TS2352": 8,
     "TS2353": 2,
     "TS2493": 3,
@@ -50,11 +48,7 @@
     "src/document-reading-check.test.ts": {
       "TS2345": 1
     },
-    "src/documents/process-purchase-safety.test.ts": {
-      "TS2349": 4
-    },
     "src/documents/reading-operations-create.test.ts": {
-      "TS2349": 1,
       "TS2352": 1,
       "TS2571": 2
     },
@@ -66,7 +60,6 @@
       "TS2345": 1
     },
     "src/guided/process-accounting-document-reading.test.ts": {
-      "TS2349": 1,
       "TS2352": 1
     },
     "src/guided/sales-recovery-regression.test.ts": {
@@ -91,9 +84,6 @@
     "src/receipts/batch-operations.test.ts": {
       "TS2345": 1,
       "TS2554": 1
-    },
-    "src/receipts/classification-operations.test.ts": {
-      "TS2349": 4
     },
     "src/server/connection-guard.test.ts": {
       "TS2345": 3
@@ -153,9 +143,7 @@
     },
     "src/tools/receipt-inbox-tools.test.ts": {
       "TS18046": 45,
-      "TS2339": 1,
-      "TS2348": 1,
-      "TS2349": 1
+      "TS2339": 1
     },
     "src/tools/receipt-inbox.test.ts": {
       "TS2353": 2
@@ -167,8 +155,7 @@
     "src/tools/wise-import.test.ts": {
       "TS18046": 39,
       "TS18048": 1,
-      "TS2322": 1,
-      "TS2348": 1
+      "TS2322": 1
     },
     "src/wise/presenter.test.ts": {
       "TS2352": 1
@@ -178,6 +165,6 @@
       "TS2352": 1
     }
   },
-  "total": 1038,
+  "total": 1025,
   "version": 1
 }

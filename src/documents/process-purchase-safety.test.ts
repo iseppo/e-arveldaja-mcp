@@ -96,7 +96,7 @@ describe("process M1: confirm is bound to the actual reviewed draft", () => {
 
   it("readback failure preserves the created ID but issues no confirm handle", async () => {
     const w = world(); const handle = await w.prepare();
-    const get = w.api.purchaseInvoices.get.getMockImplementation()!;
+    const get = w.api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
     w.api.purchaseInvoices.get.mockImplementation(async (id: number) => { if (id === 900) throw new Error("unavailable"); return get(id); });
     const created = await w.legacyCreate(handle);
     expect(created.ok).toBe(true);
@@ -117,7 +117,7 @@ describe("process M1: confirm is bound to the actual reviewed draft", () => {
 
   it("a mismatching create readback preserves the draft ID without confirm authority", async () => {
     const w = world(); const handle = await w.prepare();
-    const get = w.api.purchaseInvoices.get.getMockImplementation()!;
+    const get = w.api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<Record<string, unknown>>;
     w.api.purchaseInvoices.get.mockImplementation(async (id: number) => {
       const row = await get(id);
       return id === 900 ? { ...row, gross_price: 1240 } : row;
@@ -227,7 +227,7 @@ describe("process M8: history decisions survive verify and create", () => {
 
   it.each([false, true])("partial supplier-history warning survives supplied-items=%s", async (explicit) => {
     const w = world(["Teenus", "Teenus"]);
-    const get = w.api.purchaseInvoices.get.getMockImplementation()!;
+    const get = w.api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
     w.api.purchaseInvoices.get.mockImplementation(async (id: number) => { if (id === 502) throw new Error("503"); return get(id); });
     const preview = await w.verify(explicit ? { items: w.booking.items } : {});
     expect(preview.status).toBe("ready");
@@ -239,7 +239,7 @@ describe("process M8: history decisions survive verify and create", () => {
     const w = world(change === "tax removal" ? ["Esinduskulu restoranis"] : ["Teenus", "Teenus"]);
     const preview = await w.verify({ items: w.booking.items });
     if (change === "history") {
-      const get = w.api.purchaseInvoices.get.getMockImplementation()!;
+      const get = w.api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
       w.api.purchaseInvoices.get.mockImplementation(async (id: number) => { if (id === 502) throw new Error("503"); return get(id); });
     } else if (change === "dimension") {
       w.details[501].items[0].purchase_accounts_dimensions_id = 71;
