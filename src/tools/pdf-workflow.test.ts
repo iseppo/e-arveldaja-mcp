@@ -149,7 +149,7 @@ function setupPdfWorkflowTool(
 
   registerPdfWorkflowTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === toolName);
   if (!registration) {
     throw new Error("Tool was not registered");
   }

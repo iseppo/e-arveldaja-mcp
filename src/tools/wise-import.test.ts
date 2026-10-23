@@ -282,7 +282,7 @@ function setupWiseTool(
   const runtimeSafetyContext = options.runtimeSafetyContext ?? createTestRuntimeSafetyContext();
   registerWiseImportTools(server, api, runtimeSafetyContext);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "import_wise_transactions");
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "import_wise_transactions");
   if (!registration) throw new Error("Tool was not registered");
   const rawHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
   const handler = async (args: Record<string, unknown>) => {

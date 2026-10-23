@@ -14,7 +14,7 @@ function setupDuplicateTool(existingPurchases: unknown[]) {
 
   registerDocumentAuditTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "detect_duplicate_purchase_invoice");
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "detect_duplicate_purchase_invoice");
   if (!registration) {
     throw new Error("Tool was not registered");
   }

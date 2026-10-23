@@ -70,7 +70,7 @@ function setupReconciliationTool(options: {
   for (const resource of [api.transactions, api.saleInvoices, api.purchaseInvoices]) resource.get = vi.fn(async (id: number) => (await resource.listAll()).find((row: any) => row.id === id));
   registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === (options.toolName ?? "reconcile_transactions"));
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === (options.toolName ?? "reconcile_transactions"));
   if (!registration) {
     throw new Error("Tool was not registered");
   }
@@ -94,7 +94,7 @@ function getReconciliationToolOptions(toolName: string): { description?: string;
   } as any;
 
   registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), EXPOSE_GRANULAR);
-  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === toolName);
   if (!registration) throw new Error(`Tool was not registered: ${toolName}`);
   return registration[1] as { description?: string; inputSchema?: Record<string, unknown> };
 }

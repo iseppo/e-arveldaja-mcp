@@ -30,7 +30,7 @@ function getToolConfig(
   } else {
     register(server, {} as any, exposure);
   }
-  const registration = server.registerTool.mock.calls.find(([name]) => name === toolName);
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === toolName);
   if (!registration) throw new Error(`Missing tool registration for ${toolName}`);
   return registration[1] as { description?: string; inputSchema?: Record<string, unknown>; annotations?: { openWorldHint?: boolean } };
 }

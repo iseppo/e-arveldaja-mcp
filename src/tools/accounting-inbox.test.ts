@@ -647,7 +647,7 @@ describe("accounting_inbox (scan mode)", () => {
       ],
     }));
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
@@ -752,7 +752,7 @@ describe("accounting_inbox (scan mode)", () => {
       bankAccounts: [fixtureBankAccount()],
       accountDimensions: [fixtureAccountDimension()],
     }));
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
@@ -988,7 +988,7 @@ describe("accounting_inbox (scan mode)", () => {
       accountDimensions: [fixtureAccountDimension()],
     }));
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
@@ -1091,7 +1091,7 @@ ${entryXml}
       accountDimensions: [fixtureAccountDimension()],
     }));
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
@@ -1118,7 +1118,7 @@ ${entryXml}
         getInvoiceInfo: vi.fn().mockResolvedValue({}),
       },
     }));
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });
@@ -1177,7 +1177,7 @@ ${entryXml}
       accountDimensions: [fixtureAccountDimension()],
     }));
 
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "accounting_inbox");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "accounting_inbox");
     if (!registration) throw new Error("Autopilot tool was not registered");
     const autopilotHandlerRaw = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
     const autopilotHandler = (args: Record<string, unknown>) => autopilotHandlerRaw({ mode: "dry_run", ...args });

@@ -63,7 +63,7 @@ function setupRecurringTool(options: {
 
   registerRecurringInvoiceTools(server, api);
 
-  const registration = server.registerTool.mock.calls.find(([name]) => name === "create_recurring_sale_invoices");
+  const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "create_recurring_sale_invoices");
   if (!registration) throw new Error("Tool was not registered");
 
   return {
@@ -142,7 +142,7 @@ describe("recurring invoices tool", () => {
 
   it("registers a schema that validates month/date formats and invoice_ids", () => {
     const { server } = setupRecurringTool();
-    const registration = server.registerTool.mock.calls.find(([name]) => name === "create_recurring_sale_invoices");
+    const registration = server.registerTool.mock.calls.find((call: unknown[]) => call[0] === "create_recurring_sale_invoices");
     if (!registration) throw new Error("Tool was not registered");
 
     const schema = z.object(registration[1].inputSchema);
