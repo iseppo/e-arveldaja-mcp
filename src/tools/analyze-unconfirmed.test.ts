@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 
 /**

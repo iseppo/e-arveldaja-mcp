@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from "vitest
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { initAuditLog, logAudit, setAuditLogLabel } from "../audit-log.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 
 const RUN_LIVE_INTEGRATION = process.env.EARVELDAJA_INTEGRATION_TEST === "true";
 const DIST_ENTRYPOINT = join(process.cwd(), "dist", "index.js");

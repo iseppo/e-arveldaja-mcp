@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { cache } from "./api/base-resource.js";
 import { readonlyCache } from "./api/readonly.api.js";
-import { parseMcpResponse } from "./mcp-json.js";
+import { parseMcpResponse } from "./__fixtures__/mcp-response.js";
 import { clearRuntimeCaches, registerCacheControlTool } from "./cache-control.js";
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }> }>;

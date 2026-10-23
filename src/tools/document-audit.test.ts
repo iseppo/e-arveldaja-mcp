@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { registerDocumentAuditTools, computeMissingDocuments, wrapMissingDocuments } from "./document-audit.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import type { ApiContext } from "./crud-tools.js";
 
 function setupDuplicateTool(existingPurchases: unknown[]) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { registerCamtImportTools } from "../tools/camt-import.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import {
   createAccountingWorkflowApi,

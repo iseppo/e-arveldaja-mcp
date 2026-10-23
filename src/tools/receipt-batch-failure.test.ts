@@ -13,7 +13,7 @@ import {
 } from "./receipt-extraction.js";
 import { resolveSupplierInternal } from "./supplier-resolution.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
 import { HttpError } from "../http-client.js";
 import { fixturePurchaseReadback } from "../__fixtures__/purchase-readback.js";

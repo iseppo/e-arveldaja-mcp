@@ -6,7 +6,7 @@ import type { Account, Journal, Posting, SaleInvoice } from "../types/api.js";
 import type { ApiContext } from "./crud-tools.js";
 import { registerEstonianTaxTools, bookOwnerExpenseReimbursement } from "./estonian-tax.js";
 import { roundMoney } from "../money.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { makeAccount, makePosting, makeJournal } from "../__fixtures__/accounting.js";
 import { ESTONIAN_VAT_METADATA, vatSourceById } from "../estonian-tax-rules.js";
 import { resetAccountingRulesCache } from "../accounting-rules.js";
@@ -1711,7 +1711,7 @@ describe("prepare_dividend_package", () => {
     registerEstonianTaxTools(mock.server, api);
     const cb = mock.tools.get("prepare_dividend_package")!;
 
-    const refused = await cb({ net_dividend: 400, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false });
+    const refused = await cb({ net_dividend: 400, shareholder_client_id: 1, effective_date: "2026-06-01", dry_run: false }) as { content: Array<{ text: string }> };
     expect(isError(refused)).toBe(true);
     expect(refused.content[0]!.text).toContain("Could not determine company identity for the booking lock; retry");
     expect(api.journals.create).not.toHaveBeenCalled();
@@ -2840,7 +2840,7 @@ describe("check_vat_registration_threshold", () => {
     expect(payload.sale_invoice_turnover_reclassified_to_manual_buckets).toBe(16000);
     expect(payload.sale_invoice_ordinary_turnover_after_bucket_split).toBe(11000);
     expect(payload.taxable_or_zero_rated_turnover).toBe(11000);
-    expect(payload.count_if_not_incidental.financial_turnover).toBe(16000);
+    expect((payload.count_if_not_incidental as Record<string, unknown>).financial_turnover).toBe(16000);
     expect(payload.threshold_total_if_all_non_incidental).toBe(27000);
     expect(payload.status).toBe("ok");
   });

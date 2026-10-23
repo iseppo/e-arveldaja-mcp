@@ -1,66 +1,6 @@
 {
-  "by_code": {
-    "TS18046": 941,
-    "TS2322": 2,
-    "TS2571": 8
-  },
-  "errors": {
-    "src/__integration__/mcp-connection.integration.test.ts": {
-      "TS18046": 35
-    },
-    "src/cache-control.test.ts": {
-      "TS18046": 5
-    },
-    "src/camt/compact-routing.test.ts": {
-      "TS18046": 19
-    },
-    "src/public-tool-registrar.test.ts": {
-      "TS18046": 2
-    },
-    "src/tools/analyze-unconfirmed.test.ts": {
-      "TS18046": 81
-    },
-    "src/tools/annual-report.test.ts": {
-      "TS18046": 5,
-      "TS2322": 2
-    },
-    "src/tools/bank-reconciliation.test.ts": {
-      "TS18046": 236
-    },
-    "src/tools/camt-import-tools.test.ts": {
-      "TS18046": 150,
-      "TS2571": 5
-    },
-    "src/tools/document-audit.test.ts": {
-      "TS18046": 15
-    },
-    "src/tools/estonian-tax.test.ts": {
-      "TS18046": 2
-    },
-    "src/tools/financial-statements.test.ts": {
-      "TS18046": 113,
-      "TS2571": 2
-    },
-    "src/tools/pdf-workflow.test.ts": {
-      "TS18046": 96
-    },
-    "src/tools/receipt-batch-failure.test.ts": {
-      "TS18046": 47
-    },
-    "src/tools/receipt-inbox-path.test.ts": {
-      "TS18046": 3
-    },
-    "src/tools/receipt-inbox-tools.test.ts": {
-      "TS18046": 45
-    },
-    "src/tools/recurring-invoices.test.ts": {
-      "TS18046": 48,
-      "TS2571": 1
-    },
-    "src/tools/wise-import.test.ts": {
-      "TS18046": 39
-    }
-  },
-  "total": 951,
+  "by_code": {},
+  "errors": {},
+  "total": 0,
   "version": 1
 }

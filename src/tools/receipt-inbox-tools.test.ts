@@ -9,7 +9,8 @@ import {
   type ReceiptDirectoryAccessOptions,
 } from "./receipt-inbox-files.js";
 import { buildReceiptBatchWorkflow } from "./receipt-inbox-summary.js";
-import { parseMcpResponse, wrapUntrustedOcr } from "../mcp-json.js";
+import { wrapUntrustedOcr } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -1173,6 +1174,7 @@ describe("receipt inbox tool status handling", () => {
       const suggestedManifest = approvingWorkflow.approval_previews[0]!
         .execute_args.approved_manifest;
       expect(suggestedManifest).toEqual(publicManifest);
+      if (!Array.isArray(suggestedManifest)) throw new Error("expected an approved_manifest array");
       expect(suggestedManifest[0]).not.toHaveProperty("relative_path");
 
       expect(processedPayload.result.results[0].file).toMatchObject({

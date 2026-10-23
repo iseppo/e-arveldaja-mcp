@@ -11,7 +11,7 @@ import { logAudit } from "../audit-log.js";
 import { registerCamtImportTools } from "./camt-import.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { renderCamtImportCompact } from "../camt/presenter.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import { preflightCamt053Xml } from "../camt/parser.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { buildCamtDescriptionWithMetadataV1 } from "../camt/marker-render-v1.js";

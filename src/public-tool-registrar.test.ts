@@ -9,7 +9,7 @@ import { TOOL_SURFACE_SETUP_INFO } from "./__fixtures__/tool-surface.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseMcpResponse } from "./mcp-json.js";
+import { parseMcpResponse } from "./__fixtures__/mcp-response.js";
 import { currentToolProfile } from "./tool-profile.js";
 
 describe("PublicToolRegistrar", () => {
@@ -117,7 +117,7 @@ describe("PublicToolRegistrar", () => {
         name: "remove_stored_credentials",
         arguments: { storage_scope: "global", target: "primary" },
       });
-      const preview = parseMcpResponse((removal.content[0] as { text: string }).text) as Record<string, unknown>;
+      const preview = parseMcpResponse((removal.content as Array<{ text: string }>)[0]!.text) as Record<string, unknown>;
       expect(removal.isError).not.toBe(true);
       expect(preview.plan_handle).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
@@ -125,7 +125,7 @@ describe("PublicToolRegistrar", () => {
         name: "get_execution_plan_page",
         arguments: { plan_handle: preview.plan_handle },
       });
-      const pagePayload = parseMcpResponse((page.content[0] as { text: string }).text) as Record<string, unknown>;
+      const pagePayload = parseMcpResponse((page.content as Array<{ text: string }>)[0]!.text) as Record<string, unknown>;
       expect(page.isError).not.toBe(true);
       expect(pagePayload.contract).toBe("execution_plan_page_v1");
     } finally {

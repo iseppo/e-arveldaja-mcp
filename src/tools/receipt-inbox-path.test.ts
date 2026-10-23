@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
 import { realpath } from "fs/promises";
 import { win32 } from "path";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 import type { registerReceiptInboxTools as registerReceiptInboxToolsType } from "./receipt-inbox.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { scanReceiptFolderInternal } from "./receipt-inbox-files.js";

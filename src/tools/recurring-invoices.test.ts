@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { computeRecurringClone, registerRecurringInvoiceTools } from "./recurring-invoices.js";
-import { canonicalBusinessText, parseMcpResponse } from "../mcp-json.js";
+import { canonicalBusinessText } from "../mcp-json.js";
+import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
 
 function buildSaleInvoice(overrides: Record<string, unknown> = {}) {
   return {
