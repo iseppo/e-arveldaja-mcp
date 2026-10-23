@@ -1,4 +1,4 @@
-import type { ParsedCamtEntry } from "./types.js";
+import type { ParsedCamtEntry } from "../camt/types.js";
 
 // Statement entries pinned by the frozen V1 renderer golden test
 // (marker-render-v1.test.ts) and the byte-identity checks of the current

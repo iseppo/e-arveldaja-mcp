@@ -15,9 +15,9 @@ import type {
   ReceiptBatchExecutionMode,
   ReceiptBatchFileResult,
   ReceiptBatchResult,
-  ReceiptBatchStatus,
   ReceiptFileInfo,
 } from "./types.js";
+import type { ReceiptBatchStatus } from "../tools/receipt-inbox-types.js";
 
 // Task 8 / PR6A (Phase B): the guided compact receipt-batch response must carry
 // EVERY approval-summary field, NEVER hide blockers/partial mutations, wrap
