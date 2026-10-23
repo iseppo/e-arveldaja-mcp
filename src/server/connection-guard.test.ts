@@ -31,7 +31,7 @@ async function connect(configs: NamedConfig[]) {
   };
 }
 
-function payloadOf(response: { content?: unknown }): Record<string, unknown> {
+function payloadOf(response: { content?: unknown; [key: string]: unknown }): Record<string, unknown> {
   const first = (response.content as Array<{ text: string }>)[0]!;
   return parseMcpResponse(first.text) as Record<string, unknown>;
 }

@@ -30,7 +30,7 @@ async function connect(configs: NamedConfig[]) {
   };
 }
 
-function textOf(response: { content?: unknown }): string {
+function textOf(response: { content?: unknown; [key: string]: unknown }): string {
   return (response.content as Array<{ text: string }>)[0]!.text;
 }
 

@@ -4,7 +4,7 @@
     "TS18048": 1,
     "TS2322": 3,
     "TS2339": 2,
-    "TS2345": 8,
+    "TS2345": 1,
     "TS2352": 2,
     "TS2353": 2,
     "TS2571": 8,
@@ -23,12 +23,6 @@
     },
     "src/public-tool-registrar.test.ts": {
       "TS18046": 2
-    },
-    "src/server/connection-guard.test.ts": {
-      "TS2345": 3
-    },
-    "src/server/strict-tool-input.test.ts": {
-      "TS2345": 4
     },
     "src/tools/accounting-inbox.test.ts": {
       "TS2769": 1
@@ -93,6 +87,6 @@
       "TS2352": 1
     }
   },
-  "total": 969,
+  "total": 962,
   "version": 1
 }
