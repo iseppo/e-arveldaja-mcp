@@ -4,6 +4,7 @@ import { EXECUTION_PLAN_TTL_MS, type ExecutionPlanInput } from "./plan-store.js"
 import { createExecutionPlanPageHandler, registerPlanTools } from "./plan-tools.js";
 import { createTestRuntimeSafetyContext } from "./__fixtures__/runtime-safety.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "./response-budget.js";
+import { firstText } from "./__fixtures__/mcp-result.js";
 
 const CURSOR_SECRET = Buffer.alloc(32, 7);
 
@@ -30,7 +31,7 @@ async function page(
   args: { plan_handle: string; section?: "commands" | "exclusions" | "reviews"; cursor?: string },
 ): Promise<Record<string, any>> {
   const result = await handler(args);
-  return parseMcpResponse(result.content[0]!.text) as Record<string, any>;
+  return parseMcpResponse(firstText(result)) as Record<string, any>;
 }
 
 describe("execution plan page tool", () => {
@@ -41,9 +42,9 @@ describe("execution plan page tool", () => {
     const explicitStandard = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "standard" });
     const normalizeNonces = (text: string) => text.replace(/[0-9a-f]{32}/g, "<nonce>");
     const legacyResponse = await legacy({ plan_handle: handle });
-    expect(normalizeNonces(legacyResponse.content[0]!.text))
-      .toBe(normalizeNonces((await explicitStandard({ plan_handle: handle })).content[0]!.text));
-    expect(parseMcpResponse(legacyResponse.content[0]!.text)).toMatchObject({ contract: "execution_plan_page_v1" });
+    expect(normalizeNonces(firstText(legacyResponse)))
+      .toBe(normalizeNonces(firstText(await explicitStandard({ plan_handle: handle }))));
+    expect(parseMcpResponse(firstText(legacyResponse))).toMatchObject({ contract: "execution_plan_page_v1" });
 
     for (const profile of ["standard", "full"] as const) {
       const server = { registerTool: vi.fn() };
@@ -91,7 +92,7 @@ describe("execution plan page tool", () => {
     });
     const handler = createExecutionPlanPageHandler(runtime, { cursorSecret: CURSOR_SECRET, profile: "guided" });
     const result = await handler({ plan_handle: handle, detail: "full", page_size: 20 } as any);
-    const decoded = parseMcpResponse(result.content[0]!.text) as any;
+    const decoded = parseMcpResponse(firstText(result)) as any;
     expect(decoded.commands.length).toBeGreaterThan(0);
     expect(decoded.commands.length).toBeLessThan(20);
     expect(mcpPayloadBytes(decoded)).toBeLessThanOrEqual(RESPONSE_BUDGETS.detail.target);
@@ -242,7 +243,7 @@ describe("execution plan page tool", () => {
       const targetHandle = cursor === first.next_cursor ? handleB : handleA;
       const result = await handler({ plan_handle: targetHandle, cursor });
       expect(result.isError).toBe(true);
-      expect(result.content[0]!.text).not.toContain("RAW_CURSOR_SECRET");
+      expect(firstText(result)).not.toContain("RAW_CURSOR_SECRET");
     }
     expect(runtime.planStore.consume(handleA, "test").commands).toHaveLength(51);
     expect(runtime.planStore.consume(handleB, "test").commands).toHaveLength(51);

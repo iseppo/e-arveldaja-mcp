@@ -4,6 +4,7 @@ import { parseMcpResponse } from "./mcp-json.js";
 import { createOperationResultPageHandler, registerOperationResultTools } from "./operation-result-page.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "./response-budget.js";
 import { createPublicOperationResultDetail } from "./operation-result-store.js";
+import { firstText } from "./__fixtures__/mcp-result.js";
 
 const CURSOR_SECRET = Buffer.alloc(32, 11);
 
@@ -21,7 +22,7 @@ function publicItems(items: readonly Readonly<Record<string, unknown>>[]) {
 
 async function payload(handler: ReturnType<typeof createOperationResultPageHandler>, args: any): Promise<Record<string, any>> {
   const response = await handler(args);
-  return parseMcpResponse(response.content[0]!.text) as Record<string, any>;
+  return parseMcpResponse(firstText(response)) as Record<string, any>;
 }
 
 describe("operation result page", () => {

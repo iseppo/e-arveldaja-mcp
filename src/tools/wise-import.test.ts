@@ -15,6 +15,7 @@ import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import { approvalDigest } from "../wise/projection.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
+import { firstText } from "../__fixtures__/mcp-result.js";
 
 const { mockedLogAudit } = vi.hoisted(() => ({ mockedLogAudit: vi.fn() }));
 
@@ -5779,7 +5780,7 @@ describe("wise import server plan handle (P12/P19)", () => {
     const dry = parseWiseResponse(await setup.rawHandler({ ...baseArgs, execute: false }));
 
     const pageHandler = createExecutionPlanPageHandler(context, { cursorSecret: randomBytes(32) });
-    const page = parseMcpResponse((await pageHandler({ plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const page = parseMcpResponse(firstText(await pageHandler({ plan_handle: dry.plan_handle }))) as any;
     expect(page.contract).toBe("execution_plan_page_v1");
     expect(page.operation).toBe(WISE_PLAN_DOMAIN);
     expect(page.total_commands).toBe(2);

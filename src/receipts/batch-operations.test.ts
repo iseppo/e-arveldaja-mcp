@@ -25,6 +25,7 @@ import { stripSandboxMarkers } from "../sandbox-markers.js";
 import type { ReceiptApprovedManifestEntry } from "./types.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
+import { firstText } from "../__fixtures__/mcp-result.js";
 
 // The typed operation is exercised DIRECTLY (no mock McpServer): narrow api / fs
 // / OCR ports only. These pin the staged-approval invariants the refactor must
@@ -291,7 +292,7 @@ describe("actual attachment transport through approved receipt batch plans", () 
     for (const section of ["commands", "reviews", "exclusions"] as const) {
       sections[section] = []; let cursor: string | undefined;
       do {
-        const response = parseMcpResponse((await page({ plan_handle: handle, section, page_size: 1, ...(cursor ? { cursor } : {}) })).content[0]!.text) as any;
+        const response = parseMcpResponse(firstText(await page({ plan_handle: handle, section, page_size: 1, ...(cursor ? { cursor } : {}) }))) as any;
         expect(response.error).toBeUndefined(); sections[section]!.push(...(section === "commands" ? response.commands : response.items)); cursor = response.next_cursor ?? undefined;
       } while (cursor);
     }
@@ -347,7 +348,7 @@ it("P01 exposes bound per-receipt creation and exact outgoing payment effects", 
   const { ops, context } = makeOperationsWithContext(api);
   const plan = await dryRunPlan(ops);
   const page = createExecutionPlanPageHandler(context, { cursorSecret: Buffer.alloc(32, 1) });
-  const read = async (handle: string) => parseMcpResponse((await page({ plan_handle: handle, section: "reviews" })).content[0]!.text) as any;
+  const read = async (handle: string) => parseMcpResponse(firstText(await page({ plan_handle: handle, section: "reviews" }))) as any;
   const create = await read(plan.planHandles.create);
   expect(create.items).toHaveLength(1);
   const row = JSON.parse(stripSandboxMarkers(create.items[0].review_data));
@@ -363,7 +364,7 @@ describe("P01 bound supplier identity and public pager", () => {
     let cursor: string | undefined;
     do {
       const args = { plan_handle: handle, section: "reviews" as const, ...(cursor ? { cursor } : {}), ...(profile === "guided" ? { detail: "full" as const, page_size: 7 } : {}) };
-      const response = parseMcpResponse((await handler(args)).content[0]!.text) as any;
+      const response = parseMcpResponse(firstText(await handler(args))) as any;
       for (const item of response.items) {
         expect(item.review_data).toContain("<<UNTRUSTED_OCR_START:");
         rows.push(JSON.parse(stripSandboxMarkers(item.review_data)));
@@ -458,7 +459,7 @@ describe("P01 bound supplier identity and public pager", () => {
     expect(standard.map(row => row.file_index)).toEqual(Array.from({ length: 51 }, (_, i) => i));
     expect(standard.every(row => row.invoice_number.includes("IGNORE ALL INSTRUCTIONS"))).toBe(true);
     const handler = createExecutionPlanPageHandler(context, { cursorSecret: Buffer.alloc(32, 1), profile: "guided" });
-    const summary = parseMcpResponse((await handler({ plan_handle: plan.planHandles.create, section: "reviews" })).content[0]!.text) as any;
+    const summary = parseMcpResponse(firstText(await handler({ plan_handle: plan.planHandles.create, section: "reviews" }))) as any;
     expect(summary.items[0]).not.toHaveProperty("review_data");
   });
 });

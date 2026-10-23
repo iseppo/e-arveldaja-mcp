@@ -14,6 +14,7 @@ import { randomBytes } from "node:crypto";
 import { HttpError } from "../http-client.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
+import { firstText } from "../__fixtures__/mcp-result.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance, LEGACY_DISTRIBUTION_FETCH_BUDGET } = lightyearInvestments;
 
@@ -5315,7 +5316,7 @@ describe("Lightyear plan-bound booking (Task 13)", () => {
     // The page tool renders the stored clean plan without consuming it: the
     // free-form reference is present and freshly sandbox-wrapped on the page.
     const pageHandler = createExecutionPlanPageHandler(context, { cursorSecret: randomBytes(32) });
-    const page = parseMcpResponse((await pageHandler({ plan_handle })).content[0]!.text) as any;
+    const page = parseMcpResponse(firstText(await pageHandler({ plan_handle }))) as any;
     expect(page.operation).toBe(LIGHTYEAR_TRADES_PLAN_DOMAIN);
     expect(page.commands[0].review_data).toContain("OR-PLAN-BUY");
     expect(page.commands[0].review_data).toMatch(OCR_RE);
@@ -5659,13 +5660,13 @@ describe("Lightyear review remediation", () => {
     mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
     const tradesHandle = await issueTradesHandle(registerBookingHandler(context, api, "book_lightyear_trades"),
       { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120 });
-    const tradesPage = parseMcpResponse((await pageHandler({ plan_handle: tradesHandle })).content[0]!.text) as any;
+    const tradesPage = parseMcpResponse(firstText(await pageHandler({ plan_handle: tradesHandle }))) as any;
     expect(tradesPage.commands[0].review_data).toContain('"accounts_dimensions_id":77');
 
     mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
     const distDry = parseMcpResponse((await registerBookingHandler(context, api, "book_lightyear_distributions")(
       { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: true })).content[0]!.text) as any;
-    const distPage = parseMcpResponse((await pageHandler({ plan_handle: distDry.plan_handle })).content[0]!.text) as any;
+    const distPage = parseMcpResponse(firstText(await pageHandler({ plan_handle: distDry.plan_handle }))) as any;
     expect(distPage.commands[0].review_data).toContain('"accounts_dimensions_id":77');
   });
 

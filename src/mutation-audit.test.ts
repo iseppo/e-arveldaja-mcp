@@ -7,6 +7,7 @@ import {
   auditMutationIndeterminate,
   serializeToolMutationError,
 } from "./mutation-audit.js";
+import { firstText } from "./__fixtures__/mcp-result.js";
 
 function ambiguousClientUpdate(): MutationIndeterminateError {
   return new MutationIndeterminateError({
@@ -26,7 +27,7 @@ function ambiguousClientUpdate(): MutationIndeterminateError {
 }
 
 function payloadOf(result: ReturnType<typeof serializeToolMutationError>): Record<string, unknown> {
-  return parseMcpResponse(result.content[0]!.text) as Record<string, unknown>;
+  return parseMcpResponse(firstText(result)) as Record<string, unknown>;
 }
 
 function structuralMutation(overrides: Record<string, unknown> = {}): Record<string, unknown> {

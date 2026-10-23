@@ -3,7 +3,7 @@
     "TS18046": 941,
     "TS18048": 1,
     "TS2322": 12,
-    "TS2339": 30,
+    "TS2339": 12,
     "TS2345": 21,
     "TS2348": 2,
     "TS2349": 11,
@@ -80,17 +80,8 @@
     "src/list-views.test.ts": {
       "TS2769": 5
     },
-    "src/mutation-audit.test.ts": {
-      "TS2339": 1
-    },
-    "src/operation-result-page.test.ts": {
-      "TS2339": 1
-    },
     "src/plan-store.test.ts": {
       "TS4104": 1
-    },
-    "src/plan-tools.test.ts": {
-      "TS2339": 6
     },
     "src/prompt-registry.test.ts": {
       "TS2339": 4
@@ -100,7 +91,6 @@
       "TS2345": 2
     },
     "src/receipts/batch-operations.test.ts": {
-      "TS2339": 4,
       "TS2345": 1,
       "TS2554": 1
     },
@@ -156,7 +146,6 @@
       "TS2571": 2
     },
     "src/tools/lightyear-investments.test.ts": {
-      "TS2339": 3,
       "TS2571": 4,
       "TS7031": 1
     },
@@ -191,12 +180,8 @@
       "TS18046": 39,
       "TS18048": 1,
       "TS2322": 1,
-      "TS2339": 1,
       "TS2348": 1,
       "TS7031": 1
-    },
-    "src/wise/presenter-shared.test.ts": {
-      "TS2339": 1
     },
     "src/wise/presenter.test.ts": {
       "TS2352": 1
@@ -204,11 +189,8 @@
     "src/wise/projection.test.ts": {
       "TS2339": 2,
       "TS2352": 1
-    },
-    "src/workflow-page.test.ts": {
-      "TS2339": 1
     }
   },
-  "total": 1077,
+  "total": 1059,
   "version": 1
 }

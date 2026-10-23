@@ -11,6 +11,7 @@ import { importPreflightFailurePayload, issueCamtResultHandle, type CamtImportEx
 import { parseMcpResponse } from "../mcp-json.js";
 import { WISE_PLAN_DOMAIN } from "./projection.js";
 import { CAMT_PLAN_DOMAIN } from "../tools/camt-plan.js";
+import { firstText } from "../__fixtures__/mcp-result.js";
 
 const DIGEST = "a".repeat(64);
 
@@ -19,7 +20,7 @@ describe("Wise preflight failure envelope", () => {
     const rejected = Array.from({ length: 101 }, (_, i) => ({ source_row_id: `wise:row:${i}`, field: "ID", value: "x".repeat(300), reason: "bad" }));
     const result = wisePreflightFailure(rejected);
     expect(result.isError).toBe(true);
-    const payload = parseMcpResponse(result.content[0]!.text as string) as any;
+    const payload = parseMcpResponse(firstText(result) as string) as any;
     const shared = importPreflightFailurePayload("wise", rejected) as any;
     expect(Object.keys(payload)).toEqual(Object.keys(shared));
     expect(payload).toMatchObject({ category: "import_preflight_failed", source: "wise", rejected_field_count: 101, rejected_fields_truncated: true, retry: "never" });

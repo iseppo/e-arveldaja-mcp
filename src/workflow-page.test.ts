@@ -4,6 +4,7 @@ import { parseMcpResponse } from "./mcp-json.js";
 import { createWorkflowPageHandler, registerWorkflowPageTool } from "./workflow-page.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "./response-budget.js";
 import { createPublicWorkflowStateDetail } from "./workflow-state-store.js";
+import { firstText } from "./__fixtures__/mcp-result.js";
 
 const CURSOR_SECRET = Buffer.alloc(32, 13);
 
@@ -13,7 +14,7 @@ function publicItems(items: readonly Readonly<Record<string, unknown>>[]) {
 
 async function payload(handler: ReturnType<typeof createWorkflowPageHandler>, args: any): Promise<Record<string, any>> {
   const response = await handler(args);
-  return parseMcpResponse(response.content[0]!.text) as Record<string, any>;
+  return parseMcpResponse(firstText(response)) as Record<string, any>;
 }
 
 describe("workflow page", () => {
