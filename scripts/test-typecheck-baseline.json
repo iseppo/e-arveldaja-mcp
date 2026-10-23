@@ -3,14 +3,14 @@
     "TS18046": 941,
     "TS18048": 1,
     "TS2322": 12,
-    "TS2339": 12,
+    "TS2339": 9,
     "TS2345": 21,
     "TS2352": 8,
     "TS2353": 2,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
-    "TS2571": 14,
+    "TS2571": 8,
     "TS2741": 1,
     "TS2769": 7,
     "TS4104": 1
@@ -49,8 +49,7 @@
       "TS2345": 1
     },
     "src/documents/reading-operations-create.test.ts": {
-      "TS2352": 1,
-      "TS2571": 2
+      "TS2352": 1
     },
     "src/external-text-renderer.test.ts": {
       "TS2352": 3
@@ -119,15 +118,11 @@
       "TS18046": 15
     },
     "src/tools/estonian-tax.test.ts": {
-      "TS18046": 2,
-      "TS2339": 2
+      "TS18046": 2
     },
     "src/tools/financial-statements.test.ts": {
       "TS18046": 113,
       "TS2571": 2
-    },
-    "src/tools/lightyear-investments.test.ts": {
-      "TS2571": 4
     },
     "src/tools/pdf-workflow.test.ts": {
       "TS18046": 96
@@ -142,8 +137,7 @@
       "TS2741": 1
     },
     "src/tools/receipt-inbox-tools.test.ts": {
-      "TS18046": 45,
-      "TS2339": 1
+      "TS18046": 45
     },
     "src/tools/receipt-inbox.test.ts": {
       "TS2353": 2
@@ -165,6 +159,6 @@
       "TS2352": 1
     }
   },
-  "total": 1025,
+  "total": 1016,
   "version": 1
 }

@@ -3708,11 +3708,11 @@ describe("H16 Lightyear handler provenance", () => {
       dry_run: true,
     });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
-    const byReference = new Map(payload.results.map((entry: any) => [entry.reference, entry]));
+    const byReference = new Map<unknown, Record<string, unknown>>(payload.results.map((entry: any) => [entry.reference, entry]));
 
     expect(byReference.get(references[0])).toEqual(expect.objectContaining({ status: "would_create", eur_amount: 35575111755115.99 }));
     expect(byReference.get(references[1])).toEqual(expect.objectContaining({ status: "skipped", eur_amount: 0 }));
-    expect(byReference.get(references[1]).skip_reason).toBe(H16_MESSAGES.invalid_conversion_pair);
+    expect(byReference.get(references[1])!.skip_reason).toBe(H16_MESSAGES.invalid_conversion_pair);
     expect(payload.warnings).toContainEqual(expect.stringContaining(references[1]));
     expect(payload.warnings).toContainEqual(expect.stringContaining("FX review [invalid_conversion_pair]"));
   });
@@ -5263,12 +5263,12 @@ describe("Lightyear plan-bound booking (Task 13)", () => {
 
     // Trades handle consumed by the distributions executor → domain mismatch.
     const wrong1 = await distHandler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false, plan_handle: tradesHandle });
-    expect(parseMcpResponse(wrong1.content[0]!.text).category).toBe("plan_domain_mismatch");
+    expect((parseMcpResponse(wrong1.content[0]!.text) as Record<string, unknown>).category).toBe("plan_domain_mismatch");
 
     // Distributions handle consumed by the trades executor → domain mismatch.
     mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
     const wrong2 = await tradesHandler({ file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false, plan_handle: distHandle });
-    expect(parseMcpResponse(wrong2.content[0]!.text).category).toBe("plan_domain_mismatch");
+    expect((parseMcpResponse(wrong2.content[0]!.text) as Record<string, unknown>).category).toBe("plan_domain_mismatch");
     expect(api.journals.create).not.toHaveBeenCalled();
   });
 
@@ -5283,7 +5283,7 @@ describe("Lightyear plan-bound booking (Task 13)", () => {
       counts: {}, totals: {}, exclusions: [], reviews: [], privatePayload: null,
     });
     const result = await handler({ file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, dry_run: false, plan_handle: camtHandle });
-    expect(parseMcpResponse(result.content[0]!.text).category).toBe("plan_domain_mismatch");
+    expect((parseMcpResponse(result.content[0]!.text) as Record<string, unknown>).category).toBe("plan_domain_mismatch");
     expect(api.journals.create).not.toHaveBeenCalled();
   });
 

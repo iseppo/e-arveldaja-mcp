@@ -97,9 +97,10 @@ afterEach(() => {
 const FIXTURE_MARKER = /\n\[e-arveldaja-mcp:camt dir=(DBIT|CRDT) sig=abc123abc123abcd\]$/;
 function signFixtureMarker<T>(row: T): T {
   const description = (row as { description?: unknown } | undefined)?.description;
-  const match = typeof description === "string" ? FIXTURE_MARKER.exec(description) : null;
+  if (typeof description !== "string") return row;
+  const match = FIXTURE_MARKER.exec(description);
   if (!match) return row;
-  return withSignedCamtMarker({ ...(row as any), description: description!.slice(0, match.index) }, match[1] as "DBIT" | "CRDT");
+  return withSignedCamtMarker({ ...(row as any), description: description.slice(0, match.index) }, match[1] as "DBIT" | "CRDT");
 }
 
 function setupReceiptTool(

@@ -590,7 +590,7 @@ describe("reading item title (history template)", () => {
     expect(titleOf(ready.booking)).toBe("Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
     const created = await create(w, file, ready.planHandle!);
     expect(created.ok && created.value.status).toBe("created");
-    expect(w.createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
+    expect((w.createAndSetTotals.mock.calls[0]![0].items as Array<Record<string, unknown>>)[0]!.custom_title).toBe("Bussipilet Tartu-Tallinn-Tartu 19.10.2026");
   });
 
   it("each handle keeps its own reviewed title", async () => {
@@ -600,7 +600,7 @@ describe("reading item title (history template)", () => {
     const first = await verifyWithTitle(w, file, "Pealkiri A");
     const second = await verifyWithTitle(w, file, "Pealkiri B");
     expect((await create(w, file, first.planHandle!)).ok).toBe(true);
-    expect(w.createAndSetTotals.mock.calls[0]![0].items[0].custom_title).toBe("Pealkiri A");
+    expect((w.createAndSetTotals.mock.calls[0]![0].items as Array<Record<string, unknown>>)[0]!.custom_title).toBe("Pealkiri A");
     expect(second.planHandle).not.toBe(first.planHandle);
   });
 
