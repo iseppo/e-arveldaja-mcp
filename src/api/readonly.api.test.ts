@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { ReferenceDataApi, readonlyCache } from "./readonly.api.js";
-import { HttpError, type HttpClient } from "../http-client.js";
+import { HttpError, type HttpClient, type HttpMethod } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 
 function makeClient(): HttpClient {
@@ -72,7 +72,7 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
 
   it.each(ambiguousCases)("$label $status → MutationIndeterminateError with cache eviction", async row => {
     const client = makeClient();
-    vi.mocked(client[row.method]).mockRejectedValue(new HttpError("ambiguous", row.status, row.method.toUpperCase(), "/x"));
+    vi.mocked(client[row.method]).mockRejectedValue(new HttpError("ambiguous", row.status, row.method.toUpperCase() as HttpMethod, "/x"));
     readonlyCache.set(row.cacheKey, "stale");
 
     const error = await row.call(new ReferenceDataApi(client)).catch((e: unknown) => e);
@@ -93,7 +93,7 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
 
   it.each(writeCases)("$label 422 is definitive: rethrown unchanged, cache kept", async row => {
     const client = makeClient();
-    const rejection = new HttpError("unprocessable", 422, row.method.toUpperCase(), "/x");
+    const rejection = new HttpError("unprocessable", 422, row.method.toUpperCase() as HttpMethod, "/x");
     vi.mocked(client[row.method]).mockRejectedValue(rejection);
     readonlyCache.set(row.cacheKey, "cached");
 

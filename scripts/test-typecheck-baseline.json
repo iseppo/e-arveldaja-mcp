@@ -4,7 +4,7 @@
     "TS18048": 1,
     "TS2322": 4,
     "TS2339": 2,
-    "TS2345": 13,
+    "TS2345": 11,
     "TS2352": 4,
     "TS2353": 2,
     "TS2554": 1,
@@ -16,9 +16,6 @@
   "errors": {
     "src/__integration__/mcp-connection.integration.test.ts": {
       "TS18046": 35
-    },
-    "src/api/readonly.api.test.ts": {
-      "TS2345": 2
     },
     "src/banking/receipt-ledger-check.test.ts": {
       "TS2322": 1
@@ -117,6 +114,6 @@
       "TS2352": 1
     }
   },
-  "total": 979,
+  "total": 977,
   "version": 1
 }
