@@ -3,12 +3,12 @@
     "TS18046": 941,
     "TS18048": 1,
     "TS2322": 13,
-    "TS2339": 74,
+    "TS2339": 71,
     "TS2345": 23,
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 8,
-    "TS2353": 67,
+    "TS2353": 35,
     "TS2493": 3,
     "TS2554": 1,
     "TS2556": 1,
@@ -64,17 +64,12 @@
       "TS2345": 1
     },
     "src/documents/operations.test.ts": {
-      "TS2345": 1,
-      "TS2353": 5
+      "TS2345": 1
     },
     "src/documents/process-purchase-safety.test.ts": {
       "TS2349": 4
     },
-    "src/documents/purchase-intake-concurrency.test.ts": {
-      "TS2339": 1
-    },
     "src/documents/reading-operations-create.test.ts": {
-      "TS2339": 1,
       "TS2349": 1,
       "TS2352": 1,
       "TS2571": 2
@@ -87,12 +82,8 @@
       "TS2345": 1
     },
     "src/guided/process-accounting-document-reading.test.ts": {
-      "TS2339": 1,
       "TS2349": 1,
       "TS2352": 1
-    },
-    "src/guided/process-accounting-document.test.ts": {
-      "TS2353": 27
     },
     "src/guided/sales-recovery-regression.test.ts": {
       "TS2556": 1
@@ -240,6 +231,6 @@
       "TS2339": 1
     }
   },
-  "total": 1190,
+  "total": 1155,
   "version": 1
 }

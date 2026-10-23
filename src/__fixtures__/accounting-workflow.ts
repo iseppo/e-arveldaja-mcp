@@ -20,6 +20,7 @@ export interface MockAccountingWorkflowApi {
     listAll: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
     invalidateListCache: ReturnType<typeof vi.fn>;
+    get?: ReturnType<typeof vi.fn>;
   };
   journals: {
     listAll: ReturnType<typeof vi.fn>;
@@ -38,6 +39,7 @@ export interface MockAccountingWorkflowApi {
     confirm?: ReturnType<typeof vi.fn>;
     invalidate: ReturnType<typeof vi.fn>;
     invalidateListCache: ReturnType<typeof vi.fn>;
+    uploadDocument?: ReturnType<typeof vi.fn>;
   };
   transactions: {
     listAll: ReturnType<typeof vi.fn>;
