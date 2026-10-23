@@ -291,7 +291,7 @@ describe("createAndMaybeMatchPurchaseInvoice", () => {
       {
         found: true,
         created: false,
-        match_type: "exact_name",
+        match_type: "name_normalized",
         client: {
           id: 7,
           name: "OpenAI Ireland Limited",

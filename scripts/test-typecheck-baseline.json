@@ -2,7 +2,7 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 19,
+    "TS2322": 17,
     "TS2339": 107,
     "TS2345": 24,
     "TS2348": 2,
@@ -78,7 +78,6 @@
       "TS2349": 4
     },
     "src/documents/purchase-intake-concurrency.test.ts": {
-      "TS2322": 1,
       "TS2339": 1
     },
     "src/documents/reading-operations-create.test.ts": {
@@ -230,7 +229,6 @@
       "TS2739": 1
     },
     "src/tools/receipt-inbox.test.ts": {
-      "TS2322": 1,
       "TS2353": 2
     },
     "src/tools/recurring-invoices.test.ts": {
@@ -264,6 +262,6 @@
       "TS2339": 1
     }
   },
-  "total": 1234,
+  "total": 1232,
   "version": 1
 }

@@ -93,7 +93,7 @@ function setup(number = "A-17", fingerprint = `cross-entry-${++sequence}`) {
     { clients: [supplier], purchaseInvoices: [], purchaseArticlesWithVat: articles, accounts, isVatRegistered: true } as any,
     { file: { name: "invoice.pdf", path, extension: ".pdf", file_type: "pdf", size_bytes: bytes.length, modified_at: "2026-03-15T00:00:00Z" }, relative_path: "invoice.pdf", sha256: sha, bytes, snapshot_path: path },
     { supplier_name: supplier.name, invoice_number: number, invoice_date: booking.invoiceDate, total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Subscription" },
-    { found: true, created: false, match_type: "exact_name", client: supplier },
+    { found: true, created: false, match_type: "name_normalized", client: supplier },
     { source: "supplier_history", item: booking.items[0] } as any, [], "create", false, new Set());
   const prepareClassifier = async (target = api) => {
     const ops = createClassificationOperations(target, createTestRuntimeSafetyContext(), wrapUntrustedOcr);
