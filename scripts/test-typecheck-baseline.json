@@ -5,7 +5,7 @@
     "TS2322": 3,
     "TS2339": 2,
     "TS2345": 9,
-    "TS2352": 4,
+    "TS2352": 3,
     "TS2353": 2,
     "TS2554": 1,
     "TS2556": 1,
@@ -22,9 +22,6 @@
     },
     "src/camt/compact-routing.test.ts": {
       "TS18046": 19
-    },
-    "src/documents/reading-operations-create.test.ts": {
-      "TS2352": 1
     },
     "src/guided/process-accounting-document-reading.test.ts": {
       "TS2352": 1
@@ -108,6 +105,6 @@
       "TS2352": 1
     }
   },
-  "total": 974,
+  "total": 973,
   "version": 1
 }

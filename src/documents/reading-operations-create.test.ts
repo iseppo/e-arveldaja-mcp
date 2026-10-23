@@ -61,7 +61,7 @@ function world() {
     return { ...detail };
   });
   const confirm = vi.fn(async (id: number) => { details[id]!.status = "CONFIRMED"; return {}; });
-  (api.purchaseInvoices as Record<string, unknown>).confirm = confirm;
+  (api.purchaseInvoices as unknown as Record<string, unknown>).confirm = confirm;
   const runtime = createTestRuntimeSafetyContext();
   const ops = createReadingDocumentOperations(api, runtime);
   return { api, runtime, ops, rows, details, commit, createAndSetTotals, confirm };
