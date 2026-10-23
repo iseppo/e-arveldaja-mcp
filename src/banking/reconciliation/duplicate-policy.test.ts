@@ -394,7 +394,6 @@ describe("computeExactMatchProjection ref_number_exact rule (live-shaped)", () =
     const description = buildCamtDescriptionWithMetadata(text, {
       date: row.date!, amount: row.amount, currency: currency ?? "", direction: "CRDT",
       reference_number: row.ref_number ?? undefined, bank_reference: "BR-CCY", description: text,
-      duplicate: false, duplicate_transaction_ids: [],
     });
     const signed = { ...row, description } as Transaction;
     expect(isTrustedCamtDescriptionMetadata(signed)).toBe(true);

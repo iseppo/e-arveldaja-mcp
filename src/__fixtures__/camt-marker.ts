@@ -33,8 +33,6 @@ export function withSignedCamtMarker<T extends MarkedRow>(
     reference_number: row.ref_number ?? undefined,
     bank_reference: bankReference,
     description: text,
-    duplicate: false,
-    duplicate_transaction_ids: [],
   });
   const signed = { ...row, description };
   const check = {

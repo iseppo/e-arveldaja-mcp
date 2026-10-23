@@ -10,7 +10,7 @@ import {
   stripCamtDescriptionMetadata,
 } from "./duplicate-identity.js";
 import { TRANSACTION_DESCRIPTION_MAX_LENGTH } from "../bank-transaction-create.js";
-import type { ParsedCamtEntry } from "./types.js";
+import type { CamtRenderEntry } from "./types.js";
 
 // FROZEN: the CAMT description renderer of every release before GitHub #64
 // (the marker first, then whatever text still fits). It is never written to
@@ -21,7 +21,7 @@ import type { ParsedCamtEntry } from "./types.js";
 // change its output.
 
 function buildCamtDescriptionMarkerV1(
-  entry: ParsedCamtEntry,
+  entry: CamtRenderEntry,
   cleanDescription: string | undefined,
   instructionId?: string,
 ): string | undefined {
@@ -69,7 +69,7 @@ function buildCamtDescriptionMarkerV1(
 }
 
 /** What a release before #64 stored for this entry, `instr=` included as it decided. */
-export function buildCamtDescriptionWithMetadataV1(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
+export function buildCamtDescriptionWithMetadataV1(description: string | undefined, entry: CamtRenderEntry): string | undefined {
   const withoutInstruction = renderCamtDescriptionV1(description, entry);
   const instructionId = markerInstructionId(entry);
   if (!instructionId) return withoutInstruction;
@@ -97,7 +97,7 @@ export function buildCamtDescriptionWithMetadataV1(description: string | undefin
 /** What a release without the `instr=` marker field stored for this entry. */
 export function renderCamtDescriptionV1(
   description: string | undefined,
-  entry: ParsedCamtEntry,
+  entry: CamtRenderEntry,
   instructionId?: string,
 ): string | undefined {
   const cleanDescription = markerSafeDescription(description);

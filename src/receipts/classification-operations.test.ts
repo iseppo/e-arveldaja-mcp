@@ -948,8 +948,6 @@ describe("classification operations — ledger context (F6)", () => {
       // Only a marker with a bank reference is signed (checksummed).
       bank_reference: spec.reference ?? `REF${spec.id}`,
       description: spec.description ?? "laen",
-      duplicate: false,
-      duplicate_transaction_ids: [],
     });
     return {
       id: spec.id, status: "PROJECT", is_deleted: false, type: "C", amount: spec.amount, date: spec.date,

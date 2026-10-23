@@ -82,7 +82,7 @@ describe("counterparty booking history — chronological streak", () => {
       tx.description = buildCamtDescriptionWithMetadata(description, {
         date: tx.date, amount: tx.amount, currency: "EUR", direction: "CRDT", counterparty_name: name,
         counterparty_iban: "EE471000001020145685", bank_reference: "2947447407B8F111BB4E0627B324E395",
-        description, duplicate: false, duplicate_transaction_ids: [],
+        description,
       }, { omitCounterpartyIban: true });
       expect(isCamtCounterpartyIbanOmitted(tx)).toBe(true);
     }

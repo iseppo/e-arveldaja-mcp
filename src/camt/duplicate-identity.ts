@@ -7,6 +7,7 @@ import { TRANSACTION_DESCRIPTION_MAX_LENGTH } from "../bank-transaction-create.j
 import { buildCamtDescriptionWithMetadataV1, renderCamtDescriptionV1 } from "./marker-render-v1.js";
 import type {
   CamtPossibleDuplicateMatch,
+  CamtRenderEntry,
   DuplicateLookup,
   ParsedCamtEntry,
   PossibleDuplicateAction,
@@ -266,7 +267,7 @@ export function extractCamtDescriptionMetadata(description: string | null | unde
 /** A Refs/InstrId the marker persists: numeric, on an outgoing (DBIT) row. */
 const MARKER_INSTRUCTION_ID = /^\d{1,10}$/;
 
-export function markerInstructionId(entry: ParsedCamtEntry): string | undefined {
+export function markerInstructionId(entry: CamtRenderEntry): string | undefined {
   const id = normalizeOptionalReference(entry.instruction_id);
   return entry.direction === "DBIT" && id !== undefined && MARKER_INSTRUCTION_ID.test(id) ? id : undefined;
 }
@@ -276,7 +277,7 @@ export function markerInstructionId(entry: ParsedCamtEntry): string | undefined 
  * `ibanOmitted`: the `x=i` signature (no IBAN, `omit:iban` appended).
  */
 export function buildCamtEntrySignatureForParsedEntry(
-  entry: ParsedCamtEntry,
+  entry: CamtRenderEntry,
   cleanDescription: string | undefined,
   legacy = false,
   instructionId?: string,
@@ -322,7 +323,7 @@ interface CamtMarkerForm {
 /** Every sig is a 16-hex shortStableHash, so a form's length does not depend on the text. */
 const SIGNATURE_PLACEHOLDER = "0".repeat(16);
 
-function camtMarkerForms(entry: ParsedCamtEntry, reference: string): { complete: CamtMarkerForm[]; ibanOmitted: CamtMarkerForm[] } {
+function camtMarkerForms(entry: CamtRenderEntry, reference: string): { complete: CamtMarkerForm[]; ibanOmitted: CamtMarkerForm[] } {
   const fullReference = `br=${encodeCamtMetadataValue(reference)}`;
   const compactReference = isCompactHexReference(reference) ? `b=${encodeCompactHexReference(reference)}` : undefined;
   const hash = bankReferenceHash(reference);
@@ -359,19 +360,19 @@ function camtMarkerFromForm(form: CamtMarkerForm, direction: ParsedCamtEntry["di
   return `${CAMT_DESCRIPTION_METADATA_PREFIX} ${parts.join(" ")}]`;
 }
 
-function camtMarkerFormLength(form: CamtMarkerForm, entry: ParsedCamtEntry, instructionId?: string): number {
+function camtMarkerFormLength(form: CamtMarkerForm, entry: CamtRenderEntry, instructionId?: string): number {
   return camtMarkerFromForm(form, entry.direction, SIGNATURE_PLACEHOLDER, instructionId).length;
 }
 
 /** The form signed over the text it stores. */
-function renderCamtMarkerForm(entry: ParsedCamtEntry, form: CamtMarkerForm, storedText: string | undefined, instructionId?: string): string {
+function renderCamtMarkerForm(entry: CamtRenderEntry, form: CamtMarkerForm, storedText: string | undefined, instructionId?: string): string {
   const signature = buildCamtEntrySignatureForParsedEntry(entry, storedText, false, instructionId, form.ibanOmitted)!;
   const marker = camtMarkerFromForm(form, entry.direction, signature, instructionId);
   return storedText ? `${storedText}\n${marker}` : marker;
 }
 
 /** The row the CAMT import creates for this entry, as a trust check reads it back (no direct bank fields). */
-function renderedCamtRow(entry: ParsedCamtEntry, description: string): Parameters<typeof isTrustedCamtDescriptionMetadata>[0] {
+function renderedCamtRow(entry: CamtRenderEntry, description: string): Parameters<typeof isTrustedCamtDescriptionMetadata>[0] {
   return {
     bank_ref_number: null,
     date: entry.date,
@@ -386,7 +387,7 @@ function renderedCamtRow(entry: ParsedCamtEntry, description: string): Parameter
 }
 
 /** V1's output stores the full text with a complete, verifiable identity. */
-function v1KeepsFullIdentity(v1: string | undefined, entry: ParsedCamtEntry, cleanDescription: string | undefined): v1 is string {
+function v1KeepsFullIdentity(v1: string | undefined, entry: CamtRenderEntry, cleanDescription: string | undefined): v1 is string {
   if (v1 === undefined || stripCamtDescriptionMetadata(v1) !== cleanDescription) return false;
   const metadata = extractCamtDescriptionMetadata(v1);
   if (metadata.poisoned || (metadata.bank_ref_number === undefined && metadata.bank_ref_hash === undefined)) return false;
@@ -430,7 +431,7 @@ function withTruncationReport(rendered: string | undefined, cleanDescription: st
  */
 export function renderCamtDescriptionDetailed(
   description: string | undefined,
-  entry: ParsedCamtEntry,
+  entry: CamtRenderEntry,
   options: { readonly omitCounterpartyIban?: boolean } = {},
 ): CamtDescriptionRendering {
   const cleanDescription = markerSafeDescription(description);
@@ -482,7 +483,7 @@ export function renderCamtDescriptionDetailed(
 }
 
 /** The full-text C3 (`x=i`) rendering of this entry, whether or not it is eligible today. */
-function renderCamtDescriptionIbanOmitted(description: string | undefined, entry: ParsedCamtEntry): string | undefined {
+function renderCamtDescriptionIbanOmitted(description: string | undefined, entry: CamtRenderEntry): string | undefined {
   const reference = normalizeOptionalReference(entry.bank_reference);
   if (!reference || !entry.counterparty_iban) return undefined;
   const cleanDescription = markerSafeDescription(description);
@@ -494,7 +495,7 @@ function renderCamtDescriptionIbanOmitted(description: string | undefined, entry
 
 export function buildCamtDescriptionWithMetadata(
   description: string | undefined,
-  entry: ParsedCamtEntry,
+  entry: CamtRenderEntry,
   options: { readonly omitCounterpartyIban?: boolean } = {},
 ): string | undefined {
   return renderCamtDescriptionDetailed(description, entry, options).description;

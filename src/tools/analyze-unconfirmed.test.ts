@@ -422,7 +422,6 @@ describe("analyze_unconfirmed_transactions", () => {
           date: "2026-03-20", amount: 100, currency: "EUR", direction,
           counterparty_name: "Test OÜ", counterparty_iban: "EE471000001020145685",
           bank_reference: "2947447407B8F111BB4E0627B324E395", description,
-          duplicate: false, duplicate_transaction_ids: [],
         }, { omitCounterpartyIban: true }),
       };
       expect(isTrustedCamtDescriptionMetadata(tx as any)).toBe(true);

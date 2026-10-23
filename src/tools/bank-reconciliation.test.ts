@@ -1631,7 +1631,6 @@ describe("reconcile_inter_account_transfers", () => {
           date: base.date, amount: base.amount, currency: "EUR", direction: kind === "incoming" ? "CRDT" : "DBIT",
           counterparty_name: "Test OÜ", counterparty_iban: "EE471000001020145685",
           bank_reference: "2947447407B8F111BB4E0627B324E395", description,
-          duplicate: false, duplicate_transaction_ids: [],
         }, { omitCounterpartyIban: true }),
       };
       expect(isTrustedCamtDescriptionMetadata(row as any)).toBe(true);
@@ -4607,7 +4606,6 @@ describe("reconcile_inter_account_transfers: LHV InstrId ↔ Wise reference suff
       description: buildCamtDescriptionWithMetadata(company, {
         date, amount: 500, currency: "EUR", direction: "DBIT", counterparty_name: company,
         counterparty_iban: WISE_IBAN, bank_reference: `LHVREF${id}`, description: company, instruction_id: instructionId,
-        duplicate: false, duplicate_transaction_ids: [],
       }),
     };
   }

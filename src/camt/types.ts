@@ -81,6 +81,9 @@ export interface ParsedCamtEntry {
   duplicate_transaction_ids: number[];
 }
 
+/** The fields the CAMT description/marker renderer reads: a ParsedCamtEntry without batch duplicate flags. */
+export type CamtRenderEntry = Omit<ParsedCamtEntry, "duplicate" | "duplicate_transaction_ids">;
+
 export type CamtLegacyIdentity = Pick<ParsedCamtEntry,
   "amount" | "description" | "counterparty_name" | "counterparty_iban" | "reference_number" | "bank_reference">;
 
