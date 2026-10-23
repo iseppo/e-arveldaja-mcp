@@ -256,7 +256,7 @@ describe("CAMT full-envelope untrusted-text wrapping", () => {
       ...data,
       possibleDuplicates: [{
         date: "2026-02-01", amount: 11, currency: "EUR", type: "D", source_direction: "CRDT",
-        counterparty: "Vendor", bank_reference: "REF", ref_number: "RF1",
+        counterparty: "Vendor", bank_reference: "REF", ref_number: "RF1", movement_identity: "camt-movement-REF",
         existing_transactions: [{
           id: 9, status: "CONFIRMED", counterparty: "Vendor", description: "d", ref_number: "RF-EXIST",
           match_reasons: ["counterparty_name"],
