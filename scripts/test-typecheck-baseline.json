@@ -19,8 +19,6 @@
     "TS2769": 7,
     "TS2783": 6,
     "TS4104": 1,
-    "TS7006": 1,
-    "TS7016": 1,
     "TS7031": 15
   },
   "errors": {
@@ -153,10 +151,6 @@
     "src/receipts/classification-operations.test.ts": {
       "TS2349": 4
     },
-    "src/release-smoke.test.ts": {
-      "TS7006": 1,
-      "TS7016": 1
-    },
     "src/server/connection-guard.test.ts": {
       "TS2345": 3
     },
@@ -280,6 +274,6 @@
       "TS2339": 1
     }
   },
-  "total": 1240,
+  "total": 1238,
   "version": 1
 }

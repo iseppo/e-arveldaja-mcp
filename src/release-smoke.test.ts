@@ -224,7 +224,7 @@ describe("startAndObserve", () => {
 describe("assertPackedBinIsExecutable", () => {
   const pkg = { name: "e-arveldaja-mcp", bin: { "e-arveldaja-mcp": "dist/index.js" } };
 
-  async function makeInstallTree(root, { shim = true, shebang = true, exec = true } = {}) {
+  async function makeInstallTree(root: string, { shim = true, shebang = true, exec = true }: { shim?: boolean; shebang?: boolean; exec?: boolean } = {}) {
     const pkgRoot = resolve(root, "node_modules", pkg.name);
     await mkdir(resolve(pkgRoot, "dist"), { recursive: true });
     const target = resolve(pkgRoot, "dist", "index.js");
