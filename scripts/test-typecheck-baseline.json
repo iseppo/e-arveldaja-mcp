@@ -5,10 +5,9 @@
     "TS2322": 3,
     "TS2339": 2,
     "TS2345": 9,
-    "TS2352": 3,
+    "TS2352": 2,
     "TS2353": 2,
     "TS2554": 1,
-    "TS2556": 1,
     "TS2571": 8,
     "TS2741": 1,
     "TS2769": 1
@@ -22,12 +21,6 @@
     },
     "src/camt/compact-routing.test.ts": {
       "TS18046": 19
-    },
-    "src/guided/process-accounting-document-reading.test.ts": {
-      "TS2352": 1
-    },
-    "src/guided/sales-recovery-regression.test.ts": {
-      "TS2556": 1
     },
     "src/public-tool-registrar.test.ts": {
       "TS18046": 2
@@ -105,6 +98,6 @@
       "TS2352": 1
     }
   },
-  "total": 973,
+  "total": 971,
   "version": 1
 }

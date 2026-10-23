@@ -102,7 +102,7 @@ describe('public sales recovery controls', () => {
   const f = await salesFixture('network',undefined,true);
   const p1=f.parse(await f.handler({mode:'prepare',action:'create',payload:f.payload}));
   const p2=f.parse(await f.handler({mode:'prepare',action:'create',payload:f.payload}));
-  const original=f.post.getMockImplementation()!;
+  const original=f.post.getMockImplementation()! as (...args: any[]) => Promise<any>;
   let release!:()=>void; const gate=new Promise<void>(resolve=>{release=resolve;});
   let entered!:()=>void; const started=new Promise<void>(resolve=>{entered=resolve;});
   f.post.mockImplementation(async (...args:any[])=>{entered(); await gate; return original(...args);});

@@ -154,7 +154,7 @@ describe("process_accounting_document reading modes: create and confirm", () => 
     const get = setup.api.purchaseInvoices.get.getMockImplementation()! as (id: number) => Promise<unknown>;
     setup.api.purchaseInvoices.get.mockImplementation(async (id: number) => (id === 900 && draft ? { ...draft } : get(id)));
     const confirm = vi.fn().mockResolvedValue({});
-    (setup.api.purchaseInvoices as Record<string, unknown>).confirm = confirm;
+    (setup.api.purchaseInvoices as unknown as Record<string, unknown>).confirm = confirm;
     return { ...setup, confirm };
   }
 
