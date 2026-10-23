@@ -1157,6 +1157,8 @@ describe("receipt inbox tool status handling", () => {
           skipped_duplicate: 0,
           failed: 0,
           needs_review: 0,
+          possible_duplicate_review: 0,
+          referenced_by_journal_review: 0,
           dry_run_preview: 1,
         },
         workflowSummary: "Receipt approval preview",

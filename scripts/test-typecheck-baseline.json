@@ -2,7 +2,7 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 16,
+    "TS2322": 15,
     "TS2339": 107,
     "TS2345": 24,
     "TS2348": 2,
@@ -14,7 +14,6 @@
     "TS2556": 1,
     "TS2561": 1,
     "TS2571": 14,
-    "TS2739": 1,
     "TS2741": 1,
     "TS2769": 7,
     "TS2783": 6,
@@ -212,15 +211,13 @@
       "TS18046": 3
     },
     "src/tools/receipt-inbox-summary.test.ts": {
-      "TS2322": 1,
       "TS2741": 1
     },
     "src/tools/receipt-inbox-tools.test.ts": {
       "TS18046": 45,
       "TS2339": 1,
       "TS2348": 1,
-      "TS2349": 1,
-      "TS2739": 1
+      "TS2349": 1
     },
     "src/tools/receipt-inbox.test.ts": {
       "TS2353": 2
@@ -254,6 +251,6 @@
       "TS2339": 1
     }
   },
-  "total": 1228,
+  "total": 1226,
   "version": 1
 }
