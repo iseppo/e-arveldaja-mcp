@@ -50,7 +50,7 @@
     "typecheck:tests:update": "tsx scripts/check-test-typecheck.ts --update",
     "smoke:package": "node scripts/smoke-packed-runtime.mjs",
     "prepublishOnly": "npm run validate:release && npm run build && npm run smoke:package",
-    "release:check": "npm run validate:release && npm run build && vitest run && vitest run --config vitest.integration.config.ts && npm run smoke:package",
+    "release:check": "npm run validate:release && npm run build && npm run typecheck:tests && vitest run && vitest run --config vitest.integration.config.ts && npm run smoke:package",
     "registry:login": "mcp-publisher login github",
     "registry:publish": "npm run validate:release && mcp-publisher publish",
     "test": "vitest run",

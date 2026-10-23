@@ -29,6 +29,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Typecheck tests (ratchet)
+        run: npm run typecheck:tests
+
       - name: Report MCP surface sizes and deltas
         run: npm run measure:surface
 
