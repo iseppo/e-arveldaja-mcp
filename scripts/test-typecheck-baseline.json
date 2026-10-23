@@ -3,7 +3,7 @@
     "TS18046": 941,
     "TS18048": 1,
     "TS2322": 13,
-    "TS2339": 107,
+    "TS2339": 74,
     "TS2345": 23,
     "TS2348": 2,
     "TS2349": 11,
@@ -146,7 +146,6 @@
       "TS2322": 1
     },
     "src/tools/accounting-inbox.test.ts": {
-      "TS2339": 4,
       "TS2769": 1,
       "TS7031": 6
     },
@@ -164,12 +163,8 @@
     },
     "src/tools/camt-import-tools.test.ts": {
       "TS18046": 150,
-      "TS2339": 16,
       "TS2345": 1,
       "TS2571": 5
-    },
-    "src/tools/credential-tools.test.ts": {
-      "TS2339": 12
     },
     "src/tools/crud-tools.test.ts": {
       "TS2339": 41
@@ -225,7 +220,7 @@
       "TS18046": 39,
       "TS18048": 1,
       "TS2322": 1,
-      "TS2339": 2,
+      "TS2339": 1,
       "TS2348": 1,
       "TS7031": 1
     },
@@ -245,6 +240,6 @@
       "TS2339": 1
     }
   },
-  "total": 1223,
+  "total": 1190,
   "version": 1
 }

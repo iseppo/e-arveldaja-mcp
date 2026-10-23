@@ -7,7 +7,7 @@ import { vi } from "vitest";
 import type { ApiContext } from "../tools/crud-tools.js";
 import type { Account, AccountDimension, BankAccount, Client, Transaction } from "../types/api.js";
 
-export type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+export type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
 
 export interface MockToolServer {
   registerTool: ReturnType<typeof vi.fn>;

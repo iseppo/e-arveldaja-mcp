@@ -283,7 +283,7 @@ function setupWiseTool(
 
   const registration = server.registerTool.mock.calls.find(([name]) => name === "import_wise_transactions");
   if (!registration) throw new Error("Tool was not registered");
-  const rawHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>;
+  const rawHandler = registration[2] as (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
   const handler = async (args: Record<string, unknown>) => {
     if (args.execute !== true || args.approved_command_digest !== undefined) {
       return rawHandler(args);
