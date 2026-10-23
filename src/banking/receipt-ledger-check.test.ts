@@ -126,7 +126,7 @@ describe("checkReceiptLedger", () => {
       {accounts_id:incoming?RECEIVABLE_ACCOUNT_ID:2310,type:incoming?"C":"D",amount:1488},
     ]});
     expect(checkReceiptLedger({tx,invoices,journals:[good]})).toEqual({ok:true,journal_id:28013080});
-    const reversed={...good,postings:good.postings!.map(row=>({...row,type:row.type==="D"?"C":"D"}))};
+    const reversed={...good,postings:good.postings!.map(row=>({...row,type:row.type==="D"?"C" as const:"D" as const}))};
     expect(checkReceiptLedger({tx,invoices,journals:[reversed]})).toMatchObject({ok:false,code:"ledger_posting_mismatch",details:{transaction_id:4001,journal_id:28013080,leg:"bank",expected_type:incoming?"D":"C",expectation_source:"camt_checksum"}});
   });
   it.each([

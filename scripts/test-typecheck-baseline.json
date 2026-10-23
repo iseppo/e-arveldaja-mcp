@@ -2,7 +2,7 @@
   "by_code": {
     "TS18046": 941,
     "TS18048": 1,
-    "TS2322": 4,
+    "TS2322": 3,
     "TS2339": 2,
     "TS2345": 11,
     "TS2352": 4,
@@ -16,9 +16,6 @@
   "errors": {
     "src/__integration__/mcp-connection.integration.test.ts": {
       "TS18046": 35
-    },
-    "src/banking/receipt-ledger-check.test.ts": {
-      "TS2322": 1
     },
     "src/cache-control.test.ts": {
       "TS18046": 5
@@ -114,6 +111,6 @@
       "TS2352": 1
     }
   },
-  "total": 977,
+  "total": 976,
   "version": 1
 }
