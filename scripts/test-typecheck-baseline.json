@@ -4,7 +4,7 @@
     "TS18048": 1,
     "TS2322": 13,
     "TS2339": 107,
-    "TS2345": 24,
+    "TS2345": 23,
     "TS2348": 2,
     "TS2349": 11,
     "TS2352": 8,
@@ -198,9 +198,6 @@
       "TS18046": 96,
       "TS7031": 1
     },
-    "src/tools/purchase-vat-defaults.test.ts": {
-      "TS2345": 1
-    },
     "src/tools/receipt-batch-failure.test.ts": {
       "TS18046": 47
     },
@@ -248,6 +245,6 @@
       "TS2339": 1
     }
   },
-  "total": 1224,
+  "total": 1223,
   "version": 1
 }

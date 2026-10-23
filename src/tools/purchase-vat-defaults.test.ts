@@ -222,6 +222,7 @@ describe("applyPurchaseVatDefaults", () => {
   it("M21 preserves VAT-registered deductible defaults and rate behavior", () => {
     const articles = [{
       id: 45,
+      level: 1,
       name_est: "Sisendkäibemaks",
       name_eng: "Input VAT",
       vat_accounts_id: 1510,
