@@ -59,10 +59,14 @@ function makeSuggestions(rows: number, extraRows: Record<string, unknown>[] = []
 const suspect: DuplicatePostingSuspect = {
   journal_id: 555,
   journal_title: "Injected <title>",
+  document_number: "Injected <doc>",
+  operation_type: "ENTRY",
   date: "2026-03-01",
   amount: 100,
-  direction: "D",
-} as DuplicatePostingSuspect;
+  type: "D",
+  dimension_id: 101,
+  day_distance: 1,
+};
 
 // --- Exact-match fixtures ----------------------------------------------------
 
@@ -503,6 +507,19 @@ describe("renderExactMatchPayload", () => {
     });
     expect(payload.errors).toEqual([]);
     expect(payload.warnings).toEqual(["ledger read failed"]);
+  });
+
+  it("wraps a duplicate suspect's title and document number and emits no direction key", () => {
+    const projection = makeExactProjection(0, {
+      blockedDuplicateSuspects: [{ transaction_id: 42, reason: "Possible cross-mechanism duplicate", conflicting_journal_ids: [555], suspects: [suspect] }],
+    });
+    const payload = renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle: "P" });
+    const row = (payload.results as Array<Record<string, unknown>>).find(r => r.transaction_id === 42)!;
+    const rendered = (row.possible_duplicate_postings as Array<Record<string, unknown>>)[0]!;
+    expect(String(rendered.journal_title)).toMatch(OCR);
+    expect(String(rendered.document_number)).toMatch(OCR);
+    expect(rendered.type).toBe("D");
+    expect(rendered).not.toHaveProperty("direction");
   });
 });
 

@@ -7,7 +7,7 @@
     "TS2345": 24,
     "TS2348": 2,
     "TS2349": 11,
-    "TS2352": 9,
+    "TS2352": 8,
     "TS2353": 67,
     "TS2493": 3,
     "TS2554": 1,
@@ -48,9 +48,6 @@
     },
     "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
       "TS2741": 1
-    },
-    "src/banking/reconciliation/presenter.test.ts": {
-      "TS2352": 1
     },
     "src/booking-guard.test.ts": {
       "TS2353": 1
@@ -274,6 +271,6 @@
       "TS2339": 1
     }
   },
-  "total": 1238,
+  "total": 1237,
   "version": 1
 }
