@@ -2,8 +2,6 @@
   "by_code": {
     "TS18046": 941,
     "TS2322": 2,
-    "TS2339": 2,
-    "TS2352": 2,
     "TS2571": 8
   },
   "errors": {
@@ -61,15 +59,8 @@
     },
     "src/tools/wise-import.test.ts": {
       "TS18046": 39
-    },
-    "src/wise/presenter.test.ts": {
-      "TS2352": 1
-    },
-    "src/wise/projection.test.ts": {
-      "TS2339": 2,
-      "TS2352": 1
     }
   },
-  "total": 955,
+  "total": 951,
   "version": 1
 }

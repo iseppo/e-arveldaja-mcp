@@ -61,7 +61,7 @@ function makeData(rows: number, mode: "DRY_RUN" | "EXECUTED" = "DRY_RUN", errorC
     source: { file_path: "/statements/wise.csv" },
     sourceIdentity: {
       schema: "file_input_identity_v1",
-      source_kind: "path",
+      source_kind: "local_path",
       digest_sha256: "a".repeat(64),
       size_bytes: 1234,
       extension: ".csv",

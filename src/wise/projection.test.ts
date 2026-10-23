@@ -105,7 +105,7 @@ describe("Wise card payment split across two balances (same ID)", () => {
     const output = project(rowsOf([splitCard[1]!]), [oldUsdLeg]);
     expect(created(output)).toEqual(["main_create:33.23 EUR", "fee_create_and_confirm:0.16 EUR"]);
     // A leg of a split ID is tagged by currency even when the export holds it alone.
-    expect(output.commands.map(command => command.create_payload?.description?.split(" ")[0])).toEqual([
+    expect(output.commands.map(command => ("create_payload" in command ? command.create_payload : undefined)?.description?.split(" ")[0])).toEqual([
       "WISE:CARD_TRANSACTION-9001:EUR",
       "WISE:FEE:CARD_TRANSACTION-9001:EUR",
     ]);
@@ -932,7 +932,8 @@ describe("Wise CSV text with planted sandbox delimiters (F-IMPORT-SOURCE-MARKER-
   it("a marker-free row keeps its pre-existing identity hash and payload byte-for-byte", () => {
     const [command] = project(rowsOf([cleanLine]), []).commands;
     expect(command!.identity_hash).toBe("523d42d153914210c402043c42ab77bdc302f7e0192ea0e6137c89b36848de8e");
-    expect(command!.create_payload).toEqual({
+    if (!("create_payload" in command!)) throw new Error(`expected a create command, got ${command!.action}`);
+    expect(command.create_payload).toEqual({
       accounts_dimensions_id: WISE,
       type: "C",
       amount: 25,
@@ -1253,7 +1254,7 @@ describe("Wise-side journal evidence and the transfer hold pass (WP1b)", () => {
       const counterpartHold = {
         wise_id: "TRANSFER-A", code: "wise_transfer_counterpart_conflict", reason: "conflict", source_verified: true, target_verified: true,
         approval_required: false, counterpart_candidate_dimension_ids: [LIGHTYEAR],
-      } as const;
+      };
       const counterpart = run([line("TRANSFER-A", "IN", "100.00")], [gross(701, "LHVREF-1")], {
         decision: () => ({ sourceVerified: true, targetVerified: true, counterpartHold }) as WiseTransferDecision,
         ...ack(701),
