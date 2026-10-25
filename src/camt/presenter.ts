@@ -52,7 +52,10 @@ export type CamtResultRow = ReturnType<typeof camtResultRow>;
 export type CamtPossibleDuplicateRow = ReturnType<typeof camtPossibleDuplicateRow>;
 
 /** A result row as emitted: its statement text is sandbox-wrapped. */
-export type CamtImportResultRow = Omit<CamtResultRow, "description" | "stored_description" | "counterparty" | "bank_reference" | "ref_number"> & {
+export type CamtImportResultRow = Omit<CamtResultRow, "description" | "stored_description" | "counterparty" | "bank_reference" | "ref_number" | "clients_id" | "client_match"> & {
+  /** Absent on the wire when no client was resolved (toMcpJson drops undefined). */
+  clients_id?: NonNullable<CamtResultRow["clients_id"]>;
+  client_match?: NonNullable<CamtResultRow["client_match"]>;
   description?: string;
   stored_description?: string;
   counterparty?: string;

@@ -7423,7 +7423,7 @@ describe("Wise id output policy: validated identifiers raw, free-form text wrapp
     }
 
     const guided = await runWithToolProfile("guided", async () =>
-      parseWiseResponse(await setup.rawHandler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false })));
+      parseWiseResponse<WiseImportCompactPayload>(await setup.rawHandler({ file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false })));
     for (const id of collect(guided).filter(id => id !== "wise-import")) expect(id).toMatch(identifier);
   });
 });
