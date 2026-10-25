@@ -1,7 +1,7 @@
 {
   "by_code": {
-    "ANY": 1555,
-    "UNTYPED_PAYLOAD": 370
+    "ANY": 1553,
+    "UNTYPED_PAYLOAD": 332
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -194,8 +194,7 @@
       "ANY": 248
     },
     "src/tools/analyze-unconfirmed.test.ts": {
-      "ANY": 8,
-      "UNTYPED_PAYLOAD": 38
+      "ANY": 6
     },
     "src/tools/annual-report.test.ts": {
       "ANY": 25,
@@ -307,6 +306,6 @@
       "ANY": 9
     }
   },
-  "total": 1925,
+  "total": 1885,
   "version": 1
 }

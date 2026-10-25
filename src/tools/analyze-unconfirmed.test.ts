@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { registerAnalyzeUnconfirmedTools } from "./analyze-unconfirmed.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { registerAnalyzeUnconfirmedTools, type AnalyzeUnconfirmedPayload } from "./analyze-unconfirmed.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { buildCamtDescriptionWithMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 
 /**
@@ -130,7 +130,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
@@ -188,7 +188,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
       // Ambiguous multi-journal match without a bank-ref shortcut: confidence
@@ -233,7 +233,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("reimport_duplicate");
@@ -282,7 +282,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
@@ -321,7 +321,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).not.toBe("likely_duplicate");
@@ -363,7 +363,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
@@ -403,7 +403,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("likely_duplicate");
@@ -426,8 +426,8 @@ describe("analyze_unconfirmed_transactions", () => {
       };
       expect(isTrustedCamtDescriptionMetadata(tx as any)).toBe(true);
       const handler = setupTool({ transactions: [tx], bankAccounts: defaultBankAccounts, companyName: "Test OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
-      expect(payload.suggestions.every((s: any) => s.suggested_action !== "confirm_inter_account")).toBe(true);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
+      expect(payload.suggestions.every(s => s.suggested_action !== "confirm_inter_account")).toBe(true);
     });
 
     it("does not pick a single target when the counterparty IBAN backs several own accounts", async () => {
@@ -449,7 +449,7 @@ describe("analyze_unconfirmed_transactions", () => {
         ],
       });
 
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -482,7 +482,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -539,7 +539,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -570,14 +570,14 @@ describe("analyze_unconfirmed_transactions", () => {
         bankAccounts: lhvWise,
         companyName: "Test OÜ",
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]!.suggested_action).not.toBe("confirm_inter_account");
     });
 
     it("downgrades both legs of a possible fee-deducted transfer to review without a distribution", async () => {
       const wiseIn = { ...base, id: 2, amount: 99, accounts_dimensions_id: 300, bank_account_no: null, bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
       const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions).toHaveLength(2);
       for (const s of payload.suggestions) {
         expect(s.suggested_action).toBe("manual_review");
@@ -589,7 +589,7 @@ describe("analyze_unconfirmed_transactions", () => {
     it("downgrades a pair whose mirror leg lacks own-origin evidence", async () => {
       const wiseIn = { ...base, id: 2, amount: 100, accounts_dimensions_id: 300, bank_account_no: "BE99POOL", bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
       const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions).toHaveLength(2);
       for (const s of payload.suggestions) {
         expect(s.suggested_action).toBe("manual_review");
@@ -601,8 +601,8 @@ describe("analyze_unconfirmed_transactions", () => {
     it("keeps the confirm suggestion for two same-direction rows (separate transfers)", async () => {
       const wiseOut = { ...base, id: 2, amount: 99, accounts_dimensions_id: 300, bank_account_no: null, bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=OUT]" };
       const handler = setupTool({ transactions: [lhvOut, wiseOut], bankAccounts: lhvWise, companyName: "Test OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
-      expect(payload.suggestions.map((s: any) => s.suggested_action)).toEqual(["confirm_inter_account", "confirm_inter_account"]);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
+      expect(payload.suggestions.map(s => s.suggested_action)).toEqual(["confirm_inter_account", "confirm_inter_account"]);
     });
   });
 
@@ -644,7 +644,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({ min_confidence: 0 });
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -686,7 +686,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({ min_confidence: 0 });
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -721,7 +721,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       const s = payload.suggestions[0]!;
@@ -749,7 +749,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions[0]!.reason).toContain("USD");
     });
@@ -773,7 +773,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).not.toBe("confirm_expense");
@@ -801,7 +801,7 @@ describe("analyze_unconfirmed_transactions", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>(result.content[0]!.text);
 
       expect(payload.suggestions).toHaveLength(1);
       expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
@@ -826,7 +826,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       bankAccounts: defaultBankAccounts,
       journals: [journal(91, "2026-03-22", [{ dim: 100, type: "D", amount: 100 }])],
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 91 });
   });
 
@@ -836,7 +836,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       bankAccounts: defaultBankAccounts,
       journals: [journal(92, "2026-03-23", [{ dim: 100, type: "D", amount: 100 }])],
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 92 });
   });
 
@@ -849,7 +849,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       bankAccounts: defaultBankAccounts,
       journals: [journal(93, "2026-03-21", [{ dim: 200, type: "C", amount: 500 }, { dim: 100, type: "D", amount: 500 }])],
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ suggested_action: "likely_duplicate", duplicate_journal_id: 93 });
     expect(payload.summary.confirm_inter_account ?? 0).toBe(0);
   });
@@ -867,7 +867,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
         bankAccounts: defaultBankAccounts,
         journals: [refJournal([{ dim: 100, type: "C", amount: 100 }, { ...target, amount: 100 }])],
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
       expect(payload.suggestions[0]!.reason).not.toContain("safe to delete");
       expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
@@ -881,7 +881,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
         bankAccounts: defaultBankAccounts,
         journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 200 }])],
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
       expect(payload.suggestions[0]!.reason).toContain("does not cover this row");
       expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
@@ -893,7 +893,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
         bankAccounts: defaultBankAccounts,
         journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 100 }])],
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]).toMatchObject({ suggested_action: "reimport_duplicate", confidence: 95, duplicate_journal_id: 95 });
       expect(payload.suggestions[0]!.reason).toContain("safe to delete");
     });
@@ -906,7 +906,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
         bankAccounts: defaultBankAccounts,
         journals: [refJournal([{ dim: 100, type: "D", amount: 100 }, { dim: 200, type: "C", amount: 100 }])],
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
       expect(payload.suggestions[0]!.reason).toContain("no EUR base amount");
       expect(payload.summary.reimport_duplicate ?? 0).toBe(0);
@@ -918,7 +918,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
         bankAccounts: defaultBankAccounts,
         journals: [refJournal([{ dim: 100, type: "D", amount: 92.5 }, { dim: 200, type: "C", amount: 92.5 }])],
       });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]).toMatchObject({ suggested_action: "reimport_duplicate", confidence: 95, duplicate_journal_id: 95 });
     });
   });
@@ -944,7 +944,7 @@ describe("analyze_unconfirmed_transactions MEDIUM-5 hardening", () => {
       for (const aliases of aliasSets) {
         for (const journals of [[...aliases, reversed], [reversed, ...aliases]]) {
           const handler = setupTool({ transactions: [row], bankAccounts: defaultBankAccounts, journals });
-          const payload = parseMcpResponse((await handler({})).content[0]!.text);
+          const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
           expect(payload.suggestions[0]!.suggested_action).toBe("manual_review");
           expect(payload.suggestions[0]!.duplicate_journal_id).toBeUndefined();
         }
@@ -992,7 +992,7 @@ describe("analyze_unconfirmed_transactions F5 exact_invoice_base_amount", () => 
 
   it("suggests confirm_invoice with the EUR row amount for a unique match", async () => {
     const handler = setupTool({ transactions: [eurRow], bankAccounts: defaultBankAccounts, purchases: [usdInvoice] });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     const s = payload.suggestions[0]!;
     expect(s.suggested_action).toBe("confirm_invoice");
     expect(s.reason).toContain("exact_invoice_base_amount");
@@ -1005,7 +1005,7 @@ describe("analyze_unconfirmed_transactions F5 exact_invoice_base_amount", () => 
       bankAccounts: defaultBankAccounts,
       purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     const s = payload.suggestions[0]!;
     expect(s.suggested_action).toBe("manual_review");
     expect(s.distribution).toBeUndefined();
@@ -1026,7 +1026,7 @@ describe("analyze_unconfirmed_transactions F5 exact_invoice_base_amount", () => 
     ["USD invoice first", [usd200Invoice, eurInvoice]],
   ])("holds a mixed exact_amount / Tier A top-score tie for review (%s)", async (_label, purchases) => {
     const handler = setupTool({ transactions: [eur100Row], bankAccounts: defaultBankAccounts, purchases });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     const s = payload.suggestions[0]!;
     expect(s.suggested_action).toBe("manual_review");
     expect(s.distribution).toBeUndefined();
@@ -1061,7 +1061,7 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
 
   it("suggests confirm_inter_account to the verified marker IBAN's account", async () => {
     const handler = setupTool({ transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ" });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "confirm_inter_account", match_confidence: 90 });
     expect(payload.suggestions[0]!.distribution).toMatchObject({ related_sub_id: 300 });
   });
@@ -1073,7 +1073,7 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
       const row = camtRow(5002);
       const tampered = { ...row, bank_account_name: "Näide OÜ", description: tamper(row.description!).replace("\n[e-arveldaja-mcp:camt", `${encoded}[e-arveldaja-mcp:camt`) };
       const handler = setupTool({ transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
     }
   });
@@ -1086,7 +1086,7 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
         transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ",
         purchases: [{ id: 901, status: "CONFIRMED", payment_status: "NOT_PAID", number: "OST-901", clients_id: 77, client_name: "Wise", gross_price: 600, cl_currencies_id: "EUR" }],
       });
-      const payload = parseMcpResponse((await handler({ min_confidence: 0 })).content[0]!.text);
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({ min_confidence: 0 })).content[0]!.text);
       expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
       expect(payload.suggestions[0]!.distribution).toBeUndefined();
     }
@@ -1096,7 +1096,7 @@ describe("analyze_unconfirmed_transactions: CAMT marker IBAN (F4)", () => {
     const row = camtRow(5002);
     const tampered = { ...row, bank_account_name: "Näide OÜ", description: row.description!.replace(/sig=([a-f0-9])/, (_m, c: string) => `sig=${c === "0" ? "1" : "0"}`) };
     const handler = setupTool({ transactions: [tampered], bankAccounts: [defaultBankAccounts[0]!, threeAccounts[2]!], companyName: "Näide OÜ" });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     expect(payload.suggestions[0]).toMatchObject({ transaction_id: 5002, suggested_action: "manual_review", code: "camt_marker_unverified" });
     expect(payload.suggestions[0]!.distribution).toBeUndefined();
   });
@@ -1119,7 +1119,7 @@ describe("analyze_unconfirmed_transactions F5 Tier A when the foreign gross equa
     ["USD invoice first", [usdEqual, eurInvoice]],
   ])("holds the EUR 100 / USD 100 (base 100) tie for review (%s)", async (_label, purchases) => {
     const handler = setupTool({ transactions: [row], bankAccounts: defaultBankAccounts, purchases });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
     const s = payload.suggestions[0]!;
     expect(s.suggested_action).toBe("manual_review");
     expect(s.distribution).toBeUndefined();
