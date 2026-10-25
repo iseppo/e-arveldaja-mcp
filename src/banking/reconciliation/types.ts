@@ -257,9 +257,10 @@ export interface AmbiguousReflessRow {
   transaction_ids: number[]; amount: number; date: string;
   currency?: string; amount_eur?: number;
   source_account: string; target_account: string; reason: string;
-  /** Why the row needs review when it is not a plain ref-less collision:
-   * its CAMT marker sig does not verify. */
-  code?: "camt_marker_unverified";
+  /** Why the row needs review when it is not a plain ref-less collision: its CAMT
+   * marker sig does not verify, or the counterparty IBAN is an own account that
+   * cannot be booked (no dimension, or not registered in e-arveldaja). */
+  code?: "camt_marker_unverified" | "own_account_not_bookable";
 }
 
 export interface CrossCurrencyRow {

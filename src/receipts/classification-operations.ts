@@ -328,6 +328,7 @@ function partitionByLedgerContext(
   const inferenceLookups = {
     ownIbanToDimension: lookups.ownIbanToDimension,
     dimensionToIban: lookups.dimensionToIban,
+    ownIbansWithoutDimension: lookups.ownIbansWithoutDimension,
     companyName: normalizeCompanyName(ledger.companyLegalName),
     companyLegalName: ledger.companyLegalName,
     targetAccountsDimensionsId: undefined,
@@ -406,6 +407,18 @@ function partitionByLedgerContext(
 
     const inference = inferOneSidedTransfer({ ...transaction, bank_account_no: counterpartyIbanOf(transaction) }, inferenceLookups, inferenceCache);
     const candidates = inference.ambiguousTargetDimensions ?? [];
+    if (inference.unbookableOwnIban) {
+      // Own money to an own account that cannot be booked: never left to expense
+      // classification or an auto-booking rule.
+      partition.ownTransfers.push({
+        ...base,
+        target_dimension_id: null,
+        confidence: inference.confidence,
+        reasons: inference.reasons,
+        next_action: `give the own bank account ${inference.unbookableOwnIban} an accounting dimension in e-arveldaja, then reconcile_bank_transactions mode="inter_account_dry_run"`,
+      });
+      continue;
+    }
     if (inference.confidence >= 50 || candidates.length > 0) {
       const target = inference.confidence >= 50 ? inference.targetDimension ?? null : null;
       partition.ownTransfers.push({

@@ -2576,6 +2576,52 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload.one_sided[0]!.match_reasons).toContain("only_one_other_account");
     });
 
+    it("holds a transfer to an own bank account without a dimension instead of booking it to the other account by name", async () => {
+      const accounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+        { id: 3, account_name_est: "Savings", account_no: "EE471000001020145685", iban_code: "EE471000001020145685" },
+      ];
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 21, status: "PROJECT", is_deleted: false, type: "C", amount: 60, cl_currencies_id: "EUR", date: "2026-01-21", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: "EE47 1000 0010 2014 5685" },
+        ],
+        bankAccounts: accounts,
+        companyName: "Test OÜ",
+      });
+
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.ambiguous_refless).toEqual([expect.objectContaining({
+        transaction_ids: [21],
+        target_account: "EE471000001020145685",
+        code: "own_account_not_bookable",
+      })]);
+    });
+
+    it("recognises an own account whose iban_code is empty by its account_no", async () => {
+      const accounts = [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "", accounts_dimensions_id: 300 },
+        { id: 3, account_name_est: "SEB", account_no: "EE381010220123456789", iban_code: "EE381010220123456789", accounts_dimensions_id: 400 },
+      ];
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 22, status: "PROJECT", is_deleted: false, type: "C", amount: 60, cl_currencies_id: "EUR", date: "2026-01-21", accounts_dimensions_id: 100, bank_account_name: "Kolmas AS", bank_account_no: "BE08905767222113" },
+        ],
+        bankAccounts: accounts,
+        companyName: "Test OÜ",
+      });
+
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
+
+      expect(payload.matched_one_sided).toBe(1);
+      expect(payload.one_sided[0]!.target_dimension_id).toBe(300);
+      expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
+    });
+
     it("uses target_accounts_dimensions_id when 3+ bank accounts", async () => {
       const { handler } = setupInterAccountTool({
         transactions: [

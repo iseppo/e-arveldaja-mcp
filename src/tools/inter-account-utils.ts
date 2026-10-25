@@ -13,6 +13,12 @@ export interface BankAccountLookups {
   dimensionToTitle: Map<number, string>;
   dimensionToAccountsId: Map<number, number>;
   ownDimensionIds: Set<number>;
+  /**
+   * Own bank-account identifiers whose account has no booking dimension (and that no other own
+   * account with a dimension shares): money sent there is the company's own, but cannot be booked
+   * as an inter-account transfer, so it must go to review — never look like an external payment.
+   */
+  ownIbansWithoutDimension: Set<string>;
 }
 
 export function buildBankAccountLookups(
@@ -23,10 +29,13 @@ export function buildBankAccountLookups(
   const dimensionToIban = new Map<number, string>();
   const dimensionToTitle = new Map<number, string>();
   const dimensionToAccountsId = new Map<number, number>();
+  const ibansWithoutDimension = new Set<string>();
   for (const ba of bankAccounts) {
     // One IBAN form for keys and every lookup (counterpartyIbanOf, CAMT Lane B):
-    // a stored "EE12 3456 …" must match a statement's "EE123456…".
-    const iban = normalizeIban(ba.iban_code ?? ba.account_no) ?? "";
+    // a stored "EE12 3456 …" must match a statement's "EE123456…". The first
+    // NON-EMPTY identifier wins: an empty `iban_code` must not hide `account_no`.
+    const iban = normalizeIban(ba.iban_code) ?? normalizeIban(ba.account_no) ?? "";
+    if (iban && !ba.accounts_dimensions_id) ibansWithoutDimension.add(iban);
     if (iban && ba.accounts_dimensions_id) {
       const dims = ownIbanToDimension.get(iban);
       if (dims) dims.add(ba.accounts_dimensions_id);
@@ -46,6 +55,7 @@ export function buildBankAccountLookups(
     dimensionToTitle,
     dimensionToAccountsId,
     ownDimensionIds: new Set(dimensionToIban.keys()),
+    ownIbansWithoutDimension: new Set([...ibansWithoutDimension].filter(iban => !ownIbanToDimension.has(iban))),
   };
 }
 

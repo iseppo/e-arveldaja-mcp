@@ -556,6 +556,35 @@ describe("analyze_unconfirmed_transactions", () => {
     });
   });
 
+  it("holds a transfer to an own bank account without a dimension for review, with no name-inferred distribution", async () => {
+    const handler = setupTool({
+      transactions: [{
+        id: 5, status: "PROJECT", is_deleted: false, type: "C", amount: 60, date: "2026-01-21",
+        accounts_dimensions_id: 300, cl_currencies_id: "EUR", description: "To savings",
+        bank_account_name: "Test OÜ", bank_account_no: "EE471000001020145685",
+      }],
+      bankAccounts: [
+        { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },
+        { id: 2, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+        { id: 3, account_name_est: "Savings", account_no: "EE471000001020145685", iban_code: "EE471000001020145685" },
+      ],
+      companyName: "Test OÜ",
+      accountDimensions: [
+        { id: 100, accounts_id: 1020, is_deleted: false },
+        { id: 300, accounts_id: 1030, is_deleted: false },
+      ],
+    });
+
+    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+
+    expect(payload.suggestions).toEqual([expect.objectContaining({
+      transaction_id: 5,
+      suggested_action: "manual_review",
+      code: "own_account_not_bookable",
+    })]);
+    expect(payload.suggestions[0]).not.toHaveProperty("distribution");
+  });
+
   describe("inter-account pairs reconcile would hold for review", () => {
     const lhvWise = [
       { id: 1, account_name_est: "LHV", account_no: "EE11", iban_code: "EE11", accounts_dimensions_id: 100 },

@@ -813,12 +813,13 @@ export async function runInterAccountMatching(
   const allTx = new Map(unconfirmed.map(tx => [tx.id!, tx]));
   const companyName = normalizeCompanyName(invoiceInfo.invoice_company_name ?? "");
 
-  const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
+  const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds, ownIbansWithoutDimension } =
     buildBankAccountLookups(bankAccounts, accountDimensions);
 
   const lookups: InterAccountMatchLookups = {
     ownIbanToDimension,
     dimensionToIban,
+    ownIbansWithoutDimension,
     companyName,
     companyLegalName: invoiceInfo.invoice_company_name ?? "",
     targetAccountsDimensionsId: target_accounts_dimensions_id,
@@ -1523,8 +1524,21 @@ export async function runInterAccountMatching(
 
   for (const tx of remaining) {
     if (!tx.id || blockedOneSidedTxIds.has(tx.id) || consumedTxIds.has(tx.id)) continue;
-    const { targetDimension, confidence, reasons, ambiguousTargetDimensions } =
+    const { targetDimension, confidence, reasons, ambiguousTargetDimensions, unbookableOwnIban } =
       inferOneSidedTransfer(tx, lookups, oneSidedInferenceCache);
+
+    if (unbookableOwnIban) {
+      // The company's own money, but the account on the other side cannot be booked:
+      // never redirect it to a different own account.
+      ambiguousRefless.push({
+        transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
+        source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
+        target_account: unbookableOwnIban,
+        code: "own_account_not_bookable",
+        reason: `The counterparty IBAN ${unbookableOwnIban} is an own bank account without an accounting dimension, so the transfer cannot be booked to it; give that bank account a dimension in e-arveldaja, then reconcile again, or confirm inline.`,
+      });
+      continue;
+    }
 
     if (ambiguousTargetDimensions) {
       ambiguousRefless.push({

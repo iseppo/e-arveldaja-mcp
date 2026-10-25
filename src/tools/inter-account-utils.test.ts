@@ -72,6 +72,30 @@ describe("buildBankAccountLookups", () => {
     expect(result.ownIbanToDimension.has("WISE001")).toBe(false);
   });
 
+  it("falls back to account_no when iban_code is an empty or blank string", () => {
+    const accounts: BankAccount[] = [
+      makeBankAccount({ account_name_est: "Coop", account_no: "EE55 4433 2211", iban_code: "", accounts_dimensions_id: 30 }),
+      makeBankAccount({ account_name_est: "SEB", account_no: "EE66", iban_code: "  ", accounts_dimensions_id: 31 }),
+    ];
+    const result = buildBankAccountLookups(accounts, []);
+
+    expect(result.ownIbanToDimension.get("EE5544332211")).toEqual(new Set([30]));
+    expect(result.dimensionToIban.get(31)).toBe("EE66");
+  });
+
+  it("lists own identifiers of accounts without a dimension, unless an account with a dimension shares them", () => {
+    const accounts: BankAccount[] = [
+      makeBankAccount({ account_name_est: "Savings", account_no: "", iban_code: "EE11 2222", accounts_dimensions_id: undefined }),
+      makeBankAccount({ account_name_est: "LHV EUR", account_no: "", iban_code: "EE33", accounts_dimensions_id: 40 }),
+      makeBankAccount({ account_name_est: "LHV legacy", account_no: "", iban_code: "EE33", accounts_dimensions_id: undefined }),
+    ];
+    const result = buildBankAccountLookups(accounts, []);
+
+    expect(result.ownIbansWithoutDimension).toEqual(new Set(["EE112222"]));
+    expect(result.ownIbanToDimension.has("EE112222")).toBe(false);
+    expect(result.ownIbanToDimension.get("EE33")).toEqual(new Set([40]));
+  });
+
   it("falls back to account_no when iban_code is absent", () => {
     const accounts: BankAccount[] = [
       makeBankAccount({ account_name_est: "Coop", account_no: "coop001", accounts_dimensions_id: 30 }),

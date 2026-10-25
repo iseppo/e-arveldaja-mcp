@@ -34,7 +34,7 @@ function tamperSig(tx: Transaction): Transaction {
   return { ...tx, description };
 }
 
-function lookups(dims: Array<[number, string]>, target?: number): InterAccountMatchLookups {
+function lookups(dims: Array<[number, string]>, target?: number, ownIbansWithoutDimension: string[] = []): InterAccountMatchLookups {
   const ownIbanToDimension = new Map<string, Set<number>>();
   const dimensionToIban = new Map<number, string>();
   for (const [dim, iban] of dims) {
@@ -43,7 +43,10 @@ function lookups(dims: Array<[number, string]>, target?: number): InterAccountMa
     set.add(dim);
     ownIbanToDimension.set(iban, set);
   }
-  return { ownIbanToDimension, dimensionToIban, companyName: "naide", companyLegalName: "Näide OÜ", targetAccountsDimensionsId: target };
+  return {
+    ownIbanToDimension, dimensionToIban, ownIbansWithoutDimension: new Set(ownIbansWithoutDimension),
+    companyName: "naide", companyLegalName: "Näide OÜ", targetAccountsDimensionsId: target,
+  };
 }
 
 const THREE_ACCOUNTS: Array<[number, string]> = [[100, "EE123456789012345678"], [300, WISE_IBAN], [400, "EE999999999999999999"]];
@@ -89,6 +92,44 @@ describe("inferOneSidedTransfer with a CAMT marker IBAN", () => {
     const inference = inferOneSidedTransfer(tamperSig(camtRow(1)), lookups(THREE_ACCOUNTS), new Map());
     expect(inference.reasons).not.toContain("counterparty_iban_is_own_account");
     expect(inference.targetDimension).toBeUndefined();
+  });
+});
+
+describe("inferOneSidedTransfer with an own IBAN that cannot be booked", () => {
+  const TWO_ACCOUNTS: Array<[number, string]> = [[100, "EE123456789012345678"], [300, WISE_IBAN]];
+  const EXTERNAL = "EE471000001020145685";
+  /** A plain (non-CAMT) row paying `iban` under the company's own name. */
+  function ownNameRow(iban: string | null): Transaction {
+    return {
+      id: 7, status: "PROJECT", is_deleted: false, type: "C", amount: 60, cl_currencies_id: "EUR", date: "2026-01-21",
+      accounts_dimensions_id: 100, bank_account_name: "Näide OÜ", bank_account_no: iban,
+    } as unknown as Transaction;
+  }
+
+  it("keeps the company-name fallback for an unregistered IBAN (a provider's pooled top-up IBAN looks like this)", () => {
+    const inference = inferOneSidedTransfer(ownNameRow(EXTERNAL), lookups(TWO_ACCOUNTS), new Map());
+    expect(inference.targetDimension).toBe(300);
+    expect(inference.unbookableOwnIban).toBeUndefined();
+  });
+
+  it("still infers by name when the row has no counterparty IBAN", () => {
+    const inference = inferOneSidedTransfer(ownNameRow(null), lookups(TWO_ACCOUNTS), new Map());
+    expect(inference.targetDimension).toBe(300);
+    expect(inference.reasons).toEqual(["counterparty_name_matches_company", "only_one_other_account"]);
+    expect(inference.unbookableOwnIban).toBeUndefined();
+  });
+
+  it("holds a row paying an own account that has no dimension, whatever the name", () => {
+    const row = { ...ownNameRow(EXTERNAL), bank_account_name: "Bank" } as Transaction;
+    const inference = inferOneSidedTransfer(row, lookups(TWO_ACCOUNTS, undefined, [EXTERNAL]), new Map());
+    expect(inference.targetDimension).toBeUndefined();
+    expect(inference.reasons).toEqual(["counterparty_iban_own_account_without_dimension"]);
+    expect(inference.unbookableOwnIban).toBe(EXTERNAL);
+  });
+
+  it("is a plain non-inference for an external IBAN under a third-party name", () => {
+    const row = { ...ownNameRow(EXTERNAL), bank_account_name: "Kaupmees AS" } as Transaction;
+    expect(inferOneSidedTransfer(row, lookups(TWO_ACCOUNTS), new Map())).toEqual({ confidence: 0, reasons: [] });
   });
 });
 

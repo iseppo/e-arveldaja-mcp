@@ -201,12 +201,16 @@ export interface OneSidedInference {
   reasons: string[];
   /** The own accounts behind a shared counterparty IBAN when no single target could be chosen. */
   ambiguousTargetDimensions?: number[];
+  /** The row's counterparty IBAN is an own bank account without a booking dimension: review only. */
+  unbookableOwnIban?: string;
 }
 
 /** The read-only account lookups + config the matcher closes over per run. */
 export interface InterAccountMatchLookups {
   readonly ownIbanToDimension: Map<string, Set<number>>;
   readonly dimensionToIban: Map<number, string>;
+  /** Own identifiers of accounts without a dimension (see BankAccountLookups). */
+  readonly ownIbansWithoutDimension: ReadonlySet<string>;
   readonly companyName: string;
   /** The company's raw registered name (with legal form), for {@link sameCompanyIdentity}. */
   readonly companyLegalName: string;
@@ -256,6 +260,19 @@ export function inferOneSidedTransfer(
         reasons.push("counterparty_iban_maps_to_multiple_own_accounts");
       }
     }
+  }
+
+  // The IBAN is provably one of the company's own bank accounts, but one without a
+  // dimension: the transfer cannot be booked to it, and the company-name fallback
+  // below must never redirect it to a different own account. Review only.
+  // (An unregistered IBAN under the company's name keeps the name fallback: that is
+  // also how a top-up to a payment provider's pooled IBAN looks.)
+  if (counterpartyIban && lookups.ownIbansWithoutDimension.has(counterpartyIban)) {
+    const result: OneSidedInference = {
+      confidence: 0, reasons: ["counterparty_iban_own_account_without_dimension"], unbookableOwnIban: counterpartyIban,
+    };
+    if (tx.id) cache.set(tx.id, result);
+    return result;
   }
 
   if (!targetDimension && !ibanTargetAmbiguous && companyName.length >= 4 && counterpartyName.length >= 4) {

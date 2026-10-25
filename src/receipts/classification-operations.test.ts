@@ -1056,6 +1056,23 @@ describe("classification operations — ledger context (F6)", () => {
     expect(outcome.value.groups[0]!.suggested_booking.source).not.toBe("transaction_history");
   });
 
+  it("a row paying an own bank account without a dimension is an own transfer for review, never a group or a name-inferred target", async () => {
+    const SAVINGS = "EE470000000000000999";
+    const transfer = camtRow({ id: 3, amount: 900, date: "2026-09-14", direction: "DBIT", name: "Näide OÜ", iban: SAVINGS });
+    const { operations } = ledgerOperations({
+      rows: [transfer],
+      bankAccounts: [...BANK_ACCOUNTS, { iban_code: SAVINGS, account_name_est: "Savings" }],
+    });
+    const result = await analyze(operations);
+    expect(result.groups).toEqual([]);
+    expect(result.ownTransfers).toEqual([expect.objectContaining({
+      transaction_id: 3,
+      target_dimension_id: null,
+      reasons: ["counterparty_iban_own_account_without_dimension"],
+    })]);
+    expect(result.ownTransfers[0]!.next_action).toContain(SAVINGS);
+  });
+
   it("(b) a row whose marker IBAN is the own account of dim 200 is an own transfer with target 200, not a group", async () => {
     const transfer = camtRow({ id: 2, amount: 900, date: "2026-09-14", direction: "CRDT", name: "Näide OU", iban: OWN_WISE });
     const { operations } = ledgerOperations({ rows: [transfer] });

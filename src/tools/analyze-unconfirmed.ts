@@ -74,7 +74,7 @@ interface Suggestion {
   match_confidence?: number;
   candidate_invoices?: Array<{ related_table: string; related_id: number }>;
   /** Set on a review whose CAMT marker sig fails the checksum. */
-  code?: "camt_marker_unverified";
+  code?: "camt_marker_unverified" | "own_account_not_bookable";
 }
 
 /** One analyze_unconfirmed_transactions suggestion on the wire: the free text is sandbox-wrapped (absent when empty). */
@@ -166,7 +166,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       const saleIndex = buildInvoiceIndex(openSales);
       const purchaseIndex = buildInvoiceIndex(openPurchases);
 
-      const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds } =
+      const { ownIbanToDimension, dimensionToIban, dimensionToTitle, dimensionToAccountsId, ownDimensionIds, ownIbansWithoutDimension } =
         buildBankAccountLookups(bankAccounts, accountDimensions);
       const companyLegalName = invoiceInfo.invoice_company_name ?? "";
 
@@ -177,7 +177,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
       // A confirm_inter_account distribution for such a row would double-book.
       const allProject = allTx.filter(isProjectTransaction);
       const inferenceLookups = {
-        ownIbanToDimension, dimensionToIban, companyName: normalizeCompanyName(companyLegalName), companyLegalName,
+        ownIbanToDimension, dimensionToIban, ownIbansWithoutDimension, companyName: normalizeCompanyName(companyLegalName), companyLegalName,
         targetAccountsDimensionsId: undefined,
       };
       const inferenceCache = new Map<number, OneSidedInference>();
@@ -507,6 +507,16 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             });
             isInterAccount = true;
           }
+        }
+
+        // The counterparty IBAN is an own bank account without a dimension: never
+        // suggest a different own account by name (reconcile holds it too).
+        if (!isInterAccount && !markerUnverified && counterpartyIban && ownIbansWithoutDimension.has(counterpartyIban)) {
+          suggestions.push({
+            ...heldForReview(`Own-account transfer to ${counterpartyIban}, a bank account without an accounting dimension; give it a dimension in e-arveldaja, then reconcile.`),
+            code: "own_account_not_bookable",
+          });
+          isInterAccount = true;
         }
 
         // Check counterparty name matches company name
