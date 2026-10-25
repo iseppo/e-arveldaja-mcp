@@ -6,7 +6,7 @@ import { readOnly } from "./annotations.js";
 import { sandboxExternalText } from "./external-text-renderer.js";
 import { registerTool } from "./mcp-compat.js";
 import { toMcpJson } from "./mcp-json.js";
-import { PlanStoreError, type PlanData } from "./plan-store.js";
+import { PlanStoreError, type EXECUTION_PLAN_SCHEMA, type PlanData, type PlanRecord } from "./plan-store.js";
 import type { RuntimeSafetyContext } from "./runtime-safety-context.js";
 import type { ToolProfile } from "./tool-profile.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS, ResponseBudgetError } from "./response-budget.js";
@@ -20,6 +20,25 @@ type PlanPageSection = "commands" | "exclusions" | "reviews";
 type PlanPageArgs = { plan_handle: string; section?: PlanPageSection; cursor?: string };
 type PlanPageDetail = "summary" | "full";
 type GuidedPlanPageArgs = PlanPageArgs & { page_size?: number; detail?: PlanPageDetail };
+type PlanPageReference = { tool: "get_execution_plan_page"; args: { plan_handle: string; section: "exclusions" | "reviews" } };
+/** The standard/full get_execution_plan_page payload; review_data is sandbox-wrapped canonical JSON. */
+export type ExecutionPlanPagePayload = {
+  contract: "execution_plan_page_v1";
+  plan_handle: string;
+  plan_schema: typeof EXECUTION_PLAN_SCHEMA;
+  operation: string;
+  total_commands: number;
+  category_counts: PlanRecord;
+  monetary_totals: PlanRecord;
+  section: PlanPageSection;
+  section_total: number;
+  range: { from: number; to: number; count: number };
+  current_cursor: string | null;
+  next_cursor: string | null;
+  review_sections: { exclusions: { count: number; page_reference: PlanPageReference }; reviews: { count: number; page_reference: PlanPageReference } };
+  commands?: ReadonlyArray<{ command_id: string; category: string; review_data: string }>;
+  items?: ReadonlyArray<{ review_data: string }>;
+};
 const GUIDED_PLAN_PAGE_SIZE = 20;
 const MAX_GUIDED_PLAN_PAGE_SIZE = 50;
 const GUIDED_CURSOR_PATTERN = /^p2\.(0|[1-9][0-9]{0,6})\.([A-Za-z0-9_-]{43})$/;
@@ -196,7 +215,7 @@ export function createExecutionPlanPageHandler(
           review_data: sandboxExternalText(canonicalJson(item)),
         }));
       let end = maximumEnd;
-      const build = () => Object.freeze({
+      const build = (): ExecutionPlanPagePayload => Object.freeze({
         contract: "execution_plan_page_v1" as const,
         plan_handle,
         plan_schema: plan.schema,

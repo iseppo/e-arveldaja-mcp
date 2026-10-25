@@ -39,8 +39,10 @@ import {
 import {
   WISE_COMMAND_VERSION,
   type FeeCreateCommand,
+  type InterAccountCommand,
   type MainCreateCommand,
   type TransactionCreatePayload,
+  type WiseCommandBase,
   type WiseAlreadyJournalizedAssertion,
   type WiseCreatedEntry,
   type WiseImportCommand,
@@ -154,7 +156,41 @@ function projectUntrustedCommandText(
   return `${UNTRUSTED_OCR_START_PREFIX}${nonce}>>\n${text}\n${UNTRUSTED_OCR_END_PREFIX}${nonce}>>`;
 }
 
-function projectTransactionCreatePayload(command: MainCreateCommand | FeeCreateCommand): Record<string, unknown> {
+/** The review projection of a command's create payload: free text sandbox-wrapped (null stays null). */
+export type WiseProjectedCreatePayload = Pick<
+  TransactionCreatePayload,
+  "accounts_dimensions_id" | "type" | "amount" | "cl_currencies_id" | "date" | "clients_id"
+> & {
+  bank_account_name?: string | null;
+  ref_number?: string | null;
+  description?: string | null;
+};
+
+/**
+ * A compiled command as the dry run / execute envelope lists it (execution.commands).
+ * The action-specific fields are optional: `action` is not narrowed in the projection,
+ * so the type is flat rather than discriminated. main_create carries create_payload;
+ * fee_create_and_confirm adds the posting/client fields and confirmation_distribution;
+ * inter_account carries the counterpart/flow/ownership fields and no create_payload.
+ */
+export type WiseProjectedCommand = Pick<
+  WiseCommandBase,
+  | "date" | "row_key" | "identity_hash" | "wise_id" | "transaction_type" | "source_direction" | "booked_amount" | "booked_currency"
+  | "source_amount" | "source_currency" | "target_amount" | "target_currency" | "exchange_rate" | "exchange_rate_orientation"
+  | "wise_dimension_id" | "depends_on"
+> & {
+  action: WiseImportCommand["action"];
+  create_payload?: WiseProjectedCreatePayload;
+  posting_account_id?: number;
+  posting_dimension_id?: number;
+  wise_client_id?: number;
+  confirmation_distribution?: FeeCreateCommand["confirmation_distribution"] | InterAccountCommand["confirmation_distribution"];
+} & Partial<Pick<
+  InterAccountCommand,
+  "counterpart_dimension_id" | "flow_source_dimension_id" | "flow_target_dimension_id" | "ownership_basis" | "client_update"
+>>;
+
+function projectTransactionCreatePayload(command: MainCreateCommand | FeeCreateCommand): WiseProjectedCreatePayload {
   const payload = command.create_payload;
   return {
     accounts_dimensions_id: payload.accounts_dimensions_id,
@@ -175,7 +211,7 @@ function projectTransactionCreatePayload(command: MainCreateCommand | FeeCreateC
   };
 }
 
-export function projectWiseCommand(command: WiseImportCommand): Record<string, unknown> {
+export function projectWiseCommand(command: WiseImportCommand): WiseProjectedCommand {
   const common = {
     action: command.action,
     date: command.date,

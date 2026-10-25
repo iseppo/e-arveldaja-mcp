@@ -1,6 +1,6 @@
 import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
-import { buildBatchExecutionContract } from "../batch-execution.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildBatchExecutionContract, type BatchExecutionContract } from "../batch-execution.js";
+import { buildWorkflowEnvelope, type WorkflowEnvelope } from "../workflow-response.js";
 import { toolError } from "../tool-error.js";
 import { roundMoney } from "../money.js";
 import { cappedWarnings, compactImportStatus, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
@@ -11,15 +11,16 @@ import {
   type OperationResultStore,
   type PublicOperationResultDetail,
 } from "../operation-result-store.js";
-import { importPreflightFailurePayload } from "../camt/presenter.js";
+import { importPreflightFailurePayload, type ImportPreflightFailurePayload } from "../camt/presenter.js";
 import type { PlanStoreError } from "../plan-store.js";
 import { echoableSourcePath, type FileInputSource, type FileInputIdentity } from "../file-input-snapshot.js";
 import {
   bookedCurrencyForWiseRow,
   counterpartyNameForWiseRow,
   summarizeWiseSkippedEntries,
+  type WiseSkippedGroup,
 } from "./preflight.js";
-import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN } from "./projection.js";
+import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN, type WiseProjectedCommand } from "./projection.js";
 import { WISE_COMMAND_VERSION } from "./types.js";
 import type { WiseFailure } from "./executor.js";
 import type {
@@ -35,6 +36,114 @@ import type {
   WiseJournalizedTransferMapping,
   WiseTransferReview,
 } from "./types.js";
+
+// --- Wire payload types ------------------------------------------------------
+//
+// The envelopes as a consumer decodes them (toMcpJson drops undefined fields,
+// so conditionally spread / possibly-undefined fields are optional). Tests
+// parse tool payloads as these types (parseToolPayload<T>).
+
+/** A non-preflight failure envelope (plan gate, digest, ownership, store, drift, setup). */
+export type WiseFailurePayload = {
+  error: string;
+  category?: string;
+  code?: string;
+  retry: "never";
+  mutation_occurred: false;
+  known_object_ids?: number[];
+  affected_cache_names?: string[];
+  next_action?: string;
+};
+
+/** The preflight-rejection envelope, shared with CAMT. */
+export type WisePreflightFailurePayload = ImportPreflightFailurePayload;
+
+export type WiseImportSummary = {
+  total_csv_rows: number;
+  eligible: number;
+  filtered_out: number;
+  skipped_jar_transfers: number;
+  created: number;
+  skipped: number;
+  error_count: number;
+  inter_account_total: number;
+  needs_review: number;
+};
+
+/** A created / would-create row (description and source row stay internal). */
+export type WiseImportResultRow = Omit<WiseCreatedEntry, "description" | "source_row">;
+
+/** A skipped / errored row with its reason sandbox-wrapped (kind and record_id stay internal). */
+export type WiseImportSkippedRow = Omit<WiseSkippedEntry, "kind" | "record_id">;
+
+export type WiseInvoiceCurrencyFixes = {
+  total: number;
+  foreign_currency_lock: number;
+  eur_legacy_autofix: number;
+  advisory_only: true;
+  candidates: Array<Omit<WiseInvoiceFixCandidate, "row_index" | "current_object_state">>;
+};
+
+export type WiseAlreadyJournalizedRow = Pick<
+  WiseAlreadyJournalizedAssertion,
+  "wise_id" | "existing_journal_id" | "date" | "booked_amount" | "booked_currency" | "source_direction"
+>;
+
+export type WiseImportExecutionContract =
+  BatchExecutionContract<WiseImportResultRow, WiseImportSkippedRow, WiseImportSkippedRow, WiseTransferReview> & {
+    commands: WiseProjectedCommand[];
+    skipped_displayed?: number;
+    skipped_omitted_already_booked?: number;
+    skipped_omitted_note?: string;
+    already_journalized_count?: number;
+    already_journalized_auto_matched_count?: number;
+    already_journalized_rows?: WiseAlreadyJournalizedRow[];
+    already_journalized_note?: string;
+  };
+
+/** The full (standard/full profile) import_wise_transactions envelope, dry run and execute. */
+export type WiseImportFullPayload = {
+  mode: "DRY_RUN" | "EXECUTED";
+  source_file_ref?: string;
+  source_file?: string;
+  source_identity?: FileInputIdentity;
+  source_resubmission_required?: true;
+  summary: WiseImportSummary;
+  workflow: WorkflowEnvelope;
+  total_csv_rows: number;
+  eligible: number;
+  filtered_out: number;
+  skipped_jar_transfers?: number;
+  skipped_jar_transfer_details?: WiseSkippedJarRow[];
+  created: number;
+  skipped: number;
+  approved_command_digest?: string;
+  plan_handle?: string;
+  command_version: typeof WISE_COMMAND_VERSION;
+  command_count: number;
+  inter_account_auto_detected_dimension_id?: number;
+  inter_account_reconciliation?: {
+    total: number;
+    already_journalized: number;
+    confirmed: number;
+    details: WiseInterAccountResult[];
+  };
+  transfer_counterpart_unresolved?: {
+    message: string;
+    unresolved_row_count: number;
+    conflict_row_count: number;
+    candidates: Array<{ accounts_dimensions_id: number; label: string }>;
+  };
+  acknowledged_holds?: WiseAcknowledgedJournalHold[];
+  ownership_reviews?: WiseTransferReview[];
+  invoice_currency_fixes?: WiseInvoiceCurrencyFixes;
+  results: WiseImportResultRow[];
+  skipped_details: WiseSkippedGroup[];
+  execution: WiseImportExecutionContract;
+};
+
+/** The compact (guided-profile) envelope. */
+export type WiseImportCompactPayload = { summary: OperationSummaryV1 };
 
 // OUTPUT layer. The only Wise module that shapes MCP envelopes and applies the
 // OCR/untrusted-text sandbox (wrapUntrustedOcr). The pure preflight/projection
@@ -55,7 +164,7 @@ export function wisePreflightFailure(rejected: ImportRejectedField[]) {
 type SimpleWiseFailureKind = Exclude<WiseFailure["kind"], "preflight" | "plan_store_error" | "plan_drift">;
 
 /** The fixed non-mutating envelope payload of each data-less failure kind. */
-const SIMPLE_WISE_FAILURES: Readonly<Record<SimpleWiseFailureKind, Record<string, unknown>>> = {
+const SIMPLE_WISE_FAILURES: Readonly<Record<SimpleWiseFailureKind, WiseFailurePayload>> = {
   digest_mismatch: {
     error: "The Wise command approval digest does not match the current mutation plan.",
     category: "digest_mismatch",
@@ -122,7 +231,7 @@ function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "message">) {
     mutation_occurred: false,
     known_object_ids: [],
     affected_cache_names: [],
-  });
+  } satisfies WiseFailurePayload);
 }
 
 
@@ -138,7 +247,7 @@ function planDriftResult(detail: string) {
     known_object_ids: [],
     affected_cache_names: [],
     next_action: "Run a new Wise dry run, review the fresh plan, and execute with its new plan handle and digest.",
-  });
+  } satisfies WiseFailurePayload);
 }
 
 
@@ -285,7 +394,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     inter_account_total: interAccountResults.length,
     needs_review: ownershipReviews.length,
   };
-  const invoiceCurrencyFixes = invoiceFixCandidates.length > 0
+  const invoiceCurrencyFixes: WiseInvoiceCurrencyFixes | undefined = invoiceFixCandidates.length > 0
     ? {
         total: invoiceFixCandidates.length,
         foreign_currency_lock: invoiceFixCandidates.filter(f => f.category === "foreign_currency_lock").length,
@@ -460,7 +569,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
             already_journalized_note: "Not part of the approved commands: no writes. Execute re-checks each journal once, after all writes, and reports a changed journal as an error. already_journalized_auto_matched_count of these rows are legacy transfers matched automatically (see skipped_details auto_match).",
           } : {}),
         },
-      }),
+      } satisfies WiseImportFullPayload),
     }],
   };
 }
@@ -543,7 +652,7 @@ interface WiseCompactInput {
   readonly operationHandle?: string;
 }
 
-export function renderWiseImportCompact(input: WiseCompactInput): { summary: OperationSummaryV1 } {
+export function renderWiseImportCompact(input: WiseCompactInput): WiseImportCompactPayload {
   const { data } = input;
   const dryRun = data.mode === "DRY_RUN";
   // A dry run with no commands has nothing to approve and issues no plan.

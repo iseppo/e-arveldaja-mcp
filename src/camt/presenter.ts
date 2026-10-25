@@ -44,6 +44,18 @@ export function journalReviewClause(count: number): string {
   return count > 0 ? ` (${count} of them left unimported for existing-journal review)` : "";
 }
 
+export type ImportPreflightFailurePayload = {
+  error: "Import preflight failed";
+  category: "import_preflight_failed";
+  source: "camt" | "wise";
+  rejected_field_count: number;
+  rejected_fields_truncated: boolean;
+  /** `value` is sandbox-wrapped (absent only for an unreachable undefined). */
+  rejected_fields: Array<{ source_row_id: string; field: string; value?: string; reason: string }>;
+  retry: "never";
+  mutation_occurred: false;
+};
+
 /**
  * Bounded, sandboxed failure payload. The fixed `error` string is load-bearing:
  * without it toolError() falls through to serializeUnknownError(), which
@@ -54,7 +66,7 @@ export function journalReviewClause(count: number): string {
 export function importPreflightFailurePayload(
   source: "camt" | "wise",
   rejected: ImportRejectedField[],
-): Record<string, unknown> {
+): ImportPreflightFailurePayload {
   return {
     error: "Import preflight failed",
     category: "import_preflight_failed",
