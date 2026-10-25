@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseSource } from "@babel/parser";
 
 export type DiagnosticCounts = Record<string, Record<string, number>>;
 
@@ -36,6 +37,11 @@ export interface UpdatePlan {
   /** Per-key increases; they block the update unless forced, and are warnings when forced. */
   increases: string[];
 }
+
+/** Pseudo-codes counted next to the tsc codes: they ratchet the same way, so loose typing can only shrink. */
+export const ANY_CODE = "ANY";
+export const UNTYPED_PAYLOAD_CODE = "UNTYPED_PAYLOAD";
+const UNTYPED_PAYLOAD_MODULE_RE = /(?:^|\/)__fixtures__\/mcp-response(?:\.js)?$/;
 
 const HEADER_RE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): /;
 const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:\//;
@@ -170,8 +176,78 @@ export function findUncheckedTestFiles(programFiles: readonly string[], testFile
   return testFiles.filter(file => !inProgram.has(file)).sort();
 }
 
-export function summaryLine(total: number, ts18046: number, baselineTotal: number | string): string {
-  return `TEST_TYPECHECK total=${total} ts18046=${ts18046} other=${total - ts18046} baseline_total=${baselineTotal}`;
+type AstNode = { type: string; [key: string]: unknown };
+
+function isAstNode(value: unknown): value is AstNode {
+  return typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
+}
+
+function walkAst(node: AstNode, visit: (node: AstNode) => void): void {
+  visit(node);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "loc" || key.endsWith("Comments")) continue;
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (isAstNode(child)) walkAst(child, visit);
+    }
+  }
+}
+
+/**
+ * Loose typing in one test source: explicit `any` annotations (`as any`, `: any`, `any[]`, ...) and calls to
+ * the any-returning `parseMcpResponse` from __fixtures__/mcp-response (typed code uses parseToolPayload<T>).
+ */
+export function countLooseTyping(source: string): { any: number; untypedPayload: number } {
+  const ast = parseSource(source, { sourceType: "module", plugins: ["typescript"] }) as unknown as { program: AstNode };
+  const untypedNames = new Set<string>();
+  for (const statement of ast.program.body as AstNode[]) {
+    const from = (statement.source as { value?: unknown } | undefined)?.value;
+    if (statement.type !== "ImportDeclaration" || typeof from !== "string" || !UNTYPED_PAYLOAD_MODULE_RE.test(from)) continue;
+    for (const specifier of statement.specifiers as AstNode[]) {
+      const imported = specifier.imported as { name?: string; value?: string } | undefined;
+      if (specifier.type === "ImportSpecifier" && (imported?.name ?? imported?.value) === "parseMcpResponse") {
+        untypedNames.add((specifier.local as { name: string }).name);
+      }
+    }
+  }
+  let any = 0;
+  let untypedPayload = 0;
+  walkAst(ast.program, node => {
+    if (node.type === "TSAnyKeyword") any += 1;
+    const callee = node.callee as AstNode | undefined;
+    if (node.type === "CallExpression" && callee?.type === "Identifier" && untypedNames.has(callee.name as string)) untypedPayload += 1;
+  });
+  return { any, untypedPayload };
+}
+
+/** Test-support sources (tests, fixtures, integration) whose loose typing is ratcheted. */
+export function isTestSupportFile(file: string): boolean {
+  return file.startsWith("src/") && file.endsWith(".ts")
+    && (file.endsWith(".test.ts") || file.includes("/__fixtures__/") || file.includes("/__integration__/"));
+}
+
+/** Add the loose-typing pseudo-codes to the per-(file, code) counts. */
+export function addLooseTypingCounts(
+  counts: DiagnosticCounts,
+  files: ReadonlyArray<{ file: string; any: number; untypedPayload: number }>,
+): DiagnosticCounts {
+  const merged: DiagnosticCounts = {};
+  for (const [file, codes] of Object.entries(counts)) merged[file] = { ...codes };
+  for (const { file, any, untypedPayload } of files) {
+    if (any > 0) (merged[file] ??= {})[ANY_CODE] = any;
+    if (untypedPayload > 0) (merged[file] ??= {})[UNTYPED_PAYLOAD_CODE] = untypedPayload;
+  }
+  return buildBaseline(merged).errors;
+}
+
+export function summaryLine(counts: {
+  tsc: number;
+  ts18046: number;
+  any: number;
+  untypedPayload: number;
+}, baselineTotal: number | string): string {
+  const total = counts.tsc + counts.any + counts.untypedPayload;
+  return `TEST_TYPECHECK total=${total} tsc=${counts.tsc} ts18046=${counts.ts18046} other=${counts.tsc - counts.ts18046}`
+    + ` any=${counts.any} untyped_payload=${counts.untypedPayload} baseline_total=${baselineTotal}`;
 }
 
 const thisPath = fileURLToPath(import.meta.url);
@@ -218,17 +294,24 @@ function main(): number {
   if (listed.status !== 0 || testFiles.length === 0 || unchecked.length > 0) {
     console.error(`tsconfig.test.json does not cover every test file (tsc --listFilesOnly status ${listed.status}, ${testFiles.length} test files):`);
     for (const file of unchecked) console.error(`  not in program: ${file}`);
-    console.log(summaryLine(0, 0, baselineTotal));
+    console.log(summaryLine({ tsc: 0, ts18046: 0, any: 0, untypedPayload: 0 }, baselineTotal));
     return 2;
   }
 
   const { status, output } = runTsc();
   const { diagnostics, unparseable } = parseDiagnostics(output, repoRoot);
-  const current = summarizeDiagnostics(diagnostics);
-  const total = diagnostics.length;
-  const ts18046 = diagnostics.filter(d => d.code === "TS18046").length;
+  const loose = programFiles.filter(isTestSupportFile).sort()
+    .map(file => ({ file, ...countLooseTyping(readFileSync(resolve(repoRoot, file), "utf8")) }));
+  const current = addLooseTypingCounts(summarizeDiagnostics(diagnostics), loose);
+  const total = buildBaseline(current).total;
+  const counts = {
+    tsc: diagnostics.length,
+    ts18046: diagnostics.filter(d => d.code === "TS18046").length,
+    any: loose.reduce((sum, file) => sum + file.any, 0),
+    untypedPayload: loose.reduce((sum, file) => sum + file.untypedPayload, 0),
+  };
   const finish = (code: number, baselineShown: number | string = baselineTotal): number => {
-    console.log(summaryLine(total, ts18046, baselineShown));
+    console.log(summaryLine(counts, baselineShown));
     return code;
   };
 
@@ -264,7 +347,7 @@ function main(): number {
   }
   const comparison = compareToBaseline(current, baseline.errors);
   for (const line of comparison.increases) console.error(line);
-  if (comparison.stale) console.error("baseline stale: run npm run typecheck:tests:update");
+  if (comparison.stale) console.error("baseline stale (fewer errors or loose types than recorded): run npm run typecheck:tests:update");
   return finish(comparison.ok ? 0 : 1);
 }
 

@@ -673,6 +673,11 @@ npx tsc               # Full build to dist/
 npm run typecheck:tests   # typecheck tests + fixtures against the ratchet baseline
 ```
 
+Test typing ratchet: `npm run typecheck:tests` also counts explicit `any` and untyped `parseMcpResponse` calls in
+test sources (codes `ANY` / `UNTYPED_PAYLOAD`); they may only go down. Parse tool payloads with
+`parseToolPayload<T>()` from `src/__fixtures__/mcp-response.ts`, where `T` is the payload type the producing
+presenter exports. After removing loose typing, run `npm run typecheck:tests:update`.
+
 Unit tests use **vitest**:
 ```bash
 npm run test              # vitest run (all unit tests)

@@ -1,6 +1,320 @@
 {
-  "by_code": {},
-  "errors": {},
-  "total": 0,
+  "by_code": {
+    "ANY": 1752,
+    "UNTYPED_PAYLOAD": 605
+  },
+  "errors": {
+    "src/__fixtures__/document-reading/legacy-draft.ts": {
+      "ANY": 5
+    },
+    "src/__fixtures__/document-reading/verified-draft.ts": {
+      "ANY": 2
+    },
+    "src/__fixtures__/mcp-response.ts": {
+      "ANY": 1
+    },
+    "src/__fixtures__/nondeductible-vat.ts": {
+      "ANY": 1
+    },
+    "src/__fixtures__/receipt-attachment-transport.ts": {
+      "ANY": 18
+    },
+    "src/__integration__/mcp-connection.integration.test.ts": {
+      "ANY": 19,
+      "UNTYPED_PAYLOAD": 15
+    },
+    "src/accounting-rules.test.ts": {
+      "ANY": 21
+    },
+    "src/api/base-resource.test.ts": {
+      "ANY": 5
+    },
+    "src/api/document-methods.test.ts": {
+      "ANY": 2
+    },
+    "src/api/purchase-invoices-nondeductible.api.test.ts": {
+      "ANY": 9
+    },
+    "src/api/purchase-invoices.api.test.ts": {
+      "ANY": 38
+    },
+    "src/api/transactions-reviewed.test.ts": {
+      "ANY": 9
+    },
+    "src/api/transactions.api.test.ts": {
+      "ANY": 1
+    },
+    "src/bank-posting-duplicate-guard.test.ts": {
+      "ANY": 1
+    },
+    "src/bank-transaction-journal-direction.test.ts": {
+      "ANY": 1
+    },
+    "src/banking/eur-amount-proof.test.ts": {
+      "ANY": 4
+    },
+    "src/banking/process-safety.test.ts": {
+      "ANY": 15
+    },
+    "src/banking/reconciliation/compact-routing.test.ts": {
+      "ANY": 10
+    },
+    "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
+      "ANY": 1
+    },
+    "src/banking/reconciliation/empty-work.test.ts": {
+      "ANY": 10
+    },
+    "src/banking/reconciliation/operations.test.ts": {
+      "ANY": 4
+    },
+    "src/banking/transaction-material-snapshot.test.ts": {
+      "ANY": 1
+    },
+    "src/banking/transfer-process-safety.test.ts": {
+      "ANY": 19
+    },
+    "src/cache-control.test.ts": {
+      "ANY": 2,
+      "UNTYPED_PAYLOAD": 2
+    },
+    "src/camt/compact-routing.test.ts": {
+      "UNTYPED_PAYLOAD": 1
+    },
+    "src/camt/duplicate-identity.test.ts": {
+      "ANY": 2
+    },
+    "src/detail-page.test.ts": {
+      "ANY": 1
+    },
+    "src/documents/nondeductible-vat.integration-paths.test.ts": {
+      "ANY": 2
+    },
+    "src/documents/process-purchase-safety.test.ts": {
+      "ANY": 12
+    },
+    "src/documents/purchase-draft-verification.test.ts": {
+      "ANY": 3
+    },
+    "src/documents/purchase-intake-concurrency.test.ts": {
+      "ANY": 17
+    },
+    "src/documents/purchase-invoice-lock.test.ts": {
+      "ANY": 2
+    },
+    "src/documents/reading-operations-create.test.ts": {
+      "ANY": 11
+    },
+    "src/elicitation.test.ts": {
+      "ANY": 1
+    },
+    "src/file-input-snapshot.test.ts": {
+      "ANY": 2
+    },
+    "src/guided/manage-sale-invoice.test.ts": {
+      "ANY": 2
+    },
+    "src/guided/process-accounting-document-reading.test.ts": {
+      "ANY": 2
+    },
+    "src/guided/process-accounting-document.test.ts": {
+      "ANY": 4
+    },
+    "src/guided/process-bank-input.test.ts": {
+      "ANY": 4
+    },
+    "src/guided/run-accounting-report.test.ts": {
+      "ANY": 2
+    },
+    "src/guided/sales-recovery-regression.test.ts": {
+      "ANY": 21
+    },
+    "src/guided/search-accounting-records.test.ts": {
+      "ANY": 3
+    },
+    "src/mcp-compat.test.ts": {
+      "ANY": 4
+    },
+    "src/operation-outcome.test.ts": {
+      "ANY": 1
+    },
+    "src/operation-result-page.test.ts": {
+      "ANY": 3
+    },
+    "src/operation-result-store.test.ts": {
+      "ANY": 7
+    },
+    "src/operation-summary.test.ts": {
+      "ANY": 1
+    },
+    "src/plan-tools.test.ts": {
+      "ANY": 11
+    },
+    "src/prompt-review-contracts.test.ts": {
+      "ANY": 3
+    },
+    "src/prompts.test.ts": {
+      "ANY": 1
+    },
+    "src/public-tool-registrar.test.ts": {
+      "ANY": 1,
+      "UNTYPED_PAYLOAD": 2
+    },
+    "src/receipts/batch-operations.test.ts": {
+      "ANY": 30
+    },
+    "src/receipts/classification-operations.test.ts": {
+      "ANY": 19
+    },
+    "src/receipts/classification-presenter.test.ts": {
+      "ANY": 2
+    },
+    "src/receipts/presenter.test.ts": {
+      "ANY": 24
+    },
+    "src/reporting/annual-cash-flow.test.ts": {
+      "ANY": 1
+    },
+    "src/reporting/cash-flow-evidence.test.ts": {
+      "ANY": 7
+    },
+    "src/resources/dynamic-resources.test.ts": {
+      "ANY": 2
+    },
+    "src/server/purchase-pdf-confirm.protocol.test.ts": {
+      "ANY": 10
+    },
+    "src/tools/account-balance.test.ts": {
+      "ANY": 11
+    },
+    "src/tools/accounting-inbox-autopilot-service.test.ts": {
+      "ANY": 2
+    },
+    "src/tools/accounting-inbox.test.ts": {
+      "ANY": 248
+    },
+    "src/tools/analyze-unconfirmed.test.ts": {
+      "ANY": 8,
+      "UNTYPED_PAYLOAD": 38
+    },
+    "src/tools/annual-report.test.ts": {
+      "ANY": 25,
+      "UNTYPED_PAYLOAD": 17
+    },
+    "src/tools/bank-reconciliation.test.ts": {
+      "ANY": 164,
+      "UNTYPED_PAYLOAD": 202
+    },
+    "src/tools/camt-import-tools.test.ts": {
+      "ANY": 9,
+      "UNTYPED_PAYLOAD": 87
+    },
+    "src/tools/crud-tools.test.ts": {
+      "ANY": 12
+    },
+    "src/tools/crud/live-regressions.test.ts": {
+      "ANY": 1
+    },
+    "src/tools/crud/sale-discount-live.test.ts": {
+      "ANY": 2
+    },
+    "src/tools/currency-rounding.test.ts": {
+      "ANY": 34
+    },
+    "src/tools/document-attachments.test.ts": {
+      "ANY": 9
+    },
+    "src/tools/document-audit.test.ts": {
+      "ANY": 7,
+      "UNTYPED_PAYLOAD": 8
+    },
+    "src/tools/estonian-tax.test.ts": {
+      "ANY": 1,
+      "UNTYPED_PAYLOAD": 2
+    },
+    "src/tools/file-input-metadata.test.ts": {
+      "ANY": 8
+    },
+    "src/tools/financial-statements.test.ts": {
+      "ANY": 5,
+      "UNTYPED_PAYLOAD": 56
+    },
+    "src/tools/lightyear-investments.test.ts": {
+      "ANY": 338
+    },
+    "src/tools/pdf-workflow.test.ts": {
+      "ANY": 33,
+      "UNTYPED_PAYLOAD": 63
+    },
+    "src/tools/purchase-vat-defaults.test.ts": {
+      "ANY": 5
+    },
+    "src/tools/receipt-attachment-live-regression.test.ts": {
+      "ANY": 3
+    },
+    "src/tools/receipt-batch-failure.test.ts": {
+      "ANY": 50,
+      "UNTYPED_PAYLOAD": 17
+    },
+    "src/tools/receipt-folded-live-regression.test.ts": {
+      "ANY": 23
+    },
+    "src/tools/receipt-inbox-booking.test.ts": {
+      "ANY": 9
+    },
+    "src/tools/receipt-inbox-path.test.ts": {
+      "ANY": 2,
+      "UNTYPED_PAYLOAD": 1
+    },
+    "src/tools/receipt-inbox-tools.test.ts": {
+      "ANY": 43,
+      "UNTYPED_PAYLOAD": 40
+    },
+    "src/tools/receipt-inbox.test.ts": {
+      "ANY": 107
+    },
+    "src/tools/recurring-invoices.test.ts": {
+      "ANY": 4,
+      "UNTYPED_PAYLOAD": 21
+    },
+    "src/tools/reference-data-tools.test.ts": {
+      "ANY": 5
+    },
+    "src/tools/tool-exposure.test.ts": {
+      "ANY": 10
+    },
+    "src/tools/wise-import.test.ts": {
+      "ANY": 99,
+      "UNTYPED_PAYLOAD": 33
+    },
+    "src/tools/workflow-recommendations.test.ts": {
+      "ANY": 25
+    },
+    "src/transaction-status.test.ts": {
+      "ANY": 2
+    },
+    "src/wise/compact-routing.test.ts": {
+      "ANY": 3
+    },
+    "src/wise/operations.test.ts": {
+      "ANY": 1
+    },
+    "src/wise/presenter-shared.test.ts": {
+      "ANY": 2
+    },
+    "src/wise/presenter.test.ts": {
+      "ANY": 4
+    },
+    "src/workflow-page.test.ts": {
+      "ANY": 7
+    },
+    "src/workflow-response.test.ts": {
+      "ANY": 5
+    },
+    "src/workflow-state-store.test.ts": {
+      "ANY": 9
+    }
+  },
+  "total": 2357,
   "version": 1
 }

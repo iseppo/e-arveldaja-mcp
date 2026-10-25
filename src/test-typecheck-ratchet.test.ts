@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  addLooseTypingCounts,
   buildBaseline,
+  countLooseTyping,
+  isTestSupportFile,
   compareToBaseline,
   findUncheckedTestFiles,
   parseDiagnostics,
@@ -130,8 +133,68 @@ describe("findUncheckedTestFiles", () => {
   });
 });
 
+describe("countLooseTyping", () => {
+  it("counts every explicit any annotation, not the word in strings or comments", () => {
+    const source = [
+      "// any comment mentioning any",
+      "const a = value as any;",
+      "function f(x: any): any[] { return [x]; }",
+      "const r: Record<string, any> = {};",
+      "const s = 'any';",
+    ].join("\n");
+    expect(countLooseTyping(source)).toEqual({ any: 4, untypedPayload: 0 });
+  });
+
+  it("counts calls to the fixture's untyped parseMcpResponse, following an import alias", () => {
+    const source = [
+      'import { parseMcpResponse as parse } from "../__fixtures__/mcp-response.js";',
+      'import { parseToolPayload } from "../__fixtures__/mcp-response.js";',
+      "const a = parse(text) as any;",
+      "const b = parse(other);",
+      "const c = parseToolPayload<{ ok: boolean }>(text);",
+    ].join("\n");
+    expect(countLooseTyping(source)).toEqual({ any: 1, untypedPayload: 2 });
+  });
+
+  it("ignores parseMcpResponse imported from the production module (it returns unknown)", () => {
+    const source = 'import { parseMcpResponse } from "./mcp-json.js";\nconst a = parseMcpResponse(text);\n';
+    expect(countLooseTyping(source)).toEqual({ any: 0, untypedPayload: 0 });
+  });
+});
+
+describe("isTestSupportFile", () => {
+  it("covers tests, fixtures and integration sources only", () => {
+    expect(isTestSupportFile("src/a.test.ts")).toBe(true);
+    expect(isTestSupportFile("src/__fixtures__/mcp-response.ts")).toBe(true);
+    expect(isTestSupportFile("src/__integration__/helpers.ts")).toBe(true);
+    expect(isTestSupportFile("src/tools/bank-reconciliation.ts")).toBe(false);
+    expect(isTestSupportFile("scripts/check-test-typecheck.ts")).toBe(false);
+    expect(isTestSupportFile("node_modules/x/a.test.ts")).toBe(false);
+  });
+});
+
+describe("addLooseTypingCounts", () => {
+  it("merges the pseudo-codes into the tsc counts, sorted, skipping zeros", () => {
+    const merged = addLooseTypingCounts({ "src/b.test.ts": { TS2322: 1 } }, [
+      { file: "src/b.test.ts", any: 2, untypedPayload: 0 },
+      { file: "src/a.test.ts", any: 0, untypedPayload: 3 },
+      { file: "src/c.test.ts", any: 0, untypedPayload: 0 },
+    ]);
+    expect(merged).toEqual({ "src/a.test.ts": { UNTYPED_PAYLOAD: 3 }, "src/b.test.ts": { ANY: 2, TS2322: 1 } });
+  });
+
+  it("makes a new any an increase and a removed any a stale baseline", () => {
+    const baseline = addLooseTypingCounts({}, [{ file: "src/a.test.ts", any: 2, untypedPayload: 0 }]);
+    const more = addLooseTypingCounts({}, [{ file: "src/a.test.ts", any: 3, untypedPayload: 0 }]);
+    const fewer = addLooseTypingCounts({}, [{ file: "src/a.test.ts", any: 1, untypedPayload: 0 }]);
+    expect(compareToBaseline(more, baseline).increases).toEqual(["+1 src/a.test.ts ANY"]);
+    expect(compareToBaseline(fewer, baseline)).toEqual({ ok: false, increases: [], stale: true });
+  });
+});
+
 describe("summaryLine", () => {
   it("prints the machine-greppable totals", () => {
-    expect(summaryLine(1259, 941, 1259)).toBe("TEST_TYPECHECK total=1259 ts18046=941 other=318 baseline_total=1259");
+    expect(summaryLine({ tsc: 1259, ts18046: 941, any: 10, untypedPayload: 5 }, 1274))
+      .toBe("TEST_TYPECHECK total=1274 tsc=1259 ts18046=941 other=318 any=10 untyped_payload=5 baseline_total=1274");
   });
 });

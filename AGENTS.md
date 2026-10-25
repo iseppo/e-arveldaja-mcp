@@ -37,6 +37,11 @@ npm run build
 npm run test:integration
 ```
 
+Test typing ratchet: `npm run typecheck:tests` also counts explicit `any` and untyped `parseMcpResponse` calls in
+test sources (codes `ANY` / `UNTYPED_PAYLOAD`); they may only go down. Parse tool payloads with
+`parseToolPayload<T>()` from `src/__fixtures__/mcp-response.ts`, where `T` is the payload type the producing
+presenter exports. After removing loose typing, run `npm run typecheck:tests:update`.
+
 For release or publish work, also run:
 
 ```bash
