@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { registerCamtImportTools } from "../tools/camt-import.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { CamtImportCompactPayload, CamtImportFullPayload } from "./presenter.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import {
   createAccountingWorkflowApi,
@@ -32,20 +33,20 @@ function setup({ allowWrites = false }: { allowWrites?: boolean } = {}) {
   return { api, handler: getRegisteredToolHandler(server, "import_camt053") };
 }
 
-async function call(handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>, args: Record<string, unknown>) {
-  return parseMcpResponse((await handler(args)).content[0]!.text);
+async function call<T = CamtImportCompactPayload>(handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>, args: Record<string, unknown>): Promise<T> {
+  return parseToolPayload<T>((await handler(args)).content[0]!.text);
 }
 
 describe("CAMT compact profile routing", () => {
   it("standard profile keeps the full envelope (no compact summary)", async () => {
     const { handler } = setup();
-    const payload = await call(handler, { file_path: inline(fixtureCamtXml()), accounts_dimensions_id: 7, execute: false });
+    const payload = await call<CamtImportFullPayload>(handler, { file_path: inline(fixtureCamtXml()), accounts_dimensions_id: 7, execute: false });
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.statement_metadata).toBeDefined();
     expect(payload.execution).toBeDefined();
     expect(payload.summary).toBeDefined();
     // Full-envelope summary is a counts object, not the compact operation_summary_v1.
-    expect(payload.summary.contract).toBeUndefined();
+    expect(payload.summary).not.toHaveProperty("contract");
   });
 
   it("guided profile returns the compact operation summary with a plan handle on dry run", async () => {
@@ -55,15 +56,15 @@ describe("CAMT compact profile routing", () => {
       expect(payload.summary.contract).toBe("operation_summary_v1");
       expect(payload.summary.status).toBe("ready_for_approval");
       expect(typeof payload.summary.plan_handle).toBe("string");
-      expect(payload.summary.scope.account).toBe("EE637700771011212909");
+      expect(payload.summary.scope!.account).toBe("EE637700771011212909");
       // Statement identity: attacker-controllable statement_id is OCR-wrapped.
-      expect(payload.summary.scope.statement_id).toMatch(/UNTRUSTED_OCR_START/);
-      expect(payload.summary.scope.statement_id).toContain("stmt-1");
+      expect(payload.summary.scope!.statement_id).toMatch(/UNTRUSTED_OCR_START/);
+      expect(payload.summary.scope!.statement_id).toContain("stmt-1");
       // The new compact surface wraps display-only bank_reference too.
-      expect(payload.summary.samples[0].bank_reference).toMatch(/UNTRUSTED_OCR_START/);
-      expect(payload.summary.counts.would_create).toBe(1);
+      expect(payload.summary.samples![0]!.bank_reference).toMatch(/UNTRUSTED_OCR_START/);
+      expect(payload.summary.counts!.would_create).toBe(1);
       // No unbounded per-row array leaks into the compact surface.
-      expect(payload.statement_metadata).toBeUndefined();
+      expect(payload).not.toHaveProperty("statement_metadata");
     });
   });
 
@@ -71,12 +72,12 @@ describe("CAMT compact profile routing", () => {
     const { api, handler } = setup({ allowWrites: true });
     await runWithToolProfile("guided", async () => {
       const dry = await call(handler, { file_path: inline(fixtureCamtXml()), accounts_dimensions_id: 7, execute: false });
-      const planHandle = dry.summary.plan_handle as string;
+      const planHandle = dry.summary.plan_handle!;
       const exec = await call(handler, { file_path: inline(fixtureCamtXml()), accounts_dimensions_id: 7, execute: true, plan_handle: planHandle });
       expect(exec.summary.contract).toBe("operation_summary_v1");
       expect(exec.summary.status).toBe("completed");
-      expect(exec.summary.details.tool).toBe("get_operation_result_page");
-      expect(typeof exec.summary.details.args.operation_handle).toBe("string");
+      expect(exec.summary.details!.tool).toBe("get_operation_result_page");
+      expect(typeof exec.summary.details!.args.operation_handle).toBe("string");
       expect(api.transactions.create).toHaveBeenCalledTimes(1);
     });
   });

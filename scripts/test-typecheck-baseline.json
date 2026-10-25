@@ -1,7 +1,7 @@
 {
   "by_code": {
-    "ANY": 1553,
-    "UNTYPED_PAYLOAD": 332
+    "ANY": 1544,
+    "UNTYPED_PAYLOAD": 244
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -77,9 +77,6 @@
     "src/cache-control.test.ts": {
       "ANY": 2,
       "UNTYPED_PAYLOAD": 2
-    },
-    "src/camt/compact-routing.test.ts": {
-      "UNTYPED_PAYLOAD": 1
     },
     "src/camt/duplicate-identity.test.ts": {
       "ANY": 2
@@ -203,10 +200,6 @@
     "src/tools/bank-reconciliation.test.ts": {
       "ANY": 49
     },
-    "src/tools/camt-import-tools.test.ts": {
-      "ANY": 9,
-      "UNTYPED_PAYLOAD": 87
-    },
     "src/tools/crud-tools.test.ts": {
       "ANY": 12
     },
@@ -306,6 +299,6 @@
       "ANY": 9
     }
   },
-  "total": 1885,
+  "total": 1788,
   "version": 1
 }
