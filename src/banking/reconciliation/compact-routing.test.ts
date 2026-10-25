@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { registerBankReconciliationTools } from "../../tools/bank-reconciliation.js";
-import { parseMcpResponse } from "../../mcp-json.js";
+import { parseToolPayload } from "../../__fixtures__/mcp-response.js";
+import type { ReconCompactPayload, ReconSuggestPayload } from "./presenter.js";
+import type { ReconcileBankTransactionsPayload } from "../../tools/bank-reconciliation.js";
 import { runWithToolProfile } from "../../tool-profile.js";
 import { createTestRuntimeSafetyContext } from "../../__fixtures__/runtime-safety.js";
 
@@ -72,18 +74,18 @@ function setup() {
   return { api, handler };
 }
 
-async function call(handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>, args: Record<string, unknown>) {
-  return parseMcpResponse((await handler(args)).content[0]!.text) as any;
+async function call<T = ReconCompactPayload>(handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>, args: Record<string, unknown>): Promise<T> {
+  return parseToolPayload<T>((await handler(args)).content[0]!.text);
 }
 
 describe("reconciliation compact profile routing", () => {
   it("standard profile keeps the full envelope (no compact summary)", async () => {
     const { handler } = setup();
-    const payload = await call(handler("reconcile_bank_transactions"), { mode: "suggest" });
+    const payload = await call<ReconcileBankTransactionsPayload<ReconSuggestPayload>>(handler("reconcile_bank_transactions"), { mode: "suggest" });
     // Full merged envelope, not the compact operation_summary_v1.
     expect(payload.recommended_entry_point).toBe("reconcile_bank_transactions");
     expect(payload.result.matches).toBeDefined();
-    expect(payload.summary).toBeUndefined();
+    expect(payload).not.toHaveProperty("summary");
   });
 
   it("guided suggest returns the compact operation summary (no per-row matches array)", async () => {
@@ -92,11 +94,11 @@ describe("reconciliation compact profile routing", () => {
       const payload = await call(handler("reconcile_bank_transactions"), { mode: "suggest" });
       expect(payload.summary.contract).toBe("operation_summary_v1");
       expect(payload.summary.status).toBe("needs_review");
-      expect(payload.summary.counts.matched).toBe(1);
-      expect(payload.summary.next_action.tool).toBe("reconcile_bank_transactions");
+      expect(payload.summary.counts!.matched).toBe(1);
+      expect(payload.summary.next_action!.tool).toBe("reconcile_bank_transactions");
       // No unbounded per-row matches array leaks into the compact surface.
-      expect(payload.result).toBeUndefined();
-      expect(payload.matches).toBeUndefined();
+      expect(payload).not.toHaveProperty("result");
+      expect(payload).not.toHaveProperty("matches");
     });
   });
 
@@ -107,8 +109,8 @@ describe("reconciliation compact profile routing", () => {
       expect(payload.summary.contract).toBe("operation_summary_v1");
       expect(payload.summary.status).toBe("ready_for_approval");
       expect(typeof payload.summary.plan_handle).toBe("string");
-      expect(payload.summary.counts.would_confirm).toBe(1);
-      expect(Number(payload.summary.totals.EUR)).toBeGreaterThan(0);
+      expect(payload.summary.counts!.would_confirm).toBe(1);
+      expect(Number(payload.summary.totals!.EUR)).toBeGreaterThan(0);
     });
   });
 
@@ -120,8 +122,8 @@ describe("reconciliation compact profile routing", () => {
       const exec = await call(handler("reconcile_bank_transactions"), { mode: "execute_auto_confirm", min_confidence: 50, plan_handle: planHandle });
       expect(exec.summary.contract).toBe("operation_summary_v1");
       expect(exec.summary.status).toBe("completed");
-      expect(exec.summary.details.tool).toBe("get_operation_result_page");
-      expect(typeof exec.summary.details.args.operation_handle).toBe("string");
+      expect(exec.summary.details!.tool).toBe("get_operation_result_page");
+      expect(typeof exec.summary.details!.args.operation_handle).toBe("string");
       expect(api.transactions.confirm).toHaveBeenCalled();
     });
   });
@@ -131,8 +133,8 @@ describe("reconciliation compact profile routing", () => {
     await runWithToolProfile("guided", async () => {
       const raw = (await handler("reconcile_bank_transactions")({ mode: "dry_run_auto_confirm", min_confidence: 50, block_on_duplicate: true })).content[0]!.text;
       expect(raw).not.toContain("auto_confirm_exact_matches");
-      const dry = parseMcpResponse(raw) as any;
-      const next = dry.summary.next_action;
+      const dry = parseToolPayload<ReconCompactPayload>(raw);
+      const next = dry.summary.next_action!;
       expect(next.tool).toBe("reconcile_bank_transactions");
       expect(next.args).toEqual({
         mode: "execute_auto_confirm", plan_handle: dry.summary.plan_handle, min_confidence: 50, block_on_duplicate: true,
@@ -158,9 +160,9 @@ describe("reconciliation compact profile routing", () => {
       const exec = await call(handler("reconcile_bank_transactions"), {
         mode: "execute_auto_confirm", plan_handle: dry.summary.plan_handle, min_confidence: 50, block_on_duplicate: true,
       });
-      const codes = (exec.summary.warnings ?? []).map((w: any) => w.code);
+      const codes = (exec.summary.warnings ?? []).map(w => w.code);
       expect(codes).toContain("blocked_duplicate_suspect");
-      expect((exec.summary.warnings ?? []).some((w: any) => w.code === "possible_duplicate" && w.message.startsWith("POSSIBLE duplicate"))).toBe(false);
+      expect((exec.summary.warnings ?? []).some(w => w.code === "possible_duplicate" && w.message.startsWith("POSSIBLE duplicate"))).toBe(false);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
   });
@@ -170,9 +172,9 @@ describe("reconciliation compact profile routing", () => {
     await runWithToolProfile("guided", async () => {
       const raw = (await handler("reconcile_bank_transactions")({ mode: "inter_account_dry_run", max_date_gap: 2 })).content[0]!.text;
       expect(raw).not.toContain("reconcile_inter_account_transfers");
-      const dry = parseMcpResponse(raw) as any;
+      const dry = parseToolPayload<ReconCompactPayload>(raw);
       expect(dry.summary.contract).toBe("operation_summary_v1");
-      const next = dry.summary.next_action;
+      const next = dry.summary.next_action!;
       expect(next.tool).toBe("reconcile_bank_transactions");
       expect(next.args).toEqual({ mode: "execute_inter_account", plan_handle: dry.summary.plan_handle, max_date_gap: 2 });
       expect(next.approval_required).toBe(true);

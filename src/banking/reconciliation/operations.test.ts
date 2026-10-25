@@ -461,9 +461,9 @@ describe("BankReconciliationOperations", () => {
       executionReport: outcome.value.executionReport,
       ledgerChecks: outcome.value.ledgerChecks,
     });
-    expect((payload.summary as Record<string, unknown>).auto_confirmed).toBe(1);
-    expect((payload.summary as Record<string, unknown>).error_count).toBe(1);
-    expect(String((payload.errors as Array<Record<string, unknown>>)[0]!.reason)).toContain("ledger_client_mismatch");
+    expect(payload.summary.auto_confirmed).toBe(1);
+    expect(payload.summary.error_count).toBe(1);
+    expect(String(payload.errors[0]!.reason)).toContain("ledger_client_mismatch");
   });
 
   it("passes the ledger check when the registration journal carries the invoice client", async () => {

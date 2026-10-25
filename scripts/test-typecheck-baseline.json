@@ -1,7 +1,7 @@
 {
   "by_code": {
-    "ANY": 1752,
-    "UNTYPED_PAYLOAD": 605
+    "ANY": 1632,
+    "UNTYPED_PAYLOAD": 403
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -57,7 +57,7 @@
       "ANY": 15
     },
     "src/banking/reconciliation/compact-routing.test.ts": {
-      "ANY": 10
+      "ANY": 5
     },
     "src/banking/reconciliation/confirmed-transfer-proof.test.ts": {
       "ANY": 1
@@ -202,8 +202,7 @@
       "UNTYPED_PAYLOAD": 17
     },
     "src/tools/bank-reconciliation.test.ts": {
-      "ANY": 164,
-      "UNTYPED_PAYLOAD": 202
+      "ANY": 49
     },
     "src/tools/camt-import-tools.test.ts": {
       "ANY": 9,
@@ -315,6 +314,6 @@
       "ANY": 9
     }
   },
-  "total": 2357,
+  "total": 2035,
   "version": 1
 }

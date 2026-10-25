@@ -1,7 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { registerBankReconciliationTools, matchScore } from "./bank-reconciliation.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { registerBankReconciliationTools, matchScore, type ReconcileBankTransactionsPayload } from "./bank-reconciliation.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type {
+  ReconCompactPayload,
+  ReconExactMatchPayload,
+  ReconInterAccountPayload,
+  ReconPlanErrorPayload,
+  ReconSuggestPayload,
+} from "../banking/reconciliation/presenter.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { LinkedInvoiceClientsAmbiguousError } from "../api/transactions.api.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
@@ -218,7 +225,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "suggest", min_confidence: 50 });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconSuggestPayload>>(result.content[0]!.text);
 
       expect(payload.mode).toBe("suggest");
       expect(payload.recommended_entry_point).toBe("reconcile_bank_transactions");
@@ -252,7 +259,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>(result.content[0]!.text);
 
       expect(payload.mode).toBe("dry_run_auto_confirm");
       expect(payload.result.mode).toBe("DRY_RUN");
@@ -285,7 +292,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>(result.content[0]!.text);
 
       expect(payload.workflow).toMatchObject({
         contract: "workflow_action_v1",
@@ -338,7 +345,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "dry_run_auto_confirm", min_confidence: 90 });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>(result.content[0]!.text);
 
       expect(payload.workflow).toMatchObject({
         contract: "workflow_action_v1",
@@ -363,16 +370,16 @@ describe("reconcile_transactions", () => {
       });
 
       // Merged execute REQUIRES the reviewed plan handle from the dry run.
-      const missing = parseMcpResponse((await merged({ mode: "execute_auto_confirm", min_confidence: 90 })).content[0]!.text) as any;
+      const missing = parseToolPayload<ReconcileBankTransactionsPayload<ReconPlanErrorPayload>>((await merged({ mode: "execute_auto_confirm", min_confidence: 90 })).content[0]!.text);
       expect(missing.result.category).toBe("plan_handle_required");
       expect(api.transactions.confirm).not.toHaveBeenCalled();
 
-      const dry = parseMcpResponse((await merged({ mode: "dry_run_auto_confirm", min_confidence: 90 })).content[0]!.text) as any;
+      const dry = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>((await merged({ mode: "dry_run_auto_confirm", min_confidence: 90 })).content[0]!.text);
       const plan_handle = dry.result.plan_handle;
       expect(typeof plan_handle).toBe("string");
 
       const result = await merged({ mode: "execute_auto_confirm", min_confidence: 90, plan_handle });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>(result.content[0]!.text);
 
       expect(payload.mode).toBe("execute_auto_confirm");
       expect(payload.result.mode).toBe("EXECUTED");
@@ -395,7 +402,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "inter_account_dry_run" });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>(result.content[0]!.text);
 
       expect(payload.mode).toBe("inter_account_dry_run");
       expect(payload.result.mode).toBe("DRY_RUN");
@@ -416,7 +423,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "inter_account_dry_run", max_date_gap: 1 });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>(result.content[0]!.text);
 
       expect(payload.workflow).toMatchObject({
         contract: "workflow_action_v1",
@@ -454,7 +461,7 @@ describe("reconcile_transactions", () => {
       });
 
       const result = await handler({ mode: "inter_account_dry_run" });
-      const payload = parseMcpResponse(result.content[0]!.text) as any;
+      const payload = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>(result.content[0]!.text);
 
       expect(payload.workflow).toMatchObject({
         contract: "workflow_action_v1",
@@ -492,7 +499,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(0);
     expect(payload.matches).toHaveLength(0);
@@ -522,7 +529,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.partially_paid_warning).toBe(true);
@@ -554,7 +561,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.distribution).toEqual({
@@ -595,7 +602,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     const match = payload.matches[0]!;
@@ -629,7 +636,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matches).toHaveLength(1);
     expect(payload.matches[0]!.best_match.type).toBe("sale_invoice");
@@ -666,7 +673,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
     expect(payload.matched).toBe(0);
@@ -701,7 +708,7 @@ describe("reconcile_transactions", () => {
     });
 
     const result = await handler({ min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matched).toBe(1);
     expect(payload.matches[0]!.best_match.id).toBe(22);
@@ -798,9 +805,9 @@ describe("emitted reconciliation approval calls are executable", () => {
   });
   it.each(["dry_run_auto_confirm", "inter_account_dry_run"])("%s replaces a supplied old handle with the newly issued plan", async mode => {
     const { handler, api } = setupAutoConfirmTool({ toolName: "reconcile_bank_transactions" });
-    const dry = parseMcpResponse((await handler({ mode, plan_handle: "old-owner-handle" })).content[0].text) as any;
+    const dry = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload | ReconInterAccountPayload>>((await handler({ mode, plan_handle: "old-owner-handle" })).content[0].text);
     expect(dry.result.plan_handle).toEqual(expect.any(String));
-    expect(dry.workflow.approval_previews).toEqual([]);
+    expect(dry.workflow!.approval_previews).toEqual([]);
     expect(JSON.stringify(dry)).not.toContain("old-owner-handle");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -816,17 +823,21 @@ describe("emitted reconciliation approval calls are executable", () => {
         expect(server.registerTool.mock.calls.some(([name]: [string]) => name === "auto_confirm_exact_matches")).toBe(false);
         const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions")!;
         const invoke = (args: Record<string, unknown>) => runWithToolProfile(profile, () => registration[2](args));
-        const dry = parseMcpResponse((await invoke({ mode: "dry_run_auto_confirm", min_confidence: 95, block_on_duplicate: false })).content[0].text) as any;
-        const action = view === "recommended_next_action" ? dry.workflow.recommended_next_action : dry.workflow.approval_previews[0];
-        const args = view === "recommended_next_action" ? action.args : action.execute_args;
-        expect(view === "recommended_next_action" ? action.tool : action.execute_tool).toBe("reconcile_bank_transactions");
+        const dry = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>((await invoke({ mode: "dry_run_auto_confirm", min_confidence: 95, block_on_duplicate: false })).content[0].text);
+        const next = dry.workflow!.recommended_next_action;
+        const preview = dry.workflow!.approval_previews[0]!;
+        const action = view === "recommended_next_action"
+          ? { tool: next.tool, args: next.args!, approval_required: next.approval_required }
+          : { tool: preview.execute_tool, args: preview.execute_args, approval_required: preview.approval_required };
+        const args = action.args;
+        expect(action.tool).toBe("reconcile_bank_transactions");
         expect(args).toEqual({ mode: "execute_auto_confirm", min_confidence: 95, block_on_duplicate: false, plan_handle: dry.result.plan_handle });
         expect(action.approval_required).toBe(true);
         expect(z.object(registration[1].inputSchema).strict().safeParse(args).success).toBe(true);
-        const done = parseMcpResponse((await invoke(args)).content[0].text) as any;
+        const done = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>((await invoke(args)).content[0].text);
         expect(done.result.mode).toBe("EXECUTED");
         expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
-        const replay = parseMcpResponse((await invoke(args)).content[0].text) as any;
+        const replay = parseToolPayload<ReconcileBankTransactionsPayload<ReconPlanErrorPayload>>((await invoke(args)).content[0].text);
         expect(replay.result.category).toBe("plan_handle_consumed");
         expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
       });
@@ -845,20 +856,24 @@ describe("emitted reconciliation approval calls are executable", () => {
         registerBankReconciliationTools(server, api, createTestRuntimeSafetyContext(), { ...EXPOSE_GRANULAR, exposeGranularTools: false });
         const registration = server.registerTool.mock.calls.find(([name]: [string]) => name === "reconcile_bank_transactions")!;
         const invoke = (args: Record<string, unknown>) => runWithToolProfile(profile, () => registration[2](args));
-        const dry = parseMcpResponse((await invoke({ mode: "inter_account_dry_run", max_date_gap: 2, target_accounts_dimensions_id: 200 })).content[0].text) as any;
-        const action = view === "recommended_next_action" ? dry.workflow.recommended_next_action : dry.workflow.approval_previews[0];
-        const args = view === "recommended_next_action" ? action.args : action.execute_args;
-        const target = view === "recommended_next_action" ? action.tool : action.execute_tool;
+        const dry = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>((await invoke({ mode: "inter_account_dry_run", max_date_gap: 2, target_accounts_dimensions_id: 200 })).content[0].text);
+        const next = dry.workflow!.recommended_next_action;
+        const preview = dry.workflow!.approval_previews[0]!;
+        const action = view === "recommended_next_action"
+          ? { tool: next.tool, args: next.args!, approval_required: next.approval_required }
+          : { tool: preview.execute_tool, args: preview.execute_args, approval_required: preview.approval_required };
+        const args = action.args;
+        const target = action.tool;
         expect(target).toBe("reconcile_inter_account_transfers");
         expect(args).toEqual({ execute: true, max_date_gap: 2, target_accounts_dimensions_id: 200, plan_handle: dry.result.plan_handle });
         expect(action.approval_required).toBe(true);
         const executeRegistration = server.registerTool.mock.calls.find(([name]: [string]) => name === target)!;
         expect(z.object(executeRegistration[1].inputSchema).strict().safeParse(args).success).toBe(true);
         const execute = () => runWithToolProfile(profile, () => executeRegistration[2](args));
-        const done = parseMcpResponse((await execute()).content[0].text) as any;
+        const done = parseToolPayload<ReconInterAccountPayload>((await execute()).content[0].text);
         expect(done.mode).toBe("EXECUTED");
-        expect(done.execution.execution_report.status).toBe("completed");
-        const replay = parseMcpResponse((await execute()).content[0].text) as any;
+        expect(done.execution.execution_report!.status).toBe("completed");
+        const replay = parseToolPayload<ReconPlanErrorPayload>((await execute()).content[0].text);
         expect(replay.category).toBe("plan_handle_consumed");
         expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
       });
@@ -872,7 +887,7 @@ async function issueAutoConfirmPlanHandle(
   handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   baseArgs: Record<string, unknown>,
 ): Promise<string> {
-  const dry = parseMcpResponse((await handler({ ...baseArgs, execute: false })).content[0]!.text) as any;
+  const dry = parseToolPayload<ReconExactMatchPayload>((await handler({ ...baseArgs, execute: false })).content[0]!.text);
   const handle = dry.plan_handle;
   if (typeof handle !== "string") throw new Error("dry run did not return a plan_handle");
   return handle;
@@ -892,7 +907,7 @@ async function executeInterAccount(
   handler: (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>,
   baseArgs: Record<string, unknown> = {},
 ): Promise<{ content: Array<{ text: string }> }> {
-  const dry = parseMcpResponse((await handler({ ...baseArgs, execute: false })).content[0]!.text) as any;
+  const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ ...baseArgs, execute: false })).content[0]!.text);
   const plan_handle = dry.plan_handle;
   if (typeof plan_handle !== "string") throw new Error("inter-account dry run did not return a plan_handle");
   return handler({ ...baseArgs, execute: true, plan_handle });
@@ -946,7 +961,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await executeAutoConfirm(handler, {});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(0);
     expect(payload.auto_confirmed).toBe(0);
@@ -964,7 +979,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("DRY_RUN");
     expect(payload.auto_confirmed).toBe(1);
@@ -983,7 +998,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await executeAutoConfirm(handler, {});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.results[0]!.status).toBe("confirmed");
@@ -1021,7 +1036,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
   });
@@ -1038,7 +1053,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
   });
@@ -1054,7 +1069,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await executeAutoConfirm(handler, {});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.auto_confirmed).toBe(1);
@@ -1075,7 +1090,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await executeAutoConfirm(handler, { min_confidence: 0 });
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.auto_confirmed).toBe(0);
@@ -1095,7 +1110,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     // Only the first transaction should match; the second should find the invoice consumed
     expect(payload.auto_confirmed).toBe(1);
@@ -1139,7 +1154,7 @@ describe("auto_confirm_exact_matches", () => {
     });
 
     const result = await executeAutoConfirm(handler, {});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.auto_confirmed).toBe(0);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -1169,18 +1184,18 @@ describe("bank_reconciliation plan binding", () => {
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
 
-    const dry = parseMcpResponse((await handler({})).content[0]!.text) as any;
+    const dry = parseToolPayload<ReconExactMatchPayload>((await handler({})).content[0]!.text);
     expect(dry.mode).toBe("DRY_RUN");
     expect(dry.plan_handle).toMatch(HANDLE_RE);
     expect(dry.execution.execution_report).toBeUndefined();
 
-    const missing = parseMcpResponse((await handler({ execute: true })).content[0]!.text) as any;
+    const missing = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true })).content[0]!.text);
     expect(missing.category).toBe("plan_handle_required");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
 
-    const done = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const done = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
     expect(done.mode).toBe("EXECUTED");
-    expect(done.execution.execution_report.status).toBe("completed");
+    expect(done.execution.execution_report!.status).toBe("completed");
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
   });
 
@@ -1193,7 +1208,7 @@ describe("bank_reconciliation plan binding", () => {
     await handler({ execute: true, plan_handle: handle });
     api.transactions.confirm.mockClear();
 
-    const replay = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const replay = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
     expect(replay.category).toBe("plan_handle_consumed");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -1206,7 +1221,7 @@ describe("bank_reconciliation plan binding", () => {
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 20, gross_price: 100, bank_ref_number: "RF1" }],
     });
     const camtHandle = context.planStore.issue("camt_import", minimalPlanInput());
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: camtHandle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: camtHandle })).content[0]!.text);
     expect(res.category).toBe("plan_domain_mismatch");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -1220,7 +1235,7 @@ describe("bank_reconciliation plan binding", () => {
     });
     const handle = await issueAutoConfirmPlanHandle(handler, {});
     context.setScope({ connectionName: "switched", connectionFingerprint: "other-fp" });
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
     expect(res.category).toBe("plan_scope_mismatch");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -1237,7 +1252,7 @@ describe("bank_reconciliation plan binding", () => {
       .mockResolvedValue([]);
     api.saleInvoices.get.mockResolvedValue({id:10,status:"CONFIRMED",payment_status:"NOT_PAID",number:"ARV-10",clients_id:20,gross_price:100,bank_ref_number:"RF1",cl_currencies_id:"EUR"});
     const handle = await issueAutoConfirmPlanHandle(handler, {});
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
     expect(res.category).toBe("plan_drift");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -1247,15 +1262,15 @@ describe("bank_reconciliation plan binding", () => {
       transactions: [{ id: 1, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-03-20", clients_id: null, bank_account_name: "Acme OU", ref_number: "RF1" }],
       sales: [{ id: 10, status: "CONFIRMED", payment_status: "NOT_PAID", number: "ARV-10", clients_id: 55, client_name: "Acme OU", gross_price: 100, bank_ref_number: "RF1" }],
     });
-    const dry = parseMcpResponse((await handler({})).content[0]!.text) as any;
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const dry = parseToolPayload<ReconExactMatchPayload>((await handler({})).content[0]!.text);
+    const res = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
 
-    expect(res.execution.execution_report.status).toBe("completed");
+    expect(res.execution.execution_report!.status).toBe("completed");
     expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 55 });
     expect(api.transactions.confirm).toHaveBeenCalledWith(1, [
       { related_table: "sale_invoices", related_id: 10, amount: 100 },
     ], expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
-    const completedIds = res.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
+    const completedIds = res.execution.execution_report!.command_partitions.completed.map(c => c.command_id);
     expect(completedIds).toContain("recon-update-client-tx-1");
     expect(completedIds).toContain("recon-confirm-invoice-tx-1");
   });
@@ -1271,10 +1286,10 @@ describe("bank_reconciliation plan binding", () => {
     // The transaction is confirmed out from under the reviewed plan before its mutate.
     const handle = await issueAutoConfirmPlanHandle(handler, {});
     api.transactions.get.mockResolvedValueOnce({...tx, cl_currencies_id:"EUR"}).mockResolvedValue({ ...tx, cl_currencies_id:"EUR", status: "CONFIRMED" });
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
 
-    expect(res.execution.execution_report.status).toBe("plan_drift");
-    expect(res.execution.execution_report.stop_reason.code).toBe("transaction_material_drift");
+    expect(res.execution.execution_report!.status).toBe("plan_drift");
+    expect(res.execution.execution_report!.stop_reason!.code).toBe("transaction_material_drift");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
@@ -1294,9 +1309,9 @@ describe("bank_reconciliation plan binding", () => {
     });
     api.transactions.confirm.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error("register rejected"));
     const handle = await issueAutoConfirmPlanHandle(handler, {});
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
 
-    const report = res.execution.execution_report;
+    const report = res.execution.execution_report!;
     expect(report.status).toBe("partial_execution");
     expect(report.command_partitions.completed).toHaveLength(1);
     expect(report.command_partitions.failed).toHaveLength(1);
@@ -1313,23 +1328,23 @@ describe("bank_reconciliation plan binding", () => {
       bankAccounts: iaBankAccounts,
     });
 
-    const missing = parseMcpResponse((await handler({ execute: true })).content[0]!.text) as any;
+    const missing = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true })).content[0]!.text);
     expect(missing.category).toBe("plan_handle_required");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
 
-    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false })).content[0]!.text);
     expect(dry.plan_handle).toMatch(HANDLE_RE);
     expect(dry.pairs).toHaveLength(1);
 
-    const done = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const done = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
     expect(done.mode).toBe("EXECUTED");
-    expect(done.execution.execution_report.status).toBe("completed");
+    expect(done.execution.execution_report!.status).toBe("completed");
     const out = done.pairs[0].outgoing_transaction_id as number;
     const inc = done.pairs[0].incoming_transaction_id as number;
     expect(api.transactions.update).toHaveBeenCalledWith(out, { clients_id: 99 });
     expect(api.transactions.confirm).toHaveBeenCalledWith(out, expect.any(Array), expect.objectContaining({ autoFixClientsId: false, expectedTransaction: expect.objectContaining({contract: "bank_transaction_material_v1"}), expectedLinkedInvoices: expect.any(Object) }));
     expect(api.transactions.delete).toHaveBeenCalledWith(inc);
-    const completedIds = done.execution.execution_report.command_partitions.completed.map((c: any) => c.command_id);
+    const completedIds = done.execution.execution_report!.command_partitions.completed.map(c => c.command_id);
     expect(completedIds).toContain(`recon-update-client-tx-${out}`);
     expect(completedIds).toContain(`recon-confirm-transfer-tx-${out}`);
     expect(completedIds).toContain(`recon-delete-duplicate-tx-${inc}`);
@@ -1346,8 +1361,8 @@ describe("bank_reconciliation plan binding", () => {
     });
     api.transactions.confirm.mockRejectedValueOnce(makeError());
     const handle = await issueAutoConfirmPlanHandle(handler, {});
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: handle })).content[0]!.text) as any;
-    const failed = res.execution.execution_report.command_partitions.failed;
+    const res = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: true, plan_handle: handle })).content[0]!.text);
+    const failed = res.execution.execution_report!.command_partitions.failed;
     expect(failed).toHaveLength(1);
     expect(failed[0].code).toBe(code);
   });
@@ -1360,10 +1375,10 @@ describe("bank_reconciliation plan binding", () => {
       ],
       bankAccounts: iaBankAccounts,
     });
-    const dry = parseMcpResponse((await handler({ execute: false })).content[0]!.text) as any;
+    const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false })).content[0]!.text);
     expect(dry.pairs).toHaveLength(1);
     api.transactions.listAll.mockResolvedValue([]); // ledger emptied after review
-    const res = parseMcpResponse((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const res = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
     expect(res.category).toBe("plan_drift");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -1386,9 +1401,9 @@ describe("bank_reconciliation plan binding", () => {
     const publicMerged = publicServer.registerTool.mock.calls.find(([n]: [string]) => n === "reconcile_bank_transactions")![2] as any;
 
     // A handle issued through the Inbox dry run is consumable by the public executor.
-    const dry = parseMcpResponse((await inboxAutoConfirm({})).content[0]!.text) as any;
+    const dry = parseToolPayload<ReconExactMatchPayload>((await inboxAutoConfirm({})).content[0]!.text);
     expect(dry.plan_handle).toMatch(HANDLE_RE);
-    const done = parseMcpResponse((await publicMerged({ mode: "execute_auto_confirm", plan_handle: dry.plan_handle })).content[0]!.text) as any;
+    const done = parseToolPayload<ReconcileBankTransactionsPayload<ReconExactMatchPayload>>((await publicMerged({ mode: "execute_auto_confirm", plan_handle: dry.plan_handle })).content[0]!.text);
     expect(done.result.mode).toBe("EXECUTED");
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
 
@@ -1399,9 +1414,9 @@ describe("bank_reconciliation plan binding", () => {
     );
 
     // A handle whose runtime scope changed is rejected from a second context view.
-    const dry2 = parseMcpResponse((await inboxAutoConfirm({})).content[0]!.text) as any;
+    const dry2 = parseToolPayload<ReconExactMatchPayload>((await inboxAutoConfirm({})).content[0]!.text);
     context.setScope({ connectionName: "second-context", connectionFingerprint: "second-fingerprint" });
-    expect(() => context.planStore.consume(dry2.plan_handle, "bank_reconciliation")).toThrowError(
+    expect(() => context.planStore.consume(dry2.plan_handle!, "bank_reconciliation")).toThrowError(
       expect.objectContaining({ code: "plan_scope_mismatch" }),
     );
   });
@@ -1423,7 +1438,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
@@ -1445,7 +1460,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]!.match_reasons).toContain("exact_amount");
@@ -1475,7 +1490,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -1490,7 +1505,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -1505,7 +1520,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -1520,7 +1535,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.matched_one_sided).toBe(0);
@@ -1540,7 +1555,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.matched_one_sided).toBe(0);
@@ -1562,7 +1577,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.matched_pairs).toBe(1);
@@ -1589,7 +1604,7 @@ describe("reconcile_inter_account_transfers", () => {
     it("does not pair A->B with an unrelated receipt into C and never deletes it", async () => {
       const { handler, api } = setupInterAccountTool({ transactions: [outAtoB, customerIntoC], bankAccounts: threeAccounts });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1605,7 +1620,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: threeAccounts.slice(0, 2),
       });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1616,7 +1631,7 @@ describe("reconcile_inter_account_transfers", () => {
         transactions: [outAtoB, { ...customerIntoC, accounts_dimensions_id: 22, bank_account_name: "Test OÜ", clients_id: null }],
         bankAccounts: threeAccounts.slice(0, 2),
       });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1638,7 +1653,7 @@ describe("reconcile_inter_account_transfers", () => {
         const transactions = kind === "standalone" ? [row] : kind === "incoming" ? [outAtoB, row] : [row, { ...customerIntoC, accounts_dimensions_id: 22, bank_account_no: "EE11AAAA" }];
         const { handler, api } = setupInterAccountTool({ transactions, bankAccounts: threeAccounts.slice(0, 2), companyName: "Test OÜ" });
         const result = execute ? await executeInterAccount(handler) : await handler({});
-        const payload = parseMcpResponse(result.content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
         expect(payload.matched_pairs).toBe(0);
         expect(api.transactions.delete).not.toHaveBeenCalled();
         for (const call of api.transactions.confirm.mock.calls) expect(call[0]).not.toBe(row.id);
@@ -1655,7 +1670,7 @@ describe("reconcile_inter_account_transfers", () => {
           bankAccounts: threeAccounts.slice(0, 2),
           companyName: "Männipuu OÜ",
         });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_pairs).toBe(0);
         expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1673,7 +1688,7 @@ describe("reconcile_inter_account_transfers", () => {
         const out = { ...outAtoB, amount: 25, bank_account_name: "Männipuu OÜ" };
         const refund = { ...customerIntoC, amount: 25, accounts_dimensions_id: 22, bank_account_no: bankAccountNo, bank_account_name: "Swedbank AS", clients_id: null };
         const { handler, api } = setupInterAccountTool({ transactions: [out, refund], bankAccounts: accounts, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_pairs).toBe(0);
         expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1687,7 +1702,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: threeAccounts.slice(0, 2),
       });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1700,7 +1715,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: threeAccounts.slice(0, 2),
       });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
       expect(api.transactions.delete).toHaveBeenCalledWith(2);
@@ -1713,7 +1728,7 @@ describe("reconcile_inter_account_transfers", () => {
         bankAccounts: threeAccounts.slice(0, 2),
       });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(payload.matched_one_sided).toBe(1);
@@ -1733,7 +1748,7 @@ describe("reconcile_inter_account_transfers", () => {
         companyName: "Männipuu OÜ",
       });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -1744,7 +1759,7 @@ describe("reconcile_inter_account_transfers", () => {
       const realB = { id: 3, status: "PROJECT", is_deleted: false, type: "D", amount: 100, date: "2026-10-01", cl_currencies_id: "EUR", accounts_dimensions_id: 22, bank_account_no: "EE11AAAA", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-3 [source_direction=IN]" };
       const { handler, api } = setupInterAccountTool({ transactions: [outAtoB, customerIntoC, realB], bankAccounts: threeAccounts });
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
       expect(payload.pairs[0]!.outgoing_transaction_id).toBe(1);
@@ -1765,7 +1780,7 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("pairs Swed -> LHV EUR into dim 11 and books it once", async () => {
       const { handler, api } = setupInterAccountTool({ transactions: [swedOut, lhvEurIn], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
@@ -1779,7 +1794,7 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("does not auto-book a one-sided transfer to an IBAN shared by several own accounts", async () => {
       const { handler, api } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -1787,7 +1802,7 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("reports a one-sided transfer to a shared IBAN for review instead of dropping it", async () => {
       const { handler } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.needs_review_ambiguous_refless).toBe(1);
@@ -1796,7 +1811,7 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("books a one-sided transfer to a shared IBAN into the given target_accounts_dimensions_id when it is one of them", async () => {
       const { handler, api } = setupInterAccountTool({ transactions: [swedOut], bankAccounts: sharedIban, companyName: "Männipuu OÜ" });
-      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 11 })).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler, { target_accounts_dimensions_id: 11 })).content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(1);
       expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
@@ -1816,7 +1831,7 @@ describe("reconcile_inter_account_transfers", () => {
       const out = camtSigned({ id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 11, bank_account_no: null, bank_account_name: "Test OÜ", clients_id: null, description: "x\n[e-arveldaja-mcp:camt d=DBIT s=abc123abc123abcd]" });
       const inc = { id: 2, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-01", accounts_dimensions_id: 22, bank_account_no: "EE99THIRD", bank_account_name: "Test OÜ", clients_id: null, description: "WISE:TRANSFER-1 [source_direction=IN]" };
       const { handler, api } = setupInterAccountTool({ transactions: [out, inc], bankAccounts: accounts });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(payload.matched_one_sided).toBe(0);
@@ -1831,7 +1846,7 @@ describe("reconcile_inter_account_transfers", () => {
     it("routes an unsigned same-type pair to direction_unresolved review in either listing order", async () => {
       for (const order of [[lhvOut("Transfer to SEB"), sebIn], [sebIn, lhvOut("Transfer to SEB")]]) {
         const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(payload.matched_pairs).toBe(0);
         expect(payload.matched_one_sided).toBe(0);
         expect(payload.ambiguous_pairs).toHaveLength(1);
@@ -1844,7 +1859,7 @@ describe("reconcile_inter_account_transfers", () => {
     it("confirms the signed outgoing leg even when the incoming mirror is listed first", async () => {
       const out = lhvOut("WISE:T131 Transfer to SEB [source_direction=OUT]");
       const { handler, api } = setupInterAccountTool({ transactions: [sebIn, out], bankAccounts });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 131, incoming_transaction_id: 132, from_dimension_id: 100, to_dimension_id: 200, status: "confirmed" });
       expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(api.transactions.confirm).toHaveBeenCalledWith(131, [
@@ -1862,7 +1877,7 @@ describe("reconcile_inter_account_transfers", () => {
       ],
       bankAccounts,
     });
-    const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+    const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
     expect(payload.matched_pairs).toBe(1);
     expect(api.transactions.confirm).toHaveBeenCalledWith(141, [
       { related_table: "accounts", related_id: 1020, related_sub_id: 200, amount: 92 },
@@ -1879,7 +1894,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(0);
@@ -1918,7 +1933,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
     expect(payload.matched_one_sided).toBe(0);
@@ -1960,7 +1975,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(0);
@@ -1980,7 +1995,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.needs_review_cross_currency).toBe(1);
@@ -2026,7 +2041,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(1);
@@ -2055,13 +2070,13 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(1);
     expect(payload.skipped_already_handled).toBe(0);
     // The critical invariant: exactly one journal is created, never two.
-    expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
+    expect(api.transactions.confirm.mock.calls.length).toBe(1);
     // The second ref-less leg is surfaced for review, not silently skipped.
     expect(payload.needs_review_ambiguous_refless).toBe(1);
     expect(payload.ambiguous_refless[0]!.transaction_ids).toContain(602);
@@ -2086,11 +2101,11 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_one_sided).toBe(1);
     // The critical invariant: exactly one journal, never two.
-    expect((api.transactions.confirm as any).mock.calls.length).toBe(1);
+    expect(api.transactions.confirm.mock.calls.length).toBe(1);
     // The differing-ref mirror leg is surfaced for review, not double-booked.
     expect(payload.needs_review_ambiguous_refless).toBe(1);
     expect(payload.ambiguous_refless[0]!.transaction_ids).toContain(702);
@@ -2133,7 +2148,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.matched_one_sided).toBe(2);
@@ -2174,7 +2189,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.skipped_ambiguous).toBe(1);
@@ -2203,7 +2218,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
     expect(payload.skipped_ambiguous).toBe(0);
@@ -2225,7 +2240,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.mode).toBe("EXECUTED");
     expect(payload.matched_pairs).toBe(1);
@@ -2275,7 +2290,7 @@ describe("reconcile_inter_account_transfers", () => {
     api.transactions.delete.mockRejectedValueOnce(new Error("Delete refused by API"));
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.pairs[0]!.status).toBe("confirmed");
     expect(payload.pairs[0]!.incoming_action).toBe("orphan");
@@ -2298,7 +2313,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     // Only one pair matched, the second C stays unmatched
     expect(payload.matched_pairs).toBe(1);
@@ -2314,7 +2329,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await handler({});
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.matched_pairs).toBe(0);
   });
@@ -2329,7 +2344,7 @@ describe("reconcile_inter_account_transfers", () => {
     });
 
     const result = await executeInterAccount(handler);
-    const payload = parseMcpResponse(result.content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
     expect(payload.total_unconfirmed).toBe(1);
     expect(payload.matched_pairs).toBe(0);
@@ -2349,7 +2364,7 @@ describe("reconcile_inter_account_transfers", () => {
       it("routes both legs to review instead of booking each one-sided", async () => {
         for (const order of [[lhvOut, wiseIn], [wiseIn, lhvOut]]) {
           const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+          const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
           expect(payload.matched_pairs).toBe(0);
           expect(payload.matched_one_sided).toBe(0);
@@ -2369,7 +2384,7 @@ describe("reconcile_inter_account_transfers", () => {
       it("does not flag two OUTGOING rows (opposite ways) as one fee-deducted transfer", async () => {
         const wiseOut = { ...wiseIn, type: "C", amount: 99.5, description: "WISE:TRANSFER-9 Männipuu OÜ [source_direction=OUT]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseOut], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.ambiguous_pairs).toHaveLength(0);
         expect(payload.matched_one_sided).toBe(2);
@@ -2380,7 +2395,7 @@ describe("reconcile_inter_account_transfers", () => {
         const lhvIn = camtSigned({ ...lhvOut, type: "D", description: "x\n[e-arveldaja-mcp:camt dir=CRDT sig=abcdefabcdefabcd]" });
         const wiseIn2 = { ...wiseIn, amount: 99.5 };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvIn, wiseIn2], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.ambiguous_pairs).toHaveLength(0);
         expect(payload.matched_one_sided).toBe(2);
@@ -2391,7 +2406,7 @@ describe("reconcile_inter_account_transfers", () => {
         const smallOut = camtSigned({ ...lhvOut, amount: 99 });
         const bigIn = { ...wiseIn, amount: 100 };
         const { handler } = setupInterAccountTool({ transactions: [smallOut, bigIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.ambiguous_pairs).toHaveLength(0);
         expect(payload.matched_one_sided).toBe(2);
@@ -2400,7 +2415,7 @@ describe("reconcile_inter_account_transfers", () => {
       it("flags an unresolved-direction pair without suggesting a delete", async () => {
         const unsignedOut = { ...lhvOut, description: "own transfer" };
         const { handler, api } = setupInterAccountTool({ transactions: [unsignedOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_one_sided).toBe(0);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2412,7 +2427,7 @@ describe("reconcile_inter_account_transfers", () => {
 
       it("still pairs the equal-amount legs in Phase 1", async () => {
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 100 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
         expect(payload.matched_one_sided).toBe(0);
@@ -2422,7 +2437,7 @@ describe("reconcile_inter_account_transfers", () => {
 
       it("books one-sided when the opposite leg differs by more than the fee tolerance", async () => {
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, { ...wiseIn, amount: 50 }], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_one_sided).toBe(2);
         expect(payload.ambiguous_pairs).toHaveLength(0);
@@ -2434,7 +2449,7 @@ describe("reconcile_inter_account_transfers", () => {
         const provenIn = { ...wiseIn, amount: 97, bank_account_no: "EE11" };
         for (const order of [[lhvOut, provenIn], [provenIn, lhvOut]]) {
           const { handler, api } = setupInterAccountTool({ transactions: order, bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+          const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
           expect(payload.matched_one_sided).toBe(0);
           expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2459,7 +2474,7 @@ describe("reconcile_inter_account_transfers", () => {
         const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
         const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_pairs).toBe(0);
         expect(payload.matched_one_sided).toBe(0);
@@ -2477,7 +2492,7 @@ describe("reconcile_inter_account_transfers", () => {
         const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
         const wiseIn = { ...base, id: 2, type: "D", amount: 100, cl_currencies_id: "USD", base_amount: 95, accounts_dimensions_id: 22, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_pairs).toBe(0);
         expect(payload.matched_one_sided).toBe(0);
@@ -2493,7 +2508,7 @@ describe("reconcile_inter_account_transfers", () => {
         const legA = { ...base, id: 1, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 92, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "own transfer" };
         const legB = { ...base, id: 2, type: "C", amount: 100, cl_currencies_id: "USD", base_amount: 95, accounts_dimensions_id: 22, bank_account_no: "EE11", bank_account_name: "Männipuu OÜ", description: "own transfer" };
         const { handler, api } = setupInterAccountTool({ transactions: [legA, legB], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_one_sided).toBe(0);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2507,11 +2522,11 @@ describe("reconcile_inter_account_transfers", () => {
 
     it("warns that own-transfer detection relies on IBANs when the company name has no legal form", async () => {
       const { handler } = setupInterAccountTool({ transactions: [], bankAccounts, companyName: "Seppo AI" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(payload.warnings).toEqual([expect.stringMatching(/no legal form.*IBANs only/i)]);
 
       const withForm = setupInterAccountTool({ transactions: [], bankAccounts, companyName: "Seppo AI OÜ" });
-      const formPayload = parseMcpResponse((await withForm.handler({})).content[0]!.text) as any;
+      const formPayload = parseToolPayload<ReconInterAccountPayload>((await withForm.handler({})).content[0]!.text);
       expect(formPayload.warnings).toBeUndefined();
     });
 
@@ -2528,7 +2543,7 @@ describe("reconcile_inter_account_transfers", () => {
           bankAccounts: twoAccounts,
           companyName: "Jaan Tamm OÜ",
         });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
 
         expect(payload.matched_one_sided).toBe(0);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
@@ -2550,7 +2565,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]!.transaction_id).toBe(20);
@@ -2575,12 +2590,12 @@ describe("reconcile_inter_account_transfers", () => {
 
       // Without target param → no match (ambiguous, 2 other accounts)
       const result1 = await handler({});
-      const payload1 = parseMcpResponse(result1.content[0]!.text);
+      const payload1 = parseToolPayload<ReconInterAccountPayload>(result1.content[0]!.text);
       expect(payload1.matched_one_sided).toBe(0);
 
       // With target param → matches
       const result2 = await handler({ target_accounts_dimensions_id: 100 });
-      const payload2 = parseMcpResponse(result2.content[0]!.text);
+      const payload2 = parseToolPayload<ReconInterAccountPayload>(result2.content[0]!.text);
       expect(payload2.matched_one_sided).toBe(1);
       expect(payload2.one_sided[0]!.target_dimension_id).toBe(100);
       expect(payload2.one_sided[0]!.match_reasons).toContain("target_from_parameter");
@@ -2596,7 +2611,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]!.target_dimension_id).toBe(200);
@@ -2614,7 +2629,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
     });
@@ -2634,7 +2649,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.mode).toBe("EXECUTED");
       expect(payload.matched_one_sided).toBe(1);
@@ -2667,7 +2682,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.skipped_already_handled).toBe(1);
@@ -2698,7 +2713,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.skipped_already_handled).toBe(1);
       expect(payload.already_handled[0]!.transaction_id).toBe(31);
@@ -2730,7 +2745,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
@@ -2764,7 +2779,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.skipped_already_handled).toBe(0);
       expect(payload.matched_one_sided + payload.needs_review_ambiguous_refless).toBe(1);
@@ -2800,11 +2815,11 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await executeInterAccount(handler);
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       // The critical invariant: the pre-existing journal covers the transfer, so
       // NEITHER leg may confirm a second journal.
-      expect((api.transactions.confirm as any).mock.calls.length).toBe(0);
+      expect(api.transactions.confirm.mock.calls.length).toBe(0);
       expect(payload.matched_one_sided).toBe(0);
       // Leg 1 recognized as already journalized against snapshot 999…
       expect(payload.skipped_already_handled).toBe(1);
@@ -2847,7 +2862,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.skipped_already_handled).toBe(1);
@@ -2881,7 +2896,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
 
       const result = await handler({});
-      const payload = parseMcpResponse(result.content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.skipped_already_handled).toBe(1);
@@ -2906,7 +2921,7 @@ describe("reconcile_inter_account_transfers", () => {
       };
 
       const dry = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const dryPayload = parseMcpResponse((await dry.handler({})).content[0]!.text) as any;
+      const dryPayload = parseToolPayload<ReconInterAccountPayload>((await dry.handler({})).content[0]!.text);
       expect(dryPayload.one_sided[0]).toMatchObject({
         transaction_id: 8101, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "Wise", source_dimension_id: 300,
@@ -2919,7 +2934,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(mockedLogAudit).not.toHaveBeenCalled();
 
       const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
+      const executePayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(execute.handler)).content[0]!.text);
       expect(executePayload.one_sided[0]).toMatchObject({
         transaction_id: 8101, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "Wise", source_dimension_id: 300,
@@ -2945,7 +2960,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
+      const handledPayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handled.handler)).content[0]!.text);
       expect.soft(handledPayload.already_handled[0]).toMatchObject({
         transaction_id: 8101, amount: 100, currency: "USD", amount_eur: 90, existing_journal_id: 8190,
         source_account: "Wise", source_dimension_id: 300,
@@ -2963,7 +2978,7 @@ describe("reconcile_inter_account_transfers", () => {
       const merged = setupInterAccountTool({
         transactions: [transaction], bankAccounts: twoAccounts, toolName: "reconcile_bank_transactions",
       });
-      const mergedPayload = parseMcpResponse((await merged.handler({ mode: "inter_account_dry_run" })).content[0]!.text) as any;
+      const mergedPayload = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>((await merged.handler({ mode: "inter_account_dry_run" })).content[0]!.text);
       expect(mergedPayload).toMatchObject({
         mode: "inter_account_dry_run",
         delegated_tool: "reconcile_inter_account_transfers",
@@ -2988,7 +3003,7 @@ describe("reconcile_inter_account_transfers", () => {
       };
 
       const dry = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const dryPayload = parseMcpResponse((await dry.handler({})).content[0]!.text) as any;
+      const dryPayload = parseToolPayload<ReconInterAccountPayload>((await dry.handler({})).content[0]!.text);
       expect(dryPayload.one_sided[0]).toMatchObject({
         transaction_id: 8201, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "LHV", source_dimension_id: 100,
@@ -2997,7 +3012,7 @@ describe("reconcile_inter_account_transfers", () => {
       expect(dryPayload.execution.results[0]).toMatchObject(dryPayload.one_sided[0]);
 
       const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-      const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
+      const executePayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(execute.handler)).content[0]!.text);
       expect(executePayload.one_sided[0]).toMatchObject({
         transaction_id: 8201, amount: 100, currency: "USD", amount_eur: 90,
         source_dimension_id: 100, target_dimension_id: 300, status: "confirmed",
@@ -3022,7 +3037,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
+      const handledPayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handled.handler)).content[0]!.text);
       expect.soft(handledPayload.already_handled[0]).toMatchObject({
         transaction_id: 8201, amount: 100, currency: "USD", amount_eur: 90,
         source_account: "LHV", source_dimension_id: 100,
@@ -3045,7 +3060,7 @@ describe("reconcile_inter_account_transfers", () => {
       ] as const;
       const handledOutcomes: Array<{
         direction: (typeof directions)[number];
-        payload: any;
+        payload: ReconInterAccountPayload;
         api: any;
       }> = [];
 
@@ -3056,7 +3071,7 @@ describe("reconcile_inter_account_transfers", () => {
           accounts_dimensions_id: direction.source, bank_account_name: "Test OÜ", bank_account_no: null,
         };
         const dry = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-        const dryPayload = parseMcpResponse((await dry.handler({})).content[0]!.text) as any;
+        const dryPayload = parseToolPayload<ReconInterAccountPayload>((await dry.handler({})).content[0]!.text);
         expect(dryPayload.one_sided[0]).toMatchObject({
           transaction_id: direction.id, amount: 100, currency: "USD", amount_eur: 90,
           source_account: direction.sourceTitle, source_dimension_id: direction.source,
@@ -3066,7 +3081,7 @@ describe("reconcile_inter_account_transfers", () => {
 
         mockedLogAudit.mockClear();
         const execute = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
-        const executePayload = parseMcpResponse((await executeInterAccount(execute.handler)).content[0]!.text) as any;
+        const executePayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(execute.handler)).content[0]!.text);
         expect(executePayload.one_sided[0]).toMatchObject({
           transaction_id: direction.id, amount: 100, currency: "USD", amount_eur: 90,
           source_dimension_id: direction.source, target_dimension_id: direction.target,
@@ -3091,7 +3106,7 @@ describe("reconcile_inter_account_transfers", () => {
             ],
           }],
         });
-        const handledPayload = parseMcpResponse((await executeInterAccount(handled.handler)).content[0]!.text) as any;
+        const handledPayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handled.handler)).content[0]!.text);
         handledOutcomes.push({ direction, payload: handledPayload, api: handled.api });
       }
 
@@ -3118,7 +3133,7 @@ describe("reconcile_inter_account_transfers", () => {
         accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null,
       }));
       const run = setupInterAccountTool({ transactions, bankAccounts: twoAccounts });
-      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
 
       expect(run.api.transactions.confirm).toHaveBeenCalledTimes(1);
       expect(run.api.transactions.confirm).toHaveBeenCalledWith(8401, [
@@ -3143,7 +3158,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
         bankAccounts: twoAccounts,
       });
-      const controlPayload = parseMcpResponse((await control.handler({})).content[0]!.text) as any;
+      const controlPayload = parseToolPayload<ReconInterAccountPayload>((await control.handler({})).content[0]!.text);
       expect(controlPayload.one_sided[0]).toMatchObject({ amount: 100, currency: "USD", amount_eur: 90 });
       expect(control.api.transactions.confirm).not.toHaveBeenCalled();
       expect(mockedLogAudit).not.toHaveBeenCalled();
@@ -3163,9 +3178,9 @@ describe("reconcile_inter_account_transfers", () => {
         ],
         bankAccounts: twoAccounts,
       });
-      const smallOneCentPayload = parseMcpResponse(
+      const smallOneCentPayload = parseToolPayload<ReconInterAccountPayload>(
         (await executeInterAccount(smallOneCent.handler)).content[0]!.text,
-      ) as any;
+      );
       const smallAuditCalls = [...mockedLogAudit.mock.calls];
 
       mockedLogAudit.mockClear();
@@ -3177,9 +3192,9 @@ describe("reconcile_inter_account_transfers", () => {
         }],
         bankAccounts: twoAccounts,
       });
-      const smallTwoCentPayload = parseMcpResponse(
+      const smallTwoCentPayload = parseToolPayload<ReconInterAccountPayload>(
         (await executeInterAccount(smallTwoCent.handler)).content[0]!.text,
-      ) as any;
+      );
 
       expect(smallOneCentPayload.errors).toEqual([]);
       expect(smallOneCentPayload.already_handled).toEqual([]);
@@ -3255,7 +3270,7 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
 
       const hugeForeignRun = setupInterAccountTool({
         transactions: [{
@@ -3272,9 +3287,9 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const hugeForeignPayload = parseMcpResponse(
+      const hugeForeignPayload = parseToolPayload<ReconInterAccountPayload>(
         (await executeInterAccount(hugeForeignRun.handler)).content[0]!.text,
-      ) as any;
+      );
 
       const hugeEurRun = setupInterAccountTool({
         transactions: [{
@@ -3291,9 +3306,9 @@ describe("reconcile_inter_account_transfers", () => {
           ],
         }],
       });
-      const hugeEurPayload = parseMcpResponse(
+      const hugeEurPayload = parseToolPayload<ReconInterAccountPayload>(
         (await executeInterAccount(hugeEurRun.handler)).content[0]!.text,
-      ) as any;
+      );
 
       expect(payload.errors).toContainEqual({
         transaction_ids: [8501], code: "one_sided_eur_amount_conflict",
@@ -3336,7 +3351,7 @@ describe("reconcile_inter_account_transfers", () => {
         }],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
 
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.errors).toEqual([{
@@ -3368,7 +3383,7 @@ describe("reconcile_inter_account_transfers", () => {
         { id: 8715, fields: { amount: 100, cl_currencies_id: "USD", base_amount: undefined, currency_rate: 0 }, code: "one_sided_currency_rate_invalid", reason: "The one-sided transfer currency rate must be finite and positive and produce a finite positive EUR amount when used.", raw: 0 },
       ];
 
-      const outcomes: Array<{ testCase: typeof cases[number]; payload?: any; thrown?: unknown; api: any; auditCalls: number }> = [];
+      const outcomes: Array<{ testCase: typeof cases[number]; payload?: ReconInterAccountPayload; thrown?: unknown; api: any; auditCalls: number }> = [];
       for (const testCase of cases) {
         mockedLogAudit.mockClear();
         const run = setupInterAccountTool({
@@ -3381,7 +3396,7 @@ describe("reconcile_inter_account_transfers", () => {
         });
         try {
           const result = await executeInterAccount(run.handler);
-          outcomes.push({ testCase, payload: parseMcpResponse(result.content[0]!.text) as any, api: run.api, auditCalls: mockedLogAudit.mock.calls.length });
+          outcomes.push({ testCase, payload: parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text), api: run.api, auditCalls: mockedLogAudit.mock.calls.length });
         } catch (thrown) {
           outcomes.push({ testCase, thrown, api: run.api, auditCalls: mockedLogAudit.mock.calls.length });
         }
@@ -3395,7 +3410,7 @@ describe("reconcile_inter_account_transfers", () => {
           code: outcome.testCase.code,
           reason: outcome.testCase.reason,
         });
-        expect(error.reason).not.toContain(String(outcome.testCase.raw));
+        expect(error!.reason).not.toContain(String(outcome.testCase.raw));
         expect(outcome.api.transactions.get).toHaveBeenCalled();
         expect(outcome.api.transactions.update).not.toHaveBeenCalled();
         expect(outcome.api.transactions.confirm).not.toHaveBeenCalled();
@@ -3427,7 +3442,7 @@ describe("reconcile_inter_account_transfers", () => {
           }],
           bankAccounts: twoAccounts,
         });
-        const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
         expect(payload.matched_one_sided).toBe(0);
         expect(payload.errors).toEqual([{ transaction_ids: [testCase.id], code: testCase.code, reason: testCase.reason }]);
         expect(run.api.transactions.get).toHaveBeenCalled();
@@ -3452,7 +3467,7 @@ describe("reconcile_inter_account_transfers", () => {
       const granular = setupInterAccountTool({ transactions: [transaction], bankAccounts: twoAccounts });
       const granularResult = await granular.handler({});
       const granularText = granularResult.content[0]!.text;
-      const granularPayload = parseMcpResponse(granularText) as any;
+      const granularPayload = parseToolPayload<ReconInterAccountPayload>(granularText);
       expect(granularPayload.errors).toEqual([expectedError]);
       expect(granularPayload.execution).toMatchObject({
         contract: "batch_execution_v1", mode: "DRY_RUN", errors: [expectedError], results: [],
@@ -3464,7 +3479,7 @@ describe("reconcile_inter_account_transfers", () => {
       });
       const mergedResult = await merged.handler({ mode: "inter_account_dry_run" });
       const mergedText = mergedResult.content[0]!.text;
-      const mergedPayload = parseMcpResponse(mergedText) as any;
+      const mergedPayload = parseToolPayload<ReconcileBankTransactionsPayload<ReconInterAccountPayload>>(mergedText);
       expect(mergedPayload).toMatchObject({
         mode: "inter_account_dry_run", delegated_tool: "reconcile_inter_account_transfers",
         delegated_args: { execute: false },
@@ -3493,7 +3508,7 @@ describe("reconcile_inter_account_transfers", () => {
           }],
           bankAccounts: twoAccounts,
         });
-        const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
         expect(payload.one_sided[0]).toMatchObject({
           transaction_id: direction.id, amount: 75,
           source_dimension_id: direction.source, target_dimension_id: direction.target,
@@ -3512,7 +3527,7 @@ describe("reconcile_inter_account_transfers", () => {
         ],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
 
     expect(payload.matched_pairs).toBe(1);
       expect(payload.matched_one_sided).toBe(0);
@@ -3537,7 +3552,7 @@ describe("reconcile_inter_account_transfers", () => {
         ],
         bankAccounts: twoAccounts,
       });
-      const payload = parseMcpResponse((await executeInterAccount(run.handler)).content[0]!.text) as any;
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(run.handler)).content[0]!.text);
 
       expect(payload.matched_pairs).toBe(0);
       expect(payload.matched_one_sided).toBe(0);
@@ -3790,13 +3805,13 @@ describe("exact-match confirm duplicate-posting guard", () => {
     const { handler, api } = setupGuardAutoConfirm({ journals: [duplicateJournal] });
 
     const result = await handler({ execute: false, min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.results[0]!.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
     ]);
-    expect(payload.warnings.some((w: string) => /POSSIBLE duplicate/.test(w))).toBe(true);
+    expect(payload.warnings!.some(w => /POSSIBLE duplicate/.test(w))).toBe(true);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 
@@ -3804,7 +3819,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
     const { handler } = setupGuardAutoConfirm({ journalsThrows: true });
 
     const result = await handler({ execute: false, min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
@@ -3818,7 +3833,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
     const { handler } = setupGuardAutoConfirm({ bankDimsThrows: true });
 
     const result = await handler({ execute: false, min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
@@ -3831,7 +3846,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
     const { handler } = setupGuardAutoConfirm({ bankDimsThrows: true, toolName: "reconcile_transactions" });
 
     const result = await handler({ min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconSuggestPayload>(result.content[0]!.text);
 
     expect(payload.matched).toBe(1);
     expect(payload.matches[0].possible_duplicate_postings).toBeUndefined();
@@ -3841,18 +3856,19 @@ describe("exact-match confirm duplicate-posting guard", () => {
   it("blocks the confirm with block_on_duplicate=true and executes nothing for that transaction", async () => {
     const { handler, api } = setupGuardAutoConfirm({ journals: [duplicateJournal] });
 
-    const dry = parseMcpResponse(
+    const dry = parseToolPayload<ReconExactMatchPayload>(
       (await handler({ execute: false, min_confidence: 50, block_on_duplicate: true })).content[0]!.text,
-    ) as any;
-    const blockedRow = dry.results.find((r: any) => r.transaction_id === 1);
+    );
+    const blockedRow = dry.results.find(r => r.transaction_id === 1)!;
     expect(blockedRow.status).toBe("blocked_duplicate_suspect");
     expect(blockedRow.status).not.toBe("would_confirm");
+    if (blockedRow.status !== "blocked_duplicate_suspect") throw new Error("expected a blocked_duplicate_suspect row");
     expect(blockedRow.conflicting_journal_ids).toContain(DUP_JOURNAL_ID);
     expect(dry.auto_confirmed).toBe(0);
 
-    const executed = parseMcpResponse(
+    const executed = parseToolPayload<ReconExactMatchPayload>(
       (await handler({ execute: true, min_confidence: 50, block_on_duplicate: true, plan_handle: dry.plan_handle })).content[0]!.text,
-    ) as any;
+    );
     expect(executed.mode).toBe("EXECUTED");
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -3861,7 +3877,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
     const { handler } = setupGuardAutoConfirm({ journalsThrows: true });
 
     const result = await handler({ execute: false, min_confidence: 50, block_on_duplicate: true });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
 
     expect(payload.results[0]!.status).toBe("would_confirm");
     expect(payload.duplicate_scan_note).toMatch(/Duplicate scan unavailable/);
@@ -3886,7 +3902,7 @@ describe("exact-match confirm duplicate-posting guard", () => {
   it("flags a non-EUR reconcile tx whose EUR base_amount matches a journal base_amount", async () => {
     const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal92], tx: nonEurTx, sale: nonEurSale });
     const result = await handler({ execute: false, min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
     expect(payload.results[0]!.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: 556 }),
     ]);
@@ -3895,25 +3911,25 @@ describe("exact-match confirm duplicate-posting guard", () => {
   it("does NOT flag a non-EUR reconcile tx whose nominal matches but EUR base differs", async () => {
     const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal], tx: nonEurTx, sale: nonEurSale });
     const result = await handler({ execute: false, min_confidence: 50 });
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
+    const payload = parseToolPayload<ReconExactMatchPayload>(result.content[0]!.text);
     expect(payload.results[0]!.possible_duplicate_postings).toBeUndefined();
   });
 
   it("suggest mode echoes possible_duplicate_postings on the match row; merged tool forwards the flag", async () => {
     const { handler } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_transactions" });
-    const suggest = parseMcpResponse((await handler({ min_confidence: 50 })).content[0]!.text) as any;
+    const suggest = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 50 })).content[0]!.text);
     expect(suggest.matches[0]!.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
     ]);
 
     const { handler: blockingSuggest } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_transactions" });
-    const blocked = parseMcpResponse((await blockingSuggest({ min_confidence: 50, block_on_duplicate: true })).content[0]!.text) as any;
+    const blocked = parseToolPayload<ReconSuggestPayload>((await blockingSuggest({ min_confidence: 50, block_on_duplicate: true })).content[0]!.text);
     expect(blocked.matches[0]!.duplicate_blocked).toBe(true);
 
     const { handler: merged } = setupGuardAutoConfirm({ journals: [duplicateJournal], toolName: "reconcile_bank_transactions" });
-    const mergedResult = parseMcpResponse(
+    const mergedResult = parseToolPayload<ReconcileBankTransactionsPayload<ReconSuggestPayload>>(
       (await merged({ mode: "suggest", min_confidence: 50, block_on_duplicate: true })).content[0]!.text,
-    ) as any;
+    );
     expect(mergedResult.delegated_args.block_on_duplicate).toBe(true);
     expect(mergedResult.result.matches[0]!.possible_duplicate_postings).toEqual([
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
@@ -4040,7 +4056,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77, ref_number: "RF-5487" }],
         purchases: [{ ...usdInvoice, bank_ref_number: "RF-5487" }],
       });
-      const payload = parseMcpResponse((await executeAutoConfirm(handler, {})).content[0]!.text);
+      const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, {})).content[0]!.text);
       expect(payload.auto_confirmed).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
@@ -4050,7 +4066,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77 }],
         purchases: [usdInvoice],
       });
-      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
       expect(payload.auto_confirmed).toBe(1);
       expect(api.transactions.confirm).toHaveBeenCalledWith(901, [
         { related_table: "purchase_invoices", related_id: 5487, amount: 290.03 },
@@ -4062,7 +4078,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 12 }],
         purchases: [usdInvoice],
       });
-      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
       expect(payload.auto_confirmed).toBe(0);
       expect(payload.third_party_payer_reviews).toEqual([
         expect.objectContaining({ transaction_id: 901, invoice_id: 5487, reason: "third_party_payer" }),
@@ -4075,7 +4091,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77 }],
         purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
       });
-      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
       expect(payload.auto_confirmed).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
@@ -4088,7 +4104,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77 }],
         purchases: [usdInvoice],
       });
-      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
       expect(payload.matches[0]!.best_match.match_reasons).toContain("exact_invoice_base_amount");
       expect(payload.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 5487, amount: 290.03 });
     });
@@ -4098,7 +4114,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77 }],
         purchases: [usdInvoice, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
       });
-      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
       expect(payload.matches[0]!.distribution).toBeUndefined();
       expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
     });
@@ -4114,7 +4130,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
       ["USD invoice first", [usd200Invoice, eurInvoice]],
     ])("rejects a mixed exact_amount / Tier A top-score tie (%s)", async (_label, purchases) => {
       const handler = setupReconciliationTool({ transactions: [eur100Row], purchases });
-      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
       expect(payload.matches[0]!.distribution).toBeUndefined();
       expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
     });
@@ -4124,7 +4140,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eurRow, clients_id: 77, ref_number: "RF-5487" }],
         purchases: [{ ...usdInvoice, bank_ref_number: "RF-5487" }, { ...usdInvoice, id: 5488, number: "INV-5488", gross_price: 330 }],
       });
-      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
       expect(payload.matches[0]!.best_match.id).toBe(5487);
       expect(payload.matches[0]!.best_match.confidence).toBe(85);
       expect(payload.matches[0]!.distribution).toBeUndefined();
@@ -4136,7 +4152,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
         transactions: [{ ...eur100Row, ref_number: "RF-6001" }],
         purchases: [usd200Invoice, { ...eurInvoice, bank_ref_number: "RF-6001" }],
       });
-      const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
       expect(payload.matches[0]!.best_match.id).toBe(6001);
       expect(payload.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 6001, amount: 100 });
       expect(payload.matches[0]!.manual_review_required).toBeUndefined();
@@ -4147,7 +4163,7 @@ describe("F5 exact_invoice_base_amount (EUR payment vs foreign-currency invoice 
       ["USD invoice first", [usd200Invoice, eurInvoice]],
     ])("auto-confirm skips the mixed tie as ambiguous (%s)", async (_label, purchases) => {
       const { handler, api } = setupAutoConfirmTool({ transactions: [eur100Row], purchases });
-      const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+      const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
       expect(payload.auto_confirmed).toBe(0);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
@@ -4189,7 +4205,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     const { handler } = setupInterAccountTool({
       transactions: [camtRow(5002)], bankAccounts: threeAccounts, companyName: "Näide OÜ",
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
     expect(payload.matched_one_sided).toBe(1);
     expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
     expect(payload.one_sided[0]!.match_reasons).toContain("counterparty_iban_is_own_account");
@@ -4203,7 +4219,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       ],
       bankAccounts: threeAccounts, companyName: "Näide OÜ",
     });
-    const payload = parseMcpResponse((await handler({})).content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
     expect(payload.matched_pairs).toBe(1);
     expect(payload.pairs[0]).toMatchObject({ outgoing_transaction_id: 5002, incoming_transaction_id: 5003 });
     expect(payload.pairs[0]!.match_reasons).toContain("outgoing_iban_matches_incoming_account");
@@ -4226,12 +4242,12 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     });
     const setup = (transactions: unknown[], journals: unknown[] = [journal()]) =>
       setupInterAccountTool({ transactions, journals, bankAccounts: threeAccounts, companyName: "Näide OÜ" });
-    const proposals = (payload: any) => payload.already_handled.filter((row: any) => row.mirror_proposal);
+    const proposals = (payload: ReconInterAccountPayload) => payload.already_handled.filter(row => row.mirror_proposal);
 
     it("proposes the sole same-key mirror for explicit deletion, in dry run and execute, and never deletes it", async () => {
       const { handler, api } = setup([counterpart(), camtRow(5002)]);
-      const dry = parseMcpResponse((await handler({})).content[0]!.text);
-      const executed = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
+      const executed = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       for (const payload of [dry, executed]) {
         expect(payload.matched_one_sided).toBe(0);
         expect(payload.already_handled).toEqual([expect.objectContaining({
@@ -4248,7 +4264,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       for (const order of [[5002, 5003], [5003, 5002]]) {
         const rows = order.map(id => camtRow(id));
         const { handler, api } = setup([counterpart(), ...rows]);
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(proposals(payload)).toEqual([]);
         expect(payload.already_handled).toEqual([]);
         expect(payload.matched_one_sided).toBe(0);
@@ -4263,7 +4279,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
 
     it("makes no proposal when the journal is not the counterpart's TRANSACTION journal (ENTRY)", async () => {
       const { handler } = setup([counterpart(), camtRow(5002)], [journal({ operation_type: "ENTRY" })]);
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
       expect(proposals(payload)).toEqual([]);
     });
@@ -4271,7 +4287,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     it("makes no proposal when the counterpart is not CONFIRMED", async () => {
       for (const status of ["PROJECT", "VOID"]) {
         const { handler, api } = setup([counterpart({ status }), camtRow(5002)]);
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(proposals(payload)).toEqual([]);
         expect(api.transactions.delete).not.toHaveBeenCalled();
       }
@@ -4279,7 +4295,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
 
     it("Codex counterexample: a verified mirror plus a same-day row with a tampered marker → no proposal, both reviewed", async () => {
       const { handler } = setup([counterpart(), camtRow(5002), tamperSig(camtRow(5003))]);
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(proposals(payload)).toEqual([]);
       expect(payload.ambiguous_refless).toContainEqual(expect.objectContaining({ transaction_ids: [5002, 5003] }));
     });
@@ -4287,13 +4303,13 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     it("makes no proposal when the mirror's signed direction contradicts its journal posting", async () => {
       // The counterpart carries no signed direction, so only the posting side can veto.
       const { handler } = setup([counterpart({ description: "top-up" }), camtRow(5002, { dir: "CRDT" })]);
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(proposals(payload)).toEqual([]);
     });
 
     it("makes no proposal for a non-EUR counterpart (EUR-only)", async () => {
       const { handler } = setup([counterpart({ cl_currencies_id: "USD", base_amount: 600 }), camtRow(5002)]);
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(proposals(payload)).toEqual([]);
     });
 
@@ -4304,14 +4320,14 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const withRef = (id: number) => ({ ...camtRow(id, { ref: "R1" }), bank_ref_number: "R1" });
       const wiseIn = { id: 5007, status: "PROJECT", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null, description: "WISE:T5007 top-up [source_direction=IN]" };
       const { handler } = setup([counterpart(), withRef(5006), withRef(5002), wiseIn], [journal({ document_number: "R1" })]);
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(payload.already_handled).toEqual(expect.arrayContaining([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]));
       expect(proposals(payload)).toEqual([]);
     });
 
     it("matches the journal on the verified marker's bank reference (no direct reference)", async () => {
       const { handler, api } = setup([counterpart(), camtRow(5002, { name: "Wise Payments" })], [journal({ document_number: "REF5002" })]);
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
       expect(proposals(payload)).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
@@ -4322,10 +4338,10 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const rows = [withRef(5011, "2026-09-25"), withRef(5012, "2026-09-26"), withRef(5013, "2026-09-27")];
       for (const ordered of [rows, [...rows].reverse()]) {
         const { handler, api } = setup([counterpart(), ...ordered], [journal({ document_number: "R1" })]);
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(proposals(payload)).toEqual([]);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
-        const reviewed = new Set(payload.ambiguous_refless.flatMap((row: any) => row.transaction_ids));
+        const reviewed = new Set(payload.ambiguous_refless.flatMap(row => row.transaction_ids));
         expect([...reviewed].sort()).toEqual([5011, 5012, 5013]);
       }
     });
@@ -4335,7 +4351,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       // together; 5023 (27 Sep) has no same-key neighbour within a day, but the journal is already claimed.
       const withRef = (id: number, date: string) => ({ ...camtRow(id, { ref: "R1", date }), bank_ref_number: "R1" });
       const { handler } = setup([counterpart(), withRef(5021, "2026-09-24"), withRef(5022, "2026-09-25"), withRef(5023, "2026-09-27")], [journal({ document_number: "R1" })]);
-      const payload = parseMcpResponse((await handler({ max_date_gap: 2 })).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({ max_date_gap: 2 })).content[0]!.text);
       expect(proposals(payload)).toEqual([]);
     });
 
@@ -4346,7 +4362,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       expect(row.description).toMatch(/^\[e-arveldaja-mcp:camt brh=sha256:/);
       expect(row.description).not.toContain(longRef);
       const { handler, api } = setup([counterpart(), row], [journal({ document_number: longRef })]);
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
       expect(proposals(payload)).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
@@ -4363,7 +4379,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
       for (const order of orders) {
         const { handler, api } = setup([...counterparts, ...order.map(i => rows[i]!)], journals);
-        const payload = parseMcpResponse((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
         expect(proposals(payload)).toEqual([]);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
         expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -4374,7 +4390,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const longRef = "LONG-REFERENCE-" + "A".repeat(100);
       const row = camtRow(5002, { name: "Wise Payments", ref: longRef, text: null });
       const { handler, api } = setup([counterpart(), row], [journal({ document_number: `BANK:${longRef}` })]);
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
@@ -4391,7 +4407,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         for (const journals of [[alias, booking], [booking, alias]]) {
           const row = camtRow(5002, { name: "Wise Payments", ref: longRef, text: null });
           const { handler, api } = setup([counterpart(), row], journals);
-          const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+          const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
           expect(api.transactions.confirm).not.toHaveBeenCalled();
           expect(payload.matched_one_sided).toBe(0);
           expect(payload.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, existing_journal_id: 9001 })]);
@@ -4419,7 +4435,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         for (const aliases of aliasSets) {
           for (const journals of [[...aliases, reversed], [reversed, ...aliases]]) {
             const { handler, api } = setup([counterpart(), row], journals);
-            const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+            const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
             expect(api.transactions.confirm).not.toHaveBeenCalled();
             expect(api.transactions.delete).not.toHaveBeenCalled();
             expect(payload.matched_one_sided).toBe(0);
@@ -4441,7 +4457,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
       for (const order of orders) {
         const { handler, api } = setup([...counterparts, ...order.map(i => rows[i]!)], journals);
-        const payload = parseMcpResponse((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler, { max_date_gap: 2 })).content[0]!.text);
         expect(proposals(payload)).toEqual([]);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
         expect(api.transactions.delete).not.toHaveBeenCalled();
@@ -4454,7 +4470,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       transactions: [{ id: 5004, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-09-26", accounts_dimensions_id: 100, bank_account_name: "Näide OÜ", bank_account_no: null }],
       bankAccounts: threeAccounts, companyName: "Näide OÜ",
     });
-    const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+    const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
     expect(payload.matched_one_sided).toBe(0);
     expect(payload.ambiguous_refless).toEqual([
@@ -4469,7 +4485,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const { handler, api } = setupInterAccountTool({
         transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: twoAccounts, companyName: "Näide OÜ",
       });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.ambiguous_refless).toEqual([
@@ -4481,7 +4497,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       const { handler, api } = setupInterAccountTool({
         transactions: [tamperSig(camtRow(5002, { name: "Näide OÜ" }))], bankAccounts: threeAccounts, companyName: "Näide OÜ",
       });
-      const payload = parseMcpResponse((await executeInterAccount(handler, { target_accounts_dimensions_id: 300 })).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler, { target_accounts_dimensions_id: 300 })).content[0]!.text);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
       expect(payload.matched_one_sided).toBe(0);
       expect(payload.ambiguous_refless).toEqual([
@@ -4492,7 +4508,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
     it("(c) a marker without a sig keeps the name-only behaviour", async () => {
       const unsigned = { ...camtRow(5002, { name: "Näide OÜ" }), description: `Näide OU\n[e-arveldaja-mcp:camt br=REF5002 iban=${WISE_IBAN} dir=DBIT]` };
       const { handler } = setupInterAccountTool({ transactions: [unsigned], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
-      const payload = parseMcpResponse((await handler({})).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
       expect(payload.matched_one_sided).toBe(1);
       expect(payload.one_sided[0]).toMatchObject({ transaction_id: 5002, target_dimension_id: 300 });
       expect(payload.ambiguous_refless).toEqual([]);
@@ -4503,7 +4519,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         const tampered = tamperSig(camtRow(5002, { name: "Näide OÜ" }));
         const row = { ...tampered, description: tampered.description!.replace("\n[e-arveldaja-mcp:camt", `${encoded}[e-arveldaja-mcp:camt`) };
         const { handler, api } = setupInterAccountTool({ transactions: [row], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
         expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" })]);
       }
@@ -4513,7 +4529,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       for (const direct of ["", "   "]) {
         const row = { ...tamperSig(camtRow(5002, { name: "Wise" })), bank_account_no: direct };
         const { handler, api } = setupInterAccountTool({ transactions: [row], bankAccounts: twoAccounts, companyName: "Näide OÜ" });
-        const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
         expect(api.transactions.confirm).not.toHaveBeenCalled();
         expect(payload.ambiguous_refless).toEqual([expect.objectContaining({ transaction_ids: [5002], code: "camt_marker_unverified" })]);
       }
@@ -4527,7 +4543,7 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         ],
         bankAccounts: twoAccounts, companyName: "Näide OÜ",
       });
-      const payload = parseMcpResponse((await executeInterAccount(handler)).content[0]!.text);
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
       expect(payload.matched_pairs).toBe(0);
       expect(api.transactions.delete).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalledWith(5002, expect.anything(), expect.anything());
@@ -4562,7 +4578,7 @@ describe("F5 Tier A wins over a nominal match when the foreign gross equals its 
       transactions: [{ ...row, ref_number: "RF-7001" }],
       purchases: [{ ...usdEqual, bank_ref_number: "RF-7001" }],
     });
-    const payload = parseMcpResponse((await executeAutoConfirm(handler, {})).content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, {})).content[0]!.text);
     expect(payload.auto_confirmed).toBe(0);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
@@ -4572,7 +4588,7 @@ describe("F5 Tier A wins over a nominal match when the foreign gross equals its 
     ["USD invoice first", [usdEqual, eurInvoice]],
   ])("suggest rejects the EUR 100 / USD 100 (base 100) tie (%s)", async (_label, purchases) => {
     const handler = setupReconciliationTool({ transactions: [row], purchases });
-    const payload = parseMcpResponse((await handler({ min_confidence: 40 })).content[0]!.text);
+    const payload = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 40 })).content[0]!.text);
     expect(payload.matches[0]!.distribution).toBeUndefined();
     expect(payload.matches[0]!.manual_review_required).toContain("ambiguous_foreign_invoice_base");
   });
@@ -4582,7 +4598,7 @@ describe("F5 Tier A wins over a nominal match when the foreign gross equals its 
     ["USD invoice first", [usdEqual, eurInvoice]],
   ])("auto-confirm skips the EUR 100 / USD 100 (base 100) tie as ambiguous (%s)", async (_label, purchases) => {
     const { handler, api } = setupAutoConfirmTool({ transactions: [row], purchases });
-    const payload = parseMcpResponse((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
+    const payload = parseToolPayload<ReconExactMatchPayload>((await executeAutoConfirm(handler, { min_confidence: 40 })).content[0]!.text);
     expect(payload.auto_confirmed).toBe(0);
     expect(api.transactions.confirm).not.toHaveBeenCalled();
     expect(payload.errors).toEqual([expect.objectContaining({ reason: expect.stringContaining("ambiguous_foreign_invoice_base") })]);
@@ -4619,7 +4635,7 @@ describe("reconcile_inter_account_transfers: LHV InstrId ↔ Wise reference suff
   }
   const run = async (transactions: unknown[]) => {
     const { handler } = setupInterAccountTool({ transactions, bankAccounts: accounts, companyName: company });
-    return parseMcpResponse((await handler({})).content[0]!.text) as any;
+    return parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
   };
 
   it("breaks a same-amount same-day tie by the instruction id", async () => {
@@ -4678,6 +4694,6 @@ describe("reconcile_inter_account_transfers: LHV InstrId ↔ Wise reference suff
   it("ignores the id on a non-Wise incoming row", async () => {
     const plain = { ...wiseIn(12, "NÄIDE OÜ/68"), description: "Top-up" };
     const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/69"), plain]);
-    expect(payload.pairs?.some((pair: any) => pair.match_reasons?.includes("instruction_id_matches_reference")) ?? false).toBe(false);
+    expect(payload.pairs?.some(pair => pair.match_reasons?.includes("instruction_id_matches_reference")) ?? false).toBe(false);
   });
 });
