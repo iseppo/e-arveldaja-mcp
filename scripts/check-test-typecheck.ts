@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, posix, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseSource } from "@babel/parser";
 
@@ -41,7 +41,8 @@ export interface UpdatePlan {
 /** Pseudo-codes counted next to the tsc codes: they ratchet the same way, so loose typing can only shrink. */
 export const ANY_CODE = "ANY";
 export const UNTYPED_PAYLOAD_CODE = "UNTYPED_PAYLOAD";
-const UNTYPED_PAYLOAD_MODULE_RE = /(?:^|\/)__fixtures__\/mcp-response(?:\.js)?$/;
+const UNTYPED_PAYLOAD_MODULE = "src/__fixtures__/mcp-response";
+const TSC_CODE_RE = /^TS\d+$/;
 
 const HEADER_RE = /^(.+?)\((\d+),(\d+)\): error (TS\d+): /;
 const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:\//;
@@ -164,6 +165,8 @@ export function planBaselineUpdate(
   if (baseline === null) return { allowed: true, increases: [] };
   const increases = findIncreases(current, baseline.errors);
   if (buildBaseline(current).total > baseline.total) return { allowed: false, increases };
+  // tsc errors are never traded in, not even for removed loose typing under --force.
+  if (increases.some(line => TSC_CODE_RE.test(line.slice(line.lastIndexOf(" ") + 1)))) return { allowed: false, increases };
   return { allowed: increases.length === 0 || force, increases };
 }
 
@@ -182,40 +185,58 @@ function isAstNode(value: unknown): value is AstNode {
   return typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string";
 }
 
-function walkAst(node: AstNode, visit: (node: AstNode) => void): void {
-  visit(node);
-  for (const [key, value] of Object.entries(node)) {
-    if (key === "loc" || key.endsWith("Comments")) continue;
-    for (const child of Array.isArray(value) ? value : [value]) {
-      if (isAstNode(child)) walkAst(child, visit);
-    }
-  }
+/** Whether an import specifier in `file` (repo-relative) resolves to the untyped fixture module, any extension. */
+function importsUntypedFixture(specifier: string, file: string): boolean {
+  if (!specifier.startsWith(".")) return false;
+  const target = posix.normalize(posix.join(posix.dirname(file), specifier));
+  return target.replace(/\.[cm]?[jt]s$/, "") === UNTYPED_PAYLOAD_MODULE;
 }
 
 /**
- * Loose typing in one test source: explicit `any` annotations (`as any`, `: any`, `any[]`, ...) and calls to
- * the any-returning `parseMcpResponse` from __fixtures__/mcp-response (typed code uses parseToolPayload<T>).
+ * Loose typing in one test source: explicit `any` annotations (`as any`, `: any`, `any[]`, ...) and every
+ * reference to the any-returning `parseMcpResponse` of __fixtures__/mcp-response (named, aliased or via a
+ * namespace import; calls, `.map(parse)` and re-bindings alike). Typed code uses parseToolPayload<T>.
  */
-export function countLooseTyping(source: string): { any: number; untypedPayload: number } {
+export function countLooseTyping(source: string, file: string): { any: number; untypedPayload: number } {
   const ast = parseSource(source, { sourceType: "module", plugins: ["typescript"] }) as unknown as { program: AstNode };
   const untypedNames = new Set<string>();
+  const namespaces = new Set<string>();
+  let untypedPayload = 0;
   for (const statement of ast.program.body as AstNode[]) {
     const from = (statement.source as { value?: unknown } | undefined)?.value;
-    if (statement.type !== "ImportDeclaration" || typeof from !== "string" || !UNTYPED_PAYLOAD_MODULE_RE.test(from)) continue;
+    if (typeof from !== "string" || !importsUntypedFixture(from, file)) continue;
+    if (statement.type === "ExportNamedDeclaration") untypedPayload += 1; // re-export hands the any on
+    if (statement.type !== "ImportDeclaration") continue;
     for (const specifier of statement.specifiers as AstNode[]) {
       const imported = specifier.imported as { name?: string; value?: string } | undefined;
-      if (specifier.type === "ImportSpecifier" && (imported?.name ?? imported?.value) === "parseMcpResponse") {
-        untypedNames.add((specifier.local as { name: string }).name);
-      }
+      const local = (specifier.local as { name: string }).name;
+      if (specifier.type === "ImportNamespaceSpecifier") namespaces.add(local);
+      else if (specifier.type === "ImportSpecifier" && (imported?.name ?? imported?.value) === "parseMcpResponse") untypedNames.add(local);
     }
   }
   let any = 0;
-  let untypedPayload = 0;
-  walkAst(ast.program, node => {
+  const visit = (node: AstNode, parent: AstNode | undefined, key: string): void => {
+    if (node.type === "ImportDeclaration") return;
     if (node.type === "TSAnyKeyword") any += 1;
-    const callee = node.callee as AstNode | undefined;
-    if (node.type === "CallExpression" && callee?.type === "Identifier" && untypedNames.has(callee.name as string)) untypedPayload += 1;
-  });
+    if (node.type === "Identifier" && untypedNames.has(node.name as string)) {
+      const isPropertyName = (parent?.type === "MemberExpression" || parent?.type === "OptionalMemberExpression")
+        && key === "property" && parent.computed !== true;
+      const isObjectKey = parent?.type === "ObjectProperty" && key === "key" && parent.computed !== true && parent.shorthand !== true;
+      if (!isPropertyName && !isObjectKey) untypedPayload += 1;
+    }
+    if ((node.type === "MemberExpression" || node.type === "OptionalMemberExpression")
+      && (node.object as AstNode).type === "Identifier" && namespaces.has((node.object as AstNode).name as string)
+      && (node.property as AstNode).type === "Identifier" && (node.property as AstNode).name === "parseMcpResponse") {
+      untypedPayload += 1;
+    }
+    for (const [childKey, value] of Object.entries(node)) {
+      if (childKey === "loc" || childKey.endsWith("Comments")) continue;
+      for (const child of Array.isArray(value) ? value : [value]) {
+        if (isAstNode(child)) visit(child, node, childKey);
+      }
+    }
+  };
+  visit(ast.program, undefined, "");
   return { any, untypedPayload };
 }
 
@@ -282,6 +303,7 @@ function listTestFiles(): string[] {
 function main(): number {
   const update = process.argv.includes("--update");
   const force = process.argv.includes("--force");
+  const init = process.argv.includes("--init");
   const baseline: TestTypecheckBaseline | null = existsSync(baselinePath)
     ? JSON.parse(readFileSync(baselinePath, "utf8")) as TestTypecheckBaseline
     : null;
@@ -301,7 +323,7 @@ function main(): number {
   const { status, output } = runTsc();
   const { diagnostics, unparseable } = parseDiagnostics(output, repoRoot);
   const loose = programFiles.filter(isTestSupportFile).sort()
-    .map(file => ({ file, ...countLooseTyping(readFileSync(resolve(repoRoot, file), "utf8")) }));
+    .map(file => ({ file, ...countLooseTyping(readFileSync(resolve(repoRoot, file), "utf8"), file) }));
   const current = addLooseTypingCounts(summarizeDiagnostics(diagnostics), loose);
   const total = buildBaseline(current).total;
   const counts = {
@@ -318,6 +340,10 @@ function main(): number {
   if (unparseable.length > 0) {
     console.error("Unparseable tsc error output:");
     for (const line of unparseable) console.error(line);
+    return finish(2);
+  }
+  if (update && baseline === null && !init) {
+    console.error(`Baseline file not found: ${baselinePath}. Seeding a new one resets every count; pass --init to do that deliberately.`);
     return finish(2);
   }
   if (status !== 0 && diagnostics.length === 0) {

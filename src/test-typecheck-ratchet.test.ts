@@ -105,10 +105,22 @@ describe("planBaselineUpdate", () => {
     expect(planBaselineUpdate(current, baseline, true).allowed).toBe(false);
   });
 
-  it("refuses an equal total that swaps a fixed error for a new one unless forced", () => {
+  it("refuses an equal total that swaps fixed loose typing for new loose typing unless forced", () => {
+    const loose = buildBaseline({ "src/a.test.ts": { ANY: 2 } });
+    const swapped = { "src/a.test.ts": { ANY: 1 }, "src/b.test.ts": { ANY: 1 } };
+    expect(planBaselineUpdate(swapped, loose)).toEqual({ allowed: false, increases: ["+1 src/b.test.ts ANY"] });
+    expect(planBaselineUpdate(swapped, loose, true)).toEqual({ allowed: true, increases: ["+1 src/b.test.ts ANY"] });
+  });
+
+  it("refuses a swapped tsc error even when forced", () => {
     const renamed = TSC_OUTPUT.replace("/repo/src/c.test.ts", "src/d.test.ts");
-    expect(planBaselineUpdate(countsOf(renamed), baseline)).toEqual({ allowed: false, increases: ["+1 src/d.test.ts TS2307"] });
-    expect(planBaselineUpdate(countsOf(renamed), baseline, true)).toEqual({ allowed: true, increases: ["+1 src/d.test.ts TS2307"] });
+    expect(planBaselineUpdate(countsOf(renamed), baseline, true)).toEqual({ allowed: false, increases: ["+1 src/d.test.ts TS2307"] });
+  });
+
+  it("never lets a tsc error in, even forced in exchange for removed loose typing", () => {
+    const loose = buildBaseline({ "src/a.test.ts": { ANY: 2 } });
+    const traded = { "src/a.test.ts": { ANY: 1 }, "src/b.test.ts": { TS2322: 1 } };
+    expect(planBaselineUpdate(traded, loose, true)).toEqual({ allowed: false, increases: ["+1 src/b.test.ts TS2322"] });
   });
 
   it("allows a pure decrease without force", () => {
@@ -142,7 +154,7 @@ describe("countLooseTyping", () => {
       "const r: Record<string, any> = {};",
       "const s = 'any';",
     ].join("\n");
-    expect(countLooseTyping(source)).toEqual({ any: 4, untypedPayload: 0 });
+    expect(countLooseTyping(source, "src/tools/x.test.ts")).toEqual({ any: 4, untypedPayload: 0 });
   });
 
   it("counts calls to the fixture's untyped parseMcpResponse, following an import alias", () => {
@@ -153,12 +165,36 @@ describe("countLooseTyping", () => {
       "const b = parse(other);",
       "const c = parseToolPayload<{ ok: boolean }>(text);",
     ].join("\n");
-    expect(countLooseTyping(source)).toEqual({ any: 1, untypedPayload: 2 });
+    expect(countLooseTyping(source, "src/tools/x.test.ts")).toEqual({ any: 1, untypedPayload: 2 });
+  });
+
+  it("counts .ts specifiers, sibling imports, namespace members, references and re-exports", () => {
+    const tsExt = 'import { parseMcpResponse } from "../__fixtures__/mcp-response.ts";\nparseMcpResponse(a);\n';
+    expect(countLooseTyping(tsExt, "src/tools/x.test.ts").untypedPayload).toBe(1);
+    const sibling = 'import { parseMcpResponse as p } from "./mcp-response.js";\nexport const q = (t: string) => p(t);\n';
+    expect(countLooseTyping(sibling, "src/__fixtures__/other.ts").untypedPayload).toBe(1);
+    const namespace = 'import * as m from "../__fixtures__/mcp-response.js";\nm.parseMcpResponse(a);\nm.parseToolPayload<number>(a);\n';
+    expect(countLooseTyping(namespace, "src/tools/x.test.ts").untypedPayload).toBe(1);
+    const references = [
+      'import { parseMcpResponse } from "../__fixtures__/mcp-response.js";',
+      "const all = texts.map(parseMcpResponse);",
+      "const p = parseMcpResponse;",
+      "parseMcpResponse.call(null, a);",
+      "const o = { parseMcpResponse: 1 }; o.parseMcpResponse;",
+    ].join("\n");
+    expect(countLooseTyping(references, "src/tools/x.test.ts").untypedPayload).toBe(3);
+    const reexport = 'export { parseMcpResponse as parse } from "./mcp-response.js";\n';
+    expect(countLooseTyping(reexport, "src/__fixtures__/other.ts").untypedPayload).toBe(1);
+  });
+
+  it("does not resolve a same-named module elsewhere", () => {
+    const elsewhere = 'import { parseMcpResponse } from "./mcp-response.js";\nparseMcpResponse(a);\n';
+    expect(countLooseTyping(elsewhere, "src/tools/x.test.ts").untypedPayload).toBe(0);
   });
 
   it("ignores parseMcpResponse imported from the production module (it returns unknown)", () => {
     const source = 'import { parseMcpResponse } from "./mcp-json.js";\nconst a = parseMcpResponse(text);\n';
-    expect(countLooseTyping(source)).toEqual({ any: 0, untypedPayload: 0 });
+    expect(countLooseTyping(source, "src/tools/x.test.ts")).toEqual({ any: 0, untypedPayload: 0 });
   });
 });
 

@@ -4694,6 +4694,6 @@ describe("reconcile_inter_account_transfers: LHV InstrId ↔ Wise reference suff
   it("ignores the id on a non-Wise incoming row", async () => {
     const plain = { ...wiseIn(12, "NÄIDE OÜ/68"), description: "Top-up" };
     const payload = await run([lhvOut(1, "68"), wiseIn(11, "NÄIDE OÜ/69"), plain]);
-    expect(payload.pairs?.some(pair => pair.match_reasons?.includes("instruction_id_matches_reference")) ?? false).toBe(false);
+    expect(payload.pairs.some(pair => pair.match_reasons?.includes("instruction_id_matches_reference"))).toBe(false);
   });
 });
