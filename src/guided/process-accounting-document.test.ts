@@ -301,12 +301,13 @@ describe("process_accounting_document", () => {
       source_sha256: sha256,
       ...bookingArgs(),
     }));
+    // The op created a DRAFT and did NOT confirm. Asserted before reading
+    // confirm_plan so a stray confirm fails here as an assertion, not a TypeError.
+    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
+    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
     expect(created.result.created_invoice_id).toBe(90_001);
     expect(created.result.document_uploaded).toBe(true);
     expect(created.confirm_plan.invoice_id).toBe(90_001);
-    // The op created a DRAFT and did NOT confirm.
-    expect(api.purchaseInvoices.confirmWithTotals).not.toHaveBeenCalled();
-    expect(api.purchaseInvoices.confirm).not.toHaveBeenCalled();
   });
 
   it("rejects a create whose booking fields drifted from the reviewed booking-prepare (plan_drift, zero mutation)", async () => {
