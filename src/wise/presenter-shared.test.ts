@@ -6,9 +6,10 @@ import {
   wiseDigestInputRejection,
   wisePreflightFailure,
   type WiseImportRenderData,
+  type WisePreflightFailurePayload,
 } from "./presenter.js";
 import { importPreflightFailurePayload, issueCamtResultHandle, type CamtImportExecution } from "../camt/presenter.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { WISE_PLAN_DOMAIN } from "./projection.js";
 import { CAMT_PLAN_DOMAIN } from "../tools/camt-plan.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
@@ -20,14 +21,14 @@ describe("Wise preflight failure envelope", () => {
     const rejected = Array.from({ length: 101 }, (_, i) => ({ source_row_id: `wise:row:${i}`, field: "ID", value: "x".repeat(300), reason: "bad" }));
     const result = wisePreflightFailure(rejected);
     expect(result.isError).toBe(true);
-    const payload = parseMcpResponse(firstText(result) as string) as any;
-    const shared = importPreflightFailurePayload("wise", rejected) as any;
+    const payload = parseToolPayload<WisePreflightFailurePayload>(firstText(result) as string);
+    const shared = importPreflightFailurePayload("wise", rejected);
     expect(Object.keys(payload)).toEqual(Object.keys(shared));
     expect(payload).toMatchObject({ category: "import_preflight_failed", source: "wise", rejected_field_count: 101, rejected_fields_truncated: true, retry: "never" });
     expect(payload.rejected_fields).toHaveLength(100);
-    expect(payload.rejected_fields[0].value).toContain("UNTRUSTED_OCR_START");
-    expect(payload.rejected_fields[0].value).toContain("x".repeat(256));
-    expect(payload.rejected_fields[0].value).not.toContain("x".repeat(257));
+    expect(payload.rejected_fields[0]!.value).toContain("UNTRUSTED_OCR_START");
+    expect(payload.rejected_fields[0]!.value).toContain("x".repeat(256));
+    expect(payload.rejected_fields[0]!.value).not.toContain("x".repeat(257));
   });
 });
 

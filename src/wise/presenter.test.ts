@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { renderWiseImportCompact, renderWiseImportFull, type WiseImportRenderData } from "./presenter.js";
+import { renderWiseImportCompact, renderWiseImportFull, type WiseImportFullPayload, type WiseImportRenderData } from "./presenter.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
 import type { WiseAlreadyJournalizedAssertion, WiseCreatedEntry, WiseImportCommand, WiseRow, WiseSkippedEntry } from "./types.js";
-import { parseMcpResponse } from "../mcp-json.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 
 // B2: the guided compact Wise response must stay approximately CONSTANT in size
 // as the clean-row count grows, and always fit under the batch response budget.
@@ -307,7 +307,7 @@ describe("renderWiseImportFull — already-journalized rows", () => {
     return { ...data, commands: [], alreadyJournalized: [assertion(1, 501), assertion(2, 502)], skipped };
   }
 
-  const render = (data: WiseImportRenderData) => parseMcpResponse(renderWiseImportFull(data).content[0]!.text) as any;
+  const render = (data: WiseImportRenderData) => parseToolPayload<WiseImportFullPayload>(renderWiseImportFull(data).content[0]!.text);
 
   it("dry run: already-journalized rows are a compact table, not commands; already-booked skips are omitted, others stay itemised", () => {
     const out = render(slimData("DRY_RUN"));
@@ -317,11 +317,11 @@ describe("renderWiseImportFull — already-journalized rows", () => {
       expect.objectContaining({ existing_journal_id: 501, date: "2026-07-19", booked_amount: 100, booked_currency: "EUR", source_direction: "OUT" }),
       expect.objectContaining({ existing_journal_id: 502 }),
     ]);
-    expect(out.execution.already_journalized_commands).toBeUndefined();
+    expect(out.execution).not.toHaveProperty("already_journalized_commands");
     expect(out.execution.already_journalized_note).toMatch(/^Not part of the approved commands: no writes\./);
     // Validated identifiers are emitted raw.
-    expect(out.execution.already_journalized_rows[0].wise_id).not.toMatch(/UNTRUSTED_OCR_START/);
-    expect(out.execution.skipped.map((entry: any) => entry.wise_id)).toEqual(["ODD-1", "FEE:X"]);
+    expect(out.execution.already_journalized_rows![0]!.wise_id).not.toMatch(/UNTRUSTED_OCR_START/);
+    expect(out.execution.skipped.map(entry => entry.wise_id)).toEqual(["ODD-1", "FEE:X"]);
     expect(out.execution.skipped_displayed).toBe(2);
     expect(out.execution.skipped_omitted_already_booked).toBe(3);
     expect(out.command_count).toBe(0);
@@ -517,7 +517,7 @@ describe("already-journalized automatic matches: standard and guided labels", ()
   }
 
   it("standard counts all 31 and names the 10 automatic matches", () => {
-    const out = parseMcpResponse(renderWiseImportFull(data()).content[0]!.text) as any;
+    const out = parseToolPayload<WiseImportFullPayload>(renderWiseImportFull(data()).content[0]!.text);
     expect(out.execution.already_journalized_count).toBe(31);
     expect(out.execution.already_journalized_auto_matched_count).toBe(10);
     expect(out.execution.already_journalized_note).toContain("already_journalized_auto_matched_count");
@@ -550,7 +550,7 @@ describe("Wise acknowledged_journal_holds round trip (compact and full)", () => 
       exchange_rate_orientation: "source_to_target", wise_dimension_id: 5, depends_on: null,
       create_payload: { accounts_dimensions_id: 5, type: "C", amount: 10, cl_currencies_id: "EUR", date: "2026-02-01", description: "WISE:WISE-0 [source_direction=OUT]" },
     } as unknown as WiseImportCommand;
-    const full = parseMcpResponse(renderWiseImportFull({ ...data, commands: [command] }).content[0]!.text) as any;
+    const full = parseToolPayload<WiseImportFullPayload>(renderWiseImportFull({ ...data, commands: [command] }).content[0]!.text);
     expect(full.acknowledged_holds).toEqual(acknowledgement);
     expect(full.workflow.approval_previews[0].execute_args.acknowledged_journal_holds).toEqual(acknowledgement);
   });

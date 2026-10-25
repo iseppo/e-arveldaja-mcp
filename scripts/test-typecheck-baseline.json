@@ -1,7 +1,7 @@
 {
   "by_code": {
-    "ANY": 1632,
-    "UNTYPED_PAYLOAD": 403
+    "ANY": 1555,
+    "UNTYPED_PAYLOAD": 370
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -283,8 +283,7 @@
       "ANY": 10
     },
     "src/tools/wise-import.test.ts": {
-      "ANY": 99,
-      "UNTYPED_PAYLOAD": 33
+      "ANY": 29
     },
     "src/tools/workflow-recommendations.test.ts": {
       "ANY": 25
@@ -293,16 +292,10 @@
       "ANY": 2
     },
     "src/wise/compact-routing.test.ts": {
-      "ANY": 3
+      "ANY": 2
     },
     "src/wise/operations.test.ts": {
       "ANY": 1
-    },
-    "src/wise/presenter-shared.test.ts": {
-      "ANY": 2
-    },
-    "src/wise/presenter.test.ts": {
-      "ANY": 4
     },
     "src/workflow-page.test.ts": {
       "ANY": 7
@@ -314,6 +307,6 @@
       "ANY": 9
     }
   },
-  "total": 2035,
+  "total": 1925,
   "version": 1
 }
