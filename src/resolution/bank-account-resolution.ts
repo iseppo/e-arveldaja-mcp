@@ -104,7 +104,8 @@ export function buildBankDimensionCandidates(
       return {
         accounts_dimensions_id: account.accounts_dimensions_id!,
         label: account.account_name_est || account.bank_name || dimension?.title_est || `Dimension ${account.accounts_dimensions_id}`,
-        iban: account.iban_code ?? account.account_no,
+        // First non-blank identifier: an empty iban_code must not hide account_no.
+        iban: account.iban_code?.trim() || account.account_no,
         match_reason: dimension?.title_est
           ? `Linked bank account + dimension title "${dimension.title_est}"`
           : "Linked bank account dimension",

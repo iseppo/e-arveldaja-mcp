@@ -917,7 +917,9 @@ export async function runInterAccountMatching(
     ambiguousRefless.push({
       transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
       source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
-      target_account: claimedTargets.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
+      target_account: claimedTargets.length > 0
+        ? claimedTargets.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / ")
+        : claim.unbookableOwnIban ?? "",
       code: "camt_marker_unverified",
       reason: `Transaction ${tx.id} looks like an own-account transfer, but its CAMT statement marker fails the signature check, so its statement identity (counterparty IBAN, direction) cannot be verified. It is excluded from automatic matching; check the bank statement and resolve it manually.` +
         (legacyTruncatedCamtMarkerHint(tx) ? ` ${legacyTruncatedCamtMarkerHint(tx)}` : ""),
@@ -1554,11 +1556,20 @@ export async function runInterAccountMatching(
       // The payer is the company itself, but several own accounts could be
       // the other side: report it rather than silently dropping the row.
       const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
+      const unregisteredIban = reasons.includes(COUNTERPARTY_IBAN_NOT_REGISTERED);
       ambiguousRefless.push({
         transaction_ids: [tx.id], amount: tx.amount, date: tx.date,
         source_account: dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`,
         target_account: otherDimensions.map(d => dimensionToTitle.get(d) ?? `dim:${d}`).join(" / "),
-        reason: `The counterparty is the company itself, but several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
+        // A target parameter would not help an unregistered IBAN: it is held until its mirror row proves it.
+        ...(unregisteredIban
+          ? {
+            code: "unregistered_iban_needs_mirror" as const,
+            reason: `The counterparty is the company itself, but the counterparty IBAN ${counterpartyIbanOf(tx)} is not a registered own bank account and several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline.`,
+          }
+          : {
+            reason: `The counterparty is the company itself, but several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
+          }),
       });
       continue;
     }

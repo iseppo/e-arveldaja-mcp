@@ -158,6 +158,8 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     const iban = counterpartyIbanOf(tx);
     const ibanDims = iban === "" ? undefined : lookups.ownIbanToDimension.get(iban);
     if (ibanDims !== undefined && !ibanDims.has(wiseDim)) return undefined;
+    // So is a transfer to an own account that has no dimension.
+    if (iban !== "" && lookups.ownIbansWithoutDimension.has(iban)) return undefined;
     // A confirmed row whose registration journal does not touch the Wise
     // account books another movement.
     if (tx.status === "CONFIRMED" && registration.length > 0 && !registration.some(touchesWise)) return undefined;

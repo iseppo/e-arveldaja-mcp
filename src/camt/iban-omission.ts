@@ -4,9 +4,9 @@ import type { BankAccount } from "../types/api.js";
 // accounts, the only condition under which the CAMT marker may leave the IBAN
 // out (`x=i`) to keep the full description. PURE.
 //
-// Not buildBankAccountLookups: it skips accounts without a dimension and lets
-// an empty `iban_code` hide `account_no`. Here every bank account row counts,
-// with both identifiers, and anything short of complete evidence is "unknown",
+// Not buildBankAccountLookups: it keys each account by one identifier only
+// (iban_code, else account_no). Here every bank account row counts, with both
+// identifiers, and anything short of complete evidence is "unknown",
 // which keeps the IBAN.
 
 const IBAN_SHAPE = /^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/;

@@ -2638,6 +2638,27 @@ describe("reconcile_inter_account_transfers", () => {
       })]);
     });
 
+    it("with several other own accounts, holds an unregistered-IBAN company-name row as needing its mirror, not as needing a target", async () => {
+      const { handler } = setupInterAccountTool({
+        transactions: [
+          { id: 24, status: "PROJECT", is_deleted: false, type: "C", amount: 60, cl_currencies_id: "EUR", date: "2026-01-21", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: "EE471000001020145685" },
+        ],
+        bankAccounts: [
+          ...bankAccounts,
+          { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+        ],
+        companyName: "Test OÜ",
+      });
+
+      const payload = parseToolPayload<ReconInterAccountPayload>((await handler({})).content[0]!.text);
+
+      expect(payload.ambiguous_refless).toEqual([expect.objectContaining({
+        transaction_ids: [24],
+        code: "unregistered_iban_needs_mirror",
+      })]);
+      expect(payload.ambiguous_refless[0]!.reason).not.toContain("pass target_accounts_dimensions_id");
+    });
+
     it("recognises an own account whose iban_code is empty by its account_no", async () => {
       const accounts = [
         { id: 1, account_name_est: "LHV", account_no: "EE123456789012345678", iban_code: "EE123456789012345678", accounts_dimensions_id: 100 },

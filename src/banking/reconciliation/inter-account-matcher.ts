@@ -291,7 +291,7 @@ export function inferOneSidedTransfer(
       // company never set up, or a payment provider's pooled IBAN. The name alone
       // cannot tell which own account received it, so it books only when the other
       // account's mirror row proves the transfer (pairing); one-sided → review.
-      if (counterpartyIban) reasons.push(COUNTERPARTY_IBAN_NOT_REGISTERED);
+      if (counterpartyIban && !ownIbanToDimension.has(counterpartyIban)) reasons.push(COUNTERPARTY_IBAN_NOT_REGISTERED);
 
       const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
       const targetAccountsDimensionsId = lookups.targetAccountsDimensionsId;
@@ -323,7 +323,7 @@ export function inferOneSidedTransfer(
 /**
  * For a row with an unverifiable CAMT marker: the own-transfer inference its
  * UNTRUSTED marker IBAN or its name would give, or undefined when neither
- * points at an own account. Used only to report such a row for review
+ * points at an own account (with or without a dimension). Used only to report such a row for review
  * (`camt_marker_unverified`) — never to book, pair or delete it.
  */
 export function unverifiedMarkerTransferClaim(
@@ -334,7 +334,7 @@ export function unverifiedMarkerTransferClaim(
   const claimedIban = normalizeOptionalReference(tx.bank_account_no ?? undefined) ??
     extractCamtDescriptionMetadata(tx.description).bank_account_no ?? null;
   const inference = inferOneSidedTransfer({ ...tx, bank_account_no: claimedIban }, lookups, new Map());
-  return inference.confidence > 0 || inference.ambiguousTargetDimensions ? inference : undefined;
+  return inference.confidence > 0 || inference.ambiguousTargetDimensions || inference.unbookableOwnIban ? inference : undefined;
 }
 
 export function getTransferPairCompatibility(

@@ -6,6 +6,7 @@ import {
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   journalEurNetCents,
+  unverifiedMarkerTransferClaim,
   type InterAccountMatchLookups,
 } from "./inter-account-matcher.js";
 
@@ -111,6 +112,17 @@ describe("inferOneSidedTransfer with an own IBAN that cannot be booked", () => {
     expect(inference.targetDimension).toBe(300);
     expect(inference.reasons).toContain("counterparty_iban_not_registered");
     expect(inference.unbookableOwnIban).toBeUndefined();
+  });
+
+  it("does not call the row's own source-account IBAN unregistered", () => {
+    const inference = inferOneSidedTransfer(ownNameRow("EE123456789012345678"), lookups(TWO_ACCOUNTS), new Map());
+    expect(inference.targetDimension).toBe(300);
+    expect(inference.reasons).not.toContain("counterparty_iban_not_registered");
+  });
+
+  it("an unverifiable-marker claim on an own account without a dimension is still a claim (reported for review)", () => {
+    const claim = unverifiedMarkerTransferClaim(ownNameRow(EXTERNAL), lookups(TWO_ACCOUNTS, undefined, [EXTERNAL]));
+    expect(claim?.unbookableOwnIban).toBe(EXTERNAL);
   });
 
   it("still infers by name when the row has no counterparty IBAN", () => {

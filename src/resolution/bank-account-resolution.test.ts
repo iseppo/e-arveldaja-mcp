@@ -36,6 +36,15 @@ describe("buildBankDimensionCandidates (moved pure fn)", () => {
     ]);
   });
 
+  it("falls back to account_no when iban_code is empty or blank", () => {
+    const bankAccounts: BankAccount[] = [
+      { account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "", accounts_dimensions_id: 101 },
+      { account_name_est: "SEB", account_no: "EE381010220123456789", iban_code: "  ", accounts_dimensions_id: 102 },
+    ];
+    const dims: AccountDimension[] = [{ id: 101, accounts_id: 1020, title_est: "Wise" }, { id: 102, accounts_id: 1020, title_est: "SEB" }];
+    expect(buildBankDimensionCandidates(bankAccounts, dims).map(c => c.iban)).toEqual(["BE08905767222113", "EE381010220123456789"]);
+  });
+
   it("skips deleted dimensions and de-dupes by accounts_dimensions_id keeping first", () => {
     const bankAccounts: BankAccount[] = [
       { account_name_est: "First", account_no: "EE10", accounts_dimensions_id: 200 },
