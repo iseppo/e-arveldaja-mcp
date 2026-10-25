@@ -1,7 +1,7 @@
 {
   "by_code": {
-    "ANY": 1544,
-    "UNTYPED_PAYLOAD": 244
+    "ANY": 1526,
+    "UNTYPED_PAYLOAD": 181
   },
   "errors": {
     "src/__fixtures__/document-reading/legacy-draft.ts": {
@@ -234,8 +234,7 @@
       "ANY": 338
     },
     "src/tools/pdf-workflow.test.ts": {
-      "ANY": 33,
-      "UNTYPED_PAYLOAD": 63
+      "ANY": 15
     },
     "src/tools/purchase-vat-defaults.test.ts": {
       "ANY": 5
@@ -299,6 +298,6 @@
       "ANY": 9
     }
   },
-  "total": 1788,
+  "total": 1707,
   "version": 1
 }
