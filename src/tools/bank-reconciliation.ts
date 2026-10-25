@@ -6,7 +6,7 @@ import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { isGranularTool } from "../tool-catalog.js";
 import type { ApiContext } from "./crud-tools.js";
 import { readOnly, batch } from "../annotations.js";
-import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope, type WorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope, type RemappedWorkflowEnvelope } from "../workflow-response.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { createBankReconciliationOperations } from "../banking/reconciliation/operations.js";
 import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
@@ -57,7 +57,7 @@ export type ReconcileBankTransactionsPayload<R extends ReconcileBankTransactions
   mode: ReconcileBankTransactionsMode;
   delegated_tool: "reconcile_transactions" | "auto_confirm_exact_matches" | "reconcile_inter_account_transfers";
   delegated_args: Record<string, unknown>;
-  workflow?: WorkflowEnvelope;
+  workflow?: RemappedWorkflowEnvelope;
   result: R;
 };
 
@@ -436,7 +436,7 @@ export function registerBankReconciliationTools(
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
-            ...(workflow ? { workflow: remapHiddenGranularWorkflowEnvelope(workflow) as WorkflowEnvelope } : {}),
+            ...(workflow ? { workflow: remapHiddenGranularWorkflowEnvelope(workflow) } : {}),
             result,
           } satisfies ReconcileBankTransactionsPayload),
         }],

@@ -103,6 +103,25 @@ function remapHiddenGranularApprovalPreview(preview: unknown): unknown {
 }
 
 /**
+ * Fields the remap adds when an action carries a needs_review blocker: the
+ * blocked proposals move to needs_review and the only remaining action is the
+ * setup / resolve step.
+ */
+export type BlockedWorkflowFields = {
+  status: "needs_review";
+  blocker: Record<string, unknown>;
+  proposal: Record<string, unknown>;
+  blocked_proposals: Record<string, unknown>[];
+  safe_action_context: Record<string, unknown>[];
+  action_proposals: Record<string, unknown>[];
+};
+
+/** A remapped v1 envelope: the blocked fields are present only on the blocked branch. */
+export type RemappedWorkflowEnvelope = WorkflowEnvelope & Partial<BlockedWorkflowFields>;
+
+export function remapHiddenGranularWorkflowEnvelope(workflow: WorkflowEnvelope): RemappedWorkflowEnvelope;
+export function remapHiddenGranularWorkflowEnvelope(workflow: unknown): unknown;
+/**
  * Rewrites every granular tool named in a workflow envelope's actions and
  * approval previews to its merged entry point. Operates on the loosely-typed
  * envelope (it may be a parsed JSON record forwarded from a delegated tool), so
@@ -477,7 +496,7 @@ export function buildWorkflowEnvelope(options: BuildWorkflowEnvelopeOptions): Wo
     approval_previews: approvalPreviews,
   };
   return currentToolProfile() === "guided" || currentToolProfile() === "guided-sales"
-    ? remapHiddenGranularWorkflowEnvelope(workflow) as WorkflowEnvelope
+    ? remapHiddenGranularWorkflowEnvelope(workflow)
     : workflow;
 }
 
