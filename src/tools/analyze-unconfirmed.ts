@@ -77,6 +77,19 @@ interface Suggestion {
   code?: "camt_marker_unverified";
 }
 
+/** One analyze_unconfirmed_transactions suggestion on the wire: the free text is sandbox-wrapped (absent when empty). */
+export type AnalyzeUnconfirmedSuggestion = Omit<Suggestion, "description" | "bank_account_name"> & {
+  description?: string;
+  bank_account_name?: string;
+};
+
+/** The analyze_unconfirmed_transactions payload; summary counts suggestions per action (absent action = 0). */
+export type AnalyzeUnconfirmedPayload = {
+  total_unconfirmed: number;
+  summary: Partial<Record<Suggestion["suggested_action"], number>>;
+  suggestions: AnalyzeUnconfirmedSuggestion[];
+};
+
 function buildBankJournalDuplicateKey(
   accountsDimensionsId: number,
   type: "D" | "C",
@@ -699,7 +712,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
             total_unconfirmed: unconfirmed.length,
             summary: actionCounts,
             suggestions: sanitizedSuggestions,
-          }),
+          } satisfies AnalyzeUnconfirmedPayload),
         }],
       };
     }
