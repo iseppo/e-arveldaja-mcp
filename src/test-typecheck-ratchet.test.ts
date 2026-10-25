@@ -117,6 +117,12 @@ describe("planBaselineUpdate", () => {
     expect(planBaselineUpdate(countsOf(renamed), baseline, true)).toEqual({ allowed: false, increases: ["+1 src/d.test.ts TS2307"] });
   });
 
+  it("never seeds tsc errors into a new baseline, and refuses a decrease that still leaves tsc errors", () => {
+    expect(planBaselineUpdate({ "src/a.test.ts": { TS2322: 1, ANY: 3 } }, null).allowed).toBe(false);
+    expect(planBaselineUpdate({ "src/a.test.ts": { TS2322: 1 } }, baseline, true).allowed).toBe(false);
+    expect(planBaselineUpdate({ "src/a.test.ts": { ANY: 3 } }, null)).toEqual({ allowed: true, increases: [] });
+  });
+
   it("never lets a tsc error in, even forced in exchange for removed loose typing", () => {
     const loose = buildBaseline({ "src/a.test.ts": { ANY: 2 } });
     const traded = { "src/a.test.ts": { ANY: 1 }, "src/b.test.ts": { TS2322: 1 } };
@@ -124,12 +130,12 @@ describe("planBaselineUpdate", () => {
   });
 
   it("allows a pure decrease without force", () => {
-    const fewer = "src/a.test.ts(12,3): error TS2322: x\n";
-    expect(planBaselineUpdate(countsOf(fewer), baseline)).toEqual({ allowed: true, increases: [] });
+    const loose = buildBaseline({ "src/a.test.ts": { ANY: 2, UNTYPED_PAYLOAD: 1 } });
+    expect(planBaselineUpdate({ "src/a.test.ts": { ANY: 1 } }, loose)).toEqual({ allowed: true, increases: [] });
   });
 
   it("creates a baseline when none exists", () => {
-    expect(planBaselineUpdate(countsOf(TSC_OUTPUT), null)).toEqual({ allowed: true, increases: [] });
+    expect(planBaselineUpdate({ "src/a.test.ts": { ANY: 2 } }, null)).toEqual({ allowed: true, increases: [] });
   });
 });
 
@@ -185,6 +191,10 @@ describe("countLooseTyping", () => {
     expect(countLooseTyping(references, "src/tools/x.test.ts").untypedPayload).toBe(3);
     const reexport = 'export { parseMcpResponse as parse } from "./mcp-response.js";\n';
     expect(countLooseTyping(reexport, "src/__fixtures__/other.ts").untypedPayload).toBe(1);
+    expect(countLooseTyping('export * from "./mcp-response.js";\n', "src/__fixtures__/other.ts").untypedPayload).toBe(1);
+    expect(countLooseTyping('export { parseToolPayload } from "./mcp-response.js";\n', "src/__fixtures__/other.ts").untypedPayload).toBe(0);
+    const once = 'import { parseMcpResponse } from "./mcp-response.js";\nexport { parseMcpResponse };\nconst o = { parseMcpResponse };\n';
+    expect(countLooseTyping(once, "src/__fixtures__/other.ts").untypedPayload).toBe(2);
   });
 
   it("does not resolve a same-named module elsewhere", () => {

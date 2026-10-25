@@ -153,6 +153,10 @@ export function compareToBaseline(current: DiagnosticCounts, baseline: Diagnosti
   return { ok: increases.length === 0 && !stale, increases, stale };
 }
 
+export function hasTscErrors(counts: DiagnosticCounts): boolean {
+  return Object.values(counts).some(codes => Object.keys(codes).some(code => TSC_CODE_RE.test(code)));
+}
+
 /**
  * Update mode: never when the total rises. A per-key increase at an equal or lower total (one error
  * fixed, a new one added elsewhere) is also refused unless `force` is set, so it cannot slip in unreviewed.
@@ -162,11 +166,11 @@ export function planBaselineUpdate(
   baseline: TestTypecheckBaseline | null,
   force = false,
 ): UpdatePlan {
+  // tsc errors are never baselined: not by --init, and not traded for removed loose typing under --force.
+  if (hasTscErrors(current)) return { allowed: false, increases: findIncreases(current, baseline?.errors ?? {}) };
   if (baseline === null) return { allowed: true, increases: [] };
   const increases = findIncreases(current, baseline.errors);
   if (buildBaseline(current).total > baseline.total) return { allowed: false, increases };
-  // tsc errors are never traded in, not even for removed loose typing under --force.
-  if (increases.some(line => TSC_CODE_RE.test(line.slice(line.lastIndexOf(" ") + 1)))) return { allowed: false, increases };
   return { allowed: increases.length === 0 || force, increases };
 }
 
@@ -205,7 +209,12 @@ export function countLooseTyping(source: string, file: string): { any: number; u
   for (const statement of ast.program.body as AstNode[]) {
     const from = (statement.source as { value?: unknown } | undefined)?.value;
     if (typeof from !== "string" || !importsUntypedFixture(from, file)) continue;
-    if (statement.type === "ExportNamedDeclaration") untypedPayload += 1; // re-export hands the any on
+    // A re-export hands the any on: `export *`, `export * as ns`, or a specifier naming parseMcpResponse.
+    const reexportsUntyped = statement.type === "ExportAllDeclaration"
+      || (statement.type === "ExportNamedDeclaration" && (statement.specifiers as AstNode[]).some(specifier =>
+        specifier.type === "ExportNamespaceSpecifier"
+        || ((specifier.local as { name?: string; value?: string } | undefined)?.name ?? (specifier.local as { value?: string } | undefined)?.value) === "parseMcpResponse"));
+    if (reexportsUntyped) untypedPayload += 1;
     if (statement.type !== "ImportDeclaration") continue;
     for (const specifier of statement.specifiers as AstNode[]) {
       const imported = specifier.imported as { name?: string; value?: string } | undefined;
@@ -221,8 +230,10 @@ export function countLooseTyping(source: string, file: string): { any: number; u
     if (node.type === "Identifier" && untypedNames.has(node.name as string)) {
       const isPropertyName = (parent?.type === "MemberExpression" || parent?.type === "OptionalMemberExpression")
         && key === "property" && parent.computed !== true;
-      const isObjectKey = parent?.type === "ObjectProperty" && key === "key" && parent.computed !== true && parent.shorthand !== true;
-      if (!isPropertyName && !isObjectKey) untypedPayload += 1;
+      // Shorthand `{ name }` and `export { name }` hold two Identifier nodes; count the value / local side only.
+      const isObjectKey = parent?.type === "ObjectProperty" && key === "key" && parent.computed !== true;
+      const isExportedName = parent?.type === "ExportSpecifier" && key === "exported";
+      if (!isPropertyName && !isObjectKey && !isExportedName) untypedPayload += 1;
     }
     if ((node.type === "MemberExpression" || node.type === "OptionalMemberExpression")
       && (node.object as AstNode).type === "Identifier" && namespaces.has((node.object as AstNode).name as string)
@@ -341,6 +352,11 @@ function main(): number {
     console.error("Unparseable tsc error output:");
     for (const line of unparseable) console.error(line);
     return finish(2);
+  }
+  if (diagnostics.length > 0) {
+    for (const d of diagnostics) console.error(`${d.file}(${d.line},${d.column}): ${d.code}`);
+    console.error("Test sources must typecheck: tsc errors are never baselined (--force and --init do not apply).");
+    return finish(1);
   }
   if (update && baseline === null && !init) {
     console.error(`Baseline file not found: ${baselinePath}. Seeding a new one resets every count; pass --init to do that deliberately.`);
