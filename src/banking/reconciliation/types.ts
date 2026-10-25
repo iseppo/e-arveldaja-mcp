@@ -260,7 +260,7 @@ export interface AmbiguousReflessRow {
   /** Why the row needs review when it is not a plain ref-less collision: its CAMT
    * marker sig does not verify, or the counterparty IBAN is an own account that
    * cannot be booked (no dimension, or not registered in e-arveldaja). */
-  code?: "camt_marker_unverified" | "own_account_not_bookable";
+  code?: "camt_marker_unverified" | "own_account_not_bookable" | "unregistered_iban_needs_mirror";
 }
 
 export interface CrossCurrencyRow {

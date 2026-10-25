@@ -109,6 +109,7 @@ describe("inferOneSidedTransfer with an own IBAN that cannot be booked", () => {
   it("keeps the company-name fallback for an unregistered IBAN (a provider's pooled top-up IBAN looks like this)", () => {
     const inference = inferOneSidedTransfer(ownNameRow(EXTERNAL), lookups(TWO_ACCOUNTS), new Map());
     expect(inference.targetDimension).toBe(300);
+    expect(inference.reasons).toContain("counterparty_iban_not_registered");
     expect(inference.unbookableOwnIban).toBeUndefined();
   });
 

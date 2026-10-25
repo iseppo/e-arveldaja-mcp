@@ -74,7 +74,7 @@ interface Suggestion {
   match_confidence?: number;
   candidate_invoices?: Array<{ related_table: string; related_id: number }>;
   /** Set on a review whose CAMT marker sig fails the checksum. */
-  code?: "camt_marker_unverified" | "own_account_not_bookable";
+  code?: "camt_marker_unverified" | "own_account_not_bookable" | "unregistered_iban_needs_mirror";
 }
 
 /** One analyze_unconfirmed_transactions suggestion on the wire: the free text is sandbox-wrapped (absent when empty). */
@@ -531,6 +531,15 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               isInterAccount = true;
             } else if (heldReason) {
               suggestions.push(heldForReview(heldReason));
+              isInterAccount = true;
+            } else if (otherDimensions.length > 0 && counterpartyIban && !ownIbanToDimension.has(counterpartyIban)) {
+              // An explicit IBAN that is not a registered own account (an unregistered own
+              // account or a payment provider's pooled IBAN): reconcile books it only once
+              // the other account's mirror row proves the transfer.
+              suggestions.push({
+                ...heldForReview(`Counterparty name matches the company, but counterparty IBAN ${counterpartyIban} is not a registered own bank account; reconcile_inter_account_transfers books it only once the other account's mirror row proves the transfer. Register the account in e-arveldaja or check the statements before confirming.`),
+                code: "unregistered_iban_needs_mirror",
+              });
               isInterAccount = true;
             } else if (otherDimensions.length === 1) {
               const targetDim = otherDimensions[0]!;

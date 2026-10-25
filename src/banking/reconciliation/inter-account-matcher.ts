@@ -195,6 +195,9 @@ export function resolveTransfer(
   return consume ? guard.resolveInterAccount(query, { consume: true }) : probe;
 }
 
+/** Inference reason: the name matched the company, but the row's explicit counterparty IBAN is not a registered own account. */
+export const COUNTERPARTY_IBAN_NOT_REGISTERED = "counterparty_iban_not_registered";
+
 export interface OneSidedInference {
   targetDimension?: number;
   confidence: number;
@@ -284,6 +287,11 @@ export function inferOneSidedTransfer(
     if (nameMatch) {
       confidence += 60;
       reasons.push("counterparty_name_matches_company");
+      // An explicit IBAN that is not a registered own account: an own account the
+      // company never set up, or a payment provider's pooled IBAN. The name alone
+      // cannot tell which own account received it, so it books only when the other
+      // account's mirror row proves the transfer (pairing); one-sided → review.
+      if (counterpartyIban) reasons.push(COUNTERPARTY_IBAN_NOT_REGISTERED);
 
       const otherDimensions = [...dimensionToIban.keys()].filter(d => d !== tx.accounts_dimensions_id);
       const targetAccountsDimensionsId = lookups.targetAccountsDimensionsId;

@@ -51,6 +51,7 @@ import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, com
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
 import {
   counterpartyIbanOf,
+  COUNTERPARTY_IBAN_NOT_REGISTERED,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   isCamtCounterpartyIbanOmitted,
@@ -1654,6 +1655,15 @@ export async function runInterAccountMatching(
 
     consumedTxIds.add(tx.id);
 
+    if (reasons.includes(COUNTERPARTY_IBAN_NOT_REGISTERED)) {
+      ambiguousRefless.push({
+        transaction_ids: [tx.id], amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
+        source_account: sourceTitle, target_account: targetTitle, code: "unregistered_iban_needs_mirror",
+        reason: `The counterparty name is the company's, but the counterparty IBAN ${counterpartyIbanOf(tx)} is not a registered own bank account (an own account not set up in e-arveldaja, or a payment provider's pooled account). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline if this is a transfer to ${targetTitle}.`,
+      });
+      continue;
+    }
+
     matchedOneSided.push({
       transaction_id: tx.id, type: tx.type, amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
       source_account: sourceTitle, source_dimension_id: tx.accounts_dimensions_id,
@@ -1800,7 +1810,7 @@ export async function executeInterAccount(
       const mapping = buildBankAccountLookups(bankAccounts, accountDimensions);
       const lookups: InterAccountMatchLookups = {...mapping, companyName:normalizeCompanyName(match.invoiceInfo.invoice_company_name ?? ""), companyLegalName:match.invoiceInfo.invoice_company_name ?? "", targetAccountsDimensionsId:input.targetAccountsDimensionsId};
       const sourceInference = inferOneSidedTransfer(source, lookups, new Map());
-      if (!mirror) return sourceInference.targetDimension === action.targetDimensionId && sourceInference.confidence >= 80;
+      if (!mirror) return sourceInference.targetDimension === action.targetDimensionId && sourceInference.confidence >= 80 && !sourceInference.reasons.includes(COUNTERPARTY_IBAN_NOT_REGISTERED);
       const compatibility = getTransferPairCompatibility(source, mirror, action.pairEvidence.maxDateGap);
       if (!compatibility || compatibility.conflictingComparableAmounts || !sameAmountToTheCent(compatibility.txAComparableAmount, action.distributionAmount)) return false;
       if (action.pairEvidence.kind === "same_type") return !!getSameTypeReciprocalEvidence(source, mirror, sourceInference, inferOneSidedTransfer(mirror, lookups, new Map()), mapping.dimensionToIban);

@@ -1450,6 +1450,24 @@ describe("reconcile_inter_account_transfers", () => {
     expect(payload.pairs[0]!.status).toBe("would_confirm");
   });
 
+  it("pairs and books a company-name transfer to an unregistered IBAN when the mirror leg proves it", async () => {
+    const { handler, api } = setupInterAccountTool({
+      transactions: [
+        { id: 5, status: "PROJECT", is_deleted: false, type: "C", amount: 700, date: "2026-03-19", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: "EE471000001020145685" },
+        camtSigned({ id: 6, status: "PROJECT", is_deleted: false, type: "D", description: "[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]", amount: 700, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE123456789012345678" }),
+      ],
+      bankAccounts,
+      companyName: "Test OÜ",
+    });
+
+    const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+    expect(payload.matched_pairs).toBe(1);
+    expect(payload.matched_one_sided).toBe(0);
+    expect(payload.ambiguous_refless ?? []).toEqual([]);
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  });
+
   it("matches pairs with 1-day date gap", async () => {
     const { handler } = setupInterAccountTool({
       transactions: [
@@ -2598,6 +2616,25 @@ describe("reconcile_inter_account_transfers", () => {
         transaction_ids: [21],
         target_account: "EE471000001020145685",
         code: "own_account_not_bookable",
+      })]);
+    });
+
+    it("holds a one-sided company-name transfer to an unregistered IBAN for review instead of booking it", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 23, status: "PROJECT", is_deleted: false, type: "C", amount: 60, cl_currencies_id: "EUR", date: "2026-01-21", accounts_dimensions_id: 100, bank_account_name: "Test OÜ", bank_account_no: "EE471000001020145685" },
+        ],
+        bankAccounts,
+        companyName: "Test OÜ",
+      });
+
+      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+      expect(payload.matched_one_sided).toBe(0);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+      expect(payload.ambiguous_refless).toEqual([expect.objectContaining({
+        transaction_ids: [23],
+        code: "unregistered_iban_needs_mirror",
       })]);
     });
 
