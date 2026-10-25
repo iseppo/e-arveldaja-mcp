@@ -18,6 +18,7 @@ import type {
   InterAccountMatchResult,
   PairResult,
   ReconciliationSuggestions,
+  SuggestMatchRow,
 } from "./types.js";
 import type { DuplicatePostingSuspect } from "../../bank-posting-duplicate-guard.js";
 
@@ -30,7 +31,7 @@ const OCR = /UNTRUSTED_OCR_START/;
 
 // --- Suggest fixtures --------------------------------------------------------
 
-function suggestRow(index: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+function suggestRow(index: number, extra: Partial<SuggestMatchRow> = {}): SuggestMatchRow {
   return {
     transaction_id: index,
     date: "2026-03-01",
@@ -38,15 +39,18 @@ function suggestRow(index: number, extra: Record<string, unknown> = {}): Record<
     description: `Payment ${index}`,
     bank_account_name: `Client ${index} OÜ`,
     ref_number: `RF${index}`,
-    best_match: { type: "sale_invoice", id: 1000 + index, number: `INV-${index}`, client_name: `Client ${index}`, confidence: 95 },
+    best_match: {
+      type: "sale_invoice", id: 1000 + index, number: `INV-${index}`, client_name: `Client ${index}`, clients_id: 1,
+      gross_price: 100 + index, payment_status: "NOT_PAID", partially_paid_warning: false, confidence: 95, match_reasons: [],
+    },
     other_candidate_count: 0,
     ...extra,
   };
 }
 
-function makeSuggestions(rows: number, extraRows: Record<string, unknown>[] = []): ReconciliationSuggestions {
+function makeSuggestions(rows: number, extraRows: SuggestMatchRow[] = []): ReconciliationSuggestions {
   const matches = [...Array.from({ length: rows }, (_, index) => suggestRow(index)), ...extraRows];
-  const total = roundMoney(matches.reduce((sum, row) => sum + (row.amount as number), 0));
+  const total = roundMoney(matches.reduce((sum, row) => sum + row.amount, 0));
   return {
     totalUnconfirmed: matches.length,
     matched: matches.length,
@@ -470,14 +474,14 @@ describe("renderExactMatchPayload", () => {
   it("renders third-party-payer reviews with a wrapped invoice number and counts them in the summary", () => {
     const projection = makeExactProjection(0, { thirdPartyPayerReviews: [thirdPartyReview] });
     const payload = renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle: "P" });
-    const reviews = payload.third_party_payer_reviews as Array<Record<string, unknown>>;
+    const reviews = payload.third_party_payer_reviews;
     expect(reviews).toHaveLength(1);
     expect(String(reviews[0]!.invoice_number)).toMatch(OCR);
     expect(reviews[0]!.reason).toBe("third_party_payer");
-    expect((payload.summary as Record<string, unknown>).third_party_payer_reviews).toBe(1);
+    expect(payload.summary.third_party_payer_reviews).toBe(1);
     expect(payload.results).toEqual([]);
     // The reviewed rows also reach the batch contract's needs_review slot.
-    expect(((payload.execution as Record<string, unknown>).needs_review as unknown[])).toHaveLength(1);
+    expect(payload.execution.needs_review).toHaveLength(1);
   });
 
   it("reports ledger-check failures as errors alongside the confirmed result", () => {
@@ -488,12 +492,12 @@ describe("renderExactMatchPayload", () => {
       executionReport: executionReport([0]),
       ledgerChecks,
     });
-    expect((payload.results as Array<Record<string, unknown>>)[0]!.status).toBe("confirmed");
-    const errors = payload.errors as Array<Record<string, unknown>>;
+    expect(payload.results[0]!.status).toBe("confirmed");
+    const errors = payload.errors;
     expect(errors).toHaveLength(1);
     expect(String(errors[0]!.reason)).toContain("ledger_client_mismatch");
     expect(String(errors[0]!.reason)).toContain("journal 28013080");
-    expect((payload.summary as Record<string, unknown>).error_count).toBe(1);
+    expect(payload.summary.error_count).toBe(1);
     expect(payload.ledger_checks).toBe(ledgerChecks);
   });
 
@@ -514,8 +518,8 @@ describe("renderExactMatchPayload", () => {
       blockedDuplicateSuspects: [{ transaction_id: 42, reason: "Possible cross-mechanism duplicate", conflicting_journal_ids: [555], suspects: [suspect] }],
     });
     const payload = renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle: "P" });
-    const row = (payload.results as Array<Record<string, unknown>>).find(r => r.transaction_id === 42)!;
-    const rendered = (row.possible_duplicate_postings as Array<Record<string, unknown>>)[0]!;
+    const row = payload.results.find(r => r.transaction_id === 42)!;
+    const rendered = row.possible_duplicate_postings![0]!;
     expect(String(rendered.journal_title)).toMatch(OCR);
     expect(String(rendered.document_number)).toMatch(OCR);
     expect(rendered.type).toBe("D");

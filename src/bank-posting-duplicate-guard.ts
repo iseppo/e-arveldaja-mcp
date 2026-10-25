@@ -182,12 +182,15 @@ export function findDuplicatePostingsInJournals(
   return suspects.sort((a, b) => a.day_distance - b.day_distance || a.journal_id - b.journal_id);
 }
 
+/** Wire shape of a rendered suspect: the same fields, with `journal_title` / `document_number` sandbox-wrapped. */
+export type RenderedDuplicatePostingSuspect = { [K in keyof DuplicatePostingSuspect]: DuplicatePostingSuspect[K] };
+
 /**
  * Suspects as MCP output: the journal title and document number are
  * upstream free text, so both are sandbox-wrapped. The one rendering every
  * `possible_duplicate_postings` list uses.
  */
-export function renderDuplicatePostingSuspects(suspects: readonly DuplicatePostingSuspect[]): Array<Record<string, unknown>> {
+export function renderDuplicatePostingSuspects(suspects: readonly DuplicatePostingSuspect[]): RenderedDuplicatePostingSuspect[] {
   return suspects.map(s => ({
     ...s,
     journal_title: wrapUntrustedOcr(s.journal_title) ?? "",

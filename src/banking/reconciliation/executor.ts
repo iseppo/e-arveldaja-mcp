@@ -99,6 +99,7 @@ import type {
   AmbiguousPairResult,
   OneSidedResult,
   ReconciliationSuggestions,
+  SuggestMatchRow,
   SkippedAlreadyHandledRow,
   AmbiguousReflessRow,
   CrossCurrencyRow,
@@ -193,7 +194,7 @@ export async function runSuggestMatches(
   // each matched row can be checked against already-booked cash movements.
   const suggestBankDimsResult = await resolveBankDimensionsSafe(api);
   const suggestDimById = new Map(suggestBankDimsResult.dimensions.map(d => [d.dimensionId, d]));
-  const results: Array<Record<string, unknown>> = [];
+  const results: SuggestMatchRow[] = [];
   // Compact-only aggregates (guided surface). The FULL envelope ignores these,
   // so standard/full output stays byte-identical.
   const matchedTotalsByCurrency: Record<string, number> = {};

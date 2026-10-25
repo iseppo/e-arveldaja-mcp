@@ -4,9 +4,10 @@ import { buildBatchExecutionContract } from "../../batch-execution.js";
 import { toolError } from "../../tool-error.js";
 import type { OperationFailure } from "../../operation-outcome.js";
 import type { PlanExecutionReport } from "../../plan-execution.js";
+import type { BatchExecutionContract } from "../../batch-execution.js";
 import {
   formatDuplicatePostingWarnings,
-  type DuplicatePostingSuspect,
+  type RenderedDuplicatePostingSuspect,
   renderDuplicatePostingSuspects,
 } from "../../bank-posting-duplicate-guard.js";
 import { roundMoney } from "../../money.js";
@@ -23,13 +24,165 @@ import {
   type ReconciliationReviewCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import type {
+  AmbiguousPairResult,
+  AmbiguousReflessRow,
+  CrossCurrencyRow,
   ExactConfirmLedgerChecks,
   ExactMatchProjection,
+  InterAccountErrorRow,
   InterAccountMatchResult,
+  OneSidedResult,
+  PairResult,
   ReconciliationSuggestions,
+  SkippedAlreadyHandledRow,
+  SuggestMatchRow,
   ThirdPartyPayerReview,
 } from "./types.js";
 import type { ReconFailure } from "./executor.js";
+
+// --- Wire payload types ------------------------------------------------------
+//
+// The FULL envelopes as a consumer decodes them (toMcpJson drops undefined
+// fields, so conditionally spread / possibly-undefined fields are optional).
+// Tests parse tool payloads as these types (parseToolPayload<T>).
+
+/** Non-mutating plan-gate failure envelope. */
+export type ReconPlanErrorPayload = {
+  error: string;
+  category: string;
+  retry: OperationFailure["retry"];
+  mutation_occurred: false;
+};
+
+/** One suggest match row: untrusted free text sandbox-wrapped, suspects rendered. */
+export type ReconSuggestMatch = Omit<SuggestMatchRow, "possible_duplicate_postings"> & {
+  possible_duplicate_postings?: RenderedDuplicatePostingSuspect[];
+};
+
+export type ReconSuggestPayload = {
+  total_unconfirmed: number;
+  matched: number;
+  unmatched: number;
+  matches: ReconSuggestMatch[];
+  duplicate_scan_note?: string;
+};
+
+/** A proposed / executed exact-match confirm row. */
+export type ReconExactMatchConfirmRow = {
+  transaction_id: number;
+  amount: number;
+  date?: string;
+  match: {
+    type: "sale_invoice" | "purchase_invoice";
+    id: number;
+    number: string;
+    confidence: number;
+    auto_confirm_rule?: "ref_number_exact";
+  };
+  status: "would_confirm" | "confirmed" | "not_confirmed";
+  possible_duplicate_postings?: RenderedDuplicatePostingSuspect[];
+};
+
+/** A row partitioned out of the confirm set by block_on_duplicate. */
+export type ReconExactMatchBlockedRow = {
+  transaction_id: number;
+  status: "blocked_duplicate_suspect";
+  reason: string;
+  conflicting_journal_ids: number[];
+  possible_duplicate_postings: RenderedDuplicatePostingSuspect[];
+};
+
+export type ReconExactMatchResultRow = ReconExactMatchConfirmRow | ReconExactMatchBlockedRow;
+
+export type ReconExactMatchError = {
+  transaction_id?: number;
+  reason: string;
+  journal_id?: number;
+  mutation_occurred?: boolean;
+  automatic_retry_forbidden?: boolean;
+  accounting_status?: string;
+};
+
+export type ReconExactMatchSummary = {
+  total_unconfirmed: number;
+  auto_confirmed: number;
+  skipped: number;
+  third_party_payer_reviews: number;
+  error_count: number;
+};
+
+export type ReconExactMatchPayload = {
+  mode: "DRY_RUN" | "EXECUTED";
+  summary: ReconExactMatchSummary;
+  total_unconfirmed: number;
+  auto_confirmed: number;
+  skipped: number;
+  results: ReconExactMatchResultRow[];
+  errors: ReconExactMatchError[];
+  third_party_payer_reviews: ThirdPartyPayerReview[];
+  ledger_checks?: ExactConfirmLedgerChecks;
+  accounting_status?: "needs_review" | "unverified";
+  mutation_occurred?: true;
+  automatic_retry_forbidden?: true;
+  execution: BatchExecutionContract<ReconExactMatchResultRow, unknown, ReconExactMatchError, ThirdPartyPayerReview>;
+  warnings?: string[];
+  duplicate_scan_note?: string;
+  plan_handle?: string;
+};
+
+/** A matched transfer pair with its descriptions sandbox-wrapped. */
+export type ReconInterAccountPair = Omit<PairResult, "description_out" | "description_in"> & {
+  description_out?: string;
+  description_in?: string;
+};
+
+/** A one-sided transfer with its free text sandbox-wrapped. */
+export type ReconInterAccountOneSided = Omit<OneSidedResult, "description" | "counterparty_name"> & {
+  description?: string;
+  counterparty_name?: string;
+};
+
+export type ReconInterAccountSummary = {
+  total_unconfirmed: number;
+  matched_pairs: number;
+  matched_one_sided: number;
+  skipped_ambiguous: number;
+  skipped_already_handled: number;
+  needs_review_ambiguous_refless: number;
+  needs_review_cross_currency: number;
+  error_count: number;
+};
+
+export type ReconInterAccountPayload = {
+  mode: "DRY_RUN" | "EXECUTED";
+  summary: ReconInterAccountSummary;
+  company_name?: string | null;
+  total_unconfirmed: number;
+  matched_pairs: number;
+  matched_one_sided: number;
+  skipped_ambiguous: number;
+  skipped_already_handled: number;
+  needs_review_ambiguous_refless: number;
+  needs_review_cross_currency: number;
+  own_bank_accounts: Array<{ accounts_dimensions_id: number; iban: string; title?: string }>;
+  pairs: ReconInterAccountPair[];
+  ambiguous_pairs: AmbiguousPairResult[];
+  one_sided: ReconInterAccountOneSided[];
+  already_handled: SkippedAlreadyHandledRow[];
+  ambiguous_refless: AmbiguousReflessRow[];
+  cross_currency_review: CrossCurrencyRow[];
+  errors: InterAccountErrorRow[];
+  execution: BatchExecutionContract<
+    ReconInterAccountPair | ReconInterAccountOneSided,
+    AmbiguousPairResult | SkippedAlreadyHandledRow | AmbiguousReflessRow | CrossCurrencyRow,
+    InterAccountErrorRow
+  >;
+  warnings?: string[];
+  plan_handle?: string;
+};
+
+/** The compact (guided-profile) envelope of every reconciliation mode. */
+export type ReconCompactPayload = { summary: OperationSummaryV1 };
 
 // ---------------------------------------------------------------------------
 // OUTPUT layer. The only reconciliation module that shapes MCP envelopes and
@@ -49,7 +202,7 @@ export function reconPlanErrorPayload(
   category: string,
   message: string,
   retry: OperationFailure["retry"] = "never",
-): Record<string, unknown> {
+): ReconPlanErrorPayload {
   return { error: message, category, retry, mutation_occurred: false };
 }
 
@@ -112,7 +265,7 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
  * untrusted free text; ids, amounts, reason and next_action are ours. */
 export function renderThirdPartyPayerReviews(
   reviews: readonly ThirdPartyPayerReview[],
-): Array<Record<string, unknown>> {
+): ThirdPartyPayerReview[] {
   return reviews.map(row => ({
     ...row,
     invoice_number: wrapUntrustedOcr(row.invoice_number) ?? "",
@@ -124,14 +277,14 @@ export function renderThirdPartyPayerReviews(
 // Wrap every untrusted free-text field on a RAW suggest match row at MCP output.
 // Reassigning existing keys preserves their position, so the decoded structure is
 // identical to the pre-relocation executor-side wrapping (each field wrapped once).
-function wrapSuggestMatch(match: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...match };
+function wrapSuggestMatch(match: SuggestMatchRow): ReconSuggestMatch {
+  const out: ReconSuggestMatch = { ...match };
   if ("description" in match) out.description = wrapUntrustedOcr(match.description as string | undefined);
   if ("bank_account_name" in match) out.bank_account_name = wrapUntrustedOcr(match.bank_account_name as string | undefined);
   if ("ref_number" in match) out.ref_number = wrapUntrustedOcr(match.ref_number as string | undefined);
   const bestMatch = match.best_match;
   if (bestMatch !== null && typeof bestMatch === "object") {
-    const b = bestMatch as Record<string, unknown>;
+    const b = bestMatch;
     out.best_match = {
       ...b,
       number: wrapUntrustedOcr(b.number as string | undefined) ?? "",
@@ -140,12 +293,12 @@ function wrapSuggestMatch(match: Record<string, unknown>): Record<string, unknow
     };
   }
   if (Array.isArray(match.possible_duplicate_postings)) {
-    out.possible_duplicate_postings = renderDuplicatePostingSuspects(match.possible_duplicate_postings as DuplicatePostingSuspect[]);
+    out.possible_duplicate_postings = renderDuplicatePostingSuspects(match.possible_duplicate_postings);
   }
   return out;
 }
 
-export function renderSuggestPayload(data: ReconciliationSuggestions): Record<string, unknown> {
+export function renderSuggestPayload(data: ReconciliationSuggestions): ReconSuggestPayload {
   return {
     total_unconfirmed: data.totalUnconfirmed,
     matched: data.matched,
@@ -174,12 +327,12 @@ export function renderExactMatchPayload(input: {
   planHandle?: string;
   executionReport?: PlanExecutionReport;
   ledgerChecks?: ExactConfirmLedgerChecks;
-}): Record<string, unknown> {
+}): ReconExactMatchPayload {
   const { projection, mode } = input;
   const dryRun = mode === "DRY_RUN";
   const completedIds = new Set(input.executionReport?.command_partitions.completed.map(item => item.command_id) ?? []);
 
-  const results: Array<Record<string, unknown>> = projection.confirms.map(descriptor => {
+  const results: ReconExactMatchResultRow[] = projection.confirms.map<ReconExactMatchResultRow>(descriptor => {
     const confirmed = completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId));
     return {
       transaction_id: descriptor.transactionId,
@@ -205,7 +358,7 @@ export function renderExactMatchPayload(input: {
     });
   }
 
-  const errors: Array<{ transaction_id?: number; reason: string; journal_id?: number; mutation_occurred?: boolean; automatic_retry_forbidden?: boolean; accounting_status?: string }> = projection.skipped.map(row => ({ ...row }));
+  const errors: ReconExactMatchError[] = projection.skipped.map(row => ({ ...row }));
   if (!dryRun && input.executionReport) {
     for (const descriptor of projection.confirms) {
       if (!completedIds.has(reconInvoiceConfirmCommandId(descriptor.transactionId))) {
@@ -232,7 +385,7 @@ export function renderExactMatchPayload(input: {
   const thirdPartyPayerReviews = renderThirdPartyPayerReviews(projection.thirdPartyPayerReviews);
 
   const autoConfirmed = dryRun ? projection.confirms.length : results.filter(row => row.status === "confirmed").length;
-  const summary = {
+  const summary: ReconExactMatchSummary = {
     total_unconfirmed: projection.totalUnconfirmed,
     auto_confirmed: autoConfirmed,
     skipped: projection.skipped.length,
@@ -276,9 +429,9 @@ export function buildInterAccountPayload(input: {
   match: InterAccountMatchResult;
   planHandle?: string;
   executionReport?: PlanExecutionReport;
-}): Record<string, unknown> {
+}): ReconInterAccountPayload {
   const m = input.match;
-  const summary = {
+  const summary: ReconInterAccountSummary = {
     total_unconfirmed: m.totalUnconfirmed,
     matched_pairs: m.matchedPairs.length,
     matched_one_sided: m.matchedOneSided.length,
@@ -391,7 +544,7 @@ function reconScope(input: {
 export function renderSuggestCompact(
   data: ReconciliationSuggestions,
   ctx: ReconCompactContext = {},
-): { summary: OperationSummaryV1 } {
+): ReconCompactPayload {
   const matches = data.matches;
   const duplicateRows = matches.filter(
     row => Array.isArray(row.possible_duplicate_postings) && (row.possible_duplicate_postings as unknown[]).length > 0,
@@ -539,7 +692,7 @@ function ledgerRepairInstruction(transactionId: number): string {
       + "standard or full profile (EARVELDAJA_PROFILE); this profile cannot.";
 }
 
-export function renderExactMatchCompact(input: ExactMatchCompactInput): { summary: OperationSummaryV1 } {
+export function renderExactMatchCompact(input: ExactMatchCompactInput): ReconCompactPayload {
   const { mode, projection } = input;
   const dryRun = mode === "DRY_RUN";
   const completedIds = new Set(input.executionReport?.command_partitions.completed.map(item => item.command_id) ?? []);
@@ -783,7 +936,7 @@ export function buildReconInterAccountResultDetailItems(
   return items;
 }
 
-export function renderInterAccountCompact(input: InterAccountCompactInput): { summary: OperationSummaryV1 } {
+export function renderInterAccountCompact(input: InterAccountCompactInput): ReconCompactPayload {
   const m = input.match;
   const dryRun = input.mode === "DRY_RUN";
   const errorCount = m.errors.length;

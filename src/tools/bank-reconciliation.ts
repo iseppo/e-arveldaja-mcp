@@ -6,7 +6,7 @@ import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { isGranularTool } from "../tool-catalog.js";
 import type { ApiContext } from "./crud-tools.js";
 import { readOnly, batch } from "../annotations.js";
-import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope } from "../workflow-response.js";
+import { buildWorkflowEnvelope, remapHiddenGranularWorkflowEnvelope, type WorkflowEnvelope } from "../workflow-response.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { createBankReconciliationOperations } from "../banking/reconciliation/operations.js";
 import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
@@ -29,7 +29,37 @@ import {
   renderReconFailure,
   renderSuggestCompact,
   renderSuggestPayload,
+  type ReconExactMatchPayload,
+  type ReconInterAccountPayload,
+  type ReconPlanErrorPayload,
+  type ReconSuggestPayload,
 } from "../banking/reconciliation/presenter.js";
+
+export type ReconcileBankTransactionsMode =
+  | "suggest"
+  | "dry_run_auto_confirm"
+  | "execute_auto_confirm"
+  | "inter_account_dry_run"
+  | "execute_inter_account";
+
+/** Every payload the merged tool can nest under `result` on the full surface. */
+export type ReconcileBankTransactionsResult =
+  | ReconSuggestPayload
+  | ReconExactMatchPayload
+  | ReconInterAccountPayload
+  | ReconPlanErrorPayload;
+
+/** Full-surface (standard/full profile) envelope of reconcile_bank_transactions.
+ * `R` names the result payload of the invoked mode; the guided profiles return
+ * ReconCompactPayload instead. */
+export type ReconcileBankTransactionsPayload<R extends ReconcileBankTransactionsResult = ReconcileBankTransactionsResult> = {
+  recommended_entry_point: "reconcile_bank_transactions";
+  mode: ReconcileBankTransactionsMode;
+  delegated_tool: "reconcile_transactions" | "auto_confirm_exact_matches" | "reconcile_inter_account_transfers";
+  delegated_args: Record<string, unknown>;
+  workflow?: WorkflowEnvelope;
+  result: R;
+};
 
 // Thin adapter. It registers the reconciliation tools, gates the granular
 // constituents, and routes each mode to the typed BankReconciliationOperations
@@ -282,7 +312,7 @@ export function registerBankReconciliationTools(
         }
       }
 
-      let delegatedTool: string;
+      let delegatedTool: ReconcileBankTransactionsPayload["delegated_tool"];
       let delegatedArgs: Record<string, unknown>;
 
       switch (selectedMode) {
@@ -329,7 +359,7 @@ export function registerBankReconciliationTools(
           break;
       }
 
-      let result: Record<string, unknown>;
+      let result: ReconcileBankTransactionsResult;
       try {
         switch (selectedMode) {
           case "suggest": {
@@ -374,7 +404,7 @@ export function registerBankReconciliationTools(
         }
       }
 
-      const resultSummary = recordValue(result.summary);
+      const resultSummary = recordValue((result as Record<string, unknown>).summary);
       const workflowSummary = selectedMode === "dry_run_auto_confirm"
         ? `Exact-match dry run would confirm ${numberValue(resultSummary, "auto_confirmed")} bank transaction(s), skip ${numberValue(resultSummary, "skipped")}, and report ${numberValue(resultSummary, "error_count")} error(s).`
         : selectedMode === "inter_account_dry_run"
@@ -391,8 +421,8 @@ export function registerBankReconciliationTools(
                 // Use only the handle actually issued by this preparation.
                 // The approval builder and public-tool remapper retain it in
                 // both the recommended call and approval preview arguments.
-                ...(typeof result.plan_handle === "string" && result.plan_handle.length > 0
-                  ? { plan_handle: result.plan_handle } : {}),
+                ...(typeof (result as Record<string, unknown>).plan_handle === "string" && ((result as Record<string, unknown>).plan_handle as string).length > 0
+                  ? { plan_handle: (result as Record<string, unknown>).plan_handle } : {}),
               },
               preview: resultSummary,
             }],
@@ -406,9 +436,9 @@ export function registerBankReconciliationTools(
             mode: selectedMode,
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
-            ...(workflow ? { workflow: remapHiddenGranularWorkflowEnvelope(workflow) } : {}),
+            ...(workflow ? { workflow: remapHiddenGranularWorkflowEnvelope(workflow) as WorkflowEnvelope } : {}),
             result,
-          }),
+          } satisfies ReconcileBankTransactionsPayload),
         }],
       };
     },

@@ -129,6 +129,20 @@ export interface ExactMatchProjection {
 // client_name/ref_number, possible_duplicate_postings) carry RAW domain text;
 // the presenter is the sole sandbox site (wrapUntrustedOcr) for both the full
 // and compact renders.
+export type SuggestBestMatch = {
+  type: "sale_invoice" | "purchase_invoice";
+  id: number;
+  number: string;
+  client_name: string;
+  clients_id: number;
+  gross_price: number;
+  payment_status: string;
+  partially_paid_warning: boolean;
+  ref_number?: string;
+  confidence: number;
+  match_reasons: string[];
+};
+
 export interface SuggestMatchRow {
   transaction_id: number | undefined;
   date: string | undefined;
@@ -136,10 +150,10 @@ export interface SuggestMatchRow {
   description?: string;
   bank_account_name?: string;
   ref_number?: string;
-  best_match: Record<string, unknown>;
+  best_match: SuggestBestMatch;
   other_candidate_count: number;
   distribution?: { related_table: string; related_id: number; amount: number };
-  possible_duplicate_postings?: Array<Record<string, unknown>>;
+  possible_duplicate_postings?: DuplicatePostingSuspect[];
   duplicate_blocked?: true;
   manual_review_required?: string;
 }
@@ -157,8 +171,8 @@ export interface ReconciliationSuggestions {
   totalUnconfirmed: number;
   matched: number;
   unmatched: number;
-  // RAW match rows (see SuggestMatchRow) — the presenter wraps free-text.
-  matches: Array<Record<string, unknown>>;
+  // RAW match rows — the presenter wraps free-text.
+  matches: SuggestMatchRow[];
   duplicateScanNote?: string;
   compact?: ReconciliationSuggestCompact;
 }
