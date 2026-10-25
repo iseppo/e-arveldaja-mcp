@@ -677,6 +677,8 @@ Test typing ratchet: `npm run typecheck:tests` also counts explicit `any` and un
 test sources (codes `ANY` / `UNTYPED_PAYLOAD`); they may only go down. Parse tool payloads with
 `parseToolPayload<T>()` from `src/__fixtures__/mcp-response.ts`, where `T` is the payload type the producing
 presenter exports. After removing loose typing, run `npm run typecheck:tests:update`.
+A change that alters a tool's output shape also exports or updates that payload's type (in the producing
+presenter/tool module) in the same commit, so producer types appear where output changes, not only where tests are added.
 
 Unit tests use **vitest**:
 ```bash
