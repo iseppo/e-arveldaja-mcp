@@ -25,11 +25,11 @@ import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { parseDocument } from "../document-parser.js";
 import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
-import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
+import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
 import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
-import { resolveSupplierInternal } from "./supplier-resolution.js";
+import { resolveSupplierInternal, type SupplierResolution } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
 import { textHazardSignals } from "./document-text-hazards.js";
@@ -43,6 +43,7 @@ import {
   formatDuplicatePostingWarnings,
   type DuplicatePostingCandidate,
   renderDuplicatePostingSuspects,
+  type RenderedDuplicatePostingSuspect,
 } from "../bank-posting-duplicate-guard.js";
 import { checkJournalReferences, formatJournalReferenceWarnings } from "../journal-reference-scan.js";
 import { scanPurchaseIntakeDuplicates, withPurchaseInvoiceLock } from "../documents/purchase-invoice-lock.js";
@@ -133,6 +134,15 @@ interface ValidateInvoiceDataParams {
   vat_no?: string;
 }
 
+/** The validate_invoice_data payload; summary and note are absent when items is not a JSON array. */
+export type ValidateInvoiceDataPayload = {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  summary?: { total_net: number; total_vat: number; total_gross: number; computed_gross: number; item_count: number };
+  note?: string;
+};
+
 /**
  * Pure invoice-totals / dates / FX-guardrail validation core, EXTRACTED
  * verbatim from the `validate_invoice_data` handler body (behavior-preserving —
@@ -142,7 +152,7 @@ interface ValidateInvoiceDataParams {
  * `wrapUntrustedOcr` on echoed argument values is a value-guard for the message
  * strings and is unchanged; it is not raw-OCR surfacing.
  */
-export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<string, unknown> {
+export function validateInvoiceData(params: ValidateInvoiceDataParams): ValidateInvoiceDataPayload {
   const { total_net, total_vat, total_gross, items, invoice_date, due_date, cl_currencies_id, currency_rate, base_net_price, reg_code, vat_no } = params;
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -346,7 +356,7 @@ export function validateInvoiceData(params: ValidateInvoiceDataParams): Record<s
   };
 }
 
-interface PdfHints {
+export interface PdfHints {
   supplier_reg_code?: string;
   supplier_vat_no?: string;
   supplier_iban?: string;
@@ -358,6 +368,85 @@ interface PdfHints {
   vat_no_rationale?: "labeled" | "bare_structural" | "excluded_self" | "buyer_section_only" | "coordinate_confirmed" | "coordinate_confirmed_echo" | "coordinate_rejected" | "identity_block";
   rejected_candidates?: Array<{ kind: "reg_code" | "vat_no"; value: string; reason: string }>;
 }
+
+// --- Wire payload types ------------------------------------------------------
+//
+// The envelopes as a consumer decodes them (toMcpJson drops undefined fields,
+// so conditionally spread / possibly-undefined fields are optional). Tests
+// parse tool payloads as these types (parseToolPayload<T>).
+
+/** extract_pdf_invoice: hints carry the (capped, sandbox-wrapped) OCR text once. */
+export type ExtractPdfInvoicePayload = {
+  hints: Omit<PdfHints, "raw_text"> & { raw_text: string; raw_text_truncated?: true; raw_text_length?: number };
+  /** The extracted fields without raw_text; description / supplier_name / notes / provenance values are sandbox-wrapped. */
+  extracted: Omit<ExtractedReceiptFields, "raw_text"> & { warnings?: string[] };
+  llm_fallback: InvoiceExtractionFallback;
+  source_sha256: string;
+  page_count: number;
+  partial_ocr_failure?: true;
+  min_ocr_confidence?: number;
+};
+
+/** resolve_supplier registry data as displayed: name / address sandbox-wrapped, reg_code raw. */
+export type ResolveSupplierRegistryData = Record<string, string>;
+
+/** resolve_supplier refusal before any write: confirmed-name mismatch or the P17 identity gate. */
+export type ResolveSupplierRefusalPayload = {
+  found: false;
+  created: false;
+  code: "confirmed_supplier_name_mismatch" | "legal_entity_identity_required";
+  reason?: string;
+  suggestion: string;
+};
+
+/** resolve_supplier refusal: the identifiers match the active company itself. */
+export type ResolveSupplierSelfMatchPayload = {
+  found: false;
+  created: false;
+  self_match_blocked: true;
+  suggestion: string;
+};
+
+/** resolve_supplier: a new supplier name the registry did not confirm awaits the user's approval. */
+export type ResolveSupplierNameConfirmationPayload = {
+  found: false;
+  created: false;
+  code: "needs_name_confirmation";
+  proposed_name: string;
+  proposed_name_source: string;
+  registry_status: string;
+  reason?: string;
+  suggestion: string;
+};
+
+/** resolve_supplier: an existing client matched (display name sandbox-wrapped). */
+export type ResolveSupplierFoundPayload = {
+  found: true;
+  match_type?: SupplierResolution["match_type"];
+  client?: Client;
+};
+
+export type ResolveSupplierCreatedPayload = {
+  found: false;
+  created: true;
+  api_response: { created_object_id?: number };
+  registry_data?: ResolveSupplierRegistryData | null;
+};
+
+export type ResolveSupplierNotFoundPayload = {
+  found: false;
+  created: false;
+  registry_data?: ResolveSupplierRegistryData | null;
+  suggestion: string;
+};
+
+export type ResolveSupplierPayload =
+  | ResolveSupplierRefusalPayload
+  | ResolveSupplierSelfMatchPayload
+  | ResolveSupplierNameConfirmationPayload
+  | ResolveSupplierFoundPayload
+  | ResolveSupplierCreatedPayload
+  | ResolveSupplierNotFoundPayload;
 
 /**
  * Assemble the PDF hints from identifiers already extracted by
@@ -548,7 +637,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               page_count: parsedDocument.pageCount,
               ...(parsedDocument.ocrPartialFailure ? { partial_ocr_failure: true } : {}),
               ...(minOcrConfidence !== undefined ? { min_ocr_confidence: minOcrConfidence } : {}),
-            }),
+            } satisfies ExtractPdfInvoicePayload),
           }],
         };
       } finally {
@@ -585,9 +674,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
   // resolveSupplierInternal and are never sourced from this display copy.
   const renderRegistryDataForDisplay = (
     registryData: Record<string, string> | null | undefined,
-  ): Record<string, string | null | undefined> | null | undefined => {
+  ): ResolveSupplierRegistryData | null | undefined => {
     if (registryData === null || registryData === undefined) return registryData;
-    const out: Record<string, string | null | undefined> = { ...registryData };
+    const out: ResolveSupplierRegistryData = { ...registryData };
     if (typeof registryData.name === "string") out.name = sandboxExternalText(registryData.name);
     if (typeof registryData.address === "string") out.address = sandboxExternalText(registryData.address);
     return out;
@@ -622,7 +711,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               created: false,
               code: "confirmed_supplier_name_mismatch",
               suggestion: "confirmed_supplier_name must equal name exactly (after trimming). Nothing was created. Show the user the exact name and pass it in both fields only after the user approves it.",
-            }),
+            } satisfies ResolveSupplierRefusalPayload),
           }],
         };
       }
@@ -671,7 +760,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               reason: resolution.reason,
               suggestion:
                 "Refusing to auto-create a supplier without a verified legal-entity identity. Supply a checksum-valid Estonian registry code (reg_code), set is_physical_entity=true for a natural person, or set foreign_identity_attested=true for an operator-verified foreign registration.",
-            }),
+            } satisfies ResolveSupplierRefusalPayload),
           }],
         };
       }
@@ -686,7 +775,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               self_match_blocked: true,
               suggestion:
                 "The supplied registry code / VAT number matches the active company's own identifiers — refusing to resolve or create a supplier that is the buyer itself. Re-check the supplier fields extracted from the invoice header before booking.",
-            }),
+            } satisfies ResolveSupplierSelfMatchPayload),
           }],
         };
       }
@@ -706,7 +795,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
                 : "no registry name (lookup unavailable, no entry, or no Estonian registry code)",
               reason: resolution.reason,
               suggestion: "Nothing was created. Ask the user to approve the exact supplier name; only after approval call resolve_supplier again with auto_create=true and confirmed_supplier_name set to that exact name.",
-            }),
+            } satisfies ResolveSupplierNameConfirmationPayload),
           }],
         };
       }
@@ -715,7 +804,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
         return {
           content: [{
             type: "text",
-            text: toMcpJson({ found: true, match_type: resolution.match_type, client: renderExternalEntity("client", resolution.client) }),
+            text: toMcpJson({ found: true, match_type: resolution.match_type, client: renderExternalEntity("client", resolution.client) } satisfies ResolveSupplierFoundPayload),
           }],
         };
       }
@@ -729,7 +818,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
               created: true,
               api_response: resolution.client ? { created_object_id: resolution.client.id } : {},
               registry_data: renderRegistryDataForDisplay(resolution.registry_data),
-            }),
+            } satisfies ResolveSupplierCreatedPayload),
           }],
         };
       }
@@ -742,7 +831,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
             created: false,
             registry_data: renderRegistryDataForDisplay(resolution.registry_data),
             suggestion: "Client not found. Set auto_create=true to create, or provide more details.",
-          }),
+          } satisfies ResolveSupplierNotFoundPayload),
         }],
       };
     }
@@ -779,7 +868,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
             suggestion: core.past_invoices.length > 0
               ? "Use the purchase article, account, and VAT settings from the most recent similar invoice."
               : "No past invoices found for this supplier. Use list_purchase_articles to find appropriate articles.",
-          }),
+          } satisfies SuggestBookingPayload),
         }],
       };
     }
@@ -794,7 +883,7 @@ interface BookingSuggestionParams {
   limit?: number;
 }
 
-interface BookingSuggestionPastInvoiceItem {
+export interface BookingSuggestionPastInvoiceItem {
   custom_title?: string | null;
   cl_purchase_articles_id?: number | null;
   purchase_accounts_id?: number | null;
@@ -807,7 +896,7 @@ interface BookingSuggestionPastInvoiceItem {
   reversed_vat_id?: number | null;
 }
 
-interface BookingSuggestionPastInvoice {
+export interface BookingSuggestionPastInvoice {
   id?: number;
   number?: string;
   date?: string;
@@ -825,6 +914,21 @@ export interface BookingSuggestionCore {
   dimension_conflicts: Array<{ account_id: number; dimension_field: "purchase_accounts_dimensions_id" | "vat_accounts_dimensions_id"; dimension_ids: number[] }>;
   history_notes: string[];
 }
+
+/** A suggest_booking past invoice: item custom_title is sandbox-wrapped. */
+export type SuggestBookingPastInvoice = Omit<BookingSuggestionPastInvoice, "items"> & {
+  items?: Array<Omit<BookingSuggestionPastInvoiceItem, "custom_title"> & { custom_title?: string }>;
+};
+
+/** The suggest_booking payload. */
+export type SuggestBookingPayload = {
+  supplier_id: number;
+  past_invoices: SuggestBookingPastInvoice[];
+  tax_notes: BookingSuggestionCore["tax_notes"];
+  dimension_notes?: string[];
+  notes?: string[];
+  suggestion: string;
+};
 
 /**
  * Pure suggest_booking core, EXTRACTED from the `suggest_booking` handler
@@ -1040,6 +1144,44 @@ export function logDocumentPurchaseInvoiceAudit(entry: {
   });
 }
 
+/** The require_confirm_plan fields of a verified create_purchase_invoice_from_pdf draft. */
+export type CreatePurchaseInvoiceFromPdfConfirmation = {
+  created_invoice_id: number;
+  draft_readback_verified: true;
+  confirmation_status: "ready_for_review";
+  confirm_plan: { invoice_id: number; plan_handle: string };
+  automatic_retry_forbidden: true;
+};
+
+/** The create_purchase_invoice_from_pdf success payload (confirmation fields only with require_confirm_plan). */
+export type CreatePurchaseInvoiceFromPdfPayload = Partial<CreatePurchaseInvoiceFromPdfConfirmation> & {
+  result: PurchaseInvoice;
+  document_uploaded: true;
+  note: string;
+  duplicate_invoice_number_acknowledged?: { existing_invoice_ids: number[]; note: string };
+  warnings?: string[];
+  possible_duplicate_postings?: RenderedDuplicatePostingSuspect[];
+  referencing_journal_ids?: number[];
+};
+
+/** A create_purchase_invoice_from_pdf refusal (toolError payload) raised by this handler. */
+export type CreatePurchaseInvoiceFromPdfFailurePayload = {
+  error: string;
+  category?: string;
+  retry?: "never";
+  mutation_occurred?: boolean;
+  automatic_retry_forbidden?: true;
+  next_action?: string;
+  details?: string[] | Array<{ journal_id: number; journal_title: string; date: string; amount: number }>;
+  existing_invoice_ids?: number[];
+  conflicting_journal_ids?: number[];
+  invoice_id?: number;
+  created_invoice_id?: number;
+  confirmation_status?: "held";
+  document_uploaded?: true;
+  mismatches?: string[];
+};
+
 export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api: ApiContext, runtimeSafetyContext?: RuntimeSafetyContext): void {
   registerTool(server, "create_purchase_invoice_from_pdf",
     "Create a draft purchase invoice from extracted document data and attach the source file. Direct-call contract: pass exact invoice vat_price/gross_price when known, never recalculate; non-EUR requires currency_rate (foreign units per 1 EUR, e.g. USD 1.08); base_* may lock actual EUR settlement.",
@@ -1073,7 +1215,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
     { ...create, openWorldHint: true, title: "Create Purchase Invoice from PDF" },
     async (rawParams) => {
       if (rawParams.require_confirm_plan === true && !runtimeSafetyContext) {
-        return toolError({ category: "runtime_safety_context_required", error: "A server runtime is required for a reviewed confirmation plan.", mutation_occurred: false });
+        return toolError({ category: "runtime_safety_context_required", error: "A server runtime is required for a reviewed confirmation plan.", mutation_occurred: false } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       // Strip any sandbox markers round-tripped from a wrapped extract response
       // off the persisted business fields (invoice_number, notes, ref_number,
@@ -1085,14 +1227,14 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // H15: refuse to book unless the caller echoes the extract_pdf_invoice
       // digest, then snapshot-and-verify the bytes BEFORE any API mutation.
       if (!/^[0-9a-f]{64}$/.test(rawParams.source_sha256 ?? "")) {
-        return toolError({ category: "source_sha256_required", error: "source_sha256 from extract_pdf_invoice is required" });
+        return toolError({ category: "source_sha256_required", error: "source_sha256 from extract_pdf_invoice is required" } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       const invalidDateFields = (["invoice_date", "journal_date"] as const).filter(field => !isStrictDate(params[field]));
       if (invalidDateFields.length > 0) {
-        return toolError({ error: `${invalidDateFields.join(", ")} must be a real calendar date in canonical YYYY-MM-DD form.` });
+        return toolError({ error: `${invalidDateFields.join(", ")} must be a real calendar date in canonical YYYY-MM-DD form.` } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       if (!Number.isInteger(params.term_days) || params.term_days < 0) {
-        return toolError({ error: "term_days must be a non-negative integer." });
+        return toolError({ error: "term_days must be a non-negative integer." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256, params.file_name);
       try {
@@ -1117,14 +1259,14 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         api, purchaseArticles, rawItems, isVatReg, { allowNonDeductible: true },
       );
       if (dimErrors.length > 0) {
-        return toolError({ error: "Account validation failed", details: dimErrors });
+        return toolError({ error: "Account validation failed", details: dimErrors } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       const currencyCode = (params.currency ?? "EUR").toUpperCase();
       if (currencyCode !== "EUR" && (params.currency_rate === undefined || params.currency_rate === null)) {
         return toolError({
           error: `currency_rate is required when currency="${currencyCode}". Pass ${currencyCode} per 1 EUR (Wise: Target amount / Source amount).`,
-        });
+        } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       const invoiceData: CreatePurchaseInvoiceData = {
@@ -1151,7 +1293,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       // create are refused here with zero writes.
       const totalsPreview = previewPurchaseInvoiceTotals(invoiceData, params.vat_price, params.gross_price, isVatReg, accounts);
       if (!totalsPreview.ok) {
-        return toolError({ error: totalsPreview.message, category: totalsPreview.code, retry: "never" });
+        return toolError({ error: totalsPreview.message, category: totalsPreview.code, retry: "never" } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       // Exact live supplier + invoice-number duplicate → refuse before any write.
@@ -1163,7 +1305,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       if (duplicates.comparisonUnavailable) {
         return toolError({ category: "purchase_duplicate_comparison_required", retry: "never",
           error: `Blank invoice numbers require a positive finite supplied gross_price and a valid invoice_date for duplicate review. Missing or invalid: ${duplicates.comparisonUnavailable.join(", ")}.`,
-          next_action: "Supply the original document comparison values and review again before creating." });
+          next_action: "Supply the original document comparison values and review again before creating." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
       const duplicateNumberIds = duplicates.invoiceIds;
       if (duplicateNumberIds.length > 0 && !(duplicates.kind === "number" && params.allow_duplicate_invoice_number === true)) {
@@ -1173,7 +1315,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
           existing_invoice_ids: duplicateNumberIds,
           next_action: `Review purchase invoice(s) ${duplicateNumberIds.join(", ")}; invalidate the existing one first if this is a deliberate re-booking, ` +
             "or pass allow_duplicate_invoice_number=true if the supplier genuinely reuses this number (e.g. across years).",
-        });
+        } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       // Task 6: cross-mechanism intake duplicate guard — catches the incident at
@@ -1211,7 +1353,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
             amount: s.amount,
           })),
           next_action: `Verify journal(s) ${journalIds.join(", ")} before creating this purchase invoice, or retry without block_on_duplicate to proceed with an advisory warning.`,
-        });
+        } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       let result;
@@ -1229,17 +1371,17 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         // which draft was cleaned up. Surface both pieces instead of bubbling an
         // opaque MCP error.
         if (error instanceof InvoiceCreationError) {
-          return toolError({ error: error.message, invoice_id: error.invoiceId, created_invoice_id: error.invoiceId, automatic_retry_forbidden: true, mutation_occurred: true });
+          return toolError({ error: error.message, invoice_id: error.invoiceId, created_invoice_id: error.invoiceId, automatic_retry_forbidden: true, mutation_occurred: true } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
         }
         throw error;
       }
       if (!result.id) {
-        return toolError({ error: "Purchase invoice was created but no invoice ID was returned." });
+        return toolError({ error: "Purchase invoice was created but no invoice ID was returned." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       const uploadFailure = await uploadSourceDocumentOrInvalidate(api, result.id, documentUpload.fileName, documentUpload.contentsBase64);
       if (uploadFailure !== undefined) {
-        return toolError({ error: uploadFailure, invoice_id: result.id });
+        return toolError({ error: uploadFailure, invoice_id: result.id } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
       }
 
       logDocumentPurchaseInvoiceAudit({
@@ -1255,7 +1397,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         fileName: documentUpload.fileName,
       });
 
-      let confirmation: Record<string, unknown> = {};
+      let confirmation: Partial<CreatePurchaseInvoiceFromPdfConfirmation> = {};
       if (params.require_confirm_plan === true) {
         let draft: PurchaseInvoice;
         let mismatches: string[];
@@ -1268,12 +1410,12 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         } catch {
           return toolError({ category: "draft_readback_unavailable", confirmation_status: "held", created_invoice_id: result.id,
             document_uploaded: true, mutation_occurred: true, automatic_retry_forbidden: true,
-            error: "Created draft retained; fresh readback unavailable. Do not recreate or confirm by ID alone." });
+            error: "Created draft retained; fresh readback unavailable. Do not recreate or confirm by ID alone." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
         }
         if (mismatches.length) {
           return toolError({ category: "draft_readback_mismatch", confirmation_status: "held", created_invoice_id: result.id,
             document_uploaded: true, mutation_occurred: true, automatic_retry_forbidden: true, mismatches,
-            error: "Created draft retained; actual invoice differs from the approved model. Do not recreate or confirm by ID alone." });
+            error: "Created draft retained; actual invoice differs from the approved model. Do not recreate or confirm by ID alone." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
         }
         try {
           confirmation = { created_invoice_id: result.id, draft_readback_verified: true, confirmation_status: "ready_for_review",
@@ -1282,7 +1424,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         } catch {
           return toolError({ category: "confirmation_plan_unavailable", confirmation_status: "held", created_invoice_id: result.id,
             document_uploaded: true, mutation_occurred: true, automatic_retry_forbidden: true,
-            error: "Created verified draft retained; confirmation plan unavailable. Do not recreate or confirm by ID alone." });
+            error: "Created verified draft retained; confirmation plan unavailable. Do not recreate or confirm by ID alone." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
         }
         result = renderExternalEntity("purchase_invoice", draft);
       }
@@ -1327,7 +1469,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
               ? { possible_duplicate_postings: renderDuplicatePostingSuspects(duplicateScan.suspects) }
               : {}),
             ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
-          }),
+          } satisfies CreatePurchaseInvoiceFromPdfPayload),
         }],
       };
       });
