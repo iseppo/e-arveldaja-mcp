@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBaseline,
   compareToBaseline,
+  findUncheckedTestFiles,
   parseDiagnostics,
   planBaselineUpdate,
   serializeBaseline,
@@ -97,17 +98,35 @@ describe("planBaselineUpdate", () => {
 
   it("refuses an update when the total rises", () => {
     const current = countsOf(`${TSC_OUTPUT}src/a.test.ts(99,1): error TS2322: again\n`);
-    expect(planBaselineUpdate(current, baseline)).toEqual({ allowed: false, warnings: [] });
+    expect(planBaselineUpdate(current, baseline)).toEqual({ allowed: false, increases: ["+1 src/a.test.ts TS2322"] });
+    expect(planBaselineUpdate(current, baseline, true).allowed).toBe(false);
   });
 
-  it("allows an equal total with a redistribution and warns about the per-key increase", () => {
+  it("refuses an equal total that swaps a fixed error for a new one unless forced", () => {
     const renamed = TSC_OUTPUT.replace("/repo/src/c.test.ts", "src/d.test.ts");
-    const plan = planBaselineUpdate(countsOf(renamed), baseline);
-    expect(plan).toEqual({ allowed: true, warnings: ["+1 src/d.test.ts TS2307"] });
+    expect(planBaselineUpdate(countsOf(renamed), baseline)).toEqual({ allowed: false, increases: ["+1 src/d.test.ts TS2307"] });
+    expect(planBaselineUpdate(countsOf(renamed), baseline, true)).toEqual({ allowed: true, increases: ["+1 src/d.test.ts TS2307"] });
+  });
+
+  it("allows a pure decrease without force", () => {
+    const fewer = "src/a.test.ts(12,3): error TS2322: x\n";
+    expect(planBaselineUpdate(countsOf(fewer), baseline)).toEqual({ allowed: true, increases: [] });
   });
 
   it("creates a baseline when none exists", () => {
-    expect(planBaselineUpdate(countsOf(TSC_OUTPUT), null)).toEqual({ allowed: true, warnings: [] });
+    expect(planBaselineUpdate(countsOf(TSC_OUTPUT), null)).toEqual({ allowed: true, increases: [] });
+  });
+});
+
+describe("findUncheckedTestFiles", () => {
+  it("lists test files missing from the tsc program, sorted", () => {
+    const program = ["src/a.ts", "src/a.test.ts", "node_modules/x/index.d.ts"];
+    expect(findUncheckedTestFiles(program, ["src/z.test.ts", "src/a.test.ts", "src/b/c.test.ts"]))
+      .toEqual(["src/b/c.test.ts", "src/z.test.ts"]);
+  });
+
+  it("passes when every test file is in the program", () => {
+    expect(findUncheckedTestFiles(["src/a.test.ts", "src/b.test.ts"], ["src/a.test.ts", "src/b.test.ts"])).toEqual([]);
   });
 });
 
