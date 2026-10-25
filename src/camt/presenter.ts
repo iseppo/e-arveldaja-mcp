@@ -1,6 +1,6 @@
 import { wrapUntrustedOcr } from "../mcp-json.js";
-import { buildBatchExecutionContract } from "../batch-execution.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { buildBatchExecutionContract, type BatchExecutionContract } from "../batch-execution.js";
+import { buildWorkflowEnvelope, type WorkflowEnvelope } from "../workflow-response.js";
 import { canonicalRefNumber } from "../ref-number.js";
 import { cappedWarnings, compactImportStatus, createOperationSummary, type OperationSummaryV1 } from "../operation-summary.js";
 import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js";
@@ -17,12 +17,18 @@ import {
   camtMovementIdentity,
   determinePossibleDuplicateAction,
 } from "./duplicate-identity.js";
+import type { StatementBalanceCheck } from "../statement-balance-check.js";
 import type {
   CamtCreateDescriptor,
   CamtImportProjection,
   CamtParseResult,
+  CamtPossibleDuplicateMatch,
+  CamtSkippedRow,
+  CamtStatementMetadata,
   ImportRejectedField,
+  ParsedCamtEntry,
   StatementBalanceCheckResult,
+  Transaction,
 } from "./types.js";
 import {
   CAMT_HOLD_SKIP_CODES,
@@ -31,6 +37,143 @@ import {
   CAMT_MARKER_IDENTITY_UNFIT,
   isCamtJournalReviewRow,
 } from "./projection.js";
+
+// --- Wire payload types ------------------------------------------------------
+//
+// The envelopes as a consumer decodes them (toMcpJson drops undefined fields,
+// so conditionally spread / possibly-undefined fields are optional, and an
+// undefined array element becomes null). Tests parse tool payloads as these
+// types (parseToolPayload<T>).
+
+/** A created / would-create row before the output sandbox. */
+export type CamtResultRow = ReturnType<typeof camtResultRow>;
+
+/** A possible-duplicate row before the output sandbox. */
+export type CamtPossibleDuplicateRow = ReturnType<typeof camtPossibleDuplicateRow>;
+
+/** A result row as emitted: its statement text is sandbox-wrapped. */
+export type CamtImportResultRow = Omit<CamtResultRow, "description" | "stored_description" | "counterparty" | "bank_reference" | "ref_number"> & {
+  description?: string;
+  stored_description?: string;
+  counterparty?: string;
+  bank_reference?: string;
+  ref_number?: string;
+};
+
+/** An existing transaction a possible duplicate matched, with its text sandbox-wrapped. */
+export type CamtPossibleDuplicateMatchPayload = Omit<CamtPossibleDuplicateMatch, "counterparty" | "description" | "ref_number"> & {
+  counterparty?: string;
+  description?: string;
+  ref_number?: string;
+};
+
+/** A possible-duplicate needs_review row as emitted. */
+export type CamtPossibleDuplicatePayload = Omit<CamtPossibleDuplicateRow, "counterparty" | "bank_reference" | "ref_number" | "existing_transactions"> & {
+  counterparty?: string;
+  bank_reference?: string;
+  ref_number?: string;
+  existing_transactions: CamtPossibleDuplicateMatchPayload[];
+};
+
+/** A row left unimported because an existing journal may already book it. */
+export type CamtJournalReviewItem = {
+  code: "camt_journal_review";
+  review_code?: string;
+  date: string;
+  amount: number;
+  bank_reference?: string;
+  journal_ids: number[];
+  review_note?: string;
+};
+
+export type CamtImportReviewItem = CamtPossibleDuplicatePayload | CamtJournalReviewItem;
+
+export type CamtImportSummary = {
+  total_statement_entries: number;
+  eligible_entries: number;
+  filtered_out: number;
+  created_count: number;
+  skipped_count: number;
+  error_count: number;
+  possible_duplicate_count: number;
+  journal_review_count: number;
+  description_truncated_count: number;
+  counterparty_iban_omitted_count: number;
+};
+
+/** A row whose stored description is shorter than the statement text (no statement text). */
+export type CamtDescriptionTruncatedRow = {
+  date: string;
+  amount: number;
+  bank_reference?: string;
+  stored_length: number;
+  full_length: number;
+};
+
+/** The closing-balance tripwire: the check's fields when one ran, plus persistence and notes. */
+export type CamtStatementBalanceCheckPayload = Partial<StatementBalanceCheck> & {
+  persisted: boolean;
+  notes?: string[];
+};
+
+/** The full (standard/full profile) import_camt053 envelope, dry run and execute. */
+export type CamtImportFullPayload = {
+  mode: "DRY_RUN" | "EXECUTED";
+  summary: CamtImportSummary;
+  workflow: WorkflowEnvelope;
+  statement_metadata: CamtStatementMetadata;
+  total_statement_entries: number;
+  eligible_entries: number;
+  filtered_out: number;
+  created_count: number;
+  skipped_count: number;
+  error_count: number;
+  sample: CamtImportResultRow[];
+  description_truncated_rows?: CamtDescriptionTruncatedRow[];
+  execution: BatchExecutionContract<CamtImportResultRow, CamtSkippedRow, never, CamtImportReviewItem>;
+  /** A row without a bank reference is undefined in memory and decodes as null. */
+  skipped_summary?: { count: number; sample_refs: Array<string | null | undefined> };
+  possible_duplicate_summary?: {
+    count: number;
+    sample_existing_transaction_ids: number[];
+    default_policy: "link_confirmed_transaction_else_review_status";
+  };
+  plan_handle?: string;
+  statement_balance_check?: CamtStatementBalanceCheckPayload;
+};
+
+/** A compact sample row (guided profiles); bank_reference and counterparty are sandbox-wrapped. */
+export type CamtCompactSample = {
+  i: number;
+  status: CamtResultRow["status"];
+  date: string;
+  amount: number;
+  currency: string;
+  type: "C" | "D";
+  bank_reference?: string;
+  counterparty?: string;
+};
+
+/**
+ * The compact (guided-profile) import_camt053 envelope. Its scope carries
+ * statement_id and its samples are CamtCompactSample rows, which
+ * OperationSummaryV1 types loosely (renderCamtImportCompact narrows with `as`).
+ */
+export type CamtImportCompactPayload = {
+  summary: Omit<OperationSummaryV1, "scope" | "samples"> & {
+    scope?: OperationSummaryV1["scope"] & { statement_id?: string };
+    samples?: CamtCompactSample[];
+  };
+};
+
+/** A parse_camt053 entry: free-form text sandbox-wrapped, internal aliases dropped, flags only when set. */
+export type CamtParsedEntryPayload = Omit<ParsedCamtEntry, "legacy_identities" | "duplicate" | "duplicate_transaction_ids"> & {
+  duplicate?: true;
+  duplicate_transaction_ids?: number[];
+};
+
+/** The parse_camt053 envelope. */
+export type CamtParsePayload = Omit<CamtParseResult, "entries"> & { entries: CamtParsedEntryPayload[] };
 
 // OUTPUT layer. This is the only CAMT module that shapes MCP envelopes and
 // applies the OCR/untrusted-text sandbox (wrapUntrustedOcr). The pure
@@ -149,7 +292,7 @@ export type CamtImportRenderData = Omit<CamtImportRenderInput, "mode">;
 export type CamtImportPreview = CamtImportRenderData;
 export type CamtImportExecution = CamtImportRenderData;
 
-export function renderCamtImportPayload(input: CamtImportRenderInput): Record<string, unknown> {
+export function renderCamtImportPayload(input: CamtImportRenderInput): CamtImportFullPayload {
   const { projection, mode } = input;
   const dryRun = mode === "DRY_RUN";
   const summary = {
@@ -226,7 +369,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): Record<st
   // Rows not created because an existing journal may already book them.
   const journalReviews = projection.skipped
     .filter(isCamtJournalReviewRow)
-    .map(row => ({
+    .map<CamtJournalReviewItem>(row => ({
       code: "camt_journal_review",
       review_code: row.review_code,
       date: row.date,
@@ -366,7 +509,7 @@ interface CamtCompactInput {
   readonly operationHandle?: string;
 }
 
-export function renderCamtImportCompact(input: CamtCompactInput): { summary: OperationSummaryV1 } {
+export function renderCamtImportCompact(input: CamtCompactInput): CamtImportCompactPayload {
   const { mode, data } = input;
   const dryRun = mode === "DRY_RUN";
   // A dry run with no rows to create has nothing to approve and issues no plan.
@@ -534,14 +677,14 @@ export function renderCamtImportCompact(input: CamtCompactInput): { summary: Ope
     ...(details ? { details } : {}),
   }, { budget: "batch", measureEnvelope: "summary", warningHints: { camt_unsplit_entry: pageHint("commands") } });
 
-  return { summary };
+  return { summary } as CamtImportCompactPayload;
 }
 
 /**
  * The parse_camt053 output projection: statement metadata + entries with the
  * attacker-controllable free-form fields OCR-sandbox-wrapped at MCP output.
  */
-export function renderCamtParsePayload(parsed: CamtParseResult): Record<string, unknown> {
+export function renderCamtParsePayload(parsed: CamtParseResult): CamtParsePayload {
   return {
     ...parsed,
     // statement_id and bank_name originate from the uploaded XML and

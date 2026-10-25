@@ -6,7 +6,10 @@ import {
   renderCamtImportPayload,
   renderCamtParsePayload,
   type CamtImportRenderData,
+  type CamtParsePayload,
 } from "./presenter.js";
+import { toMcpJson } from "../mcp-json.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
 import { camtMovementIdentity } from "./duplicate-identity.js";
@@ -117,11 +120,11 @@ describe("renderCamtImportCompact", () => {
 
   it("carries the statement identity: raw IBAN + OCR-wrapped statement_id, and wraps sample bank_reference", () => {
     const { summary } = renderCamtImportCompact({ mode: "DRY_RUN", data: makeData(50) });
-    const scope = summary.scope as Record<string, unknown>;
+    const scope = summary.scope!;
     expect(scope.account).toBe("EE637700771011212909");
     expect(scope.statement_id).toMatch(/UNTRUSTED_OCR_START/);
     expect(String(scope.statement_id)).toContain("stmt-1");
-    const sample = summary.samples?.[0] as Record<string, unknown>;
+    const sample = summary.samples![0]!;
     expect(sample.bank_reference).toMatch(/UNTRUSTED_OCR_START/);
     expect(String(sample.bank_reference)).toContain("REF-0");
   });
@@ -192,10 +195,11 @@ describe("CAMT unsplit-entry review note", () => {
 
   it("renders the note but never the internal legacy identities on parse output", () => {
     const entry = flagged().projection.descriptors[0]!.entry;
-    const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);
-    const rendered = (payload.entries as Array<Record<string, unknown>>)[0]!;
+    // As the client decodes it: toMcpJson drops the undefined-valued alias key.
+    const payload = parseToolPayload<CamtParsePayload>(toMcpJson(renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never)));
+    const rendered = payload.entries[0]!;
     expect(rendered.review_note).toBe(note);
-    expect(rendered.legacy_identities).toBeUndefined();
+    expect(rendered).not.toHaveProperty("legacy_identities");
   });
 });
 
@@ -243,7 +247,7 @@ describe("CAMT full-envelope untrusted-text wrapping", () => {
   it("wraps end_to_end_id, counterparty_iban and counterparty_reg_code on parse output", () => {
     const entry = { ...cleanEntry(1), end_to_end_id: "E2E-1", counterparty_reg_code: "12345678" };
     const payload = renderCamtParsePayload({ ...makeData(0).projection.parsed, entries: [entry] } as never);
-    const rendered = (payload.entries as Array<Record<string, unknown>>)[0]!;
+    const rendered = payload.entries[0]!;
     expect(rendered.end_to_end_id).toMatch(OCR);
     expect(rendered.counterparty_iban).toMatch(OCR);
     expect(rendered.counterparty_reg_code).toMatch(OCR);
@@ -266,10 +270,11 @@ describe("CAMT full-envelope untrusted-text wrapping", () => {
         recommendation_note: "n",
       }],
     });
-    const needsReview = ((payload.execution as Record<string, unknown>).needs_review as Array<Record<string, unknown>>)[0]!;
-    const match = (needsReview.existing_transactions as Array<Record<string, unknown>>)[0]!;
+    const needsReview = payload.execution.needs_review[0]!;
+    if (!("existing_transactions" in needsReview)) throw new Error("expected the possible-duplicate review row");
+    const match = needsReview.existing_transactions[0]!;
     expect(match.ref_number).toMatch(OCR);
-    for (const value of Object.values(match.suggested_patch_missing_fields as Record<string, unknown>)) {
+    for (const value of Object.values(match.suggested_patch_missing_fields)) {
       expect(value).toMatch(OCR);
     }
   });

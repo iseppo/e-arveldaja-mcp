@@ -11,7 +11,7 @@ import { type ApiContext, coerceId } from "./crud-tools.js";
 import type { FileInputSource } from "../file-input-snapshot.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { readOnly, batch } from "../annotations.js";
-import { remapHiddenGranularWorkflowResult } from "../workflow-response.js";
+import { remapHiddenGranularWorkflowResult, type RemappedWorkflowEnvelope } from "../workflow-response.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { CamtPreflightRejectedError } from "../camt/executor.js";
 import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
@@ -21,6 +21,7 @@ import {
   renderCamtImportCompact,
   renderCamtImportPayload,
   renderCamtParsePayload,
+  type CamtImportFullPayload,
 } from "../camt/presenter.js";
 
 // Re-exported for the identity-only consumers that still import through this
@@ -28,6 +29,30 @@ import {
 // pure ../camt/* modules.
 export { extractCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 export type { ParsedCamtEntry, CamtParseResult, CamtStatementMetadata } from "../camt/types.js";
+
+/** A plan / upstream failure from the operations layer (parse, dry run or execute). */
+export type CamtPlanErrorPayload = {
+  error: string;
+  category: string;
+  retry?: OperationFailure["retry"];
+  mutation_occurred: false;
+};
+
+/** The full import envelope as process_camt053 forwards it: its workflow names the merged entry points. */
+export type CamtProcessedImportPayload = Omit<CamtImportFullPayload, "workflow"> & { workflow: RemappedWorkflowEnvelope };
+
+/**
+ * The process_camt053 envelope. R is the delegated payload for the invoked mode:
+ * CamtParsePayload (parse), CamtProcessedImportPayload / CamtImportCompactPayload
+ * (dry_run / execute), CamtPlanErrorPayload or ImportPreflightFailurePayload.
+ */
+export type ProcessCamt053Payload<R> = {
+  recommended_entry_point: "process_camt053";
+  mode: "parse" | "dry_run" | "execute";
+  delegated_tool: "parse_camt053" | "import_camt053";
+  delegated_args: Record<string, unknown>;
+  result: R;
+};
 
 interface AdapterResult {
   payload: Record<string, unknown>;
@@ -39,7 +64,7 @@ interface AdapterResult {
 // per-site signal and left every CAMT failure looking equally unretryable.
 function planErrorPayload(
   error: { code: string; message: string; retry?: OperationFailure["retry"] },
-): Record<string, unknown> {
+): CamtPlanErrorPayload {
   return {
     error: error.message,
     category: error.code,
@@ -200,7 +225,7 @@ export function registerCamtImportTools(
     { ...batch, openWorldHint: true, title: "Process CAMT.053" },
     async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle }) => {
       const selectedMode = mode ?? "parse";
-      let delegatedTool: string;
+      let delegatedTool: ProcessCamt053Payload<unknown>["delegated_tool"];
       let delegatedArgs: Record<string, unknown>;
       let inner: AdapterResult;
 
@@ -247,7 +272,7 @@ export function registerCamtImportTools(
             delegated_tool: delegatedTool,
             delegated_args: delegatedArgs,
             result,
-          }),
+          } satisfies ProcessCamt053Payload<unknown>),
         }],
       };
     },
