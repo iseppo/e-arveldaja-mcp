@@ -13,14 +13,15 @@ function buildOptions(
     promptForScope: vi.fn(async () => "global" as const),
     importCredentials: vi.fn(async () => ({
       envFile: "/tmp/.env",
-      storageScope: "global",
+      storageScope: "global" as const,
       companyName: "Acme OÜ",
       verifiedAt: "2026-03-29T12:00:00.000Z",
       created: true,
       action: "created" as const,
       sourceFile: "/tmp/apikey.txt",
       target: "primary" as const,
-    })) as unknown as StartupCredentialImportOptions["importCredentials"],
+      legacyExposureKeysRemoved: [],
+    })),
     ...overrides,
   };
 }
@@ -75,12 +76,13 @@ describe("maybeImportCredentialsOnStartup", () => {
       action: "created" as const,
       sourceFile: "/tmp/project/apikey.txt",
       target: "primary" as const,
+      legacyExposureKeysRemoved: [],
     }));
 
     const result = await maybeImportCredentialsOnStartup(buildOptions({
       candidateFiles: ["/tmp/project/apikey.txt"],
       promptForScope,
-      importCredentials: importCredentials as unknown as StartupCredentialImportOptions["importCredentials"],
+      importCredentials,
     }));
 
     expect(result).toEqual({
@@ -94,6 +96,7 @@ describe("maybeImportCredentialsOnStartup", () => {
         action: "created",
         sourceFile: "/tmp/project/apikey.txt",
         target: "primary",
+        legacyExposureKeysRemoved: [],
       },
     });
     expect(promptForScope).toHaveBeenCalledTimes(1);
