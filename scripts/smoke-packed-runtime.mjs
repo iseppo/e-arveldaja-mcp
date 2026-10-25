@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { smokePackedRuntime } from "./release-smoke-helpers.mjs";

@@ -1,8 +1,22 @@
+// @ts-check
+// Types live here as JSDoc so typecheck:tests checks callers against the real
+// implementation (a hand-written .d.mts drifted silently).
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+
+/** @typedef {import("node:child_process").ChildProcess} ChildProcess */
+/** @typedef {import("node:child_process").ChildProcessWithoutNullStreams} PipedChildProcess */
+/** @typedef {import("node:child_process").SpawnOptions} SpawnOptions */
+/** @typedef {{ name?: string, main?: string, bin?: Record<string, string> }} PackageJsonLike */
+/** @typedef {{ importCheck: { command: string, args: string[] }, binCheck: { command: string, args: string[], shell: boolean, binTarget: string } }} PackedSmokePlan */
+/** @typedef {{ code: number | null, signal: NodeJS.Signals | null }} ChildCloseResult */
+/** @typedef {{ stdout: string, stderr: string }} RunCommandResult */
+/** @typedef {SpawnOptions & { timeoutMs?: number }} RunCommandOptions */
+/** @typedef {(command: string, args: readonly string[], options?: RunCommandOptions) => Promise<RunCommandResult>} RunCommand */
+/** @typedef {{ cwd?: string, env?: NodeJS.ProcessEnv, shell?: boolean | string, minimumAliveMs?: number, timeoutMs?: number, terminateGraceMs?: number }} StartAndObserveOptions */
 
 // Pure check: which required files a packed payload (npm pack --json `files[].path`,
 // each prefixed with "package/") is missing. Directory requirements (trailing "/")
@@ -10,6 +24,13 @@ import { pathToFileURL } from "node:url";
 // module paths without extension, e.g. "api/clients.api") is given, every packed
 // dist/ output must also come from a current src/*.ts — a stale output of a
 // deleted module (tsc never removes those) would otherwise ship.
+/**
+ * @param {readonly string[]} files
+ * @param {PackageJsonLike & { main: string }} packageJson
+ * @param {readonly string[] | null} [requiredWorkflowSlugs]
+ * @param {readonly string[] | null} [sourceModules]
+ * @returns {string[]}
+ */
 export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs = null, sourceModules = null) {
   const names = new Set(files.map(file => file.replace(/^package\//, "")));
   const required = [packageJson.main, ...Object.values(packageJson.bin ?? {}), "package.json", "workflows/", ".claude/commands/"];
@@ -24,7 +45,7 @@ export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs
   // When the caller passes the source-of-truth slug set, we validate against it
   // so a workflow dropped from BOTH directories is still caught; otherwise we
   // fall back to the union of what is packed (catches one-sided omissions).
-  const slugsUnder = prefix => new Set(
+  const slugsUnder = (/** @type {string} */ prefix) => new Set(
     [...names].filter(name => name.startsWith(prefix) && name.endsWith(".md")).map(name => name.slice(prefix.length, -3)),
   );
   const workflowSlugs = slugsUnder("workflows/");
@@ -52,9 +73,15 @@ export function validatePackedFileList(files, packageJson, requiredWorkflowSlugs
 // (getProjectRoot resolves to the installed root). The bin check invokes the
 // installed `.bin` shim itself — not `node <file>` — so the real executable
 // entrypoint (bin mapping, shebang, exec bit) is exercised end to end.
+/**
+ * @param {string} packageRoot
+ * @param {PackageJsonLike} packageJson
+ * @param {string} nodeExecutable
+ * @returns {PackedSmokePlan}
+ */
 export function buildPackedSmokePlan(packageRoot, packageJson, nodeExecutable) {
   const [binName, binRelative] = Object.entries(packageJson.bin ?? {})[0] ?? [];
-  if (!binName) throw new Error("package.json must declare a bin entry");
+  if (!binName || binRelative === undefined) throw new Error("package.json must declare a bin entry");
   const onWindows = process.platform === "win32";
   const shim = resolve(packageRoot, "..", ".bin", onWindows ? `${binName}.cmd` : binName);
   return {
@@ -73,18 +100,26 @@ export function buildPackedSmokePlan(packageRoot, packageJson, nodeExecutable) {
   };
 }
 
+/** @type {(child: ChildProcess) => Promise<ChildCloseResult>} */
 const closed = child => new Promise(resolveClose => child.once("close", (code, signal) => resolveClose({ code, signal })));
+/** @type {(ms: number) => Promise<void>} */
 const wait = ms => new Promise(resolveWait => {
   const timer = setTimeout(resolveWait, ms);
   timer.unref?.(); // a losing race timer must not keep the CLI alive after real work is done
 });
 
+/** @param {ChildProcess} child @returns {Promise<ChildCloseResult>} */
 function closedAlready(child) {
   return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
 }
 
 // Terminate a running child gracefully (SIGTERM), escalating to SIGKILL after a
 // grace window, and await its actual close so callers never leak a process.
+/**
+ * @param {ChildProcess} child
+ * @param {number} [graceMs]
+ * @returns {Promise<ChildCloseResult & { terminationSignal: NodeJS.Signals | null }>}
+ */
 export async function terminateChild(child, graceMs = 1_000) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return { ...(await closedAlready(child)), terminationSignal: child.signalCode };
@@ -92,8 +127,8 @@ export async function terminateChild(child, graceMs = 1_000) {
   const closePromise = closed(child);
   child.kill("SIGTERM");
   const graceful = await Promise.race([
-    closePromise.then(value => ({ closed: true, value })),
-    wait(graceMs).then(() => ({ closed: false })),
+    closePromise.then(value => /** @type {const} */ ({ closed: true, value })),
+    wait(graceMs).then(() => /** @type {const} */ ({ closed: false })),
   ]);
   if (graceful.closed) return { ...graceful.value, terminationSignal: "SIGTERM" };
   child.kill("SIGKILL");
@@ -106,8 +141,10 @@ export async function terminateChild(child, graceMs = 1_000) {
 // outlives the grace is unref'd so it can never retain the event loop. Runs
 // BEFORE the wrapper is signalled, so the cmd.exe root still exists for /T to
 // enumerate its Node descendant.
+/** @param {number} pid @param {number} graceMs @returns {Promise<void>} */
 function killTree(pid, graceMs) {
   return new Promise(resolveKill => {
+    /** @type {ChildProcess} */
     let killer;
     try {
       killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
@@ -129,6 +166,7 @@ function killTree(pid, graceMs) {
 // cmd.exe shim wrapping the Node server; SIGKILL to the shell does not cascade,
 // so the tree is reaped with taskkill first — otherwise the wrapped Node
 // descendant would be orphaned (and would keep the temp install tree locked).
+/** @param {ChildProcess} child @param {Promise<ChildCloseResult>} closePromise @param {number} graceMs */
 async function stopChild(child, closePromise, graceMs) {
   if (process.platform === "win32" && typeof child.pid === "number") {
     await killTree(child.pid, graceMs);
@@ -147,16 +185,22 @@ async function stopChild(child, closePromise, graceMs) {
 
 // Run a command to completion with a hard timeout; closes stdin, captures
 // stdout/stderr, throws on non-zero exit or timeout (terminating the child).
+/**
+ * @param {string} command
+ * @param {readonly string[]} args
+ * @param {RunCommandOptions} [options]
+ * @returns {Promise<RunCommandResult>}
+ */
 export async function runCommand(command, args, { timeoutMs = 120_000, ...options } = {}) {
-  const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+  const child = /** @type {PipedChildProcess} */ (spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] }));
   child.stdin.end();
   let stdout = ""; let stderr = "";
   child.stdout.on("data", chunk => { stdout += chunk; });
   child.stderr.on("data", chunk => { stderr += chunk; });
   const closePromise = closed(child);
   const outcome = await Promise.race([
-    closePromise.then(value => ({ kind: "close", value })),
-    wait(timeoutMs).then(() => ({ kind: "timeout" })),
+    closePromise.then(value => /** @type {const} */ ({ kind: "close", value })),
+    wait(timeoutMs).then(() => /** @type {const} */ ({ kind: "timeout" })),
   ]);
   if (outcome.kind === "timeout") {
     await terminateChild(child);
@@ -173,14 +217,23 @@ export async function runCommand(command, args, { timeoutMs = 120_000, ...option
 // return how it closed. stdin is left OPEN for the whole window: a stdio MCP
 // server treats stdin EOF as a shutdown signal, so closing it would make a
 // perfectly healthy server exit cleanly and look like a crash.
+/**
+ * @param {string} command
+ * @param {readonly string[]} args
+ * @param {StartAndObserveOptions} options
+ * @returns {Promise<ChildCloseResult & { terminationSignal: "stdin-eof" }>}
+ */
 export async function startAndObserve(command, args, { cwd, env, shell, minimumAliveMs = 1_000, timeoutMs = 10_000, terminateGraceMs = 1_000 }) {
-  const child = spawn(command, args, { cwd, env, shell, stdio: ["pipe", "pipe", "pipe"] });
+  const child = /** @type {PipedChildProcess} */ (spawn(command, args, { cwd, env, shell, stdio: ["pipe", "pipe", "pipe"] }));
   const fatalStderr = /SyntaxError|ERR_MODULE_NOT_FOUND|ENOENT.*(?:workflow|command|package)/i;
   let stderr = "";
+  /** @type {Error | undefined} */
   let spawnError;
-  let reportFatal;
+  /** @type {(value: { kind: "fatal" }) => void} */
+  let reportFatal = () => {};
   // Resolves as soon as a fatal load error appears, so a broken bin fails
   // without waiting out the whole alive window.
+  /** @type {Promise<{ kind: "fatal" }>} */
   const fatalPromise = new Promise(resolveFatal => { reportFatal = resolveFatal; });
   child.stderr.on("data", chunk => {
     stderr += chunk;
@@ -188,14 +241,15 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
   });
   // A failed spawn (missing/non-executable bin) emits "error", not "close" —
   // surface it instead of silently timing into the alive window.
+  /** @type {Promise<{ kind: "error" }>} */
   const errorPromise = new Promise(resolveError => child.once("error", err => { spawnError = err; resolveError({ kind: "error" }); }));
   try {
     const closePromise = closed(child);
     const early = await Promise.race([
-      closePromise.then(value => ({ kind: "close", value })),
+      closePromise.then(value => /** @type {const} */ ({ kind: "close", value })),
       errorPromise,
       fatalPromise,
-      wait(minimumAliveMs).then(() => ({ kind: "alive" })),
+      wait(minimumAliveMs).then(() => /** @type {const} */ ({ kind: "alive" })),
     ]);
     if (early.kind === "error") {
       throw new Error(`Packed bin failed to start: ${spawnError?.message ?? spawnError}`);
@@ -215,8 +269,8 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
     // (with a best-effort hard stop) instead of hanging the CI job forever.
     child.stdin.end();
     const settled = await Promise.race([
-      closePromise.then(value => ({ ...value, terminationSignal: "stdin-eof" })),
-      wait(timeoutMs).then(() => "TIMEOUT"),
+      closePromise.then(value => ({ ...value, terminationSignal: /** @type {const} */ ("stdin-eof") })),
+      wait(timeoutMs).then(() => /** @type {const} */ ("TIMEOUT")),
     ]);
     if (settled === "TIMEOUT") {
       await stopChild(child, closePromise, terminateGraceMs);
@@ -238,6 +292,7 @@ export async function startAndObserve(command, args, { cwd, env, shell, minimumA
   }
 }
 
+/** @param {string} path */
 async function assertReadable(path) {
   const info = await stat(path);
   if (!info.isDirectory() && !info.isFile()) throw new Error(`Unreadable packed path: ${path}`);
@@ -245,6 +300,7 @@ async function assertReadable(path) {
 
 // Assert the installed package tree exposes the runtime resources the server
 // resolves at startup (entry, workflows, command mirrors).
+/** @param {string} packageRoot @param {PackageJsonLike & { main: string }} packageJson */
 export async function assertInstalledPackagePaths(packageRoot, packageJson) {
   await assertReadable(resolve(packageRoot, packageJson.main));
   await assertReadable(resolve(packageRoot, "dist", "prompt-registry.js"));
@@ -256,9 +312,10 @@ export async function assertInstalledPackagePaths(packageRoot, packageJson) {
 // <file>`: npm must have created the bin shim (a broken bin mapping fails here)
 // and the bin target must carry a shebang (a stripped shebang makes the shim
 // non-runnable even though `node <file>` still works).
+/** @param {string} installRoot @param {PackageJsonLike & { name: string }} packageJson */
 export async function assertPackedBinIsExecutable(installRoot, packageJson) {
   const [binName, binTarget] = Object.entries(packageJson.bin ?? {})[0] ?? [];
-  if (!binName) throw new Error("package.json must declare a bin entry");
+  if (!binName || binTarget === undefined) throw new Error("package.json must declare a bin entry");
   await assertReadable(resolve(installRoot, "node_modules", ".bin", binName));
   const target = resolve(installRoot, "node_modules", packageJson.name, binTarget);
   const info = await stat(target);
@@ -274,6 +331,7 @@ export async function assertPackedBinIsExecutable(installRoot, packageJson) {
 // with the given Node executable. No live API calls and no credentials; the
 // tarball's declared dependencies are installed with --prefer-offline (cache
 // first, registry only as a fallback).
+/** @param {{ root: string, nodeExecutable?: string, run?: RunCommand }} options */
 export async function smokePackedRuntime({ root, nodeExecutable = process.execPath, run = runCommand }) {
   const temp = await mkdtemp(resolve(tmpdir(), "e-arveldaja-pack-smoke-"));
   try {
@@ -291,7 +349,7 @@ export async function smokePackedRuntime({ root, nodeExecutable = process.execPa
       .map(name => name.replace(/\\/g, "/"))
       .filter(name => name.endsWith(".ts") && !name.endsWith(".d.ts"))
       .map(name => name.slice(0, -3));
-    const errors = validatePackedFileList(packed.files.map(file => file.path), packageJson, requiredWorkflowSlugs, sourceModules);
+    const errors = validatePackedFileList(packed.files.map((/** @type {{ path: string }} */ file) => file.path), packageJson, requiredWorkflowSlugs, sourceModules);
     if (errors.length) throw new Error(errors.join("\n"));
     const installRoot = resolve(temp, "install");
     await mkdir(installRoot);
