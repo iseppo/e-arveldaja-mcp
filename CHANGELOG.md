@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Google invoices can now go through the verified reading, so their date is read from the image and they book with one confirmation.** Before, the Google logo on page 2 was read by text recognition at low confidence, and that alone held the whole document as `low_ocr_confidence`. Details: an OCR'd item without digits whose every word its own page's text layer already prints no longer counts toward the minimum OCR confidence, and only on pages where native text outnumbers OCR text; scanned pages keep their full signal. Applies everywhere the OCR confidence is checked (verified reading, prepare, receipt batch, inbox).
+- **A 0% invoice of a VAT-registered company (e.g. reverse-charge Google services) now gets its confirm step after create.** Before, the API cleared the VAT account and VAT article on such a row, the draft no longer matched the approved booking, and no confirm handle was issued. Details: the readback accepts both fields cleared together on a 0% row with zero VAT; anything else still differs.
+- **A transfer between two of your own bank accounts no longer holds a new invoice as a possible cash duplicate.** Details: the invoice-intake scan skips a journal whose debit and credit legs are all on bank accounts; the CAMT import's own duplicate check is unchanged.
+
 ## [0.34.0] - 2026-10-26
 
 ### Added
