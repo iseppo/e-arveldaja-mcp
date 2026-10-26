@@ -234,7 +234,15 @@ describe("recheckReading (lost-value plan Step 0: the create-time re-run)", () =
       "label_quote_missing", "label_quote_no_letter", "label_quote_not_printed", "label_quote_overlaps_value",
       "missing_evidence", "proof_problem", "quote_not_printed", "reading_heuristic_conflict", "value_not_complete_token",
     ]);
-    expect(Object.keys(RECHECK_ALLOWED_CODES)).toEqual(["owner_supplied"]);
+    expect(Object.keys(RECHECK_ALLOWED_CODES)).toEqual(["owner_supplied", "image_agreed"]);
+  });
+
+  it("pins the image-agreed allow-list: evidence/proof codes only (a heuristic conflict stays a hold)", () => {
+    expect([...RECHECK_ALLOWED_CODES.image_agreed].sort()).toEqual([
+      "label_quote_missing", "label_quote_no_letter", "label_quote_not_printed", "label_quote_overlaps_value",
+      "missing_evidence", "proof_problem", "quote_not_printed",
+    ]);
+    expect(RECHECK_ALLOWED_CODES.image_agreed).not.toContain("reading_heuristic_conflict");
   });
 
   it("a re-run that cannot be performed holds: no bound reading, no bound proof, or unparseable JSON", () => {
@@ -256,6 +264,14 @@ describe("recheckReading (lost-value plan Step 0: the create-time re-run)", () =
       { code: "value_not_complete_token", field: "invoice_date" },
       { code: "reading_heuristic_conflict", field: "invoice_date" },
     ]));
+  });
+
+  it("an image-agreed date the heuristic reads differently still holds; its missing evidence does not", () => {
+    const caseInput: CaseInput = { ctx: { heuristic: { signals: [], confidence: "high", labelled: { invoice_date: "2026-03-15" } } } };
+    expect(rerun(caseInput, { invoice_date: "2026-03-14" }, { invoice_date: "image_agreed" })).toEqual([
+      { code: "reading_heuristic_conflict", field: "invoice_date" },
+    ]);
+    expect(rerun(caseInput, { invoice_date: "2026-03-15" }, { invoice_date: "image_agreed" })).toEqual([]);
   });
 
   it("the allow-list is per field: an owner-supplied date does not release a heuristic conflict on the gross", () => {

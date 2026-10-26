@@ -8,8 +8,10 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
+import type { LostValueSeam } from "./lost-value-ocr.js";
+import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
   served,
@@ -34,7 +36,7 @@ function writePdf(contents: string): { path: string; sha256: string } {
 }
 
 /** A small in-memory e-arveldaja: creates become live drafts that the uncached scans see. */
-function world() {
+function world(lostValueSeam?: LostValueSeam) {
   const rows: Array<Record<string, unknown>> = [HISTORY_INVOICE];
   const details: Record<number, Record<string, unknown>> = { [HISTORY_INVOICE.id]: HISTORY_DETAIL };
   let nextId = 900;
@@ -63,7 +65,7 @@ function world() {
   const confirm = vi.fn(async (id: number) => { details[id]!.status = "CONFIRMED"; return {}; });
   (api.purchaseInvoices as unknown as Record<string, unknown>).confirm = confirm;
   const runtime = createTestRuntimeSafetyContext();
-  const ops = createReadingDocumentOperations(api, runtime);
+  const ops = createReadingDocumentOperations(api, runtime, lostValueSeam);
   return { api, runtime, ops, rows, details, commit, createAndSetTotals, confirm };
 }
 
@@ -408,13 +410,56 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     const { file, verify } = await lostVerified(w, "lost date basis");
     expect(verify.booking).toBeUndefined();
     expect(verify.bookingBasis).toEqual({
-      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310,
-      items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1 }],
+      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, bank_account_no: null, ref_number: null, notes: null,
+      items: [{
+        custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1, total_net_price: 100,
+        vat_accounts_id: 1510, vat_accounts_dimensions_id: null, cl_vat_articles_id: null, reversed_vat_id: null,
+      }],
       gross_price: 124, vat_price: 24,
     });
     const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
     if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
     expect(outcome.value.bookingComputedAtCreate).toMatchObject({ invoice_date: "2026-03-15", gross_price: 124, vat_price: 24 });
+  });
+
+  it("a template's VAT account, VAT article and reverse-charge id are shown in the basis", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, vat_accounts_id: 1511, cl_vat_articles_id: 7, reversed_vat_id: 3 }] };
+    const { verify } = await lostVerified(w, "lost date reverse charge template");
+    expect(verify.bookingBasis!.items).toEqual([expect.objectContaining({ vat_accounts_id: 1511, cl_vat_articles_id: 7, reversed_vat_id: 3 })]);
+  });
+
+  it("deferredBookingDrift: a VAT account, VAT article, reverse-charge id, net, bank account, reference or notes unlike the basis drifts; a defaulted null does not", () => {
+    const item = {
+      custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1, total_net_price: 100,
+      vat_accounts_id: 1511, vat_accounts_dimensions_id: null, cl_vat_articles_id: null, reversed_vat_id: 3,
+    };
+    const basis = { supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, bank_account_no: null, ref_number: null, notes: null, items: [item], gross_price: 124, vat_price: 24 };
+    const fingerprint = (itemChange: Record<string, unknown> = {}, change: Record<string, unknown> = {}) => ({
+      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, gross_price: 124, vat_price: 24,
+      items: [{ ...item, vat_accounts_dimensions_id: undefined, cl_vat_articles_id: 1, vat_rate_dropdown: "24", ...itemChange }], ...change,
+    }) as never;
+    expect(deferredBookingDrift(basis, fingerprint())).toBe(false);
+    for (const change of [{ vat_accounts_id: 1510 }, { reversed_vat_id: null }, { reversed_vat_id: 4 }, { total_net_price: 101 }]) {
+      expect(deferredBookingDrift(basis, fingerprint(change)), JSON.stringify(change)).toBe(true);
+    }
+    for (const change of [{ bank_account_no: "EE382200221020145685" }, { ref_number: "123" }, { notes: "x" }]) {
+      expect(deferredBookingDrift(basis, fingerprint({}, change)), JSON.stringify(change)).toBe(true);
+    }
+    // A corrected supplier IBAN may change the bank account, as in bookingDrift.
+    expect(deferredBookingDrift(basis, fingerprint({}, { bank_account_no: "EE382200221020145685" }), ["supplier_iban"])).toBe(false);
+  });
+
+  it("a failed supplier read while building the basis holds clients_unavailable: no handle, nothing written", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LOST_LINES));
+    const file = writePdf("%PDF lost date supplier read fails");
+    const { reading, proof } = readingFor(packetFor(file.sha256, LOST_LINES), LOST_DATE);
+    w.api.clients.get.mockRejectedValue(new Error("clients down"));
+    const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "blocked", holds: [{ code: "clients_unavailable" }] } });
+    if (outcome.ok) expect(outcome.value.planHandle).toBeUndefined();
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("a supplier renamed between verify and create differs from the basis the owner saw: reading_booking_drift, 0 writes", async () => {
@@ -888,5 +933,199 @@ describe("bookingDrift", () => {
     expect(bookingDrift(reviewed, { ...reviewed, invoice_number: "A-18" }, [])).toBe(true);
     expect(bookingDrift(reviewed, { ...reviewed, invoice_date: "2026-03-14", journal_date: "2026-03-14", term_days: 1 }, ["invoice_date"])).toBe(false);
     expect(bookingDrift(reviewed, { ...reviewed, gross_price: 62 }, ["gross"])).toBe(true);
+  });
+});
+
+describe("Step 4: a lost value read from the crop image, accepted only when server OCR agrees (lost-value plan)", () => {
+  /** The date row lost its value under a leader; the label and the leader tail survive on one row. */
+  const DATE_ROWS = BASE_LINES.map((line) => (line.startsWith("Kuupäev") ? { label: "Kuupäev" } : line));
+  /** The number row lost its value too (the supplier name keeps its own row). */
+  const BOTH_ROWS = [
+    "Näidis OÜ",
+    ...BASE_LINES.slice(1).map((line) => (line.startsWith("Kuupäev") ? { label: "Kuupäev" } : line)),
+    { label: "Arve nr" },
+  ];
+  const LOST_DATE: ReadingCaseInput = { values: { invoice_date: null }, evidence: { invoice_date: undefined }, labels: { invoice_date: null } };
+  const LOST_BOTH: ReadingCaseInput = {
+    values: { invoice_date: null, invoice_number: null },
+    evidence: { invoice_date: undefined, invoice_number: undefined, supplier_name: { line: "p1:001", quote: "Näidis OÜ" } },
+    labels: { invoice_date: null, invoice_number: null },
+  };
+  const DATE_OCR = ocrRow(["Kuupäev"], [LOST_DOTS, 0.55], ["15.03.2026", 0.93]);
+  const date = (printed = "15.03.2026", line = "p1:004") => ({ invoice_date: { line, printed } });
+
+  let pdfCount = 0;
+  function lostPdf(): { path: string; sha256: string } {
+    pdfCount += 1;
+    return writePdf(`${PLAIN_PDF}% lost ${pdfCount}\n`);
+  }
+
+  async function lostVerify(
+    seam: LostValueSeam,
+    lostValueReading: unknown,
+    options: { rows?: ReadonlyArray<string | LostRow>; input?: ReadingCaseInput; file?: { path: string; sha256: string } } = {},
+  ) {
+    const rows = options.rows ?? DATE_ROWS;
+    const w = world(seam);
+    const file = options.file ?? lostPdf();
+    mockedParse.mockResolvedValue(lostValueParse(rows));
+    const { reading, proof } = readingFor(packetFor(file.sha256, lostValueLines(rows)), options.input ?? LOST_DATE);
+    const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof, lostValueReading });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    return { w, file, verify: outcome.value };
+  }
+
+  const ocrSays = (items: ReturnType<typeof ocrRow>) => fakeSeam({ ocr: async () => ({ ok: true, items }) });
+  const typedDate = (verify: { values?: { invoice_date: string | null }; card?: { rows: Array<{ id: string }> }; lostValues?: unknown }) => {
+    expect(verify.values?.invoice_date ?? null).toBeNull();
+    expect(verify.card?.rows.map((row) => row.id)).toContain("t:invoice_date");
+  };
+
+  it("an agreed date gets a confirm row with the client's printed value and cited row, a booking at verify, and creates on it", async () => {
+    const seam = ocrSays(DATE_OCR);
+    const { w, file, verify } = await lostVerify(seam, date());
+    expect(verify.status).toBe("ready");
+    expect(verify.lostValues).toEqual([{ field: "invoice_date", line: "p1:004", printed: "15.03.2026", status: "image_ocr_agreed" }]);
+    expect(verify.values!.invoice_date).toBe("2026-03-15");
+    expect(verify.card!.rows).toEqual([
+      { id: "r:invoice_date", kind: "field_review", field: "invoice_date", codes: ["text_layer_value_lost"], value: "2026-03-15", printed_token: "15.03.2026", line: `Kuupäev ¦ ${LOST_DOTS}` },
+      { id: "t:invoice_number", kind: "typed", field: "invoice_number", reason: "text_layer_value_lost" },
+    ]);
+    expect(verify.booking).toMatchObject({ invoice_date: "2026-03-15" });
+    expect(verify.bookingBasis).toBeUndefined();
+    expect(seam.ocr).toHaveBeenCalledTimes(1);
+
+    const outcome = await create(w, file, verify.planHandle!, { "r:invoice_date": { confirm: true }, "t:invoice_number": { value: "A-17" } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_number"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ number: "A-17", create_date: "2026-03-15" });
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      action: "CREATED", details: expect.objectContaining({ image_ocr_agreed_fields: ["invoice_date"], text_layer_typed: true }),
+    }));
+  });
+
+  it("the owner can still correct an agreed value: it is then owner-supplied, not image-agreed", async () => {
+    const { w, file, verify } = await lostVerify(ocrSays(DATE_OCR), date());
+    const outcome = await create(w, file, verify.planHandle!, { "r:invoice_date": { value: "2026-03-14" }, "t:invoice_number": { value: "A-17" } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_date", "invoice_number"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ create_date: "2026-03-14" });
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      action: "CREATED", details: expect.objectContaining({ image_ocr_agreed_fields: [], text_layer_typed: true }),
+    }));
+  });
+
+  it("agrees a lost date and a lost number together; each gets its own confirm row", async () => {
+    // Fields are resolved in a fixed order: the date, then the number.
+    const seam = fakeSeam({
+      ocr: vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: DATE_OCR })
+        .mockResolvedValueOnce({ ok: true, items: ocrRow(["Arve nr"], ["A-1723"]) }),
+    });
+    const rows = BOTH_ROWS;
+    const { verify } = await lostVerify(seam, { invoice_number: { line: "p1:008", printed: "A-1723" }, ...date() }, { rows, input: LOST_BOTH });
+    expect(verify.holds).toEqual([]);
+    expect(verify.lostValues!.map((entry) => entry.status)).toEqual(["image_ocr_agreed", "image_ocr_agreed"]);
+    expect(verify.values).toMatchObject({ invoice_number: "A-1723", invoice_date: "2026-03-15" });
+    expect(verify.card!.rows.map((row) => `${row.id}:${row.kind}`)).toEqual(["r:invoice_date:field_review", "r:invoice_number:field_review"]);
+  });
+
+  describe("kill tests: every failure leaves the typed row and no value", () => {
+    const cases: Array<[string, () => LostValueSeam, unknown, string]> = [
+      ["the client and OCR disagree", () => ocrSays(ocrRow(["Kuupäev"], ["16.03.2026"])), date(), "ocr_no_match"],
+      ["OCR shows two candidates", () => ocrSays(ocrRow(["Kuupäev"], ["15.03.2026"], ["7", 0.31])), date(), "ocr_ambiguous"],
+      ["OCR is unavailable or timed out", () => fakeSeam(), date(), "ocr_unavailable"],
+      ["OCR throws", () => fakeSeam({ ocr: async () => { throw new Error("failed to download tessdata"); } }), date(), "ocr_unavailable"],
+      ["the render throws", () => { const seam = ocrSays(DATE_OCR); seam.render.mockRejectedValue(new Error("render failed")); return seam; }, date(), "crop_unavailable"],
+      ["OCR confidence is under 0.6", () => ocrSays(ocrRow(["Kuupäev"], ["15.03.2026", 0.59])), date(), "ocr_low_confidence"],
+      ["OCR does not show the cited label", () => ocrSays(ocrRow(["Kokku"], ["15.03.2026"])), date(), "ocr_row_mismatch"],
+      ["the cited line is not a lost line", () => ocrSays(DATE_OCR), date("15.03.2026", "p1:001"), "line_not_lost"],
+      ["the kill switch (or OCR off) disables the seam", () => fakeSeam({ available: false, ocr: async () => ({ ok: true, items: DATE_OCR }) }), date(), "ocr_unavailable"],
+      ["the printed value is not one date", () => ocrSays(DATE_OCR), date("15.03.2026 x"), "value_form_invalid"],
+      ["the date is outside the window (second checker pass)", () => ocrSays(ocrRow(["Kuupäev"], ["15.03.2020"])), date("15.03.2020"), "checker_hold"],
+      ["the date implies another VAT rate (second checker pass)", () => ocrSays(ocrRow(["Kuupäev"], ["15.03.2025"])), date("15.03.2025"), "checker_hold"],
+    ];
+    it.each(cases)("%s", async (_name, seamOf, lostValueReading, status) => {
+      const seam = seamOf();
+      const { w, verify } = await lostVerify(seam, lostValueReading);
+      expect(verify.lostValues).toEqual([expect.objectContaining({ field: "invoice_date", status })]);
+      typedDate(verify);
+      expect(w.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
+    it("a crop cannot be made (rotated page boxes)", async () => {
+      const file = writePdf(`%PDF-1.4\n1 0 obj\n<< /Type /Page /MediaBox [0 0 595 842] /Rotate 90 >>\nendobj\n%%EOF\n`);
+      const seam = ocrSays(DATE_OCR);
+      const { verify } = await lostVerify(seam, date(), { file });
+      expect(verify.lostValues).toEqual([expect.objectContaining({ status: "crop_unavailable" })]);
+      expect(seam.ocr).not.toHaveBeenCalled();
+      typedDate(verify);
+    });
+
+    it("the reading already has a value for the field", async () => {
+      const seam = ocrSays(DATE_OCR);
+      const { verify } = await lostVerify(seam, date(), { input: { ...LOST_DATE, values: { invoice_date: "2026-03-15" } } });
+      expect(verify.lostValues).toEqual([expect.objectContaining({ status: "reading_value_present" })]);
+      expect(seam.ocr).not.toHaveBeenCalled();
+    });
+
+    it("one line cited for both fields", async () => {
+      const seam = ocrSays(DATE_OCR);
+      const { verify } = await lostVerify(seam, { ...date(), invoice_number: { line: "p1:004", printed: "A-1723" } }, { rows: BOTH_ROWS, input: LOST_BOTH });
+      expect(verify.lostValues!.map((entry) => entry.status)).toEqual(["line_reused", "line_reused"]);
+      expect(seam.ocr).not.toHaveBeenCalled();
+      typedDate(verify);
+    });
+
+    it("sandbox markers in printed: what desandboxing cannot clean is refused", async () => {
+      // Nested deeper than the strip passes: the marker names are neutralised and the entry is no longer a value.
+      let nested = "<<UNTRUSTED_OCR_START:ab>>";
+      for (let level = 0; level < 6; level += 1) nested = `<<UNTRUSTED_OCR_${nested}START:ab>>`;
+      const seam = ocrSays(DATE_OCR);
+      const { verify } = await lostVerify(seam, { invoice_date: { line: "p1:004", printed: `${nested}15.03.2026` } });
+      expect(verify.lostValues).toEqual([{ status: "lost_value_reading_invalid" }]);
+      expect(seam.ocr).not.toHaveBeenCalled();
+      typedDate(verify);
+      // Not an object at all: the input is refused as a whole.
+      const refused = await lostVerify(ocrSays(DATE_OCR), "[1]");
+      expect(refused.verify.lostValues).toEqual([{ status: "lost_value_reading_invalid" }]);
+      typedDate(refused.verify);
+    });
+
+    it("a lost number equal to the supplier's registry code (second checker pass)", async () => {
+      const seam = fakeSeam({
+        ocr: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: DATE_OCR })
+          .mockResolvedValueOnce({ ok: true, items: ocrRow(["Arve nr"], ["10000018"]) }),
+      });
+      const { verify } = await lostVerify(seam, { invoice_number: { line: "p1:008", printed: "10000018" }, ...date() }, { rows: BOTH_ROWS, input: LOST_BOTH });
+      expect(verify.lostValues).toEqual([
+        // The date alone would end the lost-date deferral and leave a booking without a number: both stay typed.
+        expect.objectContaining({ field: "invoice_date", status: "number_still_lost" }),
+        expect.objectContaining({ field: "invoice_number", status: "checker_hold" }),
+      ]);
+      expect(verify.status).toBe("ready");
+      expect(verify.values).toMatchObject({ invoice_number: null, invoice_date: null });
+      expect(verify.card!.rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    });
+
+    it("an agreed date with the number still lost (its OCR disagrees) is not applied", async () => {
+      const seam = fakeSeam({
+        ocr: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: DATE_OCR })
+          .mockResolvedValueOnce({ ok: true, items: ocrRow(["Arve nr"], ["A-1724"]) }),
+      });
+      const { verify } = await lostVerify(seam, { invoice_number: { line: "p1:008", printed: "A-1723" }, ...date() }, { rows: BOTH_ROWS, input: LOST_BOTH });
+      expect(verify.lostValues!.map((entry) => entry.status)).toEqual(["number_still_lost", "ocr_no_match"]);
+      expect(verify.status).toBe("ready");
+      expect(verify.card!.rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    });
+
+    it("a document printing another labelled date holds the lost one (the checker already holds on the field)", async () => {
+      const rows = [...DATE_ROWS, "Arve kuupäev 14.03.2026"];
+      const seam = ocrSays(DATE_OCR);
+      const { verify } = await lostVerify(seam, date(), { rows });
+      expect(verify.lostValues).toEqual([expect.objectContaining({ status: "field_has_other_holds" })]);
+      expect(seam.ocr).not.toHaveBeenCalled();
+      expect(verify.values?.invoice_date ?? null).toBeNull();
+    });
   });
 });

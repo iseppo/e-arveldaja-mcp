@@ -41,8 +41,24 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      # The lost-value image test OCRs with liteparse's Tesseract, which downloads
+      # eng+est traineddata (~31 MB) into TESSDATA_PREFIX on first use.
+      - name: Resolve liteparse version
+        id: liteparse
+        run: echo "version=$(node -p "require('@llamaindex/liteparse/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Tesseract traineddata
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/tessdata
+          key: tessdata-eng-est-liteparse-${{ steps.liteparse.outputs.version }}
+
       - name: Integration surface tests
-        run: npm run test:integration
+        env:
+          TESSDATA_PREFIX: ${{ runner.temp }}/tessdata
+        run: |
+          mkdir -p "$TESSDATA_PREFIX"
+          npm run test:integration
 
   package-smoke-node18:
     runs-on: ubuntu-latest

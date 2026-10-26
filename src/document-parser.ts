@@ -5,6 +5,7 @@ import {
   type PageComplexityStats,
   type ParseResult,
 } from "@llamaindex/liteparse";
+import { LOST_VALUE_RENDER_DPI } from "./document-reading-lost-value.js";
 
 const HIGH_IMAGE_COVERAGE_FOR_PARTIAL_OCR = 0.5;
 
@@ -261,4 +262,88 @@ export async function parseDocument(filePath: string): Promise<ParsedDocument> {
     complexity,
     ocrPartialFailure: detectOcrPartialFailure(complexity, result),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Lost-value image path (plan lost-value-image-ocr): page render + crop OCR.
+// ---------------------------------------------------------------------------
+
+export const LOST_VALUE_OCR_TIMEOUT_MS = 30_000;
+
+/** A text item OCR read from a crop, in the crop's own coordinates. */
+export interface OcrTextItem {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence?: number;
+}
+
+export type OcrPngResult = { ok: true; items: OcrTextItem[] } | { ok: false };
+
+/** False when OCR is disabled or the kill switch EARVELDAJA_READING_LOST_VALUE_IMAGES=0 is set. */
+export function lostValueImagesAvailable(): boolean {
+  if (!readBooleanEnv("EARVELDAJA_READING_LOST_VALUE_IMAGES", true)) return false;
+  try {
+    return buildDocumentParserConfig().ocrEnabled !== false;
+  } catch {
+    return false;
+  }
+}
+
+let lostValueParser: LiteParse | undefined;
+
+/**
+ * Dedicated instance: 300 dpi, OCR on, OCR failure fatal (a failed OCR is a
+ * hold, never an empty read). Only the OCR language and server settings come
+ * from the configuration; a configured OCR server receives the crops.
+ */
+function getLostValueParser(): LiteParse {
+  if (lostValueParser) return lostValueParser;
+  const base = buildDocumentParserConfig();
+  lostValueParser = new LiteParse({
+    ocrEnabled: true,
+    ocrFailureFatal: true,
+    dpi: LOST_VALUE_RENDER_DPI,
+    outputFormat: "text",
+    quiet: true,
+    ...(base.ocrLanguage !== undefined ? { ocrLanguage: base.ocrLanguage } : {}),
+    ...(base.ocrServerUrl !== undefined ? { ocrServerUrl: base.ocrServerUrl } : {}),
+    ...(base.ocrServerHeaders !== undefined ? { ocrServerHeaders: base.ocrServerHeaders } : {}),
+  });
+  return lostValueParser;
+}
+
+/** One page rendered to an RGBA PNG at 300 dpi (full page; liteparse ignores cropBox for screenshots). */
+export async function renderPagePng(filePath: string, page: number): Promise<{ png: Buffer; width: number; height: number }> {
+  const [shot] = await getLostValueParser().screenshot(filePath, [page]);
+  if (!shot || shot.pageNum !== page) throw new Error("page render unavailable");
+  return { png: shot.imageBuffer, width: shot.width, height: shot.height };
+}
+
+let ocrQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * OCR of one PNG crop. Single-flight: one OCR at a time, the next waits for the
+ * previous native work to settle (a timed-out OCR keeps running natively).
+ * Every failure and the 30 s timeout resolve to { ok: false }.
+ */
+export function ocrPng(png: Buffer, timeoutMs = LOST_VALUE_OCR_TIMEOUT_MS): Promise<OcrPngResult> {
+  const work = ocrQueue.then(() => getLostValueParser().parse(png));
+  ocrQueue = work.catch(() => undefined);
+  const outcome = work.then(
+    (result): OcrPngResult => ({
+      ok: true,
+      items: (result.pages[0]?.textItems ?? []).map(({ text, x, y, width, height, confidence }) =>
+        ({ text, x, y, width, height, ...(confidence !== undefined ? { confidence } : {}) })),
+    }),
+    (): OcrPngResult => ({ ok: false }),
+  );
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<OcrPngResult>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false }), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([outcome, timeout]).finally(() => clearTimeout(timer));
 }

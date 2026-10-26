@@ -9,7 +9,7 @@
 // owner_supplied: it never rewrites an extracted value, it replaces it with the
 // owner's own reading of the PDF, and it is recorded as a corrected field.
 
-import { checkReading, HOLD_CODES, rateMatches, type AcceptedValues, type CheckContext, type HeuristicView, type HoldCode } from "./document-reading-check.js";
+import { checkReading, HOLD_CODES, rateMatches, type AcceptedValues, type CheckContext, type CheckResult, type HeuristicView, type HoldCode } from "./document-reading-check.js";
 import type { ReadingPacket } from "./document-reading-packet.js";
 import type { ReadingField } from "./document-reading-schemas.js";
 import { lineTokens } from "./document-reading-tokens.js";
@@ -112,6 +112,15 @@ export interface ReadingCard {
   minor_notes: number;
 }
 
+/** A lost-leader value the client read from the crop image and server OCR agreed with (lost-value plan Step 4). */
+export interface ImageAgreedField {
+  field: "invoice_date" | "invoice_number";
+  /** The packet line whose crop showed it. */
+  line: string;
+  /** The value as the client transcribed it from the image. */
+  printed: string;
+}
+
 export interface CardInput {
   packet: ReadingPacket;
   values: AcceptedValues;
@@ -121,6 +130,8 @@ export interface CardInput {
   heuristic: Pick<HeuristicView, "labelled">;
   supplier: { clientId: number; name: string };
   company: { name: string | null; reg: string | null; vat: string | null };
+  /** Image-agreed fields: a mandatory confirm row each, instead of the typed row of a lost text layer. */
+  imageAgreed?: readonly ImageAgreedField[];
 }
 
 export type CardOutcome = { blocked: true; blockHolds: CardHold[] } | { blocked: false; card: ReadingCard };
@@ -216,12 +227,17 @@ export function buildReadingCard(input: CardInput): CardOutcome {
     const field = hold.field as PayloadField | "currency";
     byField.set(field, [...(byField.get(field) ?? []), hold]);
   }
+  const agreed = new Map((input.imageAgreed ?? []).map((entry) => [entry.field, entry]));
   if (textLayerLost) {
-    // §5.3: on a lost text layer the owner always types the date and the number (the true value is not in the text).
+    // §5.3: on a lost text layer the owner types the date and the number (the true value is not in the text),
+    // unless server OCR agreed with the client's reading of the crop image: then the owner confirms it.
     for (const field of ["invoice_date", "invoice_number"] as const) {
+      if (agreed.has(field)) continue;
       byField.set(field, [...(byField.get(field) ?? []), { code: "text_layer_value_lost", field }]);
     }
   }
+  // An image-agreed field gets only its confirm row (verify drops the agreement when anything else holds on it).
+  for (const field of agreed.keys()) byField.delete(field);
 
   const rows: CardRow[] = [];
   for (const [field, holds] of byField) {
@@ -253,6 +269,14 @@ export function buildReadingCard(input: CardInput): CardOutcome {
     rows.push(token === undefined || !line || value === null || value === undefined
       ? { id: `t:${field}`, kind: "typed", field, reason: "no_printed_token" }
       : { id: `r:${field}`, kind: "field_review", field, codes: [...new Set(reviewCodes)], value, printed_token: token, line: line.text });
+  }
+  for (const entry of agreed.values()) {
+    // Every image-agreed value is shown with its cited row: which label it sits on is the owner's to confirm.
+    const value = input.values[entry.field];
+    const line = lineText(input.packet, entry.line);
+    rows.push(value === null || value === undefined || !line
+      ? { id: `t:${entry.field}`, kind: "typed", field: entry.field, reason: "text_layer_value_lost" }
+      : { id: `r:${entry.field}`, kind: "field_review", field: entry.field, codes: ["text_layer_value_lost"], value, printed_token: entry.printed, line: line.text });
   }
   if (buyerQuestion) {
     rows.push({ id: "buyer", kind: "buyer_question", company: input.company, lines: addresseeLines(input), options: [{ id: "yes" }, { id: "no", stop: true }] });
@@ -344,7 +368,8 @@ export function applyOwnerAnswers(card: ReadingCard, values: AcceptedValues, ans
     if (value === undefined) { invalid.push(row.id); continue; }
     final[row.field] = value;
     corrected.add(row.field);
-    if (row.kind === "typed" && row.reason === "text_layer_value_lost") textLayerTyped = true;
+    if ((row.kind === "typed" && row.reason === "text_layer_value_lost") ||
+      (row.kind === "field_review" && row.codes.includes("text_layer_value_lost"))) textLayerTyped = true;
   }
   if (invalid.length > 0) return { ok: false, code: "owner_answer_invalid", rows: invalid };
   if (declined.length > 0) return { ok: false, code: "owner_declined", rows: declined };
@@ -365,8 +390,8 @@ export const RECHECK_EVIDENCE_PROOF_CODES = [
   "label_quote_missing", "label_quote_not_printed", "label_quote_no_letter", "label_quote_overlaps_value",
 ] as const satisfies readonly HoldCode[];
 
-/** Where a final value came from when it is not the reading's own. Step 4 adds "image_agreed" (evidence/proof codes only). */
-export type RecheckFieldSource = "owner_supplied";
+/** Where a final value came from when it is not the reading's own. */
+export type RecheckFieldSource = "owner_supplied" | "image_agreed";
 
 /**
  * The create-time re-run's per-field allow-lists (pinned by a test). Only a hold on a field of that source is
@@ -381,7 +406,39 @@ export const RECHECK_ALLOWED_CODES: { readonly [Source in RecheckFieldSource]: r
     "competitor_omitted", "competitor_limit_exceeded", "competitor_not_printed", "competitor_ambiguous",
     "reading_heuristic_conflict",
   ],
+  // Image-agreed (the client's crop reading = server OCR): the value has no packet evidence or proof answer. Nothing
+  // else is waived: a heuristic conflict, a date outside the window or a number that is an identifier still holds.
+  image_agreed: [...RECHECK_EVIDENCE_PROOF_CODES],
 };
+
+/** True when `hold` is on a field of a listed source whose allow-list names its code. */
+export function allowedForSource(hold: { code: HoldCode; field?: string }, sources: Partial<Record<ReadingField, RecheckFieldSource>>): boolean {
+  const source = hold.field === undefined ? undefined : sources[hold.field as ReadingField];
+  return source !== undefined && RECHECK_ALLOWED_CODES[source].includes(hold.code);
+}
+
+/**
+ * The whole checker on a reading and proof with `final` substituted. A field of a listed source loses its
+ * evidence and gets a neutral proof answer (its value is not the reading's own). Undefined when the reading or
+ * proof has no evidence/answers object.
+ */
+export function checkSubstituted(
+  packet: ReadingPacket,
+  reading: Record<string, unknown>,
+  proof: Record<string, unknown>,
+  final: AcceptedValues,
+  sources: Partial<Record<ReadingField, RecheckFieldSource>>,
+  ctx: CheckContext,
+): CheckResult | undefined {
+  if (!isRecord(reading.evidence) || !isRecord(proof.answers)) return undefined;
+  const evidence: Record<string, unknown> = { ...reading.evidence };
+  const answers: Record<string, unknown> = { ...proof.answers };
+  for (const field of Object.keys(sources)) {
+    delete evidence[field];
+    answers[field] = { label_quote: null, competitors: [], why_this_one: "", verdict: "confirm" };
+  }
+  return checkReading(packet, { ...reading, ...final, evidence }, { ...proof, answers }, ctx);
+}
 
 export interface RecheckReadingInput {
   packet: ReadingPacket;
@@ -419,19 +476,13 @@ export function recheckReading(input: RecheckReadingInput): CardHold[] {
   } catch {
     return unavailable;
   }
-  if (!isRecord(reading) || !isRecord(proof) || !isRecord(reading.evidence) || !isRecord(proof.answers)) return unavailable;
-  const evidence: Record<string, unknown> = { ...reading.evidence };
-  const answers: Record<string, unknown> = { ...proof.answers };
-  for (const field of Object.keys(input.sources)) {
-    delete evidence[field];
-    answers[field] = { label_quote: null, competitors: [], why_this_one: "", verdict: "confirm" };
-  }
-  const result = checkReading(input.packet, { ...reading, ...input.final, evidence }, { ...proof, answers }, input.ctx);
+  if (!isRecord(reading) || !isRecord(proof)) return unavailable;
+  const result = checkSubstituted(input.packet, reading, proof, input.final, input.sources, input.ctx);
+  if (!result) return unavailable;
   const released = new Set(input.releasedHolds.map(holdKey));
   return result.holds
     .filter((hold) => {
-      const source = hold.field === undefined ? undefined : input.sources[hold.field];
-      if (source !== undefined && RECHECK_ALLOWED_CODES[source].includes(hold.code)) return false;
+      if (allowedForSource(hold, input.sources)) return false;
       return DISPOSITION[hold.code] === "block" || !released.has(holdKey(hold));
     })
     .map((hold) => (hold.field === undefined ? { code: hold.code } : { code: hold.code, field: hold.field }));

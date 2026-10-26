@@ -70,8 +70,8 @@ export function lineCells(text: string): Cell[] {
 // dropped the value (liteparse, Google invoices; plan p2 §0, C1). A leader is a run of ≥ 4
 // leader glyphs, unspaced or single-spaced. It counts as lost unless an amount follows it in
 // the same cell ("Total ........ 13,60"); a false hold is acceptable, a missed loss is not.
-const LEADER_GLYPHS = ".…·•‧．∙⋅‥_";
-const LEADER_RUN_RE = new RegExp(`[${LEADER_GLYPHS}](?: ?[${LEADER_GLYPHS}]){3,}`, "gu");
+export const LEADER_GLYPHS = ".…·•‧．∙⋅‥_";
+export const LEADER_RUN_RE = new RegExp(`[${LEADER_GLYPHS}](?: ?[${LEADER_GLYPHS}]){3,}`, "gu");
 const AMOUNT_START_RE = new RegExp(`^ *[0-9+\\-−(\\p{Sc}]`, "u");
 
 /** Every cell holding a leader (≥ 4 leader glyphs) that no amount follows in the same cell. */

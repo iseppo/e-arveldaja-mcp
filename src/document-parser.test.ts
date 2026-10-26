@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const parseMock = vi.fn();
 const isComplexMock = vi.fn();
+const screenshotMock = vi.fn();
 const liteParseConstructor = vi.fn(function LiteParseMock() {
   return {
     parse: parseMock,
     isComplex: isComplexMock,
+    screenshot: screenshotMock,
   };
 });
 
@@ -360,6 +362,73 @@ describe("document parser", () => {
     const [, major, minor] = /^\^(\d+)\.(\d+)\./.exec(range) ?? [];
     expect(Number(major)).toBe(2);
     expect(Number(minor)).toBeGreaterThanOrEqual(9);
+  });
+});
+
+describe("lost-value render/OCR seam", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    parseMock.mockReset();
+    screenshotMock.mockReset();
+    liteParseConstructor.mockClear();
+    delete process.env.EARVELDAJA_LITEPARSE_OCR_ENABLED;
+    delete process.env.EARVELDAJA_READING_LOST_VALUE_IMAGES;
+    delete process.env.EARVELDAJA_LITEPARSE_OCR_LANGUAGE;
+    delete process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL;
+    delete process.env.EARVELDAJA_LITEPARSE_DPI;
+  });
+
+  it("is available unless OCR is disabled or the kill switch is set", async () => {
+    const { lostValueImagesAvailable } = await import("./document-parser.js");
+    expect(lostValueImagesAvailable()).toBe(true);
+    process.env.EARVELDAJA_READING_LOST_VALUE_IMAGES = "0";
+    expect(lostValueImagesAvailable()).toBe(false);
+    process.env.EARVELDAJA_READING_LOST_VALUE_IMAGES = "1";
+    process.env.EARVELDAJA_LITEPARSE_OCR_ENABLED = "false";
+    expect(lostValueImagesAvailable()).toBe(false);
+    delete process.env.EARVELDAJA_LITEPARSE_OCR_ENABLED;
+    expect(lostValueImagesAvailable()).toBe(true);
+  });
+
+  it("renders and OCRs on a dedicated 300-dpi instance with OCR failure fatal; only language and server come from config", async () => {
+    process.env.EARVELDAJA_LITEPARSE_OCR_LANGUAGE = "est";
+    process.env.EARVELDAJA_LITEPARSE_OCR_SERVER_URL = "https://ocr.example.test/ocr";
+    process.env.EARVELDAJA_LITEPARSE_DPI = "150";
+    screenshotMock.mockResolvedValue([{ pageNum: 2, width: 10, height: 20, imageBuffer: Buffer.from("png") }]);
+    parseMock.mockResolvedValue({ pages: [{ textItems: [{ text: "x", x: 1, y: 2, width: 3, height: 4, confidence: 0.9, fontName: "f" }] }] });
+    const { renderPagePng, ocrPng } = await import("./document-parser.js");
+    expect(await renderPagePng("/tmp/a.pdf", 2)).toEqual({ png: Buffer.from("png"), width: 10, height: 20 });
+    expect(screenshotMock).toHaveBeenCalledWith("/tmp/a.pdf", [2]);
+    expect(await ocrPng(Buffer.from("crop"))).toEqual({ ok: true, items: [{ text: "x", x: 1, y: 2, width: 3, height: 4, confidence: 0.9 }] });
+    expect(liteParseConstructor).toHaveBeenCalledTimes(1);
+    expect((liteParseConstructor.mock.calls[0] as unknown[] | undefined)?.[0]).toEqual({
+      ocrEnabled: true, ocrFailureFatal: true, dpi: 300, outputFormat: "text", quiet: true,
+      ocrLanguage: "est", ocrServerUrl: "https://ocr.example.test/ocr",
+    });
+  });
+
+  it("refuses a render of another page", async () => {
+    screenshotMock.mockResolvedValue([{ pageNum: 1, width: 10, height: 20, imageBuffer: Buffer.from("png") }]);
+    const { renderPagePng } = await import("./document-parser.js");
+    await expect(renderPagePng("/tmp/a.pdf", 2)).rejects.toThrow("page render unavailable");
+  });
+
+  it("resolves an OCR failure or timeout to unavailable and runs one OCR at a time", async () => {
+    const { ocrPng } = await import("./document-parser.js");
+    parseMock.mockRejectedValueOnce(new Error("failed to download tessdata"));
+    expect(await ocrPng(Buffer.from("a"))).toEqual({ ok: false });
+
+    let release: (value: unknown) => void = () => {};
+    parseMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    parseMock.mockResolvedValueOnce({ pages: [{ textItems: [] }] });
+    const slow = ocrPng(Buffer.from("b"), 20);
+    const next = ocrPng(Buffer.from("c"));
+    expect(await slow).toEqual({ ok: false });
+    // The timed-out OCR is still running natively, so the next one has not started.
+    expect(parseMock).toHaveBeenCalledTimes(2);
+    release({ pages: [{ textItems: [] }] });
+    expect(await next).toEqual({ ok: true, items: [] });
+    expect(parseMock).toHaveBeenCalledTimes(3);
   });
 });
 
