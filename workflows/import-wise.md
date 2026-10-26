@@ -88,6 +88,7 @@ Only the last two are releasable (Step 3, acknowledgement re-preview); the compa
 **Automatic matches.** Some rows are skipped automatically, and there is no flag to turn this off. Their skip reason names the stored transaction or journal (in `skipped_details`, read the per-row `records` for the ids):
 - `wise_untagged_ledger_unique`: a confirmed transaction without a `WISE:` tag is the only stored row of this movement on this Wise account.
 - `wise_transfer_journal_unique_legacy`: an inter-account journal is the only same-amount journal within one day and books exactly this transfer.
+- Exact-label journal: a payment that is not an own transfer (a card payment, or a transfer to a third party such as a loan or a cash withdrawal) whose single registered journal is labelled with its exact Wise ID and books its amount on the Wise account in its direction. It is reported as already journalized ("is labelled with this Wise ID"), needs no counterpart account, and execute re-checks that journal.
 - "Fee already journalized": that journal books the transfer net of the fee, so the fee row is not created either.
 
 Do not report these as plain duplicates. Tell the owner which Wise IDs were skipped this way and the transaction or journal ID each one matched. If the owner says one is a different movement, the undo is to correct or delete that stored transaction or journal (after approval) and run the preview again.
