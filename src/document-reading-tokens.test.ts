@@ -83,7 +83,7 @@ describe("document-reading tokens: money shapes", () => {
     expect(valuesOf("KM 24%")).toEqual([]);
     expect(valuesOf("KM 24 %")).toEqual([]);
     expect(valuesOf("KM 9,50%")).toEqual([]);
-    expect(valuesOf("IBAN EE59 1000 0018 2345 6789 EUR")).toEqual([]);
+    expect(valuesOf("IBAN EE86 1000 0018 2345 6788 EUR")).toEqual([]);
     expect(valuesOf("Konto 6789 EUR")).toEqual([[6789]]);
     expect(valuesOf("Viide EUR 1234567")).toEqual([]);
     expect(valuesOf("EUR 123456")).toEqual([[123456]]);
@@ -169,8 +169,8 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
   });
 
   it("T-ID-iban-bic: digits inside a validated IBAN or a BIC shape are excluded", () => {
-    expect(scan("IBAN EE59 1000 0018 2345 6789", "accounting")).toEqual([]);
-    expect(scan("IBAN EE591000001823456789", "accounting")).toEqual([]);
+    expect(scan("IBAN EE86 1000 0018 2345 6788", "accounting")).toEqual([]);
+    expect(scan("IBAN EE861000001823456788", "accounting")).toEqual([]);
     expect(scan("BIC DEUTDEFF500", "accounting")).toEqual([]);
     // without the IBAN the same group sequence is a registry code
     expect(scan("Kood 1000 0018", "accounting")).toEqual([["ee_reg", ["10000018"]]]);

@@ -4575,7 +4575,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     item("Arve summa", 316, 550, 61, 13),
     item("124,00", 529, 550, 33, 13),
     item("Pank", 206, 776, 40, 9),
-    item("EE162200001234567890 SWIFT: TESTEE2X", 276, 776, 145, 9),
+    item("EE212200001234567897 SWIFT: TESTEE2X", 276, 776, 145, 9),
     ...footerItems,
   ];
   // Raw text as the parser lays it out: one line per row, columns spaced apart.
@@ -4640,7 +4640,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page([
       ...footer(supplierFooter),
       ...footer(["Teine Firma OÜ", "Registrikood 10000024"], 650),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 650, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 650, 145, 9),
     ]));
     expect(result.supplier_name).toBe("ARVE NS0001234");
     expect(result.supplier_reg_code).toBeUndefined();
@@ -4743,13 +4743,13 @@ describe("supplier identity from a page-column identity block (Telia footer live
     // Also when it is printed with an address.
     const withAddress = extract(page([
       ...footer(["Näidis Side AS", "Teine Firma OÜ, Tänav 2", "Registrikood 10000018"]),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 788, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 788, 145, 9),
     ]));
     expect(withAddress.supplier_reg_code).toBeUndefined();
   });
 
   it("a bank line inside the block disqualifies it", () => {
-    const result = extract(page(footer(["Näidis Side AS", "Swedbank EE162200001234567890", "Registrikood 10000018"])));
+    const result = extract(page(footer(["Näidis Side AS", "Swedbank EE212200001234567897", "Registrikood 10000018"])));
     expect(result.supplier_reg_code).toBeUndefined();
   });
 
@@ -4771,7 +4771,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page([
       ...footer(supplierFooter),
       ...footer(["Maksete vahendaja", "Maksekeskus AS", "Registrikood 10000024"], 640),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 652, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 652, 145, 9),
     ]));
     expect(result.supplier_reg_code).toBeUndefined();
   });

@@ -3,6 +3,7 @@
 // Plan: .omc/plans/p1-reading-checker.md §2.0.
 
 import {
+  FOREIGN_VAT_PREFIXES,
   isForeignVatShape,
   isValidEeRegistryCode,
   isValidEeVatNumber,
@@ -427,12 +428,7 @@ export interface IdentifierHit extends Span {
   values: string[];
 }
 
-export const FOREIGN_VAT_PREFIXES = [
-  "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EL", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV",
-  "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK", "GB", "XI", "NO", "CH", "EU",
-  // Greek VAT numbers are printed with the ISO country code GR as often as with the official EL.
-  "GR",
-] as const;
+export { FOREIGN_VAT_PREFIXES };
 const FOREIGN_PREFIX_SET: ReadonlySet<string> = new Set(FOREIGN_VAT_PREFIXES);
 
 const BIC_RE = /\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b/g;

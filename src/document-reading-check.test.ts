@@ -144,9 +144,9 @@ describe("checkReading: H1/H2 per field", () => {
 
   it("T-H2-iban: a grouped IBAN passes", () => {
     expectAccept({
-      lines: withLines({}, ["IBAN EE59 1000 0018 2345 6789"]),
-      values: { supplier_iban: "EE591000001823456789" },
-      evidence: { supplier_iban: { line: "p1:008", quote: "IBAN EE59 1000 0018 2345 6789" } },
+      lines: withLines({}, ["IBAN EE86 1000 0018 2345 6788"]),
+      values: { supplier_iban: "EE861000001823456788" },
+      evidence: { supplier_iban: { line: "p1:008", quote: "IBAN EE86 1000 0018 2345 6788" } },
     });
   });
 
@@ -316,7 +316,7 @@ describe("checkReading: H8 parties", () => {
   });
 
   it("T-H8-iban-bic: IBAN and BIC lines account nothing", () => {
-    expectAccept({ lines: withLines({}, ["IBAN EE59 1000 0018 2345 6789    BIC DEUTDEFF500"]) });
+    expectAccept({ lines: withLines({}, ["IBAN EE86 1000 0018 2345 6788    BIC DEUTDEFF500"]) });
   });
 
   it("T-H8-r4M2: a third party's bare registry code cited as invoice_number on a receipt holds unaccounted_identifier", () => {

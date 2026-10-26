@@ -170,10 +170,10 @@ describe("checkBookingBinding", () => {
   });
 
   it("T-B-iban: an unknown bank account is a warning only", () => {
-    const accepted = { ...ACCEPTED, supplier_iban: "EE591000001823456789" };
-    expect(checkBookingBinding(accepted, booking({ bank_account_no: "EE59 1000 0018 2345 6789" }), ctx({ supplierKnownIbans: ["EE591000001823456789"] })))
+    const accepted = { ...ACCEPTED, supplier_iban: "EE861000001823456788" };
+    expect(checkBookingBinding(accepted, booking({ bank_account_no: "EE86 1000 0018 2345 6788" }), ctx({ supplierKnownIbans: ["EE861000001823456788"] })))
       .toEqual({ holds: [], warnings: [] });
-    expect(checkBookingBinding(accepted, booking({ bank_account_no: "EE591000001823456789" }), ctx())).toEqual({ holds: [], warnings: ["bank_account_not_known"] });
+    expect(checkBookingBinding(accepted, booking({ bank_account_no: "EE861000001823456788" }), ctx())).toEqual({ holds: [], warnings: ["bank_account_not_known"] });
   });
 });
 

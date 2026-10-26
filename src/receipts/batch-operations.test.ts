@@ -1175,7 +1175,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     { text: "Arve summa", x: 316, y: 550, width: 61, height: 13 },
     { text: "124,00", x: 529, y: 550, width: 33, height: 13 },
     { text: "Pank", x: 206, y: 776, width: 40, height: 9 },
-    { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
+    { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
   ];
   const documentWith = (footerLines: string[], extra: typeof items = [], letterhead = "Näidis") => {
     const all = [
@@ -1321,7 +1321,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       // As on the live footer, the bank columns share the name's row.
       document: documentWith(
         ["Maksete vahendaja", "Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"],
-        [{ text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 }],
+        [{ text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 }],
       ),
       other: { ...client, name: "Maksekeskus AS" },
     },
@@ -1347,7 +1347,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       document: documentWith([], [
         ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
           .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
-        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
         label,
       ]),
       other: { ...client, name: "Maksekeskus AS" },
@@ -1363,7 +1363,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       document: documentWith([], [
         ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
           .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
-        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
         label,
       ], "Maksekeskus"),
       other: { ...client, name: "Maksekeskus AS" },
