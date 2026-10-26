@@ -643,13 +643,14 @@ describe("H06-C cross-process create-once", () => {
     }
   });
 
-  it("H06-C captures one stdout line from each concurrent child", async () => {
+  // Spawning node can take seconds on a loaded host; the bound only catches a hang.
+  it("H06-C captures one stdout line from each concurrent child", { timeout: 30_000 }, async () => {
     const children = ["first", "second"].map(value => spawn(
       process.execPath,
       ["-e", `process.stdout.write(${JSON.stringify(`${value}\n`)})`],
       { stdio: ["ignore", "pipe", "pipe"] },
     ));
-    const observed = children.map(child => observeChild(child, 1_000));
+    const observed = children.map(child => observeChild(child, 20_000));
     try {
       const outcomes = await Promise.all(observed);
       expect(outcomes.map(outcome => outcome.stdout.trim())).toEqual(["first", "second"]);

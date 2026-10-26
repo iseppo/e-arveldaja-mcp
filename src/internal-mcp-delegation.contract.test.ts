@@ -345,8 +345,8 @@ describe("internal MCP delegation architecture contract", () => {
   it("allows no production consumers of internal MCP delegation", async () => {
     expect(await currentProductionConsumers()).toEqual([]);
   // Scans every production source file; under the parallel full suite this
-  // exceeds vitest's 5 s default.
-  }, 30_000);
+  // exceeds vitest's 5 s default, and 30 s on a loaded host.
+  }, 120_000);
 
   it("detects equivalent delegation syntax rather than only today's spellings", () => {
     const variants = [
