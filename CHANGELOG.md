@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-26
+
 ### Added
 
 - **When an invoice PDF loses its date or number behind a dotted line, the assistant can now read it from a picture of that row; the server accepts it only when its own text recognition reads the same.** Before, such a value was missing from the text and you always had to type it. You still confirm each accepted value on the review card. Details: verified-reading mode only (`EARVELDAJA_DOCUMENT_READING=1`); turn off with `EARVELDAJA_READING_LOST_VALUE_IMAGES=0`. `process_accounting_document` `mode="read"` returns PNG crops of rows held as `text_layer_value_lost` (at most 6 rows on at most 2 pages, 64 KB each, 256 KB total, else `lost_value_images_omitted`), with fixed instructions that the pixels are untrusted. At `mode="verify"` the client passes `lost_value_reading` (`invoice_date` / `invoice_number`, each `{line, printed}`); the server re-renders the crop and runs its own OCR (a configured remote OCR server is used). A value is accepted only when OCR finds exactly one matching candidate at confidence ≥ 0.6 on the cell label's row with only leader dots and punctuation beside it, and a second full check raises no new hold; a date is not applied while the number stays lost (`number_still_lost`). Accepted values get a mandatory confirm row, are re-checked at create and audited as `image_ocr_agreed_fields`; for anything not accepted, `lost_values` gives the reason and the field keeps its typed row. Unusual page geometry (rotation, offset or cropped boxes, encryption, oversized object streams) and pages over 40 Mpx at 300 dpi get no crop. With the flag off the tool surface is unchanged.
