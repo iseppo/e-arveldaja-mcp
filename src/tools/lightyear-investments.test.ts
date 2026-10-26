@@ -2031,7 +2031,9 @@ describe("H17 distribution currency and EUR provenance", () => {
     ]);
   });
 
-  it("H17 candidate-index RED bounds 1500 matching refs, trades, and distributions without materializing graph edges", { timeout: 4_000 }, async () => {
+  // No tight wall-clock bound: ~1 s alone, but a 4 s timeout flaked under full-suite load. The O(n)
+  // candidate-index guarantee is pinned deterministically by the strict_candidate_visits tests below.
+  it("H17 candidate-index RED bounds 1500 matching refs, trades, and distributions without materializing graph edges", { timeout: 30_000 }, async () => {
     const cardinality = 1_500;
     const conversions: string[][] = [];
     const trades: string[][] = [];
