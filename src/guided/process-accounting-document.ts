@@ -303,6 +303,10 @@ function renderCard(card: ReadingCard) {
   };
 }
 
+/** Step 0: the date was lost, so verify shows the booking basis; create books on the typed date and returns the booking. */
+export const BOOKING_AFTER_TYPED_DATE_NOTE =
+  "The document's date was lost from the text, so the booking is computed when the owner types it: the VAT rate, VAT account and article (or the non-VAT form), the journal date and the payment term follow from that date. Create holds when the supplier, VAT status, liability account, items or amounts differ from this basis, and returns the computed booking as booking_computed_at_create; review it before confirm.";
+
 function renderVerify(result: VerifyDocumentResult) {
   return {
     status: result.status,
@@ -312,6 +316,12 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.values ? { values: renderReadingValues(result.values as unknown as Record<string, unknown>) } : {}),
     ...(result.supplier ? { supplier: { client_id: result.supplier.clientId, name: wrapUntrustedOcr(result.supplier.name) } } : {}),
     ...(result.booking ? { booking_review: wrapBookingReview({ ...result.booking, ...(result.bookingNotes ? { decision_notes: result.bookingNotes } : {}) } as unknown as Record<string, unknown>) } : {}),
+    ...(result.bookingBasis ? {
+      booking_after_typed_date: {
+        ...(wrapBookingReview({ ...result.bookingBasis, ...(result.bookingNotes ? { decision_notes: result.bookingNotes } : {}) }) as Record<string, unknown>),
+        note: BOOKING_AFTER_TYPED_DATE_NOTE,
+      },
+    } : {}),
     ...(result.dimensionChoiceRequired ? { dimension_choice_required: result.dimensionChoiceRequired } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.itemTitleRequired ? { item_title_required: true } : {}),
@@ -522,10 +532,13 @@ export function registerProcessAccountingDocumentTool(
           result: { created_invoice_id: created.createdInvoiceId, document_uploaded: created.documentUploaded, status: "PROJECT" },
           corrected_fields: created.correctedFields,
           ...(created.readbackMismatch ? { draft_readback_mismatch: created.readbackMismatch } : {}),
+          ...(created.bookingComputedAtCreate ? { booking_computed_at_create: wrapBookingReview(created.bookingComputedAtCreate) } : {}),
           note: created.readbackMismatch
             ? "Purchase invoice created as DRAFT, but the draft read back differs from the approved booking in the fields listed in draft_readback_mismatch, so no confirm handle was issued: review the draft in e-arveldaja."
             : created.confirmPlan
-            ? "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. When the owner's approval covers confirmation, call mode='confirm' with confirm_plan; confirm registers only if the draft is unchanged."
+            ? created.bookingComputedAtCreate
+              ? "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. The booking was computed from the owner's typed date: show booking_computed_at_create to the owner; only after the owner approves it and confirmation, call mode='confirm' with confirm_plan; confirm registers only if the draft is unchanged."
+              : "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. When the owner's approval covers confirmation, call mode='confirm' with confirm_plan; confirm registers only if the draft is unchanged."
             : "Purchase invoice created as DRAFT from the verified reading and the source document uploaded. The draft could not be read back, so no confirm handle was issued: review and confirm it in e-arveldaja.",
           ...(created.confirmPlan ? { confirm_plan: { plan_handle: created.confirmPlan.planHandle, invoice_id: created.confirmPlan.invoiceId } } : {}),
           mutation_occurred: true,

@@ -79,6 +79,7 @@ import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, mat
 import type { AccountingDocumentBookingFields } from "./types.js";
 import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, recheckReading, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
 import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
+import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
 export { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
 
@@ -146,6 +147,8 @@ export interface VerifyDocumentResult {
   itemTitleRequired?: true;
   /** The owner card (present when nothing blocks). */
   card?: ReadingCard;
+  /** The date was lost: no booking is built until the owner types it; this is what create will book (DeferredBookingBasis). */
+  bookingBasis?: DeferredBookingBasis;
   /** §5.2a: an earlier create of a matching document may still complete; the owner checks e-arveldaja, then releases it. */
   indeterminateMarker?: string;
   /** The marker the owner released in this call; no handle is issued until verify runs again. */
@@ -163,8 +166,10 @@ export interface ReadingPlan {
   supplier_client_id: number;
   items_source: PlanRecord;
   booking_input: PlanRecord;
-  /** The booking the owner reviewed (computed on the reading's values). */
-  booking: PlanRecord;
+  /** The booking the owner reviewed (computed on the reading's values); null when the date was lost (booking_basis). */
+  booking: PlanRecord | null;
+  /** Present when `booking` is null: what the owner saw instead; create's booking must match it. */
+  booking_basis?: DeferredBookingBasis;
   booking_notes: ReadingBookingNotes;
   heuristic_keys: { invoiceNumber: string | null; supplierClientId: number | null };
   vat_zero_note_proven: boolean;
@@ -174,7 +179,10 @@ export interface ReadingPlan {
   /** The parsed reading and proof (canonical JSON): create re-runs the whole checker on them with the final values. */
   reading_json: string;
   proof_json: string;
-  /** The checker holds released into the card's owner rows. */
+  /**
+   * Every checker hold at verify. The card released all of them (a block code issues no handle); create drops a
+   * re-run hold that repeats one of these only when its code is not a block code.
+   */
   check_holds: ReadingHold[];
 }
 
@@ -598,6 +606,57 @@ export function bookingDrift(reviewed: PlanRecord, recomputed: PlanRecord, corre
   return canonicalPlanJson(strip(reviewed)) !== canonicalPlanJson(strip(recomputed));
 }
 
+/**
+ * Step 0 (lost-value plan): what verify shows and binds when the date was lost. No booking is built without a date
+ * (the VAT rate, the non-VAT form, the journal date and the term derive from it), so the owner sees the supplier,
+ * VAT status, liability account, cost-side items and amounts; create builds the booking on the typed date and holds
+ * reading_booking_drift when any of these differs. The VAT side (rate, VAT account and article) follows from the date
+ * and is checked at create by the full binding and the checker re-run; the created result returns the booking.
+ */
+export interface DeferredBookingBasis {
+  supplier_name: string;
+  vat_registered: boolean;
+  liability_accounts_id: number;
+  items: Array<{ custom_title: string | null; purchase_accounts_id: number | null; purchase_accounts_dimensions_id: number | null; cl_purchase_articles_id: number | null }>;
+  gross_price: number | null;
+  /** The invoice VAT for a VAT-registered company; null for a non-VAT one (its form derives from the date). */
+  vat_price: number | null;
+}
+
+const basisItem = (item: PurchaseInvoiceItem): DeferredBookingBasis["items"][number] => ({
+  custom_title: item.custom_title ?? null,
+  purchase_accounts_id: item.purchase_accounts_id ?? null,
+  purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id ?? null,
+  cl_purchase_articles_id: item.cl_purchase_articles_id ?? null,
+});
+
+function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues): DeferredBookingBasis {
+  const items = "items" in source ? parsePurchaseInvoiceItems(source.items)
+    : [{ ...source.template, ...(input?.itemTitle !== undefined ? { custom_title: input.itemTitle } : {}) }];
+  return {
+    supplier_name: supplierName,
+    vat_registered: isVatReg,
+    liability_accounts_id: input?.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
+    items: (desandboxAllStrings(items) as PurchaseInvoiceItem[]).map(basisItem),
+    gross_price: values.gross,
+    vat_price: isVatReg ? values.vat ?? 0 : null,
+  };
+}
+
+/** True when the booking computed at create differs from the basis the owner saw at verify. */
+export function deferredBookingDrift(basis: DeferredBookingBasis, fingerprint: PlanRecord): boolean {
+  const vatRegistered = fingerprint.vat_registered === true;
+  const recomputed: DeferredBookingBasis = {
+    supplier_name: String(fingerprint.supplier_name),
+    vat_registered: vatRegistered,
+    liability_accounts_id: Number(fingerprint.liability_accounts_id),
+    items: ((fingerprint.items ?? []) as unknown as PurchaseInvoiceItem[]).map(basisItem),
+    gross_price: typeof fingerprint.gross_price === "number" ? fingerprint.gross_price : null,
+    vat_price: vatRegistered ? (typeof fingerprint.vat_price === "number" ? fingerprint.vat_price : null) : null,
+  };
+  return canonicalPlanJson(basis) !== canonicalPlanJson(recomputed);
+}
+
 export interface CreateReadingInput {
   source: FileInputSource;
   snapshot?: FileInputSnapshot;
@@ -618,6 +677,8 @@ export type CreateReadingResult =
       confirmPlan?: { planHandle: string; invoiceId: number };
       /** Fields of the read-back draft that differ from the approved write model (no confirm handle then). */
       readbackMismatch?: string[];
+      /** The date was lost at verify: the booking create computed on the owner's date (review it before confirm). */
+      bookingComputedAtCreate?: PlanRecord;
     };
 
 export interface ConfirmReadingInput { planHandle: string; invoiceId: number; clientName?: string }
@@ -765,6 +826,7 @@ class ReadingDocumentOperations {
       let knownIban: string | undefined;
       let bookingNotes: ReadingBookingNotes | undefined;
       let dimensionChoiceRequired: BookingSuggestionCore["dimension_conflicts"] = [];
+      const bookingDeferred = ratesDeferredForLostDate(packet, values.invoice_date);
       if (supplierClient?.id !== undefined) {
         isVatReg = await isCompanyVatRegistered(this.api);
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
@@ -773,8 +835,9 @@ class ReadingDocumentOperations {
         itemsSource = await resolveItemsSource(this.api, supplierClient.id, input.booking, suggestion);
         dimensionChoiceRequired = requiredDimensionChoices(suggestion, itemsSource);
         if (dimensionChoiceRequired.length) holds.push({ code: "reading_dimension_choice_required" });
-        // A gross the owner still has to type cannot be booked yet: the booking is computed at create.
-        if (itemsSource && values.gross !== null) {
+        // A gross the owner still has to type cannot be booked yet, and a lost date leaves the VAT rate, the non-VAT
+        // form, the journal date and the term unknown: no booking is built or bound at verify (Step 0).
+        if (itemsSource && values.gross !== null && !bookingDeferred) {
           booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban);
           if (booking.view) {
             const binding = checkBookingBinding(values, booking.view, {
@@ -786,11 +849,7 @@ class ReadingDocumentOperations {
               supplierKnownIbans: supplierClient.bank_account_no ? [supplierClient.bank_account_no] : [],
               supplierCandidateIds: candidates.candidates.map((candidate) => candidate.id!),
             });
-            // Step 0: with the date lost, the booking has no create_date and no rates in force; create re-binds it on
-            // the owner's date (the same deferral as the checker's, nothing else).
-            const deferred = ratesDeferredForLostDate(packet, values.invoice_date);
-            holds.push(...binding.holds.filter((hold) => !(deferred &&
-              ((hold.code === "booking_field_mismatch" && hold.field === "create_date") || hold.code === "booking_vat_rate_implausible"))).map(holdOf));
+            holds.push(...binding.holds.map(holdOf));
           }
         }
       }
@@ -828,9 +887,12 @@ class ReadingDocumentOperations {
       if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
       if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
       // A booking the owner has not seen is never created: no gross, no booking review, no handle.
-      if (!booking?.effective) {
-        return ok(values.gross === null ? { ...result, holds: [{ code: "required_field_missing", field: "gross" }] } : result);
-      }
+      if (values.gross === null) return ok({ ...result, holds: [{ code: "required_field_missing", field: "gross" }] });
+      // Lost date: the owner sees the booking basis instead, and create holds a booking that differs from it.
+      const bookingBasis = bookingDeferred
+        ? deferredBookingBasis(itemsSource, input.booking, desandboxText((await this.api.clients.get(supplierClient.id)).name), isVatReg, values)
+        : undefined;
+      if (!bookingBasis && !booking?.effective) return ok(result);
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
       if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true });
       const card = cardOutcome.card;
@@ -852,7 +914,8 @@ class ReadingDocumentOperations {
           ...(input.booking?.termDays !== undefined ? { termDays: input.booking.termDays } : {}),
           ...(input.booking?.itemTitle !== undefined ? { itemTitle: input.booking.itemTitle } : {}),
         },
-        booking: booking.effective.fingerprint,
+        booking: booking?.effective?.fingerprint ?? null,
+        ...(bookingBasis ? { booking_basis: bookingBasis } : {}),
         booking_notes: bookingNotes!,
         heuristic_keys: heuristicKeys,
         vat_zero_note_proven: check.vat_zero_note_proven,
@@ -868,7 +931,7 @@ class ReadingDocumentOperations {
         sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
         liveSnapshot: { source_sha256: packet.source_sha256, packet_digest: packet.packet_digest },
         commands: [
-          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: { ...booking.effective.fingerprint, decision_notes: bookingNotes as unknown as PlanRecord } },
+          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: { ...(bookingBasis ? bookingBasis as unknown as PlanRecord : booking!.effective!.fingerprint), decision_notes: bookingNotes as unknown as PlanRecord } },
           { id: "reading-document-upload", category: "purchase_invoice_upload", reviewProjection: { file_name: material.fileName, source_sha256: material.source_sha256 } },
         ],
         counts: { rows: card.rows.length },
@@ -878,7 +941,7 @@ class ReadingDocumentOperations {
         privatePayload: { source_sha256: packet.source_sha256 },
       });
       this.handles.add(planHandle);
-      return ok({ ...result, status: "ready", card, planHandle });
+      return ok({ ...result, status: "ready", card, planHandle, ...(bookingBasis ? { bookingBasis } : {}) });
     } finally {
       await material.cleanup();
     }
@@ -993,7 +1056,9 @@ class ReadingDocumentOperations {
         }
         // Every §3.6 scan on the final values with every list cache dropped; journal references fail closed.
         holds.push(...(await readingDuplicateHolds(this.api, final, plan.supplier_client_id, plan.heuristic_keys, { uncached: true })).map(holdOf));
-        if (booking?.effective && bookingDrift(plan.booking, booking.effective.fingerprint, answered.correctedFields)) {
+        if (booking?.effective && (plan.booking === null
+          ? plan.booking_basis === undefined || deferredBookingDrift(plan.booking_basis, booking.effective.fingerprint)
+          : bookingDrift(plan.booking, booking.effective.fingerprint, answered.correctedFields))) {
           holds.push({ code: "reading_booking_drift" });
         }
         if (holds.length > 0 || !booking?.effective) {
@@ -1089,6 +1154,7 @@ class ReadingDocumentOperations {
           correctedFields: answered.correctedFields,
           ...(confirmPlan ? { confirmPlan } : {}),
           ...(readbackMismatch ? { readbackMismatch } : {}),
+          ...(plan.booking === null ? { bookingComputedAtCreate: booking.effective.fingerprint } : {}),
         });
       } finally {
         await material.cleanup();

@@ -391,7 +391,10 @@ export interface RecheckReadingInput {
   final: AcceptedValues;
   /** The fields whose final value is not the reading's own, by source. */
   sources: Partial<Record<ReadingField, RecheckFieldSource>>;
-  /** The checker holds verify released into owner rows (the owner answered them). */
+  /**
+   * Every checker hold at verify. A handle exists only when the card released all of them (owner rows, or notes for
+   * non-payload fields); the re-run drops a repeat of one only when its code is not a block code.
+   */
   releasedHolds: readonly CardHold[];
   ctx: CheckContext;
 }
@@ -401,7 +404,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 /**
  * The whole checker re-run at create on the bound reading with the final values substituted (Step 0). Holds only:
- * the re-run's holds minus (a) a non-block hold verify already released into an answered owner row and (b) a hold
+ * the re-run's holds minus (a) a non-block hold verify already raised (the card released it) and (b) a hold
  * on a field of a listed source whose code that source's allow-list names. A re-run that cannot be performed (no
  * bound reading or proof, unparseable JSON) holds reading_schema_invalid: never a fallback to recheckFinalValues alone.
  */
