@@ -493,6 +493,8 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     ["another amount", [native({ amount: 42.49 })], [registration("D", 42.49)]],
     ["a journal debiting another bank amount", [native()], [registration("D", 10)]],
     ["a manual ENTRY journal", [native()], [registration("D", 42.5, { operation_type: "ENTRY" })]],
+    // Live 2026-10-26: a same-day, same-amount movement the other way, with its own bank reference.
+    ["a row carrying another bank reference", [native({ bank_ref_number: "OTHER-REF" })], [registration("D", 42.5)]],
   ])("an inverted journal of %s is no direction conflict → created", async (_name, ledger, journals) => {
     const projection = await project(ledger as Transaction[], journals as Journal[]);
     expect(projection.skipped).toEqual([]);

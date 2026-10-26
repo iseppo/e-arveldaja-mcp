@@ -288,7 +288,9 @@ export function classifyCamtJournalCoverage(
     const transaction = context.sameDimensionTransactions.get(journal.operations_id);
     return transaction !== undefined && transaction.status === "CONFIRMED" && !transaction.is_deleted &&
       transaction.date === entry.date && cents(transaction.amount) === cents(entry.amount) &&
-      bankNetCents(journal, context) === -expectedNet;
+      bankNetCents(journal, context) === -expectedNet &&
+      // A row carrying another bank reference is a different movement, not this one booked backwards.
+      !contradictsSourceTransaction(journal, entryKey, context);
   }).map((journal) => journal.id!).sort((left, right) => left - right);
   if (invertedIds.length > 0) return { kind: "review", code: "camt_journal_direction_conflict", journal_ids: invertedIds };
   return { kind: "none" };
