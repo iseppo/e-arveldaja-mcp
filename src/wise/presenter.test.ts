@@ -250,7 +250,10 @@ describe("renderWiseImportCompact — totals currency", () => {
     const mixed = { ...data, created: [...data.created, foreignCreated(99)] };
     const { summary } = renderWiseImportCompact({ data: mixed });
 
-    expect(summary.totals?.currency).toBeUndefined();
+    // The totals stay on the card, only unlabelled (`totals?.currency` alone
+    // would also pass if the totals vanished).
+    expect(summary.totals).toEqual({ in_total: expect.any(Number), out_total: expect.any(Number) });
+    expect(summary.totals).not.toHaveProperty("currency");
     const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
     expect(warning).toBeDefined();
     expect(warning!.message).toContain("EUR");
@@ -279,7 +282,8 @@ describe("renderWiseImportCompact — fee rows vote on the totals currency", () 
       data: { ...data, created: [...data.created, feeEntry] },
     });
 
-    expect(summary.totals?.currency).toBeUndefined();
+    expect(summary.totals).toEqual({ in_total: expect.any(Number), out_total: expect.any(Number) });
+    expect(summary.totals).not.toHaveProperty("currency");
     const warning = (summary.warnings ?? []).find(w => w.code === "mixed_currency_totals");
     expect(warning).toBeDefined();
     expect(warning!.message).toContain("USD");

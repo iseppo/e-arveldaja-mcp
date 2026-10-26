@@ -1377,6 +1377,9 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true, ownCompanyName: "Proovi OÜ" });
     if (!outcome.ok) throw new Error("runBatch failed");
     const result = outcome.value.results[0]!;
+    // The codes were rejected on purpose, not lost with the whole extraction
+    // (`extracted?.x` alone would also pass with no extraction at all).
+    expect(result.extracted).toMatchObject({ reg_code_rationale: "coordinate_rejected", vat_no_rationale: "coordinate_rejected" });
     expect(result.extracted?.supplier_reg_code).toBeUndefined();
     expect(result.extracted?.supplier_vat_no).toBeUndefined();
     expect(result.status).toBe("needs_review");

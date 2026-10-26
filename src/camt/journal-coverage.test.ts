@@ -423,6 +423,15 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     reason: "Already imported by e-arveldaja's bank import as transaction 9300 (camt_native_import_match)",
     skip_code: "camt_native_import_match",
   };
+  // Positive control for every `descriptors` toHaveLength(0) below: with no
+  // ledger row and no journal the same statement entry IS projected as a create,
+  // so an empty descriptor list means the coverage check withheld it.
+  it("with no matching ledger row or journal the entry is projected as a create (positive control)", async () => {
+    const projection = await project([], []);
+    expect(projection.descriptors).toHaveLength(1);
+    expect(projection.skipped).toEqual([]);
+  });
+
   const expectReview = (projection: Awaited<ReturnType<typeof project>>, journalIds = [9400]) => {
     expect(projection.descriptors).toHaveLength(0);
     expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_posting_review", journal_ids: journalIds });
@@ -531,13 +540,19 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     expectReview(await project([native()], [twoLegs]));
   });
 
-  it("a transaction another entry already matched by bank reference → this entry stays review", async () => {
+  it("a transaction another entry already matched by bank reference → this entry is not native-matched again", async () => {
     // The row also matches a different-day entry through its stored reference.
     const claimed = native({ bank_ref_number: "STMT-REF-OTHER" });
     const other: ParsedCamtEntry = { ...outgoing, date: "2026-03-12", bank_reference: "STMT-REF-OTHER" };
     const projection = await project([claimed], [registration("C", 42.5)], [outgoing, other]);
     expect(projection.skipped.find(row => row.bank_reference === "STMT-REF-OTHER")).toMatchObject({ duplicate_transaction_ids: [9300] });
-    expect(projection.skipped.find(row => row.bank_reference === "STMT-REF-4250")?.skip_code).toBeUndefined();
+    // `skipped.find(...)?.skip_code` alone was undefined whether or not the entry
+    // was matched (it is not in skipped at all), so pin where it actually goes:
+    // its journal belongs to the claimed row and is excluded from the posting
+    // scan, so it is projected as a create carrying the possible-duplicate advisory.
+    expect(projection.skipped.find(row => row.bank_reference === "STMT-REF-4250")).toBeUndefined();
+    expect(projection.descriptors.map(descriptor => descriptor.entry.bank_reference)).toEqual(["STMT-REF-4250"]);
+    expect(projection.descriptors[0]!.possibleDuplicateMatches.map(match => match.id)).toEqual([9300]);
   });
 
   it("a reference-less transaction another entry matched (e.g. by its description marker) is not matched again", () => {
