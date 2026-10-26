@@ -280,7 +280,14 @@ export async function checkIntakeCashDuplicates(
 
     // Load journals ONCE, then run the pure in-memory matcher per account —
     // avoids refetching the full journals list per bank account.
-    const journals = await api.journals.listAllWithPostings();
+    // A journal with debit and credit legs all on bank accounts (a transfer between own accounts) has no
+    // expense leg, so it cannot be an earlier payment of this invoice (live: a 25 € transfer between own banks).
+    const isOwnTransfer = (journal: Journal) => {
+      const postings = journal.postings ?? [];
+      return postings.some(posting => posting.type === "D") && postings.some(posting => posting.type === "C")
+        && postings.every(posting => accountIds.includes(posting.accounts_id));
+    };
+    const journals = (await api.journals.listAllWithPostings()).filter(journal => !isOwnTransfer(journal));
     const seenJournalIds = new Set<number>();
     const suspects: DuplicatePostingSuspect[] = [];
     for (const accountId of accountIds) {

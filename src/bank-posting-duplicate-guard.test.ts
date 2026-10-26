@@ -274,6 +274,18 @@ describe("checkIntakeCashDuplicates", () => {
     expect(listAllWithPostings).toHaveBeenCalledTimes(1);
   });
 
+  it("skips a transfer between own bank accounts (no expense leg), but not a payment that also touches a bank", async () => {
+    const journals = [
+      journal({ id: 8, effective_date: "2026-10-04", postings: [posting(1020, "D", 25, 5001), posting(1030, "C", 25, 5002)] }),
+      journal({ id: 9, effective_date: "2026-10-04", postings: [posting(1020, "C", 25, 5001), posting(1030, "D", 20, 5002), posting(5100, "D", 5, null)] }),
+    ];
+    const api = makeApi({ listAllWithPostings: vi.fn().mockResolvedValue(journals) });
+
+    const result = await checkIntakeCashDuplicates(api, { grossAmountEur: 25, invoiceDate: "2026-09-28" });
+
+    expect(result.suspects.map(suspect => suspect.journal_id)).toEqual([9]);
+  });
+
   it("returns skipped_no_eur_amount: true (never scan_available: false) when grossAmountEur is undefined — never guesses a rate", async () => {
     const listAllWithPostings = vi.fn();
     const api = makeApi({ listAllWithPostings });
