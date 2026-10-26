@@ -3329,6 +3329,33 @@ function continuesPastCapture(rest: string): boolean {
   return /^[^\s\p{L}\p{N}][\p{L}\p{N}]/u.test(rest);
 }
 
+/**
+ * F-NR-EQUALS-ID: the invoice number equals a labelled registry code / VAT
+ * number on the document, or the active company's own registry code / VAT
+ * (also a VAT's digits without its country prefix): it was most likely read
+ * from an identifier line. The number is never changed; the caller holds it as
+ * invoice_number_ambiguous.
+ */
+function invoiceNumberEqualsIdentifier(
+  invoiceNumber: string,
+  text: string,
+  own: { vat?: string; registryCode?: string },
+): boolean {
+  const key = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const numberKey = key(invoiceNumber);
+  if (numberKey === "") return false;
+  const ids = [
+    ...[...text.matchAll(REG_CODE_LABEL_RE)].map(match => match[1]),
+    ...[...text.matchAll(VAT_LABEL_RE)].map(match => match[1]),
+    own.vat,
+    own.registryCode,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .map(key)
+    .filter(value => value !== "");
+  return ids.some(id => id === numberKey || id.replace(/^[A-Z]{2,3}(?=\d)/, "") === numberKey);
+}
+
 export function extractInvoiceNumber(text: string, fileName: string): string {
   return extractInvoiceNumberCandidates(text, fileName).invoiceNumber;
 }
@@ -4179,7 +4206,11 @@ export function extractReceiptFieldsFromText(
     ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossLine)
     : undefined;
   const currency = unsupportedCurrency || componentConflict ? undefined : detectedCurrency;
-  const { invoiceNumber, ambiguous: invoiceNumberAmbiguous } = extractInvoiceNumberCandidates(text, fileName);
+  const { invoiceNumber, ambiguous: invoiceNumberConflict } = extractInvoiceNumberCandidates(text, fileName);
+  const invoiceNumberAmbiguous = invoiceNumberConflict || invoiceNumberEqualsIdentifier(invoiceNumber, text, {
+    vat: options?.ownCompanyVat,
+    registryCode: options?.ownCompanyRegistryCode,
+  });
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
   const fieldProvenance = buildFieldProvenance(
     text,

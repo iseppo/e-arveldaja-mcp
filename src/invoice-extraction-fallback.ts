@@ -215,7 +215,7 @@ export const CREATION_GATING_SIGNAL_WARNINGS: Record<typeof CREATION_GATING_EXTR
   buyer_not_active_company: "The buyer block names another legal entity, not the active company; verify the document belongs to this company.",
   buyer_ambiguous: "The buyer block names the active company and another legal entity; verify the buyer before booking.",
   buyer_ownership_unverified: "The buyer block names a company, but the active company's own name, registry code and VAT number are unknown; verify the document belongs to this company.",
-  invoice_number_ambiguous: "The document labels two or more different invoice numbers, or the number looks cut short; verify which is this invoice's number before booking.",
+  invoice_number_ambiguous: "The document labels two or more different invoice numbers, the number looks cut short, or it equals a registry code or VAT number; verify which is this invoice's number before booking.",
   gross_unlabelled: "The gross is the largest unlabelled amount; verify the payable amount before booking.",
   labelled_amount_over_max: "A labelled amount exceeds the receipt amount maximum; verify the totals before booking.",
   zero_total_stated: "The document states a zero total (credit note, prepaid or zero invoice); verify before booking.",

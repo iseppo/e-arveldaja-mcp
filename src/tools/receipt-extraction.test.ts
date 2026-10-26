@@ -4443,6 +4443,34 @@ describe("supplier names and invoice numbers (WP5)", () => {
       expect(result.invoice_number).toBe("2026-15");
       expect(result.invoice_number_ambiguous).toBeUndefined();
     });
+
+    // F-NR-EQUALS-ID: a number equal to a labelled id, or to the company's own
+    // id, is held; the captured number itself is never changed.
+    it.each([
+      ["a labelled registry code", ["Näidis OÜ", "Reg. nr 10234957", "Arve nr 10234957", "Kokku 10,00"], {}, "10234957"],
+      ["a labelled VAT number", ["Näidis OÜ", "KMKR EE102809963", "Arve nr EE102809963", "Kokku 10,00"], {}, "EE102809963"],
+      ["a labelled VAT's digits", ["Näidis OÜ", "KMKR EE102809963", "Arve nr 102809963", "Kokku 10,00"], {}, "102809963"],
+      ["a labelled foreign VAT", ["Näidis GmbH", "VAT DE123456789", "Invoice no. DE123456789", "Total 10.00"], {}, "DE123456789"],
+      ["the own registry code", ["Näidis OÜ", "Arve nr 12345678", "Kokku 10,00"], { ownCompanyRegistryCode: "12345678" }, "12345678"],
+      ["the own VAT number", ["Näidis OÜ", "Arve nr EE100000007", "Kokku 10,00"], { ownCompanyVat: "EE100000007" }, "EE100000007"],
+    ])("an invoice number equal to %s holds as ambiguous", (_name, lines, options, number) => {
+      const result = extractReceiptFieldsFromText(lines.join("\n"), "x.pdf", options);
+      expect(result.invoice_number).toBe(number);
+      expect(result.invoice_number_ambiguous).toBe(true);
+    });
+
+    it("an invoice number different from every id is not held", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Reg. nr 10234957", "KMKR EE102809963", "Arve nr 10234958", "Kokku 10,00"].join("\n"),
+        "x.pdf",
+        { ownCompanyRegistryCode: "12345678", ownCompanyVat: "EE100000007" },
+      );
+      expect(result.invoice_number).toBe("10234958");
+      expect(result.invoice_number_ambiguous).toBeUndefined();
+      // An unlabelled number elsewhere on the page is not an id.
+      const unlabelled = extractReceiptFieldsFromText(["Näidis OÜ", "Tellimus 10234957", "Arve nr 10234957", "Kokku 10,00"].join("\n"), "x.pdf");
+      expect(unlabelled.invoice_number_ambiguous).toBeUndefined();
+    });
   });
 });
 
