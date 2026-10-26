@@ -7705,3 +7705,148 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
     expectNoWiseMutations(setup.api);
   });
 });
+
+describe("Wise row booked by a journal labelled with its exact Wise ID (live 2026-10-26)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  // Wise 5, LHV 20, Lightyear 30; cash desk 40 (account 1000) and the 8610
+  // fee dimension 9 are not bank accounts.
+  const options = (journals: unknown[]) => ({
+    accountDimensions: [
+      ...configuredTransferDimensions(),
+      { id: 30, accounts_id: 1030, title_est: "Lightyear", is_deleted: false },
+      { id: 40, accounts_id: 1000, title_est: "Kassa", is_deleted: false },
+      { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false },
+    ],
+    bankAccounts: [
+      ...configuredTransferBankAccounts(5, 20, "Seppo AI OÜ", "LHV Own Account"),
+      { accounts_dimensions_id: 30, beneficiary_name: "Lightyear Own Account", account_name_est: "Lightyear Own Account" },
+    ],
+    invoiceInfo: { invoice_company_name: "Seppo AI OÜ" },
+    journals,
+  });
+  const ownerRow = (fee = "0") => buildM04Values({
+    id: "TRANSFER-2434062345", direction: "OUT", date: "2026-10-15", sourceName: "Seppo AI OÜ",
+    targetName: "Indrek Seppo", sourceAmount: "100", sourceFeeAmount: fee,
+  });
+  const loanRow = (fee = "0") => buildM04Values({
+    id: "TRANSFER-2431991304", direction: "OUT", date: "2026-10-14", sourceName: "Seppo AI OÜ",
+    targetName: "voxpoll oü", sourceAmount: "50", sourceFeeAmount: fee,
+  });
+  type Posting = { is_deleted: boolean; accounts_id: number; accounts_dimensions_id?: number; type: "D" | "C"; amount: number; base_amount: number | null; cl_currencies_id: string };
+  const labelledJournal = (id: number, wiseId: string, date: string, debit: { accounts_id: number; accounts_dimensions_id?: number }, amount: number,
+    extra: Record<string, unknown> = {}, wiseType: "C" | "D" = "C") => ({
+    id, operation_type: "ENTRY", registered: true, is_deleted: false, effective_date: date, document_number: `WISE:${wiseId}`,
+    postings: [
+      { is_deleted: false, ...debit, type: wiseType === "C" ? "D" : "C", amount, base_amount: amount, cl_currencies_id: "EUR" },
+      { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: wiseType, amount, base_amount: amount, cl_currencies_id: "EUR" },
+    ] as Posting[],
+    ...extra,
+  });
+  const ownerJournal = (extra: Record<string, unknown> = {}, amount = 100, wiseType: "C" | "D" = "C") =>
+    labelledJournal(29600301, "TRANSFER-2434062345", "2026-10-15", { accounts_id: 1000, accounts_dimensions_id: 40 }, amount, extra, wiseType);
+  const loanJournal = (extra: Record<string, unknown> = {}, amount = 50, wiseType: "C" | "D" = "C") =>
+    labelledJournal(29580059, "TRANSFER-2431991304", "2026-10-14", { accounts_id: 1410 }, amount, extra, wiseType);
+  const baseArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5 };
+  const argVariants = [
+    { label: "no inter_account_dimension_id", args: baseArgs },
+    { label: "inter_account_dimension_id = LHV", args: { ...baseArgs, inter_account_dimension_id: 20 } },
+  ];
+  const skippedRecords = (payload: WiseImportFullPayload) => payload.skipped_details.flatMap(group => group.records ?? []);
+
+  it("both live shapes are already journalized, with or without inter_account_dimension_id; execute creates only the card row", async () => {
+    for (const { label, args } of argVariants) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([ownerRow(), loanRow(), cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool([], undefined, options([ownerJournal(), loanJournal()]));
+      const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+      expect(dry.execution.commands.map(command => command.wise_id), label).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+      expect(dry.ownership_reviews ?? [], label).toEqual([]);
+      expect(dry.execution.needs_review, label).toEqual([]);
+      expect(dry.execution.already_journalized_rows, label).toEqual([
+        expect.objectContaining({ wise_id: "TRANSFER-2434062345", existing_journal_id: 29600301, booked_amount: 100, source_direction: "OUT" }),
+        expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059, booked_amount: 50, source_direction: "OUT" }),
+      ]);
+      expect(skippedRecords(dry), label).toEqual(expect.arrayContaining([
+        { wise_id: "TRANSFER-2434062345", record_id: 29600301 },
+        { wise_id: "TRANSFER-2431991304", record_id: 29580059 },
+      ]));
+
+      expect(setup.api.transactions.create, label).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0][0].description, label).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+      expect(setup.api.transactions.confirm, label).not.toHaveBeenCalled();
+      expect(executed.execution.errors, label).toEqual([]);
+      expect(executed.inter_account_reconciliation!.details, label).toEqual([
+        { wise_id: "TRANSFER-2434062345", amount: 100, status: "already_journalized", journal_id: 29600301 },
+        { wise_id: "TRANSFER-2431991304", amount: 50, status: "already_journalized", journal_id: 29580059 },
+      ]);
+    }
+  });
+
+  it("execute re-checks the labelled journal: one changed after the review is reported, nothing is created for it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options([loanJournal()]));
+    setup.api.journals.listAllWithPostings.mockImplementation(async () =>
+      setup.api.transactions.create.mock.calls.length > 0 ? [loanJournal({ title: "edited" })] : [loanJournal()]);
+    const { executed } = await runApprovedWiseImport(setup, baseArgs);
+
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(executed.inter_account_reconciliation!.details).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-2431991304",
+      status: expect.stringContaining("precondition_failed: Stale already-journalized precondition: expected journal 29580059 changed"),
+    })]);
+  });
+
+  it("a net-of-fee journal that also debits the fee on the fee account covers the row and its fee", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow("0.5"), cardPaymentValues("2026-10-16")]));
+    const journal = loanJournal({ postings: [
+      { is_deleted: false, accounts_id: 1410, type: "D", amount: 50, base_amount: 50, cl_currencies_id: "EUR" },
+      { is_deleted: false, accounts_id: 8610, accounts_dimensions_id: 9, type: "D", amount: 0.5, base_amount: 0.5, cl_currencies_id: "EUR" },
+      { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 50.5, base_amount: 50.5, cl_currencies_id: "EUR" },
+    ] });
+    const setup = setupWiseTool([], undefined, options([journal]));
+    const dry = parseWiseResponse(await setup.handler({ ...baseArgs, fee_account_dimensions_id: 9, execute: false }));
+
+    expect(dry.execution.commands.map(command => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+    expect(dry.execution.already_journalized_rows).toEqual([expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059 })]);
+    expect(skippedRecords(dry)).toEqual(expect.arrayContaining([
+      { wise_id: "TRANSFER-2431991304", record_id: 29580059 },
+      { wise_id: "FEE:TRANSFER-2431991304", record_id: 29580059 },
+    ]));
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("still holds when the labelled journal books another amount or direction, is unregistered, lacks an EUR base, or has a twin", async () => {
+    const cases: Array<{ label: string; journals: unknown[] }> = [
+      { label: "wrong amount", journals: [loanJournal({}, 49)] },
+      { label: "wrong direction", journals: [loanJournal({}, 50, "D")] },
+      { label: "unregistered", journals: [loanJournal({ registered: false })] },
+      { label: "two labelled journals", journals: [loanJournal(), loanJournal({ id: 29580060 })] },
+      { label: "foreign posting without base", journals: [loanJournal({ postings: [
+        { is_deleted: false, accounts_id: 1410, type: "D", amount: 50, base_amount: null, cl_currencies_id: "USD" },
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 50, base_amount: 50, cl_currencies_id: "EUR" },
+      ] })] },
+    ];
+    for (const { label, journals } of cases) {
+      for (const variant of argVariants) {
+        const name = `${label} / ${variant.label}`;
+        mockedReadFile.mockResolvedValue(buildCsvRows([loanRow()]));
+        const setup = setupWiseTool([], undefined, options(journals));
+        const dry = parseWiseResponse(await setup.handler({ ...variant.args, execute: false }));
+
+        expect(dry.execution.already_journalized_rows, name).toBeUndefined();
+        expect(dry.execution.commands, name).toEqual([]);
+        expect(dry.ownership_reviews, name).toEqual([expect.objectContaining({ wise_id: "TRANSFER-2431991304" })]);
+        expect(skippedRecords(dry), name).not.toContainEqual(
+          expect.objectContaining({ wise_id: "TRANSFER-2431991304", record_id: expect.any(Number) }));
+        expectNoWiseMutations(setup.api);
+      }
+    }
+  });
+});

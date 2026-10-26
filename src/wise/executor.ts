@@ -1004,7 +1004,7 @@ async function runWiseImport(
                 wise_id: assertion.wise_id,
                 amount: assertion.booked_amount,
                 status: `precondition_failed: ${reason}`,
-                ownership_basis: assertion.ownership_basis,
+                ...(assertion.ownership_basis !== undefined ? { ownership_basis: assertion.ownership_basis } : {}),
               });
               continue;
             }
@@ -1012,7 +1012,7 @@ async function runWiseImport(
               wise_id: assertion.wise_id,
               amount: assertion.booked_amount,
               status: "already_journalized",
-              ownership_basis: assertion.ownership_basis,
+              ...(assertion.ownership_basis !== undefined ? { ownership_basis: assertion.ownership_basis } : {}),
               journal_id: assertion.existing_journal_id,
             });
           }

@@ -215,7 +215,9 @@ export interface WiseAlreadyJournalizedAssertion {
   booked_amount: number;
   booked_currency: string;
   source_direction: "IN" | "OUT";
-  ownership_basis: WiseTransferOwnershipBasis;
+  /** Absent when the row is covered by its exact Wise-ID label rather than
+   * as an own transfer: ownership was never established. */
+  ownership_basis?: WiseTransferOwnershipBasis;
   existing_journal_id: number;
   current_journal_state: unknown;
 }
@@ -281,7 +283,8 @@ export interface WiseInterAccountResult {
   wise_id: string;
   amount: number;
   status: string;
-  ownership_basis: WiseTransferOwnershipBasis;
+  /** Absent for an already-journalized row covered by its exact Wise-ID label. */
+  ownership_basis?: WiseTransferOwnershipBasis;
   journal_id?: number;
   orphan_project_transaction_id?: number;
   orphan_action_hint?: string;
