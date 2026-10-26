@@ -307,6 +307,14 @@ describe("checkReading: H8 parties", () => {
     expect(codesOf({ lines: withLines({}, ["ALV40003032949"]) })).toContain("unaccounted_identifier");
   });
 
+  // F-ACCOUNTING-PREFIX-GAPS: a Greek VAT printed with GR and a punctuated Swiss UID are identifiers too.
+  it.each([
+    "Partner: Kolmas AE    VAT GR123456789",
+    "Partner: Kolmas AG    CHE-123.456.789 MWST",
+  ])("T-H8-gr-che: an unaccounted third-party %s holds unaccounted_identifier", (line) => {
+    expect(codesOf({ lines: withLines({}, [line]) })).toContain("unaccounted_identifier");
+  });
+
   it("T-H8-iban-bic: IBAN and BIC lines account nothing", () => {
     expectAccept({ lines: withLines({}, ["IBAN EE59 1000 0018 2345 6789    BIC DEUTDEFF500"]) });
   });
@@ -336,6 +344,17 @@ describe("checkReading: H9 number is not an id", () => {
       lines: withLines({ 1: "Näidis OÜ    Arve nr 10000030" }),
       values: { invoice_number: "10000030" },
       evidence: { invoice_number: { line: "p1:001", quote: "Arve nr 10000030" } },
+    })).toContain("invoice_number_is_identifier:invoice_number");
+  });
+
+  it.each([
+    ["GR123456789", "Näidis OÜ    Arve nr GR123456789"],
+    ["CHE-123.456.789", "Näidis OÜ    Arve nr CHE-123.456.789"],
+  ])("T-H9-gr-che: a number that is itself a foreign VAT %s holds", (number, line) => {
+    expect(keysOf({
+      lines: withLines({ 1: line }),
+      values: { invoice_number: number },
+      evidence: { invoice_number: { line: "p1:001", quote: `Arve nr ${number}` } },
     })).toContain("invoice_number_is_identifier:invoice_number");
   });
 

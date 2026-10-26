@@ -430,6 +430,8 @@ export interface IdentifierHit extends Span {
 export const FOREIGN_VAT_PREFIXES = [
   "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EL", "ES", "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV",
   "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK", "GB", "XI", "NO", "CH", "EU",
+  // Greek VAT numbers are printed with the ISO country code GR as often as with the official EL.
+  "GR",
 ] as const;
 const FOREIGN_PREFIX_SET: ReadonlySet<string> = new Set(FOREIGN_VAT_PREFIXES);
 
@@ -494,6 +496,15 @@ function cellIdentifiers(cell: Cell, lineIdValue: string, mode: "strict" | "acco
         if (value.length === 8 && isValidEeRegistryCode(value)) push("ee_reg", groups[from]!.start, groups[to]!.end, [value]);
       }
     }
+  }
+
+  // Swiss UID / VAT number in its punctuated form: `CHE-123.456.789` (optionally followed by
+  // MWST / TVA / IVA). The generic scan below stops at the dash or dot, so it is read here as
+  // CHE + 9 digits; the unpunctuated forms (`CHE123456789`, `CHE 123 456 789`) are the generic scan's.
+  for (const match of text.matchAll(/CHE(?:-\d{3}[. ]?\d{3}[. ]?\d{3}|[ ]?\d{3}\.\d{3}\.\d{3})(?![0-9])/g)) {
+    const start = match.index!;
+    const end = start + match[0].length;
+    if (bounded(start, end)) push("foreign_vat", start, end, [`CHE${match[0].replace(/\D/g, "")}`]);
   }
 
   // Foreign VAT: a country prefix, an optional space, then uppercase alphanumeric groups. A

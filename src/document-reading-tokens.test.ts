@@ -226,6 +226,20 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
     expect(scan("Kood DE AB 123456789", "accounting")).toEqual([]);
   });
 
+  it("T-ID-gr-che: a GR-prefixed Greek VAT and a punctuated Swiss UID are foreign VATs", () => {
+    expect(scan("VAT GR123456789", "strict")).toEqual([["foreign_vat", ["GR123456789"]]]);
+    expect(scan("VAT GR123456789", "accounting")).toEqual([["foreign_vat", ["GR123456789"]]]);
+    expect(scan("UID CHE-123.456.789 MWST", "strict")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE-123.456.789 MWST", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE123.456.789 TVA", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE-123456789", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    // the unpunctuated form stays the generic scan's (no duplicate hit)
+    expect(scan("UID CHE123456789", "strict")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    // a longer number or a glued prefix is no strict Swiss UID
+    expect(scan("UID CHE-123.456.7890", "strict")).toEqual([]);
+    expect(scan("UID XCHE-123.456.789", "strict")).toEqual([]);
+  });
+
   it("T-ID-iban-scan: finds grouped and compact IBANs with strict boundaries", () => {
     expect(ibanScan(linesOf("IBAN EE38 2200 2210 2014 5685")).map((hit) => hit.value)).toEqual(["EE382200221020145685"]);
     expect(ibanScan(linesOf("IBAN EE382200221020145685")).map((hit) => hit.value)).toEqual(["EE382200221020145685"]);
