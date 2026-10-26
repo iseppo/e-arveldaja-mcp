@@ -4125,8 +4125,9 @@ describe("row triples and layout amount tokens (WP2)", () => {
   // is a VAT rate in force on the invoice date times the larger one, and no
   // labelled net / VAT exists. Otherwise the receipt stays gross-only.
   describe("R6b net / VAT from the total row triple", () => {
-    const doc = (date: string, ...rows: string[]) =>
-      extractReceiptFieldsFromText(["Näidis AS", "Arve nr 12345678", `Kuupäev ${date}`, ...rows].join("\n"), "arve.pdf");
+    const docWithVat = (vat: string | undefined, date: string, ...rows: string[]) =>
+      extractReceiptFieldsFromText(["Näidis AS", ...(vat ? [`KMKR: ${vat}`] : []), "Arve nr 12345678", `Kuupäev ${date}`, ...rows].join("\n"), "arve.pdf");
+    const doc = (date: string, ...rows: string[]) => docWithVat("EE102809963", date, ...rows);
 
     it.each([
       ["24% in 2026", "01.09.2026", "Arve kokku 20.00 4.80 24.80", 20, 4.8, 24.8],
@@ -4145,11 +4146,11 @@ describe("row triples and layout amount tokens (WP2)", () => {
 
     it("derives with layout items whose total row binds the triple's sum", () => {
       const items = [
-        item("Näidis AS", 52, 40, 60), item("Kuupäev 01.09.2026", 52, 60, 90),
+        item("Näidis AS", 52, 40, 60), item("KMKR: EE102809963", 52, 50, 90), item("Kuupäev 01.09.2026", 52, 60, 90),
         item("Arve kokku", 52, 200, 50), item("20.00", 300, 200, 30), item("4.80", 360, 200, 30), item("24.80", 420, 200, 30),
       ];
       const result = extractReceiptFieldsFromText(
-        ["Näidis AS", "Kuupäev 01.09.2026", "Arve kokku 20.00 4.80 24.80"].join("\n"),
+        ["Näidis AS", "KMKR: EE102809963", "Kuupäev 01.09.2026", "Arve kokku 20.00 4.80 24.80"].join("\n"),
         "arve.pdf",
         { textItems: items },
       );
@@ -4173,6 +4174,16 @@ describe("row triples and layout amount tokens (WP2)", () => {
       ["the triple's sum is not the gross", "01.09.2026", ["Teenus 20.00 4.80 24.80", "Kokku 30.00"]],
     ])("keeps the receipt gross-only: %s", (_name, date, rows) => {
       const result = doc(date, ...rows);
+      expect(result.total_net).toBeUndefined();
+      expect(result.total_vat).toBeUndefined();
+    });
+
+    it.each([
+      ["no supplier VAT number", undefined],
+      ["a foreign supplier VAT number at a rate Estonia also has", "LT100001919017"],
+    ])("keeps the receipt gross-only with %s", (_name, vat) => {
+      const result = docWithVat(vat, "01.09.2026", "Kokku 100.00 13.00 113.00");
+      expect(result.total_gross).toBe(113);
       expect(result.total_net).toBeUndefined();
       expect(result.total_vat).toBeUndefined();
     });

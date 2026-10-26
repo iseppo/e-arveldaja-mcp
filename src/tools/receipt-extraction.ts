@@ -2590,16 +2590,19 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
  * a labelled (not fallback, not conflicting) gross equal to the triple's sum,
  * every triple row of the document the same triple and one of them
  * total-labelled, and exactly one (net, VAT, rate) reading. Anything else
- * returns the amounts unchanged (gross-only, held as today).
+ * returns the amounts unchanged (gross-only, held as today). The supplier must
+ * show a valid Estonian VAT number: a foreign invoice whose rate happens to
+ * equal an Estonian one must not become Estonian input VAT.
  */
 function withTotalRowTripleNetVat(
   amounts: ExtractedAmountsWithMetadata,
   text: string,
   invoiceDate: string | undefined,
+  supplierVatNo: string | undefined,
 ): ExtractedAmountsWithMetadata {
   const gross = amounts.total_gross;
   if (
-    gross === undefined || amounts.total_net !== undefined || amounts.total_vat !== undefined ||
+    gross === undefined || !isValidEeVatNumber(supplierVatNo) || amounts.total_net !== undefined || amounts.total_vat !== undefined ||
     amounts.gross_unlabelled || amounts.total_gross_conflict ||
     amounts.provenance.find(entry => entry.field === "total_gross")?.source === "fallback"
   ) {
@@ -4256,7 +4259,7 @@ export function extractReceiptFieldsFromText(
     ? { ...extractedSupplier, name: identityBlock.name, layoutSupplierNameItem: identityBlock.nameItem, layoutSupplierNameRationale: "identity_block" }
     : extractedSupplier;
   const supplierName = supplierResult.name;
-  const amounts = withTotalRowTripleNetVat(extractAmountsWithMetadata(text, options?.textItems), text, invoice_date);
+  const amounts = withTotalRowTripleNetVat(extractAmountsWithMetadata(text, options?.textItems), text, invoice_date, identifiers.supplier_vat_no);
   // The booked currency follows the picked gross: on "Paid EUR 90.00 (1 EUR =
   // 1.1111 USD) / Total USD 100.00" the gross is the USD total, so the currency
   // is USD; on "Total USD 100.00 / EUR 90.00" with gross 90 it is EUR. A gross
