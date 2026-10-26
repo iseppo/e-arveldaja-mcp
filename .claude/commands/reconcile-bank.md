@@ -226,7 +226,11 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 the review warnings in `summary.warnings`
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->) are never booked by execute; explain each by its `code`:
   - `own_account_not_bookable`: the counterparty IBAN is one of the company's own bank accounts, but that account has no accounting dimension, so nothing can be booked to it. The owner adds the dimension in e-arveldaja, then re-run the dry run.
-  - `unregistered_iban_needs_mirror`: the counterparty is the company itself, but its IBAN is not a registered own bank account (an own account not set up in e-arveldaja, or a provider's pooled top-up account such as Wise). It books automatically once the other account's matching row exists: import that account's statement, then re-run the dry run. If the owner confirms the other account and no statement will follow, confirm the row inline against that account after approval (`confirm_transaction`, `standard` or `full` profile).
+  - `unregistered_iban_needs_mirror`: the counterparty is the company itself, but its IBAN is not a registered own bank account (an own account not set up in e-arveldaja, or a provider's pooled top-up account such as Wise). It books automatically once the other account's matching row exists: import that account's statement, then re-run the dry run.<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+ If the owner confirms the other account and no statement will follow, confirm the row inline against that account after approval (`confirm_transaction`).
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
   - `camt_marker_unverified`: the stored CAMT marker fails its check, so direction and counterparty are unproven; compare the row with the bank statement before doing anything.
   - Without a code: a same-key journal or several possible target accounts; follow the row's `reason`.
 
