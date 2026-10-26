@@ -97,6 +97,27 @@ describe("buildLostValueCrops", () => {
     expect(await noisy(5)).toEqual({ omitted: "over_budget" });
   });
 
+  // Review MINOR-a: every page's full 300-dpi render was kept until the end, on any number of pages.
+  it("renders each page once, in page order, and sends none when lost rows span more than two pages", async () => {
+    const pages = (count: number) => {
+      const parsed = lostValueParse(ROWS);
+      const first = parsed.result.pages[0]!;
+      const all = Array.from({ length: count }, (_, i) => ({ ...first, pageNum: i + 1 }));
+      const text = all.map((page) => page.text).join("\n\f");
+      return { ...parsed, text, pageCount: count, result: { ...parsed.result, text, totalPages: count, pages: all } } as ParsedDocument;
+    };
+    const two = pages(2);
+    const seam = fakeSeam();
+    const result = await buildLostValueCrops(file(PLAIN_PDF), two, packetOf(two), seam);
+    expect("images" in result && result.images.map((image) => image.line)).toEqual(["p1:002", "p1:003", "p2:002", "p2:003"]);
+    expect(seam.render.mock.calls.map((call) => (call as unknown[])[1])).toEqual([1, 2]);
+
+    const three = pages(3);
+    const capped = fakeSeam();
+    expect(await buildLostValueCrops(file(PLAIN_PDF), three, packetOf(three), capped)).toEqual({ omitted: "over_budget" });
+    expect(capped.render).not.toHaveBeenCalled();
+  });
+
   it("finds no rect for a page whose axes scale differently", async () => {
     const parsed = lostValueParse(ROWS);
     const seam = fakeSeam();

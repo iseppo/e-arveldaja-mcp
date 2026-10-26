@@ -25,6 +25,8 @@ import { cropPng, PNG_CROP_MAX_INPUT_PIXELS, PngCropError } from "../png-crop.js
 
 export const LOST_VALUE_MAX_CROPS = 6;
 export const LOST_VALUE_MAX_TOTAL_BYTES = 256 * 1024;
+/** Distinct pages rendered per read: lost rows on more pages send none (`over_budget`). */
+export const LOST_VALUE_MAX_PAGES = 2;
 
 /** Injectable render/OCR (tests); the default goes to liteparse. Calls resolve lazily so a mocked parser module stays inert. */
 export interface LostValueSeam {
@@ -87,8 +89,9 @@ export type LostValueCrops =
 
 /**
  * mode='read': one PNG crop per locatable lost line, in packet order. More than
- * six lines, a crop over 64 KB or more than 256 KB in all sends none
+ * six lines or two pages, a crop over 64 KB or more than 256 KB in all sends none
  * (`over_budget`). A line whose page cannot be rendered or cropped gets no image.
+ * Pages are cropped one at a time; a page's render is dropped before the next.
  */
 export async function buildLostValueCrops(
   filePath: string,
@@ -99,24 +102,31 @@ export async function buildLostValueCrops(
   if (!seam.available()) return { images: [] };
   const rects = await lostValueRects(filePath, parsed, packet);
   if (rects.size > LOST_VALUE_MAX_CROPS) return { omitted: "over_budget" };
-  const rendered = new Map<number, Promise<{ png: Buffer; width: number; height: number }>>();
-  const images: Array<{ line: string; png: Buffer }> = [];
-  let total = 0;
-  for (const line of packet.lines) {
+  const byPage = new Map<number, Array<{ index: number; rect: LostValueRect }>>();
+  packet.lines.forEach((line, index) => {
     const rect = rects.get(line.id);
-    if (!rect) continue;
-    let png: Buffer;
-    try {
-      png = await cropOf(filePath, parsed, rect, seam, rendered);
-    } catch (error) {
-      if (error instanceof PngCropError && error.message === "crop too large") return { omitted: "over_budget" };
-      continue;
+    if (rect) byPage.set(rect.page, [...(byPage.get(rect.page) ?? []), { index, rect }]);
+  });
+  if (byPage.size > LOST_VALUE_MAX_PAGES) return { omitted: "over_budget" };
+  const images: Array<{ index: number; line: string; png: Buffer }> = [];
+  let total = 0;
+  for (const entries of byPage.values()) {
+    // Scoped to this page, so its full 300-dpi render is released before the next page renders.
+    const rendered = new Map<number, Promise<{ png: Buffer; width: number; height: number }>>();
+    for (const { index, rect } of entries) {
+      let png: Buffer;
+      try {
+        png = await cropOf(filePath, parsed, rect, seam, rendered);
+      } catch (error) {
+        if (error instanceof PngCropError && error.message === "crop too large") return { omitted: "over_budget" };
+        continue;
+      }
+      total += png.length;
+      if (total > LOST_VALUE_MAX_TOTAL_BYTES) return { omitted: "over_budget" };
+      images.push({ index, line: rect.line, png });
     }
-    total += png.length;
-    if (total > LOST_VALUE_MAX_TOTAL_BYTES) return { omitted: "over_budget" };
-    images.push({ line: line.id, png });
   }
-  return { images };
+  return { images: images.sort((a, b) => a.index - b.index).map(({ line, png }) => ({ line, png })) };
 }
 
 export type LostValueOcr =
