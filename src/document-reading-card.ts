@@ -9,7 +9,7 @@
 // owner_supplied: it never rewrites an extracted value, it replaces it with the
 // owner's own reading of the PDF, and it is recorded as a corrected field.
 
-import { HOLD_CODES, rateMatches, type AcceptedValues, type HeuristicView, type HoldCode } from "./document-reading-check.js";
+import { checkReading, HOLD_CODES, rateMatches, type AcceptedValues, type CheckContext, type HeuristicView, type HoldCode } from "./document-reading-check.js";
 import type { ReadingPacket } from "./document-reading-packet.js";
 import type { ReadingField } from "./document-reading-schemas.js";
 import { lineTokens } from "./document-reading-tokens.js";
@@ -354,6 +354,85 @@ export function applyOwnerAnswers(card: ReadingCard, values: AcceptedValues, ans
 // ---------------------------------------------------------------------------
 // Re-checks on the final values (§5.2 step 3)
 // ---------------------------------------------------------------------------
+
+/**
+ * Lost-value plan Step 0 (rev 3 NEW-1, rev 3.1 NEW-3): the evidence and proof codes. A field whose final value is not
+ * the reading's own has its evidence and proof answer removed before the create-time re-run, so these codes say
+ * nothing about it.
+ */
+export const RECHECK_EVIDENCE_PROOF_CODES = [
+  "missing_evidence", "quote_not_printed", "proof_problem",
+  "label_quote_missing", "label_quote_not_printed", "label_quote_no_letter", "label_quote_overlaps_value",
+] as const satisfies readonly HoldCode[];
+
+/** Where a final value came from when it is not the reading's own. Step 4 adds "image_agreed" (evidence/proof codes only). */
+export type RecheckFieldSource = "owner_supplied";
+
+/**
+ * The create-time re-run's per-field allow-lists (pinned by a test). Only a hold on a field of that source is
+ * dropped; every other hold blocks create, including H5–H10, A2–A5, the foreign-rate trio and every document-level
+ * hold. Owner-supplied (typed or corrected): the owner's own reading of the PDF overrides the reading's evidence,
+ * its proof of role (the competitor codes, including A1 for an owner-typed gross) and the heuristic.
+ */
+export const RECHECK_ALLOWED_CODES: { readonly [Source in RecheckFieldSource]: readonly HoldCode[] } = {
+  owner_supplied: [
+    ...RECHECK_EVIDENCE_PROOF_CODES,
+    "value_not_complete_token",
+    "competitor_omitted", "competitor_limit_exceeded", "competitor_not_printed", "competitor_ambiguous",
+    "reading_heuristic_conflict",
+  ],
+};
+
+export interface RecheckReadingInput {
+  packet: ReadingPacket;
+  /** The verified reading and proof as the plan binds them (canonical JSON). */
+  readingJson: unknown;
+  proofJson: unknown;
+  final: AcceptedValues;
+  /** The fields whose final value is not the reading's own, by source. */
+  sources: Partial<Record<ReadingField, RecheckFieldSource>>;
+  /** The checker holds verify released into owner rows (the owner answered them). */
+  releasedHolds: readonly CardHold[];
+  ctx: CheckContext;
+}
+
+const holdKey = (hold: { code: string; field?: string }) => `${hold.code}\u0000${hold.field ?? ""}`;
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The whole checker re-run at create on the bound reading with the final values substituted (Step 0). Holds only:
+ * the re-run's holds minus (a) a non-block hold verify already released into an answered owner row and (b) a hold
+ * on a field of a listed source whose code that source's allow-list names. A re-run that cannot be performed (no
+ * bound reading or proof, unparseable JSON) holds reading_schema_invalid: never a fallback to recheckFinalValues alone.
+ */
+export function recheckReading(input: RecheckReadingInput): CardHold[] {
+  const unavailable: CardHold[] = [{ code: "reading_schema_invalid" }];
+  if (typeof input.readingJson !== "string" || typeof input.proofJson !== "string") return unavailable;
+  let reading: unknown;
+  let proof: unknown;
+  try {
+    reading = JSON.parse(input.readingJson);
+    proof = JSON.parse(input.proofJson);
+  } catch {
+    return unavailable;
+  }
+  if (!isRecord(reading) || !isRecord(proof) || !isRecord(reading.evidence) || !isRecord(proof.answers)) return unavailable;
+  const evidence: Record<string, unknown> = { ...reading.evidence };
+  const answers: Record<string, unknown> = { ...proof.answers };
+  for (const field of Object.keys(input.sources)) {
+    delete evidence[field];
+    answers[field] = { label_quote: null, competitors: [], why_this_one: "", verdict: "confirm" };
+  }
+  const result = checkReading(input.packet, { ...reading, ...input.final, evidence }, { ...proof, answers }, input.ctx);
+  const released = new Set(input.releasedHolds.map(holdKey));
+  return result.holds
+    .filter((hold) => {
+      const source = hold.field === undefined ? undefined : input.sources[hold.field];
+      if (source !== undefined && RECHECK_ALLOWED_CODES[source].includes(hold.code)) return false;
+      return DISPOSITION[hold.code] === "block" || !released.has(holdKey(hold));
+    })
+    .map((hold) => (hold.field === undefined ? { code: hold.code } : { code: hold.code, field: hold.field }));
+}
 
 export interface RecheckContext {
   today: string;

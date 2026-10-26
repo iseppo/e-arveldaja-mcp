@@ -20,12 +20,14 @@ import {
   checkReading,
   labelledHeuristicValues,
   rateMatches,
+  ratesDeferredForLostDate,
   type AcceptedValues,
+  type CheckContext,
   type CheckResult,
   type HeuristicView,
   type HoldCode,
 } from "../document-reading-check.js";
-import { parseDocumentReading, type ReadingField } from "../document-reading-schemas.js";
+import { parseDocumentReading, parseProof, type ReadingField } from "../document-reading-schemas.js";
 import {
   checkBookingBinding,
   duplicateHolds,
@@ -75,7 +77,7 @@ import { parseStrictDate } from "../strict-date.js";
 import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, materializeSnapshot, MAX_INVOICE_DOCUMENT_SIZE, wrongCompanySignal, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
-import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
+import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, recheckReading, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
 import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
 import { withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
 export { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
@@ -169,6 +171,11 @@ export interface ReadingPlan {
   reverse_charge_note_present: boolean;
   connection_fingerprint: string | null;
   own: { name: string | null; reg: string | null; vat: string | null };
+  /** The parsed reading and proof (canonical JSON): create re-runs the whole checker on them with the final values. */
+  reading_json: string;
+  proof_json: string;
+  /** The checker holds released into the card's owner rows. */
+  check_holds: ReadingHold[];
 }
 
 function sameIban(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -205,6 +212,18 @@ export async function readingOwnIdentity(api: ApiContext, clients: Client[]): Pr
   } catch {
     return undefined;
   }
+}
+
+/** The checker's context for the active company; verify and the create-time re-run build it the same way. */
+function readingCheckContext(own: OwnCompanyIdentifiers | undefined, heuristic: HeuristicView): CheckContext {
+  return {
+    today: todayInTallinn(),
+    own: own?.ownCompanyRegistryCode || own?.ownCompanyVat
+      ? { ...(own.ownCompanyRegistryCode ? { reg: own.ownCompanyRegistryCode } : {}), ...(own.ownCompanyVat ? { vat: own.ownCompanyVat } : {}) }
+      : "unavailable",
+    heuristic,
+    isReverseChargeText: detectReverseChargeFromText,
+  };
 }
 
 /** The heuristic view the checker cross-checks against, built as the reading harness builds it (build-packets.ts). */
@@ -713,14 +732,7 @@ class ReadingDocumentOperations {
       const heuristic = readingHeuristic(parsed, material.fileName, own);
       const readingInput = desandboxAllStrings(input.reading);
       const proofInput = desandboxAllStrings(input.proof);
-      const check: CheckResult = checkReading(packet, readingInput, proofInput, {
-        today: todayInTallinn(),
-        own: own?.ownCompanyRegistryCode || own?.ownCompanyVat
-          ? { ...(own.ownCompanyRegistryCode ? { reg: own.ownCompanyRegistryCode } : {}), ...(own.ownCompanyVat ? { vat: own.ownCompanyVat } : {}) }
-          : "unavailable",
-        heuristic: heuristic.view,
-        isReverseChargeText: detectReverseChargeFromText,
-      });
+      const check: CheckResult = checkReading(packet, readingInput, proofInput, readingCheckContext(own, heuristic.view));
       const holds: ReadingHold[] = check.holds.map(holdOf);
       const base: Pick<VerifyDocumentResult, "sourceSha256" | "packetDigest"> = { sourceSha256: packet.source_sha256, packetDigest: packet.packet_digest };
       const parsedReading = parseDocumentReading(readingInput);
@@ -774,7 +786,11 @@ class ReadingDocumentOperations {
               supplierKnownIbans: supplierClient.bank_account_no ? [supplierClient.bank_account_no] : [],
               supplierCandidateIds: candidates.candidates.map((candidate) => candidate.id!),
             });
-            holds.push(...binding.holds.map(holdOf));
+            // Step 0: with the date lost, the booking has no create_date and no rates in force; create re-binds it on
+            // the owner's date (the same deferral as the checker's, nothing else).
+            const deferred = ratesDeferredForLostDate(packet, values.invoice_date);
+            holds.push(...binding.holds.filter((hold) => !(deferred &&
+              ((hold.code === "booking_field_mismatch" && hold.field === "create_date") || hold.code === "booking_vat_rate_implausible"))).map(holdOf));
           }
         }
       }
@@ -818,6 +834,8 @@ class ReadingDocumentOperations {
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
       if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true });
       const card = cardOutcome.card;
+      const parsedProof = parseProof(proofInput);
+      if (!parsedProof.ok) return ok({ ...result, holds: [{ code: "proof_schema_invalid" }] });
 
       const scope = this.runtimeSafetyContext.getActiveScope();
       const planned: ReadingPlan = {
@@ -841,6 +859,9 @@ class ReadingDocumentOperations {
         reverse_charge_note_present: check.reverse_charge_note_present,
         connection_fingerprint: scope.connectionFingerprint ?? null,
         own: ownCompany,
+        reading_json: canonicalPlanJson(parsedReading.value),
+        proof_json: canonicalPlanJson(parsedProof.value),
+        check_holds: check.holds.map(holdOf),
       };
       const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
         normalizedArgs: planned as unknown as PlanRecord,
@@ -919,6 +940,17 @@ class ReadingDocumentOperations {
           holds.push({ code: "reading_create_indeterminate" });
         }
         holds.push(...recheckFinalValues(final, { today: todayInTallinn(), vatZeroNoteProven: plan.vat_zero_note_proven, original }));
+        // Step 0: the whole checker on the bound reading with the final values; recheckFinalValues stays as well.
+        const rerun = recheckReading({
+          packet,
+          readingJson: plan.reading_json,
+          proofJson: plan.proof_json,
+          final,
+          sources: Object.fromEntries(answered.correctedFields.map((field) => [field, "owner_supplied" as const])),
+          releasedHolds: Array.isArray(plan.check_holds) ? plan.check_holds : [],
+          ctx: readingCheckContext(own, readingHeuristic(parsed, material.fileName, own).view),
+        });
+        holds.push(...rerun);
 
         // The supplier the final values bind must still be the one verified.
         const candidates = supplierCandidates(final, clients);
@@ -964,7 +996,11 @@ class ReadingDocumentOperations {
         if (booking?.effective && bookingDrift(plan.booking, booking.effective.fingerprint, answered.correctedFields)) {
           holds.push({ code: "reading_booking_drift" });
         }
-        if (holds.length > 0 || !booking?.effective) return ok<CreateReadingResult>({ status: "held", holds });
+        if (holds.length > 0 || !booking?.effective) {
+          // The re-run repeats some of the targeted checks: report each code and field once.
+          const unique = [...new Map(holds.map((hold) => [`${hold.code}\u0000${hold.field ?? ""}`, hold])).values()];
+          return ok<CreateReadingResult>({ status: "held", holds: unique });
+        }
 
         const { invoiceData } = booking.effective;
         let created;

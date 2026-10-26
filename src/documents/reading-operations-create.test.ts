@@ -323,6 +323,87 @@ describe("reading create", () => {
   });
 });
 
+describe("Step 0: a date lost under a leader is typed and re-checked at create (lost-value plan rev 3 NEW-1, rev 3.1 NEW-3)", () => {
+  /** The date cell is only a dot leader: the packet holds text_layer_value_lost. */
+  const LOST_LINES = BASE_LINES.map((line) => (line.startsWith("Kuupäev") ? "Kuupäev ...................." : line));
+  /** A second consistent 24 % trio beside the read one. */
+  const LOST_TRIO_LINES = [...LOST_LINES, "Eelmine arve 50,00    12,00    62,00"];
+  const LOST_DATE: ReadingCaseInput = { values: { invoice_date: null }, evidence: { invoice_date: undefined }, labels: { invoice_date: null } };
+  const typed = (date: string) => ({ "t:invoice_date": { value: date }, "t:invoice_number": { value: "A-17" } });
+
+  async function lostVerified(w: World, name: string, lines = LOST_LINES) {
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const file = writePdf(`%PDF ${name}`);
+    return { file, verify: await verified(w, file, LOST_DATE, lines) };
+  }
+
+  it("a VAT>0 document with its date lost gets the typed date row (not blocked) and creates on the owner's date", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date");
+    expect(verify.status).toBe("ready");
+    expect(verify.card!.rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_date", "invoice_number"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ number: "A-17", create_date: "2026-03-15" });
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({ action: "CREATED", details: expect.objectContaining({ text_layer_typed: true }) }));
+  });
+
+  it("a typed date on which the read VAT does not snap to a rate in force holds at create, 0 writes", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date wrong rate");
+    // 24 % on a date when 22 % was in force.
+    expect(heldCodes(await create(w, file, verify.planHandle!, typed("2025-03-15")))).toEqual(expect.arrayContaining(["vat_rate_not_snapped", "foreign_rate_trio"]));
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a typed date whose rate leaves another printed trio competing with the read one holds at create, 0 writes", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date trio", LOST_TRIO_LINES);
+    expect(verify.status).toBe("ready");
+    expect(heldCodes(await create(w, file, verify.planHandle!, typed("2026-03-15")))).toContain("competing_consistent_total");
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a re-run that cannot be performed (the plan binds no reading) holds, 0 writes", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date no reading");
+    const consume = w.runtime.planStore.consume.bind(w.runtime.planStore);
+    vi.spyOn(w.runtime.planStore, "consume").mockImplementation((handle, domain) => {
+      const stored = consume(handle, domain);
+      const { reading_json: _reading, ...normalizedArgs } = stored.normalizedArgs as Record<string, unknown>;
+      return { ...stored, normalizedArgs: normalizedArgs as typeof stored.normalizedArgs };
+    });
+    expect(heldCodes(await create(w, file, verify.planHandle!, typed("2026-03-15")))).toEqual(["reading_schema_invalid"]);
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("an owner-corrected gross creates (the field_review value path), and A2/A4 still run on it", async () => {
+    const w = world();
+    const file = writePdf("%PDF corrected gross");
+    const unprinted: ReadingCaseInput = { evidence: { gross: { line: "p1:007", quote: "Kokku 124,00" } } };
+    const first = await verified(w, file, unprinted);
+    expect(first.card!.rows.map((row) => row.id)).toEqual(["r:gross"]);
+    // 124.01 closes within a cent (no H5 hold), but the printed 100 / 24 / 124 is then a trio nobody read.
+    const codes = heldCodes(await create(w, file, first.planHandle!, { "r:gross": { value: 124.01 } }));
+    expect(codes).toEqual(expect.arrayContaining(["competing_consistent_total", "trio_not_read"]));
+    expect(codes).not.toContain("arithmetic_mismatch");
+    const second = await verified(w, file, unprinted);
+    const outcome = await create(w, file, second.planHandle!, { "r:gross": { value: 124 } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["gross"] } });
+    expect(w.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("an owner-typed date that differs from the heuristic's labelled date creates on the owner's date", async () => {
+    const w = world();
+    const file = writePdf("%PDF typed other date");
+    const verify = await verified(w, file, { evidence: { invoice_date: { line: "p1:004", quote: "Kpv 15.03.2026" } } });
+    expect(verify.card!.rows.map((row) => row.id)).toEqual(["r:invoice_date"]);
+    const outcome = await create(w, file, verify.planHandle!, { "r:invoice_date": { value: "2026-03-14" } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_date"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ create_date: "2026-03-14" });
+  });
+});
+
 describe("reading create serialisation (§5.2a)", () => {
   it("two handles for the same file in parallel give exactly one write", async () => {
     const w = world();
