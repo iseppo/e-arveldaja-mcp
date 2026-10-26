@@ -5,14 +5,16 @@ import {
   PAYLOAD_FIELDS,
   applyOwnerAnswers,
   buildReadingCard,
+  RECHECK_ALLOWED_CODES,
   recheckFinalValues,
+  recheckReading,
   type CardHold,
   type CardInput,
   type ReadingCard,
 } from "./document-reading-card.js";
 import { HOLD_CODES, type AcceptedValues } from "./document-reading-check.js";
 import { makePacket } from "./__fixtures__/document-reading/make-packet.js";
-import { BASE_EVIDENCE, BASE_LINES, BASE_VALUES } from "./__fixtures__/document-reading/invoice.js";
+import { BASE_EVIDENCE, BASE_LINES, BASE_VALUES, buildCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
 
 const VALUES = BASE_VALUES as unknown as AcceptedValues;
 
@@ -209,5 +211,64 @@ describe("recheckFinalValues", () => {
     expect(codes({ supplier_reg: "10000019" })).toContain("identifier_invalid");
     expect(codes({ supplier_iban: "EE00 1234" })).toContain("identifier_invalid");
     expect(codes({ invoice_number: null })).toContain("required_field_missing");
+  });
+});
+
+describe("recheckReading (lost-value plan Step 0: the create-time re-run)", () => {
+  const rerun = (caseInput: CaseInput, final: Partial<AcceptedValues>, sources: Parameters<typeof recheckReading>[0]["sources"], releasedHolds: CardHold[] = [], json?: { reading?: unknown; proof?: unknown }) => {
+    const { packet, reading, proof, ctx } = buildCase(caseInput);
+    return recheckReading({
+      packet,
+      readingJson: json && "reading" in json ? json.reading : JSON.stringify(reading),
+      proofJson: json && "proof" in json ? json.proof : JSON.stringify(proof),
+      final: { ...VALUES, ...final },
+      sources,
+      releasedHolds,
+      ctx,
+    });
+  };
+
+  it("pins the owner-supplied allow-list: evidence/proof codes, the token code, the competitor codes and the heuristic conflict, nothing else", () => {
+    expect([...RECHECK_ALLOWED_CODES.owner_supplied].sort()).toEqual([
+      "competitor_ambiguous", "competitor_limit_exceeded", "competitor_not_printed", "competitor_omitted",
+      "label_quote_missing", "label_quote_no_letter", "label_quote_not_printed", "label_quote_overlaps_value",
+      "missing_evidence", "proof_problem", "quote_not_printed", "reading_heuristic_conflict", "value_not_complete_token",
+    ]);
+    expect(Object.keys(RECHECK_ALLOWED_CODES)).toEqual(["owner_supplied"]);
+  });
+
+  it("a re-run that cannot be performed holds: no bound reading, no bound proof, or unparseable JSON", () => {
+    const unavailable = [{ code: "reading_schema_invalid" }];
+    expect(rerun({}, {}, {}, [], { reading: undefined })).toEqual(unavailable);
+    expect(rerun({}, {}, {}, [], { proof: undefined })).toEqual(unavailable);
+    expect(rerun({}, {}, {}, [], { reading: "{" })).toEqual(unavailable);
+    expect(rerun({}, {}, {}, [], { proof: "[]" })).toEqual(unavailable);
+  });
+
+  it("a clean reading with unchanged values re-runs clean", () => {
+    expect(rerun({}, {}, {})).toEqual([]);
+  });
+
+  it("an owner-typed date differing from the heuristic's labelled date passes; the same value without the owner as its source holds", () => {
+    const caseInput: CaseInput = { ctx: { heuristic: { signals: [], confidence: "high", labelled: { invoice_date: "2026-03-15" } } } };
+    expect(rerun(caseInput, { invoice_date: "2026-03-14" }, { invoice_date: "owner_supplied" })).toEqual([]);
+    expect(rerun(caseInput, { invoice_date: "2026-03-14" }, {})).toEqual(expect.arrayContaining([
+      { code: "value_not_complete_token", field: "invoice_date" },
+      { code: "reading_heuristic_conflict", field: "invoice_date" },
+    ]));
+  });
+
+  it("the allow-list is per field: an owner-supplied date does not release a heuristic conflict on the gross", () => {
+    const caseInput: CaseInput = { ctx: { heuristic: { signals: [], confidence: "high", labelled: { gross: 62 } } } };
+    expect(rerun(caseInput, { invoice_date: "2026-03-14" }, { invoice_date: "owner_supplied" })).toEqual([{ code: "reading_heuristic_conflict", field: "gross" }]);
+    // Released at verify into an answered question row: not held again.
+    expect(rerun(caseInput, {}, {}, [{ code: "reading_heuristic_conflict", field: "gross" }])).toEqual([]);
+  });
+
+  it("content rules hold on owner-supplied values, and a block code is never released by a verify hold of the same name", () => {
+    // 24 % on a date when 22 % was in force.
+    const wrongRate = rerun({}, { invoice_date: "2025-03-15" }, { invoice_date: "owner_supplied" }, [{ code: "vat_rate_not_snapped", field: "vat" }]);
+    expect(wrongRate).toEqual(expect.arrayContaining([{ code: "vat_rate_not_snapped", field: "vat" }, { code: "foreign_rate_trio" }]));
+    expect(rerun({}, { gross: 125 }, { gross: "owner_supplied" })).toEqual(expect.arrayContaining([{ code: "arithmetic_mismatch" }]));
   });
 });

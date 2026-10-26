@@ -532,6 +532,17 @@ function matchFieldToken(field: EvidenceField, value: string | number, line: Pac
 // checkReading
 // ---------------------------------------------------------------------------
 
+/**
+ * Step 0 (lost-value plan rev 3 NEW-1): true when the text layer lost a value (`text_layer_value_lost`) and the
+ * reading has no invoice date. Without a date no VAT rate is in force, so every rule that reads the rates in force
+ * (H6, the N2 amount resolution, A2–A4 and the foreign-rate trio) is deferred, not failed: the owner types the date
+ * on the card and create re-runs the whole checker on it (document-reading-card.ts recheckReading). Only this hold,
+ * only a null date.
+ */
+export function ratesDeferredForLostDate(packet: Pick<ReadingPacket, "holds">, invoiceDate: string | null): boolean {
+  return invoiceDate === null && packet.holds.some((packetHold) => packetHold.code === "text_layer_value_lost");
+}
+
 export function checkReading(packet: ReadingPacket, readingInput: unknown, proofInput: unknown, ctx: CheckContext): CheckResult {
   const reverseChargeNotePresent = ctx.isReverseChargeText(reverseChargeText(packet));
   const holds: Hold[] = [];
@@ -587,13 +598,15 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   };
 
   // 4. Every remaining check
+  const deferRates = ratesDeferredForLostDate(packet, reading.invoice_date);
   const pending: PendingAmounts = {};
   const valueSpans = checkFields(doc, reading, hold, debug, pending);
-  const resolved = resolveAmountAmbiguity(doc, reading, valueSpans, pending, vatRatesInForceOn(reading.invoice_date));
+  // Deferred: no resolution without a date (the pending fields stay owner questions, as with no rates).
+  const resolved = deferRates ? new Map() as ResolvedAmounts : resolveAmountAmbiguity(doc, reading, valueSpans, pending, vatRatesInForceOn(reading.invoice_date));
   for (const field of Object.keys(pending) as Array<typeof PAYLOAD_NUMBER_FIELDS[number]>) if (!resolved.has(field)) hold("ambiguous_amount_token", field);
-  const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold);
+  const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold, deferRates);
   const hazards = documentTextHazards(packet.lines, (line) => tokensFor(doc, line as PacketLine));
-  checkAmounts(doc, reading, proof, hazards, hold);
+  checkAmounts(doc, reading, proof, hazards, hold, deferRates);
   checkDocumentLevel(reading, ctx, hazards, hold);
   checkProof(doc, reading, proof, valueSpans, hold, note, resolved);
   checkHeuristicConflict(reading, ctx.heuristic, hold);
@@ -720,7 +733,7 @@ function ownIds(own: CheckContext["own"]): Set<string> {
 }
 
 /** H5–H10 (§2.2). Returns vat_zero_note_proven. */
-function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, reverseChargeNotePresent: boolean, hold: HoldFn): boolean {
+function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, reverseChargeNotePresent: boolean, hold: HoldFn, deferRates: boolean): boolean {
   const { net, vat, gross } = reading;
   // H5
   if (net !== null && vat !== null && gross !== null && Math.abs(net + vat - gross) > 0.01 + 1e-9) hold("arithmetic_mismatch");
@@ -732,8 +745,8 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
     vatZeroNoteProven = netEqualsGross && (zeroPercentOnLine || reverseChargeNotePresent);
     if (!vatZeroNoteProven) hold("zero_vat_unproven", "vat");
   }
-  // H6
-  if (vat !== null && vat > 0) {
+  // H6 (deferred to create when the date was lost)
+  if (!deferRates && vat !== null && vat > 0) {
     const base = net ?? (gross !== null ? gross - vat : undefined);
     if (base !== undefined && rateMatches(base, vat, vatRatesInForceOn(reading.invoice_date)).length !== 1) {
       hold("vat_rate_not_snapped", "vat");
@@ -781,7 +794,7 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
 }
 
 /** A1–A5 and the foreign-rate trio (§2.3). */
-function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards: DocumentTextHazards, hold: HoldFn): void {
+function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards: DocumentTextHazards, hold: HoldFn, deferRates: boolean): void {
   const money: MoneyToken[] = doc.packet.lines.flatMap((line) => tokensFor(doc, line).money);
   const values = [...new Set(money.flatMap((token) => token.values))];
   const eeRates = vatRatesInForceOn(reading.invoice_date);
@@ -808,24 +821,27 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards:
     }
   }
 
-  // A2, A4
-  const eeTrios = trios(values, eeRates);
-  const readTrio = (t: Trio) => net !== null && vat !== null && gross !== null && near(t.net, net) && near(t.vat, vat) && near(t.gross, gross);
-  if (eeTrios.some((t) => !readTrio(t))) hold("competing_consistent_total");
-  if (eeTrios.length > 0 && !eeTrios.some(readTrio)) hold("trio_not_read");
+  // A2–A4 and the foreign-rate trio read the rates in force: deferred to create when the date was lost.
+  if (!deferRates) {
+    // A2, A4
+    const eeTrios = trios(values, eeRates);
+    const readTrio = (t: Trio) => net !== null && vat !== null && gross !== null && near(t.net, net) && near(t.vat, vat) && near(t.gross, gross);
+    if (eeTrios.some((t) => !readTrio(t))) hold("competing_consistent_total");
+    if (eeTrios.length > 0 && !eeTrios.some(readTrio)) hold("trio_not_read");
 
-  // A3
-  const wideTrios = trios(values, [...eeRates, ...FOREIGN_VAT_RATES]);
-  const disjointPair = wideTrios.some((t1, i) => wideTrios.slice(i + 1).some((t2) => !t1.rates.some((rate) => t2.rates.includes(rate))));
-  const vatLike = new Set([0, ...eeRates, ...FOREIGN_VAT_RATES]);
-  const percentValues = new Set(percentTokens(doc.packet.lines).map((token) => token.value).filter((value) => vatLike.has(value)));
-  if (disjointPair || percentValues.size >= 2) hold("mixed_vat_rate");
+    // A3
+    const wideTrios = trios(values, [...eeRates, ...FOREIGN_VAT_RATES]);
+    const disjointPair = wideTrios.some((t1, i) => wideTrios.slice(i + 1).some((t2) => !t1.rates.some((rate) => t2.rates.includes(rate))));
+    const vatLike = new Set([0, ...eeRates, ...FOREIGN_VAT_RATES]);
+    const percentValues = new Set(percentTokens(doc.packet.lines).map((token) => token.value).filter((value) => vatLike.has(value)));
+    if (disjointPair || percentValues.size >= 2) hold("mixed_vat_rate");
+  }
 
   // A5
   if (hazards.signed_amount_present) hold("signed_amount_present");
 
   // Foreign-rate trio
-  if (trios(values, FOREIGN_VAT_RATES).some((t) => rateMatches(t.net, t.vat, eeRates).length === 0)) hold("foreign_rate_trio");
+  if (!deferRates && trios(values, FOREIGN_VAT_RATES).some((t) => rateMatches(t.net, t.vat, eeRates).length === 0)) hold("foreign_rate_trio");
 }
 
 /** §2.4: document-level holds, all text, independent of doc_type. */

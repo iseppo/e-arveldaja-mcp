@@ -984,6 +984,39 @@ describe("C1: a value lost under a dot leader holds (plan p2 §3 C1)", () => {
   });
 });
 
+describe("Step 0: the rate rules wait for a date lost under a leader (lost-value plan rev 3 NEW-1)", () => {
+  // The date cell is only a leader; the reading leaves the date null and the owner types it on the card.
+  const LOST = withLines({ 4: "Kuupäev ...................." });
+  const lostDate: CaseInput = { lines: LOST, values: { invoice_date: null }, evidence: { invoice_date: undefined }, labels: { invoice_date: null } };
+  /** A second consistent 24 % trio printed beside the read one. */
+  const PREVIOUS = "Eelmine arve 50,00    12,00    62,00";
+
+  it("T-S0-defer: a VAT>0 reading with the date lost holds only the typed-date codes, not H6 or the foreign-rate trio", () => {
+    expect(holdKeys(runCase(lostDate)).sort()).toEqual(["label_quote_missing:invoice_date", "required_field_missing:invoice_date", "text_layer_value_lost"]);
+  });
+
+  it("T-S0-defer-A2: a competing trio waits for the date too", () => {
+    expect(codesOf({ ...lostDate, lines: [...LOST, PREVIOUS] })).not.toContain("competing_consistent_total");
+  });
+
+  it("T-S0-narrow-hold: a null date without the lost-value hold still fails the rate rules", () => {
+    const codes = codesOf({ values: { invoice_date: null }, evidence: { invoice_date: undefined }, labels: { invoice_date: null } });
+    expect(codes).toContain("vat_rate_not_snapped");
+    expect(codes).toContain("foreign_rate_trio");
+  });
+
+  it("T-S0-narrow-date: under the lost-value hold a read date runs every rate rule", () => {
+    const dated = (date: string, printed: string, extra: string[] = []): CaseInput => ({
+      lines: withLines({ 4: `Kuupäev ${printed}` }, ["Tarne ....................", ...extra]),
+      values: { invoice_date: date },
+      evidence: { invoice_date: { line: "p1:004", quote: `Kuupäev ${printed}` } },
+    });
+    // 24 % on a date when 22 % was in force.
+    expect(codesOf(dated("2025-03-15", "15.03.2025"))).toEqual(expect.arrayContaining(["text_layer_value_lost", "vat_rate_not_snapped", "foreign_rate_trio"]));
+    expect(codesOf(dated("2026-03-15", "15.03.2026", [PREVIOUS]))).toEqual(expect.arrayContaining(["text_layer_value_lost", "competing_consistent_total"]));
+  });
+});
+
 const expectNarrowing = (entry: NarrowingCase) => {
   const result = runCase(entry.input);
   expect(holdKeys(result).sort(), entry.name).toEqual(entry.holds);
