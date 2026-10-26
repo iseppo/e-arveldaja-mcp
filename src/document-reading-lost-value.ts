@@ -368,20 +368,23 @@ function ocrLine(items: ReadonlyArray<OcrItem>): OcrLine {
   return { text, placed, rows: spans };
 }
 
-interface Candidate { text: string; start: number; end: number }
+/** `text` keeps every trailing character a number may hold (`.` `-` `/` `_`); `bareEnd` also drops a trailing `.`. */
+interface Candidate { text: string; start: number; end: number; bareEnd: number }
 
-/** Whitespace tokens with leading `#:` and trailing `.,;:` stripped; candidates hold ≥ 1 digit. */
+/** Whitespace tokens with leading `#:` and trailing `,;:` stripped (never number characters); candidates hold ≥ 1 digit. */
 function candidates(text: string): Candidate[] {
   const out: Candidate[] = [];
   for (const match of text.matchAll(/\S+/g)) {
     const lead = /^[#:]*/.exec(match[0])![0].length;
-    const core = match[0].slice(lead).replace(/[.,;:]+$/, "");
+    const core = match[0].slice(lead).replace(/[,;:]+$/, "");
     if (!/\d/.test(core)) continue;
     const start = match.index! + lead;
-    out.push({ text: core, start, end: start + core.length });
+    out.push({ text: core, start, end: start + core.length, bareEnd: start + core.replace(/[.,;:]+$/, "").length });
   }
   return out;
 }
+
+const NUMBER_TRAILING_PUNCT_RE = /[.\-/_]+$/;
 
 function minConfidence(line: OcrLine, start: number, end: number): number {
   const covering = line.placed.filter((part) => part.start < end && part.end > start);
@@ -435,7 +438,12 @@ export function matchLostValue(
     if (found.length === 0) return { status: "ocr_no_match" };
     if (found.length > 1) return { status: "ocr_ambiguous" };
     const only = found[0]!;
-    if (only.text !== printedValue) return { status: "ocr_no_match" };
+    if (only.text !== printedValue) {
+      // A trailing `.` `-` `/` `_` may be the number's or the sentence's: never dropped on agreement, held instead.
+      return only.text.replace(NUMBER_TRAILING_PUNCT_RE, "") === printedValue.replace(NUMBER_TRAILING_PUNCT_RE, "")
+        ? { status: "ocr_ambiguous" }
+        : { status: "ocr_no_match" };
+    }
     if (minConfidence(line, only.start, only.end) < LOST_VALUE_MIN_CONFIDENCE) return { status: "ocr_low_confidence" };
     const anchored = anchorCheck(line, only.start, only.end, anchor);
     if (anchored !== "ok") return { status: anchored };
@@ -458,7 +466,7 @@ export function matchLostValue(
   if (date.values[0] !== iso || date.text.replace(/\s+/g, "") !== normalized.replace(/\s+/g, "")) {
     return { status: "ocr_no_match" };
   }
-  if (candidates(line.text).some((candidate) => candidate.start < date.start || candidate.end > date.end)) {
+  if (candidates(line.text).some((candidate) => candidate.start < date.start || candidate.bareEnd > date.end)) {
     return { status: "ocr_ambiguous" };
   }
   if (minConfidence(line, date.start, date.end) < LOST_VALUE_MIN_CONFIDENCE) return { status: "ocr_low_confidence" };

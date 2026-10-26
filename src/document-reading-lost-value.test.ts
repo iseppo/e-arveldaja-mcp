@@ -38,7 +38,12 @@ describe("matchLostValue: invoice_number", () => {
   const cases: Array<[string, string, OcrItem[], string]> = [
     ["accepts the single equal candidate", "1234567890", ocr(["Invoice number"], [DOTS, 0.5], ["1234567890"]), "image_ocr_agreed"],
     ["accepts a value glued to the leader dots", "1234567890", ocr(["Invoice number.......................1234567890", 0.93]), "image_ocr_agreed"],
-    ["accepts a leading # and a trailing period", "XY-2026-77", ocr(["Invoice number"], ["#XY-2026-77."]), "image_ocr_agreed"],
+    ["accepts a leading # and a trailing comma", "XY-2026-77", ocr(["Invoice number"], ["#XY-2026-77,"]), "image_ocr_agreed"],
+    // Review MAJOR-2: a trailing `.` `-` `/` `_` is a valid number character, never stripped on agreement.
+    ["holds a trailing period OCR saw and the client did not", "2345", ocr(["Invoice number"], ["2345."]), "ocr_ambiguous"],
+    ["holds a trailing dash OCR saw and the client did not", "XY-2026-77", ocr(["Invoice number"], ["#XY-2026-77-"]), "ocr_ambiguous"],
+    ["holds a trailing slash the client added", "2345/", ocr(["Invoice number"], ["2345"]), "ocr_ambiguous"],
+    ["accepts a trailing period both read", "2345.", ocr(["Invoice number"], ["2345."]), "image_ocr_agreed"],
     ["holds when OCR read the dash as =", "1234-5678", ocr(["Invoice number"], ["1234=5678"]), "ocr_no_match"],
     ["holds on two candidates", "1234567890", ocr(["Invoice number"], ["1234567890"], ["9876543210"]), "ocr_ambiguous"],
     ["holds on a stray digit", "1234567890", ocr(["Invoice number"], ["1234567890"], ["4", 0.31]), "ocr_ambiguous"],
@@ -105,7 +110,7 @@ describe("matchLostValue: invoice_date", () => {
     expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number"], ["0042"], ["B"]), "Invoice number").status).toBe("ocr_ambiguous");
     expect(matchLostValue("invoice_date", "31.07.2026", ocr(["Invoice date"], ["31.07.2026"], ["approx"]), "Invoice date").status).toBe("ocr_ambiguous");
     // Leaders and punctuation around the label and the value are fine.
-    expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number:"], [DOTS, 0.4], ["#0042."]), "Invoice number").status).toBe("image_ocr_agreed");
+    expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number:"], [DOTS, 0.4], ["#0042;"]), "Invoice number").status).toBe("image_ocr_agreed");
   });
 
   it("counts a confidence outside 0–1 (NaN, a 0–100 scale) as none", () => {
