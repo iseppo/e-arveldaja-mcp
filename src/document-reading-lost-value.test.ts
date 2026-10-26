@@ -56,21 +56,8 @@ describe("matchLostValue: invoice_number", () => {
     ["holds a non-canonical dash in printed", "1234–5678", ocr(["Invoice number"], ["1234-5678"]), "value_form_invalid"],
     ["holds a value with no digit", "ABCDEF", ocr(["Invoice number"], ["ABCDEF"]), "value_form_invalid"],
     ["holds a value with a space", "1234 5678", ocr(["Invoice number"], ["1234 5678"]), "value_form_invalid"],
-    ["holds the confusable l", "A23l5", ocr(["Invoice number"], ["A23l5"]), "value_form_invalid"],
-    ["holds the confusable O", "INV-0O12", ocr(["Invoice number"], ["INV-0O12"]), "value_form_invalid"],
-    ["holds 1 next to a letter", "A1-2345", ocr(["Invoice number"], ["A1-2345"]), "value_form_invalid"],
-    ["holds 0 next to a letter", "2345-0B", ocr(["Invoice number"], ["2345-0B"]), "value_form_invalid"],
-    // Review MINOR: S/5, B/8, Z/2, G/6 read the same way by both readers.
-    ["holds the confusable S", "INV-S123", ocr(["Invoice number"], ["INV-S123"]), "value_form_invalid"],
-    ["holds the confusable B", "A-B123", ocr(["Invoice number"], ["A-B123"]), "value_form_invalid"],
-    ["holds 5 next to a letter", "AX5-123", ocr(["Invoice number"], ["AX5-123"]), "value_form_invalid"],
-    ["holds 8 next to a letter", "8X-123", ocr(["Invoice number"], ["8X-123"]), "value_form_invalid"],
-    ["holds 2 next to a letter", "XY2-77", ocr(["Invoice number"], ["XY2-77"]), "value_form_invalid"],
-    ["holds 6 next to a letter", "6Y-123", ocr(["Invoice number"], ["6Y-123"]), "value_form_invalid"],
-    ["holds the confusable D", "AD-123", ocr(["Invoice number"], ["AD-123"]), "value_form_invalid"],
-    ["holds the confusable q", "XY-9q", ocr(["Invoice number"], ["XY-9q"]), "value_form_invalid"],
-    ["holds 9 next to a letter", "XY9-77", ocr(["Invoice number"], ["XY9-77"]), "value_form_invalid"],
-    ["accepts digits apart from the letters", "XY-2568-77", ocr(["Invoice number"], ["XY-2568-77"]), "image_ocr_agreed"],
+    // Owner decision 2026-10-26: look-alike glyphs are not held; OCR must still read the same value.
+    ["accepts look-alike glyphs both readers agree on", "A23l5", ocr(["Invoice number"], ["A23l5"]), "image_ocr_agreed"],
   ];
   it.each(cases)("%s", (_name, printed, items, status) => {
     expect(matchLostValue("invoice_number", printed, items, anchor).status).toBe(status);
