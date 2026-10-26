@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { z } from "zod";
+import { z } from "zod";
 import { registerProcessAccountingDocumentTool } from "./process-accounting-document.js";
 import { parseDocument } from "../document-parser.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
@@ -60,6 +60,10 @@ describe("process_accounting_document reading modes: flag", () => {
     expect(Object.keys(config.inputSchema).sort()).toEqual(Object.keys(setupReading(true).config.inputSchema).filter((key) => !readingKeys.includes(key)).sort());
     expect(config.inputSchema.mode!.safeParse("read").success).toBe(false);
     expect(config.inputSchema.mode!.safeParse("verify").success).toBe(false);
+    // The server wraps every input schema strict: an undeclared lost_value_reading is refused, not dropped.
+    const strict = z.object(config.inputSchema).strict();
+    expect(strict.safeParse({ file_path: "/tmp/a.pdf" }).success).toBe(true);
+    expect(strict.safeParse({ file_path: "/tmp/a.pdf", lost_value_reading: {} }).success).toBe(false);
     expect(config.description).not.toContain("mode='read'");
     expect(config.description.startsWith("Unified single-document purchase-invoice entry point.")).toBe(true);
   });
