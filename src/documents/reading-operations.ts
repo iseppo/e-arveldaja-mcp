@@ -15,6 +15,7 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.js";
 import { parseDocument, type ParsedDocument } from "../document-parser.js";
+import { buildLostValueCrops, defaultLostValueSeam, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
 import { buildReadingPacket, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
 import {
   checkReading,
@@ -117,6 +118,10 @@ export interface ReadDocumentResult {
   packetHolds: PacketHoldCode[];
   /** Absent when a packet hold blocks the reading path. */
   packetText?: string;
+  /** text_layer_value_lost only: PNG crops of the lost-leader rows, in packet order (untrusted pixels). */
+  lostValueImages?: Array<{ line: string; png: Buffer }>;
+  /** Set instead of lostValueImages when the crops exceed the size caps. */
+  lostValueImagesOmitted?: "over_budget";
 }
 
 export interface VerifyDocumentInput {
@@ -745,6 +750,7 @@ class ReadingDocumentOperations {
   constructor(
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
+    private readonly lostValueSeam: LostValueSeam = defaultLostValueSeam,
   ) {}
 
   /** True for a reading-domain create or confirm handle this instance issued and has not yet seen consumed. */
@@ -801,15 +807,22 @@ class ReadingDocumentOperations {
 
   /** mode='read': the packet for the client's reader. Heuristic values and supplier resolution are withheld. */
   async read(input: ReadDocumentInput): Promise<OperationOutcome<ReadDocumentResult>> {
-    const { material, packet } = await this.parseSource(input.source, input.snapshot);
+    const { material, parsed, packet } = await this.parseSource(input.source, input.snapshot);
     try {
       const packetHolds = packet.holds.map((hold) => hold.code);
       const blocked = packetHolds.some((code) => !NON_BLOCKING_PACKET_HOLDS.includes(code));
+      let lostValue: LostValueCrops = { images: [] };
+      if (!blocked && packetHolds.includes("text_layer_value_lost")) {
+        // Any failure sends no image: the owner types the value, as without this path.
+        lostValue = await buildLostValueCrops(material.path, parsed, packet, this.lostValueSeam).catch(() => ({ images: [] }));
+      }
       return ok({
         sourceSha256: packet.source_sha256,
         packetDigest: packet.packet_digest,
         packetHolds,
         ...(blocked ? {} : { packetText: packet.lines.map(renderPacketLine).join("\n") }),
+        ...("omitted" in lostValue ? { lostValueImagesOmitted: lostValue.omitted }
+          : lostValue.images.length > 0 ? { lostValueImages: lostValue.images } : {}),
       });
     } finally {
       await material.cleanup();
@@ -1272,6 +1285,10 @@ class ReadingDocumentOperations {
 
 export type ReadingOperations = ReadingDocumentOperations;
 
-export function createReadingDocumentOperations(api: ApiContext, runtimeSafetyContext: RuntimeSafetyContext): ReadingOperations {
-  return new ReadingDocumentOperations(api, runtimeSafetyContext);
+export function createReadingDocumentOperations(
+  api: ApiContext,
+  runtimeSafetyContext: RuntimeSafetyContext,
+  lostValueSeam?: LostValueSeam,
+): ReadingOperations {
+  return new ReadingDocumentOperations(api, runtimeSafetyContext, lostValueSeam);
 }
