@@ -95,9 +95,20 @@ describe("matchLostValue: invoice_date", () => {
     ["holds an ambiguous slash date in printed", "01/02/2026", ocr(["Invoice date"], ["01/02/2026"]), "value_form_invalid"],
     ["holds a printed value that is not only a date", "31. juuli 2026 x", ocr(["Invoice date"], ["31. juuli 2026"]), "value_form_invalid"],
     ["holds an impossible date", "31.02.2026", ocr(["Invoice date"], ["31.02.2026"]), "value_form_invalid"],
+    // Live 2026-10-26, Google invoices: Estonian month abbreviations, and OCR dropping the "ä" of "märts".
+    ["accepts an abbreviated Estonian month", "28. veebr 2025", ocr(["Invoice date"], ["28. veebr 2025"]), "image_ocr_agreed"],
+    ["accepts okt and dets", "31. dets 2025", ocr(["Invoice date"], ["31. dets 2025"]), "image_ocr_agreed"],
+    ["accepts märts read by OCR as marts", "31. märts 2025", ocr(["Invoice date"], ["31. marts 2025"]), "image_ocr_agreed"],
+    ["still holds marts on another day", "31. märts 2025", ocr(["Invoice date"], ["30. marts 2025"]), "ocr_no_match"],
+    ["still holds another month whose letters differ", "31. märts 2025", ocr(["Invoice date"], ["31. mai 2025"]), "ocr_no_match"],
   ];
   it.each(cases)("%s", (_name, printed, items, status) => {
     expect(matchLostValue("invoice_date", printed, items, anchor).status).toBe(status);
+  });
+
+  it("reads the Estonian abbreviations as their months", () => {
+    expect(matchLostValue("invoice_date", "31. okt 2025", ocr(["Arve kuupäev"], ["31. okt 2025"]), "Arve kuupäev")).toEqual({ status: "image_ocr_agreed", value: "2025-10-31" });
+    expect(matchLostValue("invoice_date", "31. märts 2026", ocr(["Arve kuupäev"], ["31. marts 2026"]), "Arve kuupäev")).toEqual({ status: "image_ocr_agreed", value: "2026-03-31" });
   });
 
   it("returns the ISO value of the client's date", () => {

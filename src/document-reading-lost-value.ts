@@ -466,7 +466,9 @@ export function matchLostValue(
   if (dates.length > 1) return { status: "ocr_ambiguous" };
   const date = dates[0]!;
   if (date.ambiguousSlash || date.values.length !== 1) return { status: "ocr_ambiguous" };
-  if (date.values[0] !== iso || date.text.replace(/\s+/g, "") !== normalized.replace(/\s+/g, "")) {
+  // Letter diacritics fold (OCR reads "märts" as "marts"); the ISO date above already fixes every digit.
+  const form = (text: string) => text.normalize("NFD").replace(/\p{M}+/gu, "").replace(/\s+/g, "");
+  if (date.values[0] !== iso || form(date.text) !== form(normalized)) {
     return { status: "ocr_no_match" };
   }
   if (candidates(line.text).some((candidate) => candidate.start < date.start || candidate.bareEnd > date.end)) {

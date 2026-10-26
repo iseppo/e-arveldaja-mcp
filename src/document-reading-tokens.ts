@@ -128,6 +128,8 @@ const MONTHS: Readonly<Record<string, number>> = {
   october: 10, december: 12,
   jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9,
   oct: 10, nov: 11, dec: 12,
+  // Estonian abbreviations (Google invoices print "28. veebr", "31. okt", "31. dets"); "marts" is OCR's "märts".
+  jaan: 1, veebr: 2, marts: 3, okt: 10, dets: 12,
 };
 
 function isoDate(year: number, month: number, day: number): string | undefined {
