@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Wise payment you already booked by hand with its Wise ID as the journal's document number is recognised as booked instead of held for review.** Before, such a row (e.g. a transfer to a person or a loan paid out from Wise, booked as `WISE:TRANSFER-…`) was held as an undeterminable counterpart, or as an inconsistent journal when `inter_account_dimension_id` was given. Details: `import_wise_transactions` skips the row as `already_journalized` (record_id = the journal) when exactly one live, registered journal carries the row's exact Wise ID, names no other Wise ID, has an EUR amount on every posting, and its Wise-account postings move the row's EUR amount in the row's direction (gross, or net of the fee while debiting exactly the fee on the fee account, in which case the fee row is skipped too). The journal is bound into the plan digest and re-checked on execute like other already-journalized rows; its reconciliation detail carries no `ownership_basis`. Several labelled journals, another amount or direction, an unregistered journal or a foreign posting without an EUR base still hold as before. Own transfers keep their existing inter-account handling.
+
 ## [0.32.2] - 2026-10-26
 
 ### Fixed

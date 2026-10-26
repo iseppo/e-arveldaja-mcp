@@ -1130,6 +1130,18 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   }
   const eligibleIds = new Set(eligible.map(row => normalizeReference(row.id)));
 
+  const hasForeignPostingWithoutBase = (journal: Journal): boolean =>
+    (journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
+      (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR");
+  // Whether the journal's Wise-dimension postings net to `amount` in the
+  // row's direction (IN debits the Wise account), in base EUR.
+  const wiseLegMoves = (journal: Journal | undefined, row: WiseRow, amount: number): boolean => {
+    const signedWiseCents = (journal?.postings ?? [])
+      .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
+      .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
+    return journal !== undefined &&
+      signedWiseCents === (sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1) * cents(amount);
+  };
   const approvedTransferDecisions = [...transferDecisions.values()].filter(
     decision => decision.ownershipBasis !== undefined,
   );
@@ -1176,18 +1188,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
           ? "counterpart_bank_ref"
           : "other",
       };
-    };
-    const hasForeignPostingWithoutBase = (journal: Journal): boolean =>
-      (journal.postings ?? []).some(posting => !posting.is_deleted && posting.base_amount == null &&
-        (posting.cl_currencies_id ?? journal.cl_currencies_id ?? "EUR").toUpperCase() !== "EUR");
-    // Whether the journal's Wise-dimension postings net to `amount` in the
-    // row's direction (IN debits the Wise account), in base EUR.
-    const wiseLegMoves = (journal: Journal | undefined, row: WiseRow, amount: number): boolean => {
-      const signedWiseCents = (journal?.postings ?? [])
-        .filter(posting => !posting.is_deleted && posting.accounts_dimensions_id === accounts_dimensions_id)
-        .reduce((sum, posting) => sum + (posting.type === "D" ? 1 : -1) * cents(posting.base_amount ?? posting.amount), 0);
-      return journal !== undefined &&
-        signedWiseCents === (sourceDirectionForWiseDirection(row.direction) === "IN" ? 1 : -1) * cents(amount);
     };
     const mappingRejection = (row: WiseRow, journalId: number): string | undefined => {
       const decision = transferDecisions.get(row);
@@ -1576,6 +1576,88 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     rejectMapping(row, journalId, "the row is not an own transfer approved for inter-account booking");
   }
   ownershipReviews.push(...mappingReviews);
+
+  // Exact-label coverage, for a row (transfer or not) that is not an own
+  // transfer handled above: when exactly one live journal is labelled with
+  // this row's Wise ID, is registered, names no other Wise ID, is not the
+  // registration journal of a stored Wise-account row, shows EUR for every
+  // posting, and its Wise-account postings move this row's EUR amount in the
+  // row's direction (gross, or net of the fee while debiting exactly the fee
+  // on the fee account), that journal already books the row. No Wise bank row
+  // is created, the assertion binds the journal into the plan digest and
+  // execute re-checks it. The counterpart of a booked row is irrelevant, so
+  // this precedes the counterpart and identity holds; anything else keeps
+  // today's flow.
+  for (const entry of [...created]) {
+    const row = entry.source_row;
+    if (!row || entry.status !== "would_create") continue;
+    const decision = transferDecisions.get(row);
+    if (decision?.ownershipBasis !== undefined) continue;
+    if (legsById.get(row.id)?.length !== 1 || legSuffix.has(row)) continue;
+    if (alreadyJournalized.some(assertion => assertion.row_index === row.rowIndex)) continue;
+    const mainKey = `row:${row.rowIndex}:main`;
+    const mainIndex = commands.findIndex(command => command.row_key === mainKey && command.action === "main_create");
+    if (mainIndex < 0 || bookedCurrencyForWiseRow(row) !== "EUR") continue;
+    const labelled = journalSnapshot.filter(journal =>
+      journal.id !== undefined && !journal.is_deleted && journalLabelledWithWiseId(journal, row.id));
+    if (labelled.length !== 1) continue;
+    const journal = labelled[0]!;
+    const journalId = journal.id!;
+    if (journal.registered !== true || hasForeignPostingWithoutBase(journal)) continue;
+    if (knownWiseLabels.some(other => other !== row.id && journalLabelledWithWiseId(journal, other))) continue;
+    if (journal.operation_type === "TRANSACTION" && existingTx.some(tx =>
+      tx.id === journal.operations_id && tx.accounts_dimensions_id === accounts_dimensions_id)) continue;
+    const fee = bookedFeeAmountForWiseRow(row);
+    const netAmount = wiseLegAmountNetOfFee(row, entry.amount);
+    const booksFee = feeAccountDimensionsId !== undefined && (journal.postings ?? []).some(posting =>
+      !posting.is_deleted && posting.type === "D" && posting.accounts_dimensions_id === feeAccountDimensionsId &&
+      cents(posting.base_amount ?? posting.amount) === cents(fee));
+    const booksNetOfFee = netAmount !== undefined && booksFee && wiseLegMoves(journal, row, netAmount);
+    if (!wiseLegMoves(journal, row, entry.amount) && !booksNetOfFee) continue;
+
+    commands.splice(mainIndex, 1);
+    for (const command of commands) {
+      if (command.depends_on === mainKey) command.depends_on = null;
+    }
+    mainCommandKeysByRow.delete(row.rowIndex);
+    created.splice(created.indexOf(entry), 1);
+    // The ownership review asked whether to book the row as an own transfer;
+    // the row is booked already, so it has nothing left to decide.
+    const ownershipReviewIndex = decision?.review === undefined ? -1 : ownershipReviews.indexOf(decision.review);
+    if (ownershipReviewIndex >= 0) ownershipReviews.splice(ownershipReviewIndex, 1);
+    skipped.push({
+      wise_id: row.id,
+      reason: `Already journalized: journal ${journalId} is labelled with this Wise ID and books this movement on the Wise account; no Wise bank row created`,
+      kind: "already_journalized",
+      record_id: journalId,
+    });
+    // Net of the fee, the journal books the fee too: booking the fee row
+    // would expense it twice.
+    const feeCommand = commands.find(command => command.row_key === `row:${row.rowIndex}:fee`);
+    if (booksNetOfFee && feeCommand !== undefined && feeCommand.booked_currency === "EUR" &&
+      cents(feeCommand.booked_amount) === cents(fee)) {
+      commands.splice(commands.indexOf(feeCommand), 1);
+      const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
+      if (feeEntryIndex >= 0) created.splice(feeEntryIndex, 1);
+      skipped.push({
+        wise_id: feeCommand.wise_id,
+        reason: `Fee already journalized: journal ${journalId} books this movement net of the fee`,
+        kind: "already_journalized",
+        record_id: journalId,
+      });
+    }
+    alreadyJournalized.push({
+      row_index: row.rowIndex,
+      row_key: `row:${row.rowIndex}:exact_label`,
+      wise_id: row.id,
+      date: entry.date,
+      booked_amount: entry.amount,
+      booked_currency: "EUR",
+      source_direction: entry.source_direction,
+      existing_journal_id: journalId,
+      current_journal_state: journal,
+    });
+  }
 
   // An untagged stored row of the same movement on this account, e.g. a card
   // payment entered by hand. A stored direction marker, when present, must
