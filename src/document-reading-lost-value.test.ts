@@ -324,4 +324,37 @@ describe("pdfPageBoxRefusal", () => {
     expect(await pdfPageBoxRefusal(Buffer.concat([many(2, big), Buffer.from("1 0 obj << /MediaBox [0 0 595 842] >> endobj\n")]))).toBeNull();
     expect(await pdfPageBoxRefusal(many(3, big))).toBe("object_stream_unreadable");
   });
+
+  // Review MAJOR-1: every `stream` keyword looked back unbounded for ` obj` (322 KB took 11 s, synchronously).
+  it("stays linear on many `stream` keywords far from any object header, and refuses them", async () => {
+    const body = "%PDF-1.4\n1 0 obj\n<< /MediaBox [0 0 595 842] >>\nendobj\n%" + "x".repeat(2000) + "\n" + "%stream\n".repeat(40_000);
+    const started = Date.now();
+    expect(await pdfPageBoxRefusal(Buffer.from(body, "latin1"))).toBe("object_stream_unreadable");
+    expect(Date.now() - started).toBeLessThan(2500);
+  });
+
+  it("refuses past 4096 `stream` keywords even when none is an object stream", async () => {
+    const plain = (count: number) => Buffer.from("%PDF-1.4\n1 0 obj\n<< /MediaBox [0 0 595 842] >>\nendobj\n" +
+      Array.from({ length: count }, (_, i) => `${i + 2} 0 obj\n<< /Length 1 >>\nstream\nx\nendstream\nendobj\n`).join(""), "latin1");
+    expect(await pdfPageBoxRefusal(plain(4096))).toBeNull();
+    expect(await pdfPageBoxRefusal(plain(4097))).toBe("object_stream_unreadable");
+  });
+
+  it("reads an object stream whose `stream` keyword ends in a lone CR", async () => {
+    const data = deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] /Rotate 90 >>", "latin1"));
+    const pdf = Buffer.concat([
+      Buffer.from(`%PDF-1.5\n1 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${data.length} >>\nstream\r`, "latin1"),
+      data,
+      Buffer.from("\nendstream\nendobj\n2 0 obj << /MediaBox [0 0 595 842] >> endobj\n%%EOF\n", "latin1"),
+    ]);
+    expect(await pdfPageBoxRefusal(pdf)).toBe("rotated_page");
+  });
+
+  it("compares many CropBoxes with many MediaBoxes in linear time", async () => {
+    const n = 20_000;
+    const boxes = Array.from({ length: n }, (_, i) => `/MediaBox [0 0 ${i + 1} 842]`).join("\n") + "\n" + `/CropBox [0 0 ${n} 842]\n`.repeat(n);
+    const started = Date.now();
+    expect(await pdfPageBoxRefusal(Buffer.from(`%PDF-1.4\n${boxes}`, "latin1"))).toBeNull();
+    expect(Date.now() - started).toBeLessThan(2500);
+  });
 });

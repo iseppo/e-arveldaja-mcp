@@ -200,6 +200,9 @@ const OBJ_STM_MAX_BYTES = 16 * 1024 * 1024;
 /** All object streams together (inflated) and their number: past either, the scan refuses (a typed row). */
 const OBJ_STM_TOTAL_MAX_BYTES = 32 * 1024 * 1024;
 const OBJ_STM_MAX_COUNT = 256;
+/** Bytes before a `stream` keyword searched for its ` obj`, and `stream` keywords scanned at all: past either, refused. */
+const STREAM_DICT_MAX_BYTES = 4096;
+const STREAM_KEYWORD_MAX_COUNT = 4096;
 const NUM = "-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)";
 const BOX_RE = new RegExp(`^\\s*\\[\\s*(${NUM})\\s+(${NUM})\\s+(${NUM})\\s+(${NUM})\\s*\\]`);
 
@@ -221,10 +224,17 @@ function decodeNameEscapes(text: string): string {
 async function objectStreamTexts(pdf: Buffer, text: string): Promise<string[] | string> {
   const texts: string[] = [];
   let budget = OBJ_STM_TOTAL_MAX_BYTES;
-  for (const match of text.matchAll(/(?<!end)stream\r?\n/g)) {
-    const objStart = text.lastIndexOf(" obj", match.index!);
-    if (objStart < 0) continue;
-    const dict = decodeNameEscapes(text.slice(objStart, match.index!));
+  let keywords = 0;
+  // Bounded per keyword and in count: an unbounded look-back per `stream` made a crafted file quadratic.
+  for (const match of text.matchAll(/(?<!end)stream(?:\r\n|\r|\n)/g)) {
+    if (++keywords > STREAM_KEYWORD_MAX_COUNT) return "object_stream_unreadable";
+    const windowStart = Math.max(0, match.index! - STREAM_DICT_MAX_BYTES);
+    const window = text.slice(windowStart, match.index!);
+    let objAt = -1;
+    for (const header of window.matchAll(/\sobj(?![A-Za-z0-9])/g)) objAt = header.index!;
+    // No `obj` header close before the keyword: a dictionary this long could hide an object stream, so refuse.
+    if (objAt < 0) return "object_stream_unreadable";
+    const dict = decodeNameEscapes(window.slice(objAt));
     // An object stream by its type, or by the /N and /First every object stream carries (a viewer ignores /Type).
     if (!/\/Type\s*\/ObjStm(?![A-Za-z0-9])/.test(dict) &&
       !(/\/N(?![A-Za-z0-9])/.test(dict) && /\/First(?![A-Za-z0-9])/.test(dict))) continue;
@@ -270,9 +280,12 @@ export async function pdfPageBoxRefusal(pdf: Buffer): Promise<string | null> {
   const media = boxesAt(text, "MediaBox");
   if (media.length === 0 || media.some((box) => box === null)) return "media_box_unreadable";
   if (media.some((box) => box![0] !== 0 || box![1] !== 0)) return "box_origin_not_zero";
+  // Boxes compared on a 0.001 pt grid through a Set (linear); a value straddling a grid line refuses, never passes.
+  const boxKey = (box: number[]) => box.map((value) => Math.round(value * 1000)).join(" ");
+  const mediaKeys = new Set(media.map((box) => boxKey(box!)));
   for (const crop of boxesAt(text, "CropBox")) {
     if (crop === null) return "crop_box_unreadable";
-    if (!media.some((box) => box!.every((value, i) => Math.abs(value - crop[i]!) < 1e-3))) return "crop_box_differs";
+    if (!mediaKeys.has(boxKey(crop))) return "crop_box_differs";
   }
   return null;
 }
