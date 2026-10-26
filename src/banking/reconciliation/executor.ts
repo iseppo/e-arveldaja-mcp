@@ -65,6 +65,7 @@ import {
   camtInstructionIdOf,
   wiseReferenceInstructionIdOf,
   getSameTypeReciprocalEvidence,
+  hasMirrorOwnOriginEvidence,
   type InterAccountMatchLookups,
   type OneSidedInference,
   type TransferResolution,
@@ -927,21 +928,6 @@ export async function runInterAccountMatching(
     });
   }
 
-  // Deleting a row as a transfer mirror needs positive evidence it came from
-  // the source account: its counterparty IBAN is the source account's, or (with
-  // no IBAN) the payer is the company itself — same name AND same legal form.
-  // A row from any other IBAN (third party or another own account) is never a
-  // mirror of this source, whatever its name says. A bare row (no IBAN, no
-  // name), a merely similar name, or an own account's display title (a bank's
-  // own refund "Swedbank AS" vs an account titled "Swedbank") is not evidence.
-  function hasOwnOriginEvidence(row: Transaction, sourceDimensionId: number): boolean {
-    const iban = counterpartyIbanOf(row);
-    if (iban) return ownIbanToDimension.get(iban)?.has(sourceDimensionId) ?? false;
-    // An `x=i` row left out a proven external IBAN: no name fallback.
-    if (isCamtCounterpartyIbanOmitted(row)) return false;
-    return sameCompanyIdentity(row.bank_account_name, invoiceInfo.invoice_company_name);
-  }
-
   // A pair held back from both pair matching and one-sided booking (booking
   // each leg one-sided would double-book it) is reported, never dropped silently.
   function reportBlockedPair(
@@ -1018,7 +1004,7 @@ export async function runInterAccountMatching(
       const inCounterpartyDims = inCounterpartyIban ? ownIbanToDimension.get(inCounterpartyIban) : undefined;
       if (outCounterpartyDims && !outCounterpartyDims.has(txIn.accounts_dimensions_id)) continue;
       if (inCounterpartyDims && !inCounterpartyDims.has(txOut.accounts_dimensions_id)) continue;
-      if (!hasOwnOriginEvidence(txIn, txOut.accounts_dimensions_id)) continue;
+      if (!hasMirrorOwnOriginEvidence(txIn, txOut, lookups)) continue;
 
       const hasOutgoingIbanMatchesIncomingAccount =
         Boolean(outCounterpartyIban && outCounterpartyIban === inAccountIban);
@@ -1303,7 +1289,7 @@ export async function runInterAccountMatching(
     }
     const source = txProvenOutgoing ? tx : reciprocal;
     const counterpart = txProvenOutgoing ? reciprocal : tx;
-    if (!hasOwnOriginEvidence(counterpart, source.accounts_dimensions_id)) {
+    if (!hasMirrorOwnOriginEvidence(counterpart, source, lookups)) {
       // Not a deletable mirror, yet both legs infer each other's account:
       // booking each one-sided would double-book. Leave both for review.
       reportBlockedPair(source, counterpart, bestCandidate.confidence, "counterpart_lacks_own_origin");
@@ -1497,7 +1483,7 @@ export async function runInterAccountMatching(
     if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED") return undefined;
     if (counterpart.accounts_dimensions_id !== targetDimension || !sameAmountToTheCent(counterpart.amount, tx.amount)) return undefined;
     if (!isPlainEur(tx) || !isPlainEur(counterpart)) return undefined;
-    if (!hasOwnOriginEvidence(tx, targetDimension)) return undefined;
+    if (!hasMirrorOwnOriginEvidence(tx, counterpart, lookups)) return undefined;
     const direction = signedBankTransactionDirection(tx);
     if (!direction) return undefined;
     const ownSide = direction === "incoming" ? "D" : "C";
@@ -1826,8 +1812,7 @@ export async function executeInterAccount(
       const compatibility = getTransferPairCompatibility(source, mirror, action.pairEvidence.maxDateGap);
       if (!compatibility || compatibility.conflictingComparableAmounts || !sameAmountToTheCent(compatibility.txAComparableAmount, action.distributionAmount)) return false;
       if (action.pairEvidence.kind === "same_type") return !!getSameTypeReciprocalEvidence(source, mirror, sourceInference, inferOneSidedTransfer(mirror, lookups, new Map()), mapping.dimensionToIban);
-      const mirrorIban = counterpartyIbanOf(mirror);
-      const origin = mirrorIban ? mapping.ownIbanToDimension.get(mirrorIban)?.has(source.accounts_dimensions_id!) : sameCompanyIdentity(mirror.bank_account_name ?? "", lookups.companyLegalName);
+      const origin = hasMirrorOwnOriginEvidence(mirror, source, lookups);
       const sourceIban = counterpartyIbanOf(source);
       return !!origin && (sourceInference.targetDimension === mirror.accounts_dimensions_id
         || !!(sourceIban && mapping.ownIbanToDimension.get(sourceIban)?.has(mirror.accounts_dimensions_id!)));

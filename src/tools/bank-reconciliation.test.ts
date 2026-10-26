@@ -1644,15 +1644,21 @@ describe("reconcile_inter_account_transfers", () => {
       expect(api.transactions.delete).not.toHaveBeenCalled();
     });
 
-    it("does not pair with an incoming row named as the company but from a third-party IBAN", async () => {
-      const { handler, api } = setupInterAccountTool({
-        transactions: [outAtoB, { ...customerIntoC, accounts_dimensions_id: 22, bank_account_name: "Test OÜ", clients_id: null }],
-        bankAccounts: threeAccounts.slice(0, 2),
-      });
-      const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+    it("pairs an incoming row named as the company from an unregistered IBAN only when the source names its account", async () => {
+      // An unregistered IBAN under the company's own name (a provider's pooled
+      // payout IBAN) is the mirror only because the outgoing leg names the
+      // receiving account's registered IBAN (three accounts: no name target).
+      const pooledIntoB = { ...customerIntoC, accounts_dimensions_id: 22, bank_account_name: "Test OÜ", clients_id: null };
+      const paired = setupInterAccountTool({ transactions: [outAtoB, pooledIntoB], bankAccounts: threeAccounts });
+      const pairedPayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(paired.handler)).content[0]!.text);
+      expect(pairedPayload.matched_pairs).toBe(1);
+      expect(paired.api.transactions.delete).toHaveBeenCalledWith(2);
 
-      expect(payload.matched_pairs).toBe(0);
-      expect(api.transactions.delete).not.toHaveBeenCalled();
+      // The same row when the source names another account (Swed) is never its mirror.
+      const held = setupInterAccountTool({ transactions: [{ ...outAtoB, bank_account_no: "EE33CCCC" }, pooledIntoB], bankAccounts: threeAccounts });
+      const heldPayload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(held.handler)).content[0]!.text);
+      expect(heldPayload.matched_pairs).toBe(0);
+      expect(held.api.transactions.delete).not.toHaveBeenCalled();
     });
 
     it.each(["incoming", "outgoing", "standalone"])("vetoes trusted C3 %s own-transfer inference in preview and execute", async kind => {
@@ -2489,7 +2495,9 @@ describe("reconcile_inter_account_transfers", () => {
       const base = { status: "PROJECT", is_deleted: false, cl_currencies_id: "EUR", date: "2026-10-01", clients_id: null };
 
       it("reports a same-type pair whose mirror leg lacks own-origin evidence (counterpart_lacks_own_origin)", async () => {
-        const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
+        // Neither leg names the other's registered IBAN: the company names alone
+        // do not prove the Wise row is this LHV payment's mirror.
+        const lhvOut = camtSigned({ ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE77OTHER", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
         const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
         const { handler, api } = setupInterAccountTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
         const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
@@ -2504,6 +2512,46 @@ describe("reconcile_inter_account_transfers", () => {
           code: "counterpart_lacks_own_origin",
         })]);
         expect(payload.ambiguous_pairs[0].reason).not.toMatch(/delete|remove/i);
+      });
+
+      // The incoming leg comes from an IBAN that is no registered own account
+      // (a provider's pooled payout IBAN) under the company's own name, and the
+      // outgoing leg names the receiving account's registered IBAN: the mirror
+      // image of an outgoing payment to an unregistered IBAN whose mirror names
+      // the paying account. Together the two legs prove the transfer.
+      const lhvToWise = () => camtSigned({ ...base, id: 1, type: "C", amount: 100, accounts_dimensions_id: 11, bank_account_no: "BE22", bank_account_name: "Männipuu OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
+      for (const [label, wiseDescription] of [["signed incoming", "WISE:TRANSFER-1 [source_direction=IN]"], ["unsigned same-type", "WISE:TRANSFER-1"]] as const) {
+        it(`pairs an incoming leg from an unregistered IBAN under the company name when the source names its account (${label})`, async () => {
+          const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Männipuu OÜ", description: wiseDescription };
+          const { handler, api } = setupInterAccountTool({ transactions: [lhvToWise(), wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+          const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+          expect(payload.matched_pairs).toBe(1);
+          expect(payload.matched_one_sided).toBe(0);
+          expect(payload.ambiguous_pairs).toEqual([]);
+          expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+          expect(api.transactions.confirm.mock.calls[0]![0]).toBe(1);
+          expect(api.transactions.delete).toHaveBeenCalledWith(2);
+        });
+      }
+
+      it("never deletes an incoming leg from an unregistered IBAN under a third party's name as a mirror", async () => {
+        const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "BE99POOL", bank_account_name: "Kuusepuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvToWise(), wiseIn], bankAccounts: lhvWise, companyName: "Männipuu OÜ" });
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      });
+
+      it("never deletes an incoming leg from an own account without a dimension as a mirror", async () => {
+        const accounts = [...lhvWise, { id: 3, account_name_est: "Säästukonto", account_no: "EE33", iban_code: "EE33", accounts_dimensions_id: null }];
+        const wiseIn = { ...base, id: 2, type: "C", amount: 100, accounts_dimensions_id: 22, bank_account_no: "EE33", bank_account_name: "Männipuu OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+        const { handler, api } = setupInterAccountTool({ transactions: [lhvToWise(), wiseIn], bankAccounts: accounts, companyName: "Männipuu OÜ" });
+        const payload = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+
+        expect(payload.matched_pairs).toBe(0);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
       });
 
       it("reports an opposite-direction pair whose base amounts conflict (conflicting_transfer_amounts)", async () => {

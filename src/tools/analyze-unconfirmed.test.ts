@@ -668,8 +668,10 @@ describe("analyze_unconfirmed_transactions", () => {
     });
 
     it("downgrades a pair whose mirror leg lacks own-origin evidence", async () => {
+      // Neither leg names the other's registered IBAN.
+      const lhvOutUnregistered = camtSigned({ ...base, id: 1, amount: 100, accounts_dimensions_id: 100, bank_account_no: "BE77OTHER", bank_account_name: "Test OÜ", description: "x\n[e-arveldaja-mcp:camt dir=DBIT sig=abcdefabcdefabcd]" });
       const wiseIn = { ...base, id: 2, amount: 100, accounts_dimensions_id: 300, bank_account_no: "BE99POOL", bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
-      const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
+      const handler = setupTool({ transactions: [lhvOutUnregistered, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
       const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
       expect(payload.suggestions).toHaveLength(2);
       for (const s of payload.suggestions) {
@@ -677,6 +679,14 @@ describe("analyze_unconfirmed_transactions", () => {
         expect(s.distribution).toBeUndefined();
         expect(s.reason).toMatch(/own-origin/);
       }
+    });
+
+    it("does not downgrade a mirror from an unregistered IBAN under the company name when the source names its account", async () => {
+      const wiseIn = { ...base, id: 2, amount: 100, accounts_dimensions_id: 300, bank_account_no: "BE99POOL", bank_account_name: "Test OÜ", description: "WISE:TRANSFER-1 [source_direction=IN]" };
+      const handler = setupTool({ transactions: [lhvOut, wiseIn], bankAccounts: lhvWise, companyName: "Test OÜ" });
+      const payload = parseToolPayload<AnalyzeUnconfirmedPayload>((await handler({})).content[0]!.text);
+      for (const s of payload.suggestions) expect(s.reason ?? "").not.toMatch(/own-origin/);
+      expect(payload.suggestions.find(s => s.transaction_id === 1)!.suggested_action).toBe("confirm_inter_account");
     });
 
     it("keeps the confirm suggestion for two same-direction rows (separate transfers)", async () => {

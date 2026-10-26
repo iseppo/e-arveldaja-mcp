@@ -324,6 +324,39 @@ export function inferOneSidedTransfer(
 }
 
 /**
+ * Positive evidence that `mirror` came from `source`'s account, so it may be
+ * deleted as that transfer's mirror leg: its counterparty IBAN is the source
+ * account's, or (with no IBAN) the payer is the company itself — same name AND
+ * same legal form. A row from any other registered own account, or from a
+ * third party, is never a mirror of this source, whatever its name says. A
+ * bare row (no IBAN, no name), a merely similar name, or an own account's
+ * display title (a bank's own refund "Swedbank AS" vs an account titled
+ * "Swedbank") is not evidence.
+ *
+ * One exception, the reverse of an outgoing payment to an unregistered IBAN
+ * whose mirror names the paying account: a mirror from an IBAN that is no own
+ * account at all (a provider's pooled payout IBAN) under the company's own
+ * identity counts when the source names the mirror's registered account IBAN.
+ */
+export function hasMirrorOwnOriginEvidence(
+  mirror: Transaction,
+  source: Transaction,
+  lookups: Pick<InterAccountMatchLookups, "ownIbanToDimension" | "ownIbansWithoutDimension" | "companyLegalName">,
+): boolean {
+  const iban = counterpartyIbanOf(mirror);
+  if (iban) {
+    if (lookups.ownIbanToDimension.get(iban)?.has(source.accounts_dimensions_id)) return true;
+    if (lookups.ownIbanToDimension.has(iban) || lookups.ownIbansWithoutDimension.has(iban)) return false;
+    const sourceIban = counterpartyIbanOf(source);
+    return Boolean(sourceIban && lookups.ownIbanToDimension.get(sourceIban)?.has(mirror.accounts_dimensions_id)) &&
+      sameCompanyIdentity(mirror.bank_account_name, lookups.companyLegalName);
+  }
+  // An `x=i` row left out a proven external IBAN: no name fallback.
+  if (isCamtCounterpartyIbanOmitted(mirror)) return false;
+  return sameCompanyIdentity(mirror.bank_account_name, lookups.companyLegalName);
+}
+
+/**
  * For a row with an unverifiable CAMT marker: the own-transfer inference its
  * UNTRUSTED marker IBAN or its name would give, or undefined when neither
  * points at an own account (with or without a dimension). Used only to report such a row for review
