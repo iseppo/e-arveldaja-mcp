@@ -430,6 +430,40 @@ describe("lost-value render/OCR seam", () => {
     expect(await next).toEqual({ ok: true, items: [] });
     expect(parseMock).toHaveBeenCalledTimes(3);
   });
+
+  // Review MAJOR-3: timed-out jobs stayed queued with their crops and still ran later.
+  it("drops a queued OCR whose caller already timed out, and never runs it", async () => {
+    const { ocrPng } = await import("./document-parser.js");
+    let release: (value: unknown) => void = () => {};
+    parseMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    parseMock.mockResolvedValue({ pages: [{ textItems: [] }] });
+    const first = ocrPng(Buffer.from("a"), 10);
+    const second = ocrPng(Buffer.from("b"), 10);
+    expect(await first).toEqual({ ok: false });
+    expect(await second).toEqual({ ok: false });
+    release({ pages: [{ textItems: [] }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(parseMock).toHaveBeenCalledTimes(1);
+    expect(await ocrPng(Buffer.from("c"))).toEqual({ ok: true, items: [] });
+    expect(parseMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers unavailable at once past the queue cap while an OCR stalls", async () => {
+    const { ocrPng, LOST_VALUE_OCR_QUEUE_MAX } = await import("./document-parser.js");
+    let release: (value: unknown) => void = () => {};
+    parseMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    parseMock.mockResolvedValue({ pages: [{ textItems: [] }] });
+    const queued = Array.from({ length: LOST_VALUE_OCR_QUEUE_MAX }, (_, i) => ocrPng(Buffer.from(`q${i}`), 10));
+    expect(await Promise.all(queued)).toEqual(queued.map(() => ({ ok: false })));
+    // The stalled OCR still holds the queue: a call with a 60 s timeout must not wait for it.
+    const started = Date.now();
+    expect(await ocrPng(Buffer.from("over"), 60_000)).toEqual({ ok: false });
+    expect(Date.now() - started).toBeLessThan(1000);
+    release({ pages: [{ textItems: [] }] });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(parseMock).toHaveBeenCalledTimes(1);
+    expect(await ocrPng(Buffer.from("after"))).toEqual({ ok: true, items: [] });
+  });
 });
 
 function complexityPage(overrides: Partial<{

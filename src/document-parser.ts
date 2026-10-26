@@ -323,26 +323,41 @@ export async function renderPagePng(filePath: string, page: number): Promise<{ p
 }
 
 let ocrQueue: Promise<unknown> = Promise.resolve();
+/** OCR jobs queued or running at most; past it a caller is told unavailable at once (a stalled OCR cannot pile up work). */
+export const LOST_VALUE_OCR_QUEUE_MAX = 4;
+let ocrPending = 0;
 
 /**
  * OCR of one PNG crop. Single-flight: one OCR at a time, the next waits for the
- * previous native work to settle (a timed-out OCR keeps running natively).
- * Every failure and the 30 s timeout resolve to { ok: false }.
+ * previous native work to settle (a timed-out OCR keeps running natively). A job
+ * whose caller already timed out is dropped before it starts and lets go of its
+ * crop. Every failure, the 30 s timeout and a full queue resolve to { ok: false }.
  */
 export function ocrPng(png: Buffer, timeoutMs = LOST_VALUE_OCR_TIMEOUT_MS): Promise<OcrPngResult> {
-  const work = ocrQueue.then(() => getLostValueParser().parse(png));
-  ocrQueue = work.catch(() => undefined);
+  if (ocrPending >= LOST_VALUE_OCR_QUEUE_MAX) return Promise.resolve({ ok: false });
+  ocrPending += 1;
+  // Only `input` is captured below, so clearing it on timeout releases the crop.
+  let input: Buffer | undefined = png;
+  const work = ocrQueue.then(() => {
+    const crop = input;
+    input = undefined;
+    return crop === undefined ? undefined : getLostValueParser().parse(crop);
+  });
+  ocrQueue = work.catch(() => undefined).finally(() => { ocrPending -= 1; });
   const outcome = work.then(
-    (result): OcrPngResult => ({
+    (result): OcrPngResult => result === undefined ? { ok: false } : {
       ok: true,
       items: (result.pages[0]?.textItems ?? []).map(({ text, x, y, width, height, confidence }) =>
         ({ text, x, y, width, height, ...(confidence !== undefined ? { confidence } : {}) })),
-    }),
+    },
     (): OcrPngResult => ({ ok: false }),
   );
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<OcrPngResult>((resolve) => {
-    timer = setTimeout(() => resolve({ ok: false }), timeoutMs);
+    timer = setTimeout(() => {
+      input = undefined;
+      resolve({ ok: false });
+    }, timeoutMs);
     timer.unref?.();
   });
   return Promise.race([outcome, timeout]).finally(() => clearTimeout(timer));
