@@ -48,6 +48,7 @@ import {
   type WiseImportCommand,
   type WiseInvoiceFixCandidate,
   type WiseAcknowledgedJournalHold,
+  type WiseCounterpartOverride,
   type WiseJournalizedTransferMapping,
   type WiseRow,
   type WiseSkippedEntry,
@@ -338,6 +339,9 @@ export interface WiseProjectionInput {
    * that do not book it. Never an assertion; releases a held row only when it
    * covers the row's full evidence. */
   readonly acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
+  /** Owner choices (counterpart_overrides), already applied to the transfer
+   * decisions; listed here only to report the unused ones. */
+  readonly counterpartOverrides?: readonly WiseCounterpartOverride[];
   readonly ownCompanyClientId: number | undefined;
   readonly allPurchaseInvoices: PurchaseInvoice[];
 }
@@ -739,6 +743,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     approvedTransferIds,
     journalizedTransferIds = [],
     acknowledgedJournalHolds = [],
+    counterpartOverrides = [],
     ownCompanyClientId,
     allPurchaseInvoices,
   } = input;
@@ -2006,6 +2011,26 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       wise_id: acknowledgement.wise_id,
       code: "unused_acknowledgement",
       reason: `This acknowledged_journal_holds entry was not used: ${why}.`,
+      source_verified: false,
+      target_verified: false,
+      approval_required: false,
+    });
+  }
+
+  // counterpart_overrides entries that decided nothing are reported, as an
+  // unused acknowledgement is.
+  for (const override of counterpartOverrides) {
+    const legs = eligible.filter(row => row.id === override.wise_id);
+    if (legs.some(row => transferDecisions.get(row)?.counterpartOverrideApplied === true)) continue;
+    const why = legs.length === 0
+      ? "no eligible row of this statement has this Wise ID"
+      : !legs.some(isWiseTransferCandidate)
+        ? "the row is not a Wise transfer row"
+        : "the row has no own-account evidence on another bank account to choose from (an override only picks among the evidenced bank accounts; for a row without evidence pass inter_account_dimension_id)";
+    ownershipReviews.push({
+      wise_id: override.wise_id,
+      code: "unused_counterpart_override",
+      reason: `This counterpart_overrides entry was not used: ${why}.`,
       source_verified: false,
       target_verified: false,
       approval_required: false,

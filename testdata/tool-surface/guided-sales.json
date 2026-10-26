@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 36036,
+    "toolsListBytes": 36471,
     "descriptionsBytes": 5064,
-    "inputSchemasBytes": 26102,
+    "inputSchemasBytes": 26537,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5134
@@ -476,6 +476,28 @@
             "items": {
               "minLength": 1,
               "type": "string"
+            },
+            "type": "array"
+          },
+          "counterpart_overrides": {
+            "description": "Wise only, owner-confirmed only: { wise_id, dimension_id } picking the own bank account of a transfer whose evidence points to several; must be one of the evidenced accounts.",
+            "items": {
+              "properties": {
+                "dimension_id": {
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "wise_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "wise_id",
+                "dimension_id"
+              ],
+              "type": "object"
             },
             "type": "array"
           },

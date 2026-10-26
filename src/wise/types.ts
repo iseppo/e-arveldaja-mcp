@@ -30,9 +30,10 @@ export interface WiseRow {
 export type WiseTransferOwnershipBasis = "verified_endpoints" | "operator_approved";
 
 /** How a transfer row's counterpart bank account was determined: own-account
- * evidence on that bank, the explicit inter_account_dimension_id, or the
+ * evidence on that bank, the owner's pick among the evidenced banks
+ * (counterpart_overrides), the explicit inter_account_dimension_id, or the
  * company's only other bank account. */
-export type WiseCounterpartBasis = "evidence" | "explicit" | "only_other_bank";
+export type WiseCounterpartBasis = "evidence" | "owner_selected" | "explicit" | "only_other_bank";
 
 export interface WiseTransferReview {
   wise_id: string;
@@ -47,6 +48,7 @@ export interface WiseTransferReview {
     | "wise_transfer_mapping_rejected"
     | "unused_mapping"
     | "unused_acknowledgement"
+    | "unused_counterpart_override"
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
     | "wise_transfer_journal_existing_elsewhere"
@@ -98,6 +100,14 @@ export interface WiseAcknowledgedJournalHold {
   journal_ids: number[];
 }
 
+/** One owner choice (counterpart_overrides): the own bank account a transfer
+ * row goes to or from, picked among the banks its own-account evidence points
+ * to. Never a fallback for a row without evidence. */
+export interface WiseCounterpartOverride {
+  wise_id: string;
+  dimension_id: number;
+}
+
 /** One operator-reviewed journalized_transfer_ids entry. */
 export interface WiseJournalizedTransferMapping {
   wise_id: string;
@@ -122,6 +132,9 @@ export interface WiseTransferDecision {
   /** The row's counterpart cannot be determined, or evidence contradicts the
    * selected one: a hard hold, its only review; the row is not imported. */
   counterpartHold?: WiseTransferReview;
+  /** The row's counterpart_overrides entry decided its counterpart (or its
+   * conflict hold, for a bank the evidence does not point to). */
+  counterpartOverrideApplied?: true;
   sourceVerified: boolean;
   targetVerified: boolean;
   ownershipBasis?: WiseTransferOwnershipBasis;

@@ -87,6 +87,9 @@ export function registerWiseImportTools(
       acknowledged_journal_holds: z.array(z.object({ wise_id: z.string().min(1), journal_ids: z.array(coerceId).min(1) })).optional().describe(
         "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds."
       ),
+      counterpart_overrides: z.array(z.object({ wise_id: z.string().min(1), dimension_id: coerceId })).optional().describe(
+        "Owner-confirmed only: { wise_id, dimension_id } picking the own bank account a transfer row goes to or from when its own-account evidence points to several (wise_transfer_counterpart_conflict). The pick must be one of the evidenced accounts, else the row stays held; an entry that decides nothing is reported (unused_counterpart_override)."
+      ),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe(
         "Exact lowercase SHA-256 command digest returned by the reviewed dry run. Required for execute=true when mutations are planned."
       ),
@@ -109,6 +112,7 @@ export function registerWiseImportTools(
       confirm_own_transfer_ids,
       journalized_transfer_ids,
       acknowledged_journal_holds,
+      counterpart_overrides,
       approved_command_digest,
       plan_handle,
       execute,
@@ -134,6 +138,7 @@ export function registerWiseImportTools(
         confirmOwnTransferIds: confirm_own_transfer_ids,
         journalizedTransferIds: journalized_transfer_ids,
         acknowledgedJournalHolds: acknowledged_journal_holds,
+        counterpartOverrides: counterpart_overrides,
         approvedCommandDigest: approved_command_digest,
         dateFrom: date_from,
         dateTo: date_to,

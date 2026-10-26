@@ -7704,6 +7704,107 @@ describe("Wise per-row counterpart (own-account evidence on the other banks)", (
     ]));
     expectNoWiseMutations(setup.api);
   });
+
+  // An LHV statement row of T2 (counterparty the Wise IBAN): with coopT2 the
+  // own-account evidence points to two banks.
+  const lhvT2 = {
+    id: 602, status: "PROJECT", is_deleted: false, type: "C", amount: 250, cl_currencies_id: "EUR", date: "2026-06-05",
+    accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: WISE_IBAN, bank_ref_number: null,
+    description: buildCamtDescriptionWithMetadata("To Wise", {
+      date: "2026-06-05", amount: 250, currency: "EUR", direction: "DBIT",
+      counterparty_name: COMPANY, counterparty_iban: WISE_IBAN, bank_reference: "LHV-REF-9", description: "To Wise",
+    }),
+  };
+  const setupTwoEvidencedBanks = () => setupWiseTool([lhvT1, coopT2, lhvT2], undefined, {
+    accountDimensions: dims, bankAccounts: banks, journals: [lhvT1Journal], invoiceInfo: { invoice_company_name: COMPANY },
+  });
+
+  it("counterpart_overrides picks one of two evidenced banks for that row; the plan confirms against it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    const held = parseWiseResponse(await setupTwoEvidencedBanks().handler({ ...args, execute: false }));
+    expect(held.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-T2", code: "wise_transfer_counterpart_conflict", counterpart_candidate_dimension_ids: [20, 30],
+      reason: expect.stringContaining("counterpart_overrides"),
+    })]);
+    expect(held.execution.commands).toEqual([]);
+
+    const setup = setupTwoEvidencedBanks();
+    const { dry, executed } = await runApprovedWiseImport(setup, {
+      ...args, counterpart_overrides: [{ wise_id: "TRANSFER-T2", dimension_id: 20 }],
+    });
+
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.results).toEqual([expect.objectContaining({ wise_id: "TRANSFER-T2", counterpart_dimension_id: 20, counterpart_basis: "owner_selected" })]);
+    expect(dry.execution.commands).toEqual([
+      expect.objectContaining({ action: "main_create", wise_id: "TRANSFER-T2" }),
+      expect.objectContaining({ action: "inter_account", wise_id: "TRANSFER-T2", counterpart_dimension_id: 20 }),
+    ]);
+    expect(dry.workflow.approval_previews[0]!.execute_args).toEqual(expect.objectContaining({
+      counterpart_overrides: [{ wise_id: "TRANSFER-T2", dimension_id: 20 }],
+    }));
+    expect(setup.api.transactions.confirm).toHaveBeenCalledWith(9001, [
+      { related_table: "accounts", related_id: 1020, related_sub_id: 20, amount: 250 },
+    ]);
+    expect(executed.execution.errors).toEqual([]);
+  });
+
+  it("an override the evidence does not point to holds the row; an executed plan without its override is plan drift", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transfer("TRANSFER-T2", "2026-06-05", "250")]));
+    // Only Coop (30) is evidenced: picking LHV (20) is a conflict, never a fallback.
+    const setup = setupTwoBanks();
+    const dry = parseWiseResponse(await setup.handler({
+      ...args, counterpart_overrides: [{ wise_id: "TRANSFER-T2", dimension_id: 20 }], execute: false,
+    }));
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-T2", code: "wise_transfer_counterpart_conflict", counterpart_candidate_dimension_ids: [20, 30],
+      reason: expect.stringContaining("is not one the own-account evidence (evidence_transaction_ids) points to: 30"),
+    })]);
+    expect(dry.execution.commands).toEqual([]);
+    expectNoWiseMutations(setup.api);
+
+    const bound = setupTwoEvidencedBanks();
+    const reviewed = parseWiseResponse(await bound.rawHandler({
+      ...args, counterpart_overrides: [{ wise_id: "TRANSFER-T2", dimension_id: 30 }], execute: false,
+    }));
+    expect(reviewed.plan_handle).toBeDefined();
+    clearWiseCallHistory(bound.api);
+    const drifted = parseWiseResponse<WiseFailurePayload>(await bound.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expectNoWiseMutations(bound.api);
+  });
+
+  it("reports an override that decides nothing and rejects a Wise ID listed twice", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      transfer("TRANSFER-T3", "2026-06-20", "75"), cardPaymentValues("2026-06-21"),
+    ]));
+    const setup = setupTwoBanks();
+    const dry = parseWiseResponse(await setup.handler({
+      ...args,
+      counterpart_overrides: [
+        { wise_id: "TRANSFER-T3", dimension_id: 20 },
+        { wise_id: "CARD_TRANSACTION-PLAN-1", dimension_id: 20 },
+        { wise_id: "TRANSFER-ABSENT", dimension_id: 30 },
+      ],
+      execute: false,
+    }));
+    expect(dry.ownership_reviews).toEqual(expect.arrayContaining([
+      expect.objectContaining({ wise_id: "TRANSFER-T3", code: "wise_transfer_dimensions_unverified" }),
+      expect.objectContaining({ wise_id: "TRANSFER-T3", code: "unused_counterpart_override", reason: expect.stringContaining("no own-account evidence") }),
+      expect.objectContaining({ wise_id: "CARD_TRANSACTION-PLAN-1", code: "unused_counterpart_override", reason: expect.stringContaining("not a Wise transfer row") }),
+      expect.objectContaining({ wise_id: "TRANSFER-ABSENT", code: "unused_counterpart_override", reason: expect.stringContaining("no eligible row") }),
+    ]));
+    expect(dry.execution.commands.map(command => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+
+    const outcome = await captureM03Outcome(setup.handler, {
+      ...args,
+      counterpart_overrides: [{ wise_id: "TRANSFER-T3", dimension_id: 20 }, { wise_id: "TRANSFER-T3", dimension_id: 30 }],
+      execute: false,
+    });
+    expect(String((outcome.error as Error | undefined)?.message ?? JSON.stringify(outcome.payload))).toContain("counterpart_overrides must list each Wise ID once");
+    expectNoWiseMutations(setup.api);
+  });
 });
 
 describe("Wise row booked by a journal labelled with its exact Wise ID (live 2026-10-26)", () => {

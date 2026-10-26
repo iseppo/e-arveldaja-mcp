@@ -46,6 +46,8 @@ interface WiseCounterpartHold {
   readonly selected_dimension_id?: number;
   /** Some evidence was demoted because several Wise movements could be it. */
   readonly contested?: true;
+  /** selected_dimension_id is the row's counterpart_overrides choice. */
+  readonly selected_by_override?: true;
 }
 
 type WiseCounterpartResolution =
@@ -69,6 +71,11 @@ export interface WiseCounterpartInput {
    * configured bank account counts as absent, and disables the single-bank
    * fallback, so its rows hold unless evidence resolves them. */
   readonly explicit: unknown;
+  /** counterpart_overrides: Wise ID → the own bank account the owner picked.
+   * It decides only among the banks with strong own-account evidence; a pick
+   * the evidence does not point to holds the row (conflict); a row without
+   * strong evidence ignores it. */
+  readonly overrides?: ReadonlyMap<string, number>;
 }
 
 type CandidateClass = "strong" | "weak" | "uncertain";
@@ -83,9 +90,12 @@ interface Candidate {
 const WISE_TRANSFER_COUNTERPART_CONFLICT_REASON = (hold: WiseCounterpartHold) => {
   const selected = hold.selected_dimension_id;
   if (selected === undefined) {
-    return `Own-account evidence for this transfer (evidence_transaction_ids) points to several bank accounts (${hold.candidate_dimension_ids.join(", ")}). The row is not imported; book it with the owner.`;
+    return `Own-account evidence for this transfer (evidence_transaction_ids) points to several bank accounts (${hold.candidate_dimension_ids.join(", ")}). The row is not imported. Show the owner the evidence bank rows: only when the owner confirms which bank account this transfer goes to or from, re-run with counterpart_overrides [{ wise_id, dimension_id }] naming one of them; otherwise book it with the owner.`;
   }
   const evidence = hold.candidate_dimension_ids.filter(dim => dim !== selected);
+  if (hold.selected_by_override === true) {
+    return `The counterpart_overrides choice for this transfer, bank account ${selected}, is not one the own-account evidence (evidence_transaction_ids) points to: ${evidence.join(", ")}. The row is not imported. counterpart_overrides can only pick an evidenced bank account; correct the choice with the owner or book the row with the owner.`;
+  }
   return `Own-account evidence for this transfer (evidence_transaction_ids) points to bank account(s) ${evidence.join(", ")}, not to ${selected} (the selected inter_account_dimension_id or the only other bank account). The row is not imported. If the owner confirms ${evidence.length === 1 ? evidence[0] : "one of them"} is right, re-run with inter_account_dimension_id set to it (evidence on another bank still holds the row); otherwise book it with the owner.`;
 };
 const WISE_TRANSFER_COUNTERPART_UNVERIFIED_REASON =
@@ -122,7 +132,7 @@ export function wiseCounterpartHoldReview(
 
 
 export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<WiseRow, WiseCounterpartResolution> {
-  const { rows, allRows, wiseDim, otherDims, existingTx, journals, lookups, companyLegalName, explicit } = input;
+  const { rows, allRows, wiseDim, otherDims, existingTx, journals, lookups, companyLegalName, explicit, overrides } = input;
   const result = new Map<WiseRow, WiseCounterpartResolution>();
   // A Wise-only company has no counterpart to find: its rows keep the
   // unresolved classification (created unconfirmed with their review).
@@ -261,17 +271,26 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
     const others = candidates.filter(candidate => candidate.cls !== "strong");
     const strongDims = sortedUniqueIds(strong.map(candidate => candidate.dim));
     const otherEvidenceDims = sortedUniqueIds(others.map(candidate => candidate.dim));
-    const hold = (code: WiseCounterpartHoldCode, dims: number[], evidence: Candidate[], selected?: number): WiseCounterpartResolution => ({
+    const hold = (code: WiseCounterpartHoldCode, dims: number[], evidence: Candidate[], selected?: number,
+      byOverride?: true): WiseCounterpartResolution => ({
       hold: {
         code,
         candidate_dimension_ids: dims,
         evidence_transaction_ids: sortedUniqueIds(evidence.map(candidate => candidate.tx.id!)),
         ...(selected !== undefined ? { selected_dimension_id: selected } : {}),
         ...(evidence.some(candidate => candidate.contested) ? { contested: true as const } : {}),
+        ...(byOverride ? { selected_by_override: true as const } : {}),
       },
     });
 
-    if (strongDims.length === 1) {
+    // The owner's pick decides among the strongly evidenced banks, before the
+    // explicit id; a pick outside them is a conflict, never a fallback.
+    const override = overrides?.get(row.id);
+    if (override !== undefined && strongDims.length > 0) {
+      result.set(row, strongDims.includes(override)
+        ? { dim: override, basis: "owner_selected" }
+        : hold("wise_transfer_counterpart_conflict", sortedUniqueIds(strongDims, [override]), strong, override, true));
+    } else if (strongDims.length === 1) {
       const [dim] = strongDims as [number];
       result.set(row, explicitDim === undefined || explicitDim === dim
         ? { dim, basis: "evidence" }
