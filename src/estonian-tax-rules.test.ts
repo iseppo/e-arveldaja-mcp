@@ -25,9 +25,25 @@ const VAT_TEMPLATE_ERROR_RE = /Invalid canonical VAT template token/;
 
 describe("vatRatesInForceOn", () => {
   it("lists the standard rate plus the reduced rates in force on the date", () => {
-    expect(vatRatesInForceOn("2024-06-30").sort((a, b) => a - b)).toEqual([0, 22]);
+    expect(vatRatesInForceOn("2024-06-30").sort((a, b) => a - b)).toEqual([0, 5, 9, 22]);
     expect(vatRatesInForceOn("2025-01-01").sort((a, b) => a - b)).toEqual([0, 9, 13, 22]);
     expect(vatRatesInForceOn("2025-07-01").sort((a, b) => a - b)).toEqual([0, 9, 13, 24]);
+  });
+
+  // Q6: ended reduced rates stay valid for documents dated inside their period.
+  it("keeps the historical reduced rates for older documents", () => {
+    // Accommodation 9% until 2024-12-31, 13% from 2025-01-01.
+    expect(vatRatesInForceOn("2024-12-31")).toContain(9);
+    expect(vatRatesInForceOn("2024-12-31")).not.toContain(13);
+    expect(vatRatesInForceOn("2025-01-01")).toContain(13);
+    // Press 5% from 2022-08-01 to 2024-12-31 only.
+    expect(vatRatesInForceOn("2022-07-31").sort((a, b) => a - b)).toEqual([0, 9, 20]);
+    expect(vatRatesInForceOn("2022-08-01").sort((a, b) => a - b)).toEqual([0, 5, 9, 20]);
+    expect(vatRatesInForceOn("2024-12-31").sort((a, b) => a - b)).toEqual([0, 5, 9, 22]);
+    expect(vatRatesInForceOn("2025-01-01")).not.toContain(5);
+    // 9% applied from 2009-01-01; the standard timeline starts 2009-07-01.
+    expect(vatRatesInForceOn("2009-07-01").sort((a, b) => a - b)).toEqual([0, 9, 20]);
+    expect(vatRatesInForceOn("2009-06-30")).toEqual([]);
   });
 
   it("returns no rate for an invalid date", () => {

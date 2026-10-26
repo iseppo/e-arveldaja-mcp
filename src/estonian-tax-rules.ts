@@ -160,22 +160,68 @@ export function standardVatRateOn(dateISO: string | undefined | null): number | 
 export const REDUCED_VAT_RATES: readonly ReducedVatRate[] =
   ESTONIAN_VAT_METADATA.rates.reduced;
 
+export interface HistoricalReducedVatRate {
+  rate: number;
+  applies: string;
+  /** Inclusive start date (YYYY-MM-DD). */
+  from: string;
+  /** Inclusive end date (YYYY-MM-DD). */
+  to: string;
+  basis: string;
+}
+
 /**
- * Every VAT rate (%) in force on the given ISO date: the standard rate plus each
- * reduced rate whose `from` is on or before the date. Empty for an invalid date.
- * Reduced-rate history before 2025-01-01 is not in the table, so an older
- * reduced-rate document finds only the standard rate and 0.
+ * Reduced VAT rates that are no longer in force (KMS § 15), so an older
+ * receipt at its then-valid reduced rate is not read as an implausible rate.
+ * Verified 2026-10-26 against EMTA:
+ * - accommodation 9% until 31.12.2024, 13% from 1.01.2025 —
+ *   https://www.emta.ee/ariklient/maksud-ja-tasumine/kaibemaks/kaibemaksumaarad-ja-maksuvaba-kaive/kaibemaksumaaraga-13-maksustatav-kaive
+ *   ("Alates 1. jaanuarist 2025 on senise 9% asemel 13% käibemaksumääraga maksustatud majutus …");
+ * - press publications 5% from 1.08.2022 to 31.12.2024, 9% again from 1.01.2025 —
+ *   https://www.emta.ee/ariklient/maksud-ja-tasumine/kaibemaks/kaibemaksumaarad-ja-maksuvaba-kaive/kaibemaksumaaraga-9-maksustatav-kaive
+ *   ("Alates 1. augustist 2022 kuni 31. detsembrini 2024 oli ajakirjandusväljaannete maksumäär 5%");
+ * - the 9% reduced rate (books, medicines, accommodation, press until
+ *   31.07.2022) has applied since 1.01.2009 (5% → 9%, RTL 2008, 102, 1456);
+ *   the standard-rate timeline starts 1.07.2009, so earlier dates find no rate.
+ * Statute: KMS § 15 (https://www.riigiteataja.ee/akt/KMS#para15). Cash-basis
+ * transitional rules (KMS § 46 lg 26–27) keep the old rate for supplies
+ * invoiced before 2025, so they need no entry here.
+ */
+const HISTORICAL_REDUCED_VAT_RATES: readonly HistoricalReducedVatRate[] = deepFreeze([
+  {
+    rate: 9,
+    applies: "majutus (13% alates 2025-01-01); raamatud, ravimid; ajakirjandus kuni 2022-07-31",
+    from: "2009-01-01",
+    to: "2024-12-31",
+    basis: "KMS § 15 lg 2 (redaktsioon kuni 31.12.2024)",
+  },
+  {
+    rate: 5,
+    applies: "ajakirjandusväljaanded (9% alates 2025-01-01)",
+    from: "2022-08-01",
+    to: "2024-12-31",
+    basis: "KMS § 15 lg 2¹ (redaktsioon kuni 31.12.2024)",
+  },
+]) as readonly HistoricalReducedVatRate[];
+
+/**
+ * Every VAT rate (%) in force on the given ISO date: the standard rate, each
+ * current reduced rate whose `from` is on or before the date, and each ended
+ * reduced rate whose period covers it. Empty for an invalid date.
  */
 export function vatRatesInForceOn(dateISO: string | undefined | null): number[] {
   const standardRate = standardVatRateOn(dateISO);
   if (standardRate === null) return [];
   const d = dateISO!.slice(0, 10);
-  return [
+  return [...new Set([
     standardRate,
     ...REDUCED_VAT_RATES
       .filter(reduced => reduced.from === null || d >= reduced.from)
       .map(reduced => reduced.rate),
-  ];
+    ...HISTORICAL_REDUCED_VAT_RATES
+      .filter(reduced => d >= reduced.from && d <= reduced.to)
+      .map(reduced => reduced.rate),
+  ])];
 }
 
 export interface RepresentationMonthlyLimitPeriod {

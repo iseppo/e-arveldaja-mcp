@@ -3311,7 +3311,12 @@ describe("amountConsistencyIssues", () => {
     { name: "a trio off by more than 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.05, invoice_date: "2026-03-01" }, codes: ["trio_mismatch"] },
     { name: "a trio off by 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.02, invoice_date: "2026-03-01" }, codes: [] },
     { name: "an implausible rate", amounts: { total_net: 100, total_vat: 17, total_gross: 117, invoice_date: "2026-03-01" }, codes: ["vat_rate_implausible"] },
-    { name: "13% accommodation dated 2024 (no reduced-rate history)", amounts: { total_net: 100, total_vat: 13, total_gross: 113, invoice_date: "2024-05-01" }, codes: ["vat_rate_implausible"] },
+    { name: "13% accommodation dated 2024 (13% starts 2025-01-01)", amounts: { total_net: 100, total_vat: 13, total_gross: 113, invoice_date: "2024-05-01" }, codes: ["vat_rate_implausible"] },
+    // Q6: the ended reduced rates hold no plausible older receipt.
+    { name: "9% accommodation dated 2024", amounts: { total_net: 100, total_vat: 9, total_gross: 109, invoice_date: "2024-05-01" }, codes: [] },
+    { name: "5% press dated 2023", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2023-03-01" }, codes: [] },
+    { name: "5% press dated 2025 (back to 9%)", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2025-03-01" }, codes: ["vat_rate_implausible"] },
+    { name: "5% press dated before 2022-08-01", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2022-07-31" }, codes: ["vat_rate_implausible"] },
     { name: "a rate without a valid invoice date", amounts: { total_net: 100, total_vat: 17, total_gross: 117 }, codes: [] },
   ])("$name", ({ amounts, codes }) => {
     expect(amountConsistencyIssues(amounts)).toEqual(codes);
