@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Invoices whose date was printed over a dotted line can now be booked by typing the date, also when they carry VAT.** Before, the verified reading stopped with a VAT-rate error on such invoices (Google-style PDFs whose text kept only the dots), so you never got a field to type the date into; a company that is not VAT-registered, or whose supplier's earlier invoices used another VAT rate, could not book them at all. Now you type the date and invoice number, the review shows what will be booked (supplier, accounts, items, amounts), and before creating every check runs again on your date: the VAT rate in force then, competing totals and foreign rates. If your date doesn't fit the amounts, nothing is created; the draft comes back with the full computed booking for you to review before registering. Details: verified-reading mode only (`EARVELDAJA_DOCUMENT_READING=1`). Under `text_layer_value_lost` with no `invoice_date`, `verify` defers the VAT-rate-dependent checks and returns `booking_after_typed_date` (the bound booking basis) instead of `booking_review`; `create` re-runs the full checker on the bound reading and proof with the final values, builds the booking with the full binding, holds `reading_booking_drift` if the basis changed and `reading_schema_invalid` if the bound reading is missing, and returns `booking_computed_at_create`.
+- **Corrections you make on the review card are now re-checked against the whole document.** Before, a corrected amount or date was only checked for arithmetic, the VAT rate and the date window. Details: `create` also re-runs competing-total, mixed-rate and foreign-rate checks on the final values; only evidence/proof/heuristic codes on fields you typed or corrected are waived, and the "other printed total not considered" check is waived only for a gross you typed yourself.
+
 ## [0.33.0] - 2026-10-26
 
 ### Added
