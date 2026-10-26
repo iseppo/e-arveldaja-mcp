@@ -399,7 +399,11 @@ legitimate identical payments are possible).
   matches any token of document_number or title; a weak one (4-5 characters,
   or date-shaped) only the whole document_number or its remainder after one
   `PREFIX:` (`LY:1234`), never a title, sub-token or join; shorter or
-  digit-less numbers are never matched. No date window. In `receipt_batch` an
+  digit-less numbers are never matched. No date window. `receipt_batch` also
+  scans the document's label-anchored prepayment / payment references
+  (`Ettemaksuarve nr EMSS70002960`, `Makse viide`, `Viitenumber`, `Payment
+  reference`; one unspaced value on the label's line, never an amount, date or
+  IBAN) under the same strength gate. In `receipt_batch` an
   unavailable scan is retried once and, still unavailable, holds the row
   (`journal_reference_scan_unavailable: true`, dry run and execute alike); on
   the single-document tools it only adds a note (a

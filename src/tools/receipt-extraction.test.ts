@@ -5,6 +5,7 @@ import {
   normalizeDate,
   extractDates,
   extractInvoiceNumber,
+  extractPaymentReferences,
   toIsoDate,
   extractAmountsWithMetadata,
   buildKeywordSuggestion,
@@ -4813,5 +4814,31 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(result.supplier_name).toBe("Kolmas Firma OÜ");
     expect(result.reg_code_rationale).not.toBe("identity_block");
     expect(result.vat_no_rationale).not.toBe("identity_block");
+  });
+});
+
+describe("extractPaymentReferences (F-PREPAY-REF)", () => {
+  it.each([
+    ["Ettemaksuarve nr EMSS70002960", ["EMSS70002960"]],
+    ["Ettemaks: EMSS70002960    Summa 155,00", ["EMSS70002960"]],
+    ["Prepayment invoice no. PP-2026-0042", ["PP-2026-0042"]],
+    ["Makse viide: 70002960", ["70002960"]],
+    ["Payment reference PR-778899", ["PR-778899"]],
+    ["Viitenumber 1234567890", ["1234567890"]],
+  ])("reads the label-anchored reference in %s", (line, expected) => {
+    expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual(expected);
+  });
+
+  it.each([
+    ["an amount after a prepayment label", "Ettemaks 150.00"],
+    ["an amount with a comma decimal", "Ettemaks 123456,00"],
+    ["an unlabelled identifier", "EMSS70002960"],
+    ["a label on another line", "Ettemaksuarve\nEMSS70002960"],
+    ["a date", "Viide 2026-09-23"],
+    ["an IBAN", "Reference EE382200221020145685"],
+    ["a digit-less word", "Reference ABCDEF"],
+    ["a cited invoice behind a word", "Viide arvele: 4411"],
+  ])("never reads %s", (_name, line) => {
+    expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual([]);
   });
 });

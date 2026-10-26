@@ -3329,6 +3329,32 @@ function continuesPastCapture(rest: string): boolean {
   return /^[^\s\p{L}\p{N}][\p{L}\p{N}]/u.test(rest);
 }
 
+// A prepayment / payment-reference label and the one unspaced identifier after
+// it on the same line ("Ettemaksuarve nr EMSS70002960", "Makse viide: 1234567").
+const PAYMENT_REFERENCE_RE =
+  /(?<![\p{L}\d])(?:ettemaksuarve|ettemaksu?|prepayment(?:\s+invoice)?|makse\s*viide|maksekorralduse\s+viide|payment\s+reference|viitenumber|viitenr|viide|reference|ref\.?)(?:\s*(?:nr|no|number))?\.?[:#\t .-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
+
+/**
+ * F-PREPAY-REF: the label-anchored prepayment / payment references in `text`
+ * (a final invoice citing its prepayment invoice `EMSS70002960`, a payment
+ * reference), for the journal-reference scan: a manual prepayment journal
+ * `ETR1:EMSS70002960` may already book part of this document. Only values on
+ * a label's own line; an amount (`Ettemaks 150.00`), a date or an IBAN is never
+ * one. The scan's strength gate still applies to every value.
+ */
+export function extractPaymentReferences(text: string): string[] {
+  const references = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    for (const match of line.matchAll(PAYMENT_REFERENCE_RE)) {
+      const rest = line.slice((match.index ?? 0) + match[0].length);
+      if (/^[.,]\d/.test(rest)) continue;
+      const candidate = acceptInvoiceNumberCandidate(match[1]);
+      if (candidate) references.add(candidate);
+    }
+  }
+  return [...references];
+}
+
 /**
  * F-NR-EQUALS-ID: the invoice number equals a labelled registry code / VAT
  * number on the document, or the active company's own registry code / VAT

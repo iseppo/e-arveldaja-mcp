@@ -1727,6 +1727,60 @@ describe("receipt batch — journal already references the invoice number (Messe
     expectZeroWrites(spies);
   });
 
+  // F-PREPAY-REF: the final invoice cites its prepayment invoice; the manual
+  // prepayment journal carries only that reference.
+  function primeFinalInvoiceCitingPrepayment(rawText: string): void {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "ETR1 Group OÜ",
+      invoice_number: "EE1966453",
+      invoice_date: "2026-09-23",
+      due_date: "2026-09-23",
+      total_net: 125,
+      total_vat: 30,
+      total_gross: 155,
+      currency: "EUR",
+      description: "Madrats",
+      raw_text: rawText,
+    } as never);
+  }
+
+  it("dry_run holds a row whose labelled prepayment reference a journal carries", async () => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "Ettemaksuarve nr EMSS70002960", "Kokku 155,00"].join("\n"));
+    const { api, spies } = apiWithJournals([prepaymentJournal]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551083]);
+    expect(result.notes.join(" ")).toContain("Held: journal(s) 29551083 already reference payment reference");
+    expectZeroWrites(spies);
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("%s holds a row whose labelled prepayment reference a journal carries", async (mode) => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "Ettemaksuarve nr EMSS70002960", "Kokku 155,00"].join("\n"));
+    const { api, spies } = apiWithJournals([prepaymentJournal]);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551083]);
+    expectZeroWrites(spies);
+  });
+
+  it("an unlabelled or amount-shaped value is no payment reference: the row proceeds", async () => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "EMSS70002960", "Ettemaks 70002960.00", "Kokku 155,00"].join("\n"));
+    const { api } = apiWithJournals([prepaymentJournal, { ...prepaymentJournal, id: 29551090, document_number: "70002960" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("dry_run_preview");
+    expect(result.referencing_journal_ids).toBeUndefined();
+  });
+
   it.each(["create", "create_and_confirm"] as const)("%s holds the row with zero writes", async (mode) => {
     const { api, spies } = apiWithJournals([prepaymentJournal, settlementJournal]);
     const ops = makeOperations(api);

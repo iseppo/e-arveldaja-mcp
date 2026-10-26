@@ -16,7 +16,7 @@ import type { CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, T
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
-import { amountConsistencyIssues, computeTermDays, snapVatRate } from "./receipt-extraction.js";
+import { amountConsistencyIssues, computeTermDays, extractPaymentReferences, snapVatRate } from "./receipt-extraction.js";
 import { InvoiceCreationError, PurchaseInvoiceDraftVerificationError, PurchaseInvoiceTotalsCorrectionError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
@@ -319,10 +319,14 @@ export async function createAndMaybeMatchPurchaseInvoice(
   // Same policy: holds in both modes. An unavailable scan is retried once and,
   // still unavailable, holds too: no person reads each row, so an unchecked
   // row must not be created. Only the final scan note is kept.
+  // F-PREPAY-REF: label-anchored prepayment / payment references printed on
+  // the document are scanned too (a final invoice citing its prepayment
+  // invoice `EMSS70002960`, booked by a manual journal `ETR1:EMSS70002960`).
   const invoiceNumber = extracted.invoice_number;
+  const scanReferences = [invoiceNumber, ...extractPaymentReferences(extracted.raw_text ?? "")];
   const findReferencingJournals = async (): Promise<{ hits: JournalReferenceHit[]; unavailable: boolean }> => {
-    let referenceScan = await checkJournalReferences(api, [invoiceNumber]);
-    if (!referenceScan.scan_available) referenceScan = await checkJournalReferences(api, [invoiceNumber]);
+    let referenceScan = await checkJournalReferences(api, scanReferences);
+    if (!referenceScan.scan_available) referenceScan = await checkJournalReferences(api, scanReferences);
     if (!referenceScan.scan_available && referenceScan.scan_note) notes.push(referenceScan.scan_note);
     return { hits: referenceScan.hits, unavailable: !referenceScan.scan_available };
   };
@@ -339,8 +343,10 @@ export async function createAndMaybeMatchPurchaseInvoice(
     }
     const referencingIds = referencing.map(hit => hit.journal_id);
     if (referencingIds.length > 0) {
+      const matched = [...new Set(referencing.map(hit => hit.reference))]
+        .map(reference => `${reference === invoiceNumber ? "invoice number" : "payment reference"} ${wrapUntrustedOcr(reference) ?? ""}`);
       notes.push(
-        `Held: journal(s) ${referencingIds.join(", ")} already reference invoice number ${wrapUntrustedOcr(invoiceNumber) ?? ""}; ` +
+        `Held: journal(s) ${referencingIds.join(", ")} already reference ${matched.join(" / ")}; ` +
         "this document may already be booked. Attach it to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead of creating an invoice.",
       );
     }
