@@ -129,6 +129,32 @@ describe("counterparty booking history — chronological streak", () => {
     expect(lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "incoming" }).suggestion).toBeUndefined();
   });
 
+  it("(3c) suggests an own-bank-dimension contra only when the caller allows it, and never on a name-only identity", () => {
+    // Live shape: top-ups to a broker's pooled IBAN booked against the broker's own bank dimension.
+    const topUp = (m: number, spec: Partial<RowSpec> = {}): RowSpec =>
+      ({ date: month(m), name: "Maakler AS", iban: "DE25502109000222308186", side: "C", contra: [[1020, 200]], ...spec });
+    const index = history([topUp(1), topUp(2), topUp(3)]);
+    const query = { name: "Maakler AS", iban: "DE25502109000222308186", direction: "outgoing" as const, accounts_dimensions_id: 100 };
+    expect(lookupCounterpartyHistory(index, query).suggestion).toBeUndefined();
+    expect(lookupCounterpartyHistory(index, { ...query, allow_own_bank_contra: true }).suggestion).toEqual({
+      account_id: 1020,
+      dimension_id: 200,
+      own_bank_account: true,
+      streak: 3,
+      history_total: 3,
+      latest_date: month(3),
+      breakdown: [{ account_id: 1020, dimension_id: 200, own_bank_account: true, count: 3 }],
+    });
+
+    // The same run under a bare display name (no IBAN, no legal form) is never enough.
+    const bare = history([1, 2, 3].map((m) => topUp(m, { name: "Maakler", iban: undefined })));
+    expect(lookupCounterpartyHistory(bare, { name: "Maakler", direction: "outgoing", accounts_dimensions_id: 100, allow_own_bank_contra: true }).suggestion).toBeUndefined();
+
+    // A different contra in between still breaks the run.
+    const mixed = history([topUp(1), topUp(2, { contra: [[2110, 900]] }), topUp(3), topUp(4)]);
+    expect(lookupCounterpartyHistory(mixed, { ...query, allow_own_bank_contra: true }).suggestion).toBeUndefined();
+  });
+
   it("(3b) never suggests an own-bank-dimension or invoice-ledger contra, however long its run", () => {
     for (const contra of [[1020, 200], [2310, null], [1210, null]] as Array<[number, number | null]>) {
       const index = history([1, 2, 3, 4].map((m) => ({ date: month(m), contra: [contra] })));

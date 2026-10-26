@@ -12,6 +12,11 @@ import type { Journal, Transaction } from "../types/api.js";
 // Counterparties without a stored IBAN or a legal form (e.g. a Wise fee row
 // "TransferWise") match by exact display name on the same own bank dimension
 // only, and such a suggestion is marked `identity: "name_only"`.
+// A contra on another own bank dimension is a transfer to an own account: it
+// counts as a treatment only when the caller has established that the inter-
+// account matcher cannot resolve the query row (`allow_own_bank_contra`, e.g. a
+// top-up to a broker's pooled IBAN) and never on a name-only identity;
+// otherwise it breaks the run.
 
 const MIN_STREAK = 3;
 const DEFAULT_INVOICE_LEDGER_ACCOUNTS: ReadonlySet<number> = new Set([DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE]);
@@ -21,6 +26,8 @@ export type HistoryDirection = "incoming" | "outgoing";
 interface Treatment {
   readonly account_id: number;
   readonly dimension_id: number | null;
+  /** The contra is another own bank account's dimension. */
+  readonly own_bank_account?: true;
 }
 
 interface HistoryRow {
@@ -49,6 +56,8 @@ export interface CounterpartyHistoryQuery {
   /** The query row's own bank dimension; required for a name-only match. */
   readonly accounts_dimensions_id?: number | null;
   readonly direction: HistoryDirection | "unknown";
+  /** The inter-account matcher cannot resolve the query row: an own-bank contra may be suggested. */
+  readonly allow_own_bank_contra?: boolean;
 }
 
 export interface HistoryBreakdownEntry extends Treatment {
@@ -107,7 +116,9 @@ function readJournal(
   const line = contra[0]!;
   const dimension = line.accounts_dimensions_id ?? null;
   if (invoiceLedgerAccounts.has(line.accounts_id)) return { direction };
-  if (dimension !== null && ownBankDimensionIds.has(dimension)) return { direction };
+  if (dimension !== null && ownBankDimensionIds.has(dimension)) {
+    return { direction, treatment: { account_id: line.accounts_id, dimension_id: dimension, own_bank_account: true } };
+  }
   return { direction, treatment: { account_id: line.accounts_id, dimension_id: dimension } };
 }
 
@@ -196,21 +207,26 @@ export function lookupCounterpartyHistory(
   const key = counterpartyHistoryKey(query.name);
   if (!key || query.direction === "unknown") return { history_total: 0, breakdown: [] };
   const rows = (history.rows.get(`${key}\u0000${query.direction}`) ?? []).filter((row) => sameCounterparty(query, row));
+  // Without a query IBAN or legal form, every matched row came through the name-only tier.
+  const nameOnly = normalizedIban(query.iban) === undefined && !hasLegalForm(query.name);
+  const treatmentOf = (row: HistoryRow): Treatment | undefined =>
+    row.treatment?.own_bank_account && (!query.allow_own_bank_contra || nameOnly) ? undefined : row.treatment;
 
   const counts: HistoryBreakdownEntry[] = [];
   for (const row of rows) {
-    if (!row.treatment) continue;
-    const entry = counts.find((candidate) => sameTreatment(candidate, row.treatment!));
+    const treatment = treatmentOf(row);
+    if (!treatment) continue;
+    const entry = counts.find((candidate) => sameTreatment(candidate, treatment));
     if (entry) (entry as { count: number }).count++;
-    else counts.push({ ...row.treatment, count: 1 });
+    else counts.push({ ...treatment, count: 1 });
   }
   const breakdown = counts.sort((left, right) => right.count - left.count).slice(0, 3);
 
-  const newest = rows[rows.length - 1]?.treatment;
+  const newest = rows.length > 0 ? treatmentOf(rows[rows.length - 1]!) : undefined;
   let streak = 0;
   if (newest) {
     for (let index = rows.length - 1; index >= 0; index--) {
-      const treatment = rows[index]!.treatment;
+      const treatment = treatmentOf(rows[index]!);
       if (!treatment || !sameTreatment(treatment, newest)) break;
       streak++;
     }
@@ -222,12 +238,12 @@ export function lookupCounterpartyHistory(
     suggestion: {
       account_id: newest.account_id,
       dimension_id: newest.dimension_id,
+      ...(newest.own_bank_account ? { own_bank_account: true as const } : {}),
       streak,
       history_total: rows.length,
       latest_date: rows[rows.length - 1]!.date,
       breakdown,
-      // Without a query IBAN or legal form, every matched row came through the name-only tier.
-      ...(normalizedIban(query.iban) === undefined && !hasLegalForm(query.name) ? { identity: "name_only" as const } : {}),
+      ...(nameOnly ? { identity: "name_only" as const } : {}),
     },
   };
 }
