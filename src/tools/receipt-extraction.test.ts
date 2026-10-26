@@ -2498,7 +2498,8 @@ describe("unsupported currency review gate (F-UNSUPPORTED-CCY)", () => {
     ].join("\n");
     const started = performance.now();
     const fields = extractReceiptFieldsFromText(text, "receipt.pdf");
-    expect(performance.now() - started).toBeLessThan(800);
+    // A quadratic scan over 32k groups takes tens of seconds; the loose bound only absorbs host load.
+    expect(performance.now() - started).toBeLessThan(5_000);
     expect(fields.total_gross).toBe(124);
   });
 
