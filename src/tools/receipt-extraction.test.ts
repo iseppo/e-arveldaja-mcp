@@ -570,6 +570,19 @@ describe("computeMinOcrConfidence robust heuristic", () => {
     // 10th percentile index = floor(7 * 0.1) = 0 -> 0.88
     expect(computeMinOcrConfidence(items)).toBe(0.88);
   });
+
+  // Google invoices: the page-2 logo OCRs as "Google" at 0.47 while the text layer prints "Google Cloud EMEA Limited".
+  const native = (text: string) => ({ text, x: 0, y: 0, width: 50, height: 10 });
+  it("ignores an OCR'd logo whose words the text layer already prints", () => {
+    expect(computeMinOcrConfidence([native("Google Cloud EMEA Limited"), native("Arve"), { ...native("Google"), confidence: 0.468 }])).toBeUndefined();
+    expect(computeMinOcrConfidence([native("Google Cloud"), { ...native("GOOGLE"), confidence: 0.4 }, { ...native("Kokku 25,00"), confidence: 0.9 }])).toBe(0.9);
+  });
+
+  it("still counts an OCR item with a word the text layer lacks, or with digits", () => {
+    expect(computeMinOcrConfidence([native("Google Cloud"), { ...native("Kreeditarve"), confidence: 0.4 }])).toBe(0.4);
+    expect(computeMinOcrConfidence([native("Google Cloud"), { ...native("Google Ettemaks"), confidence: 0.4 }])).toBe(0.4);
+    expect(computeMinOcrConfidence([native("Kokku 25,00 €"), { ...native("25,00"), confidence: 0.4 }])).toBe(0.4);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -2675,21 +2675,26 @@ interface ExtractReceiptFieldsOptions {
 export const LOW_OCR_CONFIDENCE_THRESHOLD = 0.6;
 
 export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | undefined): number | undefined {
-  const confidenceValues = textItems
-    ?.map(item => item.confidence)
-    .filter((value): value is number => value !== undefined && Number.isFinite(value));
-  if (!confidenceValues || confidenceValues.length === 0) return undefined;
+  if (!textItems) return undefined;
+  // An OCR item without digits whose every word the text layer already prints
+  // (a logo such as "Google" over a native "Google Cloud") adds nothing the
+  // packet lacks, so its confidence says nothing about the document's values.
+  const words = (text: string) => text.toLocaleLowerCase("et").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const nativeWords = new Set(textItems.filter(item => item.confidence === undefined).flatMap(item => words(item.text ?? "")));
+  const repeatsTextLayer = (item: LayoutTextItem) => {
+    const itemWords = words(item.text ?? "");
+    return !/\p{N}/u.test(item.text ?? "") && itemWords.length > 0 && itemWords.every(word => nativeWords.has(word));
+  };
+  const ocrItems = textItems.filter(item => item.confidence !== undefined && Number.isFinite(item.confidence) && !repeatsTextLayer(item));
+  if (ocrItems.length === 0) return undefined;
   // Filter out very short text items (< 3 chars) — likely noise/logo artifacts
   // that carry stray low confidence and would trigger false low_ocr_confidence.
-  const robustValues = textItems!
-    .filter(item => (item.text?.length ?? 0) >= 3)
-    .map(item => item.confidence)
-    .filter((value): value is number => value !== undefined && Number.isFinite(value));
+  const robustValues = ocrItems.filter(item => (item.text?.length ?? 0) >= 3).map(item => item.confidence!);
   // Too few robust items for a stable 10th-percentile: fall back to the minimum
   // of the robust (>=3 char) values so a stray low-confidence <3-char noise item
   // cannot dominate. Only use the unfiltered min when no robust item survives.
   if (robustValues.length < 5) {
-    return robustValues.length > 0 ? Math.min(...robustValues) : Math.min(...confidenceValues);
+    return Math.min(...(robustValues.length > 0 ? robustValues : ocrItems.map(item => item.confidence!)));
   }
   const sorted = [...robustValues].sort((a, b) => a - b);
   return sorted[Math.floor(sorted.length * 0.1)]!;
