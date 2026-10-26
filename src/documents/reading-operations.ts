@@ -1316,6 +1316,9 @@ class ReadingDocumentOperations {
             buyer_attested_by_owner: answered.buyerAttested,
             ...(answered.buyerAttested ? { buyer_attested_company_reg: plan.own.reg } : {}),
             text_layer_typed: answered.textLayerTyped,
+            ...(card.rows.some((row) => row.id === "r:invoice_number" && row.kind === "field_review" && row.codes.includes("text_layer_value_lost") &&
+              !(plan.image_agreed ?? []).some((entry) => entry.field === "invoice_number") && !answered.correctedFields.includes("invoice_number"))
+              ? { text_layer_number_kept_under_label: true } : {}),
             ...(plan.image_agreed?.length ? {
               image_ocr_agreed_fields: plan.image_agreed.map((entry) => entry.field).filter((field) => !answered.correctedFields.includes(field)),
             } : {}),

@@ -179,6 +179,28 @@ export function locateLostValueRects(
   return out;
 }
 
+const LABEL_TAIL_RE = /[\s:#№.]+$/u;
+const labelForm = (text: string) => anchorForm(text.replace(LABEL_TAIL_RE, ""));
+
+/**
+ * True when `value` is printed as a whole word on line `lineId`, which is not a lost line, and the text before it on
+ * that line is exactly the label of a lost cell, at least two words long: the text layer kept the value under the
+ * same label elsewhere (Google prints "Arve number: …" in the header and loses the same number in the leader table).
+ * The whole line prefix is compared, so a split cell ("Originaal ¦ Arve number: …") or a one-word label ("Nr") does
+ * not match.
+ */
+export function printedUnderLostLabel(lines: ReadingPacket["lines"], lineId: string, value: string): boolean {
+  const hits = lostValueLeaders(lines);
+  const line = lines.find((entry) => entry.id === lineId);
+  if (!line || hits.some((hit) => hit.line === lineId)) return false;
+  const labels = new Set(hits.map((hit) => lostCellLabel(lines.find((entry) => entry.id === hit.line)!.text, hit.cell))
+    .filter((label) => label.split(/\s+/).filter((word) => LETTER_RE.test(word)).length >= 2)
+    .map(labelForm));
+  const words = line.text.split(/[\s¦]+/).filter(Boolean);
+  const at = words.findIndex((word) => word.replace(/^[(#:]+/, "").replace(/[,;:)]+$/, "") === value);
+  return at > 0 && labels.has(labelForm(words.slice(0, at).join(" ")));
+}
+
 /** Page points → image pixels, or null when the axes scale differently (> 1%). */
 export function rectToPixels(
   rect: Pick<LostValueRect, "x" | "y" | "width" | "height">,

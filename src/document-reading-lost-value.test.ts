@@ -6,6 +6,7 @@ import {
   normalizeLostValueText,
   parseLostValueReading,
   pdfPageBoxRefusal,
+  printedUnderLostLabel,
   rectToPixels,
   LOST_VALUE_LABEL_PAD_PT,
   type GeometryItem,
@@ -377,5 +378,27 @@ describe("pdfPageBoxRefusal", () => {
     const started = Date.now();
     expect(await pdfPageBoxRefusal(Buffer.from(`%PDF-1.4\n${boxes}`, "latin1"))).toBeNull();
     expect(Date.now() - started).toBeLessThan(2500);
+  });
+});
+
+describe("printedUnderLostLabel", () => {
+  const google = (header: string) => lines(header, `Arve number ¦ ${DOTS}`, `Arve kuupäev ¦ ${DOTS} ¦ Kogusumma (EUR) ¦ 13,60 €`);
+
+  it("is true for the value printed right after a lost cell's own label on a line that is not lost", () => {
+    expect(printedUnderLostLabel(google("Arve number: 5528682310"), "p1:001", "5528682310")).toBe(true);
+    expect(printedUnderLostLabel(google("Arve number # 5528682310 ¦ Ireland"), "p1:001", "5528682310")).toBe(true);
+    expect(printedUnderLostLabel(lines("Invoice number: 77", `Invoice number: ¦ ${DOTS}`), "p1:001", "77")).toBe(true);
+  });
+
+  it("is false under another label, on a lost line, or with no lost line", () => {
+    // The whole line prefix is the label: a split cell or a one-word label does not count.
+    expect(printedUnderLostLabel(google("Originaal ¦ Arve number: 5528682310"), "p1:001", "5528682310")).toBe(false);
+    expect(printedUnderLostLabel(lines("Tellimus ¦ Nr 98765", `Nr ¦ ${DOTS}`), "p1:001", "98765")).toBe(false);
+    expect(printedUnderLostLabel(lines("Nr 98765", `Nr ¦ ${DOTS}`), "p1:001", "98765")).toBe(false);
+    expect(printedUnderLostLabel(google("Originaalarve number: 5528682310"), "p1:001", "5528682310")).toBe(false);
+    expect(printedUnderLostLabel(google("Tellimuse number: 5528682310"), "p1:001", "5528682310")).toBe(false);
+    expect(printedUnderLostLabel(google("Arve number: 5528682310"), "p1:001", "552868231")).toBe(false);
+    expect(printedUnderLostLabel(google("Arve number: 5528682310"), "p1:002", "5528682310")).toBe(false);
+    expect(printedUnderLostLabel(lines("Arve number: 5528682310"), "p1:001", "5528682310")).toBe(false);
   });
 });

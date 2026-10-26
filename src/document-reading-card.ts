@@ -13,6 +13,7 @@ import { checkReading, HOLD_CODES, rateMatches, type AcceptedValues, type CheckC
 import type { ReadingPacket } from "./document-reading-packet.js";
 import type { ReadingField } from "./document-reading-schemas.js";
 import { lineTokens } from "./document-reading-tokens.js";
+import { printedUnderLostLabel } from "./document-reading-lost-value.js";
 import { BUYER_MARKER_RE, isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, isValidIban, normalizeVatValue } from "./document-identifiers.js";
 import { vatRatesInForceOn } from "./estonian-tax-rules.js";
 import { isStrictDate } from "./strict-date.js";
@@ -228,11 +229,20 @@ export function buildReadingCard(input: CardInput): CardOutcome {
     byField.set(field, [...(byField.get(field) ?? []), hold]);
   }
   const agreed = new Map((input.imageAgreed ?? []).map((entry) => [entry.field, entry]));
+  let numberKept = false;
   if (textLayerLost) {
     // §5.3: on a lost text layer the owner types the date and the number (the true value is not in the text),
-    // unless server OCR agreed with the client's reading of the crop image: then the owner confirms it.
+    // unless server OCR agreed with the client's reading of the crop image, or the text layer prints the read number
+    // under the lost cell's own label on another line: then the owner confirms it.
     for (const field of ["invoice_date", "invoice_number"] as const) {
       if (agreed.has(field)) continue;
+      const value = input.values.invoice_number;
+      const line = lineText(input.packet, input.evidence.invoice_number?.line);
+      if (field === "invoice_number" && !byField.has(field) && typeof value === "string" && line &&
+        printedToken(input.packet, field, value, line.id) === value && printedUnderLostLabel(input.packet.lines, line.id, value)) {
+        numberKept = true;
+        continue;
+      }
       byField.set(field, [...(byField.get(field) ?? []), { code: "text_layer_value_lost", field }]);
     }
   }
@@ -283,6 +293,11 @@ export function buildReadingCard(input: CardInput): CardOutcome {
     rows.push(value === null || value === undefined || !line
       ? { id: `t:${entry.field}`, kind: "typed", field: entry.field, reason: "text_layer_value_lost" }
       : { id: `r:${entry.field}`, kind: "field_review", field: entry.field, codes: ["text_layer_value_lost"], value, printed_token: entry.printed, line: line.text });
+  }
+  if (numberKept) {
+    const line = lineText(input.packet, input.evidence.invoice_number!.line)!;
+    const value = input.values.invoice_number as string;
+    rows.push({ id: "r:invoice_number", kind: "field_review", field: "invoice_number", codes: ["text_layer_value_lost"], value, printed_token: value, line: line.text });
   }
   if (buyerQuestion) {
     rows.push({ id: "buyer", kind: "buyer_question", company: input.company, lines: addresseeLines(input), options: [{ id: "yes" }, { id: "no", stop: true }] });

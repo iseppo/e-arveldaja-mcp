@@ -146,6 +146,28 @@ describe("buildReadingCard", () => {
     expect(cardOf([{ code: "text_layer_value_lost" }]).rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
   });
 
+  it("a number the text layer prints under the lost cell's own label elsewhere gets a confirm row, not a typed one", () => {
+    const lost = (label: string, first = "Arve nr A-17    Näidis OÜ") =>
+      ({ packet: makePacket([first, ...BASE_LINES.slice(1), `${label}    ........................`]) });
+    expect(cardOf([{ code: "text_layer_value_lost" }], lost("Arve nr")).rows).toEqual([
+      { id: "r:invoice_number", kind: "field_review", field: "invoice_number", codes: ["text_layer_value_lost"], value: "A-17", printed_token: "A-17", line: "Arve nr A-17 ¦ Näidis OÜ" },
+      { id: "t:invoice_date", kind: "typed", field: "invoice_date", reason: "text_layer_value_lost" },
+    ]);
+    // The label must start the line: text before it in another cell does not count.
+    expect(cardOf([{ code: "text_layer_value_lost" }], lost("Arve nr", "Näidis OÜ    Arve nr A-17")).rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    // Another label, or another hold on the number: typed as before.
+    expect(cardOf([{ code: "text_layer_value_lost" }], lost("Tellimuse nr")).rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    expect(cardOf([{ code: "text_layer_value_lost" }, { code: "quote_not_printed", field: "invoice_number" }], lost("Arve nr")).rows.map((row) => row.id))
+      .toEqual(["t:invoice_date", "t:invoice_number"]);
+    // Only the number: a date under a lost date label is still typed.
+    const dateLost = { packet: makePacket([...BASE_LINES.slice(0, 3), "Arve kuupäev 15.03.2026", ...BASE_LINES.slice(4), "Arve kuupäev    ........................"]) };
+    expect(cardOf([{ code: "text_layer_value_lost" }], dateLost).rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    // A confirm keeps the reading's value and is not a typed text-layer value.
+    const card = cardOf([{ code: "text_layer_value_lost" }], lost("Arve nr"));
+    expect(applyOwnerAnswers(card, VALUES, { "r:invoice_number": { confirm: true }, "t:invoice_date": { value: "2026-03-15" } }))
+      .toMatchObject({ ok: true, correctedFields: ["invoice_date"], textLayerTyped: true });
+  });
+
   // Review MINOR-b: every hold on an image-agreed field was deleted silently.
   it("an image-agreed field gets its confirm row only when nothing else holds on it; otherwise it is typed", () => {
     const imageAgreed = [{ field: "invoice_number" as const, line: "p1:001", printed: "A-17" }];

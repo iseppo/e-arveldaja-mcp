@@ -350,6 +350,20 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({ action: "CREATED", details: expect.objectContaining({ text_layer_typed: true }) }));
   });
 
+  it("a number the text layer prints under the lost number cell's label is confirmed, not typed, and audited", async () => {
+    const w = world();
+    const lines = ["Arve nr A-17    Näidis OÜ", ...LOST_LINES.slice(1), "Arve nr ...................."];
+    const { file, verify } = await lostVerified(w, "lost number kept", lines);
+    expect(verify.status).toBe("ready");
+    expect(verify.card!.rows.map((row) => row.id)).toEqual(["r:invoice_number", "t:invoice_date"]);
+    const outcome = await create(w, file, verify.planHandle!, { "r:invoice_number": { confirm: true }, "t:invoice_date": { value: "2026-03-15" } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_date"] } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ number: "A-17", create_date: "2026-03-15" });
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      action: "CREATED", details: expect.objectContaining({ text_layer_typed: true, text_layer_number_kept_under_label: true }),
+    }));
+  });
+
   it("a typed date on which the read VAT does not snap to a rate in force holds at create, 0 writes", async () => {
     const w = world();
     const { file, verify } = await lostVerified(w, "lost date wrong rate");
