@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **An invoice number with letters that look like digits (S/5, B/8, Z/2, G/6, D/0, q/9) is no longer accepted from the picture; you type it instead.** Before, only I/l/1 and O/0 were treated as look-alikes, so a number both readers misread the same way could be accepted. Details: the lost-value number check now also holds `D Q S s B Z z G b g q` anywhere and `2 5 6 8 9` next to a letter as `value_form_invalid` (the field keeps its typed row); all-digit numbers such as Google's are unaffected.
+- **Reading an invoice can no longer hang on a page that never finishes rendering.** Details: the 300-dpi page render of the lost-value image path times out after 30 s (`LOST_VALUE_RENDER_TIMEOUT_MS`); the row then gets no picture and stays typed, as for any other render failure, and new renders are refused until the stuck one finishes.
+- **Cropping several rows of one page is about twice as fast.** Details: the page image is inflated once per render instead of once per crop.
+
+### Changed
+
+- **CI checks the text-recognition language files it downloads.** Details: eng/est traineddata come from a pinned tessdata_best commit and are verified by sha256 before the integration tests, cached or not.
+
 ## [0.34.1] - 2026-10-26
 
 ### Fixed

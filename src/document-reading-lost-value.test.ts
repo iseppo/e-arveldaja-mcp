@@ -49,7 +49,7 @@ describe("matchLostValue: invoice_number", () => {
     ["holds on two candidates", "1234567890", ocr(["Invoice number"], ["1234567890"], ["9876543210"]), "ocr_ambiguous"],
     ["holds on a stray digit", "1234567890", ocr(["Invoice number"], ["1234567890"], ["4", 0.31]), "ocr_ambiguous"],
     ["holds on no candidate", "1234567890", ocr(["Invoice number"], [DOTS]), "ocr_no_match"],
-    ["holds on a case difference", "ab-23", ocr(["Invoice number"], ["AB-23"]), "ocr_no_match"],
+    ["holds on a case difference", "ax-23", ocr(["Invoice number"], ["AX-23"]), "ocr_no_match"],
     ["holds at confidence 0.59", "1234567890", ocr(["Invoice number"], ["1234567890", 0.59]), "ocr_low_confidence"],
     ["accepts at confidence 0.60", "1234567890", ocr(["Invoice number"], ["1234567890", 0.6]), "image_ocr_agreed"],
     ["holds when the label is missing from OCR", "1234567890", ocr(["Invoice"], ["1234567890"]), "ocr_row_mismatch"],
@@ -60,6 +60,17 @@ describe("matchLostValue: invoice_number", () => {
     ["holds the confusable O", "INV-0O12", ocr(["Invoice number"], ["INV-0O12"]), "value_form_invalid"],
     ["holds 1 next to a letter", "A1-2345", ocr(["Invoice number"], ["A1-2345"]), "value_form_invalid"],
     ["holds 0 next to a letter", "2345-0B", ocr(["Invoice number"], ["2345-0B"]), "value_form_invalid"],
+    // Review MINOR: S/5, B/8, Z/2, G/6 read the same way by both readers.
+    ["holds the confusable S", "INV-S123", ocr(["Invoice number"], ["INV-S123"]), "value_form_invalid"],
+    ["holds the confusable B", "A-B123", ocr(["Invoice number"], ["A-B123"]), "value_form_invalid"],
+    ["holds 5 next to a letter", "AX5-123", ocr(["Invoice number"], ["AX5-123"]), "value_form_invalid"],
+    ["holds 8 next to a letter", "8X-123", ocr(["Invoice number"], ["8X-123"]), "value_form_invalid"],
+    ["holds 2 next to a letter", "XY2-77", ocr(["Invoice number"], ["XY2-77"]), "value_form_invalid"],
+    ["holds 6 next to a letter", "6Y-123", ocr(["Invoice number"], ["6Y-123"]), "value_form_invalid"],
+    ["holds the confusable D", "AD-123", ocr(["Invoice number"], ["AD-123"]), "value_form_invalid"],
+    ["holds the confusable q", "XY-9q", ocr(["Invoice number"], ["XY-9q"]), "value_form_invalid"],
+    ["holds 9 next to a letter", "XY9-77", ocr(["Invoice number"], ["XY9-77"]), "value_form_invalid"],
+    ["accepts digits apart from the letters", "XY-2568-77", ocr(["Invoice number"], ["XY-2568-77"]), "image_ocr_agreed"],
   ];
   it.each(cases)("%s", (_name, printed, items, status) => {
     expect(matchLostValue("invoice_number", printed, items, anchor).status).toBe(status);

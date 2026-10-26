@@ -115,6 +115,17 @@ describe("cropPng", () => {
     expect(crop.pixels.equals(region(lowRange, W, 1, 1, W - 2, H - 2))).toBe(true);
   });
 
+  it("crops one source several times, concurrently too, each crop its own region", async () => {
+    const png = encode(W, H, pixels, [0, 1, 2, 3, 4]);
+    const rects = [{ x: 0, y: 0, width: 7, height: 5 }, { x: 9, y: 8, width: 14, height: 9 }, { x: 3, y: 2, width: 5, height: 13 }];
+    const crops = await Promise.all(rects.map((rect) => cropPng(png, rect)));
+    crops.forEach((crop, index) => {
+      const { x, y, width, height } = rects[index]!;
+      expect(decodeFilterZero(crop).pixels.equals(region(pixels, W, x, y, width, height))).toBe(true);
+    });
+    expect(decodeFilterZero(await cropPng(png, rects[1]!)).pixels.equals(region(pixels, W, 9, 8, 14, 9))).toBe(true);
+  });
+
   it("clamps to the image and rounds fractional edges outward", async () => {
     const png = encode(W, H, pixels, [4]);
     const crop = decodeFilterZero(await cropPng(png, { x: -3.5, y: 10.2, width: 50, height: 4.1 }));

@@ -315,9 +315,30 @@ function getLostValueParser(): LiteParse {
   return lostValueParser;
 }
 
-/** One page rendered to an RGBA PNG at 300 dpi (full page; liteparse ignores cropBox for screenshots). */
-export async function renderPagePng(filePath: string, page: number): Promise<{ png: Buffer; width: number; height: number }> {
-  const [shot] = await getLostValueParser().screenshot(filePath, [page]);
+export const LOST_VALUE_RENDER_TIMEOUT_MS = 30_000;
+/** Renders that timed out and whose native work has not settled yet. */
+let stuckRenders = 0;
+
+/**
+ * One page rendered to an RGBA PNG at 300 dpi (full page; liteparse ignores cropBox for screenshots). A render past
+ * the timeout rejects (the caller sends no crop or holds); its native work is not cancelled, so until it settles every
+ * new render is refused at once instead of piling up more native work.
+ */
+export async function renderPagePng(
+  filePath: string, page: number, timeoutMs = LOST_VALUE_RENDER_TIMEOUT_MS,
+): Promise<{ png: Buffer; width: number; height: number }> {
+  if (stuckRenders > 0) throw new Error("page render unavailable");
+  const render = getLostValueParser().screenshot(filePath, [page]);
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      stuckRenders += 1;
+      render.then(() => undefined, () => undefined).finally(() => { stuckRenders -= 1; });
+      reject(new Error("page render timed out"));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  const [shot] = await Promise.race([render, timeout]).finally(() => clearTimeout(timer));
   if (!shot || shot.pageNum !== page) throw new Error("page render unavailable");
   return { png: shot.imageBuffer, width: shot.width, height: shot.height };
 }

@@ -435,8 +435,9 @@ function anchorCheck(line: OcrLine, start: number, end: number, anchor: string):
 }
 
 const NUMBER_FORM_RE = /^[A-Za-z0-9][A-Za-z0-9\-/._]{0,63}$/;
-// I l | O o anywhere, or 1/0 next to a letter: the glyphs a vision model and OCR confuse.
-const CONFUSABLE_RE = /[Il|Oo]|[01](?=\p{L})|(?<=\p{L})[01]/u;
+// The glyphs a vision model and OCR confuse: I l | O o D Q S s B Z z G b g q anywhere, or 0 1 2 5 6 8 9 next to a
+// letter. A digit misread after a separator (AB-S123 as AB-5123) or a letter pair (rn/m) is not caught here.
+const CONFUSABLE_RE = /[Il|OoDQSsBZzGbgq]|[0125689](?=\p{L})|(?<=\p{L})[0125689]/u;
 
 export type LostValueMatch =
   | { status: "image_ocr_agreed"; value: string }

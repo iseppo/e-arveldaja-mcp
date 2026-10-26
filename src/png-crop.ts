@@ -150,6 +150,9 @@ export function pngSize(png: Buffer): { width: number; height: number } {
   return { width, height };
 }
 
+/** The inflated image data per source PNG: several crops of one page render inflate it once. */
+const inflated = new WeakMap<Buffer, Promise<Buffer>>();
+
 /**
  * Returns a new RGBA PNG holding `rect` (pixels; clamped to the image, rounded
  * outward). Throws `PngCropError` on any unsupported or corrupt input, an
@@ -165,9 +168,14 @@ export async function cropPng(png: Buffer, rect: PixelRect): Promise<Buffer> {
 
   const stride = width * BYTES_PER_PIXEL;
   const expected = height * (stride + 1);
+  let inflating = inflated.get(png);
+  if (!inflating) {
+    inflating = inflate(idat, { maxOutputLength: expected });
+    inflated.set(png, inflating);
+  }
   let data: Buffer;
   try {
-    data = await inflate(idat, { maxOutputLength: expected });
+    data = await inflating;
   } catch {
     throw new PngCropError("image data does not inflate");
   }

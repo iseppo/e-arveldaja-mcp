@@ -413,6 +413,19 @@ describe("lost-value render/OCR seam", () => {
     await expect(renderPagePng("/tmp/a.pdf", 2)).rejects.toThrow("page render unavailable");
   });
 
+  it("rejects a render past the timeout and refuses new renders until the stuck one settles", async () => {
+    let finish: (value: unknown) => void = () => {};
+    screenshotMock.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const { renderPagePng } = await import("./document-parser.js");
+    await expect(renderPagePng("/tmp/a.pdf", 2, 20)).rejects.toThrow("page render timed out");
+    await expect(renderPagePng("/tmp/a.pdf", 2)).rejects.toThrow("page render unavailable");
+    expect(screenshotMock).toHaveBeenCalledTimes(1);
+    finish([]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    screenshotMock.mockResolvedValue([{ pageNum: 2, width: 10, height: 20, imageBuffer: Buffer.from("png") }]);
+    expect(await renderPagePng("/tmp/a.pdf", 2)).toEqual({ png: Buffer.from("png"), width: 10, height: 20 });
+  });
+
   it("resolves an OCR failure or timeout to unavailable and runs one OCR at a time", async () => {
     const { ocrPng } = await import("./document-parser.js");
     parseMock.mockRejectedValueOnce(new Error("failed to download tessdata"));
