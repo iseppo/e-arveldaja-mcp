@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
@@ -408,13 +408,56 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     const { file, verify } = await lostVerified(w, "lost date basis");
     expect(verify.booking).toBeUndefined();
     expect(verify.bookingBasis).toEqual({
-      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310,
-      items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1 }],
+      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, bank_account_no: null, ref_number: null, notes: null,
+      items: [{
+        custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1, total_net_price: 100,
+        vat_accounts_id: 1510, vat_accounts_dimensions_id: null, cl_vat_articles_id: null, reversed_vat_id: null,
+      }],
       gross_price: 124, vat_price: 24,
     });
     const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
     if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
     expect(outcome.value.bookingComputedAtCreate).toMatchObject({ invoice_date: "2026-03-15", gross_price: 124, vat_price: 24 });
+  });
+
+  it("a template's VAT account, VAT article and reverse-charge id are shown in the basis", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, vat_accounts_id: 1511, cl_vat_articles_id: 7, reversed_vat_id: 3 }] };
+    const { verify } = await lostVerified(w, "lost date reverse charge template");
+    expect(verify.bookingBasis!.items).toEqual([expect.objectContaining({ vat_accounts_id: 1511, cl_vat_articles_id: 7, reversed_vat_id: 3 })]);
+  });
+
+  it("deferredBookingDrift: a VAT account, VAT article, reverse-charge id, net, bank account, reference or notes unlike the basis drifts; a defaulted null does not", () => {
+    const item = {
+      custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1, total_net_price: 100,
+      vat_accounts_id: 1511, vat_accounts_dimensions_id: null, cl_vat_articles_id: null, reversed_vat_id: 3,
+    };
+    const basis = { supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, bank_account_no: null, ref_number: null, notes: null, items: [item], gross_price: 124, vat_price: 24 };
+    const fingerprint = (itemChange: Record<string, unknown> = {}, change: Record<string, unknown> = {}) => ({
+      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310, gross_price: 124, vat_price: 24,
+      items: [{ ...item, vat_accounts_dimensions_id: undefined, cl_vat_articles_id: 1, vat_rate_dropdown: "24", ...itemChange }], ...change,
+    }) as never;
+    expect(deferredBookingDrift(basis, fingerprint())).toBe(false);
+    for (const change of [{ vat_accounts_id: 1510 }, { reversed_vat_id: null }, { reversed_vat_id: 4 }, { total_net_price: 101 }]) {
+      expect(deferredBookingDrift(basis, fingerprint(change)), JSON.stringify(change)).toBe(true);
+    }
+    for (const change of [{ bank_account_no: "EE382200221020145685" }, { ref_number: "123" }, { notes: "x" }]) {
+      expect(deferredBookingDrift(basis, fingerprint({}, change)), JSON.stringify(change)).toBe(true);
+    }
+    // A corrected supplier IBAN may change the bank account, as in bookingDrift.
+    expect(deferredBookingDrift(basis, fingerprint({}, { bank_account_no: "EE382200221020145685" }), ["supplier_iban"])).toBe(false);
+  });
+
+  it("a failed supplier read while building the basis holds clients_unavailable: no handle, nothing written", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LOST_LINES));
+    const file = writePdf("%PDF lost date supplier read fails");
+    const { reading, proof } = readingFor(packetFor(file.sha256, LOST_LINES), LOST_DATE);
+    w.api.clients.get.mockRejectedValue(new Error("clients down"));
+    const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "blocked", holds: [{ code: "clients_unavailable" }] } });
+    if (outcome.ok) expect(outcome.value.planHandle).toBeUndefined();
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("a supplier renamed between verify and create differs from the basis the owner saw: reading_booking_drift, 0 writes", async () => {

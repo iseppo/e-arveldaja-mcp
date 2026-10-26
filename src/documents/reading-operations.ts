@@ -608,49 +608,97 @@ export function bookingDrift(reviewed: PlanRecord, recomputed: PlanRecord, corre
 
 /**
  * Step 0 (lost-value plan): what verify shows and binds when the date was lost. No booking is built without a date
- * (the VAT rate, the non-VAT form, the journal date and the term derive from it), so the owner sees the supplier,
- * VAT status, liability account, cost-side items and amounts; create builds the booking on the typed date and holds
- * reading_booking_drift when any of these differs. The VAT side (rate, VAT account and article) follows from the date
- * and is checked at create by the full binding and the checker re-run; the created result returns the booking.
+ * (the VAT rate, the non-VAT form, the journal date and the term derive from it), so the owner sees every other
+ * value the draft writes: supplier, VAT status, liability account, bank account, reference and notes, and per item
+ * the title, cost account and dimension, purchase article, net amount and (VAT-registered) the template's or the
+ * caller's VAT account, VAT dimension, VAT article and reverse-charge id. Create builds the booking on the typed date
+ * and holds reading_booking_drift when any of these differs. A VAT account, VAT dimension or VAT article the
+ * template or items leave empty (null here) is filled at create from the purchase-article defaults for the rate in
+ * force on the typed date; the created result returns the whole booking for review before confirm.
  */
 export interface DeferredBookingBasis {
   supplier_name: string;
   vat_registered: boolean;
   liability_accounts_id: number;
-  items: Array<{ custom_title: string | null; purchase_accounts_id: number | null; purchase_accounts_dimensions_id: number | null; cl_purchase_articles_id: number | null }>;
+  bank_account_no: string | null;
+  ref_number: string | null;
+  notes: string | null;
+  items: DeferredBasisItem[];
   gross_price: number | null;
   /** The invoice VAT for a VAT-registered company; null for a non-VAT one (its form derives from the date). */
   vat_price: number | null;
 }
 
-const basisItem = (item: PurchaseInvoiceItem): DeferredBookingBasis["items"][number] => ({
+export interface DeferredBasisItem {
+  custom_title: string | null;
+  purchase_accounts_id: number | null;
+  purchase_accounts_dimensions_id: number | null;
+  cl_purchase_articles_id: number | null;
+  total_net_price: number | null;
+  /** The VAT side, VAT-registered only (null otherwise: the non-VAT form derives from the date). */
+  vat_accounts_id: number | null;
+  vat_accounts_dimensions_id: number | null;
+  cl_vat_articles_id: number | null;
+  reversed_vat_id: number | null;
+}
+
+/** The VAT-side keys a null basis value leaves to the create-time purchase-article defaults. */
+const DEFAULTED_VAT_KEYS = ["vat_accounts_id", "vat_accounts_dimensions_id", "cl_vat_articles_id"] as const;
+
+const basisItem = (item: PurchaseInvoiceItem, isVatReg: boolean): DeferredBasisItem => ({
   custom_title: item.custom_title ?? null,
   purchase_accounts_id: item.purchase_accounts_id ?? null,
   purchase_accounts_dimensions_id: item.purchase_accounts_dimensions_id ?? null,
   cl_purchase_articles_id: item.cl_purchase_articles_id ?? null,
+  total_net_price: item.total_net_price ?? null,
+  vat_accounts_id: isVatReg ? item.vat_accounts_id ?? null : null,
+  vat_accounts_dimensions_id: isVatReg ? item.vat_accounts_dimensions_id ?? null : null,
+  cl_vat_articles_id: isVatReg ? item.cl_vat_articles_id ?? null : null,
+  reversed_vat_id: isVatReg ? item.reversed_vat_id ?? null : null,
 });
 
-function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues): DeferredBookingBasis {
+function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues, knownIban: string | undefined): DeferredBookingBasis {
+  // The template's net comes from the values, exactly as itemWithAmounts sets it.
   const items = "items" in source ? parsePurchaseInvoiceItems(source.items)
-    : [{ ...source.template, ...(input?.itemTitle !== undefined ? { custom_title: input.itemTitle } : {}) }];
+    : [{
+        ...source.template,
+        ...(input?.itemTitle !== undefined ? { custom_title: input.itemTitle } : {}),
+        total_net_price: values.net ?? round2((values.gross ?? 0) - (values.vat ?? 0)),
+      }];
   return {
     supplier_name: supplierName,
     vat_registered: isVatReg,
     liability_accounts_id: input?.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
-    items: (desandboxAllStrings(items) as PurchaseInvoiceItem[]).map(basisItem),
+    bank_account_no: knownIban ? desandboxText(knownIban) : null,
+    ref_number: null,
+    notes: null,
+    items: (desandboxAllStrings(items) as PurchaseInvoiceItem[]).map((item) => basisItem(item, isVatReg)),
     gross_price: values.gross,
     vat_price: isVatReg ? values.vat ?? 0 : null,
   };
 }
 
-/** True when the booking computed at create differs from the basis the owner saw at verify. */
-export function deferredBookingDrift(basis: DeferredBookingBasis, fingerprint: PlanRecord): boolean {
+/**
+ * True when the booking computed at create differs from the basis the owner saw at verify. A corrected supplier IBAN
+ * may change the bank account (as in bookingDrift); a null VAT account, VAT dimension or VAT article may be filled.
+ */
+export function deferredBookingDrift(basis: DeferredBookingBasis, fingerprint: PlanRecord, correctedFields: readonly string[] = []): boolean {
   const vatRegistered = fingerprint.vat_registered === true;
+  const text = (value: unknown) => (typeof value === "string" ? value : null);
+  const items = ((fingerprint.items ?? []) as unknown as PurchaseInvoiceItem[]).map((item, index) => {
+    const recomputed = basisItem(item, vatRegistered);
+    const shown = basis.items[index];
+    if (shown) for (const key of DEFAULTED_VAT_KEYS) if (shown[key] === null) recomputed[key] = null;
+    return recomputed;
+  });
   const recomputed: DeferredBookingBasis = {
     supplier_name: String(fingerprint.supplier_name),
     vat_registered: vatRegistered,
     liability_accounts_id: Number(fingerprint.liability_accounts_id),
-    items: ((fingerprint.items ?? []) as unknown as PurchaseInvoiceItem[]).map(basisItem),
+    bank_account_no: correctedFields.includes("supplier_iban") ? basis.bank_account_no : text(fingerprint.bank_account_no),
+    ref_number: text(fingerprint.ref_number),
+    notes: text(fingerprint.notes),
+    items,
     gross_price: typeof fingerprint.gross_price === "number" ? fingerprint.gross_price : null,
     vat_price: vatRegistered ? (typeof fingerprint.vat_price === "number" ? fingerprint.vat_price : null) : null,
   };
@@ -889,9 +937,13 @@ class ReadingDocumentOperations {
       // A booking the owner has not seen is never created: no gross, no booking review, no handle.
       if (values.gross === null) return ok({ ...result, holds: [{ code: "required_field_missing", field: "gross" }] });
       // Lost date: the owner sees the booking basis instead, and create holds a booking that differs from it.
-      const bookingBasis = bookingDeferred
-        ? deferredBookingBasis(itemsSource, input.booking, desandboxText((await this.api.clients.get(supplierClient.id)).name), isVatReg, values)
-        : undefined;
+      let bookingBasis: DeferredBookingBasis | undefined;
+      if (bookingDeferred) {
+        // The supplier name as computeEffectiveBooking reads it; a failed read holds like the client list (nothing written).
+        const supplierName = await this.api.clients.get(supplierClient.id).then((client) => desandboxText(client.name), () => undefined);
+        if (supplierName === undefined) return ok({ ...result, holds: [{ code: "clients_unavailable" }] });
+        bookingBasis = deferredBookingBasis(itemsSource, input.booking, supplierName, isVatReg, values, knownIban);
+      }
       if (!bookingBasis && !booking?.effective) return ok(result);
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
       if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true });
@@ -1057,7 +1109,7 @@ class ReadingDocumentOperations {
         // Every §3.6 scan on the final values with every list cache dropped; journal references fail closed.
         holds.push(...(await readingDuplicateHolds(this.api, final, plan.supplier_client_id, plan.heuristic_keys, { uncached: true })).map(holdOf));
         if (booking?.effective && (plan.booking === null
-          ? plan.booking_basis === undefined || deferredBookingDrift(plan.booking_basis, booking.effective.fingerprint)
+          ? plan.booking_basis === undefined || deferredBookingDrift(plan.booking_basis, booking.effective.fingerprint, answered.correctedFields)
           : bookingDrift(plan.booking, booking.effective.fingerprint, answered.correctedFields))) {
           holds.push({ code: "reading_booking_drift" });
         }

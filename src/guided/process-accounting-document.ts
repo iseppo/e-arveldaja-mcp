@@ -305,7 +305,7 @@ function renderCard(card: ReadingCard) {
 
 /** Step 0: the date was lost, so verify shows the booking basis; create books on the typed date and returns the booking. */
 export const BOOKING_AFTER_TYPED_DATE_NOTE =
-  "The document's date was lost from the text, so the booking is computed when the owner types it: the VAT rate, VAT account and article (or the non-VAT form), the journal date and the payment term follow from that date. Create holds when the supplier, VAT status, liability account, items or amounts differ from this basis, and returns the computed booking as booking_computed_at_create; review it before confirm.";
+  "The document's date was lost from the text, so the booking is computed when the owner types it. The VAT rate, the journal date and the payment term follow from that date; for a non-VAT company so does the non-VAT form. For a VAT-registered company the VAT account, VAT dimension and VAT article are the ones shown here (from the supplier's template or the items); one shown as null is filled from the purchase-article defaults for the rate in force on the typed date. Create holds when anything shown here differs, and returns the computed booking as booking_computed_at_create; review it before confirm.";
 
 function renderVerify(result: VerifyDocumentResult) {
   return {
