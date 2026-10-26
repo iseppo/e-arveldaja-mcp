@@ -344,7 +344,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     const referencingIds = referencing.map(hit => hit.journal_id);
     if (referencingIds.length > 0) {
       const matched = [...new Set(referencing.map(hit => hit.reference))]
-        .map(reference => `${reference === invoiceNumber ? "invoice number" : "payment reference"} ${wrapUntrustedOcr(reference) ?? ""}`);
+        .map(reference => `${reference === invoiceNumber ? "invoice number" : "prepayment reference"} ${wrapUntrustedOcr(reference) ?? ""}`);
       notes.push(
         `Held: journal(s) ${referencingIds.join(", ")} already reference ${matched.join(" / ")}; ` +
         "this document may already be booked. Attach it to that journal (attach_document entity_type=journal on the standard surface, or in the e-arveldaja UI) instead of creating an invoice.",

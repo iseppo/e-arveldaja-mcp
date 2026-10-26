@@ -4891,9 +4891,6 @@ describe("extractPaymentReferences (F-PREPAY-REF)", () => {
     ["Ettemaksuarve nr EMSS70002960", ["EMSS70002960"]],
     ["Ettemaks: EMSS70002960    Summa 155,00", ["EMSS70002960"]],
     ["Prepayment invoice no. PP-2026-0042", ["PP-2026-0042"]],
-    ["Makse viide: 70002960", ["70002960"]],
-    ["Payment reference PR-778899", ["PR-778899"]],
-    ["Viitenumber 1234567890", ["1234567890"]],
   ])("reads the label-anchored reference in %s", (line, expected) => {
     expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual(expected);
   });
@@ -4907,6 +4904,9 @@ describe("extractPaymentReferences (F-PREPAY-REF)", () => {
     ["an IBAN", "Reference EE382200221020145685"],
     ["a digit-less word", "Reference ABCDEF"],
     ["a cited invoice behind a word", "Viide arvele: 4411"],
+    ["a recurring customer reference number", "Viitenumber 1234567890"],
+    ["a payment reference", "Makse viide: 70002960"],
+    ["an English payment reference", "Payment reference PR-778899"],
   ])("never reads %s", (_name, line) => {
     expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual([]);
   });

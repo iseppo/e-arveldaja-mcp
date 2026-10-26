@@ -3389,15 +3389,16 @@ function continuesPastCapture(rest: string): boolean {
   return /^[^\s\p{L}\p{N}][\p{L}\p{N}]/u.test(rest);
 }
 
-// A prepayment / payment-reference label and the one unspaced identifier after
-// it on the same line ("Ettemaksuarve nr EMSS70002960", "Makse viide: 1234567").
+// A prepayment label and the one unspaced identifier after it on the same line
+// ("Ettemaksuarve nr EMSS70002960"). Generic payment references (viitenumber,
+// makse viide, reference) are left out: they repeat on every invoice of a
+// customer, so one journal carrying one would hold all later invoices.
 const PAYMENT_REFERENCE_RE =
-  /(?<![\p{L}\d])(?:ettemaksuarve|ettemaksu?|prepayment(?:\s+invoice)?|makse\s*viide|maksekorralduse\s+viide|payment\s+reference|viitenumber|viitenr|viide|reference|ref\.?)(?:\s*(?:nr|no|number))?\.?[:#\t .-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
+  /(?<![\p{L}\d])(?:ettemaksuarve|ettemaksu?|prepayment(?:\s+invoice)?)(?:\s*(?:nr|no|number))?\.?[:#\t .-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
 
 /**
- * F-PREPAY-REF: the label-anchored prepayment / payment references in `text`
- * (a final invoice citing its prepayment invoice `EMSS70002960`, a payment
- * reference), for the journal-reference scan: a manual prepayment journal
+ * F-PREPAY-REF: the label-anchored prepayment references in `text` (a final
+ * invoice citing its prepayment invoice `EMSS70002960`), for the journal-reference scan: a manual prepayment journal
  * `ETR1:EMSS70002960` may already book part of this document. Only values on
  * a label's own line; an amount (`Ettemaks 150.00`), a date or an IBAN is never
  * one. The scan's strength gate still applies to every value.

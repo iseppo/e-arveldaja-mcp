@@ -1752,7 +1752,7 @@ describe("receipt batch — journal already references the invoice number (Messe
     const result = outcome.value.results[0]!;
     expect(result.status).toBe("needs_review");
     expect(result.referencing_journal_ids).toEqual([29551083]);
-    expect(result.notes.join(" ")).toContain("Held: journal(s) 29551083 already reference payment reference");
+    expect(result.notes.join(" ")).toContain("Held: journal(s) 29551083 already reference prepayment reference");
     expectZeroWrites(spies);
   });
 
