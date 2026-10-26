@@ -460,13 +460,13 @@ describe("AccountingDocumentOperations.create", () => {
       { text: "Arve INV-1", x: 316, y: 201, height: 13 },
       { text: "Summa 12.00 EUR", x: 316, y: 550, height: 13 },
       { text: "ACME OÜ", x: 28, y: 776, height: 9 },
-      { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, height: 9 },
+      { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 776, height: 9 },
       { text: "Tänav 1, 10111 Tallinn", x: 28, y: 788, height: 9 },
       { text: "Registrikood 17487472", x: 28, y: 800, height: 9 },
     ];
     mockedParseDocument.mockResolvedValue({
       text: ["ACME", "Arve saaja", "Seppo AI OÜ", "Arve INV-1", "Summa 12.00 EUR",
-        "ACME OÜ    EE162200001234567890 SWIFT: TESTEE2X", "Tänav 1, 10111 Tallinn", "Registrikood 17487472"].join("\n"),
+        "ACME OÜ    EE212200001234567897 SWIFT: TESTEE2X", "Tänav 1, 10111 Tallinn", "Registrikood 17487472"].join("\n"),
       pageCount: 1,
       ocrPartialFailure: false,
       result: { pages: [{ pageNum: 1, textItems: items.map(entry => ({ ...entry, width: 90, confidence: 0.95 })) }] },

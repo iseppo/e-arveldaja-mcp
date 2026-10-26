@@ -1478,6 +1478,8 @@ interface ClassifiedAmountLine {
   /** The VAT label is on the amount's OWN line, not only on the next line of the inspection window. */
   hasOwnLineVatLabel: boolean;
   score: number;
+  /** R5/R6: the row's three amount tokens form this unique a + b = c. */
+  rowTriple?: { sum: number; parts: [number, number] };
 }
 
 function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
@@ -1573,6 +1575,7 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
     hasVatAmountLabel,
     hasOwnLineVatLabel,
     score,
+    ...(rowTriple ? { rowTriple } : {}),
   };
 }
 
@@ -2579,6 +2582,63 @@ function extractAmountsFromTextWithMetadata(text: string): ExtractedAmountsWithM
   };
 }
 
+/**
+ * R6b: net and VAT read from the document's total-row triple ("Kokku 20.00
+ * 4.80 24.80") when the smaller part is a VAT rate in force on the invoice
+ * date times the larger part. Weaker evidence than labelled rows, so only when
+ * nothing else gave a net or a VAT: no labelled net / VAT row with an amount,
+ * a labelled (not fallback, not conflicting) gross equal to the triple's sum,
+ * every triple row of the document the same triple and one of them
+ * total-labelled, and exactly one (net, VAT, rate) reading. Anything else
+ * returns the amounts unchanged (gross-only, held as today).
+ */
+function withTotalRowTripleNetVat(
+  amounts: ExtractedAmountsWithMetadata,
+  text: string,
+  invoiceDate: string | undefined,
+): ExtractedAmountsWithMetadata {
+  const gross = amounts.total_gross;
+  if (
+    gross === undefined || amounts.total_net !== undefined || amounts.total_vat !== undefined ||
+    amounts.gross_unlabelled || amounts.total_gross_conflict ||
+    amounts.provenance.find(entry => entry.field === "total_gross")?.source === "fallback"
+  ) {
+    return amounts;
+  }
+  const rates = vatRatesInForceOn(invoiceDate).filter(rate => rate > 0);
+  if (rates.length === 0) return amounts;
+  // Same line numbering as extractAmountsFromTextWithMetadata.
+  const lines = text.split(/\r?\n/).map(clampTextLine).filter(Boolean);
+  const classified = lines.map((_line, index) => classifyLine(lines, index));
+  if (classified.some(entry => entry.amounts.length > 0 && (entry.hasNetLikeLabel || entry.hasOwnLineVatLabel))) {
+    return amounts;
+  }
+  const triples = classified.flatMap((entry, lineIndex) => entry.rowTriple ? [{ ...entry.rowTriple, entry, lineIndex }] : []);
+  const tripleKey = (triple: { sum: number; parts: [number, number] }) =>
+    [triple.sum, ...triple.parts].sort((a, b) => a - b).join("|");
+  if (triples.length === 0 || new Set(triples.map(tripleKey)).size !== 1) return amounts;
+  const totalRow = triples.find(({ entry }) => entry.hasTotalLikeLabel && !entry.hasNetLikeLabel && !entry.blockedAsReference);
+  if (!totalRow || Math.abs(totalRow.sum - gross) > 0.01) return amounts;
+  const [a, b] = totalRow.parts;
+  const readings = ([[a, b], [b, a]] as const).flatMap(([net, vat]) => vat > 0 && vat < net
+    ? rates.filter(rate => snapVatRate(net, vat, [rate]) !== undefined).map(rate => ({ net, vat, rate }))
+    : []);
+  if (readings.length !== 1) return amounts;
+  const { net, vat, rate } = readings[0]!;
+  const rationale = `derived_from_total_row_${rate}pct`;
+  return {
+    ...amounts,
+    total_net: net,
+    total_vat: vat,
+    vat_explicit: false,
+    provenance: [
+      { field: "total_net", value: net, lineIndex: totalRow.lineIndex, source: "fallback", rationale },
+      { field: "total_vat", value: vat, lineIndex: totalRow.lineIndex, source: "fallback", rationale },
+      ...amounts.provenance,
+    ],
+  };
+}
+
 export function extractAmountsWithMetadata(text: string, textItems?: readonly LayoutTextItem[]): ExtractedAmountsWithMetadata {
   const textAmounts = extractAmountsFromTextWithMetadata(text);
   if (!textItems || textItems.length === 0) return textAmounts;
@@ -3327,6 +3387,59 @@ const OTHER_DOCUMENT_CITATION_RE =
 // invoice booked under it must still be found as a duplicate).
 function continuesPastCapture(rest: string): boolean {
   return /^[^\s\p{L}\p{N}][\p{L}\p{N}]/u.test(rest);
+}
+
+// A prepayment / payment-reference label and the one unspaced identifier after
+// it on the same line ("Ettemaksuarve nr EMSS70002960", "Makse viide: 1234567").
+const PAYMENT_REFERENCE_RE =
+  /(?<![\p{L}\d])(?:ettemaksuarve|ettemaksu?|prepayment(?:\s+invoice)?|makse\s*viide|maksekorralduse\s+viide|payment\s+reference|viitenumber|viitenr|viide|reference|ref\.?)(?:\s*(?:nr|no|number))?\.?[:#\t .-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
+
+/**
+ * F-PREPAY-REF: the label-anchored prepayment / payment references in `text`
+ * (a final invoice citing its prepayment invoice `EMSS70002960`, a payment
+ * reference), for the journal-reference scan: a manual prepayment journal
+ * `ETR1:EMSS70002960` may already book part of this document. Only values on
+ * a label's own line; an amount (`Ettemaks 150.00`), a date or an IBAN is never
+ * one. The scan's strength gate still applies to every value.
+ */
+export function extractPaymentReferences(text: string): string[] {
+  const references = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    for (const match of line.matchAll(PAYMENT_REFERENCE_RE)) {
+      const rest = line.slice((match.index ?? 0) + match[0].length);
+      if (/^[.,]\d/.test(rest)) continue;
+      const candidate = acceptInvoiceNumberCandidate(match[1]);
+      if (candidate) references.add(candidate);
+    }
+  }
+  return [...references];
+}
+
+/**
+ * F-NR-EQUALS-ID: the invoice number equals a labelled registry code / VAT
+ * number on the document, or the active company's own registry code / VAT
+ * (also a VAT's digits without its country prefix): it was most likely read
+ * from an identifier line. The number is never changed; the caller holds it as
+ * invoice_number_ambiguous.
+ */
+function invoiceNumberEqualsIdentifier(
+  invoiceNumber: string,
+  text: string,
+  own: { vat?: string; registryCode?: string },
+): boolean {
+  const key = (value: string) => value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const numberKey = key(invoiceNumber);
+  if (numberKey === "") return false;
+  const ids = [
+    ...[...text.matchAll(REG_CODE_LABEL_RE)].map(match => match[1]),
+    ...[...text.matchAll(VAT_LABEL_RE)].map(match => match[1]),
+    own.vat,
+    own.registryCode,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .map(key)
+    .filter(value => value !== "");
+  return ids.some(id => id === numberKey || id.replace(/^[A-Z]{2,3}(?=\d)/, "") === numberKey);
 }
 
 export function extractInvoiceNumber(text: string, fileName: string): string {
@@ -4142,7 +4255,7 @@ export function extractReceiptFieldsFromText(
     ? { ...extractedSupplier, name: identityBlock.name, layoutSupplierNameItem: identityBlock.nameItem, layoutSupplierNameRationale: "identity_block" }
     : extractedSupplier;
   const supplierName = supplierResult.name;
-  const amounts = extractAmountsWithMetadata(text, options?.textItems);
+  const amounts = withTotalRowTripleNetVat(extractAmountsWithMetadata(text, options?.textItems), text, invoice_date);
   // The booked currency follows the picked gross: on "Paid EUR 90.00 (1 EUR =
   // 1.1111 USD) / Total USD 100.00" the gross is the USD total, so the currency
   // is USD; on "Total USD 100.00 / EUR 90.00" with gross 90 it is EUR. A gross
@@ -4179,7 +4292,11 @@ export function extractReceiptFieldsFromText(
     ? detectUnsupportedCurrencyCode(text, detectedCurrency, grossLine)
     : undefined;
   const currency = unsupportedCurrency || componentConflict ? undefined : detectedCurrency;
-  const { invoiceNumber, ambiguous: invoiceNumberAmbiguous } = extractInvoiceNumberCandidates(text, fileName);
+  const { invoiceNumber, ambiguous: invoiceNumberConflict } = extractInvoiceNumberCandidates(text, fileName);
+  const invoiceNumberAmbiguous = invoiceNumberConflict || invoiceNumberEqualsIdentifier(invoiceNumber, text, {
+    vat: options?.ownCompanyVat,
+    registryCode: options?.ownCompanyRegistryCode,
+  });
   const minOcrConfidence = options?.minOcrConfidence ?? computeMinOcrConfidence(options?.textItems);
   const fieldProvenance = buildFieldProvenance(
     text,

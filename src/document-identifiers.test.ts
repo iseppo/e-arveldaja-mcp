@@ -7,6 +7,9 @@ import {
   isValidEeRegistryCode,
   isValidEeVatNumber,
   extractIdentifiers,
+  FOREIGN_VAT_PREFIXES,
+  isForeignVatShape,
+  isValidIban,
   buildIdentifierMarkers,
   type LayoutTextItem,
 } from "./document-identifiers.js";
@@ -280,11 +283,11 @@ describe("extractIban", () => {
   });
 
   it("only trims at a group boundary, so an OCR-truncated IBAN is not completed from the next token", () => {
-    // EE22 2200 2210 2014 568 is one digit short; its first 20 characters with
-    // the "2" of "2024" happen to pass mod-97 (EE222200221020145682).
-    expect(extractIban("EE22 2200 2210 2014 568 2024")).toBeUndefined();
+    // EE54 2200 2210 2014 006 is one digit short; its first 20 characters with
+    // the "2" of "2024" form a valid IBAN (EE542200221020140062).
+    expect(extractIban("EE54 2200 2210 2014 006 2024")).toBeUndefined();
     // The same IBAN written in full and followed by a date is still accepted.
-    expect(extractIban("EE22 2200 2210 2014 5682 2024")).toBe("EE222200221020145682");
+    expect(extractIban("EE54 2200 2210 2014 0062 2024")).toBe("EE542200221020140062");
   });
 
   it("rejects an IBAN welded to the following token without a separator", () => {
@@ -322,6 +325,44 @@ describe("extractIban", () => {
   it("rejects a country code that is not in the IBAN registry", () => {
     // XX042200221020145685 passes mod-97 but XX is not an IBAN country.
     expect(extractIban("XX042200221020145685")).toBeUndefined();
+  });
+});
+
+describe("isValidIban (ibantools)", () => {
+  it("accepts valid IBANs, spaced or compact", () => {
+    expect(isValidIban("EE38 2200 2210 2014 5685")).toBe(true);
+    expect(isValidIban("ee382200221020145685")).toBe(true);
+    expect(isValidIban("DE89 3704 0044 0532 0130 00")).toBe(true);
+  });
+
+  it("rejects an IBAN passing mod-97 but failing the country's length or national account check", () => {
+    expect(isValidIban("EE61220022102014568")).toBe(false);
+    expect(isValidIban("EE591000001823456789")).toBe(false);
+    expect(isValidIban("XX042200221020145685")).toBe(false);
+  });
+});
+
+describe("foreign VAT recognition (jsvat)", () => {
+  it("derives the prefixes from jsvat, with the printed GR / XI aliases and without EE", () => {
+    expect(FOREIGN_VAT_PREFIXES).toEqual(expect.arrayContaining(["DE", "EL", "GR", "CH", "GB", "XI", "EU", "NO"]));
+    expect(FOREIGN_VAT_PREFIXES).not.toContain("EE");
+  });
+
+  it("recognises a punctuated Swiss UID and a GR-prefixed Greek VAT", () => {
+    expect(isForeignVatShape("CHE-123.456.789MWST")).toBe(true);
+    expect(isForeignVatShape("CHE-116.281.710TVA")).toBe(true);
+    expect(isForeignVatShape("GR123456789")).toBe(true);
+  });
+
+  it("keeps a well-shaped number failing its checksum an identifier (a hold, never ignored)", () => {
+    expect(isForeignVatShape("DE123456789")).toBe(true);
+    expect(isForeignVatShape("ATU12345678")).toBe(true);
+  });
+
+  it("rejects what is no VAT number", () => {
+    expect(isForeignVatShape("DE12")).toBe(false);
+    expect(isForeignVatShape("CHE-123.456")).toBe(false);
+    expect(isForeignVatShape("INVOICE")).toBe(false);
   });
 });
 

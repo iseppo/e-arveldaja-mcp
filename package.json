@@ -64,6 +64,8 @@
     "dotenv": "^18.0.9",
     "fast-xml-parser": "^5.11.2",
     "fastest-levenshtein": "^1.0.16",
+    "ibantools": "^4.5.4",
+    "jsvat": "^2.5.4",
     "zod": "^4.6.7"
   },
   "devDependencies": {

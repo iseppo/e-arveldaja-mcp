@@ -5,6 +5,7 @@ import {
   normalizeDate,
   extractDates,
   extractInvoiceNumber,
+  extractPaymentReferences,
   toIsoDate,
   extractAmountsWithMetadata,
   buildKeywordSuggestion,
@@ -3311,7 +3312,12 @@ describe("amountConsistencyIssues", () => {
     { name: "a trio off by more than 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.05, invoice_date: "2026-03-01" }, codes: ["trio_mismatch"] },
     { name: "a trio off by 0.02", amounts: { total_net: 100, total_vat: 24, total_gross: 124.02, invoice_date: "2026-03-01" }, codes: [] },
     { name: "an implausible rate", amounts: { total_net: 100, total_vat: 17, total_gross: 117, invoice_date: "2026-03-01" }, codes: ["vat_rate_implausible"] },
-    { name: "13% accommodation dated 2024 (no reduced-rate history)", amounts: { total_net: 100, total_vat: 13, total_gross: 113, invoice_date: "2024-05-01" }, codes: ["vat_rate_implausible"] },
+    { name: "13% accommodation dated 2024 (13% starts 2025-01-01)", amounts: { total_net: 100, total_vat: 13, total_gross: 113, invoice_date: "2024-05-01" }, codes: ["vat_rate_implausible"] },
+    // Q6: the ended reduced rates hold no plausible older receipt.
+    { name: "9% accommodation dated 2024", amounts: { total_net: 100, total_vat: 9, total_gross: 109, invoice_date: "2024-05-01" }, codes: [] },
+    { name: "5% press dated 2023", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2023-03-01" }, codes: [] },
+    { name: "5% press dated 2025 (back to 9%)", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2025-03-01" }, codes: ["vat_rate_implausible"] },
+    { name: "5% press dated before 2022-08-01", amounts: { total_net: 100, total_vat: 5, total_gross: 105, invoice_date: "2022-07-31" }, codes: ["vat_rate_implausible"] },
     { name: "a rate without a valid invoice date", amounts: { total_net: 100, total_vat: 17, total_gross: 117 }, codes: [] },
   ])("$name", ({ amounts, codes }) => {
     expect(amountConsistencyIssues(amounts)).toEqual(codes);
@@ -4115,6 +4121,75 @@ describe("row triples and layout amount tokens (WP2)", () => {
     });
   });
 
+  // R6b: a total row's triple supplies net and VAT only when the smaller part
+  // is a VAT rate in force on the invoice date times the larger one, and no
+  // labelled net / VAT exists. Otherwise the receipt stays gross-only.
+  describe("R6b net / VAT from the total row triple", () => {
+    const doc = (date: string, ...rows: string[]) =>
+      extractReceiptFieldsFromText(["Näidis AS", "Arve nr 12345678", `Kuupäev ${date}`, ...rows].join("\n"), "arve.pdf");
+
+    it.each([
+      ["24% in 2026", "01.09.2026", "Arve kokku 20.00 4.80 24.80", 20, 4.8, 24.8],
+      ["22% in 2025", "15.03.2025", "Kokku € 100.00 22.00 122.00", 100, 22, 122],
+      ["the sum printed first", "01.09.2026", "Kokku 24.80 20.00 4.80", 20, 4.8, 24.8],
+      ["a rounded 24%", "01.09.2026", "Kokku 8.05 1.93 9.98", 8.05, 1.93, 9.98],
+      ["13% accommodation", "01.09.2026", "Kokku 100.00 13.00 113.00", 100, 13, 113],
+    ])("derives net and VAT: %s", (_name, date, row, net, vat, gross) => {
+      const result = doc(date, row);
+      expect(result.total_gross).toBe(gross);
+      expect(result.total_net).toBe(net);
+      expect(result.total_vat).toBe(vat);
+      expect(result.vat_explicit).toBe(false);
+      expect(result.amount_consistency_issues).toBeUndefined();
+    });
+
+    it("derives with layout items whose total row binds the triple's sum", () => {
+      const items = [
+        item("Näidis AS", 52, 40, 60), item("Kuupäev 01.09.2026", 52, 60, 90),
+        item("Arve kokku", 52, 200, 50), item("20.00", 300, 200, 30), item("4.80", 360, 200, 30), item("24.80", 420, 200, 30),
+      ];
+      const result = extractReceiptFieldsFromText(
+        ["Näidis AS", "Kuupäev 01.09.2026", "Arve kokku 20.00 4.80 24.80"].join("\n"),
+        "arve.pdf",
+        { textItems: items },
+      );
+      expect(result.total_gross).toBe(24.8);
+      expect(result.total_net).toBe(20);
+      expect(result.total_vat).toBe(4.8);
+    });
+
+    it("derives on an item row repeating the same triple", () => {
+      const result = doc("01.09.2026", "Mobiilside 20.00 4.80 24.80", "Arve kokku 20.00 4.80 24.80");
+      expect(result.total_net).toBe(20);
+      expect(result.total_vat).toBe(4.8);
+    });
+
+    it.each([
+      ["no rate snaps (17%)", "01.09.2026", ["Kokku 100.00 17.00 117.00"]],
+      ["a rate not in force on the date (24% in 2024)", "01.09.2024", ["Kokku 100.00 24.00 124.00"]],
+      ["no valid invoice date", "31.02.2026", ["Kokku 20.00 4.80 24.80"]],
+      ["two different triples on the document", "01.09.2026", ["Mobiilside 10.00 2.40 12.40", "Kokku 20.00 4.80 24.80"]],
+      ["the triple only on an unlabelled row", "01.09.2026", ["Teenus 20.00 4.80 24.80", "Kokku 24.80"]],
+      ["the triple's sum is not the gross", "01.09.2026", ["Teenus 20.00 4.80 24.80", "Kokku 30.00"]],
+    ])("keeps the receipt gross-only: %s", (_name, date, rows) => {
+      const result = doc(date, ...rows);
+      expect(result.total_net).toBeUndefined();
+      expect(result.total_vat).toBeUndefined();
+    });
+
+    it("never overrides a labelled net row", () => {
+      const result = doc("01.09.2026", "Summa km-ta 21.00", "Kokku 20.00 4.80 24.80");
+      expect(result.total_net).toBe(21);
+      expect(result.total_vat).toBe(3.8);
+    });
+
+    it("never overrides a labelled VAT row", () => {
+      const result = doc("01.09.2026", "Käibemaks 24% 4.80", "Kokku 20.00 4.80 24.80");
+      expect(result.total_vat).toBe(4.8);
+      expect(result.vat_explicit).toBe(true);
+    });
+  });
+
   describe("R5 VAT-rate row triple", () => {
     it("binds the part equal to the stated rate × the other part", () => {
       const result = extractReceiptFieldsFromText(
@@ -4438,6 +4513,34 @@ describe("supplier names and invoice numbers (WP5)", () => {
       expect(result.invoice_number).toBe("2026-15");
       expect(result.invoice_number_ambiguous).toBeUndefined();
     });
+
+    // F-NR-EQUALS-ID: a number equal to a labelled id, or to the company's own
+    // id, is held; the captured number itself is never changed.
+    it.each([
+      ["a labelled registry code", ["Näidis OÜ", "Reg. nr 10234957", "Arve nr 10234957", "Kokku 10,00"], {}, "10234957"],
+      ["a labelled VAT number", ["Näidis OÜ", "KMKR EE102809963", "Arve nr EE102809963", "Kokku 10,00"], {}, "EE102809963"],
+      ["a labelled VAT's digits", ["Näidis OÜ", "KMKR EE102809963", "Arve nr 102809963", "Kokku 10,00"], {}, "102809963"],
+      ["a labelled foreign VAT", ["Näidis GmbH", "VAT DE123456789", "Invoice no. DE123456789", "Total 10.00"], {}, "DE123456789"],
+      ["the own registry code", ["Näidis OÜ", "Arve nr 12345678", "Kokku 10,00"], { ownCompanyRegistryCode: "12345678" }, "12345678"],
+      ["the own VAT number", ["Näidis OÜ", "Arve nr EE100000007", "Kokku 10,00"], { ownCompanyVat: "EE100000007" }, "EE100000007"],
+    ])("an invoice number equal to %s holds as ambiguous", (_name, lines, options, number) => {
+      const result = extractReceiptFieldsFromText(lines.join("\n"), "x.pdf", options);
+      expect(result.invoice_number).toBe(number);
+      expect(result.invoice_number_ambiguous).toBe(true);
+    });
+
+    it("an invoice number different from every id is not held", () => {
+      const result = extractReceiptFieldsFromText(
+        ["Näidis OÜ", "Reg. nr 10234957", "KMKR EE102809963", "Arve nr 10234958", "Kokku 10,00"].join("\n"),
+        "x.pdf",
+        { ownCompanyRegistryCode: "12345678", ownCompanyVat: "EE100000007" },
+      );
+      expect(result.invoice_number).toBe("10234958");
+      expect(result.invoice_number_ambiguous).toBeUndefined();
+      // An unlabelled number elsewhere on the page is not an id.
+      const unlabelled = extractReceiptFieldsFromText(["Näidis OÜ", "Tellimus 10234957", "Arve nr 10234957", "Kokku 10,00"].join("\n"), "x.pdf");
+      expect(unlabelled.invoice_number_ambiguous).toBeUndefined();
+    });
   });
 });
 
@@ -4472,7 +4575,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     item("Arve summa", 316, 550, 61, 13),
     item("124,00", 529, 550, 33, 13),
     item("Pank", 206, 776, 40, 9),
-    item("EE162200001234567890 SWIFT: TESTEE2X", 276, 776, 145, 9),
+    item("EE212200001234567897 SWIFT: TESTEE2X", 276, 776, 145, 9),
     ...footerItems,
   ];
   // Raw text as the parser lays it out: one line per row, columns spaced apart.
@@ -4537,7 +4640,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page([
       ...footer(supplierFooter),
       ...footer(["Teine Firma OÜ", "Registrikood 10000024"], 650),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 650, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 650, 145, 9),
     ]));
     expect(result.supplier_name).toBe("ARVE NS0001234");
     expect(result.supplier_reg_code).toBeUndefined();
@@ -4640,13 +4743,13 @@ describe("supplier identity from a page-column identity block (Telia footer live
     // Also when it is printed with an address.
     const withAddress = extract(page([
       ...footer(["Näidis Side AS", "Teine Firma OÜ, Tänav 2", "Registrikood 10000018"]),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 788, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 788, 145, 9),
     ]));
     expect(withAddress.supplier_reg_code).toBeUndefined();
   });
 
   it("a bank line inside the block disqualifies it", () => {
-    const result = extract(page(footer(["Näidis Side AS", "Swedbank EE162200001234567890", "Registrikood 10000018"])));
+    const result = extract(page(footer(["Näidis Side AS", "Swedbank EE212200001234567897", "Registrikood 10000018"])));
     expect(result.supplier_reg_code).toBeUndefined();
   });
 
@@ -4668,7 +4771,7 @@ describe("supplier identity from a page-column identity block (Telia footer live
     const result = extract(page([
       ...footer(supplierFooter),
       ...footer(["Maksete vahendaja", "Maksekeskus AS", "Registrikood 10000024"], 640),
-      item("EE162200001234567890 SWIFT: TESTEE2X", 276, 652, 145, 9),
+      item("EE212200001234567897 SWIFT: TESTEE2X", 276, 652, 145, 9),
     ]));
     expect(result.supplier_reg_code).toBeUndefined();
   });
@@ -4780,5 +4883,31 @@ describe("supplier identity from a page-column identity block (Telia footer live
     expect(result.supplier_name).toBe("Kolmas Firma OÜ");
     expect(result.reg_code_rationale).not.toBe("identity_block");
     expect(result.vat_no_rationale).not.toBe("identity_block");
+  });
+});
+
+describe("extractPaymentReferences (F-PREPAY-REF)", () => {
+  it.each([
+    ["Ettemaksuarve nr EMSS70002960", ["EMSS70002960"]],
+    ["Ettemaks: EMSS70002960    Summa 155,00", ["EMSS70002960"]],
+    ["Prepayment invoice no. PP-2026-0042", ["PP-2026-0042"]],
+    ["Makse viide: 70002960", ["70002960"]],
+    ["Payment reference PR-778899", ["PR-778899"]],
+    ["Viitenumber 1234567890", ["1234567890"]],
+  ])("reads the label-anchored reference in %s", (line, expected) => {
+    expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual(expected);
+  });
+
+  it.each([
+    ["an amount after a prepayment label", "Ettemaks 150.00"],
+    ["an amount with a comma decimal", "Ettemaks 123456,00"],
+    ["an unlabelled identifier", "EMSS70002960"],
+    ["a label on another line", "Ettemaksuarve\nEMSS70002960"],
+    ["a date", "Viide 2026-09-23"],
+    ["an IBAN", "Reference EE382200221020145685"],
+    ["a digit-less word", "Reference ABCDEF"],
+    ["a cited invoice behind a word", "Viide arvele: 4411"],
+  ])("never reads %s", (_name, line) => {
+    expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual([]);
   });
 });

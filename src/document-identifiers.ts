@@ -1,3 +1,6 @@
+import { checkVAT, countries as jsvatCountries } from "jsvat";
+import { electronicFormatIBAN, isValidIBAN } from "ibantools";
+
 // ---------------------------------------------------------------------------
 // Structural validators (Estonia-specific)
 // ---------------------------------------------------------------------------
@@ -50,22 +53,12 @@ export function isValidEeVatNumber(value: string | null | undefined): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// IBAN validation (structural, ISO 7064 mod-97)
+// IBAN validation (ibantools: per-country length + BBAN format, ISO 7064 mod-97)
 // ---------------------------------------------------------------------------
 
 export function isValidIban(value: string): boolean {
-  const compact = value.replace(/\s+/g, "").toUpperCase();
-  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(compact)) return false;
-
-  const rearranged = `${compact.slice(4)}${compact.slice(0, 4)}`;
-  let remainder = 0;
-  for (const char of rearranged) {
-    const digits = /\d/.test(char) ? char : String(char.charCodeAt(0) - 55);
-    for (const digit of digits) {
-      remainder = (remainder * 10 + Number(digit)) % 97;
-    }
-  }
-  return remainder === 1;
+  const compact = electronicFormatIBAN(value.replace(/\s+/g, ""));
+  return compact !== null && isValidIBAN(compact);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,16 +193,48 @@ export const REG_CODE_LABEL_RE = /(?:Reg\.?\s*(?:nr|kood|code)|Registrikood|Regi
 // "VAT Registration EU VAT: IE4276970QH" (Anthropic invoice).
 const FOREIGN_VAT_SHAPE = String.raw`[A-Z]{2}(?=[0-9A-Z]*\d)[0-9A-Z]{6,}`;
 const FOREIGN_VAT_SHAPE_RE = new RegExp(`^${FOREIGN_VAT_SHAPE}$`);
+
+// Printed prefixes jsvat does not use for the same country: Greek VAT numbers
+// appear with the ISO code GR as often as with the official EL, and Northern
+// Ireland's XI numbers have the GB format (jsvat has no XI entry).
+const FOREIGN_VAT_PREFIX_ALIASES: Readonly<Record<string, string>> = { GR: "EL", XI: "GB" };
+
+/**
+ * The two-letter foreign VAT prefixes, from jsvat's per-country formats (each
+ * format regex starts with its prefix: `^(EL)`, `^(CHE)`) plus the printed
+ * aliases above. EE is excluded: Estonian VAT numbers have their own validator.
+ */
+export const FOREIGN_VAT_PREFIXES: readonly string[] = [...new Set([
+  ...jsvatCountries.flatMap((country) => country.rules.regex
+    .map((re) => /^\^\(([A-Z]{2,3})\)/.exec(re.source)?.[1]?.slice(0, 2))
+    .filter((prefix): prefix is string => prefix !== undefined)),
+  ...Object.keys(FOREIGN_VAT_PREFIX_ALIASES),
+])].filter((prefix) => prefix !== "EE").sort();
+
+/** jsvat's format check (structure only) on a value with its printed prefix mapped to jsvat's. */
+function hasJsvatForeignFormat(normalized: string): boolean {
+  const alias = FOREIGN_VAT_PREFIX_ALIASES[normalized.slice(0, 2)];
+  const value = alias ? `${alias}${normalized.slice(2)}` : normalized;
+  if (value.startsWith("EE")) return false;
+  const result = checkVAT(value, jsvatCountries);
+  return result.isSupportedCountry && result.isValidFormat;
+}
 export const VAT_LABEL_RE = new RegExp(
   String.raw`(?:KMKR(?:\s*(?:nr|number|no\.?))?|VAT(?:\s*(?:nr|number|no\.?))?|KM(?:\s*(?:Reg\.?\s*)?(?:nr|number|no\.?))?|KM-number|Tax\s*ID)\.?[:\s]*((?:EE[ \t]*\d(?:[ \t]*\d){8}(?![0-9A-Z]))|(?:${FOREIGN_VAT_SHAPE}))`,
   "gi",
 );
 
-/** The permissive (checksum-free) foreign VAT number shape — two letters, then
- * 6+ letters/digits with at least one digit — on a normalized (whitespace-free,
- * upper-case) value. */
+/**
+ * A foreign VAT number on a normalized (whitespace-free, upper-case) value:
+ * the permissive shape (two letters, then 6+ letters/digits with at least one
+ * digit) or a country format jsvat knows (`CHE-123.456.789MWST`, `GR` read as
+ * `EL`). The checksum is deliberately NOT required: a well-shaped number that
+ * fails its country's checksum (a misprint, an OCR slip, a test number) is
+ * still an identifier, so the identity / ambiguity checks hold on it — a false
+ * hold is acceptable, silently ignoring a third party's VAT number is not.
+ */
 export function isForeignVatShape(normalized: string): boolean {
-  return FOREIGN_VAT_SHAPE_RE.test(normalized);
+  return FOREIGN_VAT_SHAPE_RE.test(normalized) || hasJsvatForeignFormat(normalized);
 }
 
 function normalizeVatCandidate(value: string): string {

@@ -83,7 +83,7 @@ describe("document-reading tokens: money shapes", () => {
     expect(valuesOf("KM 24%")).toEqual([]);
     expect(valuesOf("KM 24 %")).toEqual([]);
     expect(valuesOf("KM 9,50%")).toEqual([]);
-    expect(valuesOf("IBAN EE59 1000 0018 2345 6789 EUR")).toEqual([]);
+    expect(valuesOf("IBAN EE86 1000 0018 2345 6788 EUR")).toEqual([]);
     expect(valuesOf("Konto 6789 EUR")).toEqual([[6789]]);
     expect(valuesOf("Viide EUR 1234567")).toEqual([]);
     expect(valuesOf("EUR 123456")).toEqual([[123456]]);
@@ -169,8 +169,8 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
   });
 
   it("T-ID-iban-bic: digits inside a validated IBAN or a BIC shape are excluded", () => {
-    expect(scan("IBAN EE59 1000 0018 2345 6789", "accounting")).toEqual([]);
-    expect(scan("IBAN EE591000001823456789", "accounting")).toEqual([]);
+    expect(scan("IBAN EE86 1000 0018 2345 6788", "accounting")).toEqual([]);
+    expect(scan("IBAN EE861000001823456788", "accounting")).toEqual([]);
     expect(scan("BIC DEUTDEFF500", "accounting")).toEqual([]);
     // without the IBAN the same group sequence is a registry code
     expect(scan("Kood 1000 0018", "accounting")).toEqual([["ee_reg", ["10000018"]]]);
@@ -224,6 +224,20 @@ describe("document-reading tokens: identifierScan / ibanScan", () => {
     expect(scan("VAT FR AB 123456789", "strict")).toEqual([["foreign_vat", ["FRAB123456789"]]]);
     // only FR's first group may be letters: `DE AB 123456789` is not a German VAT
     expect(scan("Kood DE AB 123456789", "accounting")).toEqual([]);
+  });
+
+  it("T-ID-gr-che: a GR-prefixed Greek VAT and a punctuated Swiss UID are foreign VATs", () => {
+    expect(scan("VAT GR123456789", "strict")).toEqual([["foreign_vat", ["GR123456789"]]]);
+    expect(scan("VAT GR123456789", "accounting")).toEqual([["foreign_vat", ["GR123456789"]]]);
+    expect(scan("UID CHE-123.456.789 MWST", "strict")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE-123.456.789 MWST", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE123.456.789 TVA", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    expect(scan("UID CHE-123456789", "accounting")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    // the unpunctuated form stays the generic scan's (no duplicate hit)
+    expect(scan("UID CHE123456789", "strict")).toEqual([["foreign_vat", ["CHE123456789"]]]);
+    // a longer number or a glued prefix is no strict Swiss UID
+    expect(scan("UID CHE-123.456.7890", "strict")).toEqual([]);
+    expect(scan("UID XCHE-123.456.789", "strict")).toEqual([]);
   });
 
   it("T-ID-iban-scan: finds grouped and compact IBANs with strict boundaries", () => {

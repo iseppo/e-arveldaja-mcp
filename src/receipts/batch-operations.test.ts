@@ -1175,7 +1175,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     { text: "Arve summa", x: 316, y: 550, width: 61, height: 13 },
     { text: "124,00", x: 529, y: 550, width: 33, height: 13 },
     { text: "Pank", x: 206, y: 776, width: 40, height: 9 },
-    { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
+    { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 776, width: 145, height: 9 },
   ];
   const documentWith = (footerLines: string[], extra: typeof items = [], letterhead = "Näidis") => {
     const all = [
@@ -1321,7 +1321,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       // As on the live footer, the bank columns share the name's row.
       document: documentWith(
         ["Maksete vahendaja", "Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"],
-        [{ text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 }],
+        [{ text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 }],
       ),
       other: { ...client, name: "Maksekeskus AS" },
     },
@@ -1347,7 +1347,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       document: documentWith([], [
         ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
           .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
-        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
         label,
       ]),
       other: { ...client, name: "Maksekeskus AS" },
@@ -1363,7 +1363,7 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
       document: documentWith([], [
         ...["Maksekeskus AS", "Tänav 1", "Registrikood 10000018", "KMKR number EE100000010"]
           .map((text, index) => ({ text, x: 28, y: 788 + index * 12, width: 90, height: 9 })),
-        { text: "EE162200001234567890 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
+        { text: "EE212200001234567897 SWIFT: TESTEE2X", x: 276, y: 788, width: 145, height: 9 },
         label,
       ], "Maksekeskus"),
       other: { ...client, name: "Maksekeskus AS" },
@@ -1725,6 +1725,60 @@ describe("receipt batch — journal already references the invoice number (Messe
     expect(outcome.value.summary.referenced_by_journal_review).toBe(1);
     expect(outcome.value.summary.dry_run_preview).toBe(0);
     expectZeroWrites(spies);
+  });
+
+  // F-PREPAY-REF: the final invoice cites its prepayment invoice; the manual
+  // prepayment journal carries only that reference.
+  function primeFinalInvoiceCitingPrepayment(rawText: string): void {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "ETR1 Group OÜ",
+      invoice_number: "EE1966453",
+      invoice_date: "2026-09-23",
+      due_date: "2026-09-23",
+      total_net: 125,
+      total_vat: 30,
+      total_gross: 155,
+      currency: "EUR",
+      description: "Madrats",
+      raw_text: rawText,
+    } as never);
+  }
+
+  it("dry_run holds a row whose labelled prepayment reference a journal carries", async () => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "Ettemaksuarve nr EMSS70002960", "Kokku 155,00"].join("\n"));
+    const { api, spies } = apiWithJournals([prepaymentJournal]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551083]);
+    expect(result.notes.join(" ")).toContain("Held: journal(s) 29551083 already reference payment reference");
+    expectZeroWrites(spies);
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("%s holds a row whose labelled prepayment reference a journal carries", async (mode) => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "Ettemaksuarve nr EMSS70002960", "Kokku 155,00"].join("\n"));
+    const { api, spies } = apiWithJournals([prepaymentJournal]);
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.referencing_journal_ids).toEqual([29551083]);
+    expectZeroWrites(spies);
+  });
+
+  it("an unlabelled or amount-shaped value is no payment reference: the row proceeds", async () => {
+    primeFinalInvoiceCitingPrepayment(["ETR1 Group OÜ", "Arve nr EE1966453", "EMSS70002960", "Ettemaks 70002960.00", "Kokku 155,00"].join("\n"));
+    const { api } = apiWithJournals([prepaymentJournal, { ...prepaymentJournal, id: 29551090, document_number: "70002960" }]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("dry_run_preview");
+    expect(result.referencing_journal_ids).toBeUndefined();
   });
 
   it.each(["create", "create_and_confirm"] as const)("%s holds the row with zero writes", async (mode) => {
