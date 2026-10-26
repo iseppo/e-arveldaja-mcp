@@ -402,12 +402,19 @@ function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][
       return `Show the owner candidate journal(s) ${(review.candidate_journal_ids ?? []).join(", ")}. Only if the owner picks the one that books exactly this transfer, rerun the Wise dry run with journalized_transfer_ids [{ wise_id, journal_id }] (a new preview and digest). Only if the owner confirms every journal ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} is a different movement, rerun with acknowledged_journal_holds listing all of them (this creates and confirms a new transaction). The row is held (not imported) meanwhile.`;
     case "wise_transfer_journal_existing_elsewhere":
       return `Journal(s) ${(review.required_acknowledgement_ids ?? review.candidate_journal_ids ?? []).join(", ")} already move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one books this transfer, nothing more is needed (or rerun with journalized_transfer_ids); only if the owner confirms each is a different movement, rerun with acknowledged_journal_holds listing all of them (this creates and confirms a new transaction).`;
+    case "wise_exact_label_possible_double_booking":
+      return `Journal ${review.journal_id ?? "(see the reason)"} carries this Wise ID and books the movement, but ${[
+        ...(review.candidate_journal_ids ?? []).length > 0 ? [`journal(s) ${review.candidate_journal_ids!.join(", ")}`] : [],
+        ...(review.ledger_transaction_ids ?? []).length > 0 ? [`stored transaction(s) ${review.ledger_transaction_ids!.join(", ")}`] : [],
+      ].join(" and ")} also move this amount on the Wise account, so the row is held (not imported). Show them to the owner: if one is a second booking of this movement, remove it after approval and rerun the Wise dry run; only if the owner confirms each of required_acknowledgement_ids is a different movement, rerun with acknowledged_journal_holds [{ wise_id, journal_ids }] listing all of them.`;
     case "wise_transfer_journal_inconsistent":
       return `Journal(s) ${(review.candidate_journal_ids ?? []).join(", ")} carry this Wise ID but do not book this amount and direction. Correct or remove the labelled journal with the owner's approval, then rerun the Wise dry run; the row is held (not imported) meanwhile.`;
     case "wise_transfer_mapping_rejected":
       return `The journalized_transfer_ids mapping${review.journal_id !== undefined ? ` to journal ${review.journal_id}` : ""} was rejected; tell the owner why, fix or drop the mapping and rerun the Wise dry run. The row resolves as if unmapped meanwhile (see its own result).`;
     case "unused_mapping":
       return "Tell the owner this journalized_transfer_ids mapping did nothing (row absent or already imported); drop it and rerun the Wise dry run.";
+    case "unused_counterpart_override":
+      return "Tell the owner this counterpart_overrides entry decided nothing (see the reason); drop or correct it and rerun the Wise dry run.";
     case "unused_acknowledgement":
       return "Tell the owner this acknowledged_journal_holds entry released nothing (see the reason); drop or correct it and rerun the Wise dry run.";
     case "wise_legacy_leg_ambiguous":

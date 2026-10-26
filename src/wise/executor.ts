@@ -73,6 +73,7 @@ import {
 import type {
   FeeCreateCommand,
   ImportRejectedField,
+  WiseCounterpartOverride,
   InterAccountCommand,
   MainCreateCommand,
   WiseCreatedEntry,
@@ -151,6 +152,9 @@ export interface WiseRunInput {
   /** Owner acknowledgements (acknowledged_journal_holds): journals that do not
    * book a held Wise transfer. */
   readonly acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
+  /** Owner choices (counterpart_overrides): the bank a transfer row with
+   * own-account evidence on several banks goes to or from. */
+  readonly counterpartOverrides?: readonly WiseCounterpartOverride[];
   readonly approvedCommandDigest: string | undefined;
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
@@ -192,6 +196,7 @@ async function runWiseImport(
     confirmOwnTransferIds: confirm_own_transfer_ids,
     journalizedTransferIds: journalized_transfer_ids,
     acknowledgedJournalHolds: acknowledged_journal_holds,
+    counterpartOverrides: counterpart_overrides,
     approvedCommandDigest: approved_command_digest,
     dateFrom: date_from,
     dateTo: date_to,
@@ -273,6 +278,15 @@ async function runWiseImport(
   const canonicalAcknowledgements: WiseAcknowledgedJournalHold[] = acknowledgements
     .map(({ wise_id, journal_ids }) => ({ wise_id, journal_ids: sortedUniqueIds(journal_ids) }))
     .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : 0);
+  const overrideEntries = counterpart_overrides ?? [];
+  if (new Set(overrideEntries.map(entry => entry.wise_id)).size !== overrideEntries.length) {
+    throw new Error("counterpart_overrides must list each Wise ID once.");
+  }
+  // Sorted like the acknowledgements: the listing order is not a decision.
+  const canonicalOverrides: WiseCounterpartOverride[] = overrideEntries
+    .map(({ wise_id, dimension_id }) => ({ wise_id, dimension_id }))
+    .sort((left, right) => left.wise_id < right.wise_id ? -1 : left.wise_id > right.wise_id ? 1 : 0);
+  const counterpartOverrideMap = new Map(canonicalOverrides.map(entry => [entry.wise_id, entry.dimension_id]));
   const eligibleHintIds = new Set(hintedRows.map(row => row.id));
   if (approvedTransferIds.some(id => !eligibleHintIds.has(id))) {
     throw new Error(
@@ -335,6 +349,7 @@ async function runWiseImport(
       lookups: bankAccountLookups,
       companyLegalName: invoiceInfoSnapshot.invoice_company_name ?? undefined,
       explicit: inter_account_dimension_id,
+      overrides: counterpartOverrideMap,
     });
     const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
     const approvedSet = new Set(approvedTransferIds);
@@ -367,10 +382,17 @@ async function runWiseImport(
           sourceVerified: decision.sourceVerified,
           targetVerified: decision.targetVerified,
           counterpartHold: wiseCounterpartHoldReview(row, resolution.hold, decision.sourceVerified, decision.targetVerified),
+          ...(resolution.hold.selected_by_override === true ? { counterpartOverrideApplied: true as const } : {}),
         });
         continue;
       }
-      transferDecisions.set(row, resolution !== undefined ? { ...decision, counterpartBasis: resolution.basis } : decision);
+      transferDecisions.set(row, resolution !== undefined
+        ? {
+            ...decision,
+            counterpartBasis: resolution.basis,
+            ...(resolution.basis === "owner_selected" ? { counterpartOverrideApplied: true as const } : {}),
+          }
+        : decision);
     }
   }
 
@@ -410,6 +432,7 @@ async function runWiseImport(
     approvedTransferIds: new Set(approvedTransferIds),
     journalizedTransferIds: journalized_transfer_ids,
     acknowledgedJournalHolds: canonicalAcknowledgements,
+    counterpartOverrides: canonicalOverrides,
     ownCompanyClientId,
     allPurchaseInvoices,
   };
@@ -461,6 +484,9 @@ async function runWiseImport(
     // Acknowledgements release held rows, so they bind the digest and the plan
     // scope too. Omitted when empty, keeping earlier plans byte-identical.
     ...(canonicalAcknowledgements.length > 0 ? { acknowledged_journal_holds: canonicalAcknowledgements } : {}),
+    // An override decides a row's counterpart: it binds the digest and the
+    // plan scope. Omitted when empty, keeping earlier plans byte-identical.
+    ...(canonicalOverrides.length > 0 ? { counterpart_overrides: canonicalOverrides } : {}),
     date_from,
     date_to,
     skip_jar_transfers: skipJars,
@@ -661,6 +687,7 @@ async function runWiseImport(
           lookups: bankAccountLookups,
           companyLegalName: invoiceInfoSnapshot?.invoice_company_name ?? undefined,
           explicit: inter_account_dimension_id,
+          overrides: counterpartOverrideMap,
         }).get(row);
         const resolved = resolution === undefined ? undefined : "dim" in resolution ? resolution.dim : undefined;
         return resolved === command.counterpart_dimension_id
@@ -1069,6 +1096,7 @@ async function runWiseImport(
       confirmOwnTransferIds: confirm_own_transfer_ids,
       journalizedTransferIds: journalized_transfer_ids,
       acknowledgedJournalHolds: acknowledged_journal_holds,
+      counterpartOverrides: counterpart_overrides,
       dateFrom: date_from,
       dateTo: date_to,
       skipJarTransfers: skip_jar_transfers,

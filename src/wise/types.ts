@@ -30,9 +30,10 @@ export interface WiseRow {
 export type WiseTransferOwnershipBasis = "verified_endpoints" | "operator_approved";
 
 /** How a transfer row's counterpart bank account was determined: own-account
- * evidence on that bank, the explicit inter_account_dimension_id, or the
+ * evidence on that bank, the owner's pick among the evidenced banks
+ * (counterpart_overrides), the explicit inter_account_dimension_id, or the
  * company's only other bank account. */
-export type WiseCounterpartBasis = "evidence" | "explicit" | "only_other_bank";
+export type WiseCounterpartBasis = "evidence" | "owner_selected" | "explicit" | "only_other_bank";
 
 export interface WiseTransferReview {
   wise_id: string;
@@ -47,9 +48,11 @@ export interface WiseTransferReview {
     | "wise_transfer_mapping_rejected"
     | "unused_mapping"
     | "unused_acknowledgement"
+    | "unused_counterpart_override"
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
-    | "wise_transfer_journal_existing_elsewhere";
+    | "wise_transfer_journal_existing_elsewhere"
+    | "wise_exact_label_possible_double_booking";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -59,12 +62,16 @@ export interface WiseTransferReview {
    * journals labelled with the row's Wise ID. */
   candidate_journal_ids?: number[];
   candidates?: WiseTransferJournalCandidate[];
-  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
+  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal;
+   * wise_exact_label_possible_double_booking: the journal labelled with the
+   * row's Wise ID (the other bookings are candidate_journal_ids and
+   * ledger_transaction_ids). */
   journal_id?: number;
   /** wise_transfer_journal_ambiguous / _inconsistent: candidate journals that already book the
    * row's fee, so the fee row is held out of the plan with the review. */
   fee_held_journal_ids?: number[];
-  /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
+  /** wise_untagged_ledger_match / wise_exact_label_possible_double_booking:
+   * the stored untagged rows that look like this one. */
   ledger_transaction_ids?: number[];
   /** Counterpart holds: the own bank account dimensions the evidence points to
    * (conflict), or every other configured bank account (unresolved). */
@@ -72,7 +79,7 @@ export interface WiseTransferReview {
   /** Counterpart holds: the other banks' stored transactions behind the hold. */
   evidence_transaction_ids?: number[];
   /** Releasable Wise-side journal holds (wise_transfer_journal_ambiguous /
-   * _existing_elsewhere): every journal acknowledged_journal_holds must list
+   * _existing_elsewhere / wise_exact_label_possible_double_booking): every journal acknowledged_journal_holds must list
    * to release the row (all pending legs, certain and uncertain evidence, and
    * the ambiguous candidates). */
   required_acknowledgement_ids?: number[];
@@ -91,6 +98,14 @@ export interface WiseTransferReview {
 export interface WiseAcknowledgedJournalHold {
   wise_id: string;
   journal_ids: number[];
+}
+
+/** One owner choice (counterpart_overrides): the own bank account a transfer
+ * row goes to or from, picked among the banks its own-account evidence points
+ * to. Never a fallback for a row without evidence. */
+export interface WiseCounterpartOverride {
+  wise_id: string;
+  dimension_id: number;
 }
 
 /** One operator-reviewed journalized_transfer_ids entry. */
@@ -117,6 +132,9 @@ export interface WiseTransferDecision {
   /** The row's counterpart cannot be determined, or evidence contradicts the
    * selected one: a hard hold, its only review; the row is not imported. */
   counterpartHold?: WiseTransferReview;
+  /** The row's counterpart_overrides entry decided its counterpart (or its
+   * conflict hold, for a bank the evidence does not point to). */
+  counterpartOverrideApplied?: true;
   sourceVerified: boolean;
   targetVerified: boolean;
   ownershipBasis?: WiseTransferOwnershipBasis;

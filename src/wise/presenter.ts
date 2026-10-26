@@ -33,6 +33,7 @@ import type {
   WiseSkippedEntry,
   WiseSkippedJarRow,
   WiseAcknowledgedJournalHold,
+  WiseCounterpartOverride,
   WiseJournalizedTransferMapping,
   WiseTransferReview,
 } from "./types.js";
@@ -329,6 +330,7 @@ export interface WiseImportRenderData {
     confirmOwnTransferIds: string[] | undefined;
     journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
     acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
+    counterpartOverrides?: readonly WiseCounterpartOverride[];
     dateFrom: string | undefined;
     dateTo: string | undefined;
     skipJarTransfers: boolean | undefined;
@@ -348,7 +350,7 @@ function wiseTransferCounterpartMessage(info: NonNullable<WiseImportRenderData["
     info.unresolved_row_count > 0 ? `${info.unresolved_row_count} Wise transfer row(s) have no determinable counterpart bank account` : undefined,
     info.conflict_row_count > 0 ? `${info.conflict_row_count} Wise transfer row(s) have own-account evidence that contradicts the selected counterpart` : undefined,
   ].filter((part): part is string => part !== undefined);
-  return `${parts.join("; ")}. Those rows are held (not imported); the other rows are unaffected. Own bank account(s): ${candidates}. Pass inter_account_dimension_id, or import the other bank's statement first if it is not imported yet, then re-run the preview.`;
+  return `${parts.join("; ")}. Those rows are held (not imported); the other rows are unaffected. Own bank account(s): ${candidates}. Pass inter_account_dimension_id, or import the other bank's statement first if it is not imported yet, then re-run the preview. For a row whose evidence points to several bank accounts, pass counterpart_overrides [{ wise_id, dimension_id }] with the one the owner confirms.`;
 }
 
 // --- FULL envelope (standard/full — byte-identical to the pre-refactor tool) --
@@ -457,6 +459,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
     ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
     ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
+    ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),
     ...(date_from ? { date_from } : {}),
     ...(date_to ? { date_to } : {}),
     ...(skip_jar_transfers !== undefined ? { skip_jar_transfers } : {}),
@@ -887,6 +890,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
           ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
           ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
           ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
+          ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),
           ...(data.args.skipJarTransfers !== undefined ? { skip_jar_transfers: data.args.skipJarTransfers } : {}),
           plan_handle: data.planHandle,
           approved_command_digest: data.approvedCommandDigest,
