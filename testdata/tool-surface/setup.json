@@ -2,12 +2,12 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 129,
-    "toolsListBytes": 139955,
+    "toolsListBytes": 140040,
     "descriptionsBytes": 18705,
-    "inputSchemasBytes": 90188,
+    "inputSchemasBytes": 90273,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 4990
+      "bytes": 5075
     },
     "serverInstructionsBytes": 765,
     "promptMetadataBytes": 11702,
@@ -5285,7 +5285,7 @@
             "type": "integer"
           },
           "acknowledged_journal_holds": {
-            "description": "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds.",
+            "description": "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally; an exact-label double-booking hold stays recorded as booked by its labelled journal) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds.",
             "items": {
               "properties": {
                 "journal_ids": {

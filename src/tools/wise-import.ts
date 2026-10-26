@@ -85,7 +85,7 @@ export function registerWiseImportTools(
         "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or held for review)."
       ),
       acknowledged_journal_holds: z.array(z.object({ wise_id: z.string().min(1), journal_ids: z.array(coerceId).min(1) })).optional().describe(
-        "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds."
+        "Owner-confirmed only: { wise_id, journal_ids } stating those journals do NOT book that held Wise transfer. Releases the row (imported and confirmed normally; an exact-label double-booking hold stays recorded as booked by its labelled journal) only when journal_ids lists every required_acknowledgement_ids journal of its review; never for counterpart, identity or untagged-row holds."
       ),
       counterpart_overrides: z.array(z.object({ wise_id: z.string().min(1), dimension_id: coerceId })).optional().describe(
         "Owner-confirmed only: { wise_id, dimension_id } picking the own bank account a transfer row goes to or from when its own-account evidence points to several (wise_transfer_counterpart_conflict). The pick must be one of the evidenced accounts, else the row stays held; an entry that decides nothing is reported (unused_counterpart_override)."
