@@ -402,6 +402,86 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["invoice_date"] } });
     expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ create_date: "2026-03-14" });
   });
+
+  it("verify shows the booking basis, not a booking; create books on the typed date and returns the computed booking", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date basis");
+    expect(verify.booking).toBeUndefined();
+    expect(verify.bookingBasis).toEqual({
+      supplier_name: "Näidis OÜ", vat_registered: true, liability_accounts_id: 2310,
+      items: [{ custom_title: "Teenus", purchase_accounts_id: 5000, purchase_accounts_dimensions_id: null, cl_purchase_articles_id: 1 }],
+      gross_price: 124, vat_price: 24,
+    });
+    const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(outcome.value.bookingComputedAtCreate).toMatchObject({ invoice_date: "2026-03-15", gross_price: 124, vat_price: 24 });
+  });
+
+  it("a supplier renamed between verify and create differs from the basis the owner saw: reading_booking_drift, 0 writes", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date rename");
+    w.api.clients.get.mockImplementation(async (id: number) => ({ ...(await readingApi().clients.get(id)), name: "Teine Nimi OÜ" }));
+    expect(heldCodes(await create(w, file, verify.planHandle!, typed("2026-03-15")))).toContain("reading_booking_drift");
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("a supplier template at another VAT rate books the document's rate on the typed date (no drift loop)", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, vat_rate_dropdown: "22" }] };
+    const { file, verify } = await lostVerified(w, "lost date template rate");
+    expect(verify.status).toBe("ready");
+    const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created" } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ create_date: "2026-03-15", items: [expect.objectContaining({ vat_rate_dropdown: "24" })] });
+  });
+
+  it("a non-VAT company gets the typed date row and books the non-deductible form at the rate in force on the typed date", async () => {
+    const w = world();
+    w.api.readonly.getVatInfo.mockResolvedValue({ vat_number: null });
+    // A folded history item: converted to the non-deductible form once the date gives the rate.
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, items: [{ custom_title: "Teenus", cl_purchase_articles_id: 1, purchase_accounts_id: 5000, total_net_price: 50, vat_rate_dropdown: "-" }] };
+    const { file, verify } = await lostVerified(w, "lost date non-VAT");
+    expect(verify.status).toBe("ready");
+    expect(verify.card!.rows.map((row) => row.id)).toEqual(["t:invoice_date", "t:invoice_number"]);
+    expect(verify.bookingBasis).toMatchObject({ vat_registered: false, vat_price: null });
+    const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created" } });
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({
+      create_date: "2026-03-15",
+      items: [expect.objectContaining({ vat_accounts_id: 5000, cl_vat_articles_id: 11, vat_rate_dropdown: "24" })],
+    });
+  });
+
+  it("a plan that binds no proof holds (the re-run cannot be performed), 0 writes", async () => {
+    const w = world();
+    const { file, verify } = await lostVerified(w, "lost date no proof");
+    const consume = w.runtime.planStore.consume.bind(w.runtime.planStore);
+    vi.spyOn(w.runtime.planStore, "consume").mockImplementation((handle, domain) => {
+      const stored = consume(handle, domain);
+      const { proof_json: _proof, ...normalizedArgs } = stored.normalizedArgs as Record<string, unknown>;
+      return { ...stored, normalizedArgs: normalizedArgs as typeof stored.normalizedArgs };
+    });
+    expect(heldCodes(await create(w, file, verify.planHandle!, typed("2026-03-15")))).toEqual(["reading_schema_invalid"]);
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("A1 is waived only for an owner-supplied gross: a larger printed amount the reading omits blocks; the owner's own gross creates", async () => {
+    const lines = [...BASE_LINES, "Eelmine saldo 200,00"];
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const w = world();
+    const file = writePdf("%PDF larger amount");
+    const omitted = await verified(w, file, {}, lines);
+    expect(omitted.status).toBe("blocked");
+    expect(omitted.holds).toContainEqual({ code: "competitor_omitted", field: "gross" });
+    // The reading lists the larger amount, but its gross quote is not printed: the owner types the gross.
+    const listed = await verified(w, file, {
+      evidence: { gross: { line: "p1:007", quote: "Kokku 124,00" } },
+      answers: { gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: "200,00" }], why_this_one: "", verdict: "confirm" } },
+    }, lines);
+    expect(listed.card!.rows.map((row) => row.id)).toEqual(["r:gross"]);
+    const outcome = await create(w, file, listed.planHandle!, { "r:gross": { value: 124 } });
+    expect(outcome).toMatchObject({ ok: true, value: { status: "created", correctedFields: ["gross"] } });
+  });
 });
 
 describe("reading create serialisation (§5.2a)", () => {
