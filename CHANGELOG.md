@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.32.2] - 2026-10-26
+
+### Fixed
+
+- **A transfer to one of your own bank accounts that e-arveldaja cannot book is held for review instead of being booked to a different account.** Before, a payment under the company's own name to an own account without an accounting dimension could be booked as a transfer to the only other registered account. Details: such rows are reported as `own_account_not_bookable` by reconciliation, transaction classification and `analyze_unconfirmed_transactions`; the Wise counterpart check no longer treats them as the bank side of a Wise movement.
+- **A company-name payment to an IBAN that is not a registered own account is booked only when the other account's matching row proves the transfer.** This covers both an own account not set up in e-arveldaja and a payment provider's pooled account (e.g. a Wise top-up), which look identical. Details: with the mirror row present the pair is still matched and booked as before; without it the row is held as `unregistered_iban_needs_mirror` (also in `analyze_unconfirmed_transactions`), and the guidance no longer suggests a target parameter that could not help.
+- **An own bank account whose IBAN field is empty is recognised by its account number.** Before, an empty `iban_code` hid `account_no`, so transfers to that account looked external.
+- **A company-name transfer with an explicit `target_accounts_dimensions_id` can be executed.** Before, the dry run planned it but execution always stopped as plan drift because verification demanded a higher confidence than planning.
+
+### Changed
+
+- **Dependency maintenance updates.** Details: liteparse 2.17.0, MCP SDK 1.32.2, dotenv, vite and the Babel parser; `npm audit` is clean.
+- Test sources are now type-checked in CI and release checks, with a ratchet that lets loose typing only decrease; tool payload types are exported by the producing modules. No runtime behaviour changes.
+
 ## [0.32.1] - 2026-10-19
 
 ### Fixed
