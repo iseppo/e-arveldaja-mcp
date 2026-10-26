@@ -16,6 +16,11 @@ export interface LostRow { label: string }
 const PAGE_W = 595;
 const PAGE_H = 842;
 
+/** The page text lines of `lostValueParse(rows)` (for packetFor / readingFor). */
+export function lostValueLines(rows: ReadonlyArray<string | LostRow>): string[] {
+  return rows.map((row) => (typeof row === "string" ? row : `${row.label}     ${LOST_DOTS}`));
+}
+
 /**
  * A one-page parse: a plain string is one text item on its own row; a LostRow is
  * a label item at x=48 and a leader item at x=175.77 on the same row, and the

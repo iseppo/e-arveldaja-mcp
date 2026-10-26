@@ -15,7 +15,9 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.js";
 import { parseDocument, type ParsedDocument } from "../document-parser.js";
-import { buildLostValueCrops, defaultLostValueSeam, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
+import { buildLostValueCrops, defaultLostValueSeam, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
+import { LOST_VALUE_FIELDS, matchLostValue, parseLostValueReading, type LostValueField, type LostValueReason } from "../document-reading-lost-value.js";
+import { lostValueLeaders } from "../document-reading-tokens.js";
 import { buildReadingPacket, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
 import {
   checkReading,
@@ -78,7 +80,19 @@ import { parseStrictDate } from "../strict-date.js";
 import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
 import { computeEffectiveBooking, INVOICE_DOCUMENT_EXTENSIONS, loadSnapshot, materializeSnapshot, MAX_INVOICE_DOCUMENT_SIZE, wrongCompanySignal, type EffectiveBookingModel, type MaterializedSnapshot } from "./operations.js";
 import type { AccountingDocumentBookingFields } from "./types.js";
-import { applyOwnerAnswers, buildReadingCard, recheckFinalValues, recheckReading, type CardHold, type CardHoldCode, type ReadingCard } from "../document-reading-card.js";
+import {
+  allowedForSource,
+  applyOwnerAnswers,
+  buildReadingCard,
+  checkSubstituted,
+  recheckFinalValues,
+  recheckReading,
+  type CardHold,
+  type CardHoldCode,
+  type ImageAgreedField,
+  type ReadingCard,
+  type RecheckFieldSource,
+} from "../document-reading-card.js";
 import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
@@ -132,6 +146,17 @@ export interface VerifyDocumentInput {
   booking?: ReadingBookingInput;
   /** §5.2a: the owner's explicit release of an indeterminate-create marker, by its id. */
   releaseIndeterminate?: string;
+  /** Lost-value image path: the client's transcription of the read crops ({invoice_date?, invoice_number?: {line, printed}}). */
+  lostValueReading?: unknown;
+}
+
+/** One submitted lost value and what became of it (diagnostics, not hold codes). */
+export interface LostValueStatus {
+  field?: LostValueField;
+  line?: string;
+  /** The client's transcription (untrusted: wrapped at the tool boundary). */
+  printed?: string;
+  status: "image_ocr_agreed" | LostValueReason | "lost_value_reading_invalid" | "checker_hold" | "number_still_lost";
 }
 
 export interface VerifyDocumentResult {
@@ -158,6 +183,8 @@ export interface VerifyDocumentResult {
   indeterminateMarker?: string;
   /** The marker the owner released in this call; no handle is issued until verify runs again. */
   releasedMarker?: string;
+  /** Present when lost_value_reading was given: per submitted field, agreed or why not. */
+  lostValues?: LostValueStatus[];
   planHandle?: string;
 }
 
@@ -189,6 +216,8 @@ export interface ReadingPlan {
    * re-run hold that repeats one of these only when its code is not a block code.
    */
   check_holds: ReadingHold[];
+  /** Lost-value fields the client read from the crop image and server OCR agreed with (each has a confirm row). */
+  image_agreed?: ImageAgreedField[];
 }
 
 function sameIban(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -829,6 +858,99 @@ class ReadingDocumentOperations {
     }
   }
 
+  /**
+   * The lost-value image path at verify (plan Step 4). Per submitted field: the reading left it null, the checker
+   * held nothing on it but required_field_missing, the cited line is a lost-leader line no other field cites, the
+   * re-made crop's OCR agrees (matchLostValue). Then the whole checker runs again with the agreed values (no
+   * evidence for them); a field that draws any hold beyond the image_agreed allow-list is dropped and the pass
+   * repeats. OCR never supplies a value: an agreed value is the client's own transcription.
+   */
+  private async resolveLostValues(raw: unknown, ctx: {
+    packet: ReadingPacket;
+    parsed: ParsedDocument;
+    filePath: string;
+    check: CheckResult;
+    reading: Record<string, unknown> & { evidence: unknown };
+    proofInput: unknown;
+    values: AcceptedValues;
+    checkContext: CheckContext;
+  }): Promise<{ statuses: LostValueStatus[]; agreed: ImageAgreedField[]; values: AcceptedValues; check: CheckResult; holds: CheckResult["holds"] }> {
+    const none = { agreed: [], values: ctx.values, check: ctx.check, holds: [] };
+    const parsedInput = parseLostValueReading(desandboxAllStrings(raw));
+    if (!parsedInput.ok) return { ...none, statuses: [{ status: "lost_value_reading_invalid" }] };
+    const submitted = LOST_VALUE_FIELDS.flatMap((field) => {
+      const entry = parsedInput.value[field];
+      return entry ? [{ field, line: entry.line, printed: entry.printed }] : [];
+    });
+    const statuses = new Map<LostValueField, LostValueStatus>();
+    const done = (entry: { field: LostValueField; line: string; printed: string }, status: LostValueStatus["status"]) =>
+      statuses.set(entry.field, { field: entry.field, line: entry.line, printed: entry.printed, status });
+    const lost = new Set(lostValueLeaders(ctx.packet.lines).map((hit) => hit.line));
+    const lineUses = new Map<string, number>();
+    for (const entry of submitted) lineUses.set(entry.line, (lineUses.get(entry.line) ?? 0) + 1);
+    const available = (() => { try { return this.lostValueSeam.available(); } catch { return false; } })();
+    const rects = available
+      ? await lostValueRects(ctx.filePath, ctx.parsed, ctx.packet).catch(() => new Map())
+      : new Map();
+    const rendered = new Map<number, Promise<{ png: Buffer; width: number; height: number }>>();
+    const candidates = new Map<LostValueField, { entry: { field: LostValueField; line: string; printed: string }; value: string }>();
+    for (const entry of submitted) {
+      if (ctx.values[entry.field] !== null) { done(entry, "reading_value_present"); continue; }
+      // A null field also draws the proof codes of its empty answer (no label quote); nothing else may hold on it.
+      if (ctx.check.holds.some((hold) => hold.field === entry.field && hold.code !== "required_field_missing" &&
+        !allowedForSource(hold, { [entry.field]: "image_agreed" }))) { done(entry, "field_has_other_holds"); continue; }
+      if (!lost.has(entry.line)) { done(entry, "line_not_lost"); continue; }
+      if ((lineUses.get(entry.line) ?? 0) > 1) { done(entry, "line_reused"); continue; }
+      if (!available) { done(entry, "ocr_unavailable"); continue; }
+      const ocr = await ocrLostValueLine(ctx.filePath, ctx.parsed, rects, entry.line, this.lostValueSeam, rendered);
+      if (!ocr.ok) { done(entry, ocr.reason); continue; }
+      const match = matchLostValue(entry.field, entry.printed, ocr.items, ocr.anchor);
+      if (match.status !== "image_ocr_agreed") { done(entry, match.status); continue; }
+      candidates.set(entry.field, { entry, value: match.value });
+    }
+
+    const proof = parseProof(ctx.proofInput);
+    const firstPass = new Set(ctx.check.holds.map((hold) => `${hold.code}\u0000${hold.field ?? ""}`));
+    while (candidates.size > 0) {
+      const sources: Partial<Record<ReadingField, RecheckFieldSource>> =
+        Object.fromEntries([...candidates.keys()].map((field) => [field, "image_agreed" as const]));
+      const values = { ...ctx.values, ...Object.fromEntries([...candidates].map(([field, { value }]) => [field, value])) } as AcceptedValues;
+      const check = proof.ok ? checkSubstituted(ctx.packet, ctx.reading, proof.value as unknown as Record<string, unknown>, values, sources, ctx.checkContext) : undefined;
+      if (!check) {
+        for (const { entry } of candidates.values()) done(entry, "checker_hold");
+        break;
+      }
+      const holds = check.holds.filter((hold) => !allowedForSource(hold, sources));
+      // A hold the first pass did not raise comes from an agreed value: drop the field it names, or every agreed
+      // field when it names another one (a date that implies a different VAT rate, a document-level hold).
+      const fresh = holds.filter((hold) => !firstPass.has(`${hold.code}\u0000${hold.field ?? ""}`));
+      const named = [...candidates.keys()].filter((field) => fresh.some((hold) => hold.field === field));
+      const conflicted = named.length > 0 ? named : fresh.length > 0 ? [...candidates.keys()] : [];
+      // A date alone would end the lost-date deferral while the number stays unknown, and the booking binding then
+      // holds the whole document: keep both typed instead.
+      if (conflicted.length === 0 && candidates.has("invoice_date") && values.invoice_number === null) {
+        done(candidates.get("invoice_date")!.entry, "number_still_lost");
+        candidates.delete("invoice_date");
+        continue;
+      }
+      if (conflicted.length === 0) {
+        for (const { entry } of candidates.values()) done(entry, "image_ocr_agreed");
+        return {
+          statuses: submitted.map((entry) => statuses.get(entry.field)!),
+          agreed: [...candidates.values()].map(({ entry }) => ({ field: entry.field, line: entry.line, printed: entry.printed })),
+          values,
+          check,
+          holds,
+        };
+      }
+      for (const field of conflicted) {
+        done(candidates.get(field)!.entry, "checker_hold");
+        candidates.delete(field);
+      }
+    }
+    return { ...none, statuses: submitted.map((entry) => statuses.get(entry.field)!) };
+  }
+
   /** mode='verify': the checker, binding and duplicate set; a create handle only when nothing holds. */
   async verify(input: VerifyDocumentInput): Promise<OperationOutcome<VerifyDocumentResult>> {
     const key = this.connectionKey();
@@ -854,12 +976,31 @@ class ReadingDocumentOperations {
       const heuristic = readingHeuristic(parsed, material.fileName, own);
       const readingInput = desandboxAllStrings(input.reading);
       const proofInput = desandboxAllStrings(input.proof);
-      const check: CheckResult = checkReading(packet, readingInput, proofInput, readingCheckContext(own, heuristic.view));
-      const holds: ReadingHold[] = check.holds.map(holdOf);
+      const checkContext = readingCheckContext(own, heuristic.view);
+      let check: CheckResult = checkReading(packet, readingInput, proofInput, checkContext);
+      let holds: ReadingHold[] = check.holds.map(holdOf);
       const base: Pick<VerifyDocumentResult, "sourceSha256" | "packetDigest"> = { sourceSha256: packet.source_sha256, packetDigest: packet.packet_digest };
       const parsedReading = parseDocumentReading(readingInput);
       if (!parsedReading.ok) return ok({ status: "blocked", ...base, holds });
-      const { source_sha256: _sha, packet_digest: _digest, evidence: _evidence, computed: _computed, ...values } = parsedReading.value;
+      const { source_sha256: _sha, packet_digest: _digest, evidence: _evidence, computed: _computed, ...readValues } = parsedReading.value;
+      let values: AcceptedValues = readValues;
+
+      // Lost-value image path: a value the client read from a crop counts only when server OCR of the same crop
+      // agrees and a second checker pass on it holds nothing beyond the missing evidence (plan Step 4, MAJOR-2).
+      let lostValues: LostValueStatus[] | undefined;
+      let imageAgreed: ImageAgreedField[] = [];
+      if (input.lostValueReading !== undefined) {
+        const resolved = await this.resolveLostValues(input.lostValueReading, {
+          packet, parsed, filePath: material.path, check, reading: parsedReading.value, proofInput, values, checkContext,
+        });
+        lostValues = resolved.statuses;
+        if (resolved.agreed.length > 0) {
+          imageAgreed = resolved.agreed;
+          values = resolved.values;
+          check = resolved.check;
+          holds = resolved.holds.map(holdOf);
+        }
+      }
 
       // Supplier: the unique live client of an accepted strong id.
       const candidates = supplierCandidates(values, allClients);
@@ -929,6 +1070,7 @@ class ReadingDocumentOperations {
             heuristic: heuristic.view,
             supplier: { clientId: supplierClient.id, name: supplierClient.name },
             company: ownCompany,
+            ...(imageAgreed.length > 0 ? { imageAgreed } : {}),
           })
         : undefined;
       const result: VerifyDocumentResult = {
@@ -942,6 +1084,7 @@ class ReadingDocumentOperations {
         ...(dimensionChoiceRequired.length ? { dimensionChoiceRequired } : {}),
         ...(supplierClient?.id !== undefined && (!itemsSource || dimensionChoiceRequired.length) ? { bookingItemsRequired: true as const } : {}),
         ...(marker ? { indeterminateMarker: marker.id } : {}),
+        ...(lostValues ? { lostValues } : {}),
       };
       const itemTitleRequired = itemsSource !== undefined && "template" in itemsSource && input.booking?.itemTitle === undefined &&
         itemTitleHasDate(itemsSource.template.custom_title);
@@ -990,6 +1133,7 @@ class ReadingDocumentOperations {
         reading_json: canonicalPlanJson(parsedReading.value),
         proof_json: canonicalPlanJson(parsedProof.value),
         check_holds: check.holds.map(holdOf),
+        ...(imageAgreed.length > 0 ? { image_agreed: imageAgreed } : {}),
       };
       const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
         normalizedArgs: planned as unknown as PlanRecord,
@@ -1074,7 +1218,10 @@ class ReadingDocumentOperations {
           readingJson: plan.reading_json,
           proofJson: plan.proof_json,
           final,
-          sources: Object.fromEntries(answered.correctedFields.map((field) => [field, "owner_supplied" as const])),
+          sources: {
+            ...Object.fromEntries((plan.image_agreed ?? []).map((entry) => [entry.field, "image_agreed" as const])),
+            ...Object.fromEntries(answered.correctedFields.map((field) => [field, "owner_supplied" as const])),
+          },
           releasedHolds: Array.isArray(plan.check_holds) ? plan.check_holds : [],
           ctx: readingCheckContext(own, readingHeuristic(parsed, material.fileName, own).view),
         });
@@ -1169,6 +1316,9 @@ class ReadingDocumentOperations {
             buyer_attested_by_owner: answered.buyerAttested,
             ...(answered.buyerAttested ? { buyer_attested_company_reg: plan.own.reg } : {}),
             text_layer_typed: answered.textLayerTyped,
+            ...(plan.image_agreed?.length ? {
+              image_ocr_agreed_fields: plan.image_agreed.map((entry) => entry.field).filter((field) => !answered.correctedFields.includes(field)),
+            } : {}),
             source_sha256: plan.source_sha256,
             packet_digest: plan.packet_digest,
             supplier_name: invoiceData.client_name,

@@ -25,7 +25,7 @@ import type { Elicitor } from "../elicitation.js";
 import { documentReadingEnabled } from "../config.js";
 import { jsonObjectInput } from "../tools/crud/shared.js";
 import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../document-reading-check.js";
-import { createReadingDocumentOperations, type VerifyDocumentResult } from "../documents/reading-operations.js";
+import { createReadingDocumentOperations, type LostValueStatus, type VerifyDocumentResult } from "../documents/reading-operations.js";
 import type { LostValueSeam } from "../documents/lost-value-ocr.js";
 import type { ReadingCard } from "../document-reading-card.js";
 import { desandboxText } from "../external-text-renderer.js";
@@ -337,6 +337,13 @@ export const LOST_VALUE_INSTRUCTIONS =
 export const BOOKING_AFTER_TYPED_DATE_NOTE =
   "The document's date was lost from the text, so the booking is computed when the owner types it. The VAT rate, the journal date and the payment term follow from that date; for a non-VAT company so does the non-VAT form. For a VAT-registered company the VAT account, VAT dimension and VAT article are the ones shown here (from the supplier's template or the items); one shown as null is filled from the purchase-article defaults for the rate in force on the typed date. Create holds when anything shown here differs, and returns the computed booking as booking_computed_at_create; review it before confirm.";
 
+/** verify's lost_values: per submitted lost value, agreed (image_ocr_agreed) or why not; printed is wrapped. */
+export type LostValuesPayload = Array<Omit<LostValueStatus, "printed"> & { printed?: string }>;
+
+function renderLostValues(statuses: readonly LostValueStatus[]): LostValuesPayload {
+  return statuses.map(({ printed, ...rest }) => ({ ...rest, ...(printed !== undefined ? { printed: wrapUntrustedOcr(printed) ?? "" } : {}) }));
+}
+
 function renderVerify(result: VerifyDocumentResult) {
   return {
     status: result.status,
@@ -356,6 +363,7 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.itemTitleRequired ? { item_title_required: true } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
+    ...(result.lostValues ? { lost_values: renderLostValues(result.lostValues) } : {}),
     ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),
     ...(result.releasedMarker ? { released_marker: result.releasedMarker } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
@@ -648,6 +656,7 @@ export function registerProcessAccountingDocumentTool(
           reading: args.document_reading,
           proof: args.proof,
           ...(args.release_indeterminate !== undefined ? { releaseIndeterminate: args.release_indeterminate } : {}),
+          ...(args.lost_value_reading !== undefined ? { lostValueReading: args.lost_value_reading } : {}),
           booking: {
             ...(args.items !== undefined ? { items: args.items } : {}),
             ...(args.liability_accounts_id !== undefined ? { liabilityAccountsId: args.liability_accounts_id } : {}),
