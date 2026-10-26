@@ -2676,14 +2676,25 @@ export const LOW_OCR_CONFIDENCE_THRESHOLD = 0.6;
 
 export function computeMinOcrConfidence(textItems: readonly LayoutTextItem[] | undefined): number | undefined {
   if (!textItems) return undefined;
-  // An OCR item without digits whose every word the text layer already prints
+  // An OCR item without digits whose every word its own page's text layer already prints
   // (a logo such as "Google" over a native "Google Cloud") adds nothing the
   // packet lacks, so its confidence says nothing about the document's values.
-  const words = (text: string) => text.toLocaleLowerCase("et").split(/[^\p{L}\p{N}]+/u).filter(Boolean);
-  const nativeWords = new Set(textItems.filter(item => item.confidence === undefined).flatMap(item => words(item.text ?? "")));
+  // Only on pages where native text dominates: a scanned page keeps its full signal.
+  const words = (text: string) => text.normalize("NFC").toLocaleLowerCase("et").split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
+  const pages = new Map<number | undefined, { nativeWords: Set<string>; native: number; ocr: number }>();
+  for (const item of textItems) {
+    const page = pages.get(item.pageNum) ?? { nativeWords: new Set<string>(), native: 0, ocr: 0 };
+    pages.set(item.pageNum, page);
+    if (item.confidence === undefined) {
+      page.native++;
+      for (const word of words(item.text ?? "")) page.nativeWords.add(word);
+    } else page.ocr++;
+  }
   const repeatsTextLayer = (item: LayoutTextItem) => {
+    const page = pages.get(item.pageNum)!;
     const itemWords = words(item.text ?? "");
-    return !/\p{N}/u.test(item.text ?? "") && itemWords.length > 0 && itemWords.every(word => nativeWords.has(word));
+    return page.native > page.ocr && !/\p{N}/u.test(item.text ?? "")
+      && itemWords.length > 0 && itemWords.every(word => page.nativeWords.has(word));
   };
   const ocrItems = textItems.filter(item => item.confidence !== undefined && Number.isFinite(item.confidence) && !repeatsTextLayer(item));
   if (ocrItems.length === 0) return undefined;
