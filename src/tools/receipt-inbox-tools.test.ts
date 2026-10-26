@@ -1712,9 +1712,9 @@ describe("receipt inbox tool status handling", () => {
       category: "owner_transfers",
       apply_mode: "review_only",
       review_guidance: {
-        recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+        recommendation: expect.stringContaining("do not create a purchase invoice"),
         follow_up_questions: expect.arrayContaining([
-          expect.stringContaining("laen"),
+          expect.stringContaining("loan"),
           expect.stringContaining("dividend"),
         ]),
       },

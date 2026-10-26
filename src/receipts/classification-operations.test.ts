@@ -1022,15 +1022,15 @@ describe("classification operations — ledger context (F6)", () => {
     expect(guidance).toContain("2110");
     expect(guidance).toContain("900");
     expect(guidance).toContain("confirm_transaction");
-    expect(guidance).not.toMatch(/müügi/i);
+    expect(guidance).not.toMatch(/sale invoice/i);
     // The distribution carries no amount: the text says to add each row's own.
     expect(group.suggested_booking.reason).toContain("adding amount = that transaction's own amount");
-    expect(guidance).toContain("amount: <tehingu summa>");
+    expect(guidance).toContain("amount: <transaction amount>");
     // On guided, confirm_transaction is not registered and is not named.
     const guided = await runWithToolProfile("guided", () => analyze(operations));
     const guidedGuidance = JSON.stringify(guided.groups[0]!.review_guidance);
     expect(guidedGuidance).not.toContain("confirm_transaction");
-    expect(guidedGuidance).toContain("standard- või full-profiili");
+    expect(guidedGuidance).toContain("standard or full profile");
   });
 
   it("(A4) a 'TransferWise' fee row with no IBAN or legal form gets a review-only, name-only history suggestion on its own dimension", async () => {

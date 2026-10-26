@@ -16,11 +16,11 @@ describe("estonian accounting guidance", () => {
     expect(guidance.recommendation).toContain("50%");
     expect(guidance.compliance_basis).toEqual(expect.arrayContaining([
       expect.stringContaining("KMS § 32"),
-      expect.stringContaining("EMTA sõiduauto juhis"),
+      expect.stringContaining("EMTA passenger-car guidance"),
     ]));
     expect(guidance.follow_up_questions).toEqual(expect.arrayContaining([
-      expect.stringContaining("M1-kategooria"),
-      expect.stringContaining("erasõidud"),
+      expect.stringContaining("M1-category"),
+      expect.stringContaining("private driving"),
     ]));
   });
 
@@ -58,14 +58,14 @@ describe("estonian accounting guidance", () => {
     });
 
     expect(guidance).toBeDefined();
-    expect(guidance!.recommendation).toContain("müüja nimi");
+    expect(guidance!.recommendation).toContain("supplier name");
     expect(guidance!.compliance_basis).toEqual(expect.arrayContaining([
       expect.stringContaining("RPS § 6–7"),
       expect.stringContaining("KMS § 31"),
     ]));
     expect(guidance!.follow_up_questions).toEqual(expect.arrayContaining([
-      expect.stringContaining("müüja"),
-      expect.stringContaining("arve number"),
+      expect.stringContaining("supplier"),
+      expect.stringContaining("invoice number"),
     ]));
   });
 
@@ -76,10 +76,10 @@ describe("estonian accounting guidance", () => {
     });
 
     expect(guidance).toBeDefined();
-    expect(guidance!.recommendation).toContain("ära tee sellest ostuarvet");
+    expect(guidance!.recommendation).toContain("do not create a purchase invoice");
     expect(guidance!.follow_up_questions).toEqual(expect.arrayContaining([
-      expect.stringContaining("laen"),
-      expect.stringContaining("kulude hüvitis"),
+      expect.stringContaining("loan"),
+      expect.stringContaining("expense reimbursement"),
       expect.stringContaining("dividend"),
     ]));
   });
@@ -95,14 +95,14 @@ describe("estonian accounting guidance", () => {
     expect(guidance!.recommendation).toContain("confirm_transaction");
     expect(guidance!.recommendation).toContain("related_id: 2110");
     expect(guidance!.recommendation).toContain("related_sub_id: 900");
-    expect(guidance!.recommendation).toContain("viimased 3");
-    expect(JSON.stringify(guidance)).not.toMatch(/müügi/i);
+    expect(guidance!.recommendation).toContain("last 3");
+    expect(JSON.stringify(guidance)).not.toMatch(/sale invoice/i);
   });
 
   it("does not ask extra questions for CAMT duplicates when the payload already determines the default", () => {
     const guidance = buildCamtDuplicateReviewGuidance({ hasConfirmedMatch: true });
 
     expect(guidance.follow_up_questions).toEqual([]);
-    expect(guidance.recommendation).toContain("kinnitatud");
+    expect(guidance.recommendation).toContain("already confirmed");
   });
 });

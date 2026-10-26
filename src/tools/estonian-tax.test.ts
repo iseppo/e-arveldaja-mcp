@@ -2339,8 +2339,8 @@ describe("create_owner_expense_reimbursement", () => {
       expect.stringContaining("KMS § 32"),
     ]));
     expect(payload.follow_up_questions).toEqual(expect.arrayContaining([
-      expect.stringContaining("M1-kategooria"),
-      expect.stringContaining("erasõidud"),
+      expect.stringContaining("M1-category"),
+      expect.stringContaining("private driving"),
     ]));
     expect(payload.policy_hint).toContain("save_auto_booking_rule");
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();

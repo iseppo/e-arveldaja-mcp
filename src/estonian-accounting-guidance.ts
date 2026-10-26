@@ -15,14 +15,14 @@ export interface ReviewGuidance {
   policy_hint?: string;
 }
 
-const BASIS_RPS_DOCUMENT = "RPS § 6–7: iga kirjend peab põhinema algdokumendil ning tehing tuleb dokumenteerida ja kirjendada selle tegeliku sisu järgi.";
-const BASIS_RPS_SUBSTANCE = "RPS § 4: lähtuda tuleb tehingu majanduslikust sisust ja olla konservatiivne, kui tõendav alus või käsitlus ei ole veel piisavalt selge.";
-const BASIS_RPS_MATCHING = "RPS § 4: tulud ja kulud tuleb kajastada nende tegeliku majandusliku sisu ning õige perioodi järgi.";
-const BASIS_KMS_DEDUCTION = "KMS § 29 lg 1 ja 4: sisendkäibemaksu tohib maha arvata ainult maksustatava ettevõtluse tarbeks kasutatud osas.";
-const BASIS_KMS_RESTRICTIONS = "KMS § 30: külaliste vastuvõtu ning oma töötajate toitlustuse või majutuse sisendkäibemaks ei ole üldjuhul mahaarvatav, välja arvatud töölähetuse majutus.";
-const BASIS_KMS_INVOICE = "KMS § 31 ja § 37: Eesti tarnija sisendkäibemaksu mahaarvamine eeldab üldjuhul nõuetele vastavat arvet; ilma piisava alusdokumendita ei tohiks käibemaksu maha arvata.";
-const BASIS_KMS_FOREIGN_SERVICE = "KMS § 29 lg 3 p 3, § 31 lg 3 ja § 10: välisriigi ettevõtjalt saadud teenus võib Eestis pöördmaksustamise alla minna, kuid mahaarvamine sõltub endiselt ettevõtluskasutusest ja tõenditest.";
-const BASIS_KMS_PARTIAL = "KMS § 32 ja EMTA sõiduauto juhis: segakasutuse või maksuvaba käibe korral võib maha arvata ainult ettevõtluse maksustatava osa; sõiduauto kulude puhul kehtib üldjuhul 50% piirang.";
+const BASIS_RPS_DOCUMENT = "RPS § 6–7: every entry must rest on a source document (algdokument) and be booked by the actual substance of the transaction.";
+const BASIS_RPS_SUBSTANCE = "RPS § 4: follow the economic substance of the transaction and be conservative while the supporting evidence or the treatment is not yet clear enough.";
+const BASIS_RPS_MATCHING = "RPS § 4: revenue and expenses must be recognised according to their actual economic substance and in the correct period.";
+const BASIS_KMS_DEDUCTION = "KMS § 29 lg 1 and 4: input VAT may be deducted only to the extent the purchase is used for taxable business activity.";
+const BASIS_KMS_RESTRICTIONS = "KMS § 30: input VAT on guest reception (külaliste vastuvõtt) and on catering or accommodation of the company's own employees is generally not deductible, except accommodation on a business trip (töölähetus).";
+const BASIS_KMS_INVOICE = "KMS § 31 and § 37: deducting an Estonian supplier's input VAT generally requires a compliant invoice; without an adequate source document, do not deduct it.";
+const BASIS_KMS_FOREIGN_SERVICE = "KMS § 29 lg 3 p 3, § 31 lg 3 and § 10: a service received from a foreign business may be subject to reverse charge (pöördmaksustamine) in Estonia, but the deduction still depends on business use and evidence.";
+const BASIS_KMS_PARTIAL = "KMS § 32 and the EMTA passenger-car guidance (EMTA sõiduauto juhis): with mixed use or VAT-exempt turnover only the taxable business share may be deducted; passenger-car costs are generally subject to the 50% cap.";
 
 function normalizedText(...parts: Array<string | undefined | null>): string {
   return parts
@@ -42,27 +42,27 @@ function dedupe(items: string[]): string[] {
 function formatMissingField(field: string): string {
   switch (field) {
     case "supplier_name":
-      return "müüja nimi";
+      return "supplier name";
     case "invoice_number":
-      return "arve number";
+      return "invoice number";
     case "invoice_date":
-      return "arve kuupäev";
+      return "invoice date";
     case "total_gross":
-      return "brutosumma";
+      return "gross total";
     case "total_vat":
-      return "käibemaksusumma";
+      return "VAT amount";
     case "total_net":
-      return "netosumma";
+      return "net total";
     case "supplier_reg_code":
-      return "registrikood";
+      return "registry code";
     case "supplier_vat_no":
-      return "KMKR number";
+      return "VAT number (KMKR)";
     case "supplier_iban":
       return "IBAN";
     case "ref_number":
-      return "viitenumber";
+      return "reference number";
     case "due_date":
-      return "maksetähtaeg";
+      return "due date";
     default:
       return field.replaceAll("_", " ");
   }
@@ -71,13 +71,13 @@ function formatMissingField(field: string): string {
 function buildMissingFieldQuestions(missingFields: string[]): string[] {
   const questions: string[] = [];
   if (missingFields.includes("supplier_name")) {
-    questions.push("Kes on dokumendil müüja täpse nimega ja kas registrikood või KMKR number on dokumendilt loetav?");
+    questions.push("What is the supplier's exact name on the document, and is its registry code or VAT number (KMKR) readable?");
   }
   if (missingFields.includes("invoice_number") || missingFields.includes("invoice_date")) {
-    questions.push("Mis on dokumendi arve number ja arve kuupäev täpselt nii, nagu need algdokumendil kirjas on?");
+    questions.push("What are the invoice number and invoice date exactly as written on the source document?");
   }
   if (missingFields.includes("total_gross") || missingFields.includes("total_net") || missingFields.includes("total_vat")) {
-    questions.push("Mis on dokumendi netosumma, käibemaksusumma ja brutosumma ning kas need liituvad omavahel korrektselt?");
+    questions.push("What are the document's net total, VAT amount and gross total, and do they add up?");
   }
   return dedupe(questions);
 }
@@ -85,15 +85,15 @@ function buildMissingFieldQuestions(missingFields: string[]): string[] {
 // Owner-expense review questions. Each carries server-owned answer semantics
 // (OWNER_EXPENSE_QUESTION_EFFECTS) so the inbox continuation can tell a "no"
 // that only limits the VAT deduction from one that stops the booking.
-const Q_OWNER_CAR_M1 = "Kas kulu on seotud M1-kategooria sõiduauto või selle kasutamisega?";
-const Q_OWNER_CAR_PRIVATE_USE_EXCLUDED = "Kas sõidukit kasutatakse eranditult ettevõtluses ja kas erasõidud on tegelikult välistatud?";
-const Q_OWNER_CAR_EXEMPT_TURNOVER = "Kas ettevõttel on ka maksuvaba käive või muud mitte-ettevõtluslikku kasutust, mis vähendaks mahaarvatavat osa veelgi?";
-const Q_OWNER_HOSPITALITY_GUEST_RECEPTION = "Kas tegemist on külaliste vastuvõtu kuluga (klientide, koostööpartnerite või muude külaliste võõrustamine)?";
-const Q_OWNER_HOSPITALITY_STAFF = "Kas tegemist on oma töötajate toitlustuse, majutuse või muu isikliku tarbimisega (v.a töölähetuse majutus)? Maksustatav erisoodustus on eraldi juhtum, mida selles voos ei kirjendata.";
-const Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION = "Kas tegemist on töötaja töölähetuse majutusega?";
-const Q_OWNER_HOSPITALITY_BUSINESS_LINK = "Kas kulu seos ettevõtlusega on tõendatav (töölähetuse korral: kas lähetuse alus on olemas)?";
-const Q_OWNER_BUSINESS_ONLY = "Kas kulu on tehtud ainult ettevõtluse tarbeks või on siin ka isiklikku / mitte-ettevõtluslikku kasutust?";
-const Q_OWNER_DOCUMENT_COMPLETE = "Kas alusdokumendilt on müüja, kuupäev, summa ja käibemaks selgelt tuvastatavad?";
+const Q_OWNER_CAR_M1 = "Is the cost related to an M1-category passenger car or its use?";
+const Q_OWNER_CAR_PRIVATE_USE_EXCLUDED = "Is the vehicle used exclusively for business, and is private driving actually excluded?";
+const Q_OWNER_CAR_EXEMPT_TURNOVER = "Does the company also have VAT-exempt turnover or other non-business use that would reduce the deductible share further?";
+const Q_OWNER_HOSPITALITY_GUEST_RECEPTION = "Is this a guest-reception cost (külaliste vastuvõtt: hosting customers, partners or other guests)?";
+const Q_OWNER_HOSPITALITY_STAFF = "Is this catering, accommodation or other personal consumption of the company's own employees (excluding business-trip accommodation)? A taxable fringe benefit (erisoodustus) is a separate case that this flow does not book.";
+const Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION = "Is this accommodation for an employee's business trip (töölähetus)?";
+const Q_OWNER_HOSPITALITY_BUSINESS_LINK = "Can the business purpose of the cost be evidenced (for a business trip: is there a basis for the trip)?";
+const Q_OWNER_BUSINESS_ONLY = "Was the cost incurred solely for business, or is there also personal / non-business use?";
+const Q_OWNER_DOCUMENT_COMPLETE = "Are the supplier, date, amount and VAT clearly identifiable on the source document?";
 
 /**
  * What a true/false answer to an owner-expense review question means:
@@ -152,7 +152,7 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
 
   if (expenseClass.isPassengerCar) {
     return {
-      recommendation: "Soovitus: ära eelda täismahaarvamist. Kui tegu on tavalise M1 sõiduauto või selle kuluga ja erasõidud ei ole välistatud, kasuta konservatiivse vaikimisi lahendusena osalist mahaarvamist ning alusta 50% piirangust.",
+      recommendation: "Recommendation: do not assume a full deduction. If this is an ordinary M1 passenger car or its cost and private driving is not excluded, use a partial deduction as the conservative default and start from the 50% cap.",
       compliance_basis: [
         BASIS_KMS_DEDUCTION,
         BASIS_KMS_PARTIAL,
@@ -162,13 +162,13 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
         Q_OWNER_CAR_PRIVATE_USE_EXCLUDED,
         Q_OWNER_CAR_EXEMPT_TURNOVER,
       ],
-      policy_hint: "Kui sama sõiduauto või kululiigi poliitika kordub, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement), et edaspidi küsitaks vähem.",
+      policy_hint: "If the same car or expense-type policy recurs, save it as a rule (save_auto_booking_rule, owner_expense_reimbursement) so fewer questions are asked next time.",
     };
   }
 
   if (expenseClass.isEntertainmentOrHospitality) {
     return {
-      recommendation: "Soovitus: käsitle sisendkäibemaks vaikimisi mitte-mahaarvatavana, välja arvatud juhul, kui tegemist on töötaja tõendatud töölähetuse majutusega või muu selgelt mahaarvatava erandiga.",
+      recommendation: "Recommendation: treat the input VAT as non-deductible by default, unless this is evidenced accommodation on an employee's business trip or another clearly deductible exception.",
       compliance_basis: [
         BASIS_KMS_DEDUCTION,
         BASIS_KMS_RESTRICTIONS,
@@ -180,12 +180,12 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
         Q_OWNER_HOSPITALITY_TRIP_ACCOMMODATION,
         Q_OWNER_HOSPITALITY_BUSINESS_LINK,
       ],
-      policy_hint: "Kui sama tüüpi kulude käsitlus on ettevõttes püsiv, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement).",
+      policy_hint: "If the company treats this type of cost the same way every time, save it as a rule (save_auto_booking_rule, owner_expense_reimbursement).",
     };
   }
 
   return {
-    recommendation: "Soovitus: kui kulu on üksnes ettevõtluse jaoks ning alusdokument on olemas, käsitle sisendkäibemaks vaikimisi mahaarvatavana. Kui kasutus on segane või osaliselt isiklik, vähenda mahaarvatavat osa.",
+    recommendation: "Recommendation: if the cost is solely for business and the source document exists, treat the input VAT as deductible by default. If the use is mixed or partly personal, reduce the deductible share.",
     compliance_basis: [
       BASIS_KMS_DEDUCTION,
       BASIS_KMS_INVOICE,
@@ -194,7 +194,7 @@ export function buildOwnerExpenseVatReviewGuidance(params: {
       Q_OWNER_BUSINESS_ONLY,
       Q_OWNER_DOCUMENT_COMPLETE,
     ],
-    policy_hint: "Kui sama kululiigi käibemaksukäsitlus kordub, salvesta see reeglina (save_auto_booking_rule, owner_expense_reimbursement).",
+    policy_hint: "If the VAT treatment of this expense type recurs, save it as a rule (save_auto_booking_rule, owner_expense_reimbursement).",
   };
 }
 
@@ -261,7 +261,7 @@ export function buildReceiptReviewGuidance(params: {
       description: params.extracted?.description ?? params.extracted?.supplier_name ?? "Owner-paid expense",
     });
     return {
-      recommendation: "Soovitus: ära tee sellest automaatselt ostuarvet. Kasuta omaniku kulu hüvitamise voogu ning otsusta käibemaksu mahaarvamine pärast ettevõtluskasutuse kontrolli.",
+      recommendation: "Recommendation: do not turn this into a purchase invoice automatically. Use the owner expense reimbursement flow and decide the VAT deduction after checking the business use.",
       compliance_basis: dedupe([
         BASIS_RPS_DOCUMENT,
         ...ownerExpenseGuidance.compliance_basis,
@@ -273,14 +273,14 @@ export function buildReceiptReviewGuidance(params: {
 
   if (params.classification !== "purchase_invoice") {
     return {
-      recommendation: "Soovitus: ära kajasta seda enne ostuarvena, kui dokumendi liik ja majanduslik sisu on selged. Kui see ei ole tarnija arve, kasuta sellele sobivat eraldi töövoogu.",
+      recommendation: "Recommendation: do not book this as a purchase invoice until the document type and its economic substance are clear. If it is not a supplier invoice, use the separate workflow that fits it.",
       compliance_basis: [
         BASIS_RPS_DOCUMENT,
         BASIS_RPS_SUBSTANCE,
       ],
       follow_up_questions: [
-        "Kas tegemist on üldse tarnija arvega või on see pigem kviitung, lepingu lisa, omaniku kulu või muu tõend?",
-        "Mis on selle dokumendi tegelik majanduslik sisu: ost, omaniku kulu hüvitis, lähetuskulu või midagi muud?",
+        "Is this a supplier invoice at all, or rather a receipt, a contract annex, an owner expense or other evidence?",
+        "What is the actual economic substance of this document: a purchase, an owner expense reimbursement, a business-trip cost or something else?",
       ],
     };
   }
@@ -289,29 +289,29 @@ export function buildReceiptReviewGuidance(params: {
     const readableFields = missingFields.map(formatMissingField);
     return {
       recommendation: readableFields.length > 0
-        ? `Soovitus: ära auto-booki enne, kui algdokumendilt on kinnitatud vähemalt ${readableFields.join(", ")}.`
-        : "Soovitus: ära auto-booki enne, kui müüja, arve kuupäev, number ja summad on algdokumendilt kindlalt kinnitatud.",
+        ? `Recommendation: do not auto-book until confirmed from the source document: ${readableFields.join(", ")}.`
+        : "Recommendation: do not auto-book until the supplier, invoice date, number and amounts are reliably confirmed from the source document.",
       compliance_basis: [
         BASIS_RPS_DOCUMENT,
         BASIS_KMS_INVOICE,
       ],
       follow_up_questions: buildMissingFieldQuestions(missingFields),
-      policy_hint: "Kui sama tarnija OCR kipub korduvalt samu välju vahele jätma, tasub sama tarnija jaoks kasutada varasemaid kinnitatud arveid või ettevõtte raamatupidamisreeglite (save_auto_booking_rule) vaikereeglit ainult pärast põhiandmete kinnitamist.",
+      policy_hint: "If OCR keeps missing the same fields for this supplier, reuse its earlier confirmed invoices or a booking-rule default (save_auto_booking_rule), but only once the core data is confirmed.",
     };
   }
 
   if (params.notes.some(note => note.includes("Supplier could not be resolved"))) {
     return {
-      recommendation: "Soovitus: seo või loo tarnija alles pärast seda, kui müüja nimi ning võimalusel registrikood, KMKR number või IBAN on algdokumendilt kinnitatud.",
+      recommendation: "Recommendation: link or create the supplier only after the supplier name and, where possible, the registry code, VAT number (KMKR) or IBAN are confirmed from the source document.",
       compliance_basis: [
         BASIS_RPS_DOCUMENT,
         BASIS_KMS_INVOICE,
       ],
       follow_up_questions: [
-        "Mis on dokumendil müüja ametlik nimi ning kas registrikood või KMKR number on loetav?",
-        "Kas dokumendilt on näha IBAN või muu tunnus, mille järgi saab tarnija olemasoleva kliendiga kindlalt siduda?",
+        "What is the supplier's official name on the document, and is the registry code or VAT number (KMKR) readable?",
+        "Does the document show an IBAN or another identifier that reliably links the supplier to an existing client?",
       ],
-      policy_hint: "Pärast tarnija kinnitamist saab sama tarnija vaikekäsitluse talletada ettevõtte raamatupidamisreeglitesse (save_auto_booking_rule) või lasta süsteemil kasutada varasemat kinnitatud arvet.",
+      policy_hint: "Once the supplier is confirmed, its default treatment can be stored in the company booking rules (save_auto_booking_rule), or the system can reuse an earlier confirmed invoice.",
     };
   }
 
@@ -319,8 +319,8 @@ export function buildReceiptReviewGuidance(params: {
     const foreignService = hasAnyKeyword(text, /\b(openai|google|microsoft|zoom|slack|github|hosting|cloud|subscription|software)\b/u);
     return {
       recommendation: foreignService
-        ? "Soovitus: käsitle seda vaikimisi teenuse ostuna ning kinnita, kas tegemist on välisriigi ettevõtja teenusega, mis vajab pöördmaksustamist. Alles siis vali konto/artikkel või salvesta see reegliks."
-        : "Soovitus: vali konto ja artikkel kulu tegeliku sisu järgi, kasutades võimalusel sama tarnija varasemat kinnitatud arvet vaikimisi pretsedendina.",
+        ? "Recommendation: treat this as a service purchase by default and confirm whether it is a service from a foreign business that needs reverse charge (pöördmaksustamine). Only then choose the account/article or save it as a rule."
+        : "Recommendation: choose the account and article by the actual substance of the cost, using an earlier confirmed invoice from the same supplier as the default precedent where available.",
       compliance_basis: foreignService
         ? [
             BASIS_RPS_SUBSTANCE,
@@ -333,15 +333,15 @@ export function buildReceiptReviewGuidance(params: {
           ],
       follow_up_questions: foreignService
         ? [
-            "Kas tarnija on välisriigi ettevõtja ja kas teenuse käibe tekkimise koht on Eestis?",
-            "Kas teenus on kasutatud maksustatava ettevõtluse tarbeks ning kas pöördmaksustamise alus on olemas?",
-            "Millisele kulukontole te soovite selle teenuse edaspidi vaikimisi suunata?",
+            "Is the supplier a foreign business, and is the place of supply of the service in Estonia?",
+            "Is the service used for taxable business activity, and is there a basis for reverse charge?",
+            "Which expense account should this service go to by default from now on?",
           ]
         : [
-            "Mis on selle kauba või teenuse tegelik majanduslik sisu, mille järgi konto valida?",
-            "Kas sama tarnija kohta on varasem kinnitatud arve, mille käsitlust võiks vaikeotsusena üle võtta?",
+            "What is the actual economic substance of these goods or this service, to choose the account by?",
+            "Is there an earlier confirmed invoice from the same supplier whose treatment could be adopted as the default?",
           ],
-      policy_hint: "Kui sama tarnija või kululiigi käsitlus kordub, salvesta see ettevõtte raamatupidamisreeglitesse automaatse kirjendamise reeglina (save_auto_booking_rule).",
+      policy_hint: "If the treatment of this supplier or expense type recurs, save it in the company booking rules as an auto-booking rule (save_auto_booking_rule).",
     };
   }
 
@@ -367,10 +367,10 @@ export function buildClassificationReviewGuidance(params: {
   // for any incoming row) contradicts how this counterparty was actually booked.
   if (params.history) {
     const { accountId, dimensionId, streak, historyTotal } = params.history;
-    const target = dimensionId !== null ? `kontole ${accountId} dimensiooniga ${dimensionId}` : `kontole ${accountId}`;
+    const target = dimensionId !== null ? `account ${accountId} with dimension ${dimensionId}` : `account ${accountId}`;
     const distribution = dimensionId !== null
-      ? `{ related_table: "accounts", related_id: ${accountId}, related_sub_id: ${dimensionId}, amount: <tehingu summa> }`
-      : `{ related_table: "accounts", related_id: ${accountId}, amount: <tehingu summa> }`;
+      ? `{ related_table: "accounts", related_id: ${accountId}, related_sub_id: ${dimensionId}, amount: <transaction amount> }`
+      : `{ related_table: "accounts", related_id: ${accountId}, amount: <transaction amount> }`;
     // Name confirm_transaction only where it is registered (not on guided).
     let confirmVisible = false;
     try {
@@ -379,80 +379,80 @@ export function buildClassificationReviewGuidance(params: {
       confirmVisible = false;
     }
     const howToBook = confirmVisible
-      ? `kinnita iga tehing eraldi confirm_transaction kaudu jaotusega ${distribution}`
-      : `kinnita iga tehing eraldi jaotusega ${distribution}; selles profiilis üksiktehingu kinnitamist pole, see vajab standard- või full-profiili (EARVELDAJA_PROFILE)`;
+      ? `confirm each transaction separately via confirm_transaction with the distribution ${distribution}`
+      : `confirm each transaction separately with the distribution ${distribution}; this profile has no single-transaction confirmation, which needs the standard or full profile (EARVELDAJA_PROFILE)`;
     return {
-      recommendation: `Soovitus: osapoole ${displayCounterparty} viimased ${streak} kinnitatud pangakannet (kokku ${historyTotal}) on järjest kirjendatud ${target}. Kui see tehing on sama sisuga, ${howToBook}. See on ainult vihje varasemate kannete põhjal: kontrolli enne kinnitamist tehingu sisu ja alusdokumenti.`,
+      recommendation: `Recommendation: the last ${streak} confirmed bank entries of counterparty ${displayCounterparty} (${historyTotal} in total) were all booked to ${target}. If this transaction has the same substance, ${howToBook}. This is only a hint based on earlier entries: check the transaction's substance and source document before confirming.`,
       compliance_basis: [
         BASIS_RPS_DOCUMENT,
         BASIS_RPS_SUBSTANCE,
       ],
       follow_up_questions: [
-        "Kas sellel tehingul on sama sisu ja alusdokument (nt sama leping, arve või teenusetasu) mis varasematel kannetel?",
+        "Does this transaction have the same substance and source document (e.g. the same contract, invoice or service fee) as the earlier entries?",
       ],
     };
   }
   switch (params.category) {
     case "tax_payments":
       return {
-        recommendation: "Soovitus: ära tee sellest ostuarvet. Ülekanne EMTA-le on EMTA ettemaksukonto täiendamine — kajasta makse EMTA ettemaksukontole (deebet ettemaksukonto / kreedit pank). Konkreetsed maksukulud (käibemaks, tööjõumaksud, tulumaks jne) tekib e-arveldaja ise ettemaksukonto väljavõtte põhjal (Aruandlus → EMTA ettemaksukonto kanded).",
+        recommendation: "Recommendation: do not create a purchase invoice for this. A transfer to EMTA tops up the EMTA prepayment account (ettemaksukonto) — book the payment to the EMTA prepayment account (debit prepayment account / credit bank). The actual tax expenses (VAT, payroll taxes, income tax, etc.) are created by e-arveldaja itself from the prepayment-account statement (Aruandlus → EMTA ettemaksukonto kanded).",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
         ],
         follow_up_questions: [
-          `Kas ${displayCounterparty} makse on EMTA ettemaksukonto täiendamine või mõni muu maksega seotud liikumine?`,
-          "Kas EMTA ettemaksukonto väljavõte on e-arveldajasse sisse loetud, et tekiks vastavad maksukulu kanded?",
+          `Is the ${displayCounterparty} payment a top-up of the EMTA prepayment account or some other tax-related movement?`,
+          "Has the EMTA prepayment-account statement been imported into e-arveldaja so that the matching tax-expense entries are created?",
         ],
       };
     case "salary_payroll":
       return {
-        recommendation: "Soovitus: ära tee sellest ostuarvet. Palk, tööjõumaksud ja töötajatele tehtud väljamaksed tuleb kajastada palgaarvestuse või töötasu alusdokumentide järgi.",
+        recommendation: "Recommendation: do not create a purchase invoice for this. Salaries, payroll taxes and payments to employees must be booked from the payroll or wage source documents.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
           BASIS_RPS_MATCHING,
         ],
         follow_up_questions: [
-          "Kas see ülekanne on netopalk, tööjõumaks, lähetushüvitis või muu personalikulu?",
-          "Milline palgaarvestuse või muu alusdokument selle maksega seostub?",
+          "Is this transfer a net salary, a payroll tax, a business-trip allowance or another staff cost?",
+          "Which payroll or other source document does this payment relate to?",
         ],
       };
     case "owner_transfers":
       return {
-        recommendation: "Soovitus: ära tee sellest ostuarvet. Omanikuga seotud makse tuleb sisu järgi eristada laenuks, kapitalipanuseks, kuluhüvitiseks, dividendiks või eratarbimiseks.",
+        recommendation: "Recommendation: do not create a purchase invoice for this. An owner-related payment must be classified by its substance as a loan, a capital contribution, an expense reimbursement, a dividend or private consumption.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
         ],
         follow_up_questions: [
-          "Kas see liikumine on omaniku laen, kapitalipanus, kulude hüvitis, dividend või omaniku eratarbimine?",
-          "Kas selle jaoks on olemas laenuleping, osaniku otsus, kuludokument või muu alusdokument?",
+          "Is this movement an owner loan, a capital contribution, an expense reimbursement, a dividend or the owner's private consumption?",
+          "Is there a loan agreement, a shareholder resolution, an expense document or other source document for it?",
         ],
       };
     case "revenue_without_invoice":
       return {
-        recommendation: "Soovitus: ära tee sellest ostuarvet. Seo laekumine müügi, ettemaksu või muu tulu alusdokumendiga ning veendu, et müügiarve või muu tõend on olemas.",
+        recommendation: "Recommendation: do not create a purchase invoice for this. Link the incoming payment to the source document of the sale, prepayment or other income, and make sure a sale invoice or other evidence exists.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
           BASIS_RPS_MATCHING,
         ],
         follow_up_questions: [
-          "Kas selle laekumise taga on müügiarve, ettemaks, toetuse laekumine või midagi muud?",
-          "Kas tulu kuulub samasse perioodi ja kas vajalik müügidokument on juba olemas?",
+          "Is this incoming payment backed by a sale invoice, a prepayment, a grant or something else?",
+          "Does the income belong to this period, and does the required sales document already exist?",
         ],
       };
     case "unknown":
       return {
-        recommendation: "Soovitus: ära auto-booki enne, kui tehingu tegelik sisu ja alusdokument on selged. Ebakindla tehingu puhul on konservatiivne käsitlus reeglitega kooskõlas parem kui vale automaatkanne.",
+        recommendation: "Recommendation: do not auto-book until the actual substance and source document of the transaction are clear. For an uncertain transaction a conservative, rule-compliant treatment is better than a wrong automatic entry.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
         ],
         follow_up_questions: [
-          "Mis on selle tehingu tegelik majanduslik sisu ja mis alusdokumendiga see seostub?",
-          "Kas seda tuleks käsitleda ostuna, omaniku liikumisena, palgakuluna, maksena EMTA-le või millegi muuna?",
+          "What is the actual economic substance of this transaction, and which source document does it relate to?",
+          "Should this be treated as a purchase, an owner movement, a payroll cost, a payment to EMTA or something else?",
         ],
       };
     default:
@@ -465,7 +465,7 @@ export function buildCamtDuplicateReviewGuidance(params: {
 }): ReviewGuidance {
   return params.hasConfirmedMatch
     ? {
-        recommendation: "Soovitus: hoia vaikimisi alles juba kinnitatud vanem kanne, lisa sellele CAMT bank_ref_number ja muu puuduva pangameta ning ära dubleeri sama pangaliikumist uue kirjega.",
+        recommendation: "Recommendation: by default keep the older, already confirmed entry, add the CAMT bank_ref_number and any other missing bank metadata to it, and do not duplicate the same bank movement with a new record.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
@@ -473,7 +473,7 @@ export function buildCamtDuplicateReviewGuidance(params: {
         follow_up_questions: [],
       }
     : {
-        recommendation: "Soovitus: ära kustuta ega kinnita midagi automaatselt enne, kui on selge, kumb kanne on usaldusväärsem alusdokumentidega seotud kanne. Kui vana kanne on endiselt PROJECT või ebakvaliteetne käsikanne, eelista tavaliselt CAMT allikast tulnud rida.",
+        recommendation: "Recommendation: do not delete or confirm anything automatically until it is clear which entry is the more reliable one tied to source documents. If the old entry is still PROJECT or a low-quality manual entry, usually prefer the row that came from the CAMT source.",
         compliance_basis: [
           BASIS_RPS_DOCUMENT,
           BASIS_RPS_SUBSTANCE,
