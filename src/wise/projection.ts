@@ -1870,7 +1870,11 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
     if (decision === undefined || rowCommands.length === 0) continue;
     // 1. Counterpart hold: hard, not releasable, its review is the only one.
-    if (decision.counterpartHold !== undefined) {
+    // A row its exact-label journal already books keeps only its fee leg,
+    // which is confirmed against the fee account and needs no counterpart.
+    const exactLabelled = alreadyJournalized.some(assertion =>
+      assertion.row_index === row.rowIndex && assertion.row_key === `row:${row.rowIndex}:exact_label`);
+    if (decision.counterpartHold !== undefined && !exactLabelled) {
       holdRow(row, decision.counterpartHold);
       continue;
     }

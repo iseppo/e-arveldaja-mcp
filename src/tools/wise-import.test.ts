@@ -7978,4 +7978,41 @@ describe("Wise row booked by a journal labelled with its exact Wise ID (live 202
       expectNoWiseMutations(setup.api);
     }
   });
+
+  it("a gross journal leaves the fee leg to book against the fee account even when the counterpart is undetermined", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow("0.5")]));
+    const setup = setupWiseTool([], undefined, options([loanJournal()]));
+    const { dry, executed } = await runApprovedWiseImport(setup, { ...baseArgs, fee_account_dimensions_id: 9 });
+
+    expect(dry.ownership_reviews ?? []).toEqual([]);
+    expect(dry.execution.already_journalized_rows).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059 }),
+    ]);
+    expect(dry.execution.commands.map(command => [command.action, command.wise_id])).toEqual([
+      ["fee_create_and_confirm", "FEE:TRANSFER-2431991304"],
+    ]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0][0]).toMatchObject({ amount: 0.5, type: "C" });
+    expect(setup.api.transactions.confirm).toHaveBeenCalledWith(expect.any(Number), [
+      expect.objectContaining({ related_table: "accounts", related_id: 8610, related_sub_id: 9, amount: 0.5 }),
+    ]);
+    expect(executed.execution.errors).toEqual([]);
+  });
+
+  it("the fee leg's own holds still apply: a stored untagged lookalike of the fee holds it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow("0.5")]));
+    const storedFeeLookalike = { id: 5, accounts_dimensions_id: 5, type: "C", amount: 0.5, cl_currencies_id: "EUR", date: "2026-10-14",
+      description: "Wise fee", bank_account_name: "Wise", status: "PROJECT", is_deleted: false };
+    const setup = setupWiseTool([storedFeeLookalike], undefined, options([loanJournal()]));
+    const dry = parseWiseResponse(await setup.handler({ ...baseArgs, fee_account_dimensions_id: 9, execute: false }));
+
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.execution.already_journalized_rows).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059 }),
+    ]);
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-2431991304", code: "wise_untagged_ledger_match", ledger_transaction_ids: [5],
+    })]);
+    expectNoWiseMutations(setup.api);
+  });
 });
