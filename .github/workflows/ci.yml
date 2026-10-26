@@ -41,24 +41,35 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      # The lost-value image test OCRs with liteparse's Tesseract, which downloads
-      # eng+est traineddata (~31 MB) into TESSDATA_PREFIX on first use.
-      - name: Resolve liteparse version
-        id: liteparse
-        run: echo "version=$(node -p "require('@llamaindex/liteparse/package.json').version")" >> "$GITHUB_OUTPUT"
-
+      # The lost-value image test OCRs with liteparse's Tesseract, which reads
+      # eng+est traineddata (~31 MB) from TESSDATA_PREFIX.
       - name: Cache Tesseract traineddata
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/tessdata
-          key: tessdata-eng-est-liteparse-${{ steps.liteparse.outputs.version }}
+          key: tessdata-best-e12c65a-eng-est
+
+      # liteparse fetches traineddata from tessdata_best's moving main branch; fetch it
+      # from a pinned commit instead and check every file, cached or not, by sha256.
+      - name: Fetch and verify Tesseract traineddata
+        env:
+          TESSDATA_PREFIX: ${{ runner.temp }}/tessdata
+          TESSDATA_COMMIT: e12c65a915945e4c28e237a9b52bc4a8f39a0cec
+        run: |
+          mkdir -p "$TESSDATA_PREFIX"
+          for lang in eng est; do
+            [ -f "$TESSDATA_PREFIX/$lang.traineddata" ] || curl -sfL -o "$TESSDATA_PREFIX/$lang.traineddata" \
+              "https://github.com/tesseract-ocr/tessdata_best/raw/$TESSDATA_COMMIT/$lang.traineddata"
+          done
+          cd "$TESSDATA_PREFIX" && sha256sum -c - <<'EOF'
+          8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba  eng.traineddata
+          d7bfea95a53c302b378655314adc366e294a5a95d7d611911fce5e66318d3ccd  est.traineddata
+          EOF
 
       - name: Integration surface tests
         env:
           TESSDATA_PREFIX: ${{ runner.temp }}/tessdata
-        run: |
-          mkdir -p "$TESSDATA_PREFIX"
-          npm run test:integration
+        run: npm run test:integration
 
   package-smoke-node18:
     runs-on: ubuntu-latest
