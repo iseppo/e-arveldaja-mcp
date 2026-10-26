@@ -320,6 +320,11 @@ describe("pdfPageBoxRefusal", () => {
     expect(await pdfPageBoxRefusal(Buffer.concat([Buffer.from("%PDF-1.5\n"), untyped, Buffer.from("%%EOF\n")]))).toBe("rotated_page");
   });
 
+  it("still sees an object stream whose dictionary hides an ` obj` inside a string", async () => {
+    const tricked = stream("/Type /ObjStm /N 1 /First 4 /X (x obj)", deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] /Rotate 90 >>", "latin1")));
+    expect(await pdfPageBoxRefusal(Buffer.concat([Buffer.from("%PDF-1.5\n"), tricked, Buffer.from("%%EOF\n")]))).toBe("rotated_page");
+  });
+
   it("refuses past 256 object streams or 32 MB of them inflated, instead of holding them all", async () => {
     const small = stream("/Type /ObjStm /N 1 /First 4", deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] >>", "latin1")));
     const many = (count: number, part: Buffer) => Buffer.concat([Buffer.from("%PDF-1.5\n"), ...Array.from({ length: count }, () => part), Buffer.from("%%EOF\n")]);

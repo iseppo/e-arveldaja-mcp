@@ -234,7 +234,10 @@ async function objectStreamTexts(pdf: Buffer, text: string): Promise<string[] | 
     for (const header of window.matchAll(/\sobj(?![A-Za-z0-9])/g)) objAt = header.index!;
     // No `obj` header close before the keyword: a dictionary this long could hide an object stream, so refuse.
     if (objAt < 0) return "object_stream_unreadable";
-    const dict = decodeNameEscapes(window.slice(objAt));
+    // An `obj` inside a string literal like `(x obj)` can cut the dict short, so the type is also looked for
+    // in everything since the previous stream's end; a false match only inflates or refuses.
+    const lastEnd = window.lastIndexOf("endstream");
+    const dict = decodeNameEscapes(window.slice(Math.min(objAt, lastEnd < 0 ? 0 : lastEnd + 9)));
     // An object stream by its type, or by the /N and /First every object stream carries (a viewer ignores /Type).
     if (!/\/Type\s*\/ObjStm(?![A-Za-z0-9])/.test(dict) &&
       !(/\/N(?![A-Za-z0-9])/.test(dict) && /\/First(?![A-Za-z0-9])/.test(dict))) continue;
