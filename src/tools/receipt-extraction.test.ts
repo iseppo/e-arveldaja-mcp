@@ -4121,6 +4121,75 @@ describe("row triples and layout amount tokens (WP2)", () => {
     });
   });
 
+  // R6b: a total row's triple supplies net and VAT only when the smaller part
+  // is a VAT rate in force on the invoice date times the larger one, and no
+  // labelled net / VAT exists. Otherwise the receipt stays gross-only.
+  describe("R6b net / VAT from the total row triple", () => {
+    const doc = (date: string, ...rows: string[]) =>
+      extractReceiptFieldsFromText(["Näidis AS", "Arve nr 12345678", `Kuupäev ${date}`, ...rows].join("\n"), "arve.pdf");
+
+    it.each([
+      ["24% in 2026", "01.09.2026", "Arve kokku 20.00 4.80 24.80", 20, 4.8, 24.8],
+      ["22% in 2025", "15.03.2025", "Kokku € 100.00 22.00 122.00", 100, 22, 122],
+      ["the sum printed first", "01.09.2026", "Kokku 24.80 20.00 4.80", 20, 4.8, 24.8],
+      ["a rounded 24%", "01.09.2026", "Kokku 8.05 1.93 9.98", 8.05, 1.93, 9.98],
+      ["13% accommodation", "01.09.2026", "Kokku 100.00 13.00 113.00", 100, 13, 113],
+    ])("derives net and VAT: %s", (_name, date, row, net, vat, gross) => {
+      const result = doc(date, row);
+      expect(result.total_gross).toBe(gross);
+      expect(result.total_net).toBe(net);
+      expect(result.total_vat).toBe(vat);
+      expect(result.vat_explicit).toBe(false);
+      expect(result.amount_consistency_issues).toBeUndefined();
+    });
+
+    it("derives with layout items whose total row binds the triple's sum", () => {
+      const items = [
+        item("Näidis AS", 52, 40, 60), item("Kuupäev 01.09.2026", 52, 60, 90),
+        item("Arve kokku", 52, 200, 50), item("20.00", 300, 200, 30), item("4.80", 360, 200, 30), item("24.80", 420, 200, 30),
+      ];
+      const result = extractReceiptFieldsFromText(
+        ["Näidis AS", "Kuupäev 01.09.2026", "Arve kokku 20.00 4.80 24.80"].join("\n"),
+        "arve.pdf",
+        { textItems: items },
+      );
+      expect(result.total_gross).toBe(24.8);
+      expect(result.total_net).toBe(20);
+      expect(result.total_vat).toBe(4.8);
+    });
+
+    it("derives on an item row repeating the same triple", () => {
+      const result = doc("01.09.2026", "Mobiilside 20.00 4.80 24.80", "Arve kokku 20.00 4.80 24.80");
+      expect(result.total_net).toBe(20);
+      expect(result.total_vat).toBe(4.8);
+    });
+
+    it.each([
+      ["no rate snaps (17%)", "01.09.2026", ["Kokku 100.00 17.00 117.00"]],
+      ["a rate not in force on the date (24% in 2024)", "01.09.2024", ["Kokku 100.00 24.00 124.00"]],
+      ["no valid invoice date", "31.02.2026", ["Kokku 20.00 4.80 24.80"]],
+      ["two different triples on the document", "01.09.2026", ["Mobiilside 10.00 2.40 12.40", "Kokku 20.00 4.80 24.80"]],
+      ["the triple only on an unlabelled row", "01.09.2026", ["Teenus 20.00 4.80 24.80", "Kokku 24.80"]],
+      ["the triple's sum is not the gross", "01.09.2026", ["Teenus 20.00 4.80 24.80", "Kokku 30.00"]],
+    ])("keeps the receipt gross-only: %s", (_name, date, rows) => {
+      const result = doc(date, ...rows);
+      expect(result.total_net).toBeUndefined();
+      expect(result.total_vat).toBeUndefined();
+    });
+
+    it("never overrides a labelled net row", () => {
+      const result = doc("01.09.2026", "Summa km-ta 21.00", "Kokku 20.00 4.80 24.80");
+      expect(result.total_net).toBe(21);
+      expect(result.total_vat).toBe(3.8);
+    });
+
+    it("never overrides a labelled VAT row", () => {
+      const result = doc("01.09.2026", "Käibemaks 24% 4.80", "Kokku 20.00 4.80 24.80");
+      expect(result.total_vat).toBe(4.8);
+      expect(result.vat_explicit).toBe(true);
+    });
+  });
+
   describe("R5 VAT-rate row triple", () => {
     it("binds the part equal to the stated rate × the other part", () => {
       const result = extractReceiptFieldsFromText(
