@@ -236,8 +236,14 @@ export function buildReadingCard(input: CardInput): CardOutcome {
       byField.set(field, [...(byField.get(field) ?? []), { code: "text_layer_value_lost", field }]);
     }
   }
-  // An image-agreed field gets only its confirm row (verify drops the agreement when anything else holds on it).
-  for (const field of agreed.keys()) byField.delete(field);
+  // An image-agreed field gets only its confirm row. Verify drops the agreement when anything else holds on it;
+  // should a hold still remain here, the agreement is not shown and the owner types the value instead.
+  for (const field of [...agreed.keys()]) {
+    const remaining = byField.get(field);
+    if (remaining === undefined) continue;
+    agreed.delete(field);
+    byField.set(field, [...remaining, { code: "text_layer_value_lost", field }]);
+  }
 
   const rows: CardRow[] = [];
   for (const [field, holds] of byField) {
