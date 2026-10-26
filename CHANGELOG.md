@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.1] - 2026-10-26
+
 ### Fixed
 
 - **Google invoices can now go through the verified reading, so their date is read from the image and they book with one confirmation.** Before, the Google logo on page 2 was read by text recognition at low confidence, and that alone held the whole document as `low_ocr_confidence`. Details: an OCR'd item without digits whose every word its own page's text layer already prints no longer counts toward the minimum OCR confidence, and only on pages where native text outnumbers OCR text; scanned pages keep their full signal. Applies everywhere the OCR confidence is checked (verified reading, prepare, receipt batch, inbox).
