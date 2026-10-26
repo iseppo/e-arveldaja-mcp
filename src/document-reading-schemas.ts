@@ -103,7 +103,7 @@ export type Proof = z.infer<typeof ProofSchema>;
 export type ParseOutcome<T, C extends string> = { ok: true; value: T } | { ok: false; code: C };
 
 /** Decode an object or a JSON string (as jsonObjectInput does), then apply the size cap. */
-function decode(input: unknown, maxBytes: number): Record<string, unknown> | undefined {
+export function decodeJsonObjectInput(input: unknown, maxBytes: number): Record<string, unknown> | undefined {
   let value = input;
   if (typeof value === "string") {
     if (Buffer.byteLength(value, "utf8") > MAX_RAW_INPUT_BYTES) return undefined;
@@ -124,7 +124,7 @@ function decode(input: unknown, maxBytes: number): Record<string, unknown> | und
   return value as Record<string, unknown>;
 }
 
-function containsSandboxMarker(value: unknown): boolean {
+export function containsSandboxMarker(value: unknown): boolean {
   if (typeof value === "string") return stripSandboxMarkers(value) !== value;
   if (Array.isArray(value)) return value.some(containsSandboxMarker);
   if (typeof value === "object" && value !== null) {
@@ -136,7 +136,7 @@ function containsSandboxMarker(value: unknown): boolean {
 export function parseDocumentReading(
   input: unknown,
 ): ParseOutcome<DocumentReading, "reading_schema_invalid" | "computed_field"> {
-  const decoded = decode(input, READING_MAX_BYTES);
+  const decoded = decodeJsonObjectInput(input, READING_MAX_BYTES);
   if (!decoded || containsSandboxMarker(decoded)) return { ok: false, code: "reading_schema_invalid" };
   const parsed = DocumentReadingSchema.safeParse(decoded);
   if (!parsed.success) return { ok: false, code: "reading_schema_invalid" };
@@ -145,7 +145,7 @@ export function parseDocumentReading(
 }
 
 export function parseProof(input: unknown): ParseOutcome<Proof, "proof_schema_invalid"> {
-  const decoded = decode(input, PROOF_MAX_BYTES);
+  const decoded = decodeJsonObjectInput(input, PROOF_MAX_BYTES);
   if (!decoded || containsSandboxMarker(decoded)) return { ok: false, code: "proof_schema_invalid" };
   const parsed = ProofSchema.safeParse(decoded);
   if (!parsed.success) return { ok: false, code: "proof_schema_invalid" };
