@@ -196,6 +196,9 @@ export function resolveTransfer(
 }
 
 /** Inference reason: the name matched the company, but the row's explicit counterparty IBAN is not a registered own account. */
+/** Minimum inference confidence to book a one-sided transfer; planning and execute-time verification share it. */
+export const ONE_SIDED_MIN_CONFIDENCE = 50;
+
 export const COUNTERPARTY_IBAN_NOT_REGISTERED = "counterparty_iban_not_registered";
 
 export interface OneSidedInference {

@@ -52,6 +52,7 @@ import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transacti
 import {
   counterpartyIbanOf,
   COUNTERPARTY_IBAN_NOT_REGISTERED,
+  ONE_SIDED_MIN_CONFIDENCE,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   isCamtCounterpartyIbanOmitted,
@@ -1573,7 +1574,7 @@ export async function runInterAccountMatching(
       });
       continue;
     }
-    if (confidence < 50 || !targetDimension) continue;
+    if (confidence < ONE_SIDED_MIN_CONFIDENCE || !targetDimension) continue;
 
     const sourceTitle = dimensionToTitle.get(tx.accounts_dimensions_id) ?? `dim:${tx.accounts_dimensions_id}`;
     const targetTitle = dimensionToTitle.get(targetDimension) ?? `dim:${targetDimension}`;
@@ -1821,7 +1822,7 @@ export async function executeInterAccount(
       const mapping = buildBankAccountLookups(bankAccounts, accountDimensions);
       const lookups: InterAccountMatchLookups = {...mapping, companyName:normalizeCompanyName(match.invoiceInfo.invoice_company_name ?? ""), companyLegalName:match.invoiceInfo.invoice_company_name ?? "", targetAccountsDimensionsId:input.targetAccountsDimensionsId};
       const sourceInference = inferOneSidedTransfer(source, lookups, new Map());
-      if (!mirror) return sourceInference.targetDimension === action.targetDimensionId && sourceInference.confidence >= 80 && !sourceInference.reasons.includes(COUNTERPARTY_IBAN_NOT_REGISTERED);
+      if (!mirror) return sourceInference.targetDimension === action.targetDimensionId && sourceInference.confidence >= ONE_SIDED_MIN_CONFIDENCE && !sourceInference.reasons.includes(COUNTERPARTY_IBAN_NOT_REGISTERED);
       const compatibility = getTransferPairCompatibility(source, mirror, action.pairEvidence.maxDateGap);
       if (!compatibility || compatibility.conflictingComparableAmounts || !sameAmountToTheCent(compatibility.txAComparableAmount, action.distributionAmount)) return false;
       if (action.pairEvidence.kind === "same_type") return !!getSameTypeReciprocalEvidence(source, mirror, sourceInference, inferOneSidedTransfer(mirror, lookups, new Map()), mapping.dimensionToIban);

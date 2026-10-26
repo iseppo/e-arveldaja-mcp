@@ -2705,6 +2705,24 @@ describe("reconcile_inter_account_transfers", () => {
       expect(payload2.one_sided[0]!.match_reasons).toContain("target_from_parameter");
     });
 
+    it("executes a name-only one-sided transfer whose target comes from target_accounts_dimensions_id", async () => {
+      const { handler, api } = setupInterAccountTool({
+        transactions: [
+          { id: 21, status: "PROJECT", is_deleted: false, type: "C", amount: 850, cl_currencies_id: "EUR", date: "2026-01-13", accounts_dimensions_id: 300, bank_account_name: "Test OÜ", bank_account_no: null },
+        ],
+        bankAccounts: [
+          ...bankAccounts,
+          { id: 3, account_name_est: "Wise", account_no: "BE08905767222113", iban_code: "BE08905767222113", accounts_dimensions_id: 300 },
+        ],
+        companyName: "Test OÜ",
+      });
+
+      const result = await executeInterAccount(handler, { target_accounts_dimensions_id: 100 });
+      const payload = parseToolPayload<ReconInterAccountPayload>(result.content[0]!.text);
+      expect(payload.matched_one_sided).toBe(1);
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    });
+
     it("detects one-sided transfer by counterparty IBAN matching own account", async () => {
       const { handler } = setupInterAccountTool({
         transactions: [
