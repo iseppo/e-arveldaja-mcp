@@ -1188,12 +1188,12 @@ ${entryXml}
     expect(payload.autopilot.needs_accountant_review).toEqual(expect.arrayContaining([
       expect.objectContaining({
         source: "classify_unmatched_transactions",
-        recommendation: expect.stringContaining("ära tee sellest ostuarvet"),
+        recommendation: expect.stringContaining("do not create a purchase invoice"),
         compliance_basis: expect.arrayContaining([
           expect.stringContaining("RPS § 6–7"),
         ]),
         follow_up_questions: expect.arrayContaining([
-          expect.stringContaining("laen"),
+          expect.stringContaining("loan"),
         ]),
         resolver_input: expect.objectContaining({
           review_type: "classification_group",

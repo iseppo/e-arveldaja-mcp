@@ -45,6 +45,7 @@
     "audit:legacy-accounts": "tsx scripts/audit-legacy-accounts.ts",
     "measure:surface": "tsx scripts/measure-mcp-surface.ts",
     "measure:responses": "tsx scripts/measure-response-fixtures.ts",
+    "audit:negative-assertions": "tsx scripts/find-negative-assertions.ts",
     "validate:release": "tsx scripts/validate-release-metadata.ts",
     "typecheck:tests": "tsx scripts/check-test-typecheck.ts",
     "typecheck:tests:update": "tsx scripts/check-test-typecheck.ts --update",

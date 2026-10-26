@@ -3906,6 +3906,9 @@ describe("wise import tool", () => {
     const mainFails = setupWiseTool([], vi.fn().mockRejectedValue(new Error("main create unavailable")), {
       accountDimensions: configuredTransferDimensions(),
       bankAccounts: configuredTransferBankAccounts(),
+      // Wire a purchase-invoice update spy so "never touches purchase invoices"
+      // below is checked against a real mock, not an absent fixture property.
+      purchaseInvoices: [],
     });
     const mainFailureRun = await runApprovedWiseImport(mainFails, {
       file_path: "/tmp/wise.csv",
@@ -3988,7 +3991,7 @@ describe("wise import tool", () => {
     expect(mainFails.api.transactions.create).toHaveBeenCalledTimes(1);
     expect(mainFails.api.transactions.update).not.toHaveBeenCalled();
     expect(mainFails.api.transactions.confirm).not.toHaveBeenCalled();
-    expect(mainFails.api.purchaseInvoices?.update).toBeUndefined();
+    expect(mainFails.api.purchaseInvoices.update).not.toHaveBeenCalled();
     expect(mainFailureRun.executed.results).toEqual([]);
     expect(mainFailureRun.executed.execution.errors).toEqual([
       expect.objectContaining({ wise_id: "TRANSFER-M04-MAIN-FAILS" }),
@@ -5020,9 +5023,12 @@ describe("wise import tool", () => {
         expect.objectContaining({ source_row_id: "wise:header", field: "Status" }),
         expect.objectContaining({ source_row_id: "wise:header", field: "ID" }),
       ]));
-      // Extra headers are not themselves defects.
-      expect(payload.rejected_fields.map(f => f.field))
-        .not.toEqual(expect.arrayContaining(["Unrelated Extra", "Another Extra"]));
+      // Extra headers are not themselves defects — neither one. (A negated
+      // arrayContaining of both would pass when only one extra is flagged.)
+      const rejectedHeaderFields = payload.rejected_fields.map(f => f.field);
+      expect(rejectedHeaderFields).toContain("Status");
+      expect(rejectedHeaderFields).not.toContain("Unrelated Extra");
+      expect(rejectedHeaderFields).not.toContain("Another Extra");
       // Header issues short-circuit the row loop: a missing header makes
       // idx() return -1 and fields[-1] undefined, which would manufacture a
       // spurious issue on EVERY row and — under the 100-issue cap — could
