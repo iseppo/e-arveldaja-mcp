@@ -537,7 +537,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
               // account or a payment provider's pooled IBAN): reconcile books it only once
               // the other account's mirror row proves the transfer.
               suggestions.push({
-                ...heldForReview(`Counterparty name matches the company, but counterparty IBAN ${counterpartyIban} is not a registered own bank account; reconcile_inter_account_transfers books it only once the other account's mirror row proves the transfer. Register the account in e-arveldaja or check the statements before confirming.`),
+                ...heldForReview(`Counterparty name matches the company, but its counterparty IBAN is not a registered own bank account; reconcile_inter_account_transfers books it only once the other account's mirror row proves the transfer. Register the account in e-arveldaja or check the statements before confirming.`),
                 code: "unregistered_iban_needs_mirror",
               });
               isInterAccount = true;

@@ -1566,7 +1566,7 @@ export async function runInterAccountMatching(
         ...(unregisteredIban
           ? {
             code: "unregistered_iban_needs_mirror" as const,
-            reason: `The counterparty is the company itself, but the counterparty IBAN ${counterpartyIbanOf(tx)} is not a registered own bank account and several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline.`,
+            reason: `The counterparty is the company itself, but its counterparty IBAN is not a registered own bank account and several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline.`,
           }
           : {
             reason: `The counterparty is the company itself, but several own accounts could be the other side (dimensions ${otherDimensions.join(", ")}); pass target_accounts_dimensions_id naming one of them, or confirm inline.`,
@@ -1671,7 +1671,7 @@ export async function runInterAccountMatching(
       ambiguousRefless.push({
         transaction_ids: [tx.id], amount: nominalAmount, currency, amount_eur: amountEur, date: tx.date,
         source_account: sourceTitle, target_account: targetTitle, code: "unregistered_iban_needs_mirror",
-        reason: `The counterparty name is the company's, but the counterparty IBAN ${counterpartyIbanOf(tx)} is not a registered own bank account (an own account not set up in e-arveldaja, or a payment provider's pooled account). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline if this is a transfer to ${targetTitle}.`,
+        reason: `The counterparty name is the company's, but its counterparty IBAN is not a registered own bank account (an own account not set up in e-arveldaja, or a payment provider's pooled account). It is booked automatically only once the other account's mirror row proves the transfer; register the account or confirm inline if this is a transfer to ${targetTitle}.`,
       });
       continue;
     }
