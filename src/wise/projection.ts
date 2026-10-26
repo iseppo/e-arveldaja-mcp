@@ -1594,6 +1594,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const decision = transferDecisions.get(row);
     if (decision?.ownershipBasis !== undefined) continue;
     if (legsById.get(row.id)?.length !== 1 || legSuffix.has(row)) continue;
+    // A split ID counts as split even when the date filter dropped its other leg.
+    if (allRows.some(other => other.rowIndex !== row.rowIndex && other.id === row.id)) continue;
     if (alreadyJournalized.some(assertion => assertion.row_index === row.rowIndex)) continue;
     const mainKey = `row:${row.rowIndex}:main`;
     const mainIndex = commands.findIndex(command => command.row_key === mainKey && command.action === "main_create");
@@ -1612,8 +1614,16 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     const booksFee = feeAccountDimensionsId !== undefined && (journal.postings ?? []).some(posting =>
       !posting.is_deleted && posting.type === "D" && posting.accounts_dimensions_id === feeAccountDimensionsId &&
       cents(posting.base_amount ?? posting.amount) === cents(fee));
-    const booksNetOfFee = netAmount !== undefined && booksFee && wiseLegMoves(journal, row, netAmount);
-    if (!wiseLegMoves(journal, row, entry.amount) && !booksNetOfFee) continue;
+    const feeCommand = commands.find(command => command.row_key === `row:${row.rowIndex}:fee`);
+    const feePending = feeCommand !== undefined && feeCommand.booked_currency === "EUR" &&
+      cents(feeCommand.booked_amount) === cents(fee);
+    // Net of the fee only while the fee row is still to be imported: a stored
+    // fee row plus the journal's fee posting is a double expense to review.
+    const booksNetOfFee = netAmount !== undefined && booksFee && feePending && wiseLegMoves(journal, row, netAmount);
+    // Gross plus an exact fee debit also expenses the fee; importing the fee
+    // row would book it twice, so leave such a journal to the normal flow.
+    const booksGross = !(booksFee && cents(fee) > 0) && wiseLegMoves(journal, row, entry.amount);
+    if (!booksGross && !booksNetOfFee) continue;
 
     commands.splice(mainIndex, 1);
     for (const command of commands) {
@@ -1633,9 +1643,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     });
     // Net of the fee, the journal books the fee too: booking the fee row
     // would expense it twice.
-    const feeCommand = commands.find(command => command.row_key === `row:${row.rowIndex}:fee`);
-    if (booksNetOfFee && feeCommand !== undefined && feeCommand.booked_currency === "EUR" &&
-      cents(feeCommand.booked_amount) === cents(fee)) {
+    if (booksNetOfFee && feeCommand !== undefined) {
       commands.splice(commands.indexOf(feeCommand), 1);
       const feeEntryIndex = created.findIndex(candidate => candidate.wise_id === feeCommand.wise_id);
       if (feeEntryIndex >= 0) created.splice(feeEntryIndex, 1);

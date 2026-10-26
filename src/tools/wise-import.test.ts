@@ -7822,6 +7822,40 @@ describe("Wise row booked by a journal labelled with its exact Wise ID (live 202
     expectNoWiseMutations(setup.api);
   });
 
+  it("is not journalized when the fee would be expensed twice or the ID has a filtered-out second leg", async () => {
+    const netJournal = loanJournal({ postings: [
+      { is_deleted: false, accounts_id: 1410, type: "D", amount: 50, base_amount: 50, cl_currencies_id: "EUR" },
+      { is_deleted: false, accounts_id: 8610, accounts_dimensions_id: 9, type: "D", amount: 0.5, base_amount: 0.5, cl_currencies_id: "EUR" },
+      { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 50.5, base_amount: 50.5, cl_currencies_id: "EUR" },
+    ] });
+    const storedFee = { id: 2, accounts_dimensions_id: 5, type: "C", amount: 0.5, cl_currencies_id: "EUR", date: "2026-10-14",
+      description: "WISE:FEE:TRANSFER-2431991304 Wise teenustasu [source_direction=OUT]", bank_account_name: "Wise", status: "PROJECT", is_deleted: false };
+    const cases: Array<{ label: string; rows: string[][]; stored: unknown[]; journal: unknown; args: Record<string, unknown> }> = [
+      { label: "gross journal that also expenses the fee", rows: [loanRow("0.5")], stored: [], args: { fee_account_dimensions_id: 9 },
+        journal: loanJournal({ postings: [
+          { is_deleted: false, accounts_id: 1410, type: "D", amount: 49.5, base_amount: 49.5, cl_currencies_id: "EUR" },
+          { is_deleted: false, accounts_id: 8610, accounts_dimensions_id: 9, type: "D", amount: 0.5, base_amount: 0.5, cl_currencies_id: "EUR" },
+          { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 50, base_amount: 50, cl_currencies_id: "EUR" },
+        ] }) },
+      { label: "net-of-fee journal with the fee row already stored", rows: [loanRow("0.5")], stored: [storedFee], args: { fee_account_dimensions_id: 9 }, journal: netJournal },
+      { label: "second leg dropped by the date filter", rows: [loanRow(), buildM04Values({
+        id: "TRANSFER-2431991304", direction: "OUT", date: "2026-10-13", sourceName: "Seppo AI OÜ",
+        targetName: "voxpoll oü", sourceAmount: "20", sourceFeeAmount: "0",
+      })], stored: [], args: { date_from: "2026-10-14" }, journal: loanJournal() },
+    ];
+    for (const { label, rows, stored, journal, args } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows(rows));
+      const setup = setupWiseTool(stored, undefined, options([journal]));
+      const dry = parseWiseResponse(await setup.handler({ ...baseArgs, ...args, execute: false }));
+
+      expect(dry.execution.already_journalized_rows ?? [], label).not.toContainEqual(
+        expect.objectContaining({ wise_id: "TRANSFER-2431991304" }));
+      expect(skippedRecords(dry), label).not.toContainEqual(
+        expect.objectContaining({ wise_id: "TRANSFER-2431991304", record_id: 29580059 }));
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
   it("still holds when the labelled journal books another amount or direction, is unregistered, lacks an EUR base, or has a twin", async () => {
     const cases: Array<{ label: string; journals: unknown[] }> = [
       { label: "wrong amount", journals: [loanJournal({}, 49)] },

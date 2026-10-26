@@ -229,10 +229,18 @@ the review warnings in `summary.warnings`
   - `unregistered_iban_needs_mirror`: the counterparty is the company itself, but its IBAN is not a registered own bank account (an own account not set up in e-arveldaja, or a provider's pooled top-up account such as Wise). It books automatically once the other account's matching row exists: import that account's statement, then re-run the dry run.<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
- If the owner confirms the other account and no statement will follow, confirm the row inline against that account after approval (`confirm_transaction`).
+ If the other account is set up in e-arveldaja, the owner confirms it, and no statement will follow, confirm the row inline against that account after approval (`confirm_transaction` with `block_on_duplicate: true`). An own account not set up in e-arveldaja has nothing to confirm against; the owner adds it first.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
   - `camt_marker_unverified`: the stored CAMT marker fails its check, so direction and counterparty are unproven; compare the row with the bank statement before doing anything.
-  - Without a code: a same-key journal or several possible target accounts; follow the row's `reason`.
+  - <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`ambiguous_refless` (or `ambiguous_refless_more` for overflow)
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+Without a code
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->: a same-key journal or several possible target accounts; follow the row's `reason`.
 
 Ask for approval. If the user does not explicitly approve, stop — the plan handle is not approval. If approved, call `reconcile_bank_transactions` with `mode: "execute_inter_account"` and `plan_handle` set to the handle from the reviewed dry run (required; consumed once). Pass the same `target_accounts_dimensions_id` / `max_date_gap` as the dry run, or the plan is refused with `plan_drift`.
 - After execute, inspect the execution report (`status`, `command_partitions`, `stop_reason`) — on a partial execution do not retry automatically, re-run the dry run.
