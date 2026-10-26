@@ -736,6 +736,11 @@ function renderDetails(entry: Omit<AuditEntry, "timestamp"> & { timestamp: strin
   for (const [key, value] of Object.entries(d)) {
     if (rendered.has(key)) continue;
     if (value === undefined || value === null) continue;
+    // A non-empty list of plain values (field names, ids) is one comma-joined cell.
+    if (Array.isArray(value) && value.length > 0 && value.every((entry) => ["string", "number", "boolean"].includes(typeof entry))) {
+      addRow(key, value.join(", "));
+      continue;
+    }
     if (typeof value === "object") continue; // skip complex nested objects
     addRow(key, value);
   }

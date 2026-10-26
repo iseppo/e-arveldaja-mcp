@@ -412,6 +412,20 @@ describe("audit log Markdown rendering", () => {
     expect(log).not.toContain("**reason:**");
   });
 
+  it("renders a list of plain values as one row and still skips nested objects and empty lists", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-render-list-"));
+    const auditLog = await loadAuditLogModule(tempDir);
+    auditLog.initAuditLog(() => "acme");
+    auditLog.logAudit({
+      tool: "process_accounting_document", action: "CREATED", entity_type: "purchase_invoice", entity_id: 7,
+      summary: "Created purchase invoice from a verified reading",
+      details: { image_ocr_agreed_fields: ["invoice_date"], corrected_fields: [], nested: [{ a: 1 }] },
+    });
+    const log = auditLog.getAuditLog();
+    expect(log).toContain("| Image Ocr Agreed Fields | invoice\\_date |");
+    expect(log).not.toMatch(/Corrected Fields|Nested/);
+  });
+
   it("keeps multiple totals inside one Markdown table cell", async () => {
     process.env.EARVELDAJA_AUDIT_LANG = "et";
     tempDir = await mkdtemp(join(tmpdir(), "e-arveldaja-audit-log-render-totals-"));
