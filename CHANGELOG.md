@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-26
+
 ### Added
 
 - **When a Wise transfer matches transfers on two of your own banks, you can now say which bank it went to or from, for that one row.** Before, such a row stayed held and could only be booked by hand. Details: new input `counterpart_overrides [{ wise_id, dimension_id }]` on `import_wise_transactions` / `process_bank_input`; the pick must be one of the evidenced banks (otherwise the row stays held), it binds the plan digest, the row shows `counterpart_basis: "owner_selected"`, and an entry that decides nothing is reported as `unused_counterpart_override`.
