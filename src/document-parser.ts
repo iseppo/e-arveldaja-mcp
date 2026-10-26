@@ -5,6 +5,7 @@ import {
   type PageComplexityStats,
   type ParseResult,
 } from "@llamaindex/liteparse";
+import { LOST_VALUE_RENDER_DPI } from "./document-reading-lost-value.js";
 
 const HIGH_IMAGE_COVERAGE_FOR_PARTIAL_OCR = 0.5;
 
@@ -267,7 +268,6 @@ export async function parseDocument(filePath: string): Promise<ParsedDocument> {
 // Lost-value image path (plan lost-value-image-ocr): page render + crop OCR.
 // ---------------------------------------------------------------------------
 
-export const LOST_VALUE_RENDER_DPI = 300;
 export const LOST_VALUE_OCR_TIMEOUT_MS = 30_000;
 
 /** A text item OCR read from a crop, in the crop's own coordinates. */

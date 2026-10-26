@@ -100,6 +100,29 @@ describe("matchLostValue: invoice_date", () => {
       .toEqual({ status: "image_ocr_agreed", value: "2026-07-31" });
   });
 
+  it("holds a candidate whose row keeps a letter-only part beside it (a cut-short value)", () => {
+    expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number"], ["INV"], ["0042"]), "Invoice number").status).toBe("ocr_ambiguous");
+    expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number"], ["0042"], ["B"]), "Invoice number").status).toBe("ocr_ambiguous");
+    expect(matchLostValue("invoice_date", "31.07.2026", ocr(["Invoice date"], ["31.07.2026"], ["approx"]), "Invoice date").status).toBe("ocr_ambiguous");
+    // Leaders and punctuation around the label and the value are fine.
+    expect(matchLostValue("invoice_number", "0042", ocr(["Invoice number:"], [DOTS, 0.4], ["#0042."]), "Invoice number").status).toBe("image_ocr_agreed");
+  });
+
+  it("counts a confidence outside 0–1 (NaN, a 0–100 scale) as none", () => {
+    for (const confidence of [Number.NaN, 95, -1]) {
+      expect(matchLostValue("invoice_number", "1234567890", ocr(["Invoice number"], ["1234567890", confidence]), "Invoice number").status)
+        .toBe("ocr_low_confidence");
+    }
+  });
+
+  it("holds when the label is on another OCR row than the value", () => {
+    const label = { text: "Invoice date", x: 4, y: 0, width: 72, height: 12, confidence: 0.95 };
+    const value = (y: number) => ({ text: "31.07.2026", x: 90, y, width: 60, height: 12, confidence: 0.95 });
+    expect(matchLostValue("invoice_date", "31.07.2026", [label, value(20)], "Invoice date").status).toBe("ocr_row_mismatch");
+    expect(matchLostValue("invoice_number", "1234567890", [label, { ...value(20), text: "1234567890" }], "Invoice date").status).toBe("ocr_row_mismatch");
+    expect(matchLostValue("invoice_date", "31.07.2026", [label, value(2)], "Invoice date").status).toBe("image_ocr_agreed");
+  });
+
   it("does not fold diacritics in the label anchor", () => {
     const items = ocr(["Arve kuupaev"], ["31. juuli 2026"]);
     expect(matchLostValue("invoice_date", "31. juuli 2026", items, "Arve kuupäev").status).toBe("ocr_row_mismatch");
@@ -274,5 +297,31 @@ describe("pdfPageBoxRefusal", () => {
 
   it("refuses an object stream it cannot read", async () => {
     expect(await pdfPageBoxRefusal(objStmPdf("3 0 << /MediaBox [0 0 595 842] >>", "/LZWDecode"))).toBe("object_stream_unreadable");
+  });
+
+  const stream = (dict: string, body: Buffer) => Buffer.concat([
+    Buffer.from(`1 0 obj\n<< ${dict} /Filter /FlateDecode /Length ${body.length} >>\nstream\n`, "latin1"), body, Buffer.from("\nendstream\nendobj\n", "latin1"),
+  ]);
+
+  it("decodes name escapes before matching", async () => {
+    expect(await pdfPageBoxRefusal(rawPdf("/MediaBox [0 0 595 842] /Rot#61te 90"))).toBe("rotated_page");
+    expect(await pdfPageBoxRefusal(rawPdf("/MediaBox [0 0 595 842] /Crop#42ox [10 10 585 832]"))).toBe("crop_box_differs");
+    const escapedType = stream("/Type /Obj#53tm /N 1 /First 4", deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] /Rotate 90 >>", "latin1")));
+    expect(await pdfPageBoxRefusal(Buffer.concat([Buffer.from("%PDF-1.5\n"), escapedType, Buffer.from("%%EOF\n")]))).toBe("rotated_page");
+  });
+
+  it("reads an object stream by its /N and /First even without its /Type", async () => {
+    const untyped = stream("/N 1 /First 4", deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] /Rotate 90 >>", "latin1")));
+    expect(await pdfPageBoxRefusal(Buffer.concat([Buffer.from("%PDF-1.5\n"), untyped, Buffer.from("%%EOF\n")]))).toBe("rotated_page");
+  });
+
+  it("refuses past 256 object streams or 32 MB of them inflated, instead of holding them all", async () => {
+    const small = stream("/Type /ObjStm /N 1 /First 4", deflateSync(Buffer.from("3 0 << /MediaBox [0 0 595 842] >>", "latin1")));
+    const many = (count: number, part: Buffer) => Buffer.concat([Buffer.from("%PDF-1.5\n"), ...Array.from({ length: count }, () => part), Buffer.from("%%EOF\n")]);
+    expect(await pdfPageBoxRefusal(many(256, small))).toBeNull();
+    expect(await pdfPageBoxRefusal(many(257, small))).toBe("object_stream_unreadable");
+    const big = stream("/Type /ObjStm /N 1 /First 4", deflateSync(Buffer.alloc(12 * 1024 * 1024, 0x20)));
+    expect(await pdfPageBoxRefusal(Buffer.concat([many(2, big), Buffer.from("1 0 obj << /MediaBox [0 0 595 842] >> endobj\n")]))).toBeNull();
+    expect(await pdfPageBoxRefusal(many(3, big))).toBe("object_stream_unreadable");
   });
 });

@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import type { ReadingPacket } from "./document-reading-packet.js";
 import { containsSandboxMarker, decodeJsonObjectInput, type ParseOutcome } from "./document-reading-schemas.js";
-import { COLUMN_MARK, DASHES, LEADER_RUN_RE, lineCells, lineTokens, lostValueLeaders } from "./document-reading-tokens.js";
+import { COLUMN_MARK, DASHES, LEADER_GLYPHS, LEADER_RUN_RE, lineCells, lineTokens, lostValueLeaders } from "./document-reading-tokens.js";
 
 const inflate = promisify(inflateCallback);
 
@@ -18,6 +18,8 @@ export type LostValueField = typeof LOST_VALUE_FIELDS[number];
 
 /** Crop geometry fixed by Step 1 (synthetic fixtures + dev corpus): label left − 10 pt, leader band ± 0.4·h. */
 export const LOST_VALUE_LABEL_PAD_PT = 10;
+/** The page render resolution of the crops (document-parser renders at it). */
+export const LOST_VALUE_RENDER_DPI = 300;
 export const LOST_VALUE_BAND_PAD = 0.4;
 export const LOST_VALUE_RIGHT_GAP_PT = 2;
 /** LOW_OCR_CONFIDENCE_THRESHOLD (tools/receipt-extraction.ts), pinned here to keep this module pure. */
@@ -195,6 +197,9 @@ export function rectToPixels(
 // ---------------------------------------------------------------------------
 
 const OBJ_STM_MAX_BYTES = 16 * 1024 * 1024;
+/** All object streams together (inflated) and their number: past either, the scan refuses (a typed row). */
+const OBJ_STM_TOTAL_MAX_BYTES = 32 * 1024 * 1024;
+const OBJ_STM_MAX_COUNT = 256;
 const NUM = "-?(?:\\d+(?:\\.\\d*)?|\\.\\d+)";
 const BOX_RE = new RegExp(`^\\s*\\[\\s*(${NUM})\\s+(${NUM})\\s+(${NUM})\\s+(${NUM})\\s*\\]`);
 
@@ -208,13 +213,22 @@ function boxesAt(text: string, name: string): Array<number[] | null> {
   return out;
 }
 
+/** PDF name escapes (`/Rot#61te`) decoded, so the name regexes see what a viewer sees. */
+function decodeNameEscapes(text: string): string {
+  return text.replace(/#([0-9A-Fa-f]{2})/g, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+}
+
 async function objectStreamTexts(pdf: Buffer, text: string): Promise<string[] | string> {
   const texts: string[] = [];
+  let budget = OBJ_STM_TOTAL_MAX_BYTES;
   for (const match of text.matchAll(/(?<!end)stream\r?\n/g)) {
     const objStart = text.lastIndexOf(" obj", match.index!);
     if (objStart < 0) continue;
-    const dict = text.slice(objStart, match.index!);
-    if (!/\/Type\s*\/ObjStm(?![A-Za-z0-9])/.test(dict)) continue;
+    const dict = decodeNameEscapes(text.slice(objStart, match.index!));
+    // An object stream by its type, or by the /N and /First every object stream carries (a viewer ignores /Type).
+    if (!/\/Type\s*\/ObjStm(?![A-Za-z0-9])/.test(dict) &&
+      !(/\/N(?![A-Za-z0-9])/.test(dict) && /\/First(?![A-Za-z0-9])/.test(dict))) continue;
+    if (texts.length >= OBJ_STM_MAX_COUNT || budget <= 0) return "object_stream_unreadable";
     if (!/\/Filter\s*(?:\/FlateDecode|\[\s*\/FlateDecode\s*\])/.test(dict) || /\/DecodeParms/.test(dict)) {
       return "object_stream_unreadable";
     }
@@ -222,7 +236,9 @@ async function objectStreamTexts(pdf: Buffer, text: string): Promise<string[] | 
     const end = text.indexOf("endstream", start);
     if (end < 0) return "object_stream_unreadable";
     try {
-      const inflated = await inflate(pdf.subarray(start, end), { maxOutputLength: OBJ_STM_MAX_BYTES });
+      // Past the per-stream or the total budget zlib throws: refused, never truncated.
+      const inflated = await inflate(pdf.subarray(start, end), { maxOutputLength: Math.min(OBJ_STM_MAX_BYTES, budget) });
+      budget -= inflated.length;
       texts.push(inflated.toString("latin1"));
     } catch {
       // A trailing EOL before `endstream` is not part of the data; zlib stops at
@@ -245,7 +261,7 @@ export async function pdfPageBoxRefusal(pdf: Buffer): Promise<string | null> {
   if (/\/Encrypt(?![A-Za-z0-9])/.test(raw)) return "encrypted";
   const streams = await objectStreamTexts(pdf, raw);
   if (typeof streams === "string") return streams;
-  const text = [raw, ...streams].join("\n");
+  const text = decodeNameEscapes([raw, ...streams].join("\n"));
   if (/\/UserUnit(?![A-Za-z0-9])/.test(text)) return "user_unit";
   for (const match of text.matchAll(/\/Rotate(?![A-Za-z0-9])\s*(-?\d+)?(\s+\d+\s+R)?/g)) {
     if (match[1] === undefined || match[2] !== undefined) return "rotate_unreadable";
@@ -301,7 +317,8 @@ export interface OcrItem {
 }
 
 interface Placed { start: number; end: number; confidence: number }
-interface OcrLine { text: string; placed: Placed[] }
+/** The joined text, its items' spans, and each OCR row's span in it (rows never share a character). */
+interface OcrLine { text: string; placed: Placed[]; rows: Array<{ start: number; end: number }> }
 
 /** Items bucketed into rows by vertical overlap, rows top to bottom, items left to right, joined by one space. */
 function ocrLine(items: ReadonlyArray<OcrItem>): OcrLine {
@@ -319,17 +336,23 @@ function ocrLine(items: ReadonlyArray<OcrItem>): OcrLine {
     }
   }
   const placed: Placed[] = [];
+  const spans: OcrLine["rows"] = [];
   let text = "";
   for (const row of rows.sort((a, b) => a.top - b.top)) {
+    let rowStart: number | undefined;
     for (const item of row.items.sort((a, b) => a.x - b.x)) {
       const part = normalizeLostValueText(item.text);
       if (part.length === 0) continue;
       if (text.length > 0) text += " ";
-      placed.push({ start: text.length, end: text.length + part.length, confidence: item.confidence ?? 0 });
+      rowStart ??= text.length;
+      // liteparse confidence is 0–1; anything else (NaN, a 0–100 scale from a remote server) counts as none.
+      const confidence = typeof item.confidence === "number" && item.confidence >= 0 && item.confidence <= 1 ? item.confidence : 0;
+      placed.push({ start: text.length, end: text.length + part.length, confidence });
       text += part;
     }
+    if (rowStart !== undefined) spans.push({ start: rowStart, end: text.length });
   }
-  return { text, placed };
+  return { text, placed, rows: spans };
 }
 
 interface Candidate { text: string; start: number; end: number }
@@ -352,9 +375,22 @@ function minConfidence(line: OcrLine, start: number, end: number): number {
   return covering.length === 0 ? 0 : Math.min(...covering.map((part) => part.confidence));
 }
 
-function anchorHolds(line: OcrLine, start: number, end: number, anchor: string): boolean {
-  const remainder = line.text.slice(0, start) + " " + line.text.slice(end);
-  return anchorForm(remainder).includes(anchorForm(anchor));
+const RESIDUE_ALLOWED_RE = new RegExp(`[${LEADER_GLYPHS}#:.,;\\-–—]`, "gu");
+
+/**
+ * The label must sit on the candidate's own OCR row (a label on a neighbouring row proves nothing), and beside
+ * the label and the candidate that row holds only leader glyphs and punctuation: a letter-only part left over
+ * (`INV 0042` read as `0042`) means the candidate may be a cut-short value.
+ */
+function anchorCheck(line: OcrLine, start: number, end: number, anchor: string): "ok" | "ocr_row_mismatch" | "ocr_ambiguous" {
+  const row = line.rows.find((span) => span.start <= start && end <= span.end);
+  if (!row) return "ocr_row_mismatch";
+  const remainder = anchorForm(line.text.slice(row.start, start) + " " + line.text.slice(end, row.end));
+  const label = anchorForm(anchor);
+  const at = remainder.indexOf(label);
+  if (at < 0) return "ocr_row_mismatch";
+  const residue = (remainder.slice(0, at) + remainder.slice(at + label.length)).replace(RESIDUE_ALLOWED_RE, "");
+  return residue.length === 0 ? "ok" : "ocr_ambiguous";
 }
 
 const NUMBER_FORM_RE = /^[A-Za-z0-9][A-Za-z0-9\-/._]{0,63}$/;
@@ -388,7 +424,8 @@ export function matchLostValue(
     const only = found[0]!;
     if (only.text !== printedValue) return { status: "ocr_no_match" };
     if (minConfidence(line, only.start, only.end) < LOST_VALUE_MIN_CONFIDENCE) return { status: "ocr_low_confidence" };
-    if (!anchorHolds(line, only.start, only.end, anchor)) return { status: "ocr_row_mismatch" };
+    const anchored = anchorCheck(line, only.start, only.end, anchor);
+    if (anchored !== "ok") return { status: anchored };
     return { status: "image_ocr_agreed", value: printedValue };
   }
 
@@ -412,6 +449,7 @@ export function matchLostValue(
     return { status: "ocr_ambiguous" };
   }
   if (minConfidence(line, date.start, date.end) < LOST_VALUE_MIN_CONFIDENCE) return { status: "ocr_low_confidence" };
-  if (!anchorHolds(line, date.start, date.end, anchor)) return { status: "ocr_row_mismatch" };
+  const anchored = anchorCheck(line, date.start, date.end, anchor);
+  if (anchored !== "ok") return { status: anchored };
   return { status: "image_ocr_agreed", value: iso };
 }

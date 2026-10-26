@@ -13,6 +13,7 @@ import {
 } from "../document-parser.js";
 import type { ReadingPacket } from "../document-reading-packet.js";
 import {
+  LOST_VALUE_RENDER_DPI,
   locateLostValueRects,
   pdfPageBoxRefusal,
   rectToPixels,
@@ -20,7 +21,7 @@ import {
   type LostValueRect,
   type OcrItem,
 } from "../document-reading-lost-value.js";
-import { cropPng, PngCropError } from "../png-crop.js";
+import { cropPng, PNG_CROP_MAX_INPUT_PIXELS, PngCropError } from "../png-crop.js";
 
 export const LOST_VALUE_MAX_CROPS = 6;
 export const LOST_VALUE_MAX_TOTAL_BYTES = 256 * 1024;
@@ -68,6 +69,11 @@ async function cropOf(
 ): Promise<Buffer> {
   const page = parsed.result.pages.find((candidate) => candidate.pageNum === rect.page);
   if (!page) throw new PngCropError("page missing");
+  // Refuse before rendering: a large page at 300 dpi would allocate far past the crop's input cap.
+  const scale = LOST_VALUE_RENDER_DPI / 72;
+  if (!(Math.ceil(page.width * scale) * Math.ceil(page.height * scale) <= PNG_CROP_MAX_INPUT_PIXELS)) {
+    throw new PngCropError("page too large");
+  }
   if (!rendered.has(rect.page)) rendered.set(rect.page, seam.render(filePath, rect.page));
   const shot = await rendered.get(rect.page)!;
   const pixels = rectToPixels(rect, page, shot);

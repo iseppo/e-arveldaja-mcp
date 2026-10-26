@@ -52,6 +52,16 @@ describe("buildLostValueCrops", () => {
     }
   });
 
+  it("never renders a page whose 300-dpi image would exceed the crop's 40 Mpx input cap", async () => {
+    const parsed = lostValueParse(ROWS);
+    const seam = fakeSeam();
+    const page = parsed.result.pages[0]!;
+    // 1600 × 1700 pt → 6667 × 7084 px ≈ 47 Mpx at 300 dpi (A4 is ≈ 8.7 Mpx).
+    Object.assign(page, { width: 1600, height: 1700 });
+    expect(await buildLostValueCrops(file(PLAIN_PDF), parsed, packetOf(parsed), seam)).toEqual({ images: [] });
+    expect(seam.render).not.toHaveBeenCalled();
+  });
+
   it("skips the rows of a page that cannot be rendered", async () => {
     const parsed = lostValueParse(ROWS);
     const seam = fakeSeam();
