@@ -49,7 +49,8 @@ export interface WiseTransferReview {
     | "unused_acknowledgement"
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
-    | "wise_transfer_journal_existing_elsewhere";
+    | "wise_transfer_journal_existing_elsewhere"
+    | "wise_exact_label_possible_double_booking";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -59,12 +60,16 @@ export interface WiseTransferReview {
    * journals labelled with the row's Wise ID. */
   candidate_journal_ids?: number[];
   candidates?: WiseTransferJournalCandidate[];
-  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal. */
+  /** wise_transfer_mapping_rejected / unused_mapping: the mapped journal;
+   * wise_exact_label_possible_double_booking: the journal labelled with the
+   * row's Wise ID (the other bookings are candidate_journal_ids and
+   * ledger_transaction_ids). */
   journal_id?: number;
   /** wise_transfer_journal_ambiguous / _inconsistent: candidate journals that already book the
    * row's fee, so the fee row is held out of the plan with the review. */
   fee_held_journal_ids?: number[];
-  /** wise_untagged_ledger_match: the stored untagged rows that look like this one. */
+  /** wise_untagged_ledger_match / wise_exact_label_possible_double_booking:
+   * the stored untagged rows that look like this one. */
   ledger_transaction_ids?: number[];
   /** Counterpart holds: the own bank account dimensions the evidence points to
    * (conflict), or every other configured bank account (unresolved). */
@@ -72,7 +77,7 @@ export interface WiseTransferReview {
   /** Counterpart holds: the other banks' stored transactions behind the hold. */
   evidence_transaction_ids?: number[];
   /** Releasable Wise-side journal holds (wise_transfer_journal_ambiguous /
-   * _existing_elsewhere): every journal acknowledged_journal_holds must list
+   * _existing_elsewhere / wise_exact_label_possible_double_booking): every journal acknowledged_journal_holds must list
    * to release the row (all pending legs, certain and uncertain evidence, and
    * the ambiguous candidates). */
   required_acknowledgement_ids?: number[];

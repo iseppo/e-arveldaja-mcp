@@ -402,6 +402,10 @@ const WISE_UNTAGGED_LEDGER_MATCH_TRANSFER_REASON =
   "A bank row without a WISE: identity tag, already stored on this Wise account, has the same date, amount and currency as this transfer. It may be this transfer entered by hand, so the row and its fee are not imported. If the stored row is this transfer, nothing is left to do; otherwise book the transfer with the owner.";
 const WISE_TRANSFER_JOURNAL_EXISTING_ELSEWHERE_REASON =
   `A registered journal already moves this amount on the Wise account within one day of this transfer (or may, for a journal of several Wise postings). The row and its fee are not imported. First check whether one of those journals IS this transfer: then it is already booked and nothing is needed (an inter-account journal can be recorded with journalized_transfer_ids). ${WISE_JOURNAL_HOLD_RELEASE}`;
+const WISE_EXACT_LABEL_POSSIBLE_DOUBLE_BOOKING_REASON = (journalId: number, releasable: boolean): string =>
+  `Journal ${journalId} (journal_id) is labelled with this Wise ID and books this movement on the Wise account, but another booking of the same amount in the same direction within one day is also on the Wise account (candidate_journal_ids, ledger_transaction_ids), so the movement may be booked twice. The row and its fee are not imported. Check them with the owner: if one also books this movement, remove the duplicate booking (after approval) and re-run the preview. ${releasable
+    ? `Only if the owner confirms every journal in required_acknowledgement_ids is a different movement, re-run with acknowledged_journal_holds [{ wise_id, journal_ids: <required_acknowledgement_ids> }]: the row is then recorded as already journalized by journal ${journalId} (nothing is created).`
+    : "A stored bank row in ledger_transaction_ids has no registration journal among them, so this hold cannot be acknowledged: delete or correct that row with the owner, then re-run the preview."}`;
 const WISE_TRANSFER_ALREADY_IMPORTED_REASON =
   `This Wise transfer was already imported by an earlier run, so confirm_own_transfer_ids does not act on it. If the existing bank transaction is already CONFIRMED, nothing is left to do; if it is still unconfirmed (PROJECT), ${WISE_INTER_ACCOUNT_ROUTE}.`;
 
@@ -1577,6 +1581,52 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   }
   ownershipReviews.push(...mappingReviews);
 
+  // Holding a row: it loses all of its commands (main, fee, inter-account)
+  // and its created entries, is skipped as "Held for review (<code>): not
+  // imported", and carries exactly one review (mapping feedback aside). Only
+  // this row's own reviews are replaced: split legs of one Wise ID share
+  // row.id. A row whose transfer is already journalized holds only its fee
+  // leg: the assertion stays, and the skip and review say so.
+  const heldCodes = new Map<WiseRow, WiseTransferReview["code"]>();
+  const holdRow = (row: WiseRow, holdReview: WiseTransferReview) => {
+    const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
+    const commandWiseIds = new Set(rowCommands.map(command => command.wise_id));
+    for (const command of rowCommands) commands.splice(commands.indexOf(command), 1);
+    for (const entry of [...created]) {
+      if (entry.source_row === row || commandWiseIds.has(entry.wise_id)) created.splice(created.indexOf(entry), 1);
+    }
+    mainCommandKeysByRow.delete(row.rowIndex);
+    // The hold review takes the place of the row's first replaced review.
+    let at = -1;
+    for (const other of [...ownershipReviews]) {
+      if (reviewRows.get(other) === row.rowIndex) {
+        const index = ownershipReviews.indexOf(other);
+        if (at < 0) at = index;
+        ownershipReviews.splice(index, 1);
+      }
+    }
+    const journalized = alreadyJournalized.find(assertion => assertion.row_index === row.rowIndex);
+    const legId = legIdOf(row);
+    const review = journalized === undefined ? holdReview : {
+      ...holdReview,
+      reason: `${holdReview.reason} Only this transfer's fee leg (FEE:${legId}) is held: the transfer itself is already journalized by journal ${journalized.existing_journal_id}.`,
+    };
+    skipped.push(journalized === undefined
+      ? { wise_id: row.id, reason: `Held for review (${review.code}): not imported`, kind: "held" }
+      : {
+          wise_id: `FEE:${legId}`,
+          reason: `Held for review (${review.code}): fee leg not imported; the transfer is already journalized by journal ${journalized.existing_journal_id}`,
+          kind: "held",
+          record_id: journalized.existing_journal_id,
+        });
+    heldCodes.set(row, review.code);
+    reviewRows.set(review, row.rowIndex);
+    ownershipReviews.splice(at < 0 ? ownershipReviews.length : at, 0, review);
+  };
+  const wiseSideIndex = buildWiseSideJournalIndex(journalSnapshot, accounts_dimensions_id);
+  const registrationJournalIds = (tx: Transaction | undefined): number[] =>
+    tx?.id === undefined ? [] : findRegistrationJournal(journalSnapshot, tx.id).map(journal => journal.id!);
+
   // Exact-label coverage, for a row (transfer or not) that is not an own
   // transfer handled above: when exactly one live journal is labelled with
   // this row's Wise ID, is registered, names no other Wise ID, is not the
@@ -1588,6 +1638,8 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // execute re-checks it. The counterpart of a booked row is irrelevant, so
   // this precedes the counterpart and identity holds; anything else keeps
   // today's flow.
+  // Rows an acknowledgement kept covered by their exact-label journal.
+  const exactLabelAcknowledgedIds = new Set<string>();
   for (const entry of [...created]) {
     const row = entry.source_row;
     if (!row || entry.status !== "would_create") continue;
@@ -1624,6 +1676,51 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     // row would book it twice, so leave such a journal to the normal flow.
     const booksGross = !(booksFee && cents(fee) > 0) && wiseLegMoves(journal, row, entry.amount);
     if (!booksGross && !booksNetOfFee) continue;
+    // Skipping the row would hide a second booking of the same movement: the
+    // hold pass never sees it. So the main leg's Wise-side evidence (the hold
+    // pass's) without this journal, and the stored untagged rows moving its
+    // amount in its direction within one day, hold the row and its fee
+    // instead. Journals of another Wise ID or of a stored WISE:-tagged row
+    // book another movement. An acknowledgement of every such journal keeps
+    // the row covered by this journal; a stored row without one of them as
+    // its registration journal cannot be acknowledged.
+    const mainLeg = wiseMainLeg(row)!;
+    const mainLegCents = mainLeg.amounts.map(cents);
+    const ownRegistrationTxId = journal.operation_type === "TRANSACTION" ? journal.operations_id : undefined;
+    const taggedRegistration = (other: Journal) => other.operation_type === "TRANSACTION" && existingTx.some(tx =>
+      tx.id === other.operations_id && tx.accounts_dimensions_id === accounts_dimensions_id && tx.description?.startsWith("WISE:"));
+    const otherEvidence = wiseLegEvidence(wiseSideIndex, mainLeg, other =>
+      other.id === journalId || labelledWithOtherWiseId(other, row, knownWiseLabels) || taggedRegistration(other));
+    const otherJournalIds = sortedUniqueIds(otherEvidence.certain, otherEvidence.uncertain);
+    const otherRows = existingTx.filter(tx => isNonVoidTransaction(tx) && tx.id !== undefined && tx.id !== ownRegistrationTxId &&
+      !tx.description?.startsWith("WISE:") && tx.accounts_dimensions_id === accounts_dimensions_id &&
+      typeof tx.amount === "number" && mainLegCents.includes(cents(tx.amount)) && withinOneDay(tx.date, mainLeg.date) &&
+      [mainLeg.direction, "?"].includes(markedWiseDirection(tx.description)) && !registrationJournalIds(tx).includes(journalId));
+    const unacknowledgeableRows = otherRows.filter(tx => !registrationJournalIds(tx).some(id => otherJournalIds.includes(id)));
+    const acknowledged = acknowledgedIds.get(row.id);
+    const releasedByAcknowledgement = otherJournalIds.length > 0 && unacknowledgeableRows.length === 0 &&
+      acknowledged !== undefined && otherJournalIds.every(id => acknowledged.has(id));
+    if ((otherJournalIds.length > 0 || otherRows.length > 0) && !releasedByAcknowledgement) {
+      const releasable = unacknowledgeableRows.length === 0;
+      holdRow(row, {
+        wise_id: row.id,
+        code: "wise_exact_label_possible_double_booking",
+        reason: WISE_EXACT_LABEL_POSSIBLE_DOUBLE_BOOKING_REASON(journalId, releasable),
+        source_verified: decision?.sourceVerified ?? false,
+        target_verified: decision?.targetVerified ?? false,
+        approval_required: false,
+        journal_id: journalId,
+        ...(otherJournalIds.length > 0 ? { candidate_journal_ids: otherJournalIds } : {}),
+        ...(otherEvidence.uncertain.length > 0 ? { uncertain_journal_ids: otherEvidence.uncertain } : {}),
+        ...(otherRows.length > 0 ? { ledger_transaction_ids: sortedUniqueIds(otherRows.map(tx => tx.id!)) } : {}),
+        ...(releasable ? { required_acknowledgement_ids: otherJournalIds } : {}),
+        ...(releasable && acknowledged !== undefined
+          ? { unacknowledged_journal_ids: otherJournalIds.filter(id => !acknowledged.has(id)) }
+          : {}),
+      });
+      continue;
+    }
+    if (releasedByAcknowledgement) exactLabelAcknowledgedIds.add(row.id);
 
     commands.splice(mainIndex, 1);
     for (const command of commands) {
@@ -1637,7 +1734,9 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     if (ownershipReviewIndex >= 0) ownershipReviews.splice(ownershipReviewIndex, 1);
     skipped.push({
       wise_id: row.id,
-      reason: `Already journalized: journal ${journalId} is labelled with this Wise ID and books this movement on the Wise account; no Wise bank row created`,
+      reason: `Already journalized: journal ${journalId} is labelled with this Wise ID and books this movement on the Wise account; no Wise bank row created${releasedByAcknowledgement
+        ? `; journal(s) ${otherJournalIds.join(", ")} acknowledged (acknowledged_journal_holds) as other movements`
+        : ""}`,
       kind: "already_journalized",
       record_id: journalId,
     });
@@ -1762,54 +1861,10 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     ownershipReviews.push(untaggedReview);
   }
 
-  // --- Hold pass: every eligible hinted (transfer) row that still has a
-  // command. A held row loses all of its commands (main, fee, inter-account)
-  // and its created entries, is skipped as "Held for review (<code>): not
-  // imported", and carries exactly one review (mapping feedback aside). Only
-  // this row's own reviews are replaced: split legs of one Wise ID share
-  // row.id. A row whose transfer is already journalized holds only its fee
-  // leg: the assertion stays, and the skip and review say so.
-  const heldCodes = new Map<WiseRow, WiseTransferReview["code"]>();
-  const holdRow = (row: WiseRow, holdReview: WiseTransferReview) => {
-    const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
-    const commandWiseIds = new Set(rowCommands.map(command => command.wise_id));
-    for (const command of rowCommands) commands.splice(commands.indexOf(command), 1);
-    for (const entry of [...created]) {
-      if (entry.source_row === row || commandWiseIds.has(entry.wise_id)) created.splice(created.indexOf(entry), 1);
-    }
-    mainCommandKeysByRow.delete(row.rowIndex);
-    // The hold review takes the place of the row's first replaced review.
-    let at = -1;
-    for (const other of [...ownershipReviews]) {
-      if (reviewRows.get(other) === row.rowIndex) {
-        const index = ownershipReviews.indexOf(other);
-        if (at < 0) at = index;
-        ownershipReviews.splice(index, 1);
-      }
-    }
-    const journalized = alreadyJournalized.find(assertion => assertion.row_index === row.rowIndex);
-    const legId = legIdOf(row);
-    const review = journalized === undefined ? holdReview : {
-      ...holdReview,
-      reason: `${holdReview.reason} Only this transfer's fee leg (FEE:${legId}) is held: the transfer itself is already journalized by journal ${journalized.existing_journal_id}.`,
-    };
-    skipped.push(journalized === undefined
-      ? { wise_id: row.id, reason: `Held for review (${review.code}): not imported`, kind: "held" }
-      : {
-          wise_id: `FEE:${legId}`,
-          reason: `Held for review (${review.code}): fee leg not imported; the transfer is already journalized by journal ${journalized.existing_journal_id}`,
-          kind: "held",
-          record_id: journalized.existing_journal_id,
-        });
-    heldCodes.set(row, review.code);
-    reviewRows.set(review, row.rowIndex);
-    ownershipReviews.splice(at < 0 ? ownershipReviews.length : at, 0, review);
-  };
-  const wiseSideIndex = buildWiseSideJournalIndex(journalSnapshot, accounts_dimensions_id);
-  const registrationJournalIds = (tx: Transaction | undefined): number[] =>
-    tx?.id === undefined ? [] : findRegistrationJournal(journalSnapshot, tx.id).map(journal => journal.id!);
   const holdCheckRows: WiseHoldCheckRow[] = [];
   const acknowledgedHolds: WiseAcknowledgedJournalHold[] = [];
+  // --- Hold pass: every eligible hinted (transfer) row that still has a
+  // command (holdRow above).
   for (const row of eligible) {
     const decision = transferDecisions.get(row);
     const rowCommands = commands.filter(command => command.row_index === row.rowIndex);
@@ -1930,10 +1985,12 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // an unused journalized_transfer_ids mapping is. A row still held by a
   // releasable hold already names the journals its acknowledgement missed.
   for (const acknowledgement of acknowledgedJournalHolds) {
-    if (acknowledgedHolds.some(hold => hold.wise_id === acknowledgement.wise_id)) continue;
+    if (acknowledgedHolds.some(hold => hold.wise_id === acknowledgement.wise_id) ||
+      exactLabelAcknowledgedIds.has(acknowledgement.wise_id)) continue;
     const legs = eligible.filter(row => row.id === acknowledgement.wise_id);
     const codes = legs.flatMap(row => heldCodes.get(row) ?? []);
-    if (codes.some(code => code === "wise_transfer_journal_ambiguous" || code === "wise_transfer_journal_existing_elsewhere")) continue;
+    if (codes.some(code => code === "wise_transfer_journal_ambiguous" || code === "wise_transfer_journal_existing_elsewhere" ||
+      code === "wise_exact_label_possible_double_booking")) continue;
     const why = legs.length === 0
       ? "no eligible row of this statement has this Wise ID"
       : !legs.some(isWiseTransferCandidate)

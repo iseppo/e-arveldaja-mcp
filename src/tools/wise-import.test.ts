@@ -7883,4 +7883,99 @@ describe("Wise row booked by a journal labelled with its exact Wise ID (live 202
       }
     }
   });
+
+  // An unlabelled journal that also credits the Wise account 50 on 2026-10-15
+  // (within one day of the row): a possible second booking of the movement.
+  const secondJournal = (extra: Record<string, unknown> = {}, wiseType: "C" | "D" = "C") => ({
+    ...loanJournal({}, 50, wiseType), id: 29580100, effective_date: "2026-10-15", document_number: null, ...extra,
+  });
+  const untaggedStored = (description: string, extra: Record<string, unknown> = {}) => ({
+    id: 3, accounts_dimensions_id: 5, type: "C", amount: 50, cl_currencies_id: "EUR", date: "2026-10-15",
+    description, bank_account_name: "voxpoll oü", status: "PROJECT", is_deleted: false, ...extra,
+  });
+
+  it("holds the row and its fee when another journal or a stored untagged row also books the movement", async () => {
+    const cases: Array<{ label: string; rows: string[][]; stored: unknown[]; journals: unknown[]; args?: Record<string, unknown>;
+      expected: Record<string, unknown> }> = [
+      { label: "second unlabelled journal", rows: [loanRow()], stored: [], journals: [loanJournal(), secondJournal()],
+        expected: { candidate_journal_ids: [29580100], required_acknowledgement_ids: [29580100] } },
+      { label: "gross journal, fee row pending", rows: [loanRow("0.5")], stored: [], journals: [loanJournal(), secondJournal()],
+        args: { fee_account_dimensions_id: 9 }, expected: { candidate_journal_ids: [29580100], required_acknowledgement_ids: [29580100] } },
+      { label: "stored untagged row without a journal", rows: [loanRow()], stored: [untaggedStored("voxpoll oü laen")], journals: [loanJournal()],
+        expected: { ledger_transaction_ids: [3] } },
+      { label: "confirmed untagged row", rows: [loanRow()], journals: [loanJournal(), secondJournal({ operation_type: "TRANSACTION", operations_id: 3 })],
+        stored: [untaggedStored("voxpoll oü laen [source_direction=OUT]", { status: "CONFIRMED" })],
+        expected: { candidate_journal_ids: [29580100], ledger_transaction_ids: [3], required_acknowledgement_ids: [29580100] } },
+    ];
+    for (const { label, rows, stored, journals, args, expected } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([...rows, cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool(stored, undefined, options(journals));
+      const dry = parseWiseResponse(await setup.handler({ ...baseArgs, ...args, execute: false }));
+
+      expect(dry.execution.already_journalized_rows ?? [], label).toEqual([]);
+      expect(dry.execution.commands.map(command => command.wise_id), label).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+      expect(dry.ownership_reviews, label).toEqual([expect.objectContaining({
+        wise_id: "TRANSFER-2431991304", code: "wise_exact_label_possible_double_booking", journal_id: 29580059, ...expected,
+      })]);
+      if (!("required_acknowledgement_ids" in expected)) {
+        expect(dry.ownership_reviews![0]!.required_acknowledgement_ids, label).toBeUndefined();
+      }
+      expect(dry.skipped_details, label).toEqual(expect.arrayContaining([expect.objectContaining({
+        reason: expect.stringContaining("Held for review (wise_exact_label_possible_double_booking): not imported"),
+        sample_ids: ["TRANSFER-2431991304"],
+      })]));
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
+  it("an acknowledgement of every other journal keeps the row covered by its labelled journal; a short one keeps it held", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options([loanJournal(), secondJournal()]));
+    const released = parseWiseResponse(await setup.handler({
+      ...baseArgs, acknowledged_journal_holds: [{ wise_id: "TRANSFER-2431991304", journal_ids: [29580100] }], execute: false,
+    }));
+
+    expect(released.ownership_reviews ?? []).toEqual([]);
+    expect(released.execution.commands.map(command => command.wise_id)).toEqual(["CARD_TRANSACTION-PLAN-1"]);
+    expect(released.execution.already_journalized_rows).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059 }),
+    ]);
+    expect(JSON.stringify(released.skipped_details)).toContain("journal(s) 29580100 acknowledged (acknowledged_journal_holds) as other movements");
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([loanRow(), cardPaymentValues("2026-10-16")]));
+    const third = { ...secondJournal(), id: 29580101 };
+    const shortSetup = setupWiseTool([], undefined, options([loanJournal(), secondJournal(), third]));
+    const held = parseWiseResponse(await shortSetup.handler({
+      ...baseArgs, acknowledged_journal_holds: [{ wise_id: "TRANSFER-2431991304", journal_ids: [29580100] }], execute: false,
+    }));
+    expect(held.ownership_reviews).toEqual([expect.objectContaining({
+      code: "wise_exact_label_possible_double_booking",
+      required_acknowledgement_ids: [29580100, 29580101],
+      unacknowledged_journal_ids: [29580101],
+    })]);
+    expectNoWiseMutations(shortSetup.api);
+  });
+
+  it("other movements do not hold the row: another Wise ID's journal, a stored WISE:-tagged row, the opposite direction, two days away", async () => {
+    const taggedOther = untaggedStored("WISE:CARD_TRANSACTION-77 voxpoll [source_direction=OUT]", { id: 4, status: "CONFIRMED" });
+    const cases: Array<{ label: string; stored: unknown[]; journals: unknown[] }> = [
+      { label: "journal labelled with another Wise ID", stored: [], journals: [loanJournal(), secondJournal({ document_number: "WISE:TRANSFER-999" })] },
+      { label: "registration journal of a stored WISE:-tagged row", stored: [taggedOther],
+        journals: [loanJournal(), secondJournal({ operation_type: "TRANSACTION", operations_id: 4 })] },
+      { label: "opposite direction", stored: [untaggedStored("voxpoll [source_direction=IN]")], journals: [loanJournal(), secondJournal({}, "D")] },
+      { label: "two days away", stored: [untaggedStored("voxpoll", { date: "2026-10-16" })],
+        journals: [loanJournal(), secondJournal({ effective_date: "2026-10-16" })] },
+    ];
+    for (const { label, stored, journals } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([loanRow()]));
+      const setup = setupWiseTool(stored, undefined, options(journals));
+      const dry = parseWiseResponse(await setup.handler({ ...baseArgs, execute: false }));
+
+      expect(dry.ownership_reviews ?? [], label).toEqual([]);
+      expect(dry.execution.already_journalized_rows, label).toEqual([
+        expect.objectContaining({ wise_id: "TRANSFER-2431991304", existing_journal_id: 29580059 }),
+      ]);
+      expectNoWiseMutations(setup.api);
+    }
+  });
 });
