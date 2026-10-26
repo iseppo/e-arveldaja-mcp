@@ -140,16 +140,21 @@ export function draftReadbackMismatches(
     && items[0]!.vat_amount === null && items[0]!.vat_rate === null && items[0]!.cl_vat_articles_id === null;
   expectedItems.map(applyPurchaseItemStructuralDefaults).forEach((item, index) => {
     const { net, vat } = amounts[index]!;
+    const actual = items[index] as unknown as Record<string, unknown>;
+    // Observed live (2026-10-26, Google reverse-charge rows): on a 0% row of a VAT-registered company the API
+    // clears the VAT account and VAT article the create sent; with no VAT there is no VAT posting either way.
+    const zeroRateNulls = isVatRegistered && item.vat_rate_dropdown === "0" && vat === 0
+      && actual.vat_accounts_id === null && actual.cl_vat_articles_id === null && (actual.vat_accounts_dimensions_id ?? null) === null;
     const expected: Record<string, unknown> = {
       ...item, total_net_price: net, vat_amount: vat,
       vat_rate: item.vat_rate ?? parseVatRateDropdown(item.vat_rate_dropdown),
       base_total_net_price: item.base_total_net_price ?? roundMoney(net / rate),
       ...(foldedNulls ? { vat_amount: null, vat_rate: null, cl_vat_articles_id: null } : {}),
+      ...(zeroRateNulls ? { vat_accounts_id: null, cl_vat_articles_id: null, vat_accounts_dimensions_id: null } : {}),
     };
     // Not sent: the API leaves it empty or echoes the predicted value (live 2026-10-18: unit_net_price reads back null).
     const defaults = (field: string) => (field === "project_no_vat_gross_price" ? [roundMoney(net + vat)]
       : field === "unit_net_price" ? [roundMoney(net / (item.amount ?? 1))] : []);
-    const actual = items[index] as unknown as Record<string, unknown>;
     for (const key of recordMismatches(expected, actual, READBACK_ITEM_ALLOWED_TO_DIFFER, defaults)) fields.push(`items[${index}].${key}`);
   });
   return fields;
