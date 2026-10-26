@@ -1033,6 +1033,38 @@ describe("classification operations — ledger context (F6)", () => {
     expect(guidedGuidance).toContain("standard- või full-profiili");
   });
 
+  it("suggests a review-only own-bank contra for recurring top-ups to a third party's pooled IBAN", async () => {
+    // Live shape: broker top-ups to a pooled IBAN, each confirmed against the
+    // broker's own bank dimension (here 200), never an inter-account pair.
+    const POOLED = "DE25502109000222308186";
+    const topUps = historyRows("Maakler AS", "C", [1020, 200], ["2026-06-01", "2026-07-01", "2026-08-01"], 700);
+    const topUp = camtRow({ id: 21, amount: 300, date: "2026-09-10", direction: "DBIT", name: "Maakler AS", iban: POOLED, description: "top-up" });
+    const { operations } = ledgerOperations({ rows: [topUp, ...topUps.transactions], journals: topUps.journals });
+    const result = await analyze(operations);
+    expect(result.groups).toHaveLength(1);
+    const group = result.groups[0]!;
+    expect(group.apply_mode).toBe("review_only");
+    expect(group.suggested_booking).toMatchObject({
+      source: "transaction_history",
+      purchase_account_id: 1020,
+      purchase_account_dimensions_id: 200,
+      suggested_distribution: { related_table: "accounts", related_id: 1020, related_sub_id: 200 },
+      transaction_history: { account_id: 1020, dimension_id: 200, own_bank_account: true, streak: 3 },
+    });
+    expect(group.suggested_booking.reason).toContain("another own bank account");
+  });
+
+  it("never turns an own-account transfer into an own-bank history suggestion", async () => {
+    // The company's own transfers to Wise were booked against dimension 200
+    // before; a new one stays with the inter-account flow.
+    const own = historyRows("Näide OÜ", "C", [1020, 200], ["2026-06-01", "2026-07-01", "2026-08-01"], 800);
+    const transfer = camtRow({ id: 31, amount: 300, date: "2026-09-10", direction: "DBIT", name: "Näide OÜ", iban: OWN_WISE, description: "own" });
+    const { operations } = ledgerOperations({ rows: [transfer, ...own.transactions], journals: own.journals });
+    const result = await analyze(operations);
+    expect(result.groups).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("transaction_history");
+  });
+
   it("(A4) a 'TransferWise' fee row with no IBAN or legal form gets a review-only, name-only history suggestion on its own dimension", async () => {
     const feeHistory = historyRows("TransferWise", "C", [2110, 900], ["2026-06-01", "2026-07-01", "2026-08-01"], 600);
     const fee = camtRow({ id: 11, amount: 0.02, date: "2026-09-10", direction: "DBIT", name: "TransferWise", description: "fee" });

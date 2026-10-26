@@ -468,12 +468,15 @@ function historyBookingSuggestion(
   const nameOnly = history.identity === "name_only"
     ? " The counterparty is matched by its name only (no IBAN or legal form on these rows), so check it is the same party."
     : "";
+  const ownBank = history.own_bank_account
+    ? " That is another own bank account: book it this way only if that account has no imported row of the same payment; if it has one, reconcile the two as an inter-account transfer instead."
+    : "";
   return {
     purchase_account_id: history.account_id,
     purchase_account_name: account ? `${history.account_id} ${account.name_est}` : undefined,
     ...(history.dimension_id !== null ? { purchase_account_dimensions_id: history.dimension_id } : {}),
     source: "transaction_history",
-    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly} Review-only: confirm the substance before booking. suggested_distribution carries no amount: book each transaction separately, adding amount = that transaction's own amount.`,
+    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly}${ownBank} Review-only: confirm the substance before booking. suggested_distribution carries no amount: book each transaction separately, adding amount = that transaction's own amount.`,
     transaction_history: history,
     suggested_distribution: {
       related_table: "accounts",
@@ -707,6 +710,9 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           iban_omitted: isCamtCounterpartyIbanOmitted(transaction),
           accounts_dimensions_id: transaction.accounts_dimensions_id,
           direction: trustedDirection(transaction) ?? "unknown",
+          // Only rows the ledger partition left over reach classification: the
+          // inter-account matcher found no own-transfer target for them.
+          allow_own_bank_contra: true,
         }).suggestion;
     const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
     const context = {

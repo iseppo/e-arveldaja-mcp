@@ -11,6 +11,7 @@ import { getInvoiceMatchEligibility, matchScore, buildInvoiceIndex, getIndexedCa
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import {
   counterpartyIbanOf,
+  hasMirrorOwnOriginEvidence,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   isCamtCounterpartyIbanOmitted,
@@ -181,12 +182,6 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
         targetAccountsDimensionsId: undefined,
       };
       const inferenceCache = new Map<number, OneSidedInference>();
-      const hasOwnOriginEvidence = (row: Transaction, sourceDim: number): boolean => {
-        const iban = counterpartyIbanOf(row);
-        if (iban) return ownIbanToDimension.get(iban)?.has(sourceDim) ?? false;
-        if (isCamtCounterpartyIbanOmitted(row)) return false;
-        return sameCompanyIdentity(row.bank_account_name, companyLegalName);
-      };
       const reconcileReviewReason = (tx: Transaction, targetDim: number): string | undefined => {
         const txDirection = bankTransactionDirection(tx);
         for (const other of allProject) {
@@ -200,7 +195,7 @@ export function registerAnalyzeUnconfirmedTools(server: McpServer, api: ApiConte
           const sourceAmount = Math.abs(comparableTransactionAmount(source));
           const mirrorAmount = Math.abs(comparableTransactionAmount(mirror));
           if (sameAmountToTheCent(sourceAmount, mirrorAmount)) {
-            if (hasOwnOriginEvidence(mirror, source.accounts_dimensions_id)) continue;
+            if (hasMirrorOwnOriginEvidence(mirror, source, inferenceLookups)) continue;
             return `Own-account transfer with transaction ${other.id}, but ${mirror.id} has no own-origin evidence (its counterparty IBAN is not ${source.id}'s account), so reconcile holds the pair for review; check the bank statements before confirming.`;
           }
           if (directionsProven && sourceAmount < mirrorAmount) continue;
