@@ -84,7 +84,13 @@ describe("CAMT marker selection and signed identity", () => {
         for (const length of [0, 1, 35, 40, 53, 60, 100, 170]) {
           const e = entry({ bank_reference: ref, counterparty_iban: iban, description: "õ".repeat(length) || undefined });
           const result = renderCamtDescriptionDetailed(e.description, e, { omitCounterpartyIban: true });
-          if (!ref) { expect(result.description).toBe(buildCamtDescriptionWithMetadataV1(e.description, e)); continue; }
+          if (!ref) {
+            // Exactly V1, except that an unmarked (ref-less, IBAN-less) text is capped like a marked row's.
+            const v1 = buildCamtDescriptionWithMetadataV1(e.description, e);
+            expect(result.description).toBe(iban || length <= 150 ? v1 : v1!.slice(0, 150).trimEnd());
+            expect(result.description?.length ?? 0).toBeLessThanOrEqual(150);
+            continue;
+          }
           if (result.held) continue;
           expect(result.description!.length).toBeLessThanOrEqual(150);
           expect(isTrustedCamtDescriptionMetadata(stored(e, result.description))).toBe(true);

@@ -1606,6 +1606,51 @@ describe("camt import tool", () => {
     expect(legacyPayload.summary.skipped_count).toBe(1);
   });
 
+  it("caps an over-long description of an unmarked (ref-less, IBAN-less) entry and still flags its rerun", async () => {
+    const longText = `Account maintenance fee ${"x".repeat(180)} end`;
+    const chargeXml = `<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.02">
+  <BkToCstmrStmt>
+    <Stmt>
+      <Id>stmt-charge</Id>
+      <Acct>
+        <Id><IBAN>EE637700771011212909</IBAN></Id>
+        <Ccy>EUR</Ccy>
+      </Acct>
+      <Ntry>
+        <Amt Ccy="EUR">3.00</Amt>
+        <CdtDbtInd>DBIT</CdtDbtInd>
+        <BookgDt><Dt>2026-02-05</Dt></BookgDt>
+        <AddtlNtryInf>${longText}</AddtlNtryInf>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>`;
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(chargeXml);
+    const first = setupCamtTool({ allowWrites: true });
+    const executed = parseToolPayload<CamtImportFullPayload>((await executeGranularWithPlan(first.handler, { file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(first.api.transactions.create).toHaveBeenCalledTimes(1);
+    const created = first.api.transactions.create.mock.calls[0]![0] as Record<string, unknown>;
+    expect(created.description).toBe(longText.slice(0, 150).trimEnd());
+    expect(executed.summary.description_truncated_count).toBe(1);
+
+    // The rerun's only evidence is the description: the capped stored text must still match.
+    const rerun = setupCamtTool({ existingTransactions: [{ ...created, id: 9303, status: "PROJECT", is_deleted: false }] });
+    const payload = parseToolPayload<CamtImportFullPayload>((await rerun.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(payload.summary.possible_duplicate_count).toBe(1);
+
+    // A row an earlier release stored with the full, uncapped text still matches.
+    const legacy = setupCamtTool({ existingTransactions: [{ ...created, description: longText, id: 9304, status: "PROJECT", is_deleted: false }] });
+    const legacyPayload = parseToolPayload<CamtImportFullPayload>((await legacy.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(legacyPayload.summary.possible_duplicate_count).toBe(1);
+
+    // A row with another text is not this entry.
+    const other = setupCamtTool({ existingTransactions: [{ ...created, description: "Account maintenance fee", id: 9305, status: "PROJECT", is_deleted: false }] });
+    const otherPayload = parseToolPayload<CamtImportFullPayload>((await other.handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    expect(otherPayload.summary.possible_duplicate_count).toBe(0);
+  });
+
   // Guards the ref-less/ref-less shape, for which possible-duplicate review is
   // the ONLY defense: an entry with no bank reference has no exact key at all.
   // Any future narrowing of the candidate set must not silently drop it.

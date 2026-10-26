@@ -414,6 +414,12 @@ export interface CamtDescriptionRendering {
   readonly ibanOmitted?: true;
 }
 
+/** An unmarked description cut to the stored-description cap (trimEnd at the cut, as marked rows are). */
+function capUnmarkedCamtDescription(cleanDescription: string | undefined): string | undefined {
+  if (!cleanDescription || cleanDescription.length <= TRANSACTION_DESCRIPTION_MAX_LENGTH) return cleanDescription;
+  return cleanDescription.slice(0, TRANSACTION_DESCRIPTION_MAX_LENGTH).trimEnd() || undefined;
+}
+
 function withTruncationReport(rendered: string | undefined, cleanDescription: string | undefined): CamtDescriptionRendering {
   const storedLength = stripCamtDescriptionMetadata(rendered)?.length ?? 0;
   const fullLength = cleanDescription?.length ?? 0;
@@ -437,9 +443,11 @@ export function renderCamtDescriptionDetailed(
   const cleanDescription = markerSafeDescription(description);
   const v1 = buildCamtDescriptionWithMetadataV1(description, entry);
   const reference = normalizeOptionalReference(entry.bank_reference);
-  // A reference-less entry has no sig to verify: exactly as V1 rendered it.
+  // A reference-less entry has no sig to verify: exactly as V1 rendered it,
+  // except that V1 left an entry with neither a reference nor an IBAN unmarked
+  // and uncapped; its text is cut to the cap like every marked row's.
   if (!reference || buildCamtEntrySignatureForParsedEntry(entry, cleanDescription) === undefined) {
-    return withTruncationReport(v1, cleanDescription);
+    return withTruncationReport(v1 === cleanDescription ? capUnmarkedCamtDescription(cleanDescription) : v1, cleanDescription);
   }
   // Every row V1 already stored whole and verifiable stays byte-identical
   // (`instr=` included as V1 decided).
@@ -1194,6 +1202,9 @@ export function findPossibleDuplicateMatches(
     .filter((transaction, index, all) => all.findIndex((candidate) => candidate.id === transaction.id) === index);
   const entryCounterparty = normalizedCounterpartyName(entry.counterparty_name);
   const entryDescription = normalizeBatchDuplicateKeyPart(entry.description);
+  // The text this import stores for an over-long unmarked entry is cut to the
+  // cap: a row stored from it must still match on its description.
+  const entryStoredDescription = normalizeBatchDuplicateKeyPart(capUnmarkedCamtDescription(markerSafeDescription(entry.description)));
   // Compare/enrich against the canonical (cap-enforced) reference the write
   // boundary actually persists, so an over-cap reference still matches its
   // stored truncated counterpart instead of silently missing.
@@ -1223,7 +1234,8 @@ export function findPossibleDuplicateMatches(
       if (entryCounterparty && entryCounterparty === normalizedCounterpartyName(transaction.bank_account_name ?? undefined)) {
         matchReasons.push("counterparty_name");
       }
-      if (entryDescription && entryDescription === normalizeBatchDuplicateKeyPart(transaction.description ?? undefined)) {
+      const storedDescription = normalizeBatchDuplicateKeyPart(transaction.description ?? undefined);
+      if (entryDescription && (entryDescription === storedDescription || entryStoredDescription === storedDescription)) {
         matchReasons.push("description");
       }
       return {
