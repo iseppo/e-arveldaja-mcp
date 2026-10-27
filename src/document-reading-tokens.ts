@@ -90,6 +90,20 @@ export function lostValueLeaders(lines: ReadonlyArray<TokenLine>): Array<{ line:
   return hits;
 }
 
+/** Which leader run of the whole line (0-based, left to right) is the lost one of cell `cellIndex`, as `lostValueLeaders` picks it. */
+export function lostLeaderRunIndex(lineText: string, cellIndex: number): number | undefined {
+  let before = 0;
+  for (const cell of lineCells(lineText)) {
+    let index = 0;
+    for (const run of cell.text.matchAll(LEADER_RUN_RE)) {
+      if (cell.index === cellIndex && !AMOUNT_START_RE.test(cell.text.slice(run.index! + run[0].length))) return before + index;
+      index += 1;
+    }
+    before += index;
+  }
+  return undefined;
+}
+
 function cellWords(cell: Cell): Word[] {
   const words: Word[] = [];
   for (const match of cell.text.matchAll(/[^ ]+/g)) {

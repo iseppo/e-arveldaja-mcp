@@ -15,10 +15,9 @@ import type { ApiContext } from "../tools/crud-tools.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.js";
 import { parseDocument, type ParsedDocument } from "../document-parser.js";
-import { buildLostValueCrops, defaultLostValueSeam, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
+import { blankLeaderLines, buildLostValueCrops, defaultLostValueSeam, type BlankLeaderProof, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
 import { LOST_VALUE_FIELDS, matchLostValue, parseLostValueReading, type LostValueField, type LostValueReason } from "../document-reading-lost-value.js";
-import { lostValueLeaders } from "../document-reading-tokens.js";
-import { buildReadingPacket, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
+import { buildReadingPacket, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
 import {
   checkReading,
   labelledHeuristicValues,
@@ -40,7 +39,7 @@ import {
   type BookingField,
   type BookingView,
 } from "../document-reading-binding.js";
-import { packetInputFromParse } from "../tools/document-text-hazards.js";
+import { readingPacketOf } from "../tools/document-text-hazards.js";
 import {
   computeMinOcrConfidence,
   detectReverseChargeFromText,
@@ -218,6 +217,8 @@ export interface ReadingPlan {
   check_holds: ReadingHold[];
   /** Lost-value fields the client read from the crop image and server OCR agreed with (each has a confirm row). */
   image_agreed?: ImageAgreedField[];
+  /** Leader lines proven blank at verify: create's proof must give exactly these, else the card is stale. */
+  blank_leader_lines?: string[];
 }
 
 function sameIban(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -780,6 +781,8 @@ class ReadingDocumentOperations {
     private readonly api: ApiContext,
     private readonly runtimeSafetyContext: RuntimeSafetyContext,
     private readonly lostValueSeam: LostValueSeam = defaultLostValueSeam,
+    /** Signature-line proof run on every packet build; default the same seam. */
+    private readonly proveBlank: BlankLeaderProof = (path, parsed, packet) => blankLeaderLines(path, parsed, packet, lostValueSeam),
   ) {}
 
   /** True for a reading-domain create or confirm handle this instance issued and has not yet seen consumed. */
@@ -826,7 +829,7 @@ class ReadingDocumentOperations {
     const material = await materializeSnapshot(snapshot, source, this.runtimeSafetyContext);
     try {
       const parsed = await parseDocument(material.path);
-      const packet = buildReadingPacket(packetInputFromParse(parsed, material.source_sha256, READING_PARSER_VERSION));
+      const packet = await readingPacketOf(parsed, material.path, material.source_sha256, READING_PARSER_VERSION, this.proveBlank);
       return { material, snapshot, parsed, packet };
     } catch (error) {
       await material.cleanup();
@@ -885,7 +888,7 @@ class ReadingDocumentOperations {
     const statuses = new Map<LostValueField, LostValueStatus>();
     const done = (entry: { field: LostValueField; line: string; printed: string }, status: LostValueStatus["status"]) =>
       statuses.set(entry.field, { field: entry.field, line: entry.line, printed: entry.printed, status });
-    const lost = new Set(lostValueLeaders(ctx.packet.lines).map((hit) => hit.line));
+    const lost = new Set(packetLostLeaders(ctx.packet).map((hit) => hit.line));
     const lineUses = new Map<string, number>();
     for (const entry of submitted) lineUses.set(entry.line, (lineUses.get(entry.line) ?? 0) + 1);
     const available = (() => { try { return this.lostValueSeam.available(); } catch { return false; } })();
@@ -1134,6 +1137,7 @@ class ReadingDocumentOperations {
         proof_json: canonicalPlanJson(parsedProof.value),
         check_holds: check.holds.map(holdOf),
         ...(imageAgreed.length > 0 ? { image_agreed: imageAgreed } : {}),
+        ...(packet.blank_leader_lines?.length ? { blank_leader_lines: packet.blank_leader_lines } : {}),
       };
       const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
         normalizedArgs: planned as unknown as PlanRecord,
@@ -1204,8 +1208,12 @@ class ReadingDocumentOperations {
       const material = await materializeSnapshot(snapshot, input.source, this.runtimeSafetyContext);
       try {
         const parsed = await parseDocument(material.path);
-        const packet = buildReadingPacket(packetInputFromParse(parsed, material.source_sha256, READING_PARSER_VERSION));
+        const packet = await readingPacketOf(parsed, material.path, material.source_sha256, READING_PARSER_VERSION, this.proveBlank);
         if (packet.packet_digest !== plan.packet_digest) return ok<CreateReadingResult>({ status: "held", holds: [{ code: "packet_changed" }] });
+        // The digest leaves out the blank proof: a different blank set means other lost rows than the card was built on.
+        if ((packet.blank_leader_lines ?? []).join("\n") !== (plan.blank_leader_lines ?? []).join("\n")) {
+          return ok<CreateReadingResult>({ status: "held", holds: [{ code: "packet_changed" }] });
+        }
 
         const holds: ReadingHold[] = [];
         if (this.matchingMarker(key, { supplierClientId: plan.supplier_client_id, invoiceNumber: final.invoice_number, gross: final.gross, invoiceDate: final.invoice_date, sourceSha256: plan.source_sha256 })) {
@@ -1322,6 +1330,7 @@ class ReadingDocumentOperations {
             ...(plan.image_agreed?.length ? {
               image_ocr_agreed_fields: plan.image_agreed.map((entry) => entry.field).filter((field) => !answered.correctedFields.includes(field)),
             } : {}),
+            ...(packet.blank_leader_lines?.length ? { blank_leader_lines: packet.blank_leader_lines } : {}),
             source_sha256: plan.source_sha256,
             packet_digest: plan.packet_digest,
             supplier_name: invoiceData.client_name,
@@ -1442,6 +1451,7 @@ export function createReadingDocumentOperations(
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
   lostValueSeam?: LostValueSeam,
+  proveBlank?: BlankLeaderProof,
 ): ReadingOperations {
-  return new ReadingDocumentOperations(api, runtimeSafetyContext, lostValueSeam);
+  return new ReadingDocumentOperations(api, runtimeSafetyContext, lostValueSeam, proveBlank);
 }

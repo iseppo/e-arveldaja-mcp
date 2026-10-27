@@ -11,17 +11,20 @@ import {
   type OcrPngResult,
   type ParsedDocument,
 } from "../document-parser.js";
-import type { ReadingPacket } from "../document-reading-packet.js";
+import { packetLostLeaders, type ReadingPacket } from "../document-reading-packet.js";
 import {
   LOST_VALUE_RENDER_DPI,
+  leaderRowBand,
+  leaderRowIsBlank,
   locateLostValueRects,
+  ocrItemsOnPage,
   pdfPageBoxRefusal,
   rectToPixels,
   type LostValuePage,
   type LostValueRect,
   type OcrItem,
 } from "../document-reading-lost-value.js";
-import { cropPng, PNG_CROP_MAX_INPUT_PIXELS, PngCropError } from "../png-crop.js";
+import { croppedPixels, cropPng, PNG_CROP_MAX_INPUT_PIXELS, PngCropError } from "../png-crop.js";
 
 export const LOST_VALUE_MAX_CROPS = 6;
 export const LOST_VALUE_MAX_TOTAL_BYTES = 256 * 1024;
@@ -46,8 +49,8 @@ function pagesOf(parsed: ParsedDocument): LostValuePage[] {
     pageNum: page.pageNum,
     width: page.width,
     height: page.height,
-    items: (page.textItems ?? []).map(({ text, x, y, width, height, rotation }) =>
-      ({ text, x, y, width, height, ...(rotation !== undefined ? { rotation } : {}) })),
+    items: (page.textItems ?? []).map(({ text, x, y, width, height, rotation, confidence }) =>
+      ({ text, x, y, width, height, ...(rotation !== undefined ? { rotation } : {}), ...(confidence !== undefined ? { ocr: true } : {}) })),
   }));
 }
 
@@ -55,7 +58,7 @@ function pagesOf(parsed: ParsedDocument): LostValuePage[] {
 export async function lostValueRects(
   filePath: string,
   parsed: ParsedDocument,
-  packet: Pick<ReadingPacket, "lines">,
+  packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">,
 ): Promise<Map<string, LostValueRect>> {
   const bytes = await readFile(filePath);
   if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-") return new Map();
@@ -83,6 +86,24 @@ async function cropOf(
   return cropPng(shot.png, pixels);
 }
 
+/** `cropOf`, and the page rectangle the crop really covers (`croppedPixels`: cropPng rounds outward and clamps). */
+async function cropWithRect(
+  filePath: string,
+  parsed: ParsedDocument,
+  rect: LostValueRect,
+  seam: LostValueSeam,
+  rendered: Map<number, Promise<{ png: Buffer; width: number; height: number }>>,
+): Promise<{ png: Buffer; covered: Pick<LostValueRect, "x" | "y" | "width" | "height"> }> {
+  const png = await cropOf(filePath, parsed, rect, seam, rendered);
+  const shot = await rendered.get(rect.page)!;
+  const page = parsed.result.pages.find((candidate) => candidate.pageNum === rect.page)!;
+  const sx = shot.width / page.width;
+  const sy = shot.height / page.height;
+  // cropOf succeeded, so rectToPixels gave this same rectangle.
+  const cut = croppedPixels(rectToPixels(rect, page, shot)!, shot);
+  return { png, covered: { x: cut.x / sx, y: cut.y / sy, width: cut.width / sx, height: cut.height / sy } };
+}
+
 export type LostValueCrops =
   | { images: Array<{ line: string; png: Buffer }> }
   | { omitted: "over_budget" };
@@ -96,7 +117,7 @@ export type LostValueCrops =
 export async function buildLostValueCrops(
   filePath: string,
   parsed: ParsedDocument,
-  packet: Pick<ReadingPacket, "lines">,
+  packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">,
   seam: LostValueSeam = defaultLostValueSeam,
 ): Promise<LostValueCrops> {
   if (!seam.available()) return { images: [] };
@@ -161,4 +182,57 @@ export async function ocrLostValueLine(
   }
   if (!result.ok) return { ok: false, reason: "ocr_unavailable" };
   return { ok: true, items: result.items, anchor: rect.anchor };
+}
+
+/** Proves lost-leader lines blank from the page image; `blankLeaderLines` on a seam, or a stub in tests. */
+export type BlankLeaderProof = (
+  filePath: string, parsed: ParsedDocument, packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">,
+) => Promise<string[]>;
+
+/**
+ * The lost-leader lines the page image proves blank (signature and receipt lines, plan p2 C1-SIG): each line's
+ * full-width band is rendered and OCR'd, mapped back to page points, and `leaderRowIsBlank` decides. Any failure (no
+ * OCR, a refused page box, a page or crop over its cap, more than six lines or two pages, no OCR extent) proves
+ * nothing, and the line stays lost. Pages are rendered one at a time.
+ */
+export async function blankLeaderLines(
+  filePath: string,
+  parsed: ParsedDocument,
+  packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">,
+  seam: LostValueSeam = defaultLostValueSeam,
+): Promise<string[]> {
+  if (!seam.available()) return [];
+  const lineIds = [...new Set(packetLostLeaders(packet).map((hit) => hit.line))];
+  if (lineIds.length === 0 || lineIds.length > LOST_VALUE_MAX_CROPS) return [];
+  const byPage = new Map<number, string[]>();
+  for (const lineId of lineIds) {
+    const page = packet.lines.find((entry) => entry.id === lineId)!.page;
+    byPage.set(page, [...(byPage.get(page) ?? []), lineId]);
+  }
+  if (byPage.size > LOST_VALUE_MAX_PAGES) return [];
+  const bytes = await readFile(filePath);
+  if (bytes.subarray(0, 5).toString("latin1") !== "%PDF-" || await pdfPageBoxRefusal(bytes) !== null) return [];
+  const pages = pagesOf(parsed);
+  const blank: string[] = [];
+  for (const [pageNum, ids] of byPage) {
+    const page = pages.find((candidate) => candidate.pageNum === pageNum);
+    if (!page) continue;
+    // Scoped to this page, so its full 300-dpi render is released before the next page renders.
+    const rendered = new Map<number, Promise<{ png: Buffer; width: number; height: number }>>();
+    for (const lineId of ids) {
+      const band = leaderRowBand(packet, lineId, page);
+      if (!band) continue;
+      const rect: LostValueRect = { line: lineId, page: pageNum, x: 0, y: band.y0, width: page.width, height: band.y1 - band.y0, anchor: "" };
+      let crop: Awaited<ReturnType<typeof cropWithRect>>;
+      try {
+        crop = await cropWithRect(filePath, parsed, rect, seam, rendered);
+      } catch {
+        continue;
+      }
+      const result = await seam.ocr(crop.png).catch((): OcrPngResult => ({ ok: false }));
+      const items = result.ok ? ocrItemsOnPage(result.items, result.size, crop.covered) : undefined;
+      if (items && leaderRowIsBlank(items, band)) blank.push(lineId);
+    }
+  }
+  return blank;
 }

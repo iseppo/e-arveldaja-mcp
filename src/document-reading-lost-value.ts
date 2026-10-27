@@ -7,9 +7,9 @@
 import { inflate as inflateCallback } from "node:zlib";
 import { promisify } from "node:util";
 import { z } from "zod";
-import type { ReadingPacket } from "./document-reading-packet.js";
+import { packetLostLeaders, type ReadingPacket } from "./document-reading-packet.js";
 import { containsSandboxMarker, decodeJsonObjectInput, type ParseOutcome } from "./document-reading-schemas.js";
-import { COLUMN_MARK, DASHES, LEADER_GLYPHS, LEADER_RUN_RE, lineCells, lineTokens, lostValueLeaders } from "./document-reading-tokens.js";
+import { COLUMN_MARK, DASHES, LEADER_GLYPHS, LEADER_RUN_RE, lineCells, lineTokens, lostLeaderRunIndex } from "./document-reading-tokens.js";
 
 const inflate = promisify(inflateCallback);
 
@@ -21,6 +21,15 @@ export const LOST_VALUE_LABEL_PAD_PT = 10;
 /** The page render resolution of the crops (document-parser renders at it). */
 export const LOST_VALUE_RENDER_DPI = 300;
 export const LOST_VALUE_BAND_PAD = 0.4;
+/** Blank proof: the band reaches this many row heights above the row (a value may sit on the rule). */
+export const LEADER_BAND_ABOVE = 2;
+/** Blank proof: an OCR centre may sit this many row heights outside its text-layer item (not a word with a digit). */
+export const LEADER_HOST_PAD = 0.15;
+/** Blank proof: an OCR item lower than this many row heights, under the confidence below, is a smudge (a dot row). */
+export const LEADER_SMUDGE_MAX = 0.2;
+export const LEADER_SMUDGE_MAX_CONFIDENCE = 0.5;
+/** Blank proof: the band crop's two axis scales (page pt per OCR unit) may differ by this share. */
+export const LEADER_BAND_MAX_SCALE_SKEW = 0.03;
 export const LOST_VALUE_RIGHT_GAP_PT = 2;
 /** LOW_OCR_CONFIDENCE_THRESHOLD (tools/receipt-extraction.ts), pinned here to keep this module pure. */
 export const LOST_VALUE_MIN_CONFIDENCE = 0.6;
@@ -76,6 +85,8 @@ export interface GeometryItem {
   width: number;
   height: number;
   rotation?: number;
+  /** True for an item liteparse OCR'd (it has a confidence): not text-layer evidence. */
+  ocr?: boolean;
 }
 
 export interface LostValuePage {
@@ -135,13 +146,13 @@ function lostCellLabel(lineText: string, cellIndex: number): string {
  * rotated. `boxRefusal` (from `pdfPageBoxRefusal`) refuses every line.
  */
 export function locateLostValueRects(
-  packet: Pick<ReadingPacket, "lines">,
+  packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">,
   pages: ReadonlyArray<LostValuePage>,
   boxRefusal: string | null,
 ): Map<string, LostValueRect> {
   const out = new Map<string, LostValueRect>();
   if (boxRefusal !== null) return out;
-  const hits = lostValueLeaders(packet.lines);
+  const hits = packetLostLeaders(packet);
   for (const hit of hits) {
     const line = packet.lines.find((candidate) => candidate.id === hit.line);
     if (!line || out.has(line.id)) continue;
@@ -179,6 +190,188 @@ export function locateLostValueRects(
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Blank leaders (signature lines)
+// ---------------------------------------------------------------------------
+
+/** A text-layer item meeting a blank-proof band, in page points. */
+export interface BandNative {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  /** Its words in word form (of a leader item, only the text before its first leader run). */
+  words: string[];
+  /**
+   * True for an item holding a leader run. Where its label text ends and the run starts is unknown, so the whole box
+   * counts as leader: only its label words may be read on it.
+   */
+  leader?: true;
+}
+
+/** One lost cell's evidence: the last word of its label, which OCR must read on the label's own text-layer item. */
+export interface LeaderLabel {
+  word: string;
+  /** Index into `natives`. */
+  native: number;
+}
+
+/** A full-width page band around a lost leader's row (and up to two row heights above it, where a value may sit). */
+export interface LeaderRowBand {
+  line: string;
+  page: number;
+  y0: number;
+  y1: number;
+  /** The row's height (its tallest text-layer item), and the top and bottom of its items. */
+  height: number;
+  rowTop: number;
+  rowBottom: number;
+  /** Text-layer (non-OCR) items whose box meets the band. */
+  natives: BandNative[];
+  labels: LeaderLabel[];
+}
+
+/**
+ * Word form: NFD without marks, casefolded, `|` as `l`. A word with a digit keeps its sign and inner punctuation
+ * (`-12,40` is not `12,40` nor `1240`); any other word keeps only letters and digits. Leader runs and bare punctuation
+ * give no word.
+ */
+function wordForm(token: string): string {
+  const folded = token.normalize("NFD").replace(/\p{M}+/gu, "").toLocaleLowerCase("et").replace(/\|/g, "l");
+  if (/\p{N}/u.test(folded)) return folded.replace(/^[^\p{L}\p{N}+\-−]+|[^\p{L}\p{N}]+$/gu, "");
+  return folded.replace(/[^\p{L}\p{N}]+/gu, "");
+}
+const bareWords = (text: string) => text.split(/\s+/).map(wordForm).filter((word) => word.length > 0);
+/** Comparison form of a word: OCR confuses i, I and l, so they compare equal. */
+const sameGlyphs = (word: string) => word.replace(/i/g, "l");
+
+/**
+ * The band of one lost-leader line, or undefined. The line's text must be unique on its page, its leaders must sit in
+ * text-layer items whose text is part of the line and that share one row (centres within one item height), the row's
+ * items must hold the line's leader runs one for one, and every lost cell needs the label item of its own run: the
+ * run's item when label text precedes it (its first run only), else the row item right before it (without a run),
+ * whose last word (two characters or more) is the cell label's last word.
+ */
+export function leaderRowBand(
+  packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">, lineId: string, page: LostValuePage,
+): LeaderRowBand | undefined {
+  const line = packet.lines.find((entry) => entry.id === lineId);
+  if (!line || line.page !== page.pageNum) return undefined;
+  const signature = compactNfc(line.text.split(COLUMN_MARK).join(" "));
+  const sameText = packet.lines.filter((other) => other.page === line.page && compactNfc(other.text.split(COLUMN_MARK).join(" ")) === signature);
+  if (sameText.length !== 1) return undefined;
+  const leaderRun = (text: string) => new RegExp(LEADER_RUN_RE.source, "u").exec(text);
+  // The row is the items around a leader-bearing item whose joined text is exactly the line (as for the crops).
+  const rows = page.items
+    .filter((item) => !item.ocr && leaderRun(item.text))
+    .map((item) => rowOf(page, item).filter((member) => !member.ocr))
+    .filter((row) => compactNfc(row.map((item) => item.text).join("")) === signature);
+  const distinct = [...new Map(rows.map((row) => [row.map((item) => page.items.indexOf(item)).join(","), row])).values()];
+  if (distinct.length !== 1) return undefined;
+  const row = distinct[0]!;
+  if (row.some((item) => (item.rotation ?? 0) !== 0)) return undefined;
+  const height = Math.max(...row.map((item) => item.height));
+  if (!(height > 0)) return undefined;
+  const rowTop = Math.min(...row.map((item) => item.y));
+  const rowBottom = Math.max(...row.map((item) => item.y + item.height));
+  const y0 = Math.max(0, rowTop - LEADER_BAND_ABOVE * height);
+  const y1 = Math.min(page.height, rowBottom + LOST_VALUE_BAND_PAD * height);
+  const sources = page.items.filter((item) => !item.ocr && (item.rotation ?? 0) === 0 && item.y < y1 && item.y + item.height > y0);
+  const natives = sources.map((item): BandNative => {
+    const run = leaderRun(item.text);
+    const box = { x0: item.x, x1: item.x + item.width, y0: item.y, y1: item.y + item.height };
+    if (!run) return { ...box, words: bareWords(item.text) };
+    return { ...box, words: bareWords(item.text.slice(0, run.index)), leader: true };
+  });
+  // The row's leader runs left to right, each with the row index of its item and whether it is that item's first run.
+  const runs = row.flatMap((item, index) => [...item.text.matchAll(LEADER_RUN_RE)].map((_, nth) => ({ index, first: nth === 0 })));
+  if (runs.length !== [...line.text.matchAll(LEADER_RUN_RE)].length) return undefined;
+  const labels: LeaderLabel[] = [];
+  for (const hit of packetLostLeaders(packet).filter((entry) => entry.line === lineId)) {
+    const word = bareWords(lostCellLabel(line.text, hit.cell)).at(-1);
+    const at = lostLeaderRunIndex(line.text, hit.cell);
+    const run = at === undefined ? undefined : runs[at];
+    if (word === undefined || word.length < 2 || !run?.first) return undefined;
+    const own = row[run.index]!;
+    const labelItem = natives[sources.indexOf(own)]!.words.length > 0 ? own : row[run.index - 1];
+    if (!labelItem || (labelItem !== own && leaderRun(labelItem.text))) return undefined;
+    const native = sources.indexOf(labelItem);
+    if (natives[native]!.words.at(-1) !== word) return undefined;
+    labels.push({ word, native });
+  }
+  return labels.length > 0 ? { line: lineId, page: page.pageNum, y0, y1, height, rowTop, rowBottom, natives, labels } : undefined;
+}
+
+// A word made only of glyphs that read as digits (O/0, l/1, S/5, B/8, Z/2, G/6, q/9, D/0) may be a misread number.
+const DIGIT_LOOKALIKE_WORD_RE = /^[oilsbzgqd]+$/;
+const mayBeValue = (word: string) => /\p{N}/u.test(word) || DIGIT_LOOKALIKE_WORD_RE.test(word);
+const LEADER_ONLY_RE = new RegExp(`^[\\s${LEADER_GLYPHS}]*$`, "u");
+
+/**
+ * OCR items of a band crop in page points. `size` is the OCR's coordinate extent of the whole crop, `rect` the page
+ * rectangle the crop covers; a missing size or axis scales differing by more than 3% map nothing (undefined).
+ */
+export function ocrItemsOnPage(
+  items: ReadonlyArray<OcrItem>, size: { width: number; height: number } | undefined, rect: Pick<LostValueRect, "x" | "y" | "width" | "height">,
+): OcrItem[] | undefined {
+  if (!size || !(size.width > 0) || !(size.height > 0)) return undefined;
+  const kx = rect.width / size.width;
+  const ky = rect.height / size.height;
+  if (!(kx > 0) || !(ky > 0) || Math.abs(kx / ky - 1) > LEADER_BAND_MAX_SCALE_SKEW) return undefined;
+  return items.map((item) => ({
+    ...item, x: rect.x + item.x * kx, y: rect.y + item.y * ky, width: item.width * kx, height: item.height * ky,
+  }));
+}
+
+/**
+ * Positive evidence that a leader row carries no value (plan p2 C1-SIG), from the band's OCR items in page points.
+ * An OCR item's host is the text-layer item its centre lies on (a word with a digit: inside it, no slack). An item
+ * hosted on a leader item, reaching into a leader item's box (its box, not its centre) or with no host is "on the
+ * leader". Then:
+ * - a smudge (lower than 0.2 row heights, confidence under 0.5, no digit) is noise: a dot row OCR read as letters;
+ * - an item of only punctuation is fine when it is only leader glyphs, or is not on the leader;
+ * - on the leader, a word with a digit always holds, and any other word must be one of the host's words (counted; of
+ *   a leader item, its label words);
+ * - off the leader, a word must be one of the host's words, or have no digit and not be only digit look-alikes (a
+ *   script-font name or a scribble on printed text).
+ * And OCR must have read each lost cell's last label word on that cell's own label item (a row item).
+ */
+export function leaderRowIsBlank(ocrItems: ReadonlyArray<OcrItem>, band: Pick<LeaderRowBand, "natives" | "labels" | "height">): boolean {
+  const remaining = band.natives.map((native) => native.words.map(sameGlyphs));
+  const read: Array<{ native: number; word: string }> = [];
+  const slack = LEADER_HOST_PAD * band.height;
+  const inside = (native: BandNative, x: number, y: number, pad: number) =>
+    x >= native.x0 - pad && x <= native.x1 + pad && y >= native.y0 - pad && y <= native.y1 + pad;
+  for (const item of ocrItems) {
+    const words = bareWords(item.text).map(sameGlyphs);
+    const hasDigit = words.some((word) => /\p{N}/u.test(word));
+    const cx = item.x + item.width / 2;
+    const cy = item.y + item.height / 2;
+    const host = band.natives.findIndex((native) => inside(native, cx, cy, hasDigit ? 0 : slack));
+    const onLeader = host < 0 || band.natives[host]!.leader === true || band.natives.some((native) => native.leader &&
+      Math.min(item.x + item.width, native.x1) - Math.max(item.x, native.x0) > slack &&
+      Math.min(item.y + item.height, native.y1) > Math.max(item.y, native.y0));
+    if (item.height < LEADER_SMUDGE_MAX * band.height && (item.confidence ?? 1) < LEADER_SMUDGE_MAX_CONFIDENCE && !hasDigit) continue;
+    if (words.length === 0) {
+      if (LEADER_ONLY_RE.test(item.text) || !onLeader) continue;
+      return false;
+    }
+    if (onLeader && hasDigit) return false;
+    for (const word of words) {
+      const at = host < 0 ? -1 : remaining[host]!.indexOf(word);
+      if (at >= 0) remaining[host]!.splice(at, 1);
+      else if (onLeader || mayBeValue(word)) return false;
+      if (host >= 0) read.push({ native: host, word });
+    }
+  }
+  return band.labels.every((label) => {
+    const at = read.findIndex((entry) => entry.native === label.native && entry.word === sameGlyphs(label.word));
+    if (at < 0) return false;
+    read.splice(at, 1);
+    return true;
+  });
+}
+
 const LABEL_TAIL_RE = /[\s:#№.]+$/u;
 const labelForm = (text: string) => anchorForm(text.replace(LABEL_TAIL_RE, ""));
 
@@ -189,8 +382,9 @@ const labelForm = (text: string) => anchorForm(text.replace(LABEL_TAIL_RE, ""));
  * The whole line prefix is compared, so a split cell ("Originaal ¦ Arve number: …") or a one-word label ("Nr") does
  * not match.
  */
-export function printedUnderLostLabel(lines: ReadingPacket["lines"], lineId: string, value: string): boolean {
-  const hits = lostValueLeaders(lines);
+export function printedUnderLostLabel(packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">, lineId: string, value: string): boolean {
+  const { lines } = packet;
+  const hits = packetLostLeaders(packet);
   const line = lines.find((entry) => entry.id === lineId);
   if (!line || hits.some((hit) => hit.line === lineId)) return false;
   const labels = new Set(hits.map((hit) => lostCellLabel(lines.find((entry) => entry.id === hit.line)!.text, hit.cell))

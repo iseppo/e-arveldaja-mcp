@@ -10,7 +10,7 @@ import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.j
 import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
-import type { LostValueSeam } from "./lost-value-ocr.js";
+import type { BlankLeaderProof, LostValueSeam } from "./lost-value-ocr.js";
 import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
 import {
   BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, HISTORY_INVOICE, packetFor, readingApi, readingFor, readingParse, SUPPLIER_ID, type ReadingCaseInput,
@@ -36,7 +36,7 @@ function writePdf(contents: string): { path: string; sha256: string } {
 }
 
 /** A small in-memory e-arveldaja: creates become live drafts that the uncached scans see. */
-function world(lostValueSeam?: LostValueSeam) {
+function world(lostValueSeam?: LostValueSeam, proveBlank: BlankLeaderProof = async () => []) {
   const rows: Array<Record<string, unknown>> = [HISTORY_INVOICE];
   const details: Record<number, Record<string, unknown>> = { [HISTORY_INVOICE.id]: HISTORY_DETAIL };
   let nextId = 900;
@@ -65,7 +65,7 @@ function world(lostValueSeam?: LostValueSeam) {
   const confirm = vi.fn(async (id: number) => { details[id]!.status = "CONFIRMED"; return {}; });
   (api.purchaseInvoices as unknown as Record<string, unknown>).confirm = confirm;
   const runtime = createTestRuntimeSafetyContext();
-  const ops = createReadingDocumentOperations(api, runtime, lostValueSeam);
+  const ops = createReadingDocumentOperations(api, runtime, lostValueSeam, proveBlank);
   return { api, runtime, ops, rows, details, commit, createAndSetTotals, confirm };
 }
 
@@ -378,6 +378,34 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     expect(verify.status).toBe("ready");
     expect(heldCodes(await create(w, file, verify.planHandle!, typed("2026-03-15")))).toContain("competing_consistent_total");
     expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("signature lines proven blank create with no typed row and are audited; another blank set at create holds, 0 writes", async () => {
+    const lines = [...BASE_LINES, "Allkiri ....................", "Võttis vastu ...................."];
+    const ids = packetFor("a".repeat(64), lines).lines;
+    const allkiri = ids.find((line) => line.text.startsWith("Allkiri"))!.id;
+    const vastu = ids.find((line) => line.text.startsWith("Võttis"))!.id;
+    // At create the proof fails, or proves a different line (the card was built on the other line being lost).
+    for (const atCreate of [[allkiri, vastu], [allkiri], [vastu], []]) {
+      let proven = [allkiri, vastu];
+      const w = world(undefined, async () => proven);
+      mockedParse.mockResolvedValue(readingParse(lines));
+      const file = writePdf(`%PDF signature ${atCreate.join(",")}`);
+      const verify = await verified(w, file, {}, lines);
+      expect(verify.status).toBe("ready");
+      expect(verify.card!.rows.map((row) => row.id)).not.toContain("t:invoice_date");
+      proven = atCreate;
+      const outcome = await create(w, file, verify.planHandle!, {});
+      if (atCreate.length === 2) {
+        expect(outcome).toMatchObject({ ok: true, value: { status: "created" } });
+        expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+          action: "CREATED", details: expect.objectContaining({ blank_leader_lines: [allkiri, vastu].sort() }),
+        }));
+      } else {
+        expect(heldCodes(outcome), atCreate.join(",")).toEqual(["packet_changed"]);
+        expect(w.createAndSetTotals).not.toHaveBeenCalled();
+      }
+    }
   });
 
   it("a re-run that cannot be performed (the plan binds no reading) holds, 0 writes", async () => {

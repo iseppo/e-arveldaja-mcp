@@ -325,7 +325,7 @@ async function extractReceiptFields(
     minOcrConfidence: computeMinOcrConfidence(allTextItems),
     partialOcrFailure: parsedDocument.ocrPartialFailure,
   });
-  return { extracted, textHazards: textHazardSignals(parsedDocument, extracted.currency) };
+  return { extracted, textHazards: await textHazardSignals(parsedDocument, extracted.currency, snapshot.snapshot_path) };
 }
 
 /**

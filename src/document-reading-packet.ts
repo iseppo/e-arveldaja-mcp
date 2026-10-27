@@ -44,6 +44,8 @@ export interface PacketBuildInput {
   totalPages: number;
   pageErrors: ReadonlyArray<{ pageNum: number }>;
   parseConfig: { maxPagesSet: boolean; targetPagesSet: boolean };
+  /** Lost-leader lines the server proved blank from the page image (src/documents/lost-value-ocr.ts). */
+  blankLeaderLines?: readonly string[];
 }
 export interface PacketLine { id: string; page: number; n: number; text: string }
 export interface PageOrigin { page: number; native: string; ocr: string[] }
@@ -58,6 +60,8 @@ export interface ReadingPacket {
   text_bytes: number;
   holds: PacketHold[];
   origin: PageOrigin[];
+  /** Leader lines proven blank (signature lines): not lost values. Absent when none. */
+  blank_leader_lines?: string[];
 }
 
 // C0 and C1 control characters (tab and newline included; lines are already split).
@@ -141,7 +145,8 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
   if (input.pageErrors.length > 0) hold("page_extraction_failed");
   if (textBytes > PACKET_MAX_TEXT_BYTES || lines.length > PACKET_MAX_LINES) hold("packet_oversize");
   if (input.pages.some(isOcrPage)) hold("ocr_document");
-  if (lostValueLeaders(lines).length > 0) hold("text_layer_value_lost");
+  const blank = [...new Set(input.blankLeaderLines ?? [])].filter((id) => lines.some((line) => line.id === id)).sort();
+  if (packetLostLeaders({ lines, blank_leader_lines: blank }).length > 0) hold("text_layer_value_lost");
 
   return {
     version: 1,
@@ -159,7 +164,14 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
     text_bytes: textBytes,
     holds,
     origin,
+    ...(blank.length > 0 ? { blank_leader_lines: blank } : {}),
   };
+}
+
+/** The lost-value leaders of a packet: every leader cell, minus the lines the server proved blank. */
+export function packetLostLeaders(packet: Pick<ReadingPacket, "lines" | "blank_leader_lines">): Array<{ line: string; cell: number }> {
+  const blank = new Set(packet.blank_leader_lines ?? []);
+  return lostValueLeaders(packet.lines).filter((hit) => !blank.has(hit.line));
 }
 
 // ---------------------------------------------------------------------------

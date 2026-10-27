@@ -1091,7 +1091,7 @@ describe("P2 E0: text hazards on the guided prepare parse", () => {
       expect(mockedParseDocument).toHaveBeenCalledTimes(1);
       expect(textHazardSignals).toHaveBeenCalledTimes(1);
       expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
-      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+      expect(await vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
       // What the caller returns: the signal in its signals and a warning with its code.
       const [signal] = Object.keys(TEXT_HAZARD_EXPECTED[kind]);
       expect(outcome.value.extraction.confidence_signals).toMatchObject(TEXT_HAZARD_EXPECTED[kind]);

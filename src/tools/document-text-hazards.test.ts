@@ -8,7 +8,7 @@ import { packetInputFromParse, textHazardSignals } from "./document-text-hazards
 const FIXTURES = Object.keys(TEXT_HAZARD_EXPECTED) as TextHazardFixture[];
 
 describe("documentTextHazards (P2 E0 shared producer)", () => {
-  it("raises each hazard from the packet lines", () => {
+  it("raises each hazard from the packet lines", async () => {
     expect(documentTextHazards(makePacket(["Kreeditarve K-1", "Kokku 10,00 €"]).lines)).toMatchObject({ credit_word_present: true, signed_amount_present: false, foreign_currency_marker: false, eur_stated: true });
     expect(documentTextHazards(makePacket(["Allahindlus -5,00 €"]).lines)).toMatchObject({ credit_word_present: false, signed_amount_present: true });
     expect(documentTextHazards(makePacket(["Att betala 1 250,00 kr"]).lines)).toMatchObject({ foreign_currency_marker: true, eur_stated: false });
@@ -17,7 +17,7 @@ describe("documentTextHazards (P2 E0 shared producer)", () => {
     });
   });
 
-  it("is the producer the checker holds on: the same hazard codes on the same line", () => {
+  it("is the producer the checker holds on: the same hazard codes on the same line", async () => {
     const hazardLine: Record<TextHazardFixture, string> = {
       credit_word: "Kreeditarve K-17",
       signed_amount: "Allahindlus -5,00",
@@ -36,29 +36,29 @@ describe("documentTextHazards (P2 E0 shared producer)", () => {
 });
 
 describe("textHazardSignals (tool-side adapter)", () => {
-  it.each(FIXTURES)("maps the %s fixture to exactly its signal", (kind) => {
-    expect(textHazardSignals(textHazardParse(kind), undefined)).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+  it.each(FIXTURES)("maps the %s fixture to exactly its signal", async (kind) => {
+    expect(await textHazardSignals(textHazardParse(kind), undefined, "/nonexistent.pdf")).toEqual(TEXT_HAZARD_EXPECTED[kind]);
   });
 
-  it("P2 E3: a foreign-currency marker counts only on a reading that is, or defaults to, EUR", () => {
+  it("P2 E3: a foreign-currency marker counts only on a reading that is, or defaults to, EUR", async () => {
     const parsed = textHazardParse("foreign_marker");
-    expect(textHazardSignals(parsed, "EUR")).toEqual({ foreign_currency_marker: true });
-    expect(textHazardSignals(parsed, "eur")).toEqual({ foreign_currency_marker: true });
-    expect(textHazardSignals(parsed, undefined)).toEqual({ foreign_currency_marker: true });
-    expect(textHazardSignals(parsed, "SEK")).toEqual({});
+    expect(await textHazardSignals(parsed, "EUR", "/nonexistent.pdf")).toEqual({ foreign_currency_marker: true });
+    expect(await textHazardSignals(parsed, "eur", "/nonexistent.pdf")).toEqual({ foreign_currency_marker: true });
+    expect(await textHazardSignals(parsed, undefined, "/nonexistent.pdf")).toEqual({ foreign_currency_marker: true });
+    expect(await textHazardSignals(parsed, "SEK", "/nonexistent.pdf")).toEqual({});
   });
 
-  it("P2 E2: a leader-only table cell raises text_layer_value_lost; a leader inside a text cell does not", () => {
+  it("P2 E2: a leader-only table cell raises text_layer_value_lost; a leader inside a text cell does not", async () => {
     const page = (text: string) => ({ text, pageCount: 1, result: { pages: [{ pageNum: 1, text, width: 600, height: 800, textItems: [] }], totalPages: 1 } }) as never;
-    expect(textHazardSignals(page("Arve kuupäev    ....................    Kogusumma (EUR)    1,87 €"), "EUR")).toEqual({ text_layer_value_lost: true });
-    expect(textHazardSignals(page("Total ........ 13,60"), "EUR")).toEqual({});
+    expect(await textHazardSignals(page("Arve kuupäev    ....................    Kogusumma (EUR)    1,87 €"), "EUR", "/nonexistent.pdf")).toEqual({ text_layer_value_lost: true });
+    expect(await textHazardSignals(page("Total ........ 13,60"), "EUR", "/nonexistent.pdf")).toEqual({});
   });
 
-  it("raises nothing on a parse with no pages", () => {
-    expect(textHazardSignals({ text: "Kreeditarve", pageCount: 0 } as never, undefined)).toEqual({});
+  it("raises nothing on a parse with no pages", async () => {
+    expect(await textHazardSignals({ text: "Kreeditarve", pageCount: 0 } as never, undefined, "/nonexistent.pdf")).toEqual({});
   });
 
-  it("builds the packet from the parse pages exactly as the reading harness does", () => {
+  it("builds the packet from the parse pages exactly as the reading harness does", async () => {
     const parsed = textHazardParse("credit_word");
     const input = packetInputFromParse(parsed, "b".repeat(64), "liteparse@x");
     expect(input).toMatchObject({ sourceSha256: "b".repeat(64), parserVersion: "liteparse@x", totalPages: 1, pageErrors: [] });

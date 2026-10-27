@@ -153,6 +153,15 @@ export function pngSize(png: Buffer): { width: number; height: number } {
 /** The inflated image data per source PNG: several crops of one page render inflate it once. */
 const inflated = new WeakMap<Buffer, Promise<Buffer>>();
 
+/** The pixel rectangle `cropPng` cuts for `rect` from an image of `image`'s size: rounded outward, clamped. */
+export function croppedPixels(rect: PixelRect, image: { width: number; height: number }): PixelRect {
+  const x0 = Math.max(0, Math.floor(rect.x));
+  const y0 = Math.max(0, Math.floor(rect.y));
+  const x1 = Math.min(image.width, Math.ceil(rect.x + rect.width));
+  const y1 = Math.min(image.height, Math.ceil(rect.y + rect.height));
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
 /**
  * Returns a new RGBA PNG holding `rect` (pixels; clamped to the image, rounded
  * outward). Throws `PngCropError` on any unsupported or corrupt input, an
@@ -160,10 +169,9 @@ const inflated = new WeakMap<Buffer, Promise<Buffer>>();
  */
 export async function cropPng(png: Buffer, rect: PixelRect): Promise<Buffer> {
   const { width, height, idat } = readChunks(png);
-  const x0 = Math.max(0, Math.floor(rect.x));
-  const y0 = Math.max(0, Math.floor(rect.y));
-  const x1 = Math.min(width, Math.ceil(rect.x + rect.width));
-  const y1 = Math.min(height, Math.ceil(rect.y + rect.height));
+  const { x: x0, y: y0, width: cutWidth, height: cutHeight } = croppedPixels(rect, { width, height });
+  const x1 = x0 + cutWidth;
+  const y1 = y0 + cutHeight;
   if (!Number.isFinite(x0 + y0 + x1 + y1) || x1 <= x0 || y1 <= y0) throw new PngCropError("empty crop");
 
   const stride = width * BYTES_PER_PIXEL;

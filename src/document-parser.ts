@@ -280,7 +280,8 @@ export interface OcrTextItem {
   confidence?: number;
 }
 
-export type OcrPngResult = { ok: true; items: OcrTextItem[] } | { ok: false };
+/** `size` is the extent of the items' coordinate space (the whole crop), when the OCR reports it. */
+export type OcrPngResult = { ok: true; items: OcrTextItem[]; size?: { width: number; height: number } } | { ok: false };
 
 /** False when OCR is disabled or the kill switch EARVELDAJA_READING_LOST_VALUE_IMAGES=0 is set. */
 export function lostValueImagesAvailable(): boolean {
@@ -348,6 +349,12 @@ let ocrQueue: Promise<unknown> = Promise.resolve();
 export const LOST_VALUE_OCR_QUEUE_MAX = 4;
 let ocrPending = 0;
 
+function ocrSize(page: { width?: number; height?: number } | undefined): { size: { width: number; height: number } } | undefined {
+  const { width, height } = page ?? {};
+  return typeof width === "number" && typeof height === "number" && width > 0 && height > 0 && Number.isFinite(width) && Number.isFinite(height)
+    ? { size: { width, height } } : undefined;
+}
+
 /**
  * OCR of one PNG crop. Single-flight: one OCR at a time, the next waits for the
  * previous native work to settle (a timed-out OCR keeps running natively). A job
@@ -370,6 +377,7 @@ export function ocrPng(png: Buffer, timeoutMs = LOST_VALUE_OCR_TIMEOUT_MS): Prom
       ok: true,
       items: (result.pages[0]?.textItems ?? []).map(({ text, x, y, width, height, confidence }) =>
         ({ text, x, y, width, height, ...(confidence !== undefined ? { confidence } : {}) })),
+      ...(ocrSize(result.pages[0]) ?? {}),
     },
     (): OcrPngResult => ({ ok: false }),
   );

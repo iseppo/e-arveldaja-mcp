@@ -8,6 +8,7 @@ import type { ParsedDocument } from "../document-parser.js";
 import { documentTextHazards } from "../document-reading-check.js";
 import { buildReadingPacket, type PacketBuildInput, type ReadingPacket } from "../document-reading-packet.js";
 import type { ExtractionConfidenceSignals } from "../invoice-extraction-fallback.js";
+import { blankLeaderLines, type BlankLeaderProof } from "../documents/lost-value-ocr.js";
 
 /** The packet input of one parse, the same mapping the reading harness uses (OCR item = one with a confidence). */
 export function packetInputFromParse(parsed: ParsedDocument, sourceSha256: string, parserVersion: string): PacketBuildInput {
@@ -37,13 +38,29 @@ export function packetInputFromParse(parsed: ParsedDocument, sourceSha256: strin
 }
 
 /**
- * The checker's text hazards on the caller's parse, as extraction confidence signals (only the raised ones).
- * `currency` is the extracted currency: a foreign-currency marker counts only on a reading that is, or
+ * The reading packet of one parse. When it holds text_layer_value_lost, the leader lines the page image proves blank
+ * (signature lines; `blankLeaderLines`) are passed to the builder, so they are not lost values. Any failure of that
+ * proof leaves the packet as built.
+ */
+export async function readingPacketOf(
+  parsed: ParsedDocument, filePath: string, sourceSha256: string, parserVersion: string,
+  proveBlank: BlankLeaderProof = (path, source, built) => blankLeaderLines(path, source, built),
+): Promise<ReadingPacket> {
+  const input = packetInputFromParse(parsed, sourceSha256, parserVersion);
+  const packet = buildReadingPacket(input);
+  if (!packet.holds.some((hold) => hold.code === "text_layer_value_lost")) return packet;
+  const blank = await Promise.resolve().then(() => proveBlank(filePath, parsed, packet)).catch((): string[] => []);
+  return blank.length > 0 ? buildReadingPacket({ ...input, blankLeaderLines: blank }) : packet;
+}
+
+/**
+ * The checker's text hazards on the caller's parse of `filePath`, as extraction confidence signals (only the raised
+ * ones). `currency` is the extracted currency: a foreign-currency marker counts only on a reading that is, or
  * defaults to, EUR (a non-EUR reading already stops at booking).
  */
-export function textHazardSignals(parsed: ParsedDocument, currency: string | undefined): ExtractionConfidenceSignals {
+export async function textHazardSignals(parsed: ParsedDocument, currency: string | undefined, filePath: string): Promise<ExtractionConfidenceSignals> {
   // The digest is never read here: the packet only normalizes the lines exactly as the checker sees them.
-  const packet: ReadingPacket = buildReadingPacket(packetInputFromParse(parsed, "", ""));
+  const packet = await readingPacketOf(parsed, filePath, "", "");
   const hazards = documentTextHazards(packet.lines);
   const signals: ExtractionConfidenceSignals = {};
   if (hazards.credit_word_present) signals.credit_word_present = true;

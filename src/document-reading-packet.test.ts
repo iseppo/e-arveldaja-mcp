@@ -6,6 +6,7 @@ import {
   citedTokenOriginHolds,
   computePacketDigest,
   matchOffsets,
+  packetLostLeaders,
   normalizeForMatch,
 } from "./document-reading-packet.js";
 import { FIXTURE_PARSER, FIXTURE_SHA, makePacket, makePacketInput } from "./__fixtures__/document-reading/make-packet.js";
@@ -122,7 +123,8 @@ describe("document-reading packet: holds", () => {
   });
 
   // A signature-line exemption was tried and reverted (Codex r5): a label blacklist cannot prove that a leader
-  // hides no payload. Every line below must keep holding; a future exemption has to beat them all.
+  // hides no payload. Every line below must keep holding on its text. The only exemption is the server's image
+  // proof (`blankLeaderLines`, T-PK-blank-leader), which never looks at the label.
   it("T-KILL-signature: signature-label leaders hold, including every known exemption bypass", () => {
     const holds = (lines: string[]) => expect(codes(makePacket(lines)), JSON.stringify(lines)).toContain("text_layer_value_lost");
     // The #15 / #17 shapes: accepted false holds.
@@ -149,6 +151,21 @@ describe("document-reading packet: holds", () => {
     holds(["Kogusumma / Allkiri ........"]);
     holds(["Vahesumma / Allkiri ........"]);
     holds(["Tasumiseks / Allkiri ........"]);
+  });
+
+  it("T-PK-blank-leader: a line the server proved blank does not hold; the others still do; the digest is unchanged", () => {
+    const lines = ["Arve kuupäev ........", "Allkiri ........"];
+    const plain = buildReadingPacket(makePacketInput(lines));
+    expect(packetLostLeaders(plain).map((hit) => hit.line)).toEqual(["p1:001", "p1:002"]);
+    const signed = buildReadingPacket(makePacketInput(lines, undefined, { blankLeaderLines: ["p1:002", "p1:002", "p9:001"] }));
+    expect(signed.blank_leader_lines).toEqual(["p1:002"]);
+    expect(codes(signed)).toContain("text_layer_value_lost");
+    expect(packetLostLeaders(signed).map((hit) => hit.line)).toEqual(["p1:001"]);
+    expect(signed.packet_digest).toBe(plain.packet_digest);
+    const both = buildReadingPacket(makePacketInput(lines, undefined, { blankLeaderLines: ["p1:001", "p1:002"] }));
+    expect(codes(both)).not.toContain("text_layer_value_lost");
+    expect("blank_leader_lines" in plain).toBe(false);
+    expect("blank_leader_lines" in buildReadingPacket(makePacketInput(lines, undefined, { blankLeaderLines: ["p9:001"] }))).toBe(false);
   });
 
   it("T-PK-leader-in-cell: a leader an amount follows, or 3 leader glyphs, does not hold (C1)", () => {

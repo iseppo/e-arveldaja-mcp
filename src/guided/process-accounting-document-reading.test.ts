@@ -93,7 +93,7 @@ describe("process_accounting_document reading modes: lost-value images on read",
   function setupImages(seam: ReturnType<typeof fakeSeam>): ImageHandler {
     const registerTool = vi.fn();
     const server = { registerTool } as unknown as Parameters<typeof registerProcessAccountingDocumentTool>[0];
-    registerProcessAccountingDocumentTool(server, readingApi(), createTestRuntimeSafetyContext(), { documentReading: true, lostValueSeam: seam });
+    registerProcessAccountingDocumentTool(server, readingApi(), createTestRuntimeSafetyContext(), { documentReading: true, lostValueSeam: seam, blankLeaderProof: async () => [] });
     const call = registerTool.mock.calls.find((args: unknown[]) => args[0] === "process_accounting_document");
     return call![2] as ImageHandler;
   }

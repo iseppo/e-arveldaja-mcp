@@ -26,7 +26,7 @@ import { documentReadingEnabled } from "../config.js";
 import { jsonObjectInput } from "../tools/crud/shared.js";
 import { JSON_OUTPUT_FORMAT, PROOF_QUESTIONS, READING_INSTRUCTIONS } from "../document-reading-check.js";
 import { createReadingDocumentOperations, type LostValueStatus, type VerifyDocumentResult } from "../documents/reading-operations.js";
-import type { LostValueSeam } from "../documents/lost-value-ocr.js";
+import type { BlankLeaderProof, LostValueSeam } from "../documents/lost-value-ocr.js";
 import type { ReadingCard } from "../document-reading-card.js";
 import { desandboxText } from "../external-text-renderer.js";
 
@@ -235,6 +235,8 @@ export interface ProcessAccountingDocumentDeps {
   documentReading?: boolean;
   /** Lost-value image path: injectable page render + crop OCR (tests); default liteparse. */
   lostValueSeam?: LostValueSeam;
+  /** Signature-line proof on the packet build (tests); default `blankLeaderLines` on the lost-value seam. */
+  blankLeaderProof?: BlankLeaderProof;
 }
 
 const LEGACY_DESCRIPTION = "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.";
@@ -398,7 +400,7 @@ export function registerProcessAccountingDocumentTool(
   const { elicit } = deps;
   const operations = createAccountingDocumentOperations(api, runtimeSafetyContext);
   const reading = deps.documentReading ?? documentReadingEnabled();
-  const readingOperations = reading ? createReadingDocumentOperations(api, runtimeSafetyContext, deps.lostValueSeam) : undefined;
+  const readingOperations = reading ? createReadingDocumentOperations(api, runtimeSafetyContext, deps.lostValueSeam, deps.blankLeaderProof) : undefined;
   const readingShape: Record<string, z.ZodTypeAny> = reading
     ? {
         document_reading: jsonObjectInput.optional().describe("mode='verify': the document_reading JSON object from your reading of the mode='read' packet."),

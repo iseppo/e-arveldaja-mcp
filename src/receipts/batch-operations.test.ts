@@ -2121,7 +2121,7 @@ describe("P2 E0: text hazards on the receipt_batch parse", () => {
       expect(parseDocument).toHaveBeenCalledTimes(1);
       expect(textHazardSignals).toHaveBeenCalledTimes(1);
       expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
-      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+      expect(await vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
       // What the caller does with them: the signals it summarizes (and gates on) carry the hazard.
       expect(vi.mocked(summarizeInvoiceExtraction).mock.calls[0]![1]).toMatchObject(TEXT_HAZARD_EXPECTED[kind]);
     },

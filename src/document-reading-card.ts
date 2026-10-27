@@ -239,7 +239,7 @@ export function buildReadingCard(input: CardInput): CardOutcome {
       const value = input.values.invoice_number;
       const line = lineText(input.packet, input.evidence.invoice_number?.line);
       if (field === "invoice_number" && !byField.has(field) && typeof value === "string" && line &&
-        printedToken(input.packet, field, value, line.id) === value && printedUnderLostLabel(input.packet.lines, line.id, value)) {
+        printedToken(input.packet, field, value, line.id) === value && printedUnderLostLabel(input.packet, line.id, value)) {
         numberKept = true;
         continue;
       }

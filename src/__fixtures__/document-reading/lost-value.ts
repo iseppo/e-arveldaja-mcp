@@ -4,9 +4,9 @@
 import { randomBytes } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { vi } from "vitest";
-import type { OcrTextItem, ParsedDocument } from "../../document-parser.js";
+import type { OcrPngResult, OcrTextItem, ParsedDocument } from "../../document-parser.js";
 import type { LostValueSeam } from "../../documents/lost-value-ocr.js";
-import { crc32 } from "../../png-crop.js";
+import { crc32, pngSize } from "../../png-crop.js";
 
 export const LOST_DOTS = "....................";
 
@@ -95,11 +95,27 @@ export function ocrRow(...parts: Array<[string, number?]>): OcrTextItem[] {
   });
 }
 
+/** The row top of `lostValueParse` row `index`, and the top of its blank-proof band (two leader heights above). */
+export const rowY = (index: number) => 40 + 14 * index;
+export const bandTop = (index: number) => Math.max(0, rowY(index) - 2 * 9.64);
+
+/**
+ * OCR of a blank-proof band crop whose top is page y `top` (72-dpi render: 1 px = 1 pt), answering items given in page
+ * points `[text, x, y, width?, height?, confidence?]`, with the crop's extent as the OCR size.
+ */
+export function placedOcr(top: number, ...items: Array<[string, number, number, number?, number?, number?]>) {
+  return async (png: Buffer): Promise<OcrPngResult> => ({
+    ok: true,
+    size: pngSize(png),
+    items: items.map(([text, x, y, width = text.length * 4, height = 9.64, confidence = 0.9]) => ({ text, x, y: y - top, width, height, confidence })),
+  });
+}
+
 /** A mocked seam: available, renders a white page at 72 dpi, OCR answers `ocr` (default: unavailable). */
 export function fakeSeam(options: {
   available?: boolean;
   png?: Buffer;
-  ocr?: (png: Buffer) => Promise<{ ok: true; items: OcrTextItem[] } | { ok: false }>;
+  ocr?: (png: Buffer) => Promise<OcrPngResult>;
 } = {}) {
   const png = options.png ?? pagePng();
   return {

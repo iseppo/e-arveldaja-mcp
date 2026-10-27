@@ -1932,7 +1932,7 @@ describe("P2 E0: text hazards on the extract_pdf_invoice parse", () => {
       expect(mockedParseDocument).toHaveBeenCalledTimes(1);
       expect(textHazardSignals).toHaveBeenCalledTimes(1);
       expect(vi.mocked(textHazardSignals).mock.calls[0]![0]).toBe(parsed);
-      expect(vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
+      expect(await vi.mocked(textHazardSignals).mock.results[0]!.value).toEqual(TEXT_HAZARD_EXPECTED[kind]);
     },
   );
 });

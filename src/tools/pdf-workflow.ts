@@ -550,7 +550,7 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
           ownCompanyVat,
           ownCompanyRegistryCode,
         });
-        Object.assign(signals, textHazardSignals(parsedDocument, extracted.currency));
+        Object.assign(signals, await textHazardSignals(parsedDocument, extracted.currency, snapshot.snapshotPath));
         // extract_pdf_invoice carries the full OCR text once, as hints.raw_text,
         // so the fallback guidance must point there (not the dropped
         // extracted.raw_text).
