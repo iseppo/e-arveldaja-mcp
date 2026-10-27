@@ -872,7 +872,16 @@ function checkDocumentLevel(reading: DocumentReading, ctx: CheckContext, hazards
   if (hazards.foreign_currency_marker) hold("foreign_currency_marker");
   if (!hazards.eur_stated) hold("currency_not_stated");
   const hazardSignals = new Set<string>(READING_HAZARD_SIGNALS);
+  // Live 2026-10-28 (Royal Apartments, a non-VAT supplier printing the buyer's VAT): `self_vat_detected` stands in for
+  // "the supplier may be us". The reading answers that itself when it gives a supplier registry code that is not ours,
+  // no supplier VAT, and our VAT as the buyer's; every other combination keeps the hazard.
+  const own = ownIds(ctx.own);
+  const ownVat = ctx.own !== "unavailable" && ctx.own.vat ? normalizeVatValue(ctx.own.vat) : undefined;
+  const ownVatAccounted = reading.supplier_reg !== null && !own.has(normalizeReg(reading.supplier_reg))
+    && reading.supplier_vat === null
+    && ownVat !== undefined && reading.buyer_vat !== null && normalizeVatValue(reading.buyer_vat) === ownVat;
   for (const signal of ctx.heuristic.signals) {
+    if (signal === "self_vat_detected" && ownVatAccounted) continue;
     if (hazardSignals.has(signal)) hold(signal as HoldCode);
   }
 }

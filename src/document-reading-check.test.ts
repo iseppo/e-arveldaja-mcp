@@ -639,6 +639,52 @@ describe("checkReading: heuristic signals", () => {
   });
 });
 
+describe("checkReading: self_vat_detected accounted for by the reading (live 2026-10-28, Royal Apartments)", () => {
+  // Supplier "Registrikood: 17190329", "Ei ole käibemaksukohustuslane"; buyer "KMKR EE100000010" (our VAT).
+  const lines = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" });
+  const base: CaseInput = {
+    lines,
+    values: { supplier_vat: null, buyer_reg: null, buyer_vat: "EE100000010", net: 124, vat: 0, gross: 124 },
+    evidence: { supplier_reg: { line: "p1:002", quote: "Registrikood: 10000018" }, supplier_vat: undefined, buyer_reg: undefined, buyer_vat: { line: "p1:003", quote: "KMKR EE100000010" }, net: { line: "p1:005", quote: "Summa 124,00" }, vat: undefined },
+    labels: { supplier_vat: null },
+    ctx: { heuristic: { signals: ["self_vat_detected"], confidence: "high", labelled: {} } },
+  };
+
+  it("T-SELFVAT-accounted: a supplier reg that is not ours, no supplier VAT and our VAT as the buyer's does not hold", () => {
+    const codes = codesOf(base);
+    expect(codes).not.toContain("reading_schema_invalid");
+    expect(codes).not.toContain("self_vat_detected");
+    expect(codes).not.toContain("supplier_is_own");
+  });
+
+  it("T-SELFVAT-buyer-missing: without the buyer VAT read, the own VAT is unaccounted and holds", () => {
+    expect(codesOf({ ...base, values: { ...base.values, buyer_vat: null }, evidence: { ...base.evidence, buyer_vat: undefined } })).toContain("self_vat_detected");
+  });
+
+  it("T-SELFVAT-reg-missing: without a supplier registry code it holds, with supplier_id_missing", () => {
+    const codes = codesOf({ ...base, values: { ...base.values, supplier_reg: null }, evidence: { ...base.evidence, supplier_reg: undefined }, labels: { ...base.labels, supplier_reg: null } });
+    expect(codes).toEqual(expect.arrayContaining(["self_vat_detected", "supplier_id_missing"]));
+  });
+
+  it("T-SELFVAT-own-reg: a supplier registry code equal to ours holds supplier_is_own and self_vat_detected", () => {
+    const codes = codesOf({ ...base, lines: withLines({ 2: "Registrikood: 10000024    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }),
+      values: { ...base.values, supplier_reg: "10000024" }, evidence: { ...base.evidence, supplier_reg: { line: "p1:002", quote: "Registrikood: 10000024" } } });
+    expect(codes).toEqual(expect.arrayContaining(["supplier_is_own", "self_vat_detected"]));
+  });
+
+  it("T-SELFVAT-own-vat-as-supplier: our VAT read as the supplier's holds supplier_is_own and self_vat_detected", () => {
+    const codes = codesOf({ ...base, lines: withLines({ 2: "Registrikood: 10000018    KMKR EE100000010", 3: "Ostja: Ostja AS", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }),
+      values: { ...base.values, supplier_vat: "EE100000010", buyer_vat: null },
+      evidence: { ...base.evidence, supplier_vat: { line: "p1:002", quote: "KMKR EE100000010" }, buyer_vat: undefined }, labels: {} });
+    expect(codes).toEqual(expect.arrayContaining(["supplier_is_own", "self_vat_detected"]));
+  });
+
+  it("T-SELFVAT-other-buyer-vat: a buyer VAT that is not ours leaves the own VAT unaccounted", () => {
+    expect(codesOf({ ...base, lines: withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000099", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }),
+      values: { ...base.values, buyer_vat: "EE100000099" }, evidence: { ...base.evidence, buyer_vat: { line: "p1:003", quote: "KMKR EE100000099" } } })).toContain("self_vat_detected");
+  });
+});
+
 describe("signal classes (§1.4)", () => {
   const fallbackSource = readFileSync(join(process.cwd(), "src/invoice-extraction-fallback.ts"), "utf8");
   const inboxSource = readFileSync(join(process.cwd(), "src/tools/receipt-inbox.ts"), "utf8");
