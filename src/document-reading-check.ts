@@ -17,6 +17,7 @@ import { normalizeInvoiceNumberForComparison } from "./purchase-invoice-status.j
 import {
   citedTokenOriginHolds,
   matchOffsets,
+  normalizeForMatch,
   reverseChargeText,
   type PacketLine,
   type ReadingPacket,
@@ -793,12 +794,32 @@ function checkDocument(doc: Doc, reading: DocumentReading, ctx: CheckContext, re
   return vatZeroNoteProven;
 }
 
+/** A discount label as a whole word, in the money token's own cell or the one before it (Estonian, English, German, Finnish). */
+const DISCOUNT_LABEL_RE = /(?:^|[^\p{L}])(?:soodustus|allahindlus|discount|rabatt|alennus)(?![\p{L}])/iu;
+
 /** A1–A5 and the foreign-rate trio (§2.3). */
 function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards: DocumentTextHazards, hold: HoldFn, deferRates: boolean): void {
   const money: MoneyToken[] = doc.packet.lines.flatMap((line) => tokensFor(doc, line).money);
   const values = [...new Set(money.flatMap((token) => token.values))];
   const eeRates = vatRatesInForceOn(reading.invoice_date);
   const { net, vat, gross } = reading;
+  const readTrio = (t: Trio) => net !== null && vat !== null && gross !== null && near(t.net, net) && near(t.vat, vat) && near(t.gross, gross);
+  // Live 2026-10-28 (Lux ticket `Hind 11,00 / Soodustus 1,10 / Summa 9,90`): an unsigned discount d on the accepted
+  // total reads as a d/(total) % trio (10 % → 11 %), disjoint from the read trio. A trio is a discount trio when it is
+  // not the read trio, its net is the accepted total (read gross or net) and its vat is printed in a cell (or right
+  // after one) labelled as a discount. Such trios are not VAT trios for A3 and the foreign-rate check.
+  const discountValues: number[] = [];
+  for (const line of doc.packet.lines) {
+    const tokens = tokensFor(doc, line);
+    for (const token of tokens.money) {
+      const own = tokens.cells[token.cell]?.text ?? "";
+      const previous = token.cell > 0 ? tokens.cells[token.cell - 1]?.text ?? "" : "";
+      if (DISCOUNT_LABEL_RE.test(normalizeForMatch(`${previous} ${own}`))) discountValues.push(...token.values);
+    }
+  }
+  const isDiscountTrio = (t: Trio) => !readTrio(t)
+    && ((gross !== null && near(t.net, gross)) || (net !== null && near(t.net, net)))
+    && discountValues.some((value) => near(value, t.vat));
 
   // A1
   if (gross !== null) {
@@ -825,12 +846,11 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards:
   if (!deferRates) {
     // A2, A4
     const eeTrios = trios(values, eeRates);
-    const readTrio = (t: Trio) => net !== null && vat !== null && gross !== null && near(t.net, net) && near(t.vat, vat) && near(t.gross, gross);
     if (eeTrios.some((t) => !readTrio(t))) hold("competing_consistent_total");
     if (eeTrios.length > 0 && !eeTrios.some(readTrio)) hold("trio_not_read");
 
     // A3
-    const wideTrios = trios(values, [...eeRates, ...FOREIGN_VAT_RATES]);
+    const wideTrios = trios(values, [...eeRates, ...FOREIGN_VAT_RATES]).filter((t) => !isDiscountTrio(t));
     const disjointPair = wideTrios.some((t1, i) => wideTrios.slice(i + 1).some((t2) => !t1.rates.some((rate) => t2.rates.includes(rate))));
     const vatLike = new Set([0, ...eeRates, ...FOREIGN_VAT_RATES]);
     const percentValues = new Set(percentTokens(doc.packet.lines).map((token) => token.value).filter((value) => vatLike.has(value)));
@@ -841,7 +861,7 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards:
   if (hazards.signed_amount_present) hold("signed_amount_present");
 
   // Foreign-rate trio
-  if (!deferRates && trios(values, FOREIGN_VAT_RATES).some((t) => rateMatches(t.net, t.vat, eeRates).length === 0)) hold("foreign_rate_trio");
+  if (!deferRates && trios(values, FOREIGN_VAT_RATES).filter((t) => !isDiscountTrio(t)).some((t) => rateMatches(t.net, t.vat, eeRates).length === 0)) hold("foreign_rate_trio");
 }
 
 /** §2.4: document-level holds, all text, independent of doc_type. */

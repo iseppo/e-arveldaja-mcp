@@ -523,6 +523,72 @@ describe("checkReading: foreign-rate trio", () => {
   });
 });
 
+describe("checkReading: discount trio (live 2026-10-28, Lux ticket)", () => {
+  // Hind 11,00 − Soodustus 1,10 = Summa 9,90 reads as a 9,90 + 1,10 = 11,00 trio at "11 %" (RO), disjoint from 24 %.
+  const luxTotal = (discountLabel: string) => ["Hind:    11,00", `${discountLabel}:    1,10`, "Summa:    9,90"];
+  const luxReading = {
+    values: { net: 7.98, vat: 1.92, gross: 9.9 },
+    evidence: { net: { line: "p1:005", quote: "Neto 7,98" }, vat: { line: "p1:006", quote: "KM 24% 1,92" }, gross: { line: "p1:007", quote: "Kokku EUR 9,90" }, currency: { line: "p1:007", quote: "Kokku EUR 9,90" } },
+    answers: { gross: { label_quote: "Kokku", competitors: [{ line: "p1:008", quote: "11,00" }], why_this_one: "", verdict: "confirm" } },
+  };
+  const luxLines = (discountLabel: string) => withLines({ 5: "Neto 7,98", 6: "KM 24% 1,92", 7: "Kokku EUR 9,90" }, luxTotal(discountLabel));
+
+  it("T-DISC-gross: an unsigned discount on the accepted gross is not a VAT trio", () => {
+    const codes = codesOf({ ...luxReading, lines: luxLines("Soodustus") });
+    expect(codes).not.toContain("mixed_vat_rate");
+    expect(codes).not.toContain("foreign_rate_trio");
+    expectAccept({ ...luxReading, lines: luxLines("Soodustus") });
+  });
+
+  it("T-DISC-labels: allahindlus / discount / rabatt / alennus count, case-insensitively", () => {
+    for (const label of ["Allahindlus", "DISCOUNT", "Rabatt", "alennus"]) {
+      expect(codesOf({ ...luxReading, lines: luxLines(label) }), label).not.toContain("foreign_rate_trio");
+    }
+  });
+
+  it("T-DISC-net: a pre-VAT discount on the accepted net is not a VAT trio", () => {
+    const lines = withLines({ 5: "Neto 9,00", 6: "KM 24% 2,16", 7: "Kokku EUR 11,16" }, ["Hind:    10,00", "Soodustus:    1,00", "Summa:    9,00"]);
+    expectAccept({
+      lines,
+      values: { net: 9, vat: 2.16, gross: 11.16 },
+      evidence: { net: { line: "p1:005", quote: "Neto 9,00" }, vat: { line: "p1:006", quote: "KM 24% 2,16" }, gross: { line: "p1:007", quote: "Kokku EUR 11,16" }, currency: { line: "p1:007", quote: "Kokku EUR 11,16" } },
+    });
+  });
+
+  it("T-DISC-other-label: the same figures under `Lisatasu` keep both holds", () => {
+    const codes = codesOf({ ...luxReading, lines: luxLines("Lisatasu") });
+    expect(codes).toEqual(expect.arrayContaining(["mixed_vat_rate", "foreign_rate_trio"]));
+  });
+
+  it("T-DISC-glued-label: a discount word glued to letters is no label", () => {
+    expect(codesOf({ ...luxReading, lines: luxLines("Ebasoodustus") })).toContain("foreign_rate_trio");
+  });
+
+  it("T-DISC-not-total: a discount trio whose net is neither the read net nor the read gross keeps both holds", () => {
+    const codes = codesOf({
+      lines: withLines({ 5: "Neto 16,13", 6: "KM 24% 3,87", 7: "Kokku EUR 20,00" }, luxTotal("Soodustus")),
+      values: { net: 16.13, vat: 3.87, gross: 20 },
+      evidence: { net: { line: "p1:005", quote: "Neto 16,13" }, vat: { line: "p1:006", quote: "KM 24% 3,87" }, gross: { line: "p1:007", quote: "Kokku EUR 20,00" }, currency: { line: "p1:007", quote: "Kokku EUR 20,00" } },
+    });
+    expect(codes).toEqual(expect.arrayContaining(["mixed_vat_rate", "foreign_rate_trio"]));
+  });
+
+  it("T-DISC-read-trio: the read trio itself is never exempt (a 25 % reading labelled as a discount still holds)", () => {
+    const lines = ["Butik AB    Kvitto nr A-17", "Reg. nr 10000018    KMKR EE100000007", "Ostja: Ostja AS    Reg. nr 10000024",
+      "Kuupäev 15.03.2026", "Netto 1 000,00", "Soodustus 250,00", "Kokku EUR 1 250,00"];
+    const codes = codesOf({
+      lines,
+      values: { net: 1000, vat: 250, gross: 1250 },
+      evidence: { net: { line: "p1:005", quote: "Netto 1 000,00" }, vat: { line: "p1:006", quote: "Soodustus 250,00" }, gross: { line: "p1:007", quote: "Kokku EUR 1 250,00" }, currency: { line: "p1:007", quote: "Kokku EUR 1 250,00" } },
+    });
+    expect(codes).toContain("foreign_rate_trio");
+  });
+
+  it("T-DISC-signed: a signed discount is still signed_amount_present", () => {
+    expect(codesOf({ ...luxReading, lines: withLines({ 5: "Neto 7,98", 6: "KM 24% 1,92", 7: "Kokku EUR 9,90" }, ["Hind:    11,00", "Soodustus:    -1,10", "Summa:    9,90"]) })).toContain("signed_amount_present");
+  });
+});
+
 describe("checkReading: document-level holds", () => {
   it("T-DT-bookable: doc_type other than invoice/receipt holds", () => {
     for (const docType of ["credit_note", "multiple_documents", "other"]) {
