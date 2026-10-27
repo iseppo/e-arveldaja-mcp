@@ -39,12 +39,30 @@ describe("real attachment lifecycle and fresh receipt fingerprint", () => {
     expect(fake.calls.some(c => c.path.endsWith("/document_user") && c.method === "GET")).toBe(true);
     expect(fake.api.transactions.confirm).not.toHaveBeenCalled();
   });
-  it("retains the original AI2 VAT mismatch instead of waiving actual row VAT", async () => {
+  it("accepts the API ignoring the last-row residue (AI2 24.20 / 5.80 / 30): books with the document's VAT", async () => {
+    // Live 2026-10-19 and 2026-10-28 (Tele2): a VAT-registered row drops the residue's project gross and keeps net × rate.
     const fake = receiptAttachmentTransport({ isVatRegistered: true, net: 24.20, vat: 5.80, gross: 30 });
+    const confirm = vi.spyOn(fake.api.purchaseInvoices, "confirmWithTotals");
+    const result = await run(fake);
+    expect(result.status).toBe("matched");
+    expect(fake.read()).toMatchObject({ status: "CONFIRMED", vat_price: 5.80 });
+    expect(fake.read().items[0]).toMatchObject({ vat_amount: 5.81, project_no_vat_gross_price: null });
+    expect(confirm).toHaveBeenCalledWith(fake.id, true, { expectedDraftFingerprint: expect.any(String) });
+  });
+  it("still holds a last-row VAT that is not exactly net × rate", async () => {
+    const fake = receiptAttachmentTransport({ isVatRegistered: true, net: 24.20, vat: 5.80, gross: 30,
+      onInvoiceGet: (row, nth) => nth >= 3 ? { ...row, items: [{ ...row.items[0], vat_amount: 5.82 }] } : row });
     const result = await run(fake);
     expect(result.status).toBe("needs_review"); expect(result.created_invoice?.id).toBe(fake.id);
-    expect(result.notes.join(" ")).toContain("vat_amount"); expect(result.notes.join(" ")).toContain("project_no_vat_gross_price");
-    expect(fake.read().items[0]).toMatchObject({ vat_amount: 5.81, project_no_vat_gross_price: null });
+    expect(result.notes.join(" ")).toContain("vat_amount");
+    expect(downstream(fake)).toEqual([]);
+  });
+  it("still holds a header VAT that is not the document's", async () => {
+    const fake = receiptAttachmentTransport({ isVatRegistered: true, net: 24.20, vat: 5.80, gross: 30,
+      onInvoiceGet: row => ({ ...row, vat_price: 5.81 }) });
+    const result = await run(fake);
+    expect(result.status).toBe("needs_review"); expect(result.created_invoice?.id).toBe(fake.id);
+    expect(result.notes.join(" ")).toContain("vat_price");
     expect(downstream(fake)).toEqual([]);
   });
 });

@@ -42,4 +42,31 @@ describe("shared purchase draft evidence", () => {
     const at24Draft = { ...draft, items: [{ ...draft.items[0], vat_accounts_id: null, cl_vat_articles_id: null }] };
     expect(draftReadbackMismatches(at24Draft, at24, { vatPrice: 24, grossPrice: 124 }, true)).toEqual(expect.arrayContaining(["items[0].vat_accounts_id", "items[0].cl_vat_articles_id"]));
   });
+
+  it("accepts the API ignoring the last row's VAT residue on a VAT-registered invoice, and nothing wider", () => {
+    // Live 2026-10-28 (Tele2): net 483.07 at 24% is 115.94; the invoice prints VAT 115.93.
+    const residueModel = { ...model, items: [{ ...model.items[0], total_net_price: 483.07 }] };
+    const totals = { vatPrice: 115.93, grossPrice: 599 };
+    const header = { net_price: 483.07, vat_price: 115.93, gross_price: 599, base_net_price: 483.07, base_vat_price: 115.93, base_gross_price: 599 };
+    const row = { ...draft.items[0], total_net_price: 483.07, base_total_net_price: 483.07 };
+    const ignored = { ...draft, ...header, items: [{ ...row, vat_amount: 115.94, project_no_vat_gross_price: null }] };
+    const absorbed = { ...draft, ...header, items: [{ ...row, vat_amount: 115.93, project_no_vat_gross_price: 599 }] };
+    expect(draftReadbackMismatches(absorbed, residueModel, totals, true)).toEqual([]);
+    expect(draftReadbackMismatches(ignored, residueModel, totals, true)).toEqual([]);
+    // The invoice VAT must still be the approved one, and the row VAT exactly net × rate.
+    expect(draftReadbackMismatches({ ...ignored, vat_price: 115.94 }, residueModel, totals, true)).toContain("vat_price");
+    expect(draftReadbackMismatches({ ...ignored, items: [{ ...ignored.items[0], vat_amount: 115.95 }] }, residueModel, totals, true)).toContain("items[0].vat_amount");
+    // Without a residue there is nothing to ignore.
+    expect(draftReadbackMismatches({ ...draft, items: [{ ...draft.items[0], vat_amount: 24.01 }] }, model, { vatPrice: 24, grossPrice: 124 }, true)).toContain("items[0].vat_amount");
+    // Only a VAT-registered company: the same readback shape on a non-VAT company is a mismatch.
+    expect(draftReadbackMismatches(ignored, residueModel, totals, false)).not.toEqual([]);
+    // Only the last row: a first row reading the same shape is still compared normally.
+    const twoModel = { ...residueModel, items: [{ ...model.items[0], total_net_price: 100 }, { ...model.items[0], total_net_price: 483.07 }] };
+    const twoTotals = { vatPrice: 139.93, grossPrice: 723 };
+    const twoHeader = { net_price: 583.07, vat_price: 139.93, gross_price: 723, base_net_price: 583.07, base_vat_price: 139.93, base_gross_price: 723 };
+    const first = { ...draft.items[0], total_net_price: 100, base_total_net_price: 100, vat_amount: 24, project_no_vat_gross_price: null };
+    const twoDraft = { ...draft, ...twoHeader, items: [first, { ...row, vat_amount: 115.94, project_no_vat_gross_price: null }] };
+    expect(draftReadbackMismatches(twoDraft, twoModel, twoTotals, true)).toEqual([]);
+    expect(draftReadbackMismatches({ ...twoDraft, items: [{ ...first, vat_amount: 24.01 }, twoDraft.items[1]] }, twoModel, twoTotals, true)).toEqual(["items[0].vat_amount"]);
+  });
 });

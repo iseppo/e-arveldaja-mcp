@@ -145,8 +145,15 @@ export function draftReadbackMismatches(
     // clears the VAT account and VAT article the create sent; with no VAT there is no VAT posting either way.
     const zeroRateNulls = isVatRegistered && item.vat_rate_dropdown === "0" && vat === 0
       && actual.vat_accounts_id === null && actual.cl_vat_articles_id === null && (actual.vat_accounts_dimensions_id ?? null) === null;
+    // Observed live (2026-10-28, Tele2 94905034: net 483.07 at 24%, invoice VAT 115.93): on a VAT-registered row the
+    // API ignores the residue's project_no_vat_gross_price, reads it back empty and keeps the item VAT at net × rate
+    // (115.94); the invoice VAT stays the approved one (checked on the header). Only the last row carries the residue.
+    const unabsorbedVat = roundMoney(net * parseVatRateDropdown(item.vat_rate_dropdown) / 100);
+    const residueIgnored = isVatRegistered && preview.ok && preview.lastItemGross !== undefined && index === expectedItems.length - 1
+      && isAbsent(actual.project_no_vat_gross_price) && sameValue("vat_amount", unabsorbedVat, actual.vat_amount);
     const expected: Record<string, unknown> = {
       ...item, total_net_price: net, vat_amount: vat,
+      ...(residueIgnored ? { project_no_vat_gross_price: undefined, vat_amount: unabsorbedVat } : {}),
       vat_rate: item.vat_rate ?? parseVatRateDropdown(item.vat_rate_dropdown),
       base_total_net_price: item.base_total_net_price ?? roundMoney(net / rate),
       ...(foldedNulls ? { vat_amount: null, vat_rate: null, cl_vat_articles_id: null } : {}),
