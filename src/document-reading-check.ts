@@ -608,7 +608,7 @@ export function checkReading(packet: ReadingPacket, readingInput: unknown, proof
   const vatZeroNoteProven = checkDocument(doc, reading, ctx, reverseChargeNotePresent, hold, deferRates);
   const hazards = documentTextHazards(packet.lines, (line) => tokensFor(doc, line as PacketLine));
   checkAmounts(doc, reading, proof, hazards, hold, deferRates);
-  checkDocumentLevel(reading, ctx, hazards, hold);
+  checkDocumentLevel(doc, reading, ctx, hazards, hold);
   checkProof(doc, reading, proof, valueSpans, hold, note, resolved);
   checkHeuristicConflict(reading, ctx.heuristic, hold);
 
@@ -865,7 +865,7 @@ function checkAmounts(doc: Doc, reading: DocumentReading, proof: Proof, hazards:
 }
 
 /** §2.4: document-level holds, all text, independent of doc_type. */
-function checkDocumentLevel(reading: DocumentReading, ctx: CheckContext, hazards: DocumentTextHazards, hold: HoldFn): void {
+function checkDocumentLevel(doc: Doc, reading: DocumentReading, ctx: CheckContext, hazards: DocumentTextHazards, hold: HoldFn): void {
   if (reading.doc_type !== "invoice" && reading.doc_type !== "receipt") hold("doc_type_not_bookable");
   if (hazards.credit_word_present) hold("credit_word_present");
   if (reading.currency !== null && reading.currency !== "EUR") hold("non_eur_currency", "currency");
@@ -875,11 +875,15 @@ function checkDocumentLevel(reading: DocumentReading, ctx: CheckContext, hazards
   // Live 2026-10-28 (Royal Apartments, a non-VAT supplier printing the buyer's VAT): `self_vat_detected` stands in for
   // "the supplier may be us". The reading answers that itself when it gives a supplier registry code that is not ours,
   // no supplier VAT, and our VAT as the buyer's; every other combination keeps the hazard.
+  // Not when our own registry code is printed anywhere (a role-swapped reading of our own sale invoice).
   const own = ownIds(ctx.own);
   const ownVat = ctx.own !== "unavailable" && ctx.own.vat ? normalizeVatValue(ctx.own.vat) : undefined;
+  const ownReg = ctx.own !== "unavailable" && ctx.own.reg ? normalizeReg(ctx.own.reg) : undefined;
+  const ownRegPrinted = ownReg === undefined || doc.packet.lines.some((line) => new RegExp(`(?<!\\d)${ownReg}(?!\\d)`).test(normalizeReg(line.text)));
   const ownVatAccounted = reading.supplier_reg !== null && !own.has(normalizeReg(reading.supplier_reg))
     && reading.supplier_vat === null
-    && ownVat !== undefined && reading.buyer_vat !== null && normalizeVatValue(reading.buyer_vat) === ownVat;
+    && ownVat !== undefined && reading.buyer_vat !== null && normalizeVatValue(reading.buyer_vat) === ownVat
+    && !ownRegPrinted;
   for (const signal of ctx.heuristic.signals) {
     if (signal === "self_vat_detected" && ownVatAccounted) continue;
     if (hazardSignals.has(signal)) hold(signal as HoldCode);

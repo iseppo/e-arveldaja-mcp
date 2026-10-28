@@ -657,6 +657,16 @@ describe("checkReading: self_vat_detected accounted for by the reading (live 202
     expect(codes).not.toContain("supplier_is_own");
   });
 
+  it("T-SELFVAT-own-reg-printed: our own registry code printed anywhere on the page keeps the hold (a role-swapped own sale invoice)", () => {
+    const printed = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    Reg. nr 10000024    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" });
+    expect(codesOf({ ...base, lines: printed })).toContain("self_vat_detected");
+    const spaced = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, ["Reg 1000 0024"]);
+    expect(codesOf({ ...base, lines: spaced })).toContain("self_vat_detected");
+    // A longer number containing our code is not our code.
+    const inside = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, ["Tellimus 910000024"]);
+    expect(codesOf({ ...base, lines: inside })).not.toContain("self_vat_detected");
+  });
+
   it("T-SELFVAT-buyer-missing: without the buyer VAT read, the own VAT is unaccounted and holds", () => {
     expect(codesOf({ ...base, values: { ...base.values, buyer_vat: null }, evidence: { ...base.evidence, buyer_vat: undefined } })).toContain("self_vat_detected");
   });
