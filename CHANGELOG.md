@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.2] - 2026-10-28
+
 ### Fixed
 
 - **Re-linking a payment that was imported by an older version of this server now verifies the money direction again instead of reporting it as unverified.** Details: for a CAMT marker without a direction field, the post-confirm ledger check re-verifies the legacy signature for both stored types and uses the one that matches (`camt_checksum_legacy`); a marker that matches neither, a poisoned marker or a modern marker with a bad signature stays `unverified_source_marker` and never falls back to the invoice direction.
