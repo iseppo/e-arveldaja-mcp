@@ -18,6 +18,7 @@ import { parseDocument, type ParsedDocument } from "../document-parser.js";
 import { blankLeaderLines, buildLostValueCrops, defaultLostValueSeam, type BlankLeaderProof, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
 import { LOST_VALUE_FIELDS, matchLostValue, parseLostValueReading, type LostValueField, type LostValueReason } from "../document-reading-lost-value.js";
 import { buildReadingPacket, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
+import { printedPaymentReference } from "../document-reading-reference.js";
 import {
   checkReading,
   labelledHeuristicValues,
@@ -174,6 +175,8 @@ export interface VerifyDocumentResult {
   bookingItemsRequired?: true;
   /** Set when the history template's item title carries a date: the client repeats verify with `item_title`. */
   itemTitleRequired?: true;
+  /** The packet prints several distinct valid payment references: none is bound (counted as a card minor note). */
+  paymentReferenceNote?: string;
   /** The owner card (present when nothing blocks). */
   card?: ReadingCard;
   /** The date was lost: no booking is built until the owner types it; this is what create will book (DeferredBookingBasis). */
@@ -520,6 +523,8 @@ export async function buildReadingBooking(
   material: Pick<MaterializedSnapshot, "source_sha256" | "fileName">,
   isVatReg: boolean,
   knownIban: string | undefined,
+  /** The payment reference the packet prints (printedPaymentReference); never a client argument. */
+  paymentReference: string | undefined,
 ): Promise<ReadingBookingResult> {
   let items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values, isVatReg, input?.itemTitle)];
   let nonDeductible = false;
@@ -542,6 +547,7 @@ export async function buildReadingBooking(
     ...(values.gross !== null ? { grossPrice: values.gross } : {}),
     ...(input?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.liabilityAccountsId } : {}),
     ...(knownIban ? { bankAccountNo: knownIban } : {}),
+    ...(paymentReference !== undefined ? { refNumber: paymentReference } : {}),
   };
   const effective = await computeEffectiveBooking(api, fields, material.source_sha256, material.fileName);
   if (!effective.ok) return { bookingSideSignals: [], failure: { code: effective.error.code, message: effective.error.message } };
@@ -692,7 +698,7 @@ const basisItem = (item: PurchaseInvoiceItem, isVatReg: boolean): DeferredBasisI
   reversed_vat_id: isVatReg ? item.reversed_vat_id ?? null : null,
 });
 
-function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues, knownIban: string | undefined): DeferredBookingBasis {
+function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues, knownIban: string | undefined, paymentReference: string | undefined): DeferredBookingBasis {
   // The template's net comes from the values, exactly as itemWithAmounts sets it.
   const items = "items" in source ? parsePurchaseInvoiceItems(source.items)
     : [{
@@ -705,7 +711,7 @@ function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingI
     vat_registered: isVatReg,
     liability_accounts_id: input?.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
     bank_account_no: knownIban ? desandboxText(knownIban) : null,
-    ref_number: null,
+    ref_number: paymentReference ?? null,
     notes: null,
     items: (desandboxAllStrings(items) as PurchaseInvoiceItem[]).map((item) => basisItem(item, isVatReg)),
     gross_price: values.gross,
@@ -1032,6 +1038,11 @@ class ReadingDocumentOperations {
       let bookingNotes: ReadingBookingNotes | undefined;
       let dimensionChoiceRequired: BookingSuggestionCore["dimension_conflicts"] = [];
       const bookingDeferred = ratesDeferredForLostDate(packet, values.invoice_date);
+      // The printed payment reference (viitenumber) is bound into the booking; several distinct ones bind nothing.
+      const reference = printedPaymentReference(packet);
+      const paymentReference = reference && "value" in reference ? reference.value : undefined;
+      const paymentReferenceNote = reference && "ambiguous" in reference
+        ? `payment reference not bound: ${reference.ambiguous.length} distinct values printed` : undefined;
       if (supplierClient?.id !== undefined) {
         isVatReg = await isCompanyVatRegistered(this.api);
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
@@ -1043,7 +1054,7 @@ class ReadingDocumentOperations {
         // A gross the owner still has to type cannot be booked yet, and a lost date leaves the VAT rate, the non-VAT
         // form, the journal date and the term unknown: no booking is built or bound at verify (Step 0).
         if (itemsSource && values.gross !== null && !bookingDeferred) {
-          booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban);
+          booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban, paymentReference);
           if (booking.view) {
             const binding = checkBookingBinding(values, booking.view, {
               vatRegistered: isVatReg,
@@ -1069,7 +1080,7 @@ class ReadingDocumentOperations {
             values,
             evidence: parsedReading.value.evidence,
             holds,
-            noteCount: check.notes?.length ?? 0,
+            noteCount: (check.notes?.length ?? 0) + (paymentReferenceNote !== undefined ? 1 : 0),
             heuristic: heuristic.view,
             supplier: { clientId: supplierClient.id, name: supplierClient.name },
             company: ownCompany,
@@ -1086,6 +1097,7 @@ class ReadingDocumentOperations {
         ...(bookingNotes ? { bookingNotes } : {}),
         ...(dimensionChoiceRequired.length ? { dimensionChoiceRequired } : {}),
         ...(supplierClient?.id !== undefined && (!itemsSource || dimensionChoiceRequired.length) ? { bookingItemsRequired: true as const } : {}),
+        ...(paymentReferenceNote !== undefined ? { paymentReferenceNote } : {}),
         ...(marker ? { indeterminateMarker: marker.id } : {}),
         ...(lostValues ? { lostValues } : {}),
       };
@@ -1101,7 +1113,7 @@ class ReadingDocumentOperations {
         // The supplier name as computeEffectiveBooking reads it; a failed read holds like the client list (nothing written).
         const supplierName = await this.api.clients.get(supplierClient.id).then((client) => desandboxText(client.name), () => undefined);
         if (supplierName === undefined) return ok({ ...result, holds: [{ code: "clients_unavailable" }] });
-        bookingBasis = deferredBookingBasis(itemsSource, input.booking, supplierName, isVatReg, values, knownIban);
+        bookingBasis = deferredBookingBasis(itemsSource, input.booking, supplierName, isVatReg, values, knownIban, paymentReference);
       }
       if (!bookingBasis && !booking?.effective) return ok(result);
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
@@ -1260,8 +1272,9 @@ class ReadingDocumentOperations {
           }
           isVatReg = await isCompanyVatRegistered(this.api);
           const knownIban = sameIban(final.supplier_iban, supplierClient.bank_account_no) ? final.supplier_iban ?? undefined : undefined;
+          const reference = printedPaymentReference(packet);
           booking = await buildReadingBooking(this.api, final, plan.supplier_client_id, plan.items_source as unknown as ReadingItemsSource,
-            plan.booking_input as Omit<ReadingBookingInput, "items">, material, isVatReg, knownIban);
+            plan.booking_input as Omit<ReadingBookingInput, "items">, material, isVatReg, knownIban, reference && "value" in reference ? reference.value : undefined);
           if (booking.failure) return fail(booking.failure.code, booking.failure.message, "never");
           const binding = checkBookingBinding(final, booking.view!, {
             vatRegistered: isVatReg,

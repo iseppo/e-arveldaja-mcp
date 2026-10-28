@@ -364,6 +364,7 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.dimensionChoiceRequired ? { dimension_choice_required: result.dimensionChoiceRequired } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.itemTitleRequired ? { item_title_required: true } : {}),
+    ...(result.paymentReferenceNote !== undefined ? { payment_reference_note: result.paymentReferenceNote } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.lostValues ? { lost_values: renderLostValues(result.lostValues) } : {}),
     ...(result.indeterminateMarker ? { indeterminate_marker: result.indeterminateMarker } : {}),

@@ -38,3 +38,16 @@ export function canonicalRefNumber(value: string | null | undefined): CanonicalR
     full: trimmed,
   };
 }
+
+/**
+ * The Estonian payment reference (viitenumber) check: 2–20 digits whose last digit is the 7-3-1 check digit
+ * (weights 7, 3, 1 repeating from the right over the other digits; check = (10 − sum mod 10) mod 10).
+ */
+export function isValidEstonianReferenceNumber(value: string): boolean {
+  if (!/^\d{2,20}$/.test(value)) return false;
+  const body = value.slice(0, -1);
+  const weights = [7, 3, 1];
+  let sum = 0;
+  for (let i = 0; i < body.length; i += 1) sum += Number(body[body.length - 1 - i]) * weights[i % 3]!;
+  return (10 - (sum % 10)) % 10 === Number(value[value.length - 1]);
+}

@@ -17,7 +17,7 @@ import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { fakeSeam, lostValueParse, PLAIN_PDF } from "../__fixtures__/document-reading/lost-value.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type { LostValuesPayload, ReadToReadPayload } from "./process-accounting-document.js";
-import { FIXTURE_NOW, HISTORY_DETAIL, ownClient, packetFor, readingApi, readingFor, readingParse, served, supplierClient, type ReadingApiOptions } from "../__fixtures__/document-reading/verified-draft.js";
+import { BASE_LINES, FIXTURE_NOW, HISTORY_DETAIL, ownClient, packetFor, readingApi, readingFor, readingParse, served, supplierClient, type ReadingApiOptions } from "../__fixtures__/document-reading/verified-draft.js";
 
 vi.mock("../audit-log.js", () => ({ logAudit: vi.fn() }));
 vi.mock("../document-parser.js", () => ({ parseDocument: vi.fn() }));
@@ -191,7 +191,7 @@ describe("process_accounting_document reading modes: read and verify", () => {
     const { handler } = setupReading(true);
     const file = writePdf();
     const { reading, proof } = readingFor(packetFor(file.sha256));
-    for (const extra of [{ base_gross_price: 124 }, { currency_rate: 1 }, { gross_price: 124 }, { supplier_client_id: 4242 }]) {
+    for (const extra of [{ base_gross_price: 124 }, { currency_rate: 1 }, { gross_price: 124 }, { supplier_client_id: 4242 }, { ref_number: "3114100" }, { notes: "x" }]) {
       const result = await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, ...extra });
       expect(result.isError).toBe(true);
       expect(parse(result).category).toBe("reading_args_refused");
@@ -377,5 +377,26 @@ describe("process_accounting_document reading modes: untrusted text", () => {
     expect(leaks).toEqual([]);
     expect(body.booking_review.supplier_name).toMatch(/^<<UNTRUSTED_OCR_START:/);
     expect(body.booking_review.items[0].custom_title).toMatch(/^<<UNTRUSTED_OCR_START:/);
+  });
+
+  it("a printed payment reference is shown wrapped in booking_review; two different ones leave a note instead", async () => {
+    const { handler } = setupReading(true);
+    const withRef = [...BASE_LINES, "Viitenumber: 3114100"];
+    mockedParse.mockResolvedValue(readingParse(withRef));
+    const file = writePdf("%PDF reference facade");
+    const { reading, proof } = readingFor(packetFor(file.sha256, withRef));
+    const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect(body.status).toBe("ready");
+    expect(body.booking_review.ref_number).toMatch(/^<<UNTRUSTED_OCR_START:.*3114100/s);
+    expect(body).not.toHaveProperty("payment_reference_note");
+
+    const twoRefs = [...BASE_LINES, "Viitenumber: 3114100", "Viitenumber: 1234561"];
+    mockedParse.mockResolvedValue(readingParse(twoRefs));
+    const other = writePdf("%PDF two references facade");
+    const second = readingFor(packetFor(other.sha256, twoRefs));
+    const ambiguous = parse(await handler({ mode: "verify", file_path: other.path, document_reading: second.reading, proof: second.proof }));
+    expect(ambiguous.status).toBe("ready");
+    expect(ambiguous.booking_review).not.toHaveProperty("ref_number");
+    expect(ambiguous.payment_reference_note).toBe("payment reference not bound: 2 distinct values printed");
   });
 });

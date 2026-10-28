@@ -571,6 +571,73 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
   });
 });
 
+describe("payment reference (viitenumber) printed on the document (live 2026-10-28, Arvutitark 447292)", () => {
+  const LINES_REF = [...BASE_LINES, "Viitenumber: 3114100", "Palume tasuda viitenumber 3114100."];
+  const LINES_TWO_REFS = [...BASE_LINES, "Viitenumber: 3114100", "Viitenumber: 1234561"];
+  const LOST_REF_LINES = LINES_REF.map((line) => (line.startsWith("Kuupäev") ? "Kuupäev ...................." : line));
+  const LOST_DATE: ReadingCaseInput = { values: { invoice_date: null }, evidence: { invoice_date: undefined }, labels: { invoice_date: null } };
+  const typed = { "t:invoice_date": { value: "2026-03-15" }, "t:invoice_number": { value: "A-17" } };
+
+  it("binds the one printed reference into the booking and writes bank_ref_number; the readback passes", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LINES_REF));
+    const file = writePdf("%PDF reference");
+    const verify = await verified(w, file, {}, LINES_REF);
+    expect(verify.status).toBe("ready");
+    expect(verify.booking).toMatchObject({ ref_number: "3114100" });
+    expect(verify.paymentReferenceNote).toBeUndefined();
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ bank_ref_number: "3114100" });
+    expect(outcome.value.readbackMismatch).toBeUndefined();
+    expect(outcome.value.confirmPlan).toBeDefined();
+  });
+
+  it("a draft that reads back another reference is a readback mismatch", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LINES_REF));
+    const file = writePdf("%PDF reference readback");
+    const verify = await verified(w, file, {}, LINES_REF);
+    w.createAndSetTotals.mockImplementationOnce(async (data: Record<string, unknown>, vat?: number, gross?: number) =>
+      ({ id: w.commit({ ...data, bank_ref_number: "1234561" }, vat, gross) }));
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(outcome.value.confirmPlan).toBeUndefined();
+    expect(outcome.value.readbackMismatch).toContain("bank_ref_number");
+  });
+
+  it("a packet without a reference label binds nothing", async () => {
+    const w = world();
+    const verify = await verified(w, writePdf("%PDF no reference"));
+    expect(verify.booking!.ref_number).toBeUndefined();
+    expect(verify.paymentReferenceNote).toBeUndefined();
+  });
+
+  it("two different valid references bind nothing and add a minor note", async () => {
+    const w = world();
+    const plain = await verified(w, writePdf("%PDF plain for note count"));
+    mockedParse.mockResolvedValue(readingParse(LINES_TWO_REFS));
+    const file = writePdf("%PDF two references");
+    const verify = await verified(w, file, {}, LINES_TWO_REFS);
+    expect(verify.status).toBe("ready");
+    expect(verify.booking!.ref_number).toBeUndefined();
+    expect(verify.paymentReferenceNote).toBe("payment reference not bound: 2 distinct values printed");
+    expect(verify.card!.minor_notes).toBe(plain.card!.minor_notes + 1);
+  });
+
+  it("the deferred booking basis carries the reference and create books it", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LOST_REF_LINES));
+    const file = writePdf("%PDF lost date with reference");
+    const verify = await verified(w, file, LOST_DATE, LOST_REF_LINES);
+    expect(verify.booking).toBeUndefined();
+    expect(verify.bookingBasis).toMatchObject({ ref_number: "3114100" });
+    const outcome = await create(w, file, verify.planHandle!, typed);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ bank_ref_number: "3114100" });
+  });
+});
+
 describe("reading create serialisation (§5.2a)", () => {
   it("two handles for the same file in parallel give exactly one write", async () => {
     const w = world();
