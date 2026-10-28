@@ -297,14 +297,19 @@ export function citedTokenOriginHolds(
   const holds: OriginHoldCode[] = [];
   const related = (text: string) => token.includes(text) || text.includes(token);
   // Live 2026-10-28 (Tele2 logo OCR "9"/"EE", Anthropic logo "A"): a substring hit is released only by place — the OCR
-  // item is a strict fragment of the token, it and a native item that prints the token as a whole token both have a
-  // box, and the OCR box touches none of those native boxes. An OCR item containing the whole value is always held
+  // item is a strict fragment of the token, it has a box, a native item prints the token as a whole token, and the OCR
+  // box touches no native item at all (a stray logo glyph, not a character completing a native prefix such as "A-1"
+  // + OCR "7" while "Tellimus A-17" is printed elsewhere); a native item without a box may touch it, so it holds. Nor
+  // may it touch another OCR fragment of the same value (OCR "A-1" + "7"; Tele2's logo pieces touch each other but not
+  // two of one value). An OCR item containing the whole value is always held
   // ("Tasuda 59,00" read by OCR while the text layer prints only "Eelmine saldo 159,00"). Without geometry on either
   // side the substring rule stands (the rejected separator-boundary relaxation stays rejected).
   const printing = pageOrigin.native_items.filter((item) => item.box !== undefined && printsWholeToken(item.raw, tokenText));
   const ocrHit = pageOrigin.ocr_items.some((item) => related(item.text)
     && !(item.box !== undefined && token.includes(item.text) && item.text !== token && printing.length > 0
-      && !printing.some((native) => boxesTouch(item.box!, native.box!))));
+      && !pageOrigin.native_items.some((native) => native.box === undefined || boxesTouch(item.box!, native.box))
+      && !pageOrigin.ocr_items.some((other) => other !== item && related(other.text)
+        && (other.box === undefined || boxesTouch(item.box!, other.box)))));
   if (ocrHit) holds.push("ocr_cited_text");
   if (!pageOrigin.native.includes(token)) holds.push("cited_origin_unestablished");
   return holds;

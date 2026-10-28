@@ -261,6 +261,23 @@ describe("document-reading packet: cited-token origin", () => {
       expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
     });
 
+    it("T-PK-geo-ocr-pair: two touching OCR fragments of one value hold; touching unrelated OCR does not", () => {
+      // Review 2026-10-28: OCR "A-1" + OCR "7" in a scanned stamp, "Tellimus A-17" printed elsewhere.
+      const items = [{ text: "Tellimus A-17", ocr: false, box: box(50, 600, 70) }, { text: "A-1", ocr: true, box: box(300, 100, 30) }, { text: "7", ocr: true, box: box(331, 100, 6) }];
+      expect(citedTokenOriginHolds(makePacket(["Tellimus A-17", "A-1 7"], { items }), 1, "A-17", "invoice_number")).toEqual(["ocr_cited_text"]);
+      // Tele2 shape: logo pieces "9" and "M" touch each other; only "9" is part of the value.
+      const logo = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "9", ocr: true, box: box(400, 100, 10, 25) }, { text: "M", ocr: true, box: box(411, 100, 10, 25) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00"], { items: logo }), 1, "599,00", "gross")).toEqual([]);
+    });
+
+    it("T-PK-geo-touch-non-printing: an OCR fragment touching only a non-printing native item holds", () => {
+      const items = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Telefon", ocr: false, box: box(400, 100, 40, 10) }, { text: "9", ocr: true, box: box(441, 100, 6, 10) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Telefon"], { items }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+      // Beyond the slack (0.25 × the native height = 2.5) the fragment is a stray glyph again.
+      const far = items.map((item) => item.ocr ? { ...item, box: box(443, 100, 6, 10) } : item);
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Telefon"], { items: far }), 1, "599,00", "gross")).toEqual([]);
+    });
+
     it("T-PK-geo-native-no-box: a printing native item without a box falls back to the substring rule", () => {
       const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false }, { text: "9", ocr: true, box: box(400, 790, 12, 25) }] });
       expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
@@ -297,6 +314,20 @@ describe("document-reading packet: cited-token origin", () => {
     it("T-PK-geo-any-printing-item: the OCR fragment touching any item that prints the token holds", () => {
       const twice = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Tasuda 599,00", ocr: false, box: box(50, 780, 60) }, { text: "9", ocr: true, box: box(95, 781, 8, 9) }];
       expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Tasuda 599,00"], { items: twice }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-native-prefix: an OCR fragment touching any native item holds, even one that does not print the token", () => {
+      // Review 2026-10-28 (d92f59c): native "Arve nr A-1" + OCR "7" beside it, "Tellimus A-17" printed elsewhere.
+      const items = [{ text: "Arve nr A-1", ocr: false, box: box(50, 100, 60) }, { text: "7", ocr: true, box: box(111, 100, 6) },
+        { text: "Tellimus A-17", ocr: false, box: box(50, 600, 70) }];
+      expect(citedTokenOriginHolds(makePacket(["Arve nr A-1 7", "Tellimus A-17"], { items }), 1, "A-17", "invoice_number")).toEqual(["ocr_cited_text"]);
+      const apart = items.map((item) => item.ocr ? { ...item, box: box(400, 300, 6) } : item);
+      expect(citedTokenOriginHolds(makePacket(["Arve nr A-1", "Tellimus A-17", "7"], { items: apart }), 1, "A-17", "invoice_number")).toEqual([]);
+    });
+
+    it("T-PK-geo-native-no-box: a native item without a box may touch the fragment, so it holds", () => {
+      const items = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Märkus", ocr: false }, { text: "9", ocr: true, box: box(400, 100, 10, 25) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Märkus"], { items }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
     });
 
     it("T-PK-geo-digest: boxes do not enter the packet digest or text", () => {
