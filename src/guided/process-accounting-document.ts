@@ -363,7 +363,7 @@ function renderVerify(result: VerifyDocumentResult) {
     } : {}),
     ...(result.dimensionChoiceRequired ? { dimension_choice_required: result.dimensionChoiceRequired } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
-    ...(result.itemTitleRequired ? { item_title_required: true } : {}),
+    ...(result.itemTitleRequired ? { item_title_required: true, ...(result.itemTitleReason ? { item_title_required_reason: result.itemTitleReason } : {}) } : {}),
     ...(result.paymentReferenceNote !== undefined ? { payment_reference_note: result.paymentReferenceNote } : {}),
     ...(result.card ? { card: renderCard(result.card) } : {}),
     ...(result.lostValues ? { lost_values: renderLostValues(result.lostValues) } : {}),
@@ -379,7 +379,7 @@ function renderVerify(result: VerifyDocumentResult) {
         : result.bookingItemsRequired
         ? "Review the decision notes and dimension_choice_required, use list_account_dimensions or the UI to choose active dimensions on the affected accounts, then repeat mode='verify' with full explicit items (accounts, selected dimensions, VAT settings)."
         : result.itemTitleRequired
-        ? "The suggested item title comes from the supplier's previous invoice and carries a date or period that may not fit this document: call mode='verify' again with the same arguments plus item_title, a title for this document (the service and its date or period as this document prints them)."
+        ? "The suggested item title comes from the supplier's previous invoice and carries a date or period, or names goods this document does not print (item_title_required_reason): call mode='verify' again with the same arguments plus item_title, a title for this document (the goods or service and their date or period as this document prints them)."
         : "The verified reading holds on the codes above; nothing can be created on this path. Book the document with mode='prepare' instead.",
     mutation_occurred: false,
   };

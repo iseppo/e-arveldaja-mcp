@@ -17,7 +17,7 @@ import type { FileInputSnapshot, FileInputSource } from "../file-input-snapshot.
 import { parseDocument, type ParsedDocument } from "../document-parser.js";
 import { blankLeaderLines, buildLostValueCrops, defaultLostValueSeam, type BlankLeaderProof, lostValueRects, ocrLostValueLine, type LostValueCrops, type LostValueSeam } from "./lost-value-ocr.js";
 import { LOST_VALUE_FIELDS, matchLostValue, parseLostValueReading, type LostValueField, type LostValueReason } from "../document-reading-lost-value.js";
-import { buildReadingPacket, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
+import { buildReadingPacket, normalizeForMatch, packetLostLeaders, renderPacketLine, type PacketHoldCode, type ReadingPacket } from "../document-reading-packet.js";
 import { printedPaymentReference } from "../document-reading-reference.js";
 import {
   checkReading,
@@ -173,8 +173,9 @@ export interface VerifyDocumentResult {
   dimensionChoiceRequired?: BookingSuggestionCore["dimension_conflicts"];
   /** Set when the server could not suggest booking items: the client repeats verify with `items`. */
   bookingItemsRequired?: true;
-  /** Set when the history template's item title carries a date: the client repeats verify with `item_title`. */
+  /** Set when the history template's item title carries a date or names goods this document does not print: the client repeats verify with `item_title`. */
   itemTitleRequired?: true;
+  itemTitleReason?: "dated" | "not_printed";
   /** The packet prints several distinct valid payment references: none is bound (counted as a card minor note). */
   paymentReferenceNote?: string;
   /** The owner card (present when nothing blocks). */
@@ -380,6 +381,36 @@ const DATE_TOKEN = /\d{1,2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{2,4}|\d{4}-\d{1,2}-\d
 /** True when a history item title names a date, period or month: copied to another document it would be stale. */
 export function itemTitleHasDate(title: string | undefined): boolean {
   return title !== undefined && (DATE_TOKEN.test(title) || MONTH_WORD.test(title));
+}
+
+/** Generic title words that say nothing about the goods. */
+const TITLE_GENERIC_WORDS: ReadonlySet<string> = new Set(["teenus", "teenused", "arve", "kulu", "kulud", "tasu", "eest"]);
+const titleWords = (text: string): string[] => text.normalize("NFC").toLocaleLowerCase("et").split(/[^\p{L}\p{M}\p{N}]+/u).filter((word) => word.length > 0);
+
+/**
+ * Whether two words are the same word in another Estonian inflection: equal, or sharing a prefix of at least 5
+ * characters that leaves at most 1 character of the shorter (pakiautomaat / pakiautomaadi) and at most 3 of the
+ * longer (koolitus / koolitusele); arvutitarvikud / arvutitark do not match.
+ */
+export function titleWordsMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  let prefix = 0;
+  while (prefix < short.length && short[prefix] === long[prefix]) prefix += 1;
+  return prefix >= 5 && short.length - prefix <= 1 && long.length - prefix <= 3;
+}
+
+/**
+ * Live 2026-10-28 (Arvutitark 447292): a history title naming other goods (Logitech mouse, UGREEN charger) would land
+ * on a document printing a LogiLink headset. True when the title has at least two specific words (4+ characters,
+ * generic words excluded) and the packet prints none of them, in any inflection.
+ */
+export function historyTitleNotPrinted(title: string | undefined, packet: Pick<ReadingPacket, "lines">): boolean {
+  if (title === undefined) return false;
+  const specific = [...new Set(titleWords(title).filter((word) => word.length >= 4 && !TITLE_GENERIC_WORDS.has(word)))];
+  if (specific.length < 2) return false;
+  const printed = [...new Set(packet.lines.flatMap((line) => titleWords(normalizeForMatch(line.text))))];
+  return !specific.some((word) => printed.some((candidate) => titleWordsMatch(word, candidate)));
 }
 
 /**
@@ -1101,8 +1132,11 @@ class ReadingDocumentOperations {
         ...(marker ? { indeterminateMarker: marker.id } : {}),
         ...(lostValues ? { lostValues } : {}),
       };
-      const itemTitleRequired = itemsSource !== undefined && "template" in itemsSource && input.booking?.itemTitle === undefined &&
-        itemTitleHasDate(itemsSource.template.custom_title);
+      const itemTitleReason = itemsSource !== undefined && "template" in itemsSource && input.booking?.itemTitle === undefined
+        ? itemTitleHasDate(itemsSource.template.custom_title) ? "dated" as const
+          : historyTitleNotPrinted(itemsSource.template.custom_title, packet) ? "not_printed" as const : undefined
+        : undefined;
+      const itemTitleRequired = itemTitleReason !== undefined;
       if (booking?.failure) return fail(booking.failure.code, booking.failure.message, "never");
       if (!cardOutcome || cardOutcome.blocked || !itemsSource || supplierClient?.id === undefined) return ok(result);
       // A booking the owner has not seen is never created: no gross, no booking review, no handle.
@@ -1117,7 +1151,7 @@ class ReadingDocumentOperations {
       }
       if (!bookingBasis && !booking?.effective) return ok(result);
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
-      if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true });
+      if (itemTitleRequired) return ok({ ...result, itemTitleRequired: true, itemTitleReason });
       const card = cardOutcome.card;
       const parsedProof = parseProof(proofInput);
       if (!parsedProof.ok) return ok({ ...result, holds: [{ code: "proof_schema_invalid" }] });

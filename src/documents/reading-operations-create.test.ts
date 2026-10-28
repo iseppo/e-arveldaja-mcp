@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, itemTitleHasDate, READING_CONFIRM_DOMAIN } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, historyTitleNotPrinted, itemTitleHasDate, READING_CONFIRM_DOMAIN, titleWordsMatch } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import type { BlankLeaderProof, LostValueSeam } from "./lost-value-ocr.js";
 import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
@@ -878,8 +878,8 @@ describe("reading item title (history template)", () => {
     const detail = w.details[HISTORY_INVOICE.id as number]!;
     w.details[HISTORY_INVOICE.id as number] = { ...detail, items: (detail.items as Array<Record<string, unknown>>).map((item) => ({ ...item, custom_title: title })) };
   }
-  async function verifyWithTitle(w: World, file: { path: string; sha256: string }, itemTitle?: string) {
-    const { reading, proof } = readingFor(packetFor(file.sha256));
+  async function verifyWithTitle(w: World, file: { path: string; sha256: string }, itemTitle?: string, lines = BASE_LINES) {
+    const { reading, proof } = readingFor(packetFor(file.sha256, lines));
     const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof, booking: itemTitle !== undefined ? { itemTitle } : {} });
     if (!outcome.ok) throw new Error(outcome.error.message);
     return outcome.value;
@@ -891,10 +891,52 @@ describe("reading item title (history template)", () => {
     datedHistory(w);
     const file = writePdf("%PDF dated title");
     const held = await verifyWithTitle(w, file);
-    expect(held).toMatchObject({ status: "blocked", itemTitleRequired: true });
+    expect(held).toMatchObject({ status: "blocked", itemTitleRequired: true, itemTitleReason: "dated" });
     expect(held.planHandle).toBeUndefined();
     expect(w.createAndSetTotals).not.toHaveBeenCalled();
   });
+
+  // Live 2026-10-28 (Arvutitark 447292): the history title lists other goods than the document prints.
+  const ARVUTITARK_TITLE = "Arvutitarvikud: 2x Logitech M185 hiir, UGREEN 45W laadija, DPD pakiautomaat";
+  const LINES_GOODS = [...BASE_LINES, "1. BT0071    LogiLink BT0071 Bluetooth 6.0 Sound Wave Headset", "2. dpd-parcel-    DPD parcel lockers"];
+
+  it("a history title naming goods this document does not print issues no handle until the client gives item_title", async () => {
+    const w = world();
+    datedHistory(w, ARVUTITARK_TITLE);
+    mockedParse.mockResolvedValue(readingParse(LINES_GOODS));
+    const file = writePdf("%PDF other goods");
+    const held = await verifyWithTitle(w, file, undefined, LINES_GOODS);
+    expect(held).toMatchObject({ status: "blocked", itemTitleRequired: true, itemTitleReason: "not_printed" });
+    expect(held.planHandle).toBeUndefined();
+    const ready = await verifyWithTitle(w, file, "LogiLink BT0071 peakomplekt, DPD pakiautomaat", LINES_GOODS);
+    expect(ready.status).toBe("ready");
+    expect(titleOf(ready.booking)).toBe("LogiLink BT0071 peakomplekt, DPD pakiautomaat");
+  });
+
+  it("a history title with one specific word printed on the document, or only generic words, needs no item_title", async () => {
+    for (const [title, lines] of [["Mainor koolitus", [...BASE_LINES, "Mainor koolituse osalustasu"]], ["Teenus", BASE_LINES]] as Array<[string, string[]]>) {
+      const w = world();
+      datedHistory(w, title);
+      mockedParse.mockResolvedValue(readingParse(lines));
+      const ready = await verifyWithTitle(w, writePdf(`%PDF printed ${title}`), undefined, lines);
+      expect(ready.status, title).toBe("ready");
+      expect(ready.itemTitleRequired, title).toBeUndefined();
+    }
+  });
+
+  it("historyTitleNotPrinted: two or more specific words, none printed in any inflection", () => {
+    const packet = (lines: string[]) => packetFor("b".repeat(64), [...BASE_LINES, ...lines]);
+    expect(historyTitleNotPrinted(ARVUTITARK_TITLE, packet(["LogiLink BT0071 Bluetooth Headset", "DPD parcel lockers"]))).toBe(true);
+    expect(historyTitleNotPrinted(ARVUTITARK_TITLE, packet(["DPD pakiautomaadi tasu"]))).toBe(false);
+    expect(historyTitleNotPrinted("Arvutitarvikud: Logitech hiir", packet(["Arvutitark OÜ"]))).toBe(true);
+    expect(historyTitleNotPrinted("Teenus", packet([]))).toBe(false);
+    expect(historyTitleNotPrinted("Teenuse arve eest", packet([]))).toBe(false);
+    expect(historyTitleNotPrinted("Mainor koolitus", packet(["Mainor AS"]))).toBe(false);
+    expect(historyTitleNotPrinted(undefined, packet([]))).toBe(false);
+  });
+
+  it.each([["pakiautomaat", "pakiautomaadi", true], ["koolitus", "koolitusele", true], ["mainor", "mainor", true], ["arvutitarvikud", "arvutitark", false], ["hiir", "hiire", false], ["laadija", "laadimine", false]])(
+    "titleWordsMatch(%s, %s) is %s", (a, b, expected) => { expect(titleWordsMatch(a, b)).toBe(expected); expect(titleWordsMatch(b, a)).toBe(expected); });
 
   it("item_title replaces the template title in the reviewed booking and in the created draft", async () => {
     const w = world();
@@ -922,7 +964,9 @@ describe("reading item title (history template)", () => {
   it("an undated history title needs no item_title", async () => {
     const w = world();
     datedHistory(w, "Bussipilet Tallinn-Tartu");
-    const ready = await verifyWithTitle(w, writePdf("%PDF undated"));
+    const lines = [...BASE_LINES, "Bussipilet Tallinn-Tartu"];
+    mockedParse.mockResolvedValue(readingParse(lines));
+    const ready = await verifyWithTitle(w, writePdf("%PDF undated"), undefined, lines);
     expect(ready.status).toBe("ready");
     expect(ready.itemTitleRequired).toBeUndefined();
   });

@@ -361,8 +361,11 @@ describe("process_accounting_document reading modes: untrusted text", () => {
       if (id !== 501) throw new Error(`Missing purchase invoice ${id}`);
       return { ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0]!, custom_title: `${HOSTILE} title` }] };
     });
+    // The document prints one word of the history title, so the title is not held as naming other goods.
+    const lines = [...BASE_LINES, "Instructions: see previous page"];
+    mockedParse.mockResolvedValue(readingParse(lines));
     const file = writePdf();
-    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const { reading, proof } = readingFor(packetFor(file.sha256, lines));
     const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
     expect(body.status).toBe("ready");
     const leaks: string[] = [];
@@ -377,6 +380,19 @@ describe("process_accounting_document reading modes: untrusted text", () => {
     expect(leaks).toEqual([]);
     expect(body.booking_review.supplier_name).toMatch(/^<<UNTRUSTED_OCR_START:/);
     expect(body.booking_review.items[0].custom_title).toMatch(/^<<UNTRUSTED_OCR_START:/);
+  });
+
+  it("item_title_required carries its reason and the next step names both causes", async () => {
+    const { handler, api } = setupReading(true);
+    api.purchaseInvoices.get.mockResolvedValue({ ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0], custom_title: "Arvutitarvikud: Logitech M185 hiir, UGREEN laadija" }] });
+    const file = writePdf("%PDF item title reason");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect(body.status).toBe("blocked");
+    expect(body.item_title_required).toBe(true);
+    expect(body.item_title_required_reason).toBe("not_printed");
+    expect(body.next_step).toContain("names goods this document does not print");
+    expect(body).not.toHaveProperty("plan_handle");
   });
 
   it("a printed payment reference is shown wrapped in booking_review; two different ones leave a note instead", async () => {
