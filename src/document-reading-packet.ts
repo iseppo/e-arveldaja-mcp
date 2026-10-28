@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import { stripSandboxMarkers } from "./sandbox-markers.js";
 import type { ReadingField } from "./document-reading-schemas.js";
-import { COLUMN_MARK, lostValueLeaders } from "./document-reading-tokens.js";
+import { COLUMN_MARK, isWholeToken, lostValueLeaders } from "./document-reading-tokens.js";
 
 export { COLUMN_MARK };
 
@@ -50,7 +50,8 @@ export interface PacketBuildInput {
   blankLeaderLines?: readonly string[];
 }
 export interface PacketLine { id: string; page: number; n: number; text: string }
-export interface OriginItem { text: string; box?: ItemBox }
+/** `text` is compacted (no whitespace); `raw` keeps the item's own text for whole-token matching. */
+export interface OriginItem { text: string; raw: string; box?: ItemBox }
 /** `native` and `ocr` are the compacted texts (digest-free, text only); the `*_items` keep each item's box for the origin check. */
 export interface PageOrigin { page: number; native: string; ocr: string[]; native_items: OriginItem[]; ocr_items: OriginItem[] }
 export interface ReadingPacket {
@@ -111,7 +112,7 @@ export function computePacketDigest(input: {
 
 function nonEmptyItems(items: readonly PacketSourceItem[], ocr: boolean): OriginItem[] {
   return items.filter((item) => item.ocr === ocr)
-    .map((item) => ({ text: compact(item.text), ...(item.box ? { box: item.box } : {}) }))
+    .map((item) => ({ text: compact(item.text), raw: item.text.normalize("NFC"), ...(item.box ? { box: item.box } : {}) }))
     .filter((item) => item.text.length > 0);
 }
 
@@ -295,15 +296,23 @@ export function citedTokenOriginHolds(
   if (!pageOrigin) return ["cited_origin_unestablished"];
   const holds: OriginHoldCode[] = [];
   const related = (text: string) => token.includes(text) || text.includes(token);
-  // Live 2026-10-28 (Tele2 logo OCR "9"/"EE", Anthropic logo "A"): a substring hit is released only by place — both the
-  // OCR item and a native item that prints the token have a box, and the OCR box touches none of those native boxes.
-  // Without geometry on either side the substring rule stands (the rejected separator-boundary relaxation stays rejected).
-  const printing = pageOrigin.native_items.filter((item) => item.box !== undefined && related(item.text));
+  // Live 2026-10-28 (Tele2 logo OCR "9"/"EE", Anthropic logo "A"): a substring hit is released only by place — the OCR
+  // item is a strict fragment of the token, it and a native item that prints the token as a whole token both have a
+  // box, and the OCR box touches none of those native boxes. An OCR item containing the whole value is always held
+  // ("Tasuda 59,00" read by OCR while the text layer prints only "Eelmine saldo 159,00"). Without geometry on either
+  // side the substring rule stands (the rejected separator-boundary relaxation stays rejected).
+  const printing = pageOrigin.native_items.filter((item) => item.box !== undefined && printsWholeToken(item.raw, tokenText));
   const ocrHit = pageOrigin.ocr_items.some((item) => related(item.text)
-    && !(item.box !== undefined && printing.length > 0 && !printing.some((native) => boxesTouch(item.box!, native.box!))));
+    && !(item.box !== undefined && token.includes(item.text) && item.text !== token && printing.length > 0
+      && !printing.some((native) => boxesTouch(item.box!, native.box!))));
   if (ocrHit) holds.push("ocr_cited_text");
   if (!pageOrigin.native.includes(token)) holds.push("cited_origin_unestablished");
   return holds;
+}
+
+/** Whether `raw` prints `tokenText` as a whole token (whitespace-tolerant match, letters/digits on neither side). */
+function printsWholeToken(raw: string, tokenText: string): boolean {
+  return matchOffsets(tokenText, { text: raw }).some((span) => isWholeToken(raw, span.start, span.end - span.start));
 }
 
 /** Whether the OCR box intersects the native box widened by 0.25 of the native item's height on every side. */

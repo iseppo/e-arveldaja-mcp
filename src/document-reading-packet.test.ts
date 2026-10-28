@@ -276,6 +276,24 @@ describe("document-reading packet: cited-token origin", () => {
       expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual([]);
     });
 
+    it("T-PK-geo-substring-native: a native item printing the value only inside a longer number does not release", () => {
+      // Review 2026-10-28: "Eelmine saldo 159,00" does not print "59,00"; the OCR-only "Tasuda 59,00" stays held.
+      const items = [{ text: "Eelmine saldo 159,00", ocr: false, box: box(50, 100, 60) }, { text: "Tasuda 59,00", ocr: true, box: box(50, 500, 60) }];
+      expect(citedTokenOriginHolds(makePacket(["Eelmine saldo 159,00", "Tasuda 59,00"], { items }), 1, "59,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-whole-ocr: an OCR item containing the whole value is held wherever it sits", () => {
+      const items = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Summa 599,00", ocr: true, box: box(400, 100, 60) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00"], { items }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+      const equal = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "599,00", ocr: true, box: box(400, 100, 30) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00"], { items: equal }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-spaced-native: the native item may print the value with spaces (whitespace-tolerant whole token)", () => {
+      const items = [{ text: "Reg 102 349 57", ocr: false, box: box(50, 700) }, { text: "9", ocr: true, box: box(400, 100, 10, 25) }];
+      expect(citedTokenOriginHolds(makePacket(["Reg 102 349 57"], { items }), 1, "102 349 57", "supplier_reg")).toEqual([]);
+    });
+
     it("T-PK-geo-any-printing-item: the OCR fragment touching any item that prints the token holds", () => {
       const twice = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Tasuda 599,00", ocr: false, box: box(50, 780, 60) }, { text: "9", ocr: true, box: box(95, 781, 8, 9) }];
       expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Tasuda 599,00"], { items: twice }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
