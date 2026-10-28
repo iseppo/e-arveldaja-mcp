@@ -149,7 +149,9 @@ export function draftReadbackMismatches(
     // API ignores the residue's project_no_vat_gross_price, reads it back empty and keeps the item VAT at net × rate
     // (115.94); the invoice VAT stays the approved one (checked on the header). Only the last row carries the residue.
     const unabsorbedVat = roundMoney(net * parseVatRateDropdown(item.vat_rate_dropdown) / 100);
+    // The gap is bounded by the totals rule's own tolerance (a reverse-charge row skips that rule upstream).
     const residueIgnored = isVatRegistered && preview.ok && preview.lastItemGross !== undefined && index === expectedItems.length - 1
+      && Math.abs(unabsorbedVat - vat) <= 0.01 * expectedItems.length + 1e-9
       && isAbsent(actual.project_no_vat_gross_price) && sameValue("vat_amount", unabsorbedVat, actual.vat_amount);
     const expected: Record<string, unknown> = {
       ...item, total_net_price: net, vat_amount: vat,

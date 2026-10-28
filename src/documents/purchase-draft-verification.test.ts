@@ -58,6 +58,10 @@ describe("shared purchase draft evidence", () => {
     expect(draftReadbackMismatches({ ...ignored, items: [{ ...ignored.items[0], vat_amount: 115.95 }] }, residueModel, totals, true)).toContain("items[0].vat_amount");
     // Without a residue there is nothing to ignore.
     expect(draftReadbackMismatches({ ...draft, items: [{ ...draft.items[0], vat_amount: 24.01 }] }, model, { vatPrice: 24, grossPrice: 124 }, true)).toContain("items[0].vat_amount");
+    // A reverse-charge row skips the totals tolerance upstream: a gap wider than one cent per line is never a residue.
+    const reverseModel = { ...model, items: [{ ...model.items[0], reversed_vat_id: 1, total_net_price: 100 }] };
+    const reverseDraft = { ...draft, vat_price: 0, gross_price: 100, base_vat_price: 0, base_gross_price: 100, items: [{ ...draft.items[0], reversed_vat_id: 1, vat_amount: 24, project_no_vat_gross_price: null }] };
+    expect(draftReadbackMismatches(reverseDraft, reverseModel, { vatPrice: 0, grossPrice: 100 }, true)).toContain("items[0].vat_amount");
     // Only a VAT-registered company: the same readback shape on a non-VAT company is a mismatch.
     expect(draftReadbackMismatches(ignored, residueModel, totals, false)).not.toEqual([]);
     // Only the last row: a first row reading the same shape is still compared normally.
