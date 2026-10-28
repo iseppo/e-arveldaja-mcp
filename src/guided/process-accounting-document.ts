@@ -376,6 +376,8 @@ function renderVerify(result: VerifyDocumentResult) {
         ? "The marker is released. Call mode='verify' again with the same file and objects, without release_indeterminate: the duplicate scans re-run uncached before a plan_handle is issued."
       : result.indeterminateMarker
         ? "An earlier create of a matching document may still complete. Check e-arveldaja: when the invoice is not there, the owner may release the marker by calling mode='verify' again with release_indeterminate set to indeterminate_marker; when it is there, nothing more is needed."
+        : result.bookingItemsRequired && !result.dimensionChoiceRequired?.length
+        ? "This supplier has no booked purchase to copy from: repeat mode='verify' with the same arguments plus full explicit items (accounts, dimensions, VAT settings)."
         : result.bookingItemsRequired
         ? "Review the decision notes and dimension_choice_required, use list_account_dimensions or the UI to choose active dimensions on the affected accounts, then repeat mode='verify' with full explicit items (accounts, selected dimensions, VAT settings)."
         : result.itemTitleRequired

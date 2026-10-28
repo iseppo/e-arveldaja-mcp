@@ -196,6 +196,7 @@ describe("process M8: history decisions survive verify and create", () => {
     expect(blocked.booking_items_required).toBe(true);
     expect(w.create).not.toHaveBeenCalled();
     expect(blocked.dimension_choice_required).toEqual([{ account_id: field === "purchase_accounts_dimensions_id" ? 5000 : 1510, dimension_field: field, dimension_ids: [71, 72] }]);
+    expect(blocked.next_step).toContain("dimension_choice_required");
     const preview = await w.verify({ items: [{ ...w.booking.items[0], [field]: 72 }] });
     expect(preview.status).toBe("ready");
     expect(preview.booking_review.decision_notes.dimension_notes[0]).toContain("ambiguous_dimension");

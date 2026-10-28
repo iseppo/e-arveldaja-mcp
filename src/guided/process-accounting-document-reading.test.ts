@@ -382,6 +382,19 @@ describe("process_accounting_document reading modes: untrusted text", () => {
     expect(body.booking_review.items[0].custom_title).toMatch(/^<<UNTRUSTED_OCR_START:/);
   });
 
+  it("without supplier history, booking_items_required's next step asks for explicit items and does not point at dimension notes", async () => {
+    const { handler } = setupReading(true, { withHistory: false });
+    const file = writePdf("%PDF no history");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof }));
+    expect(body.status).toBe("blocked");
+    expect(body.booking_items_required).toBe(true);
+    expect(body).not.toHaveProperty("dimension_choice_required");
+    expect(body).not.toHaveProperty("booking_review");
+    expect(body.next_step).toContain("no booked purchase to copy from");
+    expect(body.next_step).not.toContain("dimension_choice_required");
+  });
+
   it("item_title_required carries its reason and the next step names both causes", async () => {
     const { handler, api } = setupReading(true);
     api.purchaseInvoices.get.mockResolvedValue({ ...HISTORY_DETAIL, items: [{ ...HISTORY_DETAIL.items[0], custom_title: "Arvutitarvikud: Logitech M185 hiir, UGREEN laadija" }] });
