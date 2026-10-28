@@ -22,7 +22,11 @@ export function packetInputFromParse(parsed: ParsedDocument, sourceSha256: strin
       return {
         pageNum: page.pageNum,
         text: page.text ?? "",
-        items: (page.textItems ?? []).map((item) => ({ text: item.text, ocr: item.confidence !== undefined })),
+        items: (page.textItems ?? []).map((item) => ({
+          text: item.text, ocr: item.confidence !== undefined,
+          ...([item.x, item.y, item.width, item.height].every((value) => typeof value === "number" && Number.isFinite(value))
+            ? { box: { x: item.x, y: item.y, width: item.width, height: item.height } } : {}),
+        })),
         fullPageImage: complexity?.fullPageImage ?? false,
         reasons: complexity?.reasons ?? [],
         isGarbled: complexity?.isGarbled ?? false,

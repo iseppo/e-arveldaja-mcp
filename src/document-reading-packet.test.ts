@@ -225,4 +225,68 @@ describe("document-reading packet: cited-token origin", () => {
     const packet = buildReadingPacket(makePacketInput(["Reg 102 349 57"]));
     expect(citedTokenOriginHolds(packet, 1, "102 349 57", "supplier_reg")).toEqual([]);
   });
+
+  describe("geometry (live 2026-10-28: logo fragments are not where the value is printed)", () => {
+    const box = (x: number, y: number, width = 40, height = 10) => ({ x, y, width, height });
+    const lines = ["Tele2 Eesti AS", "IBAN EE382200221001178223", "Kokku 599,00", "Arve 60E2BBAF-0027"];
+    const native = [
+      { text: "Tele2 Eesti AS", ocr: false, box: box(50, 100) },
+      { text: "IBAN EE382200221001178223", ocr: false, box: box(50, 300, 200) },
+      { text: "Kokku 599,00", ocr: false, box: box(50, 700) },
+      { text: "Arve 60E2BBAF-0027", ocr: false, box: box(50, 120, 120) },
+    ];
+    const logo = [{ text: "9", ocr: true, box: box(400, 790, 12, 25) }, { text: "EE", ocr: true, box: box(420, 788, 30, 25) }, { text: "A", ocr: true, box: box(500, 40, 20, 23) }];
+
+    it("T-PK-geo-released: logo OCR away from the printed value does not hold", () => {
+      const packet = makePacket(lines, { items: [...native, ...logo] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual([]);
+      expect(citedTokenOriginHolds(packet, 1, "EE382200221001178223", "supplier_iban")).toEqual([]);
+      expect(citedTokenOriginHolds(packet, 1, "60E2BBAF-0027", "invoice_number")).toEqual([]);
+    });
+
+    it("T-PK-geo-touching: an OCR fragment overlapping the value's own item still holds (the D2 completion case)", () => {
+      const packet = makePacket(["Arve A-1"], { items: [{ text: "Arve A-1", ocr: false, box: box(50, 100) }, { text: "7", ocr: true, box: box(85, 101, 8, 9) }] });
+      expect(citedTokenOriginHolds(packet, 1, "A-17", "invoice_number")).toEqual(["ocr_cited_text", "cited_origin_unestablished"]);
+      // The text rule is unchanged: "7" is no substring of the printed "A-1", so that citation is clean.
+      expect(citedTokenOriginHolds(packet, 1, "A-1", "invoice_number")).toEqual([]);
+    });
+
+    it("T-PK-geo-slack: an OCR item just beside the native box (within a quarter height) is touching", () => {
+      const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "9", ocr: true, box: box(91, 700, 5, 10) }] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-ocr-no-box: an OCR item without a box falls back to the substring rule", () => {
+      const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "9", ocr: true }] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-native-no-box: a printing native item without a box falls back to the substring rule", () => {
+      const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false }, { text: "9", ocr: true, box: box(400, 790, 12, 25) }] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-same-column: a native item overlapping only in x (same column, other row) releases", () => {
+      const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "9", ocr: true, box: box(60, 790, 12, 25) }] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual([]);
+    });
+
+    it("T-PK-geo-same-row: a native item overlapping only in y (same row, other column) releases", () => {
+      const packet = makePacket(["Kokku 599,00"], { items: [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "9", ocr: true, box: box(400, 702, 12, 8) }] });
+      expect(citedTokenOriginHolds(packet, 1, "599,00", "gross")).toEqual([]);
+    });
+
+    it("T-PK-geo-any-printing-item: the OCR fragment touching any item that prints the token holds", () => {
+      const twice = [{ text: "Kokku 599,00", ocr: false, box: box(50, 700) }, { text: "Tasuda 599,00", ocr: false, box: box(50, 780, 60) }, { text: "9", ocr: true, box: box(95, 781, 8, 9) }];
+      expect(citedTokenOriginHolds(makePacket(["Kokku 599,00", "Tasuda 599,00"], { items: twice }), 1, "599,00", "gross")).toEqual(["ocr_cited_text"]);
+    });
+
+    it("T-PK-geo-digest: boxes do not enter the packet digest or text", () => {
+      const withBoxes = makePacket(lines, { items: [...native, ...logo] });
+      const without = makePacket(lines, { items: [...native, ...logo].map(({ text, ocr }) => ({ text, ocr })) });
+      expect(withBoxes.packet_digest).toBe(without.packet_digest);
+      expect(withBoxes.text).toBe(without.text);
+      expect(withBoxes.origin[0]!.ocr).toEqual(["9", "EE", "A"]);
+    });
+  });
 });

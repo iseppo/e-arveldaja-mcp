@@ -28,7 +28,9 @@ export interface PacketHold { code: PacketHoldCode; class: "non_content" }
 
 export type OriginHoldCode = "ocr_cited_text" | "cited_origin_unestablished";
 
-export interface PacketSourceItem { text: string; ocr: boolean }
+/** A text item's box on the page (liteparse x/y/width/height, page points). Absent when the parser gave none. */
+export interface ItemBox { x: number; y: number; width: number; height: number }
+export interface PacketSourceItem { text: string; ocr: boolean; box?: ItemBox }
 export interface PacketSourcePage {
   pageNum: number;
   text: string;
@@ -48,7 +50,9 @@ export interface PacketBuildInput {
   blankLeaderLines?: readonly string[];
 }
 export interface PacketLine { id: string; page: number; n: number; text: string }
-export interface PageOrigin { page: number; native: string; ocr: string[] }
+export interface OriginItem { text: string; box?: ItemBox }
+/** `native` and `ocr` are the compacted texts (digest-free, text only); the `*_items` keep each item's box for the origin check. */
+export interface PageOrigin { page: number; native: string; ocr: string[]; native_items: OriginItem[]; ocr_items: OriginItem[] }
 export interface ReadingPacket {
   version: 1;
   source_sha256: string;
@@ -105,8 +109,14 @@ export function computePacketDigest(input: {
   return hash.digest("hex");
 }
 
+function nonEmptyItems(items: readonly PacketSourceItem[], ocr: boolean): OriginItem[] {
+  return items.filter((item) => item.ocr === ocr)
+    .map((item) => ({ text: compact(item.text), ...(item.box ? { box: item.box } : {}) }))
+    .filter((item) => item.text.length > 0);
+}
+
 function nonEmptyItemTexts(items: readonly PacketSourceItem[], ocr: boolean): string[] {
-  return items.filter((item) => item.ocr === ocr).map((item) => compact(item.text)).filter((text) => text.length > 0);
+  return nonEmptyItems(items, ocr).map((item) => item.text);
 }
 
 function isOcrPage(page: PacketSourcePage): boolean {
@@ -129,10 +139,14 @@ export function buildReadingPacket(input: PacketBuildInput): ReadingPacket {
       n += 1;
       lines.push({ id: lineId(page.pageNum, n), page: page.pageNum, n, text });
     }
+    const nativeItems = nonEmptyItems(page.items, false);
+    const ocrItems = nonEmptyItems(page.items, true);
     origin.push({
       page: page.pageNum,
-      native: nonEmptyItemTexts(page.items, false).join(""),
-      ocr: nonEmptyItemTexts(page.items, true),
+      native: nativeItems.map((item) => item.text).join(""),
+      ocr: ocrItems.map((item) => item.text),
+      native_items: nativeItems,
+      ocr_items: ocrItems,
     });
   }
   const text = lines.map(renderPacketLine).join("\n");
@@ -280,7 +294,21 @@ export function citedTokenOriginHolds(
   const pageOrigin = packet.origin.find((entry) => entry.page === page);
   if (!pageOrigin) return ["cited_origin_unestablished"];
   const holds: OriginHoldCode[] = [];
-  if (pageOrigin.ocr.some((ocrText) => token.includes(ocrText) || ocrText.includes(token))) holds.push("ocr_cited_text");
+  const related = (text: string) => token.includes(text) || text.includes(token);
+  // Live 2026-10-28 (Tele2 logo OCR "9"/"EE", Anthropic logo "A"): a substring hit is released only by place — both the
+  // OCR item and a native item that prints the token have a box, and the OCR box touches none of those native boxes.
+  // Without geometry on either side the substring rule stands (the rejected separator-boundary relaxation stays rejected).
+  const printing = pageOrigin.native_items.filter((item) => item.box !== undefined && related(item.text));
+  const ocrHit = pageOrigin.ocr_items.some((item) => related(item.text)
+    && !(item.box !== undefined && printing.length > 0 && !printing.some((native) => boxesTouch(item.box!, native.box!))));
+  if (ocrHit) holds.push("ocr_cited_text");
   if (!pageOrigin.native.includes(token)) holds.push("cited_origin_unestablished");
   return holds;
+}
+
+/** Whether the OCR box intersects the native box widened by 0.25 of the native item's height on every side. */
+function boxesTouch(ocr: ItemBox, native: ItemBox): boolean {
+  const slack = 0.25 * native.height;
+  return ocr.x < native.x + native.width + slack && native.x - slack < ocr.x + ocr.width
+    && ocr.y < native.y + native.height + slack && native.y - slack < ocr.y + ocr.height;
 }
