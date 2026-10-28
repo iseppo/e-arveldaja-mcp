@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.3] - 2026-10-28
+
 ### Fixed
 
 - **A character that text recognition reads right beside a printed value can no longer complete that value into a different one.** Before, an invoice printing "A-1" with an OCR'd "7" next to it, and an order number "A-17" elsewhere, could pass "A-17" as the invoice number without a confirm row. Details: an OCR item that is a strict fragment of a cited value releases `ocr_cited_text` only when its box touches no text-layer item at all (previously: none of the items printing the value) and no other OCR fragment of the same value; an item without a box counts as touching. On the 28 live 2026-10-28 documents all 279 cited values keep their result, so Tele2 and Anthropic stay released.
