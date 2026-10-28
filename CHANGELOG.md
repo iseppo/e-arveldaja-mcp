@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A character that text recognition reads right beside a printed value can no longer complete that value into a different one.** Before, an invoice printing "A-1" with an OCR'd "7" next to it, and an order number "A-17" elsewhere, could pass "A-17" as the invoice number without a confirm row. Details: an OCR item that is a strict fragment of a cited value releases `ocr_cited_text` only when its box touches no text-layer item at all (previously: none of the items printing the value) and no other OCR fragment of the same value; an item without a box counts as touching. On the 28 live 2026-10-28 documents all 279 cited values keep their result, so Tele2 and Anthropic stay released.
+- **Your own registry code followed by a date or another number on the same line now counts as printed, so such a document keeps the `self_vat_detected` hold.** Details: the own-registry-code scan in the verified reading matches on the raw line with optional spaces or column breaks between digits ("16123456 17.07.2026", "1612 3456", "1612  3456") instead of on the line with all spaces removed; a longer unbroken number containing the code still does not count, while a digit separated from it by a space ("9 16123456") does, which may hold more often but never less.
+
+### Changed
+
+- **Dependencies:** `@types/node` 26.6.6.
+
 ## [0.34.2] - 2026-10-28
 
 ### Fixed

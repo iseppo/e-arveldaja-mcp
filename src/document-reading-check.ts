@@ -879,7 +879,12 @@ function checkDocumentLevel(doc: Doc, reading: DocumentReading, ctx: CheckContex
   const own = ownIds(ctx.own);
   const ownVat = ctx.own !== "unavailable" && ctx.own.vat ? normalizeVatValue(ctx.own.vat) : undefined;
   const ownReg = ctx.own !== "unavailable" && ctx.own.reg ? normalizeReg(ctx.own.reg) : undefined;
-  const ownRegPrinted = ownReg === undefined || doc.packet.lines.some((line) => new RegExp(`(?<!\\d)${ownReg}(?!\\d)`).test(normalizeReg(line.text)));
+  // Matched on the raw line with optional spaces or column marks between its digits, so a spaced code ("1000 0024",
+  // "1000  0024" → "1000 ¦ 0024") and a code followed by another number ("10000024 17.07.2026") both count; a longer
+  // digit run containing it does not, a digit separated by a space before it ("9 10000024") does (over-holds).
+  const ownRegPattern = ownReg === undefined ? undefined
+    : new RegExp(`(?<!\\d)${[...ownReg].map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s¦]*")}(?!\\d)`);
+  const ownRegPrinted = ownRegPattern === undefined || doc.packet.lines.some((line) => ownRegPattern.test(line.text));
   const ownVatAccounted = reading.supplier_reg !== null && !own.has(normalizeReg(reading.supplier_reg))
     && reading.supplier_vat === null
     && ownVat !== undefined && reading.buyer_vat !== null && normalizeVatValue(reading.buyer_vat) === ownVat

@@ -662,6 +662,13 @@ describe("checkReading: self_vat_detected accounted for by the reading (live 202
     expect(codesOf({ ...base, lines: printed })).toContain("self_vat_detected");
     const spaced = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, ["Reg 1000 0024"]);
     expect(codesOf({ ...base, lines: spaced })).toContain("self_vat_detected");
+    // Review 2026-10-28 (a210ae8): our code followed by another number on the same line still counts.
+    const followed = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, ["Reg 10000024 17.07.2026"]);
+    expect(codesOf({ ...base, lines: followed })).toContain("self_vat_detected");
+    for (const extra of ["Reg 1000 0024 17.07.2026", "Reg 1000  0024", "Tellimus 9 10000024"]) {
+      const shaped = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, [extra]);
+      expect(codesOf({ ...base, lines: shaped }), extra).toContain("self_vat_detected");
+    }
     // A longer number containing our code is not our code.
     const inside = withLines({ 2: "Registrikood: 10000018    Ei ole käibemaksukohustuslane", 3: "Ostja: Ostja AS    KMKR EE100000010", 5: "Summa 124,00", 6: "Käibemaksu ei lisandu" }, ["Tellimus 910000024"]);
     expect(codesOf({ ...base, lines: inside })).not.toContain("self_vat_detected");
