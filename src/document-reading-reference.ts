@@ -5,27 +5,28 @@
 // check digit. English `Reference` labels are order references and are deliberately not read.
 
 import type { ReadingPacket } from "./document-reading-packet.js";
-import { isWholeToken, lineTokens } from "./document-reading-tokens.js";
+import { isWholeToken } from "./document-reading-tokens.js";
 import { isValidEstonianReferenceNumber } from "./ref-number.js";
 
-const REFERENCE_LABEL_RE = /(?:^|[^\p{L}])(?:viitenumb(?:er|ri|rit|riga)?(?![\p{L}])|viitenr\.?)/giu;
+// The label in its noun form (Viitenumber / Viitenr / Viite nr), then only `:`, `.`, `nr`, the column mark or
+// whitespace, then the FIRST digit run. Any word between the label and the digits (a customer code, a phone number,
+// a sentence) binds nothing; an inflected label ("Viitenumbrit ei ole vaja märkida") is a sentence, not a field.
+const REFERENCE_RE = /(?:^|[^\p{L}])(?:viitenumber|viitenr\.?|viite\s*nr\.?)(?![\p{L}])[\s¦:.]*(?:nr\.?[\s¦]*)?(\d+)/giu;
+/** Fewer than 4 digits: the 7-3-1 check accepts one random 2–3 digit run in ten; references in use are longer. */
+const REFERENCE_MIN_DIGITS = 4;
 
 export type PrintedPaymentReference = { value: string } | { ambiguous: string[] };
 
-/** Exactly one distinct valid reference printed under an Estonian label → `{ value }`; several → `{ ambiguous }`; none → undefined. */
+/** Exactly one distinct valid reference printed right after an Estonian label → `{ value }`; several → `{ ambiguous }`; none → undefined. */
 export function printedPaymentReference(packet: Pick<ReadingPacket, "lines">): PrintedPaymentReference | undefined {
   const found = new Set<string>();
   for (const line of packet.lines) {
-    const labels = [...line.text.matchAll(REFERENCE_LABEL_RE)];
-    if (labels.length === 0) continue;
-    const tokens = lineTokens(line);
-    for (const label of labels) {
-      const from = label.index! + label[0].length;
-      for (const token of tokens.wordTokens) {
-        if (token.start < from || !/^\d{2,20}$/.test(token.text)) continue;
-        if (!isWholeToken(line.text, token.start, token.text.length) || isDecimalPart(line.text, token)) continue;
-        if (isValidEstonianReferenceNumber(token.text)) found.add(token.text);
-      }
+    for (const match of line.text.matchAll(REFERENCE_RE)) {
+      const digits = match[1]!;
+      const start = match.index! + match[0].length - digits.length;
+      if (digits.length < REFERENCE_MIN_DIGITS || digits.length > 20) continue;
+      if (!isWholeToken(line.text, start, digits.length) || isDecimalPart(line.text, { start, end: start + digits.length })) continue;
+      if (isValidEstonianReferenceNumber(digits)) found.add(digits);
     }
   }
   if (found.size === 0) return undefined;
@@ -33,7 +34,7 @@ export function printedPaymentReference(packet: Pick<ReadingPacket, "lines">): P
   return { ambiguous: [...found].sort() };
 }
 
-/** A digit run joined by `,` or `.` to another digit run is part of an amount (124,00), not a reference. */
+/** A digit run joined by `,` `.` `-` `/` `_` to another letter or digit run is part of a longer token (124,00; 3114100-1). */
 function isDecimalPart(text: string, token: { start: number; end: number }): boolean {
-  return /\d[.,]$/.test(text.slice(0, token.start)) || /^[.,]\d/.test(text.slice(token.end));
+  return /[\p{L}\p{N}][.,\-/_]$/u.test(text.slice(0, token.start)) || /^[.,\-/_][\p{L}\p{N}]/u.test(text.slice(token.end));
 }
