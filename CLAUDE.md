@@ -328,7 +328,11 @@ OpenAPI spec: `GET /openapi.yaml` on the API server. HTML docs: `/api.html`.
   `"C"`). So no confirm-time check can compare a signed marker against the stored type —
   the 0.26.0 `stored_type_direction_mismatch` guard did exactly that, blocked every
   signed incoming row, and was removed. Correctness rests on `createBankTransaction`
-  setting `type` right at creation. A signed outgoing row (DBIT/OUT) only ever matches
+  setting `type` right at creation. A legacy CAMT marker (no `dir=`) was signed over the
+  then-stored type, so a legacy incoming row no longer verifies against the read-back `C`;
+  the post-confirm ledger check (`expectedReceiptBankDirection`) re-verifies such a marker
+  with both types and takes the single match (`camt_checksum_legacy`), never an invoice
+  fallback. A signed outgoing row (DBIT/OUT) only ever matches
   purchase invoices; the sale-invoice fallback for outgoing rows exists only for legacy
   unsigned `C` rows.
 - **Distribution + direction together** determine the journal at confirmation:

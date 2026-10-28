@@ -1,5 +1,6 @@
 import type { Journal, Posting, PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { snapshotBankTransaction } from "./transaction-material-snapshot.js";
+import { isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
 import { positiveEurAmount, type EurAmountRow } from "./eur-amount-proof.js";
 
 /**
@@ -113,12 +114,27 @@ export function expectedReceiptBankDirection(tx: Transaction, invoices: readonly
   const material=snapshotBankTransaction(tx);
   if (material.direction_proof.verified) return {direction:material.trusted_direction==="incoming"?"D":"C",source:"camt_checksum"};
   if (material.direction_proof.source==="wise_importer_marker" && material.trusted_direction!=="unknown") return {direction:material.trusted_direction==="incoming"?"D":"C",source:"wise_importer_marker"};
-  if (material.direction_proof.marker_present) return {source:"unverified_source_marker"};
+  if (material.direction_proof.marker_present) {
+    const legacy=legacyMarkerDirection(tx,material.direction_proof);
+    return legacy?{direction:legacy,source:"camt_checksum_legacy"}:{source:"unverified_source_marker"};
+  }
   if (independent) return independent;
   const ordinary=invoices.length>0 && invoices.every(inv=>typeof inv.gross_price==="number" && Number.isFinite(inv.gross_price) && inv.gross_price>0
     && inv.paid_in_cash!==true && (inv.table==="purchase_invoices" || inv.sale_invoice_type==="INVOICE" && !inv.credit_sale_invoices_id));
   if (ordinary && new Set(invoices.map(inv=>inv.table)).size===1) return {direction:invoices[0]!.table==="sale_invoices"?"D":"C",source:"ordinary_invoice"};
   return {source:"direction_unproven"};
+}
+
+/**
+ * Live 2026-10-28 (finding 6b): a CAMT marker written before `dir=` was signed over the row's then-stored type (CRDT → "D",
+ * DBIT → "C"), but GET always reads back "C", so every legacy incoming row failed verification. Re-verify the signature
+ * with both types; exactly one match gives the direction. A marker with `dir=`, a poisoned marker or one matching
+ * neither type stays unverified (never a fallback to the invoice direction).
+ */
+function legacyMarkerDirection(tx: Transaction, proof: ReturnType<typeof snapshotBankTransaction>["direction_proof"]): "D"|"C"|undefined {
+  if (proof.source!=="camt_checksum" || proof.verified || proof.poisoned || proof.source_direction!==null) return undefined;
+  const matches=(["D","C"] as const).filter(type=>isTrustedCamtDescriptionMetadata({...tx,type}));
+  return matches.length===1?matches[0]:undefined;
 }
 
 export function checkReceiptLedger(input: {

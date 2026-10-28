@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   checkReceiptLedger,
+  expectedReceiptBankDirection,
   findRegistrationJournal,
   invoiceLinksFromTransaction,
   verifyInvoiceReceiptLedger,
@@ -9,6 +10,7 @@ import {
 } from "./receipt-ledger-check.js";
 import type { Journal, Transaction } from "../types/api.js";
 import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
+import { buildCamtEntrySignatureForParsedEntry } from "../camt/duplicate-identity.js";
 
 const BANK_ACCOUNT_ID = 1020;
 const BANK_DIMENSION_ID = 500;
@@ -141,6 +143,41 @@ describe("checkReceiptLedger", () => {
   it("leaves mixed sale and purchase semantics unverified without a signed source",()=>{
     const result=checkReceiptLedger({tx:makeTransaction({type:"C"}),invoices:[{...SALE_INVOICE,amount:744},{...SALE_INVOICE,table:"purchase_invoices",amount:744}],journals:[makeRegistrationJournal()]});
     expect(result).toMatchObject({ok:true,unverified:expect.arrayContaining([expect.stringMatching(/^direction:/)])});
+  });
+  describe("legacy CAMT marker without dir= (live 2026-10-28, 6b)",()=>{
+    /** What a release before the signed direction wrote: signed over the stored type (CRDT → D, DBIT → C), no dir field. */
+    const legacyRow=(direction:"CRDT"|"DBIT",text="Arve 77",over:Partial<Transaction>={})=>{
+      const base=makeTransaction({type:"C",bank_account_name:"Payer OÜ",bank_account_no:"EE382200221020145685",ref_number:"77",...over});
+      const entry={bank_reference:"REF4001",date:base.date,amount:base.amount,currency:"EUR",direction,counterparty_name:base.bank_account_name!,counterparty_iban:base.bank_account_no!,reference_number:base.ref_number!,description:text};
+      const signature=buildCamtEntrySignatureForParsedEntry(entry as never,text,true)!;
+      return {...base,description:`${text}\n[e-arveldaja-mcp:camt br=REF4001 iban=${base.bank_account_no} sig=${signature}]`};
+    };
+    const purchase:LinkedReceiptInvoice={...SALE_INVOICE,table:"purchase_invoices",ledger_accounts_id:2310};
+    const outgoing=makeRegistrationJournal({postings:[{accounts_id:BANK_ACCOUNT_ID,accounts_dimensions_id:BANK_DIMENSION_ID,type:"C",amount:1488},{accounts_id:2310,type:"D",amount:1488}]});
+
+    it("a legacy CRDT marker on a type-C row verifies as incoming and checks the direction",()=>{
+      const tx=legacyRow("CRDT");
+      expect(expectedReceiptBankDirection(tx,[SALE_INVOICE])).toEqual({direction:"D",source:"camt_checksum_legacy"});
+      expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[makeRegistrationJournal()]})).toEqual({ok:true,journal_id:28013080});
+      expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[outgoing]})).toMatchObject({ok:false,code:"ledger_posting_mismatch",details:{expected_type:"D",expectation_source:"camt_checksum_legacy"}});
+    });
+    it("a legacy DBIT marker verifies as outgoing",()=>{
+      // Signed over "C", the type GET reads back: the ordinary checksum already verifies it.
+      const tx=legacyRow("DBIT");
+      expect(expectedReceiptBankDirection(tx,[purchase])).toEqual({direction:"C",source:"camt_checksum"});
+      expect(checkReceiptLedger({tx,invoices:[purchase],journals:[outgoing]})).toEqual({ok:true,journal_id:28013080});
+    });
+    it("a legacy marker whose signature matches neither type stays unverified and never falls back to the invoice direction",()=>{
+      const signed=legacyRow("CRDT");
+      const tx={...signed,description:signed.description!.replace("Arve 77\n","Arve 78\n")};
+      expect(expectedReceiptBankDirection(tx,[SALE_INVOICE])).toEqual({source:"unverified_source_marker"});
+      expect(checkReceiptLedger({tx,invoices:[SALE_INVOICE],journals:[makeRegistrationJournal()]})).toMatchObject({ok:true,unverified:expect.arrayContaining([expect.stringMatching(/^direction:/)])});
+    });
+    it("a marker with dir= and a bad signature is never re-verified by type",()=>{
+      const signed=withSignedCamtMarker(makeTransaction({type:"C"}),"CRDT");
+      const tx={...signed,description:signed.description!.replace("CRDT","DBIT")};
+      expect(expectedReceiptBankDirection(tx,[SALE_INVOICE])).toEqual({source:"unverified_source_marker"});
+    });
   });
   it("never falls back to ordinary invoice direction after a CAMT checksum fails",()=>{
     const signed=withSignedCamtMarker(makeTransaction(),"CRDT");
