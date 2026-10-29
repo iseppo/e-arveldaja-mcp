@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-30
+
 ### Added
 
 - **When a purchase document prints an order or cart number (Ostukorvi nr, Tellimuse nr, Order no), it is saved in the invoice notes, and a bank payment that names it is suggested for that invoice.** Before, a Lux Express ticket whose bank line carried only the cart number never matched its invoice, which has the ticket number. Details: `extractOrderReferences` reads one unspaced value on the label's line; exactly one distinct value writes the notes line `Ostukorvi/tellimuse nr: <value>` on `process_accounting_document` (prepare stores it, create re-applies it, the reading path re-derives it and holds on `packet_changed`), `receipt_batch` and `create_purchase_invoice_from_pdf` (text layer only via `parseDocumentTextLayerOnly`; a failure writes no line and never blocks the booking). Reconcile suggestions list an exact-amount purchase invoice whose number or notes line appears as a whole strong token in the bank description in a separate `document_reference_candidates` group, only at the default threshold (`min_confidence` ≤ 50). Match scores, the best match and automatic confirmation are unchanged.
