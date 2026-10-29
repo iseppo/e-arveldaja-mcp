@@ -51,7 +51,13 @@ interface WiseCounterpartHold {
 }
 
 type WiseCounterpartResolution =
-  | { readonly dim: number; readonly basis: WiseCounterpartBasis }
+  | {
+      readonly dim: number;
+      readonly basis: WiseCounterpartBasis;
+      /** A fallback resolved over non-strong (weak, uncertain or contested)
+       * evidence on that same bank: the banks it was on. */
+      readonly otherEvidenceDims?: readonly number[];
+    }
   | { readonly hold: WiseCounterpartHold };
 
 export interface WiseCounterpartInput {
@@ -299,7 +305,7 @@ export function resolveWiseRowCounterparts(input: WiseCounterpartInput): Map<Wis
       result.set(row, hold("wise_transfer_counterpart_conflict", strongDims, strong));
     } else if (fallback !== undefined) {
       result.set(row, otherEvidenceDims.every(dim => dim === fallback)
-        ? { dim: fallback, basis: fallbackBasis }
+        ? { dim: fallback, basis: fallbackBasis, ...(otherEvidenceDims.length > 0 ? { otherEvidenceDims } : {}) }
         : hold("wise_transfer_counterpart_conflict", sortedUniqueIds(otherEvidenceDims, [fallback]), others, fallback));
     } else {
       result.set(row, hold("wise_transfer_dimensions_unverified", sortedUniqueIds(otherDims), others));

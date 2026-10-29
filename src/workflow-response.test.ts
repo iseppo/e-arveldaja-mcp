@@ -126,6 +126,30 @@ describe("workflow response helpers", () => {
     expect(direct!.tool).toBeUndefined();
   });
 
+  it("approves a Wise dry run by its blocking reviews; a preview without that count blocks on needs_review", () => {
+    const wiseStep = (preview: Record<string, unknown>) => ({
+      tool: "import_wise_transactions",
+      suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, execute: false },
+      preview: { created: 2, command_count: 2, error_count: 0, skipped: 0, ...preview },
+    });
+
+    expect(approvalPreviewFromDryRunStep(wiseStep({ needs_review: 2, blocking_review_count: 0 }))).toMatchObject({
+      execute_tool: "import_wise_transactions",
+      accounting_impact: expect.arrayContaining([
+        "2 transfer(s) will be imported as unconfirmed ordinary rows; to book one as an own transfer, re-run the preview with it in confirm_own_transfer_ids",
+      ]),
+    });
+
+    const blocking = wiseStep({ needs_review: 2, blocking_review_count: 1 });
+    expect(approvalPreviewFromDryRunStep(blocking)).toBeUndefined();
+    expect(workflowActionFromBlockedDryRunStep(blocking)?.why).toContain("1 Wise review blocking approval");
+
+    // An older preview carries only needs_review: it keeps blocking (fail-closed).
+    const legacy = wiseStep({ needs_review: 1 });
+    expect(approvalPreviewFromDryRunStep(legacy)).toBeUndefined();
+    expect(workflowActionFromBlockedDryRunStep(legacy)?.why).toContain("1 Wise review blocking approval");
+  });
+
   it("creates receipt approval previews from dry-run preview counts", () => {
     const preview = approvalPreviewFromDryRunStep({
       tool: "process_receipt_batch",
@@ -323,14 +347,14 @@ describe("workflow response helpers", () => {
     expect(preview?.accounting_impact.join(" ")).toContain("3 skipped row(s) match an existing journal ambiguously");
   });
 
-  it("blocks Wise approval while transfer ownership reviews remain", () => {
+  it("blocks Wise approval while reviews remain (a preview without blocking_review_count counts them all)", () => {
     const step = {
       tool: "import_wise_transactions",
       suggested_args: { file_path: "/tmp/wise.csv", accounts_dimensions_id: 8, execute: false },
       preview: { created: 2, command_count: 3, skipped: 0, error_count: 0, needs_review: 1 },
     };
     expect(approvalPreviewFromDryRunStep(step)).toBeUndefined();
-    expect(workflowActionFromBlockedDryRunStep(step)?.why).toContain("1 transfer needing ownership review");
+    expect(workflowActionFromBlockedDryRunStep(step)?.why).toContain("1 Wise review blocking approval");
   });
 
   it("turns handle-less inbox dry runs into a dry-run step instead of an execute card", () => {

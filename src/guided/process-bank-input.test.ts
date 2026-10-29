@@ -265,6 +265,21 @@ describe("process_bank_input — Wise journalized_transfer_ids", () => {
     expect(JSON.stringify(result)).toContain("unused_counterpart_override");
   });
 
+  it("accepts not_own_transfer_ids and forwards it: the reviewed next_action repeats it", async () => {
+    const { handler } = setup();
+    const registerTool = vi.fn();
+    registerProcessBankInputTool({ registerTool } as unknown as Parameters<typeof registerProcessBankInputTool>[0],
+      createAccountingWorkflowApi({ transactionRows: [] }), createTestRuntimeSafetyContext(), {});
+    const registration = registerTool.mock.calls.find(([name]) => name === "process_bank_input") as [string, { inputSchema: object }];
+    expect(Object.keys(registration[1].inputSchema)).toContain("not_own_transfer_ids");
+
+    const transfer = `TRANSFER-77,COMPLETED,OUT,"2026-07-06 10:00:00","2026-07-06 10:00:01",0.00,EUR,,,"Test OÜ",40.00,EUR,"Some Person",40.00,EUR,1,,,"Test Person","General",`;
+    const withTransfer = `base64:csv:${Buffer.from(`${header}\n${card}\n${transfer}\n`, "utf8").toString("base64")}`;
+    const not_own_transfer_ids = ["TRANSFER-77"];
+    const result = parse(await handler({ mode: "prepare", file_path: withTransfer, accounts_dimensions_id: 7, not_own_transfer_ids }));
+    expect(result.summary.next_action.args.not_own_transfer_ids).toEqual(not_own_transfer_ids);
+  });
+
   it("an override naming a dimension that is not a bank account is refused by the Wise import, before any write", async () => {
     // The explicit override wins resolution even when it is not a bank
     // candidate; the Wise executor then refuses it (wise_dimension_not_bank_account).

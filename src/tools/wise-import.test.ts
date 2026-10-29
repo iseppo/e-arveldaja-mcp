@@ -20,6 +20,7 @@ import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import { approvalDigest } from "../wise/projection.js";
+import { wiseReviewBlocksApproval } from "../wise/types.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
 
@@ -210,6 +211,10 @@ async function captureM03Outcome(
 
 const M03_OWNERSHIP_CODE = "wise_transfer_ownership_unverified";
 const M03_OWNERSHIP_REASON = "Wise transfer ownership is unverified; both endpoints must match configured own-account identities or this exact Wise ID must be explicitly approved.";
+// Without a company identity no endpoint is provably a third party, so a
+// prefix-only transfer keeps the ownership review these tests exercise rather
+// than being imported as an ordinary payment.
+const M03_NO_COMPANY_IDENTITY = {};
 const M03_DIMENSIONS_CODE = "wise_transfer_dimensions_unverified";
 const M03_DIMENSIONS_REASON = "Wise and target dimensions must resolve to two distinct configured bank accounts before reconciliation.";
 
@@ -1742,7 +1747,7 @@ describe("wise import tool", () => {
       const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 9400 }), {
         accountDimensions: configuredTransferDimensions(),
         bankAccounts: configuredTransferBankAccounts(),
-        invoiceInfo: { invoice_company_name: "Company Legal Name" },
+        invoiceInfo: M03_NO_COMPANY_IDENTITY,
       });
       const outcome = await captureM03Outcome(setup.handler, {
         file_path: "/tmp/wise.csv",
@@ -2055,7 +2060,7 @@ describe("wise import tool", () => {
       const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 9413 }), {
         accountDimensions: configuredTransferDimensions(),
         bankAccounts: [configuredTransferBankAccounts()[0], item.otherBank],
-        invoiceInfo: { invoice_company_name: "Company Legal Name" },
+        invoiceInfo: M03_NO_COMPANY_IDENTITY,
       });
       const outcome = await captureM03Outcome(setup.handler, {
         file_path: "/tmp/wise.csv",
@@ -2341,7 +2346,7 @@ describe("wise import tool", () => {
       const setup = setupWiseTool([], undefined, {
         accountDimensions: configuredTransferDimensions(),
         bankAccounts: configuredTransferBankAccounts(),
-        invoiceInfo: { invoice_company_name: "Company Legal Name" },
+        invoiceInfo: M03_NO_COMPANY_IDENTITY,
       });
       const outcome = await captureM03Outcome(setup.handler, {
         file_path: "/tmp/wise.csv",
@@ -2388,7 +2393,7 @@ describe("wise import tool", () => {
     const setup = setupWiseTool([], vi.fn().mockResolvedValue({ created_object_id: 9430 }), {
       accountDimensions: configuredTransferDimensions(),
       bankAccounts: configuredTransferBankAccounts(),
-      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+      invoiceInfo: M03_NO_COMPANY_IDENTITY,
     });
     const metadata = toolMetadataText(setup.options);
     const outcome = await captureM03Outcome(setup.handler, {
@@ -5819,7 +5824,7 @@ describe("wise import server plan handle (P12/P19)", () => {
     const transferOptions = () => ({
       accountDimensions: configuredTransferDimensions(),
       bankAccounts: configuredTransferBankAccounts(),
-      invoiceInfo: { invoice_company_name: "Company Legal Name" },
+      invoiceInfo: M03_NO_COMPANY_IDENTITY,
     });
     const transferBase = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20 } as const;
 
@@ -8121,5 +8126,460 @@ describe("Wise row booked by a journal labelled with its exact Wise ID (live 202
       wise_id: "TRANSFER-2431991304", code: "wise_untagged_ledger_match", ledger_transaction_ids: [5],
     })]);
     expectNoWiseMutations(setup.api);
+  });
+});
+
+describe("Wise transfer to a third party is imported as an ordinary payment (okt 2026, item 1)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const COMPANY = "Seppo AI OÜ";
+  const FEE_DIMENSION = { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false };
+  const options = (extra: Parameters<typeof setupWiseTool>[2] = {}) => ({
+    accountDimensions: [...configuredTransferDimensions(), FEE_DIMENSION],
+    bankAccounts: configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"),
+    invoiceInfo: { invoice_company_name: COMPANY },
+    ...extra,
+  });
+  const personOut = (overrides: Partial<Parameters<typeof buildM04Values>[0]> = {}) => buildM04Values({
+    id: "TRANSFER-900001", direction: "OUT", date: "2026-10-15", sourceName: COMPANY, targetName: "Indrek Seppo",
+    sourceAmount: "100", ...overrides,
+  });
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20, fee_account_dimensions_id: 9 };
+  const onlyOtherBankArgs = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+  const commandsOf = (payload: WiseImportFullPayload) => payload.execution.commands.map(command => [command.action, command.wise_id]);
+
+  it("an OUT transfer to a person is a plain unconfirmed row with no review; only its fee is confirmed", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ sourceFeeAmount: "0.5" })]));
+    const setup = setupWiseTool([], undefined, options());
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900001"], ["fee_create_and_confirm", "FEE:TRANSFER-900001"]]);
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.summary.needs_review).toBe(0);
+    expect(dry.transfers_treated_as_payments).toEqual([{ wise_id: "TRANSFER-900001", basis: "automatic" }]);
+    expect(dry.results.find(result => result.wise_id === "TRANSFER-900001")).not.toHaveProperty("counterpart_dimension_id");
+
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
+    expect(setup.api.transactions.confirm).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).toHaveBeenCalledWith(expect.any(Number), [
+      expect.objectContaining({ related_table: "accounts", related_id: 8610, related_sub_id: 9, amount: 0.5 }),
+    ]);
+    expect(setup.api.transactions.update).not.toHaveBeenCalled();
+    expect(executed.execution.errors).toEqual([]);
+    expect(executed.inter_account_reconciliation).toBeUndefined();
+  });
+
+  it("an IN transfer and a BANK_DETAILS_PAYMENT_RETURN from a person are plain rows, with the explicit id or the only other bank", async () => {
+    for (const runArgs of [args, onlyOtherBankArgs]) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([
+        buildM04Values({ id: "TRANSFER-900002", direction: "IN", date: "2026-10-15", sourceName: "Indrek Seppo", targetName: COMPANY, sourceAmount: "40" }),
+        buildM04Values({ id: "BANK_DETAILS_PAYMENT_RETURN-900003", direction: "IN", date: "2026-10-16", sourceName: "Indrek Seppo", targetName: COMPANY, sourceAmount: "15" }),
+      ]));
+      const setup = setupWiseTool([], undefined, options());
+      const { dry, executed } = await runApprovedWiseImport(setup, runArgs);
+
+      expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900002"], ["main_create", "BANK_DETAILS_PAYMENT_RETURN-900003"]]);
+      expect(dry.ownership_reviews).toBeUndefined();
+      expect(dry.transfers_treated_as_payments).toEqual([
+        { wise_id: "TRANSFER-900002", basis: "automatic" },
+        { wise_id: "BANK_DETAILS_PAYMENT_RETURN-900003", basis: "automatic" },
+      ]);
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(2);
+      expect(setup.api.transactions.create.mock.calls.map((call: Array<{ type?: string }>) => call[0]!.type)).toEqual(["D", "D"]);
+      expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+      expect(executed.execution.errors).toEqual([]);
+    }
+  });
+
+  it("the ownership review stays when the automatic condition does not hold", async () => {
+    const weakLhvEvidence = {
+      id: 701, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-15",
+      accounts_dimensions_id: 20, bank_account_name: "Some Supplier OÜ", bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Transfer", {
+        date: "2026-10-15", amount: 100, currency: "EUR", direction: "CRDT",
+        counterparty_name: "Some Supplier OÜ", counterparty_iban: "EE999999999999999999", bank_reference: "REF701",
+        description: "Transfer",
+      }),
+    };
+    const cases: Array<{ label: string; row: string[]; existing?: unknown[]; extra?: Parameters<typeof setupWiseTool>[2] }> = [
+      { label: "empty external endpoint name", row: personOut({ targetName: "" }) },
+      {
+        label: "name held by two own bank accounts",
+        row: personOut({ targetName: "Shared Holder" }),
+        extra: {
+          accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Third bank", is_deleted: false }, FEE_DIMENSION],
+          bankAccounts: [
+            ...configuredTransferBankAccounts(5, 20, COMPANY, "Shared Holder"),
+            { accounts_dimensions_id: 30, beneficiary_name: "Shared Holder" },
+          ],
+        },
+      },
+      { label: "no own company identity", row: personOut(), extra: { invoiceInfo: {} } },
+      { label: "spelled-out legal form of the own company", row: personOut({ targetName: "Osaühing Seppo AI" }) },
+      { label: "weak evidence on the fallback bank", row: personOut(), existing: [weakLhvEvidence] },
+    ];
+    for (const { label, row, existing, extra } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([row]));
+      const setup = setupWiseTool(existing ?? [], undefined, options(extra));
+      const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+
+      expect(dry.ownership_reviews, label).toEqual([expect.objectContaining({ wise_id: "TRANSFER-900001", code: M03_OWNERSHIP_CODE })]);
+      expect(dry.transfers_treated_as_payments, label).toBeUndefined();
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
+  it("a confirmed, named, uncontested untagged lookalike never skips a transfer as wise_untagged_ledger_unique: it is held", async () => {
+    const manualRow = {
+      id: 41, status: "CONFIRMED", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 100,
+      cl_currencies_id: "EUR", date: "2026-10-15", bank_account_name: "Indrek Seppo", description: "Indrek Seppo",
+    };
+    const registration = {
+      id: 8101, registered: true, is_deleted: false, effective_date: "2026-10-15", operation_type: "TRANSACTION", operations_id: 41,
+      postings: [
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount: 100, base_amount: 100 },
+        { is_deleted: false, accounts_id: 5000, type: "D", amount: 100, base_amount: 100 },
+      ],
+    };
+    // The same stored row covers a card payment of that movement: the fixture
+    // is one wise_untagged_ledger_unique accepts.
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ id: "CARD_TRANSACTION-900001" })]));
+    const card = setupWiseTool([manualRow], undefined, options({ journals: [registration] }));
+    const cardDry = parseWiseResponse(await card.handler({ ...args, execute: false }));
+    expect(JSON.stringify(cardDry.skipped_details)).toContain("wise_untagged_ledger_unique");
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut()]));
+    const setup = setupWiseTool([manualRow], undefined, options({ journals: [registration] }));
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+
+    expect(dry.execution.commands).toEqual([]);
+    expect(JSON.stringify(dry.skipped_details)).not.toContain("wise_untagged_ledger_unique");
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({
+      wise_id: "TRANSFER-900001", code: "wise_untagged_ledger_match", ledger_transaction_ids: [41],
+    })]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("the Wise-side guards still hold an ordinary-payment transfer", async () => {
+    const wiseJournal = (id: number, amount: number, extra: Record<string, unknown> = {}) => ({
+      id, operation_type: "ENTRY", registered: true, is_deleted: false, effective_date: "2026-10-15",
+      postings: [
+        { is_deleted: false, accounts_id: 1000, type: "D", amount, base_amount: amount, cl_currencies_id: "EUR" },
+        { is_deleted: false, accounts_id: 1010, accounts_dimensions_id: 5, type: "C", amount, base_amount: amount, cl_currencies_id: "EUR" },
+      ],
+      ...extra,
+    });
+    const cases = [
+      { label: "a journal labelled with the Wise ID books another amount", journals: [wiseJournal(501, 70, { document_number: "WISE:TRANSFER-900001" })], code: "wise_transfer_journal_inconsistent" },
+      { label: "an untagged journal moves the amount on the Wise account", journals: [wiseJournal(502, 100)], code: "wise_transfer_journal_existing_elsewhere" },
+    ];
+    for (const { label, journals, code } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([personOut()]));
+      const setup = setupWiseTool([], undefined, options({ journals }));
+      const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+      expect(dry.execution.commands, label).toEqual([]);
+      expect(dry.ownership_reviews, label).toEqual([expect.objectContaining({ wise_id: "TRANSFER-900001", code })]);
+      expect(dry.transfers_treated_as_payments, label).toBeUndefined();
+      expectNoWiseMutations(setup.api);
+    }
+
+    // A stored untagged unconfirmed row of the same movement holds it.
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut()]));
+    const storedRow = { id: 42, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 100,
+      cl_currencies_id: "EUR", date: "2026-10-15", bank_account_name: "Someone", description: "manual" };
+    const stored = setupWiseTool([storedRow], undefined, options());
+    const storedDry = parseWiseResponse(await stored.handler({ ...args, execute: false }));
+    expect(storedDry.execution.commands).toEqual([]);
+    expect(storedDry.ownership_reviews).toEqual([expect.objectContaining({ code: "wise_untagged_ledger_match", ledger_transaction_ids: [42] })]);
+
+    // A journal that appears between the preview and execute writes nothing.
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut()]));
+    const late = setupWiseTool([], undefined, options());
+    const reviewed = parseWiseResponse(await late.handler({ ...args, execute: false }));
+    expect(commandsOf(reviewed)).toEqual([["main_create", "TRANSFER-900001"]]);
+    late.api.journals.listAllWithPostings.mockResolvedValue([wiseJournal(503, 100)]);
+    clearWiseCallHistory(late.api);
+    const lateResult = parseWiseResponse<WiseFailurePayload>(await late.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(lateResult.code).toBe("plan_drift");
+    expectNoWiseMutations(late.api);
+  });
+
+  it("a real own transfer (target is an own bank identity) still books as inter-account", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ targetName: "LHV Own Account" })]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900001"], ["inter_account", "TRANSFER-900001"]]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expect(dry.ownership_reviews).toBeUndefined();
+  });
+
+  it("O4 acceptance: a hand-booked journal D 1010 / C 1020-Wise labelled WISE:<id>, without a bank row, reads as already_journalized", async () => {
+    // Wise on account 1020 (dimension 5), the cash desk on 1010 without a dimension.
+    const accountDimensions = [
+      { id: 5, accounts_id: 1020, title_est: "Wise", is_deleted: false },
+      { id: 20, accounts_id: 1030, title_est: "Other bank", is_deleted: false },
+      FEE_DIMENSION,
+    ];
+    const cashJournal = {
+      id: 29700001, operation_type: "ENTRY", registered: true, is_deleted: false, effective_date: "2026-10-15",
+      document_number: "WISE:TRANSFER-900001",
+      postings: [
+        { is_deleted: false, accounts_id: 1010, type: "D", amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+        { is_deleted: false, accounts_id: 1020, accounts_dimensions_id: 5, type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+      ],
+    };
+    for (const runArgs of [args, onlyOtherBankArgs]) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([personOut(), cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool([], undefined, options({ accountDimensions, journals: [cashJournal] }));
+      const { dry, executed } = await runApprovedWiseImport(setup, runArgs);
+
+      expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+      expect(dry.execution.already_journalized_rows).toEqual([
+        expect.objectContaining({ wise_id: "TRANSFER-900001", existing_journal_id: 29700001, booked_amount: 100, source_direction: "OUT" }),
+      ]);
+      expect(dry.ownership_reviews).toBeUndefined();
+      expect(dry.transfers_treated_as_payments).toBeUndefined();
+      expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+      expect(setup.api.transactions.create.mock.calls[0][0].description).toMatch(/^WISE:CARD_TRANSACTION-PLAN-1 /);
+      expect(executed.execution.errors).toEqual([]);
+    }
+  });
+});
+
+describe("not_own_transfer_ids: the owner marks a transfer as a payment to a third party (okt 2026, item 1)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const COMPANY = "Seppo AI OÜ";
+  const FEE_DIMENSION = { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false };
+  // No company identity: the automatic condition never holds, so only the
+  // owner's decision makes the row an ordinary payment.
+  const options = (extra: Parameters<typeof setupWiseTool>[2] = {}) => ({
+    accountDimensions: [...configuredTransferDimensions(), FEE_DIMENSION],
+    bankAccounts: configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"),
+    invoiceInfo: {},
+    ...extra,
+  });
+  const transferOut = (overrides: Partial<Parameters<typeof buildM04Values>[0]> = {}) => buildM04Values({
+    id: "TRANSFER-900011", direction: "OUT", date: "2026-10-15", sourceName: COMPANY, targetName: "Indrek Seppo",
+    sourceAmount: "100", ...overrides,
+  });
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20 };
+  const commandsOf = (payload: WiseImportFullPayload) => payload.execution.commands.map(command => [command.action, command.wise_id]);
+
+  it("a listed row is a plain unconfirmed row with no review; the emitted action executes unchanged, a changed one drifts", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut()]));
+    const without = setupWiseTool([], undefined, options());
+    const baseline = parseWiseResponse(await without.handler({ ...args, execute: false }));
+    expect(baseline.ownership_reviews).toEqual([expect.objectContaining({ wise_id: "TRANSFER-900011", code: M03_OWNERSHIP_CODE })]);
+
+    const setup = setupWiseTool([], undefined, options());
+    const runArgs = { ...args, not_own_transfer_ids: ["TRANSFER-900011"] };
+    const dry = parseWiseResponse(await setup.handler({ ...runArgs, execute: false }));
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900011"]]);
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.transfers_treated_as_payments).toEqual([{ wise_id: "TRANSFER-900011", basis: "owner" }]);
+    // The same write as without the decision: only the presentation differs.
+    expect(dry.execution.commands).toEqual(baseline.execution.commands);
+    expect(dry.approved_command_digest).not.toBe(baseline.approved_command_digest);
+
+    const emitted = dry.workflow.recommended_next_action.args;
+    expect(emitted).toHaveProperty("not_own_transfer_ids", ["TRANSFER-900011"]);
+
+    // The emitted action, called as given (with the approval artifacts), executes.
+    clearWiseCallHistory(setup.api);
+    const executed = parseWiseResponse(await setup.rawHandler({ ...emitted, execute: true }));
+    expect(executed.mode).toBe("EXECUTED");
+    expect(executed.execution.errors).toEqual([]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+
+    // Dropping the decision from the reviewed call is drift.
+    const drift = setupWiseTool([], undefined, options());
+    const reviewed = parseWiseResponse(await drift.handler({ ...runArgs, execute: false }));
+    clearWiseCallHistory(drift.api);
+    const drifted = parseWiseResponse<WiseFailurePayload>(await drift.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expectNoWiseMutations(drift.api);
+  });
+
+  it("an empty list leaves the plan byte-identical to omitting it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut()]));
+    const setup = setupWiseTool([], undefined, options());
+    const omitted = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    const empty = parseWiseResponse(await setup.handler({ ...args, not_own_transfer_ids: [], execute: false }));
+    expect(empty.approved_command_digest).toBe(omitted.approved_command_digest);
+  });
+
+  it("refuses a duplicate, unknown, filtered-out or non-transfer ID and an overlap with confirm_own_transfer_ids", async () => {
+    const cases: Array<{ label: string; extra: Record<string, unknown>; message: string }> = [
+      { label: "duplicate", extra: { not_own_transfer_ids: ["TRANSFER-900011", "TRANSFER-900011"] }, message: "not_own_transfer_ids must contain unique" },
+      { label: "unknown", extra: { not_own_transfer_ids: ["TRANSFER-ABSENT"] }, message: "not_own_transfer_ids must reference eligible" },
+      { label: "filtered out by the date range", extra: { not_own_transfer_ids: ["TRANSFER-900011"], date_from: "2026-10-16" }, message: "not_own_transfer_ids must reference eligible" },
+      { label: "not a transfer row", extra: { not_own_transfer_ids: ["CARD_TRANSACTION-PLAN-1"] }, message: "not_own_transfer_ids must reference eligible" },
+      {
+        label: "also in confirm_own_transfer_ids",
+        extra: { not_own_transfer_ids: ["TRANSFER-900011"], confirm_own_transfer_ids: ["TRANSFER-900011"] },
+        message: "cannot be in both confirm_own_transfer_ids and not_own_transfer_ids",
+      },
+    ];
+    for (const { label, extra, message } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool([], undefined, options());
+      const outcome = await captureM03Outcome(setup.handler, { ...args, ...extra, execute: false });
+      expect(String((outcome.error as Error | undefined)?.message ?? JSON.stringify(outcome.payload)), label).toContain(message);
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
+  it("a row held for its counterpart stays held, with an unbound not_own_transfer_conflicts_evidence review", async () => {
+    // Three banks and no inter_account_dimension_id: the counterpart is unresolved.
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options({
+      accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false }, FEE_DIMENSION],
+      bankAccounts: [...configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"), { accounts_dimensions_id: 30, beneficiary_name: "Coop Own Account" }],
+    }));
+    const dry = parseWiseResponse(await setup.handler({
+      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, not_own_transfer_ids: ["TRANSFER-900011"], execute: false,
+    }));
+
+    expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+    expect(dry.ownership_reviews).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "wise_transfer_dimensions_unverified" }),
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
+    ]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (wise_transfer_dimensions_unverified)");
+  });
+
+  it("a row whose counterpart own-account evidence decided is held with not_own_transfer_conflicts_evidence", async () => {
+    // A stored LHV row naming the company, the same amount the same day, money
+    // in: strong own-account evidence.
+    const lhvEvidence = {
+      id: 702, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-15",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Transfer", {
+        date: "2026-10-15", amount: 100, currency: "EUR", direction: "CRDT",
+        counterparty_name: COMPANY, counterparty_iban: "EE999999999999999999", bank_reference: "REF702",
+        description: "Transfer",
+      }),
+    };
+    const ownName = { invoiceInfo: { invoice_company_name: COMPANY } };
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const evidenced = setupWiseTool([lhvEvidence], undefined, options(ownName));
+    const plain = parseWiseResponse(await evidenced.handler({ ...args, execute: false }));
+    expect(plain.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", counterpart_basis: "evidence" }),
+    ]));
+
+    const setup = setupWiseTool([lhvEvidence], undefined, options(ownName));
+    const dry = parseWiseResponse(await setup.handler({ ...args, not_own_transfer_ids: ["TRANSFER-900011"], execute: false }));
+    expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+    expect(dry.ownership_reviews).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
+    ]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (not_own_transfer_conflicts_evidence)");
+  });
+
+  it("the guided next_action carries not_own_transfer_ids", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await setup.handler({ ...args, not_own_transfer_ids: ["TRANSFER-900011"], execute: false })));
+    expect(dry.summary.next_action!.args).toHaveProperty("not_own_transfer_ids", ["TRANSFER-900011"]);
+    expect(dry.summary.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ item_id: "TRANSFER-900011", code: "wise_transfer_treated_as_payment" }),
+    ]));
+  });
+});
+
+describe("Wise ownership reviews do not block approval; every other review does (okt 2026, item 1 / O2)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  it("wiseReviewBlocksApproval is fail-closed: only wise_transfer_ownership_unverified does not block", () => {
+    expect(wiseReviewBlocksApproval("wise_transfer_ownership_unverified")).toBe(false);
+    for (const code of [
+      "wise_transfer_dimensions_unverified", "wise_transfer_counterpart_conflict", "wise_transfer_cross_currency",
+      "wise_untagged_ledger_match", "wise_transfer_journal_existing_elsewhere", "not_own_transfer_conflicts_evidence",
+      "unused_acknowledgement", "a_code_added_later", "",
+    ]) {
+      expect(wiseReviewBlocksApproval(code), code).toBe(true);
+    }
+  });
+
+  // No company identity, so the prefix-only transfer keeps its ownership review.
+  const options = () => ({
+    accountDimensions: [...configuredTransferDimensions(), { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false }],
+    bankAccounts: configuredTransferBankAccounts(),
+    invoiceInfo: M03_NO_COMPANY_IDENTITY,
+  });
+  const ownershipRow = buildM04Values({ id: "TRANSFER-900021", direction: "OUT", date: "2026-10-15", sourceName: "Wise Own Account", targetName: "Some Person", sourceAmount: "100" });
+  // A stored untagged unconfirmed row on the Wise account: a card row keeps
+  // its create with an advisory wise_untagged_ledger_match review.
+  const cardWithLookalike = buildM04Values({ id: "CARD_TRANSACTION-900022", date: "2026-10-16", sourceName: "Wise Own Account", targetName: "Shop", sourceAmount: "12.34" });
+  const lookalike = { id: 43, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 12.34,
+    cl_currencies_id: "EUR", date: "2026-10-16", bank_account_name: "Someone", description: "manual" };
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20, fee_account_dimensions_id: 9 };
+
+  it("standard: ownership reviews alone leave the plan approvable; any other review blocks it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({ code: M03_OWNERSHIP_CODE })]);
+    expect(dry.summary).toMatchObject({ needs_review: 1, blocking_review_count: 0 });
+    expect(dry.workflow.approval_previews).toEqual([expect.objectContaining({
+      execute_tool: "import_wise_transactions",
+      accounting_impact: expect.arrayContaining([
+        "1 transfer(s) will be imported as unconfirmed ordinary rows; to book one as an own transfer, re-run the preview with it in confirm_own_transfer_ids",
+      ]),
+    })]);
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardWithLookalike]));
+    const blocked = setupWiseTool([lookalike], undefined, options());
+    const blockedDry = parseWiseResponse(await blocked.handler({ ...args, execute: false }));
+    expect(blockedDry.ownership_reviews!.map(review => review.code)).toEqual([M03_OWNERSHIP_CODE, "wise_untagged_ledger_match"]);
+    expect(blockedDry.summary).toMatchObject({ needs_review: 2, blocking_review_count: 1 });
+    expect(blockedDry.workflow.approval_previews).toEqual([]);
+  });
+
+  it("guided: ownership reviews alone are ready_for_approval; any other review is needs_review", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await setup.handler({ ...args, execute: false })));
+    expect(dry.summary.counts).toMatchObject({ needs_review: 1, blocking_review_count: 0 });
+    expect(dry.summary.status).toBe("ready_for_approval");
+    expect(dry.summary.next_action).toBeDefined();
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardWithLookalike]));
+    const blocked = setupWiseTool([lookalike], undefined, options());
+    const blockedDry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await blocked.handler({ ...args, execute: false })));
+    expect(blockedDry.summary.counts).toMatchObject({ needs_review: 2, blocking_review_count: 1 });
+    expect(blockedDry.summary.status).toBe("needs_review");
   });
 });

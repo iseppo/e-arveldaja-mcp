@@ -16,6 +16,7 @@ import type { CamtParseResult } from "../camt/types.js";
 import { journalReviewClause, type CamtImportPreview } from "../camt/presenter.js";
 import { isCamtJournalReviewRow } from "../camt/projection.js";
 import type { WiseImportPreview } from "../wise/presenter.js";
+import { wiseReviewBlocksApproval } from "../wise/types.js";
 
 import type { ReceiptBatchResult } from "../receipts/types.js";
 import type { UnmatchedAnalysisResult } from "../receipts/classification-operations.js";
@@ -393,7 +394,7 @@ function invokeAutopilotOperation(
 function wiseReviewRecommendation(review: WiseImportPreview["ownershipReviews"][number]): string {
   switch (review.code) {
     case "wise_transfer_ownership_unverified":
-      return "Verify that both accounts belong to the company, then rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true.";
+      return "Not a blocker: on approval the transfer is imported as an unconfirmed ordinary bank row. Only if the owner confirms it is a real own transfer (both accounts belong to the company), rerun the Wise dry run with this wise_id in confirm_own_transfer_ids before execute=true.";
     case "wise_transfer_dimensions_unverified":
       return "Rerun the Wise dry run with inter_account_dimension_id naming the company's other own bank account in this transfer (and make sure the Wise account is a configured bank account) before execute=true.";
     case "wise_untagged_ledger_match":
@@ -598,6 +599,7 @@ function summarizeAutopilotToolResult(
           skipped,
           error_count: errorCount,
           needs_review: preview.ownershipReviews.length,
+          blocking_review_count: preview.ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length,
           command_count: preview.commands.length,
           ...(counterpart !== undefined
             ? { transfer_counterpart_unresolved: counterpart.unresolved_row_count + counterpart.conflict_row_count }

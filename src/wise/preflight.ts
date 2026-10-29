@@ -1,6 +1,6 @@
 import type { AccountDimension, BankAccount } from "../types/api.js";
 import { parseCSV } from "../csv.js";
-import { normalizeCompanyName } from "../company-name.js";
+import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import { roundMoney } from "../money.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
@@ -171,6 +171,29 @@ export function classifyWiseOwnTransfer(
       approval_required: true,
     },
   };
+}
+
+/**
+ * Whether a transfer row's external endpoint (OUT: the recipient, IN: the
+ * sender; never the other side as a fallback) is provably not an own account:
+ * a non-empty name that is not the company's own identity, appears in no
+ * configured bank account's identities (a name shared by several own accounts
+ * still counts as own), and is not the company's legal name with its form
+ * spelled out. Without an own company identity nothing is provably foreign.
+ */
+export function wiseExternalEndpointIsForeign(
+  row: WiseRow,
+  identityDimensions: Map<string, Set<number>>,
+  ownCompanyIdentity: string,
+  companyLegalName: string | undefined,
+): boolean {
+  if (!ownCompanyIdentity) return false;
+  const direction = normalizeWiseDirection(row.direction);
+  if (direction !== "IN" && direction !== "OUT") return false;
+  const name = direction === "IN" ? row.sourceName : row.targetName;
+  const identity = normalizeWiseCompanyName(name);
+  if (!identity || identity === ownCompanyIdentity || identityDimensions.has(identity)) return false;
+  return !sameCompanyIdentity(name, companyLegalName);
 }
 
 // --- M05 scaffolding: shared with CAMT (../camt/preflight.ts) ----------------

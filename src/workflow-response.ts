@@ -618,19 +618,26 @@ const DRY_RUN_TOOL_REGISTRY: DryRunToolSpec[] = [
       commandCount: numberAt(preview, "command_count") ?? numberAt(preview, "created") ?? 0,
       errorCount: numberAt(preview, "error_count") ?? 0,
       skipped: numberAt(preview, "skipped") ?? 0,
-      reviewCount: numberAt(preview, "needs_review") ?? 0,
+      // Fail-closed: a preview without blocking_review_count (an older
+      // producer) blocks on every review it counts.
+      reviewCount: numberAt(preview, "blocking_review_count") ?? numberAt(preview, "needs_review") ?? 0,
+      nonBlockingReviewCount: Math.max(0, (numberAt(preview, "needs_review") ?? 0) -
+        (numberAt(preview, "blocking_review_count") ?? numberAt(preview, "needs_review") ?? 0)),
     }),
     canApprove: counts => counts.commandCount > 0 && counts.errorCount <= 0 && counts.reviewCount <= 0,
     buildImpact: (counts, preview) => [
       impactLine(counts.created, "bank transaction"),
       impactLine(counts.skipped, "skipped row"),
       invoiceCurrencyFixImpact(preview),
-      counts.reviewCount > 0 ? `${counts.reviewCount} transfer(s) still need ownership review before approval` : undefined,
+      counts.nonBlockingReviewCount > 0
+        ? `${counts.nonBlockingReviewCount} transfer(s) will be imported as unconfirmed ordinary rows; to book one as an own transfer, re-run the preview with it in confirm_own_transfer_ids`
+        : undefined,
+      counts.reviewCount > 0 ? `${counts.reviewCount} Wise review(s) must be resolved before approval` : undefined,
       counts.errorCount > 0 ? `${counts.errorCount} import error(s) must be reviewed before approval` : undefined,
     ].filter((line): line is string => line !== undefined),
     duplicateRisk: () => "Review skipped rows, transfer handling, and invoice_currency_fixes before approval. Execution confirms or links source bank transactions where the dry run shows fee or inter-account handling.",
     blockedReasons: counts => [
-      impactLine(counts.reviewCount, "transfer needing ownership review", "transfers needing ownership review"),
+      impactLine(counts.reviewCount, "Wise review blocking approval", "Wise reviews blocking approval"),
       impactLine(counts.errorCount, "import error"),
     ].filter((line): line is string => line !== undefined),
   },

@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 36471,
+    "toolsListBytes": 36707,
     "descriptionsBytes": 5064,
-    "inputSchemasBytes": 26537,
+    "inputSchemasBytes": 26773,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5134
@@ -564,6 +564,14 @@
               "show_details"
             ],
             "type": "string"
+          },
+          "not_own_transfer_ids": {
+            "description": "Wise only, owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party; imported as ordinary unconfirmed rows.",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
           },
           "operation_handle": {
             "description": "mode='show_details' only: operation-result handle from a prior execute.",

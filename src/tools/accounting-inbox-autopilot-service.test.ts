@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { wrapUntrustedOcr } from "../mcp-json.js";
-import { buildWorkflowEnvelope } from "../workflow-response.js";
+import { approvalPreviewFromDryRunStep, buildWorkflowEnvelope } from "../workflow-response.js";
 import {
   runAccountingInboxDryRunPipeline,
   shortReviewId,
@@ -828,6 +828,35 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(prepareCamtImport).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandles: false }));
     expect(prepareWiseImport).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandle: false }));
     expect(prepareInterAccount).toHaveBeenCalledWith(expect.objectContaining({ mintPlanHandles: false }));
+  });
+
+  it("a Wise preview whose only reviews are ownership reviews is approvable; the advice says it imports as a plain row", async () => {
+    const review = (wiseId: string, code: string) => ({
+      wise_id: wiseId, code, reason: "r", source_verified: false, target_verified: false, approval_required: code === "wise_transfer_ownership_unverified",
+    });
+    const run = (ownershipReviews: ReturnType<typeof review>[]) => runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_wise_transactions", purpose: "Wise", recommended: true,
+          suggested_args: { file_path: "/tmp/w.csv", accounts_dimensions_id: 5, execute: false },
+          missing_inputs: [], reason: "Wise found",
+        }],
+      }),
+      operations: mockOperations({ prepareWiseImport: vi.fn().mockResolvedValue(ok({
+        created: [{}], skipped: [], commands: [{ action: "main_create" }], invoiceFixCandidates: [], ownershipReviews,
+      })) }),
+    });
+
+    const ownershipOnly = await run([review("TRANSFER-1", "wise_transfer_ownership_unverified")]);
+    const step = ownershipOnly.executed_steps[0]!;
+    expect(step.preview).toMatchObject({ needs_review: 1, blocking_review_count: 0 });
+    expect(approvalPreviewFromDryRunStep(step)).toBeDefined();
+    expect(ownershipOnly.needs_accountant_review[0]!.recommendation).toContain("imported as an unconfirmed ordinary bank row");
+    expect(ownershipOnly.needs_accountant_review[0]!.recommendation).toContain("confirm_own_transfer_ids");
+
+    const mixed = await run([review("TRANSFER-1", "wise_transfer_ownership_unverified"), review("TRANSFER-2", "a_code_added_later")]);
+    expect(mixed.executed_steps[0]!.preview).toMatchObject({ needs_review: 2, blocking_review_count: 1 });
+    expect(approvalPreviewFromDryRunStep(mixed.executed_steps[0]!)).toBeUndefined();
   });
 
   it("emits one stable follow-up per Wise ownership review and blocks the downstream ledger step", async () => {
