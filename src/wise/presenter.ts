@@ -36,6 +36,7 @@ import type {
   WiseCounterpartOverride,
   WiseJournalizedTransferMapping,
   WiseTransferReview,
+  WiseTransferTreatedAsPayment,
 } from "./types.js";
 
 // --- Wire payload types ------------------------------------------------------
@@ -136,6 +137,8 @@ export type WiseImportFullPayload = {
     candidates: Array<{ accounts_dimensions_id: number; label: string }>;
   };
   acknowledged_holds?: WiseAcknowledgedJournalHold[];
+  /** Transfer rows imported as ordinary unconfirmed payments (info, not a review). */
+  transfers_treated_as_payments?: WiseTransferTreatedAsPayment[];
   ownership_reviews?: WiseTransferReview[];
   invoice_currency_fixes?: WiseInvoiceCurrencyFixes;
   results: WiseImportResultRow[];
@@ -313,6 +316,9 @@ export interface WiseImportRenderData {
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
   /** Rows released by acknowledged_journal_holds (info only, not a review). */
   acknowledgedHolds?: WiseAcknowledgedJournalHold[];
+  /** Transfer rows imported as ordinary unconfirmed payments (info only, not
+   * a review). */
+  transfersTreatedAsPayments?: WiseTransferTreatedAsPayment[];
   /** Set when some transfer rows are held because their counterpart bank
    * account could not be determined (unresolved) or own-account evidence
    * contradicts the selected one (conflict). Info only: the other rows still
@@ -537,6 +543,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           },
         } : {}),
         ...(data.acknowledgedHolds !== undefined ? { acknowledged_holds: data.acknowledgedHolds } : {}),
+        ...(data.transfersTreatedAsPayments !== undefined ? { transfers_treated_as_payments: data.transfersTreatedAsPayments } : {}),
         ...(ownershipReviews.length > 0 ? { ownership_reviews: ownershipReviews } : {}),
         ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
         results: outputResults,
@@ -747,6 +754,13 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
       message: `Released by acknowledged_journal_holds: journal(s) ${hold.journal_ids.join(", ")} acknowledged as not booking this transfer; the row is imported and confirmed normally, and execute re-checks those journals.`,
     });
   }
+  // Transfers imported as ordinary payments: info (not a review; approval is
+  // not blocked), so the owner can still mark a real own transfer.
+  warnings.push(...cappedWarnings("wise_transfer_treated_as_payment", (data.transfersTreatedAsPayments ?? []).map(entry => ({
+    item_id: entry.wise_id,
+    code: "wise_transfer_treated_as_payment",
+    message: `Imported as an ordinary unconfirmed payment, not an own transfer (${entry.basis === "owner" ? "not_own_transfer_ids" : "the other party is not an own account"}). If it is an own transfer after all, re-run the preview with this ID in confirm_own_transfer_ids.`,
+  })), "they are plain unconfirmed rows in the plan; re-run the preview with a narrower date_from/date_to to list them."));
   if (counterpartInfo !== undefined) {
     warnings.unshift({
       item_id: "wise-import",

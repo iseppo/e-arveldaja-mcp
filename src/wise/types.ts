@@ -125,6 +125,18 @@ export interface WiseTransferJournalCandidate {
   label_source: "counterpart_bank_ref" | "other";
 }
 
+/** Why a transfer row is imported as an ordinary payment (a plain
+ * unconfirmed row, no inter-account booking): its external endpoint is
+ * provably not an own account ("automatic"), or the owner listed it in
+ * not_own_transfer_ids ("owner"). */
+export type WiseExternalPaymentBasis = "automatic" | "owner";
+
+/** One transfer row imported as an ordinary payment (info only, not a review). */
+export interface WiseTransferTreatedAsPayment {
+  wise_id: string;
+  basis: WiseExternalPaymentBasis;
+}
+
 export interface WiseTransferDecision {
   targetDimensionId?: number;
   /** Set when targetDimensionId came from the per-row counterpart resolution. */
@@ -139,6 +151,10 @@ export interface WiseTransferDecision {
   targetVerified: boolean;
   ownershipBasis?: WiseTransferOwnershipBasis;
   review?: WiseTransferReview;
+  /** The row is a payment to or from a third party, not an own transfer: no
+   * targetDimensionId, ownershipBasis or review, so it is created as a plain
+   * unconfirmed row. It stays a transfer candidate for every hold. */
+  externalPayment?: WiseExternalPaymentBasis;
 }
 
 // --- M05: strict Wise row validation -----------------------------------------

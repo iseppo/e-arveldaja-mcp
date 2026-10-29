@@ -46,6 +46,7 @@ import {
   sourceDirectionForWiseDirection,
   uniqueActivePostingDimensions,
   validateWiseDateRange,
+  wiseExternalEndpointIsForeign,
   wiseRowAmounts,
   wiseRowDate,
 } from "./preflight.js";
@@ -383,6 +384,25 @@ async function runWiseImport(
           targetVerified: decision.targetVerified,
           counterpartHold: wiseCounterpartHoldReview(row, resolution.hold, decision.sourceVerified, decision.targetVerified),
           ...(resolution.hold.selected_by_override === true ? { counterpartOverrideApplied: true as const } : {}),
+        });
+        continue;
+      }
+      // A transfer whose counterpart is only the fallback (no own-account
+      // evidence of any strength) and whose external endpoint is provably not
+      // an own account pays a third party: it is imported as an ordinary,
+      // unconfirmed row instead of waiting on an ownership review. It stays a
+      // transfer candidate, so every Wise-side hold still applies to it.
+      if (
+        resolution !== undefined &&
+        (resolution.basis === "explicit" || resolution.basis === "only_other_bank") &&
+        resolution.otherEvidenceDims === undefined &&
+        decision.review?.code === "wise_transfer_ownership_unverified" &&
+        wiseExternalEndpointIsForeign(row, identityDimensions, ownCompanyIdentity, invoiceInfoSnapshot.invoice_company_name ?? undefined)
+      ) {
+        transferDecisions.set(row, {
+          sourceVerified: decision.sourceVerified,
+          targetVerified: decision.targetVerified,
+          externalPayment: "automatic",
         });
         continue;
       }
@@ -1073,6 +1093,7 @@ async function runWiseImport(
     ownershipReviews,
     invoiceFixCandidates,
     ...(projected.acknowledgedHolds.length > 0 ? { acknowledgedHolds: projected.acknowledgedHolds } : {}),
+    ...(projected.transfersTreatedAsPayments.length > 0 ? { transfersTreatedAsPayments: projected.transfersTreatedAsPayments } : {}),
     ...(counterpartHoldReviews.length > 0
       ? (() => {
           const labels = new Map(buildBankDimensionCandidates(bankAccountsSnapshot, accountDimensionsSnapshot)
