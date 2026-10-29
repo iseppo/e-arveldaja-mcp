@@ -6,6 +6,7 @@ import {
   extractDates,
   extractInvoiceNumber,
   extractPaymentReferences,
+  extractOrderReferences,
   toIsoDate,
   extractAmountsWithMetadata,
   buildKeywordSuggestion,
@@ -4990,6 +4991,40 @@ describe("extractPaymentReferences (F-PREPAY-REF)", () => {
     ["an English payment reference", "Payment reference PR-778899"],
   ])("never reads %s", (_name, line) => {
     expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual([]);
+  });
+});
+
+describe("extractOrderReferences (okt 2026 finding 5)", () => {
+  it("reads the cart number on the real two-column line shape (the first token after the label)", () => {
+    const ticket = [
+      "Ostetud:          18.10.2026 12:26    Pileti(te) hind (KM 24%):    20,32 EUR",
+      "Ostukorvi nr:     100000000002                        KM (24%):     4,88 EUR",
+      "                                                         Kokku:    25,20 EUR",
+    ].join("\n");
+    expect(extractOrderReferences(ticket)).toEqual(["100000000002"]);
+  });
+
+  it.each([
+    ["Tellimuse nr: TL-2026-0042", ["TL-2026-0042"]],
+    ["Order number 7001234", ["7001234"]],
+    ["Order no. A1234567", ["A1234567"]],
+    ["Ostukorvi nr: ¦ 100000000002 ¦ KM (24%): ¦ 4,88 EUR", ["100000000002"]],
+  ])("reads %s", (line, expected) => {
+    expect(extractOrderReferences(["Näidis OÜ", line, "Kokku 25,20"].join("\n"))).toEqual(expected);
+  });
+
+  it("returns every distinct value (the notes line then binds none)", () => {
+    expect(extractOrderReferences("Ostukorvi nr: 100000000002\nOstukorvi nr: 100000000003")).toEqual(["100000000002", "100000000003"]);
+  });
+
+  it.each([
+    ["an amount", "Ostukorvi nr: 25,20"],
+    ["a date", "Tellimuse nr 18.10.2026"],
+    ["an IBAN", "Order number EE382200221020145685"],
+    ["a value on the next line", "Ostukorvi nr:\n100000000002"],
+    ["a word between label and value", "Ostukorvi nr on 100000000002"],
+  ])("never reads %s", (_name, text) => {
+    expect(extractOrderReferences(text)).toEqual([]);
   });
 });
 

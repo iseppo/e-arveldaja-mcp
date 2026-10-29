@@ -27,6 +27,7 @@ import type {
   AmbiguousPairResult,
   AmbiguousReflessRow,
   CrossCurrencyRow,
+  DocumentReferenceCandidateRow,
   ExactConfirmLedgerChecks,
   ExactMatchProjection,
   InterAccountErrorRow,
@@ -64,6 +65,9 @@ export type ReconSuggestPayload = {
   matched: number;
   unmatched: number;
   matches: ReconSuggestMatch[];
+  /** Below-threshold purchase invoices with an exact amount and a document reference on the row; never auto-confirmed. */
+  document_reference_candidates?: DocumentReferenceCandidateRow[];
+  document_reference_note?: string;
   duplicate_scan_note?: string;
 };
 
@@ -298,12 +302,39 @@ function wrapSuggestMatch(match: SuggestMatchRow): ReconSuggestMatch {
   return out;
 }
 
+const DOCUMENT_REFERENCE_NOTE =
+  "These purchase invoices match a transaction's exact amount and a document reference (invoice number or order / cart number) "
+  + "in its description, but scored below the suggestion threshold. They are not auto-confirmed: check each one and "
+  + "confirm the transaction against that invoice only when it is that invoice's payment.";
+
+// Wrap every untrusted free-text field on a RAW document-reference row.
+function wrapDocumentReferenceCandidate(row: DocumentReferenceCandidateRow): DocumentReferenceCandidateRow {
+  return {
+    ...row,
+    ...(row.description !== undefined ? { description: wrapUntrustedOcr(row.description) } : {}),
+    ...(row.bank_account_name !== undefined ? { bank_account_name: wrapUntrustedOcr(row.bank_account_name) } : {}),
+    invoice: {
+      ...row.invoice,
+      number: wrapUntrustedOcr(row.invoice.number) ?? "",
+      client_name: wrapUntrustedOcr(row.invoice.client_name) ?? "",
+    },
+    matched_reference: wrapUntrustedOcr(row.matched_reference) ?? "",
+  };
+}
+
 export function renderSuggestPayload(data: ReconciliationSuggestions): ReconSuggestPayload {
+  const documentReferenceCandidates = data.documentReferenceCandidates ?? [];
   return {
     total_unconfirmed: data.totalUnconfirmed,
     matched: data.matched,
     unmatched: data.unmatched,
     matches: data.matches.map(wrapSuggestMatch),
+    ...(documentReferenceCandidates.length > 0
+      ? {
+          document_reference_candidates: documentReferenceCandidates.map(wrapDocumentReferenceCandidate),
+          document_reference_note: DOCUMENT_REFERENCE_NOTE,
+        }
+      : {}),
     ...(data.duplicateScanNote !== undefined ? { duplicate_scan_note: data.duplicateScanNote } : {}),
   };
 }
@@ -571,6 +602,13 @@ export function renderSuggestCompact(
   if (data.duplicateScanNote !== undefined) {
     warnings.push({ code: "duplicate_scan_unavailable", message: data.duplicateScanNote });
   }
+  // Server-authored text only: ids and amounts, no document strings.
+  warnings.push(...cappedWarnings("document_reference_candidate", (data.documentReferenceCandidates ?? []).map(row => ({
+    item_id: String(row.transaction_id ?? ""),
+    code: "document_reference_candidate",
+    message: `Transaction ${row.transaction_id ?? "?"} (${row.amount}) carries the exact amount and a document reference of purchase invoice #${row.invoice.id}, `
+      + "but scored below the suggestion threshold; it is not auto-confirmed. Check it before confirming the payment against that invoice.",
+  })), "each needs the same check before confirming."));
 
   // Suggest is read-only (no execution) — it never produces execution blockers.
   const blockers: CompactReviewItem[] = [];

@@ -16,7 +16,8 @@ import type { CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, T
 import { type ApiContext, tagNotes } from "./crud-tools.js";
 import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
-import { amountConsistencyIssues, computeTermDays, extractPaymentReferences, snapVatRate } from "./receipt-extraction.js";
+import { amountConsistencyIssues, computeTermDays, extractOrderReferences, extractPaymentReferences, snapVatRate } from "./receipt-extraction.js";
+import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-reference-note.js";
 import { InvoiceCreationError, PurchaseInvoiceDraftVerificationError, PurchaseInvoiceTotalsCorrectionError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
@@ -235,7 +236,10 @@ export async function createAndMaybeMatchPurchaseInvoice(
   const invoiceCurrency = extracted.currency ?? "EUR";
   // Never the source filename (user preference): the file name is not a
   // description of the purchase.
-  const invoiceNotes = "Receipt inbox import";
+  // Okt 2026 finding 5: the printed order / cart number, which a card
+  // payment's bank description names, goes into the notes on its own line.
+  const orderReferenceNote = orderReferenceNoteLine(extractOrderReferences(extracted.raw_text ?? ""));
+  const invoiceNotes = appendOrderReferenceNote("Receipt inbox import", orderReferenceNote) ?? "Receipt inbox import";
 
   if (!supplierName) {
     notes.push("Supplier resolution did not return a concrete client ID.");
@@ -406,6 +410,9 @@ export async function createAndMaybeMatchPurchaseInvoice(
       notes.push(`Dry run: matched candidate transaction ${candidate.transaction_id} at confidence ${candidate.confidence}.`);
     } else if (dryRunMatch?.ambiguous) {
       notes.push(`Dry run: ${dryRunMatch.tiedCount} bank transactions tied at confidence ${dryRunMatch.topConfidence}; no candidate auto-selected.`);
+    }
+    if (orderReferenceNote !== undefined) {
+      notes.push(`Dry run: the invoice notes will carry the document's order number line ${wrapUntrustedOcr(orderReferenceNote) ?? ""}.`);
     }
     notes.push("Dry run: purchase invoice document was not uploaded and the invoice was not confirmed.");
 

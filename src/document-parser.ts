@@ -203,6 +203,16 @@ function getOcrDisabledDocumentParser(): LiteParse {
   return ocrDisabledParser;
 }
 
+/**
+ * The native text layer of in-memory document bytes; OCR never runs. For a
+ * reader that must parse exactly the bytes it was handed (a sha-verified
+ * snapshot), not a path that could be swapped. The parser gets a copy, so
+ * the caller's buffer is never handed over.
+ */
+export async function parseDocumentTextLayerOnly(bytes: Buffer): Promise<string> {
+  return (await getOcrDisabledDocumentParser().parse(Buffer.from(bytes))).text;
+}
+
 export async function analyzeDocumentComplexity(filePath: string): Promise<PageComplexityStats[]> {
   return getDocumentParser().isComplex(filePath);
 }

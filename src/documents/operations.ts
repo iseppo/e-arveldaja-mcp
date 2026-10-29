@@ -17,10 +17,13 @@ import { sanitizeUploadFileName } from "../file-validation.js";
 import { parseDocument } from "../document-parser.js";
 import {
   computeMinOcrConfidence,
+  extractOrderReferences,
   extractReceiptFieldsFromText,
   inferSupplierCountry,
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
+import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-reference-note.js";
+import { isRecord } from "../record-utils.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { resolveOwnCompanyIdentifiers } from "../tools/own-company-identity.js";
@@ -375,6 +378,11 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         ownCompanyName,
       });
 
+      // Okt 2026 finding 5: the order / cart number the document prints goes
+      // into the booking notes (bound by the fingerprint, stored in the plan
+      // for create — create never re-parses it).
+      const orderReferenceNote = orderReferenceNoteLine(extractOrderReferences(extracted.raw_text ?? ""));
+
       const signals = buildExtractionConfidenceSignals(extracted, {
         partialOcrFailure: parsedDocument.ocrPartialFailure,
         minOcrConfidence,
@@ -556,7 +564,8 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       let planHandle: string | undefined;
       let bookingProjection: PlanData | undefined;
       if (input.booking !== undefined) {
-        const effective = await this.computeEffectiveBooking(input.booking, material.source_sha256, material.fileName);
+        const booking = { ...input.booking, notes: appendOrderReferenceNote(input.booking.notes, orderReferenceNote) };
+        const effective = await this.computeEffectiveBooking(booking, material.source_sha256, material.fileName);
         if (!effective.ok) return effective;
         bookingProjection = effective.value.fingerprint;
         // The extraction-level duplicate check above keys on the OCR number and
@@ -597,7 +606,10 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
           },
           exclusions: [],
           reviews: [],
-          privatePayload: { source_sha256: material.source_sha256 },
+          privatePayload: {
+            source_sha256: material.source_sha256,
+            ...(orderReferenceNote !== undefined ? { order_reference_note: orderReferenceNote } : {}),
+          },
         };
         // ...but a bound booking is not by itself approval. When the supplier
         // did not resolve, or a blocker stands, the preview reports
@@ -641,6 +653,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         blockers,
         warnings,
         planProjection,
+        ...(orderReferenceNote !== undefined ? { orderReferenceNote } : {}),
         ...(planHandle !== undefined ? { planHandle } : {}),
         ...(bookingProjection !== undefined ? { bookingProjection } : {}),
       };
@@ -706,7 +719,14 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       // dates, items, accounts, dimensions, VAT config, totals, currency,
       // rate, base amounts, liability account, references, notes, duplicate
       // policy — rejects as plan_drift with ZERO API writes.
-      const effective = await this.computeEffectiveBooking(input, material.source_sha256, material.fileName);
+      // The order-reference notes line prepare derived from these same bytes
+      // (stored with their digest) is added again, idempotently — never re-parsed.
+      const stored = isRecord(storedPlan.privatePayload) ? storedPlan.privatePayload : {};
+      const storedOrderReferenceNote = stored.source_sha256 === material.source_sha256 && typeof stored.order_reference_note === "string"
+        ? stored.order_reference_note
+        : undefined;
+      const booking = { ...input, notes: appendOrderReferenceNote(input.notes, storedOrderReferenceNote) };
+      const effective = await this.computeEffectiveBooking(booking, material.source_sha256, material.fileName);
       if (!effective.ok) return effective;
       if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint)) {
         return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");

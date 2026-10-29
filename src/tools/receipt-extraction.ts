@@ -3465,9 +3465,26 @@ const PAYMENT_REFERENCE_RE =
  * one. The scan's strength gate still applies to every value.
  */
 export function extractPaymentReferences(text: string): string[] {
+  return extractLabelledReferences(text, PAYMENT_REFERENCE_RE);
+}
+
+// Okt 2026 finding 5: an order / shopping-cart number ("Ostukorvi nr:
+// 100000000002") is what a card payment's bank description names. The FIRST
+// unspaced value after the label on its line: a right-hand column may follow
+// on the same line ("Ostukorvi nr:   <nr>   KM (24%):   4,88 EUR"). The
+// reading packet's column mark `¦` counts as a gap.
+const ORDER_REFERENCE_RE =
+  /(?<![\p{L}\d])(?:ostukorvi\s*nr|tellimuse\s*nr|order\s*(?:no|number))\.?[:#\t ¦.-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
+
+/** The label-anchored order / shopping-cart references in `text`, distinct (never an amount, date or IBAN). */
+export function extractOrderReferences(text: string): string[] {
+  return extractLabelledReferences(text, ORDER_REFERENCE_RE);
+}
+
+function extractLabelledReferences(text: string, labelledValueRe: RegExp): string[] {
   const references = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
-    for (const match of line.matchAll(PAYMENT_REFERENCE_RE)) {
+    for (const match of line.matchAll(labelledValueRe)) {
       const rest = line.slice((match.index ?? 0) + match[0].length);
       if (/^[.,]\d/.test(rest)) continue;
       const candidate = acceptInvoiceNumberCandidate(match[1]);

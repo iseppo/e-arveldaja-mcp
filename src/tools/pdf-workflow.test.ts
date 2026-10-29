@@ -5,7 +5,7 @@ import { tmpdir } from "os";
 import { access } from "fs/promises";
 import { FILE_CHANGED_WHILE_READING_MESSAGE, readFileCapped } from "../bounded-read.js";
 import { resolveFileInput } from "../file-validation.js";
-import { parseDocument } from "../document-parser.js";
+import { parseDocument, parseDocumentTextLayerOnly } from "../document-parser.js";
 import {
   prepareInvoiceDocumentUpload,
   registerPdfWorkflowTools,
@@ -38,6 +38,7 @@ vi.mock("../file-validation.js", async () => ({
 
 vi.mock("../document-parser.js", () => ({
   parseDocument: vi.fn(),
+  parseDocumentTextLayerOnly: vi.fn(),
 }));
 
 vi.mock("./document-text-hazards.js", async (importOriginal) => {
@@ -55,6 +56,7 @@ vi.mock("../bounded-read.js", async () => {
 
 const mockedResolveFileInput = vi.mocked(resolveFileInput);
 const mockedParseDocument = vi.mocked(parseDocument);
+const mockedParseDocumentTextLayerOnly = vi.mocked(parseDocumentTextLayerOnly);
 const mockedReadFileCapped = vi.mocked(readFileCapped);
 
 const tempDirs: string[] = [];
@@ -180,6 +182,7 @@ function setupPdfWorkflowTool(
 afterEach(() => {
   mockedResolveFileInput.mockReset();
   mockedParseDocument.mockReset();
+  mockedParseDocumentTextLayerOnly.mockReset();
   mockedReadFileCapped.mockClear();
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -1084,6 +1087,37 @@ describe("pdf workflow tools", () => {
       expect(response.isError).toBe(true);
       expect(response.content[0]!.text).toContain("Non-VAT purchase invoice contains deductible VAT fields");
       expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    });
+
+    it("writes the document's cart number into the notes, read from the verified snapshot bytes (okt 2026 finding 5)", async () => {
+      const filePath = createTempInvoiceFile("cart.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      mockedParseDocumentTextLayerOnly.mockResolvedValue("Ostetud:   15.03.2026\nOstukorvi nr:   990011223344   KM (24%): 4,88 EUR");
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+      const response = await handler(args(filePath, { notes: "Bus ticket" }));
+      expect(response.isError).not.toBe(true);
+      expect(mockedParseDocumentTextLayerOnly).toHaveBeenCalledWith(Buffer.from("%PDF-pdf-bytes"));
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledWith(
+        expect.objectContaining({ notes: "Bus ticket\nOstukorvi/tellimuse nr: 990011223344" }),
+        24, 124, true, expect.any(Array),
+      );
+      const payload = parseToolPayload<CreatePurchaseInvoiceFromPdfPayload>(response.content[0]!.text);
+      expect(payload.order_reference_note).toContain("Ostukorvi/tellimuse nr: 990011223344");
+      expect(payload.order_reference_note).toContain("UNTRUSTED_OCR_START");
+    });
+
+    it("still creates, with no order line, when the text layer cannot be read (okt 2026 finding 5)", async () => {
+      const filePath = createTempInvoiceFile("cartfail.pdf", "%PDF-pdf-bytes");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      mockedParseDocumentTextLayerOnly.mockRejectedValue(new Error("parser crashed"));
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf");
+      const response = await handler(args(filePath, { notes: "Bus ticket" }));
+      expect(response.isError).not.toBe(true);
+      expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledWith(
+        expect.objectContaining({ notes: "Bus ticket" }),
+        24, 124, true, expect.any(Array),
+      );
+      expect(parseToolPayload<CreatePurchaseInvoiceFromPdfPayload>(response.content[0]!.text).order_reference_note).toBeUndefined();
     });
   });
 

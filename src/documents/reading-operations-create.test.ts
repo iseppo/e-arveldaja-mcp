@@ -638,6 +638,44 @@ describe("payment reference (viitenumber) printed on the document (live 2026-10-
   });
 });
 
+describe("order / cart number printed on the document (okt 2026 finding 5)", () => {
+  const LINE = "Ostukorvi/tellimuse nr: 100000000002";
+  const LINES_CART = [...BASE_LINES, "Ostukorvi nr:    100000000002    Märkus"];
+
+  it("verify derives the notes line from the packet and create writes it", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LINES_CART));
+    const file = writePdf("%PDF cart");
+    const verify = await verified(w, file, {}, LINES_CART);
+    expect(verify.status).toBe("ready");
+    expect(verify.booking).toMatchObject({ notes: LINE });
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ notes: LINE });
+    expect(outcome.value.readbackMismatch).toBeUndefined();
+  });
+
+  it("a packet without an order number writes no notes", async () => {
+    const w = world();
+    const verify = await verified(w, writePdf("%PDF no cart"));
+    expect(verify.booking!.notes).toBeUndefined();
+  });
+
+  it("a line at create other than the one verify bound holds packet_changed", async () => {
+    const w = world();
+    mockedParse.mockResolvedValue(readingParse(LINES_CART));
+    const file = writePdf("%PDF cart drift");
+    const verify = await verified(w, file, {}, LINES_CART);
+    const consume = w.runtime.planStore.consume.bind(w.runtime.planStore);
+    vi.spyOn(w.runtime.planStore, "consume").mockImplementationOnce((handle, domain) => {
+      const stored = consume(handle, domain);
+      return { ...stored, normalizedArgs: { ...stored.normalizedArgs, order_reference_note: "Ostukorvi/tellimuse nr: 100000000003" } };
+    });
+    expect(heldCodes(await create(w, file, verify.planHandle!))).toEqual(["packet_changed"]);
+    expect(w.createAndSetTotals).not.toHaveBeenCalled();
+  });
+});
+
 describe("reading create serialisation (§5.2a)", () => {
   it("two handles for the same file in parallel give exactly one write", async () => {
     const w = world();
