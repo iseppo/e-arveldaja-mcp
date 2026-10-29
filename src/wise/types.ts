@@ -52,7 +52,8 @@ export interface WiseTransferReview {
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
     | "wise_transfer_journal_existing_elsewhere"
-    | "wise_exact_label_possible_double_booking";
+    | "wise_exact_label_possible_double_booking"
+    | "not_own_transfer_conflicts_evidence";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -92,6 +93,13 @@ export interface WiseTransferReview {
   unacknowledged_journal_ids?: number[];
 }
 
+/** Whether a Wise review blocks approval of the plan. Fail-closed: only an
+ * unverified ownership review does not (its row is imported as a plain
+ * unconfirmed bank row either way); every other or unknown code blocks. */
+export function wiseReviewBlocksApproval(code: string): boolean {
+  return code !== "wise_transfer_ownership_unverified";
+}
+
 /** One owner acknowledgement (acknowledged_journal_holds): the listed journals
  * do not book this Wise transfer. Releases a held row only when it lists every
  * required_acknowledgement_ids journal. */
@@ -125,6 +133,18 @@ export interface WiseTransferJournalCandidate {
   label_source: "counterpart_bank_ref" | "other";
 }
 
+/** Why a transfer row is imported as an ordinary payment (a plain
+ * unconfirmed row, no inter-account booking): its external endpoint is
+ * provably not an own account ("automatic"), or the owner listed it in
+ * not_own_transfer_ids ("owner"). */
+export type WiseExternalPaymentBasis = "automatic" | "owner";
+
+/** One transfer row imported as an ordinary payment (info only, not a review). */
+export interface WiseTransferTreatedAsPayment {
+  wise_id: string;
+  basis: WiseExternalPaymentBasis;
+}
+
 export interface WiseTransferDecision {
   targetDimensionId?: number;
   /** Set when targetDimensionId came from the per-row counterpart resolution. */
@@ -139,6 +159,13 @@ export interface WiseTransferDecision {
   targetVerified: boolean;
   ownershipBasis?: WiseTransferOwnershipBasis;
   review?: WiseTransferReview;
+  /** The row is a payment to or from a third party, not an own transfer: no
+   * targetDimensionId, ownershipBasis or review, so it is created as a plain
+   * unconfirmed row. It stays a transfer candidate for every hold. */
+  externalPayment?: WiseExternalPaymentBasis;
+  /** not_own_transfer_ids named a row held for its counterpart: the hold
+   * stays, and this review reports the conflict without binding to the row. */
+  notOwnConflict?: WiseTransferReview;
 }
 
 // --- M05: strict Wise row validation -----------------------------------------

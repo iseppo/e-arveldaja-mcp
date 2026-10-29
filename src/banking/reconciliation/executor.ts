@@ -23,8 +23,10 @@ import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import { buildBankAccountLookups, normalizeReference } from "../../tools/inter-account-utils.js";
 import { toUtcDay } from "../../date-utils.js";
 import {
+  annotateDistinctSourceReferences,
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,
+  transactionSourceReferenceIdentity,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
   type DuplicatePostingSuspect,
@@ -46,6 +48,8 @@ import {
   type ReconciliationExecutionCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
+import { textCarriesStrongReference } from "../../journal-reference-scan.js";
+import { orderReferencesFromNotes } from "../../order-reference-note.js";
 import { legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
@@ -103,6 +107,7 @@ import type {
   OneSidedResult,
   ReconciliationSuggestions,
   SuggestMatchRow,
+  DocumentReferenceCandidateRow,
   SkippedAlreadyHandledRow,
   AmbiguousReflessRow,
   CrossCurrencyRow,
@@ -167,11 +172,27 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 
 // === Suggest =================================================================
 
+/** The suggestion path's default minimum confidence. */
+export const SUGGEST_DEFAULT_MIN_CONFIDENCE = 50;
+
+/**
+ * The strong document reference (invoice number, then the notes' order / cart
+ * number lines) that `description` carries as a whole token, if any.
+ */
+function documentReferenceOnTransaction(description: string | null | undefined, inv: PurchaseInvoice): string | undefined {
+  const references = [inv.number, ...orderReferencesFromNotes(inv.notes)];
+  return references.find(reference => textCarriesStrongReference(description, reference));
+}
+
 export async function runSuggestMatches(
   api: ApiContext,
   input: SuggestMatchesInput,
 ): Promise<ReconciliationSuggestions> {
-  const threshold = input.minConfidence ?? 50;
+  const threshold = input.minConfidence ?? SUGGEST_DEFAULT_MIN_CONFIDENCE;
+  // A caller asking for a stricter threshold than the default gets no
+  // below-threshold document-reference group (okt 2026 finding 5).
+  const documentReferenceGroupEnabled = input.minConfidence === undefined || input.minConfidence <= SUGGEST_DEFAULT_MIN_CONFIDENCE;
+  const documentReferenceCandidates: DocumentReferenceCandidateRow[] = [];
   const block_on_duplicate = input.blockOnDuplicate;
 
   // Get all unconfirmed transactions
@@ -247,6 +268,28 @@ export async function runSuggestMatches(
             confidence,
             match_reasons: reasons,
           });
+        } else if (documentReferenceGroupEnabled && reasons.includes("exact_amount")) {
+          const matchedReference = documentReferenceOnTransaction(tx.description, inv);
+          if (matchedReference !== undefined) {
+            // RAW domain strings — the presenter wraps the free-text fields.
+            documentReferenceCandidates.push({
+              transaction_id: tx.id,
+              date: tx.date,
+              amount: tx.amount,
+              description: tx.description ?? undefined,
+              bank_account_name: tx.bank_account_name ?? undefined,
+              invoice: {
+                type: "purchase_invoice",
+                id: inv.id!,
+                number: inv.number,
+                client_name: inv.client_name,
+                gross_price: inv.gross_price ?? 0,
+                payment_status: inv.payment_status ?? "NOT_PAID",
+              },
+              matched_reference: matchedReference,
+              match_reasons: [...reasons, "document_reference"],
+            });
+          }
         }
       }
     }
@@ -273,13 +316,17 @@ export async function runSuggestMatches(
       const suggestDim = suggestDimById.get(tx.accounts_dimensions_id);
       let possibleDuplicatePostings: DuplicatePostingSuspect[] | undefined;
       if (suggestDim && tx.date) {
-        const scan = await findDuplicateBankPostings(api, {
-          accountId: suggestDim.accountId,
-          dimensionId: suggestDim.dimensionId,
-          amount: tx.base_amount ?? tx.amount,
-          direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
-          date: tx.date,
-        });
+        const scan = await annotateDistinctSourceReferences(
+          await findDuplicateBankPostings(api, {
+            accountId: suggestDim.accountId,
+            dimensionId: suggestDim.dimensionId,
+            amount: tx.base_amount ?? tx.amount,
+            direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
+            date: tx.date,
+          }),
+          () => transactionSourceReferenceIdentity(tx),
+          async () => allTx,
+        );
         if (scan.scan_available && scan.suspects.length > 0) {
           possibleDuplicatePostings = scan.suspects;
         }
@@ -357,6 +404,7 @@ export async function runSuggestMatches(
     matched: results.length,
     unmatched: unconfirmed.length - results.length,
     matches: results,
+    ...(documentReferenceCandidates.length > 0 ? { documentReferenceCandidates } : {}),
     ...(suggestBankDimsResult.scanAvailable ? {} : { duplicateScanNote: suggestBankDimsResult.scanNote }),
     compact: {
       matchedTotalsByCurrency,
@@ -391,6 +439,8 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
   api: ApiContext,
   projection: ExactMatchProjection,
   blockOnDuplicate: boolean,
+  allTransactions: readonly Transaction[],
+  pendingTransactions: readonly Transaction[],
 ): Promise<void> {
   if (projection.confirms.length === 0) return;
 
@@ -422,7 +472,16 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
       direction: descriptor.direction,
       date: descriptor.date,
     };
-    const scan = await findDuplicateBankPostings(api, candidate);
+    // The source-reference annotation is advisory: it never changes which
+    // suspects block, and the plan fingerprint binds only their journal ids.
+    const scan = await annotateDistinctSourceReferences(
+      await findDuplicateBankPostings(api, candidate),
+      () => {
+        const transaction = pendingTransactions.find(tx => tx.id === descriptor.transactionId);
+        return transaction ? transactionSourceReferenceIdentity(transaction) : undefined;
+      },
+      async () => allTransactions,
+    );
 
     if (!scan.scan_available) {
       projection.duplicateScanNote ??= scan.scan_note;
@@ -738,7 +797,7 @@ async function loadExactMatchProjection(
   });
 
   const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
-  await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true);
+  await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true, allTx, unconfirmed);
   return { projection, threshold };
 }
 

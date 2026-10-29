@@ -55,6 +55,7 @@ import {
   type WiseTransferDecision,
   type WiseTransferJournalCandidate,
   type WiseTransferReview,
+  type WiseTransferTreatedAsPayment,
 } from "./types.js";
 
 // PURE projection: byte-stable command building + digest assembly + plan-review
@@ -365,6 +366,9 @@ export interface WiseProjectionOutput {
   /** Rows released by acknowledged_journal_holds, with the journals the
    * acknowledgement exempts (info only, not a review). */
   acknowledgedHolds: WiseAcknowledgedJournalHold[];
+  /** Transfer rows imported as ordinary payments (externalPayment) that
+   * still create their row after the hold pass (info only, not a review). */
+  transfersTreatedAsPayments: WiseTransferTreatedAsPayment[];
 }
 
 export interface WiseHoldCheckLeg {
@@ -1813,10 +1817,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
   // direction (base EUR, to the cent), with no signed marker contradicting it
   // (provenBankDirection — an unsigned or unverifiable marker proves
   // nothing). A plain card/payment row only: a transfer or a reviewed row
-  // keeps its create.
+  // keeps its create (and a transfer is then held by its lookalike), even a
+  // transfer imported as an ordinary payment, which has neither a review nor
+  // an inter-account command.
   const untaggedRowCovers = (entry: WiseCreatedEntry, tx: Transaction): boolean => {
     const row = entry.source_row;
     if (!row || tx.status !== "CONFIRMED" || typeof tx.amount !== "number") return false;
+    if (isWiseTransferCandidate(row)) return false;
     if (Math.round(tx.amount * 100) !== Math.round(entry.amount * 100) || (tx.cl_currencies_id ?? "EUR") !== "EUR") return false;
     if (!commands.some(command => command.row_key === `row:${row.rowIndex}:main` && command.action === "main_create")) return false;
     if (commands.some(command => command.row_index === row.rowIndex && command.action === "inter_account")) return false;
@@ -1988,6 +1995,24 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
       ...(feeLegIds.length > 0 ? { fee_leg_journal_ids: feeLegIds } : {}),
       ...(acknowledged !== undefined ? { unacknowledged_journal_ids: unacknowledged } : {}),
     });
+  }
+
+  // not_own_transfer_ids on a row held for its counterpart: the hold stays,
+  // and the conflict is reported unbound to the row (as an unused
+  // acknowledgement is), so holdRow never replaces it.
+  for (const row of eligible) {
+    const conflict = transferDecisions.get(row)?.notOwnConflict;
+    if (conflict !== undefined && heldCodes.has(row) && !ownershipReviews.includes(conflict)) ownershipReviews.push(conflict);
+  }
+
+  // Transfer rows imported as ordinary payments, once per Wise ID: info for
+  // the owner, not a review. A held row has lost its create and is not listed.
+  const transfersTreatedAsPayments: WiseTransferTreatedAsPayment[] = [];
+  for (const row of eligible) {
+    const basis = transferDecisions.get(row)?.externalPayment;
+    if (basis === undefined || transfersTreatedAsPayments.some(entry => entry.wise_id === row.id)) continue;
+    if (!commands.some(command => command.row_key === `row:${row.rowIndex}:main` && command.action === "main_create")) continue;
+    transfersTreatedAsPayments.push({ wise_id: row.id, basis });
   }
 
   // acknowledged_journal_holds entries that release nothing are reported, as
@@ -2170,5 +2195,6 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     feeResolutionRequired,
     holdCheckRows,
     acknowledgedHolds,
+    transfersTreatedAsPayments,
   };
 }

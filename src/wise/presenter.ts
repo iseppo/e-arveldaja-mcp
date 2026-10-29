@@ -21,7 +21,7 @@ import {
   type WiseSkippedGroup,
 } from "./preflight.js";
 import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN, type WiseProjectedCommand } from "./projection.js";
-import { WISE_COMMAND_VERSION } from "./types.js";
+import { WISE_COMMAND_VERSION, wiseReviewBlocksApproval } from "./types.js";
 import type { WiseFailure } from "./executor.js";
 import type {
   ImportRejectedField,
@@ -36,6 +36,7 @@ import type {
   WiseCounterpartOverride,
   WiseJournalizedTransferMapping,
   WiseTransferReview,
+  WiseTransferTreatedAsPayment,
 } from "./types.js";
 
 // --- Wire payload types ------------------------------------------------------
@@ -69,6 +70,8 @@ export type WiseImportSummary = {
   error_count: number;
   inter_account_total: number;
   needs_review: number;
+  /** The needs_review items that block approval (wiseReviewBlocksApproval). */
+  blocking_review_count: number;
 };
 
 /** A created / would-create row (description and source row stay internal). */
@@ -136,6 +139,8 @@ export type WiseImportFullPayload = {
     candidates: Array<{ accounts_dimensions_id: number; label: string }>;
   };
   acknowledged_holds?: WiseAcknowledgedJournalHold[];
+  /** Transfer rows imported as ordinary unconfirmed payments (info, not a review). */
+  transfers_treated_as_payments?: WiseTransferTreatedAsPayment[];
   ownership_reviews?: WiseTransferReview[];
   invoice_currency_fixes?: WiseInvoiceCurrencyFixes;
   results: WiseImportResultRow[];
@@ -313,6 +318,9 @@ export interface WiseImportRenderData {
   invoiceFixCandidates: WiseInvoiceFixCandidate[];
   /** Rows released by acknowledged_journal_holds (info only, not a review). */
   acknowledgedHolds?: WiseAcknowledgedJournalHold[];
+  /** Transfer rows imported as ordinary unconfirmed payments (info only, not
+   * a review). */
+  transfersTreatedAsPayments?: WiseTransferTreatedAsPayment[];
   /** Set when some transfer rows are held because their counterpart bank
    * account could not be determined (unresolved) or own-account evidence
    * contradicts the selected one (conflict). Info only: the other rows still
@@ -328,6 +336,7 @@ export interface WiseImportRenderData {
     feeAccountRelationId: number | undefined;
     interAccountDimensionId: number | undefined;
     confirmOwnTransferIds: string[] | undefined;
+    notOwnTransferIds?: readonly string[];
     journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
     acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
     counterpartOverrides?: readonly WiseCounterpartOverride[];
@@ -395,6 +404,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     error_count: executionErrors.length,
     inter_account_total: interAccountResults.length,
     needs_review: ownershipReviews.length,
+    blocking_review_count: ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length,
   };
   const invoiceCurrencyFixes: WiseInvoiceCurrencyFixes | undefined = invoiceFixCandidates.length > 0
     ? {
@@ -457,6 +467,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...(fee_account_relation_id !== undefined ? { fee_account_relation_id } : {}),
     ...(inter_account_dimension_id !== undefined ? { inter_account_dimension_id } : {}),
     ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
+    ...(data.args.notOwnTransferIds !== undefined ? { not_own_transfer_ids: data.args.notOwnTransferIds } : {}),
     ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
     ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
     ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),
@@ -537,6 +548,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
           },
         } : {}),
         ...(data.acknowledgedHolds !== undefined ? { acknowledged_holds: data.acknowledgedHolds } : {}),
+        ...(data.transfersTreatedAsPayments !== undefined ? { transfers_treated_as_payments: data.transfersTreatedAsPayments } : {}),
         ...(ownershipReviews.length > 0 ? { ownership_reviews: ownershipReviews } : {}),
         ...(invoiceCurrencyFixes ? { invoice_currency_fixes: invoiceCurrencyFixes } : {}),
         results: outputResults,
@@ -675,6 +687,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
   const inEntries = data.created.filter(entry => entry.source_direction === "IN");
   const outEntries = data.created.filter(entry => entry.source_direction === "OUT");
 
+  const blockingReviewCount = data.ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length;
   const counts = {
     total_csv_rows: data.totalCsvRows,
     eligible: data.eligibleCount,
@@ -687,6 +700,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
     auto_matched: autoMatched.length,
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
+    blocking_review_count: blockingReviewCount,
     // Preview: the planned inter-account confirmations (results exist only
     // after execute). Execute: the inter-account results.
     inter_account: dryRun
@@ -747,6 +761,13 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
       message: `Released by acknowledged_journal_holds: journal(s) ${hold.journal_ids.join(", ")} acknowledged as not booking this transfer; the row is imported and confirmed normally, and execute re-checks those journals.`,
     });
   }
+  // Transfers imported as ordinary payments: info (not a review; approval is
+  // not blocked), so the owner can still mark a real own transfer.
+  warnings.push(...cappedWarnings("wise_transfer_treated_as_payment", (data.transfersTreatedAsPayments ?? []).map(entry => ({
+    item_id: entry.wise_id,
+    code: "wise_transfer_treated_as_payment",
+    message: `Imported as an ordinary unconfirmed payment, not an own transfer (${entry.basis === "owner" ? "not_own_transfer_ids" : "the other party is not an own account"}). If it is an own transfer after all, re-run the preview with this ID in confirm_own_transfer_ids.`,
+  })), "they are plain unconfirmed rows in the plan; re-run the preview with a narrower date_from/date_to to list them."));
   if (counterpartInfo !== undefined) {
     warnings.unshift({
       item_id: "wise-import",
@@ -819,13 +840,15 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
       ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
       : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
 
-  // Dry-run ladder: open reviews (including held rows) mirror the standard
-  // surface's canApprove (reviews block approval) while the plan handle and
-  // next_action stay available, as the standard digest/handle do.
+  // Dry-run ladder: open blocking reviews (including held rows) mirror the
+  // standard surface's canApprove while the plan handle and next_action stay
+  // available, as the standard digest/handle do. An unverified ownership
+  // review alone does not block (wiseReviewBlocksApproval); a zero-write
+  // preview still reports any open review.
   const status = compactImportStatus({
     dryRun,
     zeroWrite,
-    reviews: data.ownershipReviews.length > 0,
+    reviews: zeroWrite ? data.ownershipReviews.length > 0 : blockingReviewCount > 0,
     reviewsBlockApproval: true,
     failed: executionErrors.length > 0,
   });
@@ -888,6 +911,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
           ...(data.args.feeAccountDimensionsId !== undefined ? { fee_account_dimensions_id: data.args.feeAccountDimensionsId } : {}),
           ...(data.args.interAccountDimensionId !== undefined ? { inter_account_dimension_id: data.args.interAccountDimensionId } : {}),
           ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
+          ...(data.args.notOwnTransferIds !== undefined ? { not_own_transfer_ids: data.args.notOwnTransferIds } : {}),
           ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
           ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
           ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),

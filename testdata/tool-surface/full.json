@@ -2,12 +2,12 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 170053,
+    "toolsListBytes": 170841,
     "descriptionsBytes": 23426,
-    "inputSchemasBytes": 111394,
+    "inputSchemasBytes": 112182,
     "largestTool": {
-      "name": "process_accounting_document",
-      "bytes": 5134
+      "name": "import_wise_transactions",
+      "bytes": 5627
     },
     "serverInstructionsBytes": 1016,
     "promptMetadataBytes": 11702,
@@ -5646,7 +5646,7 @@
             "type": "string"
           },
           "confirm_own_transfer_ids": {
-            "description": "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only.",
+            "description": "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only; a hinted row whose other party is provably not an own account is imported as an ordinary unconfirmed payment (transfers_treated_as_payments).",
             "items": {
               "minLength": 1,
               "type": "string"
@@ -5730,6 +5730,14 @@
                 "journal_id"
               ],
               "type": "object"
+            },
+            "type": "array"
+          },
+          "not_own_transfer_ids": {
+            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence).",
+            "items": {
+              "minLength": 1,
+              "type": "string"
             },
             "type": "array"
           },
@@ -6038,6 +6046,14 @@
               "show_details"
             ],
             "type": "string"
+          },
+          "not_own_transfer_ids": {
+            "description": "Wise only, owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party; imported as ordinary unconfirmed rows.",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
           },
           "operation_handle": {
             "description": "mode='show_details' only: operation-result handle from a prior execute.",

@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerProcessAccountingDocumentTool, type ProcessAccountingDocumentDeps } from "./process-accounting-document.js";
+import { registerProcessAccountingDocumentTool, type ProcessAccountingDocumentDeps, type ProcessAccountingDocumentPreviewPayload } from "./process-accounting-document.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import type { ElicitOutcome, Elicitor } from "../elicitation.js";
 import { parseDocument } from "../document-parser.js";
 import { createAccountingWorkflowApi, fixtureAccount, fixtureClient } from "../__fixtures__/accounting-workflow.js";
@@ -308,6 +309,35 @@ describe("process_accounting_document", () => {
     expect(created.result.created_invoice_id).toBe(90_001);
     expect(created.result.document_uploaded).toBe(true);
     expect(created.confirm_plan.invoice_id).toBe(90_001);
+  });
+
+  it("carries the document's cart number into the notes through prepare and create (okt 2026 finding 5)", async () => {
+    const cartDoc = docWithRegCode();
+    mockedParseDocument.mockResolvedValue({ ...cartDoc, text: `${cartDoc.text}\nOstukorvi nr:     100000000002    KM (20%):    2,00 EUR` });
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn(),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn(),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const extracted = parseToolPayload<ProcessAccountingDocumentPreviewPayload>((await handler({ mode: "prepare", file_path: path })).content[0]!.text);
+    expect(extracted.summary.extraction.order_reference_note).toContain("UNTRUSTED_OCR_START");
+    expect(extracted.summary.extraction.order_reference_note).toContain("Ostukorvi/tellimuse nr: 100000000002");
+    const prepared = parseToolPayload<ProcessAccountingDocumentPreviewPayload>(
+      (await handler({ mode: "prepare", file_path: path, ...bookingArgs(), notes: "Sõit" })).content[0]!.text,
+    );
+    expect(String(prepared.summary.booking_review?.notes)).toContain("Sõit\nOstukorvi/tellimuse nr: 100000000002");
+    await handler({ mode: "create", file_path: path, plan_handle: prepared.summary.plan_handle, source_sha256: sha256, ...bookingArgs(), notes: "Sõit" });
+    expect(vi.mocked(api.purchaseInvoices.createAndSetTotals).mock.calls[0]![0].notes).toBe("Sõit\nOstukorvi/tellimuse nr: 100000000002");
   });
 
   it("rejects a create whose booking fields drifted from the reviewed booking-prepare (plan_drift, zero mutation)", async () => {

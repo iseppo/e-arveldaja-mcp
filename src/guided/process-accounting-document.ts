@@ -68,6 +68,9 @@ function supplierNeedsInput(resolution: Exclude<Resolution<SupplierRef>, { statu
   };
 }
 
+/** The mode='prepare' payload (legacy path). */
+export type ProcessAccountingDocumentPreviewPayload = ReturnType<typeof renderPreview>;
+
 // Compact, OCR-sandboxed projection of the typed preview. NO raw OCR text; only
 // structured fields, with every untrusted supplier/OCR string wrapped here.
 function renderPreview(preview: AccountingDocumentPreview) {
@@ -155,6 +158,7 @@ function renderPreview(preview: AccountingDocumentPreview) {
         total_vat: fields.total_vat,
         total_gross: fields.total_gross,
         currency: fields.currency,
+        ...(preview.orderReferenceNote !== undefined ? { order_reference_note: wrapUntrustedOcr(preview.orderReferenceNote) } : {}),
         warnings: preview.extraction.warnings,
         // Compact extraction-quality evidence only (no raw OCR text / no
         // raw-text field references). Full text is only on the advanced path.

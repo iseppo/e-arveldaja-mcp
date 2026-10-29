@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- **When a purchase document prints an order or cart number (Ostukorvi nr, Tellimuse nr, Order no), it is saved in the invoice notes, and a bank payment that names it is suggested for that invoice.** Before, a Lux Express ticket whose bank line carried only the cart number never matched its invoice, which has the ticket number. Details: `extractOrderReferences` reads one unspaced value on the label's line; exactly one distinct value writes the notes line `Ostukorvi/tellimuse nr: <value>` on `process_accounting_document` (prepare stores it, create re-applies it, the reading path re-derives it and holds on `packet_changed`), `receipt_batch` and `create_purchase_invoice_from_pdf` (text layer only via `parseDocumentTextLayerOnly`; a failure writes no line and never blocks the booking). Reconcile suggestions list an exact-amount purchase invoice whose number or notes line appears as a whole strong token in the bank description in a separate `document_reference_candidates` group, only at the default threshold (`min_confidence` ≤ 50). Match scores, the best match and automatic confirmation are unchanged.
+- **You can tell the Wise import that a transfer is not to one of your own accounts.** Details: `not_own_transfer_ids` (also on the guided bank facade) imports the listed `TRANSFER-*` / `BANK_DETAILS_PAYMENT_RETURN-*` rows as ordinary unconfirmed rows; an unknown or ineligible ID, or one also in `confirm_own_transfer_ids`, is an error; own-account evidence on another bank holds the row (`not_own_transfer_conflicts_evidence`) instead of ignoring it.
+
+### Fixed
+
+- **A Wise transfer to a person or company that is not you no longer blocks the whole import.** Before, with `inter_account_dimension_id` set, a transfer to e.g. the owner's private account became an own-transfer candidate needing approval, and every other row of the import, card payments included, waited for it. Details: when the counterpart comes only from the fallback (no own-account evidence of any strength), your company name is known, and the receiving (or, for incoming, sending) name is neither your company nor any own bank account's name, the row is imported as an ordinary unconfirmed row and listed in `transfers_treated_as_payments`; duplicate holds and execute-time checks still apply, and such a row is never skipped as an untagged ledger match. An unverified-ownership review no longer blocks approval (standard, guided and Accounting Inbox use `blocking_review_count`); every other or unknown review code still does.
+- **A ticket's purchase date (Ostetud / Purchased) is now read as the invoice date instead of the departure date.** Details: `Ostetud`, `Ostu kuupäev`, `Ostukuupäev` and `Purchased (on)` are tier-2 date labels; an explicit invoice-date label still wins.
+- **An invoice with a reverse-charge footnote no longer reports a made-up VAT amount and low confidence.** Before, the Anthropic invoice footnote "[1] Tax to be paid on reverse charge basis" picked up a footer amount below it as VAT. Details: a layout row that starts with a `[n]` marker referenced earlier on the page, contains reverse-charge wording, has no amount and at least four words after the marker is not used as a label for an amount below it; column headers such as "VAT (reverse charge)" and labels with their own amount keep their bindings and conflicts.
+
+### Changed
+
+- **Possible-duplicate warnings say when the other booking has a different import reference, so they are easier to dismiss.** Details: a bank-posting suspect whose Wise ID (same leg) or CAMT bank reference differs from the new entry's is marked `distinct_source_reference` and shown as "Likely a different movement (different source reference)"; it is still a suspect, so `block_on_duplicate` refuses exactly as before and reconcile plan fingerprints are unchanged. Different clients are never treated as proof of a different payment.
+
 ## [0.34.3] - 2026-10-28
 
 ### Fixed

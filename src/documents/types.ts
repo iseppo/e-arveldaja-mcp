@@ -109,6 +109,9 @@ export interface AccountingDocumentPreview {
   readonly warnings: readonly CompactWarning[];
   /** Public, review-only plan projection (no private fingerprint). */
   readonly planProjection: PlanData;
+  /** The canonical `Ostukorvi/tellimuse nr: <value>` notes line derived from the
+   * document (UNWRAPPED document text); a bound booking's notes carry it. */
+  readonly orderReferenceNote?: string;
   /** Present ONLY when the prepare bound the final booking fields — an
    * extraction-only preview is NOT create approval and mints no handle. */
   readonly planHandle?: string;

@@ -146,7 +146,10 @@ describe("resolveWiseRowCounterparts — classes and resolution", () => {
       hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], selected_dimension_id: LHV },
     });
     const weakLhv = camtTx(2, LHV, { iban: "EE999999999999999999", name: "Some Supplier OÜ" });
-    expect(only(resolve({ existingTx: [weakLhv], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit" });
+    // The fallback names the non-strong evidence it resolved over, so a caller
+    // can tell a bare fallback from one with weak evidence on that bank.
+    expect(only(resolve({ existingTx: [weakLhv], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit", otherEvidenceDims: [LHV] });
+    expect(only(resolve({ existingTx: [], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit" });
   });
 
   it("no evidence: explicit-only rows resolve (OQ-5); several banks without explicit hold unresolved", () => {
@@ -200,7 +203,7 @@ describe("resolveWiseRowCounterparts — Codex r3 M1 (usable amount)", () => {
     expect(only(resolve({ existingTx: [usd] }))).toEqual({
       hold: { code: "wise_transfer_dimensions_unverified", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1] },
     });
-    expect(only(resolve({ existingTx: [usd], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit" });
+    expect(only(resolve({ existingTx: [usd], explicit: LHV }))).toEqual({ dim: LHV, basis: "explicit", otherEvidenceDims: [LHV] });
     expect(only(resolve({ existingTx: [usd], explicit: COOP }))).toEqual({
       hold: { code: "wise_transfer_counterpart_conflict", candidate_dimension_ids: [LHV, COOP], evidence_transaction_ids: [1], selected_dimension_id: COOP },
     });

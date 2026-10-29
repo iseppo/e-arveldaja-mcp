@@ -563,6 +563,8 @@ interface LayoutLabelCell {
   row: LayoutRow;
   columnIndex: number;
   centerX: number;
+  /** The label sits on a positively identified reverse-charge footnote body. */
+  footnoteBody?: true;
 }
 
 interface LayoutTextCell {
@@ -1781,6 +1783,43 @@ function isLayoutIdentifierCell(item: LayoutTextItem, row: LayoutRow, rows: read
   return heading !== undefined && isIdentifierLabelSpan(clampTextLine(heading.text));
 }
 
+const FOOTNOTE_BODY_RE = /^\s*\[(\d{1,2})\]\s+(.*)$/su;
+const FOOTNOTE_REVERSE_CHARGE_RE = /reverse[\s-]*charge|p[öo]ördmaksustami|p[öo]ördk[äa]ibemaks/i;
+
+function layoutRowText(row: LayoutRow): string {
+  return [...row.items].sort((a, b) => a.x - b.x).map(item => clampTextLine(item.text)).join(" ");
+}
+
+/**
+ * Okt 2026 finding 3: a row is a reverse-charge footnote BODY only when all
+ * hold: it starts with a `[n]` marker that an earlier row references (a
+ * standalone superscript item `[n]` or one attached to a value, `0%[n]`), it
+ * states reverse charge, it carries no amount of its own, and at least four
+ * words follow the marker (a sentence, not a column header). Such a row is no
+ * label for the column below it (a footer repeating the amount due).
+ */
+function isReverseChargeFootnoteBody(row: LayoutRow, rows: readonly LayoutRow[]): boolean {
+  const match = FOOTNOTE_BODY_RE.exec(layoutRowText(row));
+  if (!match) return false;
+  const [, marker, body] = match;
+  if (!FOOTNOTE_REVERSE_CHARGE_RE.test(body!)) return false;
+  if (body!.split(/\s+/).filter(word => /\p{L}/u.test(word)).length < 4) return false;
+  const markerToken = `[${marker}]`;
+  const ownItems = [...row.items].sort((a, b) => a.x - b.x);
+  if (ownItems.some((item, index) => {
+    const text = clampTextLine(item.text);
+    const withoutMarker = index === 0 ? text.replace(FOOTNOTE_BODY_RE, "$2") : text;
+    return withoutMarker.trim() !== markerToken && extractAmountsFromLine(withoutMarker).length > 0;
+  })) return false;
+  return rows.some(other =>
+    (other.pageNum < row.pageNum || (other.pageNum === row.pageNum && other.y < row.y)) &&
+    !FOOTNOTE_BODY_RE.test(layoutRowText(other)) &&
+    other.items.some(item => {
+      const text = clampTextLine(item.text);
+      return text.trim() === markerToken || text.includes(markerToken) && /\S/.test(text.slice(0, text.indexOf(markerToken)).slice(-1));
+    }));
+}
+
 function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {
   labels: LayoutLabelCell[];
   amounts: LayoutAmountCell[];
@@ -1824,15 +1863,18 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
       }
     }
 
+    let footnoteBody: boolean | undefined;
     for (const cell of buildLayoutTextCells(row, columnByItem)) {
       const field = classifyLayoutAmountLabel(cell.text);
       if (field) {
+        footnoteBody ??= isReverseChargeFootnoteBody(row, rows);
         labels.push({
           field,
           item: cell.item,
           row: cell.row,
           columnIndex: cell.columnIndex,
           centerX: cell.centerX,
+          ...(footnoteBody ? { footnoteBody: true as const } : {}),
         });
       }
     }
@@ -1935,7 +1977,7 @@ function hasOwnRowValue(label: LayoutLabelCell): boolean {
 
 function findLayoutAmountForLabel(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
   return findSameRowLayoutAmount(label, amounts) ??
-    (hasOwnRowValue(label) ? undefined : findBelowColumnLayoutAmount(label, amounts));
+    (hasOwnRowValue(label) || label.footnoteBody ? undefined : findBelowColumnLayoutAmount(label, amounts));
 }
 
 function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell): boolean {
@@ -3423,11 +3465,32 @@ const PAYMENT_REFERENCE_RE =
  * one. The scan's strength gate still applies to every value.
  */
 export function extractPaymentReferences(text: string): string[] {
+  return extractLabelledReferences(text, PAYMENT_REFERENCE_RE);
+}
+
+// Okt 2026 finding 5: an order / shopping-cart number ("Ostukorvi nr:
+// 100000000002") is what a card payment's bank description names. The FIRST
+// unspaced value after the label on its line: a right-hand column may follow
+// on the same line ("Ostukorvi nr:   <nr>   KM (24%):   4,88 EUR"). The
+// reading packet's column mark `¦` counts as a gap.
+const ORDER_REFERENCE_RE =
+  /(?<![\p{L}\d])(?:ostukorvi\s*nr|tellimuse\s*nr|order\s*(?:no|number))\.?[:#\t ¦.-]*([A-Z0-9][A-Z0-9/_-]*\d[A-Z0-9/_-]*)(?![\p{L}\d])/giu;
+
+/** The label-anchored order / shopping-cart references in `text`, distinct (never an amount, date or IBAN). */
+export function extractOrderReferences(text: string): string[] {
+  // A value the line continues past a delimiter ("123456.ABC") may be cut
+  // short: two such numbers would collapse into one shared value, so it is
+  // not taken at all.
+  return extractLabelledReferences(text, ORDER_REFERENCE_RE, { rejectCutShort: true });
+}
+
+function extractLabelledReferences(text: string, labelledValueRe: RegExp, options: { rejectCutShort?: boolean } = {}): string[] {
   const references = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
-    for (const match of line.matchAll(PAYMENT_REFERENCE_RE)) {
+    for (const match of line.matchAll(labelledValueRe)) {
       const rest = line.slice((match.index ?? 0) + match[0].length);
       if (/^[.,]\d/.test(rest)) continue;
+      if (options.rejectCutShort && continuesPastCapture(rest)) continue;
       const candidate = acceptInvoiceNumberCandidate(match[1]);
       if (candidate) references.add(candidate);
     }
@@ -3588,7 +3651,7 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
   // delivery / order / payment label, and only then an order date.
   const invoiceDate = extractDateByLabels(text, [
     new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|issue\\s*date|date\\s*of\\s*issue|date\\s*issued|väljastamise\\s*kuupäev|koostamise\\s*kuupäev)[:\\s-]*${dateValue}`, "iu"),
-    new RegExp(`(?:receipt\\s*date|purchase\\s*date|date\\s*paid)[:\\s-]*${dateValue}`, "iu"),
+    new RegExp(`(?:receipt\\s*date|purchase\\s*date|date\\s*paid|\\bostetud|\\bostu\\s*kuupäev|\\bostukuupäev|\\bpurchased(?:\\s*on)?)[:\\s-]*${dateValue}`, "iu"),
     new RegExp(`(?<!(?:due|delivery|order|payment|shipping|service|supply|tarne|tellimuse|makse|maksmise|teenuse|üleandmise)[\\s-]*)(?:\\bkuupäev|\\bdate)(?![ \\t]*(?:due|paid)\\b)[:\\s-]*${dateValue}`, "iu"),
     new RegExp(`(?:tellimuse\\s*kuupäev|order\\s*date)[:\\s-]*${dateValue}`, "iu"),
   ]);
@@ -3711,7 +3774,7 @@ function invoiceNumberSource(text: string, invoiceNumber: string): { source: Fie
 
 function dateSource(text: string, value: string): { source: FieldProvenance["source"]; rationale?: string } {
   const labelPatterns = [
-    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid|receipt\\s*date|purchase\\s*date)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid|receipt\\s*date|purchase\\s*date|\\bostetud|\\bostu\\s*kuupäev|\\bostukuupäev|\\bpurchased(?:\\s*on)?)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
   ];
   for (const pattern of labelPatterns) {
     const match = text.match(pattern);

@@ -10,6 +10,7 @@ export interface AccountPostingRow {
   amount: number;                 // base_amount ?? amount
   accounts_dimensions_id: number | null;
   clients_id: number | null;
+  operations_id?: number;         // journal.operations_id (the registered transaction of a TRANSACTION journal)
 }
 
 export function listAccountDimensionPostings(
@@ -36,6 +37,7 @@ export function listAccountDimensionPostings(
         amount: p.base_amount ?? p.amount,
         accounts_dimensions_id: p.accounts_dimensions_id ?? null,
         clients_id: journal.clients_id ?? null,
+        ...(journal.operations_id != null ? { operations_id: journal.operations_id } : {}),
       });
     }
   }

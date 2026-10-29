@@ -316,6 +316,25 @@ beforeEach(() => {
   primeExtraction();
 });
 
+it("carries the document's cart number into the created invoice's notes (okt 2026 finding 5)", async () => {
+  const { api, spies } = makeApi();
+  vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+    supplier_name: "Supplier OÜ", invoice_number: "INV-1", invoice_date: "2026-03-20", due_date: "2026-03-20",
+    total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service",
+    raw_text: "Supplier OÜ\nOstukorvi nr:     100000000002    KM (24%):    24,00 EUR\nKokku 124,00",
+  } as never);
+  const ops = makeOperations(api);
+  const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+  if (!dryRun.ok || !dryRun.value.planHandles) throw new Error("dry run failed");
+  const dryNotes = dryRun.value.results[0]!.notes.join("\n");
+  expect(dryNotes).toContain("Ostukorvi/tellimuse nr: 100000000002");
+  expect(dryNotes).toContain("<<UNTRUSTED_OCR_START:");
+  const outcome = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles.create });
+  if (!outcome.ok) throw new Error(outcome.error.code);
+  expect(spies.createAndSetTotals.mock.calls[0]![0].notes).toBe("Receipt inbox import\nOstukorvi/tellimuse nr: 100000000002");
+  expect(outcome.value.results[0]).toMatchObject({ status: "created" });
+});
+
 it.each(["failed", "invalidated"] as const)("propagates known created-ID recovery through batch mapping (%s)", async cleanup => {
   const cause = new HttpError("Synthetic totals failure", 409, "PATCH", "/purchase_invoices/555");
   const { api, spies } = makeApi({ createAndSetTotals: vi.fn().mockRejectedValue(new InvoiceCreationError("Created555; follow-up failed", 555, { cause, cleanup })) });
