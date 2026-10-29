@@ -6,6 +6,7 @@ import {
   extractDates,
   extractInvoiceNumber,
   extractPaymentReferences,
+  extractOrderReferences,
   toIsoDate,
   extractAmountsWithMetadata,
   buildKeywordSuggestion,
@@ -2351,6 +2352,53 @@ describe("extractDates unlabelled fallback is flagged, never re-picked (corpus #
     expect(fields.invoice_date_unlabelled).toBe(true);
     expect(extractReceiptFieldsFromText("Näidis OÜ\nArve nr INV-1\nArve kuupäev 31.07.2026\nKokku 10.00", "x.pdf").invoice_date_unlabelled)
       .toBeUndefined();
+  });
+});
+
+describe("extractDates purchase-date labels (bus ticket, okt 2026 finding 2)", () => {
+  // Synthetic ticket shape: departure dates first, the purchase line is a
+  // two-column row with the price column on the same line.
+  const ticket = [
+    "Pileti nr 100000000001",
+    "Näidisbuss - Teinelinn",
+    "Esmaspäev, 19.10.2026 10:00",
+    "Väljumine:    Näidisbuss Esmaspäev, 19.10.2026 10:00",
+    "Peatusest X toimub sisenemine ainult eelmüügist",
+    "ostetud pileti olemasolul.",
+    "Ostetud:          18.10.2026 12:26    Pileti(te) hind (KM 24%):    20,32 EUR",
+    "Ostukorvi nr:     100000000002                        KM (24%):     4,88 EUR",
+    "                                                         Kokku:    25,20 EUR",
+  ].join("\n");
+
+  it("takes the purchase date over an earlier departure date and does not flag it unlabelled", () => {
+    const dates = extractDates(ticket);
+    expect(dates.invoice_date).toBe("2026-10-18");
+    expect(dates.invoice_date_unlabelled).toBeUndefined();
+    const fields = extractReceiptFieldsFromText(ticket, "ticket.pdf");
+    expect(fields.invoice_date).toBe("2026-10-18");
+    expect(fields.invoice_date_unlabelled).toBeUndefined();
+    expect(fields.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "invoice_date", value: "2026-10-18", source: "label" }),
+    ]));
+  });
+
+  it("reads the other purchase-date spellings", () => {
+    for (const label of ["Ostu kuupäev:", "Ostukuupäev", "Purchased:", "Purchased on"]) {
+      const dates = extractDates(`Departure 19.10.2026 10:00\n${label} 18.10.2026 12:26`);
+      expect(dates.invoice_date).toBe("2026-10-18");
+      expect(dates.invoice_date_unlabelled).toBeUndefined();
+    }
+  });
+
+  it("does not take a date-less 'ostetud pileti olemasolul' sentence as a label", () => {
+    const dates = extractDates("Esmaspäev, 19.10.2026 10:00\nsisenemine ainult eelmüügist\nostetud pileti olemasolul.");
+    expect(dates.invoice_date).toBe("2026-10-19");
+    expect(dates.invoice_date_unlabelled).toBe(true);
+  });
+
+  it("keeps an explicit invoice-date label ahead of the purchase date", () => {
+    const dates = extractDates("Ostetud: 18.10.2026 12:26\nArve kuupäev: 20.10.2026");
+    expect(dates.invoice_date).toBe("2026-10-20");
   });
 });
 
@@ -4943,5 +4991,171 @@ describe("extractPaymentReferences (F-PREPAY-REF)", () => {
     ["an English payment reference", "Payment reference PR-778899"],
   ])("never reads %s", (_name, line) => {
     expect(extractPaymentReferences(["Näidis OÜ", line, "Kokku 155,00"].join("\n"))).toEqual([]);
+  });
+});
+
+describe("extractOrderReferences (okt 2026 finding 5)", () => {
+  it("reads the cart number on the real two-column line shape (the first token after the label)", () => {
+    const ticket = [
+      "Ostetud:          18.10.2026 12:26    Pileti(te) hind (KM 24%):    20,32 EUR",
+      "Ostukorvi nr:     100000000002                        KM (24%):     4,88 EUR",
+      "                                                         Kokku:    25,20 EUR",
+    ].join("\n");
+    expect(extractOrderReferences(ticket)).toEqual(["100000000002"]);
+  });
+
+  it.each([
+    ["Tellimuse nr: TL-2026-0042", ["TL-2026-0042"]],
+    ["Order number 7001234", ["7001234"]],
+    ["Order no. A1234567", ["A1234567"]],
+    ["Ostukorvi nr: ¦ 100000000002 ¦ KM (24%): ¦ 4,88 EUR", ["100000000002"]],
+  ])("reads %s", (line, expected) => {
+    expect(extractOrderReferences(["Näidis OÜ", line, "Kokku 25,20"].join("\n"))).toEqual(expected);
+  });
+
+  it("returns every distinct value (the notes line then binds none)", () => {
+    expect(extractOrderReferences("Ostukorvi nr: 100000000002\nOstukorvi nr: 100000000003")).toEqual(["100000000002", "100000000003"]);
+  });
+
+  it.each([
+    ["an amount", "Ostukorvi nr: 25,20"],
+    ["a date", "Tellimuse nr 18.10.2026"],
+    ["an IBAN", "Order number EE382200221020145685"],
+    ["a value on the next line", "Ostukorvi nr:\n100000000002"],
+    ["a word between label and value", "Ostukorvi nr on 100000000002"],
+  ])("never reads %s", (_name, text) => {
+    expect(extractOrderReferences(text)).toEqual([]);
+  });
+});
+
+describe("reverse-charge footnote body does not bind a footer amount below it (okt 2026 finding 3)", () => {
+  const item = (text: string, x: number, y: number, width: number, height = 11): LayoutTextItem => ({
+    text, x, y, width, height, pageNum: 1,
+  });
+  const isHeld = (result: ReturnType<typeof extractReceiptFieldsFromText>) =>
+    result.total_gross_conflict === true || (result.amount_consistency_issues ?? []).length > 0;
+  const run = (items: LayoutTextItem[]) =>
+    extractReceiptFieldsFromText(items.map(entry => entry.text).join("\n"), "invoice.pdf", { textItems: items });
+
+  // Synthetic shape of a US SaaS invoice: a 0% tax column with a superscript
+  // footnote marker, totals, the footnote body and a footer that repeats an
+  // identifier and the amount due.
+  const header = [
+    item("Invoice", 30, 31, 62, 22),
+    item("Invoice number 7A1B2C3D-0042", 30, 69, 152),
+    item("Date of issue", 30, 83, 56), item("October 20, 2026", 108, 83, 76),
+    item("Näidis Inc.", 30, 138, 66),
+    item("Description", 30, 325, 40, 9), item("Qty", 393, 325, 13, 9), item("Unit price", 436, 324, 34, 9),
+    item("Tax", 507, 325, 13, 9), item("Amount", 554, 324, 28, 9),
+    item("Plan - 5x", 30, 345, 58), item("1", 402, 345, 4), item("€90.00", 440, 345, 30),
+    item("0%", 500, 345, 13),
+  ];
+  const marker = item("[1]", 514, 344, 5, 7);
+  const totals = [
+    item("Subtotal", 306, 388, 36), item("€90.00", 552, 388, 30),
+    item("Total", 306, 402, 21), item("€90.00", 552, 402, 30),
+    item("Amount due", 306, 417, 53), item("€90.00", 550, 417, 32),
+  ];
+  const lineAmount = item("€90.00", 552, 345, 30);
+  const footnote = (text = "[1] Tax to be paid on reverse charge basis") => item(text, 31, 461, 147, 9);
+  const footer = (text = "7A1B2C3D-0042 · €90.00 due October 20, 2026") => item(text, 30, 747, 172, 9);
+
+  it("binds 90 / 0 / 90 without conflict codes", () => {
+    const items = [...header, marker, lineAmount, ...totals, footnote(), footer()];
+    const result = run(items);
+    expect(result).toMatchObject({ total_net: 90, total_vat: 0, total_gross: 90 });
+    expect(result.amount_consistency_issues ?? []).toEqual([]);
+    expect(result.total_gross_conflict).not.toBe(true);
+    expect(extractAmountsFromLayout(items)?.explicit_amount_conflicts).toBeUndefined();
+  });
+
+  it("an attached marker (`0%[1]`) also identifies the footnote body", () => {
+    // The rate column is headed "Rate" here: under a "Tax" header the shared
+    // tokenizer reads `0%[1]` as an amount 1, which this rule does not change.
+    const rateHeader = header.map(entry => entry.text === "Tax" ? { ...entry, text: "Rate" } : entry);
+    const attached = rateHeader.map(entry => entry.text === "0%" ? { ...entry, text: "0%[1]", width: 19 } : entry);
+    const result = run([...attached, lineAmount, ...totals, footnote(), footer()]);
+    expect(result).toMatchObject({ total_net: 90, total_vat: 0, total_gross: 90 });
+    expect(result.amount_consistency_issues ?? []).toEqual([]);
+    // The same page without the reference binds the footer (held as today).
+    expect(isHeld(run([...rateHeader, lineAmount, ...totals, footnote(), footer()]))).toBe(true);
+  });
+
+  it("binds 90 / 0 / 90 with a footer that has no numeric identifier", () => {
+    const result = run([...header, marker, lineAmount, ...totals, footnote(), footer("€90.00 due October 20, 2026")]);
+    expect(result).toMatchObject({ total_net: 90, total_vat: 0, total_gross: 90 });
+    expect(result.amount_consistency_issues ?? []).toEqual([]);
+  });
+
+  it("without an earlier `[1]` reference the line still binds the footer amount (held as today)", () => {
+    expect(isHeld(run([...header, lineAmount, ...totals, footnote(), footer()]))).toBe(true);
+  });
+
+  it("a short footnote (`[1] VAT reverse charge`, under four words) still binds (held as today)", () => {
+    expect(isHeld(run([...header, marker, lineAmount, ...totals, footnote("[1] VAT reverse charge"), footer()]))).toBe(true);
+  });
+
+  it("a reverse-charge footnote carrying its own amount binds that amount", () => {
+    const items = [
+      item("Summa km-ta", 52, 100, 60), item("100,00", 300, 100, 30),
+      item("Teenus", 52, 116, 60), item("0%", 250, 116, 13), item("[1]", 264, 115, 5, 7),
+      item("Kokku", 52, 132, 40), item("124,00", 300, 132, 30),
+      item("[1] Tax to be paid on reverse charge basis", 52, 160, 180), item("48,00", 300, 160, 30),
+    ];
+    expect(extractAmountsFromLayout(items)?.total_vat).toBe(48);
+  });
+
+  // The real conflicts stay.
+  const textLines = ["Näidis OÜ", "Summa km-ta 100,00", "Käibemaks 24,00", "Kokku 124,00"];
+  const withText = (items: LayoutTextItem[]) =>
+    extractReceiptFieldsFromText(textLines.join("\n"), "conflict.pdf", { textItems: items });
+
+  it("a printed layout 90 / 48 / 124 against text 100 / 24 / 124 keeps its conflict", () => {
+    const result = withText([
+      item("Näidis OÜ", 52, 40, 60),
+      item("Summa km-ta", 52, 100, 60), item("90,00", 300, 100, 30),
+      item("Käibemaks", 52, 116, 60), item("48,00", 300, 116, 30),
+      item("Kokku", 52, 132, 40), item("124,00", 300, 132, 30),
+    ]);
+    expect(isHeld(result)).toBe(true);
+    expect(result.amount_consistency_issues).toEqual(expect.arrayContaining(["explicit_trio_mismatch"]));
+  });
+
+  it("`[1] VAT 48` with a same-row amount keeps its conflict", () => {
+    const result = withText([
+      item("Näidis OÜ", 52, 40, 60),
+      item("Teenus", 52, 80, 60), item("0%[1]", 250, 80, 20),
+      item("Summa km-ta", 52, 100, 60), item("100,00", 300, 100, 30),
+      item("[1] VAT", 52, 116, 60), item("48", 300, 116, 30),
+      item("Kokku", 52, 132, 40), item("124,00", 300, 132, 30),
+    ]);
+    expect(isHeld(result)).toBe(true);
+  });
+
+  it("`* Käibemaks 4.80` and `VAT (reverse charge) 0.00` are VAT labels", () => {
+    expect(classifyLayoutAmountLabel("* Käibemaks")).toBe("total_vat");
+    expect(classifyLayoutAmountLabel("VAT (reverse charge)")).toBe("total_vat");
+    expect(extractAmountsFromLayout([
+      item("Summa km-ta", 52, 100, 60), item("20.00", 300, 100, 30),
+      item("* Käibemaks", 52, 116, 60), item("4.80", 300, 116, 30),
+      item("Kokku", 52, 132, 40), item("24.80", 300, 132, 30),
+    ])).toMatchObject({ total_net: 20, total_vat: 4.8, total_gross: 24.8 });
+    expect(extractAmountsFromLayout([
+      item("Summa km-ta", 52, 100, 60), item("20.00", 300, 100, 30),
+      item("VAT (reverse charge)", 52, 116, 90), item("0.00", 300, 116, 30),
+      item("Kokku", 52, 132, 40), item("20.00", 300, 132, 30),
+    ])).toMatchObject({ total_net: 20, total_vat: 0, total_gross: 20 });
+  });
+
+  it("a `VAT (reverse charge)` column header binds the 48 below it and keeps the conflict and hold", () => {
+    const result = withText([
+      item("Näidis OÜ", 52, 40, 60),
+      item("Summa km-ta", 52, 100, 60), item("VAT (reverse charge)", 200, 100, 90), item("Kokku", 350, 100, 40),
+      item("100,00", 52, 116, 30), item("48,00", 200, 116, 30), item("124,00", 350, 116, 30),
+    ]);
+    expect(result.amount_consistency_issues).toEqual(
+      expect.arrayContaining(["explicit_trio_mismatch", "explicit_net_overridden"]),
+    );
+    expect(isHeld(result)).toBe(true);
   });
 });

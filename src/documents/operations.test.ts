@@ -960,6 +960,60 @@ describe("AccountingDocumentOperations.create", () => {
     expect(outcome.error.code).toBe("plan_drift");
     expectNoWrites(api);
   });
+
+  describe("order / cart number into the notes (okt 2026 finding 5)", () => {
+    const LINE = "Ostukorvi/tellimuse nr: 100000000002";
+    const docWithCart = (): Awaited<ReturnType<typeof parseDocument>> => {
+      const base = docWithRegCode();
+      return { ...base, text: `${base.text}\nOstukorvi nr:     100000000002                        KM (20%):     2,00 EUR` };
+    };
+    const createdNotes = (api: ReturnType<typeof createAccountingWorkflowApi>) =>
+      vi.mocked(api.purchaseInvoices.createAndSetTotals).mock.calls[0]![0].notes;
+
+    it("an extraction-only prepare shows the derived line", async () => {
+      mockedParseDocument.mockResolvedValue(docWithCart());
+      const { path, ops } = createSetup();
+      const outcome = await ops.prepare({ source: { file_path: path } });
+      expect(outcome.ok).toBe(true);
+      if (!outcome.ok) return;
+      expect(outcome.value.orderReferenceNote).toBe(LINE);
+    });
+
+    it("prepare with notes X → create with notes X: no plan_drift, the line is written exactly once after X", async () => {
+      mockedParseDocument.mockResolvedValue(docWithCart());
+      const { path, sha256, api, ops } = createSetup();
+      const prepared = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), notes: "Sõit koolitusele" } });
+      expect(prepared.ok).toBe(true);
+      if (!prepared.ok) return;
+      expect((prepared.value.bookingProjection as Record<string, unknown>).notes).toBe(`Sõit koolitusele\n${LINE}`);
+      // Create never re-parses the document: the stored line is used.
+      mockedParseDocument.mockResolvedValue(docWithRegCode());
+      const outcome = await ops.create({ ...baseCreateInput(path, sha256), notes: "Sõit koolitusele", planHandle: prepared.value.planHandle });
+      expect(outcome.ok).toBe(true);
+      expect(createdNotes(api)).toBe(`Sõit koolitusele\n${LINE}`);
+    });
+
+    it("without caller notes the line is the whole notes, and a create echoing the line does not duplicate it", async () => {
+      mockedParseDocument.mockResolvedValue(docWithCart());
+      const first = createSetup();
+      const handle = await prepareBookingHandle(first.ops, first.path);
+      expect((await first.ops.create({ ...baseCreateInput(first.path, first.sha256), planHandle: handle })).ok).toBe(true);
+      expect(createdNotes(first.api)).toBe(LINE);
+
+      const second = createSetup();
+      const again = await prepareBookingHandle(second.ops, second.path, { notes: LINE });
+      const outcome = await second.ops.create({ ...baseCreateInput(second.path, second.sha256), notes: LINE, planHandle: again });
+      expect(outcome.ok).toBe(true);
+      expect(createdNotes(second.api)).toBe(LINE);
+    });
+
+    it("a document without an order number leaves the notes unchanged", async () => {
+      const { path, sha256, api, ops } = createSetup();
+      const handle = await prepareBookingHandle(ops, path, { notes: "Sõit" });
+      expect((await ops.create({ ...baseCreateInput(path, sha256), notes: "Sõit", planHandle: handle })).ok).toBe(true);
+      expect(createdNotes(api)).toBe("Sõit");
+    });
+  });
 });
 
 describe("AccountingDocumentOperations.confirmDraft", () => {

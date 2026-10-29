@@ -167,12 +167,38 @@ export interface ReconciliationSuggestCompact {
   dateTo?: string;
 }
 
+/**
+ * A purchase invoice below the suggestion threshold whose exact amount and a
+ * strong document reference (invoice number or the notes' order / cart number
+ * line) both appear on the transaction. Kept apart from `matches`: it never
+ * changes a best match, a distribution or the auto-confirm set.
+ */
+export interface DocumentReferenceCandidateRow {
+  transaction_id: number | undefined;
+  date: string | undefined;
+  amount: number;
+  description?: string;
+  bank_account_name?: string;
+  invoice: {
+    type: "purchase_invoice";
+    id: number;
+    number: string;
+    client_name: string;
+    gross_price: number;
+    payment_status: string;
+  };
+  matched_reference: string;
+  match_reasons: string[];
+}
+
 export interface ReconciliationSuggestions {
   totalUnconfirmed: number;
   matched: number;
   unmatched: number;
   // RAW match rows — the presenter wraps free-text.
   matches: SuggestMatchRow[];
+  // RAW rows — the presenter wraps free-text. Absent when the group is off or empty.
+  documentReferenceCandidates?: DocumentReferenceCandidateRow[];
   duplicateScanNote?: string;
   compact?: ReconciliationSuggestCompact;
 }

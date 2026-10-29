@@ -23,12 +23,13 @@ import { roundMoney } from "../money.js";
 import { readOnly, create } from "../annotations.js";
 import { logAudit } from "../audit-log.js";
 import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
-import { parseDocument } from "../document-parser.js";
+import { parseDocument, parseDocumentTextLayerOnly } from "../document-parser.js";
+import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-reference-note.js";
 import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type LayoutTextItem } from "../document-identifiers.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
-import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
+import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractOrderReferences, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import { resolveSupplierInternal, type SupplierResolution } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
@@ -1162,6 +1163,8 @@ export type CreatePurchaseInvoiceFromPdfPayload = Partial<CreatePurchaseInvoiceF
   warnings?: string[];
   possible_duplicate_postings?: RenderedDuplicatePostingSuspect[];
   referencing_journal_ids?: number[];
+  /** The document's order / cart number line written into the notes (OCR-sandboxed). */
+  order_reference_note?: string;
 };
 
 /** A create_purchase_invoice_from_pdf refusal (toolError payload) raised by this handler. */
@@ -1238,6 +1241,15 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       }
       const documentUpload = await prepareInvoiceDocumentUpload(rawParams.file_path, rawParams.source_sha256, params.file_name);
       try {
+      // The document's order / cart number goes into the notes (okt 2026
+      // finding 5), read from the sha-verified snapshot's text layer outside
+      // the invoice lock. A read failure adds no line and never fails the create.
+      let orderReferenceNote: string | undefined;
+      try {
+        orderReferenceNote = orderReferenceNoteLine(extractOrderReferences(await parseDocumentTextLayerOnly(documentUpload.bytes)));
+      } catch {
+        orderReferenceNote = undefined;
+      }
       return await withPurchaseInvoiceLock(api, async () => {
       const supplier = await api.clients.get(params.supplier_client_id);
       // supplier.name is a trusted API read, but a client created before this
@@ -1284,7 +1296,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
         liability_accounts_id: params.liability_accounts_id ?? DEFAULT_LIABILITY_ACCOUNT,
         bank_ref_number: params.ref_number,
         bank_account_no: params.bank_account_no,
-        notes: tagNotes(params.notes),
+        notes: tagNotes(appendOrderReferenceNote(params.notes, orderReferenceNote)),
         items,
       };
 
@@ -1469,6 +1481,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
               ? { possible_duplicate_postings: renderDuplicatePostingSuspects(duplicateScan.suspects) }
               : {}),
             ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
+            ...(orderReferenceNote !== undefined ? { order_reference_note: wrapUntrustedOcr(orderReferenceNote) } : {}),
           } satisfies CreatePurchaseInvoiceFromPdfPayload),
         }],
       };

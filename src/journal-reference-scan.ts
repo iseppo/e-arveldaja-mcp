@@ -101,6 +101,18 @@ function candidateKeys(text: string): Set<string> {
   return keys;
 }
 
+/**
+ * Whether `text` carries `reference` as a whole token (or token join) under the
+ * same rules as the journal scan. Only a strong reference counts; a weak or
+ * unusable one never matches.
+ */
+export function textCarriesStrongReference(text: string | null | undefined, reference: string | null | undefined): boolean {
+  if (typeof text !== "string" || text === "") return false;
+  const key = journalReferenceKey(reference);
+  if (journalReferenceStrength(key) !== "strong") return false;
+  return candidateKeys(text).has(key);
+}
+
 /** Whole document_number keys a weak reference may equal: the value, and its remainder after one `PREFIX:`. */
 function wholeDocumentNumberKeys(documentNumber: string): Set<string> {
   const trimmed = documentNumber.trim();

@@ -44,10 +44,12 @@ import { readingPacketOf } from "../tools/document-text-hazards.js";
 import {
   computeMinOcrConfidence,
   detectReverseChargeFromText,
+  extractOrderReferences,
   extractReceiptFieldsFromText,
   inferSupplierCountry,
   type ExtractedReceiptFields,
 } from "../tools/receipt-extraction.js";
+import { orderReferenceNoteLine } from "../order-reference-note.js";
 import { buildExtractionConfidenceSignals } from "../tools/receipt-inbox.js";
 import { summarizeInvoiceExtraction } from "../invoice-extraction-fallback.js";
 import { resolveOwnCompanyIdentifiers, type OwnCompanyIdentifiers } from "../tools/own-company-identity.js";
@@ -223,6 +225,13 @@ export interface ReadingPlan {
   image_agreed?: ImageAgreedField[];
   /** Leader lines proven blank at verify: create's proof must give exactly these, else the card is stale. */
   blank_leader_lines?: string[];
+  /** The order / cart number notes line the packet prints (null: none); create derives it again and must agree. */
+  order_reference_note?: string | null;
+}
+
+/** The canonical `Ostukorvi/tellimuse nr:` notes line for the one order / cart number the packet prints, if any. */
+function printedOrderReferenceNote(packet: Pick<ReadingPacket, "lines">): string | undefined {
+  return orderReferenceNoteLine(extractOrderReferences(packet.lines.map((line) => line.text).join("\n")));
 }
 
 function sameIban(a: string | null | undefined, b: string | null | undefined): boolean {
@@ -556,6 +565,8 @@ export async function buildReadingBooking(
   knownIban: string | undefined,
   /** The payment reference the packet prints (printedPaymentReference); never a client argument. */
   paymentReference: string | undefined,
+  /** The order / cart number notes line the packet prints (printedOrderReferenceNote); never a client argument. */
+  orderReferenceNote?: string,
 ): Promise<ReadingBookingResult> {
   let items: unknown = "items" in itemsSource ? itemsSource.items : [itemWithAmounts(itemsSource.template, values, isVatReg, input?.itemTitle)];
   let nonDeductible = false;
@@ -579,6 +590,7 @@ export async function buildReadingBooking(
     ...(input?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.liabilityAccountsId } : {}),
     ...(knownIban ? { bankAccountNo: knownIban } : {}),
     ...(paymentReference !== undefined ? { refNumber: paymentReference } : {}),
+    ...(orderReferenceNote !== undefined ? { notes: orderReferenceNote } : {}),
   };
   const effective = await computeEffectiveBooking(api, fields, material.source_sha256, material.fileName);
   if (!effective.ok) return { bookingSideSignals: [], failure: { code: effective.error.code, message: effective.error.message } };
@@ -729,7 +741,7 @@ const basisItem = (item: PurchaseInvoiceItem, isVatReg: boolean): DeferredBasisI
   reversed_vat_id: isVatReg ? item.reversed_vat_id ?? null : null,
 });
 
-function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues, knownIban: string | undefined, paymentReference: string | undefined): DeferredBookingBasis {
+function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingInput | undefined, supplierName: string, isVatReg: boolean, values: AcceptedValues, knownIban: string | undefined, paymentReference: string | undefined, orderReferenceNote: string | undefined): DeferredBookingBasis {
   // The template's net comes from the values, exactly as itemWithAmounts sets it.
   const items = "items" in source ? parsePurchaseInvoiceItems(source.items)
     : [{
@@ -743,7 +755,7 @@ function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingI
     liability_accounts_id: input?.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
     bank_account_no: knownIban ? desandboxText(knownIban) : null,
     ref_number: paymentReference ?? null,
-    notes: null,
+    notes: orderReferenceNote ?? null,
     items: (desandboxAllStrings(items) as PurchaseInvoiceItem[]).map((item) => basisItem(item, isVatReg)),
     gross_price: values.gross,
     vat_price: isVatReg ? values.vat ?? 0 : null,
@@ -1074,6 +1086,8 @@ class ReadingDocumentOperations {
       const paymentReference = reference && "value" in reference ? reference.value : undefined;
       const paymentReferenceNote = reference && "ambiguous" in reference
         ? `payment reference not bound: ${reference.ambiguous.length} distinct values printed` : undefined;
+      // The printed order / cart number goes into the notes; several distinct ones bind nothing.
+      const orderReferenceNote = printedOrderReferenceNote(packet);
       if (supplierClient?.id !== undefined) {
         isVatReg = await isCompanyVatRegistered(this.api);
         knownIban = sameIban(values.supplier_iban, supplierClient.bank_account_no) ? values.supplier_iban ?? undefined : undefined;
@@ -1085,7 +1099,7 @@ class ReadingDocumentOperations {
         // A gross the owner still has to type cannot be booked yet, and a lost date leaves the VAT rate, the non-VAT
         // form, the journal date and the term unknown: no booking is built or bound at verify (Step 0).
         if (itemsSource && values.gross !== null && !bookingDeferred) {
-          booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban, paymentReference);
+          booking = await buildReadingBooking(this.api, values, supplierClient.id, itemsSource, input.booking, material, isVatReg, knownIban, paymentReference, orderReferenceNote);
           if (booking.view) {
             const binding = checkBookingBinding(values, booking.view, {
               vatRegistered: isVatReg,
@@ -1147,7 +1161,7 @@ class ReadingDocumentOperations {
         // The supplier name as computeEffectiveBooking reads it; a failed read holds like the client list (nothing written).
         const supplierName = await this.api.clients.get(supplierClient.id).then((client) => desandboxText(client.name), () => undefined);
         if (supplierName === undefined) return ok({ ...result, holds: [{ code: "clients_unavailable" }] });
-        bookingBasis = deferredBookingBasis(itemsSource, input.booking, supplierName, isVatReg, values, knownIban, paymentReference);
+        bookingBasis = deferredBookingBasis(itemsSource, input.booking, supplierName, isVatReg, values, knownIban, paymentReference, orderReferenceNote);
       }
       if (!bookingBasis && !booking?.effective) return ok(result);
       // A dated history title would land on this document unchanged: no handle until the client gives item_title.
@@ -1184,6 +1198,7 @@ class ReadingDocumentOperations {
         check_holds: check.holds.map(holdOf),
         ...(imageAgreed.length > 0 ? { image_agreed: imageAgreed } : {}),
         ...(packet.blank_leader_lines?.length ? { blank_leader_lines: packet.blank_leader_lines } : {}),
+        order_reference_note: orderReferenceNote ?? null,
       };
       const planHandle = this.runtimeSafetyContext.planStore.issue(READING_PLAN_DOMAIN, {
         normalizedArgs: planned as unknown as PlanRecord,
@@ -1260,6 +1275,11 @@ class ReadingDocumentOperations {
         if ((packet.blank_leader_lines ?? []).join("\n") !== (plan.blank_leader_lines ?? []).join("\n")) {
           return ok<CreateReadingResult>({ status: "held", holds: [{ code: "packet_changed" }] });
         }
+        // The notes line is derived from the packet again; another line than verify bound is another document text.
+        const orderReferenceNote = printedOrderReferenceNote(packet);
+        if ((orderReferenceNote ?? null) !== (plan.order_reference_note ?? null)) {
+          return ok<CreateReadingResult>({ status: "held", holds: [{ code: "packet_changed" }] });
+        }
 
         const holds: ReadingHold[] = [];
         if (this.matchingMarker(key, { supplierClientId: plan.supplier_client_id, invoiceNumber: final.invoice_number, gross: final.gross, invoiceDate: final.invoice_date, sourceSha256: plan.source_sha256 })) {
@@ -1308,7 +1328,8 @@ class ReadingDocumentOperations {
           const knownIban = sameIban(final.supplier_iban, supplierClient.bank_account_no) ? final.supplier_iban ?? undefined : undefined;
           const reference = printedPaymentReference(packet);
           booking = await buildReadingBooking(this.api, final, plan.supplier_client_id, plan.items_source as unknown as ReadingItemsSource,
-            plan.booking_input as Omit<ReadingBookingInput, "items">, material, isVatReg, knownIban, reference && "value" in reference ? reference.value : undefined);
+            plan.booking_input as Omit<ReadingBookingInput, "items">, material, isVatReg, knownIban, reference && "value" in reference ? reference.value : undefined,
+            orderReferenceNote);
           if (booking.failure) return fail(booking.failure.code, booking.failure.message, "never");
           const binding = checkBookingBinding(final, booking.view!, {
             vatRegistered: isVatReg,

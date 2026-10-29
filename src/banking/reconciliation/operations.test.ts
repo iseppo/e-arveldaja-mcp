@@ -535,3 +535,146 @@ describe("BankReconciliationOperations", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
   });
 });
+
+// --- Document-reference candidates (okt 2026 finding 5) -----------------------
+// A card payment's description names the cart number, not the invoice number;
+// with no client or reference match the exact amount alone scores 40, below
+// the suggestion default 50. Synthetic numbers only.
+describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", () => {
+  const CART = "990011223344";
+  const cardTx = (id: number, description: string) => withSignedCamtMarker({
+    id, status: "PROJECT", is_deleted: false, type: "C",
+    amount: 25.2, base_amount: 25.2, ref_number: null, clients_id: null,
+    date: "2026-03-18", accounts_dimensions_id: 9, accounts_id: 1020, cl_currencies_id: "EUR",
+    description, bank_account_name: null,
+  }, "DBIT");
+  const ticketInvoice = (id: number, notes: string | null, number = `99001122${id}`) => ({
+    id, number, clients_id: 77, client_name: "Bussiliin OÜ", gross_price: 25.2, base_gross_price: 25.2,
+    bank_ref_number: null, payment_status: "NOT_PAID", status: "CONFIRMED", cl_currencies_id: "EUR", notes,
+  });
+  // A second, independent row that does reach the exact-confirm set (95).
+  const refTx = () => withSignedCamtMarker({
+    id: 2, status: "PROJECT", is_deleted: false, type: "C",
+    amount: 300, base_amount: 300, ref_number: "77123", clients_id: 88,
+    date: "2026-03-18", accounts_dimensions_id: 9, accounts_id: 1020, cl_currencies_id: "EUR",
+    description: "Rent", bank_account_name: null,
+  }, "DBIT");
+  const rentInvoice = () => ({
+    id: 900, number: "RENT-03", clients_id: 88, client_name: "Landlord OÜ", gross_price: 300, base_gross_price: 300,
+    bank_ref_number: "77123", payment_status: "NOT_PAID", status: "CONFIRMED", cl_currencies_id: "EUR", notes: null,
+  });
+
+  function setupDocRef(transactions: Array<{ id: number }>, purchases: unknown[]) {
+    return setup({
+      transactions: {
+        invalidateListCache: vi.fn(),
+        listAll: vi.fn().mockResolvedValue(transactions),
+        get: vi.fn(async (id: number) => transactions.find(row => row.id === id)),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue(purchases) },
+    });
+  }
+
+  async function suggest(transactions: Array<{ id: number }>, purchases: unknown[], minConfidence?: number) {
+    const { operations, api } = setupDocRef(transactions, purchases);
+    const outcome = await operations.suggestMatches({ minConfidence, blockOnDuplicate: undefined });
+    if (!outcome.ok) throw new Error("suggest failed");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    return outcome.value;
+  }
+
+  it("lists the invoice whose notes carry the cart number printed in the card payment description, outside matches", async () => {
+    const result = await suggest(
+      [cardTx(7, `Kaardimakse 18.03.2026 ostukorv ${CART} Tallinn`)],
+      [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)],
+    );
+    expect(result.matches).toEqual([]);
+    expect(result.documentReferenceCandidates).toEqual([expect.objectContaining({
+      transaction_id: 7,
+      amount: 25.2,
+      matched_reference: CART,
+      invoice: expect.objectContaining({ type: "purchase_invoice", id: 701 }),
+      match_reasons: expect.arrayContaining(["exact_amount", "document_reference"]),
+    })]);
+  });
+
+  it("lists nothing without the notes line", async () => {
+    const result = await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}`)], [ticketInvoice(701, "Bus ticket")]);
+    expect(result.documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("picks only the invoice with this row's cart number among two same-amount invoices", async () => {
+    const result = await suggest(
+      [cardTx(7, `Kaardimakse ostukorv ${CART}`)],
+      [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`), ticketInvoice(702, "Ostukorvi/tellimuse nr: 990011225566")],
+    );
+    expect(result.documentReferenceCandidates?.map(row => row.invoice.id)).toEqual([701]);
+  });
+
+  it("also matches the invoice number itself as a whole token", async () => {
+    const result = await suggest([cardTx(7, "Payment INV-2026-000431 card")], [ticketInvoice(701, null, "INV-2026-000431")]);
+    expect(result.documentReferenceCandidates?.map(row => row.matched_reference)).toEqual(["INV-2026-000431"]);
+  });
+
+  it("forms the group at the default and min_confidence 50, never at 51 or 90", async () => {
+    const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`)];
+    const purchases = [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)];
+    expect((await suggest(tx, purchases, undefined)).documentReferenceCandidates).toHaveLength(1);
+    expect((await suggest(tx, purchases, 50)).documentReferenceCandidates).toHaveLength(1);
+    expect((await suggest(tx, purchases, 51)).documentReferenceCandidates).toBeUndefined();
+    expect((await suggest(tx, purchases, 90)).documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("matches the cart number as a token, never as a substring", async () => {
+    const purchases = [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)];
+    expect((await suggest([cardTx(7, `Kaardimakse ostukorv 9${CART}`)], purchases)).documentReferenceCandidates).toBeUndefined();
+    expect((await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}7`)], purchases)).documentReferenceCandidates).toBeUndefined();
+    expect((await suggest([cardTx(7, `Kaardimakse ostukorvX${CART}`)], purchases)).documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("does not count a weak reference", async () => {
+    const result = await suggest(
+      [cardTx(7, "Kaardimakse ostukorv 12345 kuupäev 20260318")],
+      [ticketInvoice(701, "Ostukorvi/tellimuse nr: 12345"), ticketInvoice(702, "Ostukorvi/tellimuse nr: 20260318")],
+    );
+    expect(result.documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("leaves matches, best matches and distributions unchanged", async () => {
+    const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`), refTx()];
+    const withLine = await suggest(tx, [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`), rentInvoice()]);
+    const withoutLine = await suggest(tx, [ticketInvoice(701, null), rentInvoice()]);
+    expect(withLine.documentReferenceCandidates).toHaveLength(1);
+    expect(withLine.matches).toEqual(withoutLine.matches);
+    expect(withLine.matches.map(row => row.best_match.id)).toEqual([900]);
+  });
+
+  it("keeps the auto-confirm set unchanged at the default and a custom threshold", async () => {
+    const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`), refTx()];
+    const line = `Ostukorvi/tellimuse nr: ${CART}`;
+    // With vs without the notes line: one invoice, two invoices sharing the
+    // cart number, and a partially paid invoice.
+    const variants: Array<[unknown[], unknown[]]> = [
+      [[ticketInvoice(701, line), rentInvoice()], [ticketInvoice(701, null), rentInvoice()]],
+      [[ticketInvoice(701, line), ticketInvoice(702, line), rentInvoice()], [ticketInvoice(701, null), ticketInvoice(702, null), rentInvoice()]],
+      [[{ ...ticketInvoice(701, line), payment_status: "PARTIALLY_PAID" }, rentInvoice()], [{ ...ticketInvoice(701, null), payment_status: "PARTIALLY_PAID" }, rentInvoice()]],
+    ];
+    for (const minConfidence of [undefined, 50, 80]) {
+      const confirmIds = async (purchases: unknown[]) => {
+        const { operations } = setupDocRef(tx, purchases);
+        const outcome = await operations.prepareExactConfirm({ minConfidence, blockOnDuplicate: undefined });
+        if (!outcome.ok) throw new Error("prepare failed");
+        return outcome.value.projection.confirms.map(row => row.transactionId);
+      };
+      for (const [withLinePurchases, withoutLinePurchases] of variants) {
+        const withLine = await confirmIds(withLinePurchases);
+        expect(withLine).toEqual(await confirmIds(withoutLinePurchases));
+        expect(withLine).toEqual([2]);
+      }
+    }
+  });
+});
