@@ -93,6 +93,13 @@ export interface WiseTransferReview {
   unacknowledged_journal_ids?: number[];
 }
 
+/** Whether a Wise review blocks approval of the plan. Fail-closed: only an
+ * unverified ownership review does not (its row is imported as a plain
+ * unconfirmed bank row either way); every other or unknown code blocks. */
+export function wiseReviewBlocksApproval(code: string): boolean {
+  return code !== "wise_transfer_ownership_unverified";
+}
+
 /** One owner acknowledgement (acknowledged_journal_holds): the listed journals
  * do not book this Wise transfer. Releases a held row only when it lists every
  * required_acknowledgement_ids journal. */

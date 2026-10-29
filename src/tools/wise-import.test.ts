@@ -20,6 +20,7 @@ import { MutationIndeterminateError } from "../mutation-outcome.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { runWithToolProfile } from "../tool-profile.js";
 import { approvalDigest } from "../wise/projection.js";
+import { wiseReviewBlocksApproval } from "../wise/types.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
 
@@ -8507,5 +8508,78 @@ describe("not_own_transfer_ids: the owner marks a transfer as a payment to a thi
     expect(dry.summary.warnings).toEqual(expect.arrayContaining([
       expect.objectContaining({ item_id: "TRANSFER-900011", code: "wise_transfer_treated_as_payment" }),
     ]));
+  });
+});
+
+describe("Wise ownership reviews do not block approval; every other review does (okt 2026, item 1 / O2)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  it("wiseReviewBlocksApproval is fail-closed: only wise_transfer_ownership_unverified does not block", () => {
+    expect(wiseReviewBlocksApproval("wise_transfer_ownership_unverified")).toBe(false);
+    for (const code of [
+      "wise_transfer_dimensions_unverified", "wise_transfer_counterpart_conflict", "wise_transfer_cross_currency",
+      "wise_untagged_ledger_match", "wise_transfer_journal_existing_elsewhere", "not_own_transfer_conflicts_evidence",
+      "unused_acknowledgement", "a_code_added_later", "",
+    ]) {
+      expect(wiseReviewBlocksApproval(code), code).toBe(true);
+    }
+  });
+
+  // No company identity, so the prefix-only transfer keeps its ownership review.
+  const options = () => ({
+    accountDimensions: [...configuredTransferDimensions(), { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false }],
+    bankAccounts: configuredTransferBankAccounts(),
+    invoiceInfo: M03_NO_COMPANY_IDENTITY,
+  });
+  const ownershipRow = buildM04Values({ id: "TRANSFER-900021", direction: "OUT", date: "2026-10-15", sourceName: "Wise Own Account", targetName: "Some Person", sourceAmount: "100" });
+  // A stored untagged unconfirmed row on the Wise account: a card row keeps
+  // its create with an advisory wise_untagged_ledger_match review.
+  const cardWithLookalike = buildM04Values({ id: "CARD_TRANSACTION-900022", date: "2026-10-16", sourceName: "Wise Own Account", targetName: "Shop", sourceAmount: "12.34" });
+  const lookalike = { id: 43, status: "PROJECT", is_deleted: false, accounts_dimensions_id: 5, type: "C", amount: 12.34,
+    cl_currencies_id: "EUR", date: "2026-10-16", bank_account_name: "Someone", description: "manual" };
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20, fee_account_dimensions_id: 9 };
+
+  it("standard: ownership reviews alone leave the plan approvable; any other review blocks it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(dry.ownership_reviews).toEqual([expect.objectContaining({ code: M03_OWNERSHIP_CODE })]);
+    expect(dry.summary).toMatchObject({ needs_review: 1, blocking_review_count: 0 });
+    expect(dry.workflow.approval_previews).toEqual([expect.objectContaining({
+      execute_tool: "import_wise_transactions",
+      accounting_impact: expect.arrayContaining([
+        "1 transfer(s) will be imported as unconfirmed ordinary rows; to book one as an own transfer, re-run the preview with it in confirm_own_transfer_ids",
+      ]),
+    })]);
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardWithLookalike]));
+    const blocked = setupWiseTool([lookalike], undefined, options());
+    const blockedDry = parseWiseResponse(await blocked.handler({ ...args, execute: false }));
+    expect(blockedDry.ownership_reviews!.map(review => review.code)).toEqual([M03_OWNERSHIP_CODE, "wise_untagged_ledger_match"]);
+    expect(blockedDry.summary).toMatchObject({ needs_review: 2, blocking_review_count: 1 });
+    expect(blockedDry.workflow.approval_previews).toEqual([]);
+  });
+
+  it("guided: ownership reviews alone are ready_for_approval; any other review is needs_review", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await setup.handler({ ...args, execute: false })));
+    expect(dry.summary.counts).toMatchObject({ needs_review: 1, blocking_review_count: 0 });
+    expect(dry.summary.status).toBe("ready_for_approval");
+    expect(dry.summary.next_action).toBeDefined();
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([ownershipRow, cardWithLookalike]));
+    const blocked = setupWiseTool([lookalike], undefined, options());
+    const blockedDry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await blocked.handler({ ...args, execute: false })));
+    expect(blockedDry.summary.counts).toMatchObject({ needs_review: 2, blocking_review_count: 1 });
+    expect(blockedDry.summary.status).toBe("needs_review");
   });
 });

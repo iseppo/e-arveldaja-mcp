@@ -21,7 +21,7 @@ import {
   type WiseSkippedGroup,
 } from "./preflight.js";
 import { projectWiseCommand, SHA256_HEX, WISE_PLAN_DOMAIN, type WiseProjectedCommand } from "./projection.js";
-import { WISE_COMMAND_VERSION } from "./types.js";
+import { WISE_COMMAND_VERSION, wiseReviewBlocksApproval } from "./types.js";
 import type { WiseFailure } from "./executor.js";
 import type {
   ImportRejectedField,
@@ -70,6 +70,8 @@ export type WiseImportSummary = {
   error_count: number;
   inter_account_total: number;
   needs_review: number;
+  /** The needs_review items that block approval (wiseReviewBlocksApproval). */
+  blocking_review_count: number;
 };
 
 /** A created / would-create row (description and source row stay internal). */
@@ -402,6 +404,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     error_count: executionErrors.length,
     inter_account_total: interAccountResults.length,
     needs_review: ownershipReviews.length,
+    blocking_review_count: ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length,
   };
   const invoiceCurrencyFixes: WiseInvoiceCurrencyFixes | undefined = invoiceFixCandidates.length > 0
     ? {
@@ -684,6 +687,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
   const inEntries = data.created.filter(entry => entry.source_direction === "IN");
   const outEntries = data.created.filter(entry => entry.source_direction === "OUT");
 
+  const blockingReviewCount = data.ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length;
   const counts = {
     total_csv_rows: data.totalCsvRows,
     eligible: data.eligibleCount,
@@ -696,6 +700,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
     auto_matched: autoMatched.length,
     errors: executionErrors.length,
     needs_review: data.ownershipReviews.length,
+    blocking_review_count: blockingReviewCount,
     // Preview: the planned inter-account confirmations (results exist only
     // after execute). Execute: the inter-account results.
     inter_account: dryRun
@@ -835,13 +840,15 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
       ? `Wise dry run would create ${data.created.length} bank transaction(s), skip ${executionSkipped.length}, and report ${executionErrors.length} error(s).`
       : `Wise import created ${data.created.length} bank transaction(s), skipped ${executionSkipped.length}, and reported ${executionErrors.length} error(s).`;
 
-  // Dry-run ladder: open reviews (including held rows) mirror the standard
-  // surface's canApprove (reviews block approval) while the plan handle and
-  // next_action stay available, as the standard digest/handle do.
+  // Dry-run ladder: open blocking reviews (including held rows) mirror the
+  // standard surface's canApprove while the plan handle and next_action stay
+  // available, as the standard digest/handle do. An unverified ownership
+  // review alone does not block (wiseReviewBlocksApproval); a zero-write
+  // preview still reports any open review.
   const status = compactImportStatus({
     dryRun,
     zeroWrite,
-    reviews: data.ownershipReviews.length > 0,
+    reviews: zeroWrite ? data.ownershipReviews.length > 0 : blockingReviewCount > 0,
     reviewsBlockApproval: true,
     failed: executionErrors.length > 0,
   });
