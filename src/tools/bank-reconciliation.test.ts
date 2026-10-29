@@ -4123,6 +4123,71 @@ describe("exact-match confirm duplicate-posting guard", () => {
       expect.objectContaining({ journal_id: DUP_JOURNAL_ID }),
     ]);
   });
+
+  // Another statement row of the same bank (transaction 2, LHV-REF-1) already
+  // registered the same 100 € inflow; the matched row carries LHV-REF-2.
+  const otherRowRegistration = { ...duplicateJournal, document_number: null, operation_type: "TRANSACTION", operations_id: 2 };
+  const otherRowTx = {
+    id: 2, status: "CONFIRMED", is_deleted: false, type: "D", amount: 100, date: "2026-03-22",
+    accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR", bank_ref_number: "LHV-REF-1",
+  };
+  // Already carries the invoice client, so execute needs no client update.
+  const refTx = { ...matchingTx, clients_id: matchingSale.clients_id, bank_ref_number: "LHV-REF-2" };
+
+  function setupDistinctReference(toolName?: string) {
+    const setup = setupGuardAutoConfirm({ journals: [otherRowRegistration], tx: refTx, toolName });
+    setup.api.transactions.listAll = vi.fn().mockResolvedValue([refTx, otherRowTx]);
+    return setup;
+  }
+
+  it("annotates a different-reference suspect without changing the plan: blocked rows, fingerprint and execute stay the same", async () => {
+    const { handler, api } = setupDistinctReference();
+
+    const dry = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: false, min_confidence: 50 })).content[0]!.text);
+    expect(dry.results[0]!.status).toBe("would_confirm");
+    expect(dry.results[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID, distinct_source_reference: true }),
+    ]);
+    expect(dry.results[0]!.possible_duplicate_postings![0]).not.toHaveProperty("operations_id");
+    expect(dry.warnings!.some(w => w.startsWith(`Likely a different movement (different source reference): journal ${DUP_JOURNAL_ID} `))).toBe(true);
+    expect(dry.warnings!.some(w => /POSSIBLE duplicate/.test(w))).toBe(false);
+
+    // The annotation is not part of the reviewed plan: losing it before execute
+    // (the other row's transaction is no longer in the snapshot) is no drift.
+    api.transactions.listAll = vi.fn().mockResolvedValue([refTx]);
+    const executed = parseToolPayload<ReconExactMatchPayload>(
+      (await handler({ execute: true, min_confidence: 50, plan_handle: dry.plan_handle })).content[0]!.text,
+    );
+    expect(executed.mode).toBe("EXECUTED");
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("still blocks a different-reference suspect with block_on_duplicate=true", async () => {
+    const { handler, api } = setupDistinctReference();
+    const dry = parseToolPayload<ReconExactMatchPayload>(
+      (await handler({ execute: false, min_confidence: 50, block_on_duplicate: true })).content[0]!.text,
+    );
+    const blockedRow = dry.results.find(r => r.transaction_id === 1)!;
+    if (blockedRow.status !== "blocked_duplicate_suspect") throw new Error("expected a blocked_duplicate_suspect row");
+    expect(blockedRow.conflicting_journal_ids).toEqual([DUP_JOURNAL_ID]);
+    expect(blockedRow.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID, distinct_source_reference: true }),
+    ]);
+    const executed = parseToolPayload<ReconExactMatchPayload>(
+      (await handler({ execute: true, min_confidence: 50, block_on_duplicate: true, plan_handle: dry.plan_handle })).content[0]!.text,
+    );
+    expect(executed.mode).toBe("EXECUTED");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("suggest mode annotates the match row's suspect and keeps duplicate_blocked", async () => {
+    const { handler } = setupDistinctReference("reconcile_transactions");
+    const suggest = parseToolPayload<ReconSuggestPayload>((await handler({ min_confidence: 50, block_on_duplicate: true })).content[0]!.text);
+    expect(suggest.matches[0]!.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID, distinct_source_reference: true }),
+    ]);
+    expect(suggest.matches[0]!.duplicate_blocked).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

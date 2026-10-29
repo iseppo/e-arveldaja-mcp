@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { AccountDimension, BankAccount, Journal } from "./types/api.js";
+import type { AccountDimension, BankAccount, Journal, Transaction } from "./types/api.js";
 import {
   DUPLICATE_SCAN_WINDOW_DAYS,
   DUPLICATE_AMOUNT_TOLERANCE,
@@ -8,9 +8,14 @@ import {
   findDuplicateBankPostings,
   formatDuplicatePostingWarnings,
   checkIntakeCashDuplicates,
+  annotateDistinctSourceReferences,
+  journalSourceReferenceIdentity,
+  renderDuplicatePostingSuspects,
+  transactionSourceReferenceIdentity,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
 } from "./bank-posting-duplicate-guard.js";
+import { buildCamtDescriptionWithMetadata } from "./camt/duplicate-identity.js";
 
 // ---------------------------------------------------------------------------
 // Helpers — mirror the fixture style used in src/account-postings.test.ts
@@ -396,5 +401,175 @@ describe("formatDuplicatePostingWarnings", () => {
   it("returns no lines when scan_available is true and there are no suspects", () => {
     const result: DuplicatePostingScanResult = { scan_available: true, window_days: 7, suspects: [] };
     expect(formatDuplicatePostingWarnings(result, baseCandidate, wrapTitle)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Distinct source reference annotation (annotation, never filtering)
+// ---------------------------------------------------------------------------
+
+describe("annotateDistinctSourceReferences", () => {
+  const WISE_DIM = BANK_DIMENSION_ID;
+  const OTHER_DIM = 5002;
+
+  /** A registration journal of transaction `txId` posting the candidate's bank leg. */
+  function registration(id: number, txId: number | undefined, overrides: Partial<Journal> = {}): Journal {
+    return journal({
+      id,
+      title: "Registration",
+      operation_type: "TRANSACTION",
+      ...(txId !== undefined ? { operations_id: txId } : {}),
+      postings: [posting(BANK_ACCOUNT_ID, "C", 100, WISE_DIM)],
+      ...overrides,
+    });
+  }
+
+  function bankTx(id: number, overrides: Partial<Transaction> = {}): Transaction {
+    return {
+      id, accounts_dimensions_id: WISE_DIM, type: "C", amount: 100, date: "2024-06-15",
+      cl_currencies_id: "EUR", status: "CONFIRMED", is_deleted: false,
+      ...overrides,
+    } as Transaction;
+  }
+
+  function scanOf(journals: Journal[]): DuplicatePostingScanResult {
+    return { scan_available: true, window_days: DUPLICATE_SCAN_WINDOW_DAYS, suspects: findDuplicatePostingsInJournals(journals, baseCandidate) };
+  }
+
+  const wiseCandidate = (tag: string) => () => transactionSourceReferenceIdentity(bankTx(999, { description: `${tag} Payment` }));
+
+  it("carries operations_id internally but never renders it", () => {
+    const scan = scanOf([registration(10, 77)]);
+    expect(scan.suspects[0]!.operations_id).toBe(77);
+    const rendered = renderDuplicatePostingSuspects(scan.suspects)[0]!;
+    expect(rendered).not.toHaveProperty("operations_id");
+    expect(rendered.journal_id).toBe(10);
+  });
+
+  it("marks a suspect whose Wise transaction carries a different WISE: id on the same leg; journal ids unchanged", async () => {
+    const scan = scanOf([registration(10, 77)]);
+    const transactions = [bankTx(77, { description: "WISE:TRANSFER-1 Payment" })];
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"), async () => transactions);
+    expect(annotated.scan_available).toBe(true);
+    expect(annotated.suspects.map(s => s.journal_id)).toEqual(scan.suspects.map(s => s.journal_id));
+    expect(annotated.suspects[0]!.distinct_source_reference).toBe(true);
+    expect(renderDuplicatePostingSuspects(annotated.suspects)[0]!.distinct_source_reference).toBe(true);
+  });
+
+  it("keeps the same WISE: id (also with a split-leg currency suffix) a plain suspect", async () => {
+    const scan = scanOf([registration(10, 77), registration(11, 78)]);
+    const transactions = [
+      bankTx(77, { description: "WISE:TRANSFER-1 Payment" }),
+      bankTx(78, { description: "WISE:TRANSFER-1:USD Payment" }),
+    ];
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-1"), async () => transactions);
+    expect(annotated.suspects).toHaveLength(2);
+    expect(annotated.suspects.every(s => s.distinct_source_reference === undefined)).toBe(true);
+  });
+
+  it("does not compare a main leg with a fee leg", async () => {
+    const scan = scanOf([registration(10, 77)]);
+    const transactions = [bankTx(77, { description: "WISE:FEE:TRANSFER-1 Wise teenustasu" })];
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"), async () => transactions);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("uses a non-transaction journal's WISE: document number", async () => {
+    const scan = scanOf([journal({ id: 10, document_number: "WISE:TRANSFER-1", postings: [posting(BANK_ACCOUNT_ID, "C", 100, WISE_DIM)] })]);
+    const annotated = await annotateDistinctSourceReferences(scan, () => journalSourceReferenceIdentity("WISE:TRANSFER-2", WISE_DIM), async () => []);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBe(true);
+    const same = await annotateDistinctSourceReferences(scan, () => journalSourceReferenceIdentity("WISE:TRANSFER-1", WISE_DIM), async () => []);
+    expect(same.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("does not read a TRANSACTION journal's own document number: without its transaction it stays plain", async () => {
+    const scan = scanOf([registration(10, 77, { document_number: "WISE:TRANSFER-1" })]);
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"), async () => []);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("keeps a Wise reference against a CAMT reference a plain suspect (different namespaces)", async () => {
+    const scan = scanOf([registration(10, 77)]);
+    const transactions = [bankTx(77, { description: "Payment", bank_ref_number: "CAMT-REF-1" })];
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"), async () => transactions);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("treats the full and the hash form of one CAMT reference as the same identity", async () => {
+    const longReference = "A".repeat(120);
+    const hashed = buildCamtDescriptionWithMetadata("Payment", {
+      date: "2024-06-15", amount: 100, currency: "EUR", direction: "DBIT", counterparty_name: "Payee",
+      bank_reference: longReference, description: "Payment",
+    } as Parameters<typeof buildCamtDescriptionWithMetadata>[1])!;
+    expect(hashed).toContain("brh=sha256:");
+    const candidateTx = bankTx(999, { description: hashed, bank_account_name: "Payee" });
+    const scan = scanOf([registration(10, 77)]);
+    const sameRef = await annotateDistinctSourceReferences(scan, () => transactionSourceReferenceIdentity(candidateTx),
+      async () => [bankTx(77, { bank_ref_number: longReference })]);
+    expect(sameRef.suspects[0]!.distinct_source_reference).toBeUndefined();
+    const otherRef = await annotateDistinctSourceReferences(scan, () => transactionSourceReferenceIdentity(candidateTx),
+      async () => [bankTx(77, { bank_ref_number: "B".repeat(120) })]);
+    expect(otherRef.suspects[0]!.distinct_source_reference).toBe(true);
+  });
+
+  it("keeps a poisoned or unverified marker, a missing transaction and a missing operations_id plain", async () => {
+    const candidate = () => transactionSourceReferenceIdentity(bankTx(999, { bank_ref_number: "REF-2" }));
+    const poisoned = bankTx(77, { description: "Payment\n[e-arveldaja-mcp:camt br=REF-1 br=REF-3 dir=DBIT sig=abc]" });
+    const unverified = bankTx(78, { description: "Payment\n[e-arveldaja-mcp:camt br=REF-1 dir=DBIT sig=0000000000000000]" });
+    const scan = scanOf([registration(10, 77), registration(11, 78), registration(12, 79), registration(13, undefined)]);
+    const annotated = await annotateDistinctSourceReferences(scan, candidate, async () => [poisoned, unverified]);
+    expect(annotated.suspects.map(s => s.journal_id)).toEqual([10, 11, 12, 13]);
+    expect(annotated.suspects.every(s => s.distinct_source_reference === undefined)).toBe(true);
+  });
+
+  it("never compares identities on different bank dimensions", async () => {
+    const scan = scanOf([registration(10, 77)]);
+    const transactions = [bankTx(77, { description: "WISE:TRANSFER-1 Payment", accounts_dimensions_id: OTHER_DIM })];
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"), async () => transactions);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("ignores clients: a different, third-party or reassigned client with the same reference stays a plain suspect", async () => {
+    const scan = scanOf([registration(10, 77, { clients_id: 5 }), registration(11, 78, { clients_id: 6 })]);
+    const transactions = [
+      bankTx(77, { description: "WISE:TRANSFER-1 Payment", clients_id: 9 }),
+      bankTx(78, { bank_ref_number: "REF-1", clients_id: 9 }),
+    ];
+    const wise = await annotateDistinctSourceReferences(scan, () => transactionSourceReferenceIdentity(
+      bankTx(999, { description: "WISE:TRANSFER-1 Payment", clients_id: 1 })), async () => transactions);
+    expect(wise.suspects.every(s => s.distinct_source_reference === undefined)).toBe(true);
+    const camt = await annotateDistinctSourceReferences(scan, () => transactionSourceReferenceIdentity(
+      bankTx(999, { bank_ref_number: "REF-1", clients_id: 2 })), async () => transactions);
+    expect(camt.suspects.every(s => s.distinct_source_reference === undefined)).toBe(true);
+  });
+
+  it("returns the original scan unannotated when the transaction read rejects", async () => {
+    const scan = scanOf([registration(10, 77)]);
+    const annotated = await annotateDistinctSourceReferences(scan, wiseCandidate("WISE:TRANSFER-2"),
+      () => Promise.reject(new Error("transactions unavailable")));
+    expect(annotated).toEqual(scan);
+    expect(annotated.suspects[0]!.distinct_source_reference).toBeUndefined();
+  });
+
+  it("does not read transactions for an unavailable scan or a candidate without identity", async () => {
+    const load = vi.fn().mockResolvedValue([]);
+    const unavailable: DuplicatePostingScanResult = { scan_available: false, scan_note: "x", window_days: 7, suspects: [] };
+    expect(await annotateDistinctSourceReferences(unavailable, wiseCandidate("WISE:TRANSFER-2"), load)).toEqual(unavailable);
+    const scan = scanOf([registration(10, 77)]);
+    expect(await annotateDistinctSourceReferences(scan, () => undefined, load)).toEqual(scan);
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it("renders a distinct suspect as an advisory line, not a POSSIBLE duplicate", () => {
+    const [suspect] = findDuplicatePostingsInJournals([journal({ id: 10, title: "Wise", postings: [posting(BANK_ACCOUNT_ID, "C", 100, WISE_DIM)] })], baseCandidate);
+    const lines = formatDuplicatePostingWarnings(
+      { scan_available: true, window_days: 7, suspects: [{ ...suspect!, distinct_source_reference: true }] },
+      baseCandidate,
+      t => `[${t}]`,
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/^Likely a different movement \(different source reference\)/);
+    expect(lines[0]).not.toContain("POSSIBLE duplicate");
+    expect(lines[0]).toContain("journal 10");
   });
 });

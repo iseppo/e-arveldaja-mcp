@@ -36,9 +36,11 @@ import {
   isTrustedCamtDescriptionMetadata,
 } from "../../camt/duplicate-identity.js";
 import {
+  annotateDistinctSourceReferences,
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,
   formatDuplicatePostingWarnings,
+  transactionSourceReferenceIdentity,
   DUPLICATE_SCAN_WINDOW_DAYS,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
@@ -365,7 +367,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
           // A blocking scan gates the write, so it must not run on a cached
           // journal snapshot that predates UI/other-process bookings.
           if (params.block_on_duplicate === true) api.journals.invalidateListCache();
-          duplicateScan = await findDuplicateBankPostings(api, candidate);
+          duplicateScan = await annotateDistinctSourceReferences(
+            await findDuplicateBankPostings(api, candidate),
+            () => transactionSourceReferenceIdentity({ ...params, type: params.type ?? "C", cl_currencies_id: params.cl_currencies_id ?? "EUR" }),
+            () => api.transactions.listAll(),
+          );
         } else {
           duplicateScan = {
             scan_available: false,
@@ -533,7 +539,11 @@ export function registerTransactionTools(server: McpServer, api: ApiContext): vo
                 direction: side,
                 date: tx.date,
               };
-              const scan = await findDuplicateBankPostings(api, candidate);
+              const scan = await annotateDistinctSourceReferences(
+                await findDuplicateBankPostings(api, candidate),
+                () => transactionSourceReferenceIdentity(tx),
+                () => api.transactions.listAll(),
+              );
               if (!scan.scan_available) {
                 interAccountWarnings.push(scan.scan_note ?? "Duplicate scan unavailable.");
               } else if (scan.suspects.length > 0) {

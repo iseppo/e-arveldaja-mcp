@@ -23,8 +23,10 @@ import type { RuntimeSafetyContext } from "../../runtime-safety-context.js";
 import { buildBankAccountLookups, normalizeReference } from "../../tools/inter-account-utils.js";
 import { toUtcDay } from "../../date-utils.js";
 import {
+  annotateDistinctSourceReferences,
   findDuplicateBankPostings,
   resolveBankDimensionsSafe,
+  transactionSourceReferenceIdentity,
   type DuplicatePostingCandidate,
   type DuplicatePostingScanResult,
   type DuplicatePostingSuspect,
@@ -273,13 +275,17 @@ export async function runSuggestMatches(
       const suggestDim = suggestDimById.get(tx.accounts_dimensions_id);
       let possibleDuplicatePostings: DuplicatePostingSuspect[] | undefined;
       if (suggestDim && tx.date) {
-        const scan = await findDuplicateBankPostings(api, {
-          accountId: suggestDim.accountId,
-          dimensionId: suggestDim.dimensionId,
-          amount: tx.base_amount ?? tx.amount,
-          direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
-          date: tx.date,
-        });
+        const scan = await annotateDistinctSourceReferences(
+          await findDuplicateBankPostings(api, {
+            accountId: suggestDim.accountId,
+            dimensionId: suggestDim.dimensionId,
+            amount: tx.base_amount ?? tx.amount,
+            direction: bankPostingSideForInvoiceMatch(tx, bestMatch.type),
+            date: tx.date,
+          }),
+          () => transactionSourceReferenceIdentity(tx),
+          async () => allTx,
+        );
         if (scan.scan_available && scan.suspects.length > 0) {
           possibleDuplicatePostings = scan.suspects;
         }
@@ -391,6 +397,8 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
   api: ApiContext,
   projection: ExactMatchProjection,
   blockOnDuplicate: boolean,
+  allTransactions: readonly Transaction[],
+  pendingTransactions: readonly Transaction[],
 ): Promise<void> {
   if (projection.confirms.length === 0) return;
 
@@ -422,7 +430,16 @@ async function enrichExactMatchProjectionWithDuplicateGuard(
       direction: descriptor.direction,
       date: descriptor.date,
     };
-    const scan = await findDuplicateBankPostings(api, candidate);
+    // The source-reference annotation is advisory: it never changes which
+    // suspects block, and the plan fingerprint binds only their journal ids.
+    const scan = await annotateDistinctSourceReferences(
+      await findDuplicateBankPostings(api, candidate),
+      () => {
+        const transaction = pendingTransactions.find(tx => tx.id === descriptor.transactionId);
+        return transaction ? transactionSourceReferenceIdentity(transaction) : undefined;
+      },
+      async () => allTransactions,
+    );
 
     if (!scan.scan_available) {
       projection.duplicateScanNote ??= scan.scan_note;
@@ -738,7 +755,7 @@ async function loadExactMatchProjection(
   });
 
   const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
-  await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true);
+  await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true, allTx, unconfirmed);
   return { projection, threshold };
 }
 

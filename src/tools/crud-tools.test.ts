@@ -2462,13 +2462,14 @@ describe("create_transaction duplicate-posting guard", () => {
     journalsThrows?: boolean;
     bankDimsThrows?: boolean;
     create?: ReturnType<typeof vi.fn>;
+    listTransactions?: ReturnType<typeof vi.fn>;
   } = {}) {
     const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
     const listAllWithPostings = options.journalsThrows
       ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
       : vi.fn().mockResolvedValue(options.journals ?? []);
     const { api, handler } = getCrudToolHarness("create_transaction", {
-      transactions: { create },
+      transactions: { create, ...(options.listTransactions ? { listAll: options.listTransactions } : {}) },
       readonly: {
         getBankAccounts: options.bankDimsThrows
           ? vi.fn().mockRejectedValue(new Error("bank accounts unavailable"))
@@ -2657,6 +2658,77 @@ describe("create_transaction duplicate-posting guard", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(payload.duplicate_guard_note).toBeTruthy();
   });
+
+  // A Wise row registered as transaction 700 (WISE:TRANSFER-1) already books
+  // the same 100 € inflow on this dimension; the new row is another transfer.
+  const wiseRegistration = {
+    ...duplicateJournal,
+    title: "Wise",
+    document_number: null,
+    operation_type: "TRANSACTION",
+    operations_id: 700,
+  };
+  const registeredWiseTx = {
+    id: 700, status: "CONFIRMED", is_deleted: false, type: "D", amount: 100, date: "2026-07-19",
+    accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR", description: "WISE:TRANSFER-1 Indrek Seppo",
+  };
+  const otherWiseParams = { ...createParams, description: "WISE:TRANSFER-2 Indrek Seppo" };
+
+  type CreatedTransactionPayload = {
+    warnings?: string[];
+    possible_duplicate_postings?: Array<{ journal_id: number; distinct_source_reference?: true }>;
+  };
+
+  it("different WISE: reference: annotated as a likely different movement, never hidden, still refused with block_on_duplicate", async () => {
+    const { handler, create } = setupCreateTransaction({
+      journals: [wiseRegistration],
+      listTransactions: vi.fn().mockResolvedValue([registeredWiseTx]),
+    });
+
+    const result = await handler(otherWiseParams) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as CreatedTransactionPayload;
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(payload.possible_duplicate_postings).toEqual([
+      expect.objectContaining({ journal_id: DUP_JOURNAL_ID, distinct_source_reference: true }),
+    ]);
+    expect(payload.possible_duplicate_postings![0]).not.toHaveProperty("operations_id");
+    expect(payload.warnings).toEqual([expect.stringMatching(/^Likely a different movement \(different source reference\): journal 555 /)]);
+
+    const blocked = await handler({ ...otherWiseParams, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({
+      category: "possible_duplicate_posting",
+      conflicting_journal_ids: [DUP_JOURNAL_ID],
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("same WISE: reference stays a POSSIBLE duplicate", async () => {
+    const { handler } = setupCreateTransaction({
+      journals: [wiseRegistration],
+      listTransactions: vi.fn().mockResolvedValue([registeredWiseTx]),
+    });
+    const result = await handler({ ...createParams, description: "WISE:TRANSFER-1 Indrek Seppo" }) as { content: Array<{ text: string }> };
+    const payload = parseMcpResponse(result.content[0]!.text) as CreatedTransactionPayload;
+    expect(payload.possible_duplicate_postings![0]).not.toHaveProperty("distinct_source_reference");
+    expect(payload.warnings?.some(w => /^POSSIBLE duplicate/.test(w))).toBe(true);
+  });
+
+  it("transaction identity read rejected: same suspects, same refusal", async () => {
+    const { handler, create } = setupCreateTransaction({
+      journals: [wiseRegistration],
+      listTransactions: vi.fn().mockRejectedValue(new Error("transactions unavailable")),
+    });
+    const payload = parseMcpResponse(((await handler(otherWiseParams)) as { content: Array<{ text: string }> }).content[0]!.text) as CreatedTransactionPayload;
+    expect(payload.possible_duplicate_postings).toEqual([expect.objectContaining({ journal_id: DUP_JOURNAL_ID })]);
+    expect(payload.possible_duplicate_postings![0]).not.toHaveProperty("distinct_source_reference");
+    expect(payload.warnings?.some(w => /^POSSIBLE duplicate/.test(w))).toBe(true);
+
+    const blocked = await handler({ ...otherWiseParams, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({ conflicting_journal_ids: [DUP_JOURNAL_ID] });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2718,12 +2790,14 @@ describe("create_journal duplicate-posting guard", () => {
     journalsThrows?: boolean;
     bankDimsThrows?: boolean;
     create?: ReturnType<typeof vi.fn>;
+    listTransactions?: ReturnType<typeof vi.fn>;
   } = {}) {
     const create = options.create ?? vi.fn().mockResolvedValue({ created_object_id: 42 });
     const listAllWithPostings = options.journalsThrows
       ? vi.fn().mockRejectedValue(new Error("page cap exceeded"))
       : vi.fn().mockResolvedValue(options.journals ?? []);
     const { api, handler } = getCrudToolHarness("create_journal", {
+      ...(options.listTransactions ? { transactions: { listAll: options.listTransactions } } : {}),
       journals: { create, listAllWithPostings },
       readonly: {
         getAccounts: vi.fn().mockResolvedValue(accounts),
@@ -2831,6 +2905,61 @@ describe("create_journal duplicate-posting guard", () => {
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(payload).not.toHaveProperty("warnings");
+  });
+
+  // The incident's case 2: a journal labelled WISE:TRANSFER-2445917042 against
+  // the registration of the Wise row WISE:TRANSFER-2434062345 (same amount and
+  // dimension, a different transfer).
+  const wiseRegistration = { ...duplicateJournal, title: "Wise", document_number: null, operation_type: "TRANSACTION", operations_id: 700 };
+  const registeredWiseTx = {
+    id: 700, status: "CONFIRMED", is_deleted: false, type: "C", amount: 226.80, date: "2026-07-19",
+    accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR", description: "WISE:TRANSFER-2434062345 Indrek Seppo",
+  };
+  const otherWiseJournal = { ...bankJournalParams, document_number: "WISE:TRANSFER-2445917042" };
+  type CreatedJournalPayload = {
+    warnings?: string[];
+    possible_duplicate_postings?: Array<{ suspects: Array<{ journal_id: number; distinct_source_reference?: true }> }>;
+  };
+
+  it("different WISE: document number: annotated as a likely different movement, still refused with block_on_duplicate", async () => {
+    const { handler, create } = setupCreateJournal({
+      journals: [wiseRegistration],
+      listTransactions: vi.fn().mockResolvedValue([registeredWiseTx]),
+    });
+
+    const payload = parseMcpResponse(((await handler(otherWiseJournal)) as { content: Array<{ text: string }> }).content[0]!.text) as CreatedJournalPayload;
+    expect(create).toHaveBeenCalledTimes(1);
+    const suspects = payload.possible_duplicate_postings!.flatMap(p => p.suspects);
+    expect(suspects).toEqual([expect.objectContaining({ journal_id: DUP_JOURNAL_ID, distinct_source_reference: true })]);
+    expect(suspects[0]).not.toHaveProperty("operations_id");
+    expect(payload.warnings?.some(w => w.startsWith(`Likely a different movement (different source reference): journal ${DUP_JOURNAL_ID} `))).toBe(true);
+    expect(payload.warnings?.some(w => /POSSIBLE duplicate/.test(w))).toBe(false);
+
+    const blocked = await handler({ ...otherWiseJournal, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({
+      category: "possible_duplicate_posting",
+      conflicting_journal_ids: [DUP_JOURNAL_ID],
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("transaction identity read rejected: same suspects, same refusal, no annotation", async () => {
+    const { handler, create } = setupCreateJournal({
+      journals: [wiseRegistration],
+      listTransactions: vi.fn().mockRejectedValue(new Error("transactions unavailable")),
+    });
+
+    const payload = parseMcpResponse(((await handler(otherWiseJournal)) as { content: Array<{ text: string }> }).content[0]!.text) as CreatedJournalPayload;
+    const suspects = payload.possible_duplicate_postings!.flatMap(p => p.suspects);
+    expect(suspects.map(s => s.journal_id)).toEqual([DUP_JOURNAL_ID]);
+    expect(suspects[0]).not.toHaveProperty("distinct_source_reference");
+    expect(payload.warnings?.some(w => /^POSSIBLE duplicate/.test(w))).toBe(true);
+
+    const blocked = await handler({ ...otherWiseJournal, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({ conflicting_journal_ids: [DUP_JOURNAL_ID] });
+    expect(create).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3341,6 +3470,55 @@ describe("confirm_transaction inter-account duplicate guard (MEDIUM-4)", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
     expect(payload).not.toHaveProperty("possible_duplicate_postings");
     expect(payload.warnings).toBeUndefined();
+  });
+
+  // Another LHV statement row (transaction 40, bank reference LHV-REF-1) was
+  // confirmed against SEB three days later: outside Lane B's ±1 day, inside the
+  // ±7 day posting scan. This row carries LHV-REF-2.
+  const otherLhvRegistration = {
+    id: 14, registered: true, is_deleted: false, effective_date: "2026-03-24", title: "LHV to SEB", document_number: null,
+    operation_type: "TRANSACTION", operations_id: 40,
+    postings: [
+      { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 500, is_deleted: false },
+      { accounts_id: 1020, accounts_dimensions_id: 200, type: "D", amount: 500, is_deleted: false },
+    ],
+  };
+  const otherLhvTx = {
+    id: 40, status: "CONFIRMED", is_deleted: false, type: "C", amount: 500, date: "2026-03-24",
+    accounts_dimensions_id: 100, cl_currencies_id: "EUR", bank_ref_number: "LHV-REF-1",
+  };
+  type ConfirmedTransactionPayload = {
+    warnings?: string[];
+    possible_duplicate_postings?: Array<{ journal_id: number; distinct_source_reference?: true }>;
+    extra?: { possible_duplicate_postings?: Array<{ journal_id: number; distinct_source_reference?: true }> };
+  };
+
+  it("annotates a suspect with a different CAMT reference on the same bank and still refuses with block_on_duplicate", async () => {
+    const { api, handler } = interAccountHarness([otherLhvRegistration], { bank_ref_number: "LHV-REF-2" });
+    Object.assign(api.transactions, { listAll: vi.fn().mockResolvedValue([otherLhvTx]) });
+
+    const payload = parseMcpResponse(((await handler(args)) as { content: Array<{ text: string }> }).content[0]!.text) as ConfirmedTransactionPayload;
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+    const suspects = payload.possible_duplicate_postings ?? payload.extra?.possible_duplicate_postings;
+    expect(suspects).toEqual([expect.objectContaining({ journal_id: 14, distinct_source_reference: true })]);
+    expect(payload.warnings?.some(w => w.startsWith("Likely a different movement (different source reference): journal 14 "))).toBe(true);
+
+    const blocked = await handler({ ...args, block_on_duplicate: true }) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(blocked.isError).toBe(true);
+    expect(parseMcpResponse(blocked.content[0]!.text)).toMatchObject({
+      category: "possible_duplicate_posting",
+      conflicting_journal_ids: [14],
+    });
+    expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the same CAMT reference a plain suspect", async () => {
+    const { api, handler } = interAccountHarness([otherLhvRegistration], { bank_ref_number: "LHV-REF-1" });
+    Object.assign(api.transactions, { listAll: vi.fn().mockResolvedValue([otherLhvTx]) });
+    const payload = parseMcpResponse(((await handler(args)) as { content: Array<{ text: string }> }).content[0]!.text) as ConfirmedTransactionPayload;
+    const suspects = payload.possible_duplicate_postings ?? payload.extra?.possible_duplicate_postings;
+    expect(suspects).toEqual([expect.objectContaining({ journal_id: 14 })]);
+    expect(suspects![0]).not.toHaveProperty("distinct_source_reference");
   });
 });
 

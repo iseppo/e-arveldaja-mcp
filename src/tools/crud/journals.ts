@@ -12,8 +12,10 @@ import { isNotFoundHttpError } from "../../http-client.js";
 import { applyListView, viewParam } from "../../list-views.js";
 import { validatePostingDimensions } from "../../account-validation.js";
 import {
+  annotateDistinctSourceReferences,
   findDuplicateBankPostings,
   formatDuplicatePostingWarnings,
+  journalSourceReferenceIdentity,
   renderDuplicatePostingSuspects,
   resolveBankDimensionsSafe,
   DUPLICATE_SCAN_WINDOW_DAYS,
@@ -245,7 +247,11 @@ export function registerJournalTools(server: McpServer, api: ApiContext): void {
             window_days: DUPLICATE_SCAN_WINDOW_DAYS,
             suspects: [],
           }
-        : await findDuplicateBankPostings(api, candidate);
+        : await annotateDistinctSourceReferences(
+            await findDuplicateBankPostings(api, candidate),
+            () => journalSourceReferenceIdentity(params.document_number, dim.dimensionId),
+            () => api.transactions.listAll(),
+          );
       postingScans.push({ dim, candidate, scan });
     }
 

@@ -1,8 +1,10 @@
-import type { AccountDimension, BankAccount, Journal } from "./types/api.js";
+import type { AccountDimension, BankAccount, Journal, Transaction } from "./types/api.js";
 import { listAccountDimensionPostings } from "./account-postings.js";
 import { roundMoney } from "./money.js";
 import { wrapUntrustedOcr } from "./mcp-json.js";
 import { toUtcDay } from "./date-utils.js";
+import { storedBankReferenceLookupKey } from "./camt/duplicate-identity.js";
+import { matchWiseLegTag } from "./wise/projection.js";
 
 /**
  * Cross-mechanism bank-posting duplicate guard — core matching logic.
@@ -48,6 +50,13 @@ export interface DuplicatePostingSuspect {
   type: "D" | "C";
   dimension_id: number | null;
   day_distance: number;
+  /** Internal only (never rendered): the transaction a TRANSACTION journal registers. */
+  operations_id?: number;
+  /**
+   * Advisory annotation: a same-namespace source reference proves this suspect
+   * is a different movement. It stays a suspect: blocking is unchanged.
+   */
+  distinct_source_reference?: true;
 }
 
 export interface DuplicatePostingScanResult {
@@ -176,14 +185,18 @@ export function findDuplicatePostingsInJournals(
       type: row.type,
       dimension_id: row.accounts_dimensions_id,
       day_distance: utcDayDiff(row.date, candidate.date),
+      ...(row.operations_id !== undefined ? { operations_id: row.operations_id } : {}),
     });
   }
 
   return suspects.sort((a, b) => a.day_distance - b.day_distance || a.journal_id - b.journal_id);
 }
 
-/** Wire shape of a rendered suspect: the same fields, with `journal_title` / `document_number` sandbox-wrapped. */
-export type RenderedDuplicatePostingSuspect = { [K in keyof DuplicatePostingSuspect]: DuplicatePostingSuspect[K] };
+/**
+ * Wire shape of a rendered suspect: the same fields without the internal
+ * `operations_id`, with `journal_title` / `document_number` sandbox-wrapped.
+ */
+export type RenderedDuplicatePostingSuspect = Omit<DuplicatePostingSuspect, "operations_id">;
 
 /**
  * Suspects as MCP output: the journal title and document number are
@@ -191,11 +204,108 @@ export type RenderedDuplicatePostingSuspect = { [K in keyof DuplicatePostingSusp
  * `possible_duplicate_postings` list uses.
  */
 export function renderDuplicatePostingSuspects(suspects: readonly DuplicatePostingSuspect[]): RenderedDuplicatePostingSuspect[] {
-  return suspects.map(s => ({
+  return suspects.map(({ operations_id: _operationsId, ...s }) => ({
     ...s,
     journal_title: wrapUntrustedOcr(s.journal_title) ?? "",
     document_number: s.document_number == null ? s.document_number : wrapUntrustedOcr(s.document_number) ?? "",
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Source-reference annotation — advisory only, never a filter. A suspect stays
+// in the list (and in every block_on_duplicate refusal); one proven to be a
+// different movement by a typed source reference in the SAME namespace is
+// only marked `distinct_source_reference: true`.
+// ---------------------------------------------------------------------------
+
+/** The typed source identity of one bank movement on its bank dimension. */
+export interface SourceReferenceIdentity {
+  readonly dimensionId: number;
+  /** `wise:<id>` per leg (main row or its fee row). */
+  readonly wise?: { readonly leg: "main" | "fee"; readonly id: string };
+  /** `camt:<key>` — the stored bank-reference lookup key (full and hash forms agree). */
+  readonly camt?: string;
+}
+
+/** The Wise leg and ID a `WISE:{id}` / `WISE:FEE:{id}` tag names (a split-leg `:CUR` suffix is the same ID). */
+function wiseTagIdentity(tag: string | null | undefined): SourceReferenceIdentity["wise"] {
+  const value = tag?.trim().split(/\s+/)[0] ?? "";
+  const leg = value.startsWith("WISE:FEE:") ? "fee" : value.startsWith("WISE:") ? "main" : undefined;
+  if (leg === undefined) return undefined;
+  const prefix = leg === "fee" ? "WISE:FEE:" : "WISE:";
+  const id = value.slice(prefix.length).split(":")[0] ?? "";
+  if (id === "" || matchWiseLegTag(value, `${prefix}${id}`) === undefined) return undefined;
+  return { leg, id };
+}
+
+/** A stored or about-to-be-created bank transaction's identity: its WISE: tag and/or verified CAMT key. */
+export function transactionSourceReferenceIdentity(
+  transaction: Parameters<typeof storedBankReferenceLookupKey>[0] & Pick<Transaction, "accounts_dimensions_id">,
+): SourceReferenceIdentity | undefined {
+  const dimensionId = transaction.accounts_dimensions_id;
+  if (typeof dimensionId !== "number") return undefined;
+  const wise = wiseTagIdentity(transaction.description);
+  const camt = storedBankReferenceLookupKey(transaction);
+  if (wise === undefined && camt === undefined) return undefined;
+  return { dimensionId, ...(wise ? { wise } : {}), ...(camt ? { camt } : {}) };
+}
+
+/** A journal's identity from a `WISE:{id}` document number, on the bank dimension it posts. */
+export function journalSourceReferenceIdentity(
+  documentNumber: string | null | undefined,
+  dimensionId: number | null,
+): SourceReferenceIdentity | undefined {
+  const wise = wiseTagIdentity(documentNumber);
+  return wise !== undefined && dimensionId !== null ? { dimensionId, wise } : undefined;
+}
+
+/**
+ * Positively different: the same bank dimension, at least one namespace both
+ * sides carry (Wise on the same leg, or CAMT), and a different value in every
+ * such namespace. Different namespaces are not comparable.
+ */
+function differentSourceReference(left: SourceReferenceIdentity, right: SourceReferenceIdentity): boolean {
+  if (left.dimensionId !== right.dimensionId) return false;
+  const differs: boolean[] = [];
+  if (left.wise && right.wise && left.wise.leg === right.wise.leg) differs.push(left.wise.id !== right.wise.id);
+  if (left.camt && right.camt) differs.push(left.camt !== right.camt);
+  return differs.length > 0 && differs.every(Boolean);
+}
+
+/**
+ * Annotate an existing scan's suspects with `distinct_source_reference`.
+ * Runs after the scan and never changes it otherwise: same suspects, same
+ * order, same `scan_available`. A TRANSACTION journal is identified only
+ * through its registered transaction (`operations_id`), any other journal by
+ * its `WISE:` document number. Any error returns the scan unannotated.
+ */
+export async function annotateDistinctSourceReferences(
+  scan: DuplicatePostingScanResult,
+  candidate: () => SourceReferenceIdentity | undefined,
+  loadTransactions: () => Promise<readonly Transaction[]>,
+): Promise<DuplicatePostingScanResult> {
+  if (!scan.scan_available || scan.suspects.length === 0) return scan;
+  try {
+    const candidateIdentity = candidate();
+    if (candidateIdentity === undefined) return scan;
+    const transactions = await loadTransactions();
+    const transactionById = new Map(transactions.filter(tx => tx.is_deleted !== true && tx.id !== undefined).map(tx => [tx.id!, tx]));
+    const suspects = scan.suspects.map(suspect => {
+      let identity: SourceReferenceIdentity | undefined;
+      if (suspect.operation_type === "TRANSACTION") {
+        const transaction = suspect.operations_id !== undefined ? transactionById.get(suspect.operations_id) : undefined;
+        identity = transaction ? transactionSourceReferenceIdentity(transaction) : undefined;
+      } else {
+        identity = journalSourceReferenceIdentity(suspect.document_number, suspect.dimension_id);
+      }
+      return identity && differentSourceReference(candidateIdentity, identity)
+        ? { ...suspect, distinct_source_reference: true as const }
+        : suspect;
+    });
+    return { ...scan, suspects };
+  } catch {
+    return scan;
+  }
 }
 
 /**
@@ -335,6 +445,12 @@ export function formatDuplicatePostingWarnings(
   for (const suspect of result.suspects) {
     // document_number is upstream free text too — sandbox it like the title.
     const docPart = suspect.document_number ? `, doc ${wrapTitle(suspect.document_number)}` : "";
+    if (suspect.distinct_source_reference === true) {
+      lines.push(
+        `Likely a different movement (different source reference): journal ${suspect.journal_id} "${wrapTitle(suspect.journal_title)}" (${suspect.date}${docPart}) books the same ${amount} € ${directionWord} under a different source reference. Advisory only — it is still listed as a duplicate suspect.`,
+      );
+      continue;
+    }
     lines.push(
       `POSSIBLE duplicate: this ${amount} € ${directionWord} may already be booked by journal ${suspect.journal_id} "${wrapTitle(suspect.journal_title)}" (${suspect.date}${docPart}). Verify before proceeding — two legitimate identical payments are possible.`,
     );
