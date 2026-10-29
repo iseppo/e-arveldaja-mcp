@@ -2354,6 +2354,53 @@ describe("extractDates unlabelled fallback is flagged, never re-picked (corpus #
   });
 });
 
+describe("extractDates purchase-date labels (bus ticket, okt 2026 finding 2)", () => {
+  // Synthetic ticket shape: departure dates first, the purchase line is a
+  // two-column row with the price column on the same line.
+  const ticket = [
+    "Pileti nr 100000000001",
+    "Näidisbuss - Teinelinn",
+    "Esmaspäev, 19.10.2026 10:00",
+    "Väljumine:    Näidisbuss Esmaspäev, 19.10.2026 10:00",
+    "Peatusest X toimub sisenemine ainult eelmüügist",
+    "ostetud pileti olemasolul.",
+    "Ostetud:          18.10.2026 12:26    Pileti(te) hind (KM 24%):    20,32 EUR",
+    "Ostukorvi nr:     100000000002                        KM (24%):     4,88 EUR",
+    "                                                         Kokku:    25,20 EUR",
+  ].join("\n");
+
+  it("takes the purchase date over an earlier departure date and does not flag it unlabelled", () => {
+    const dates = extractDates(ticket);
+    expect(dates.invoice_date).toBe("2026-10-18");
+    expect(dates.invoice_date_unlabelled).toBeUndefined();
+    const fields = extractReceiptFieldsFromText(ticket, "ticket.pdf");
+    expect(fields.invoice_date).toBe("2026-10-18");
+    expect(fields.invoice_date_unlabelled).toBeUndefined();
+    expect(fields.field_provenance).toEqual(expect.arrayContaining([
+      expect.objectContaining({ field: "invoice_date", value: "2026-10-18", source: "label" }),
+    ]));
+  });
+
+  it("reads the other purchase-date spellings", () => {
+    for (const label of ["Ostu kuupäev:", "Ostukuupäev", "Purchased:", "Purchased on"]) {
+      const dates = extractDates(`Departure 19.10.2026 10:00\n${label} 18.10.2026 12:26`);
+      expect(dates.invoice_date).toBe("2026-10-18");
+      expect(dates.invoice_date_unlabelled).toBeUndefined();
+    }
+  });
+
+  it("does not take a date-less 'ostetud pileti olemasolul' sentence as a label", () => {
+    const dates = extractDates("Esmaspäev, 19.10.2026 10:00\nsisenemine ainult eelmüügist\nostetud pileti olemasolul.");
+    expect(dates.invoice_date).toBe("2026-10-19");
+    expect(dates.invoice_date_unlabelled).toBe(true);
+  });
+
+  it("keeps an explicit invoice-date label ahead of the purchase date", () => {
+    const dates = extractDates("Ostetud: 18.10.2026 12:26\nArve kuupäev: 20.10.2026");
+    expect(dates.invoice_date).toBe("2026-10-20");
+  });
+});
+
 describe("categorizeTransactionGroup — mixed directions (bank-review MAJOR-2)", () => {
   it("routes a group mixing incoming and outgoing rows to review instead of reading transactions[0]", () => {
     const classification = categorizeTransactionGroup({

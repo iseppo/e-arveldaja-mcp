@@ -24,7 +24,7 @@ import {
 } from "./document-reading-check.js";
 import { READING_FIELDS } from "./document-reading-schemas.js";
 import { CREATION_GATING_EXTRACTION_SIGNALS } from "./invoice-extraction-fallback.js";
-import { detectReverseChargeFromText } from "./tools/receipt-extraction.js";
+import { detectReverseChargeFromText, extractReceiptFieldsFromText } from "./tools/receipt-extraction.js";
 import { BASE_LINES, buildCase, holdCodes, holdKeys, runCase, type CaseInput } from "./__fixtures__/document-reading/invoice.js";
 import { N1_CASES, N2_CASES, N3_PINS, type NarrowingCase } from "./__fixtures__/document-reading/narrowings.js";
 
@@ -377,6 +377,21 @@ describe("checkReading: H10 date window", () => {
   it("T-H10-prevyear: 1 January of the previous year passes, 31 December two years back holds", () => {
     expect(dated("2025-01-01", "01.01.2025")).not.toContain("invoice_date_out_of_window:invoice_date");
     expect(dated("2024-12-31", "31.12.2024")).toContain("invoice_date_out_of_window:invoice_date");
+  });
+});
+
+describe("checkReading: purchase-date label (okt 2026 finding 2)", () => {
+  it("T-H10-ostetud: a printed `Ostetud:` date on a two-column row passes and agrees with the labelled heuristic date", () => {
+    const lines = withLines({ 4: "Ostetud:    15.03.2026 12:26    Hind (KM 24%):    100,00 EUR" });
+    const heuristic = extractReceiptFieldsFromText(lines.join("\n"), "ticket.pdf");
+    expect(heuristic.invoice_date).toBe("2026-03-15");
+    expect(heuristic.invoice_date_unlabelled).toBeUndefined();
+    expectAccept({
+      lines,
+      evidence: { invoice_date: { line: "p1:004", quote: "Ostetud: ¦ 15.03.2026" } },
+      labels: { invoice_date: "Ostetud:" },
+      ctx: { heuristic: { signals: [], confidence: "high" as const, labelled: labelledHeuristicValues(heuristic.field_provenance ?? []) } },
+    });
   });
 });
 

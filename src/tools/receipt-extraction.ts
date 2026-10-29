@@ -3588,7 +3588,7 @@ export function extractDates(text: string): { invoice_date?: string; due_date?: 
   // delivery / order / payment label, and only then an order date.
   const invoiceDate = extractDateByLabels(text, [
     new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|issue\\s*date|date\\s*of\\s*issue|date\\s*issued|väljastamise\\s*kuupäev|koostamise\\s*kuupäev)[:\\s-]*${dateValue}`, "iu"),
-    new RegExp(`(?:receipt\\s*date|purchase\\s*date|date\\s*paid)[:\\s-]*${dateValue}`, "iu"),
+    new RegExp(`(?:receipt\\s*date|purchase\\s*date|date\\s*paid|\\bostetud|\\bostu\\s*kuupäev|\\bostukuupäev|\\bpurchased(?:\\s*on)?)[:\\s-]*${dateValue}`, "iu"),
     new RegExp(`(?<!(?:due|delivery|order|payment|shipping|service|supply|tarne|tellimuse|makse|maksmise|teenuse|üleandmise)[\\s-]*)(?:\\bkuupäev|\\bdate)(?![ \\t]*(?:due|paid)\\b)[:\\s-]*${dateValue}`, "iu"),
     new RegExp(`(?:tellimuse\\s*kuupäev|order\\s*date)[:\\s-]*${dateValue}`, "iu"),
   ]);
@@ -3711,7 +3711,7 @@ function invoiceNumberSource(text: string, invoiceNumber: string): { source: Fie
 
 function dateSource(text: string, value: string): { source: FieldProvenance["source"]; rationale?: string } {
   const labelPatterns = [
-    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid|receipt\\s*date|purchase\\s*date)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
+    new RegExp(`(?:invoice\\s*date|arve\\s*kuupäev|arve\\s*kpv|kuupäev|date|issue\\s*date|date\\s*of\\s*issue|tellimuse\\s*kuupäev|date\\s*paid|receipt\\s*date|purchase\\s*date|\\bostetud|\\bostu\\s*kuupäev|\\bostukuupäev|\\bpurchased(?:\\s*on)?)[:\\s-]*(${WEEKDAY_PREFIX_SOURCE}${DATE_VALUE_SOURCE})`, "iu"),
   ];
   for (const pattern of labelPatterns) {
     const match = text.match(pattern);
