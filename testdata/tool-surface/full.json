@@ -2,12 +2,12 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 170195,
+    "toolsListBytes": 170841,
     "descriptionsBytes": 23426,
-    "inputSchemasBytes": 111536,
+    "inputSchemasBytes": 112182,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 5217
+      "bytes": 5627
     },
     "serverInstructionsBytes": 1016,
     "promptMetadataBytes": 11702,
@@ -5733,6 +5733,14 @@
             },
             "type": "array"
           },
+          "not_own_transfer_ids": {
+            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence).",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
           "plan_handle": {
             "description": "Execution-plan handle returned by the reviewed dry run. Required for execute=true in addition to approved_command_digest; the digest alone cannot execute.",
             "type": "string"
@@ -6038,6 +6046,14 @@
               "show_details"
             ],
             "type": "string"
+          },
+          "not_own_transfer_ids": {
+            "description": "Wise only, owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party; imported as ordinary unconfirmed rows.",
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
           },
           "operation_handle": {
             "description": "mode='show_details' only: operation-result handle from a prior execute.",

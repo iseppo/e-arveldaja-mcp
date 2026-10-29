@@ -52,7 +52,8 @@ export interface WiseTransferReview {
     | "wise_untagged_ledger_match"
     | "wise_transfer_counterpart_conflict"
     | "wise_transfer_journal_existing_elsewhere"
-    | "wise_exact_label_possible_double_booking";
+    | "wise_exact_label_possible_double_booking"
+    | "not_own_transfer_conflicts_evidence";
   reason: string;
   source_verified: boolean;
   target_verified: boolean;
@@ -155,6 +156,9 @@ export interface WiseTransferDecision {
    * targetDimensionId, ownershipBasis or review, so it is created as a plain
    * unconfirmed row. It stays a transfer candidate for every hold. */
   externalPayment?: WiseExternalPaymentBasis;
+  /** not_own_transfer_ids named a row held for its counterpart: the hold
+   * stays, and this review reports the conflict without binding to the row. */
+  notOwnConflict?: WiseTransferReview;
 }
 
 // --- M05: strict Wise row validation -----------------------------------------

@@ -81,6 +81,9 @@ export function registerWiseImportTools(
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe(
         "Exact Wise IDs explicitly approved as own transfers. TRANSFER-* and BANK_DETAILS_PAYMENT_RETURN-* prefixes are hints only; a hinted row whose other party is provably not an own account is imported as an ordinary unconfirmed payment (transfers_treated_as_payments)."
       ),
+      not_own_transfer_ids: z.array(z.string().min(1)).optional().describe(
+        "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence)."
+      ),
       journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe(
         "Exact { wise_id, journal_id } pairs the operator has checked: the labelled inter-account journal already books that Wise transfer (resolves a wise_transfer_journal_ambiguous review). Each mapping is validated; a rejected one is reported and the row resolves as if unmapped (it may still be skipped as already journalized, or held for review)."
       ),
@@ -110,6 +113,7 @@ export function registerWiseImportTools(
       fee_account_relation_id,
       inter_account_dimension_id,
       confirm_own_transfer_ids,
+      not_own_transfer_ids,
       journalized_transfer_ids,
       acknowledged_journal_holds,
       counterpart_overrides,
@@ -136,6 +140,7 @@ export function registerWiseImportTools(
         feeAccountRelationId: fee_account_relation_id,
         interAccountDimensionId: inter_account_dimension_id,
         confirmOwnTransferIds: confirm_own_transfer_ids,
+        notOwnTransferIds: not_own_transfer_ids,
         journalizedTransferIds: journalized_transfer_ids,
         acknowledgedJournalHolds: acknowledged_journal_holds,
         counterpartOverrides: counterpart_overrides,

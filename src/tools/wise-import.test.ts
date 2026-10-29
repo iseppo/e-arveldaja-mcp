@@ -8354,3 +8354,158 @@ describe("Wise transfer to a third party is imported as an ordinary payment (okt
     }
   });
 });
+
+describe("not_own_transfer_ids: the owner marks a transfer as a payment to a third party (okt 2026, item 1)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const COMPANY = "Seppo AI OÜ";
+  const FEE_DIMENSION = { id: 9, accounts_id: 8610, title_est: "Muud finantskulud", is_deleted: false };
+  // No company identity: the automatic condition never holds, so only the
+  // owner's decision makes the row an ordinary payment.
+  const options = (extra: Parameters<typeof setupWiseTool>[2] = {}) => ({
+    accountDimensions: [...configuredTransferDimensions(), FEE_DIMENSION],
+    bankAccounts: configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"),
+    invoiceInfo: {},
+    ...extra,
+  });
+  const transferOut = (overrides: Partial<Parameters<typeof buildM04Values>[0]> = {}) => buildM04Values({
+    id: "TRANSFER-900011", direction: "OUT", date: "2026-10-15", sourceName: COMPANY, targetName: "Indrek Seppo",
+    sourceAmount: "100", ...overrides,
+  });
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, inter_account_dimension_id: 20 };
+  const commandsOf = (payload: WiseImportFullPayload) => payload.execution.commands.map(command => [command.action, command.wise_id]);
+
+  it("a listed row is a plain unconfirmed row with no review; the emitted action executes unchanged, a changed one drifts", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut()]));
+    const without = setupWiseTool([], undefined, options());
+    const baseline = parseWiseResponse(await without.handler({ ...args, execute: false }));
+    expect(baseline.ownership_reviews).toEqual([expect.objectContaining({ wise_id: "TRANSFER-900011", code: M03_OWNERSHIP_CODE })]);
+
+    const setup = setupWiseTool([], undefined, options());
+    const runArgs = { ...args, not_own_transfer_ids: ["TRANSFER-900011"] };
+    const dry = parseWiseResponse(await setup.handler({ ...runArgs, execute: false }));
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900011"]]);
+    expect(dry.ownership_reviews).toBeUndefined();
+    expect(dry.transfers_treated_as_payments).toEqual([{ wise_id: "TRANSFER-900011", basis: "owner" }]);
+    // The same write as without the decision: only the presentation differs.
+    expect(dry.execution.commands).toEqual(baseline.execution.commands);
+    expect(dry.approved_command_digest).not.toBe(baseline.approved_command_digest);
+
+    const emitted = dry.workflow.recommended_next_action.args;
+    expect(emitted).toHaveProperty("not_own_transfer_ids", ["TRANSFER-900011"]);
+
+    // The emitted action, called as given (with the approval artifacts), executes.
+    clearWiseCallHistory(setup.api);
+    const executed = parseWiseResponse(await setup.rawHandler({ ...emitted, execute: true }));
+    expect(executed.mode).toBe("EXECUTED");
+    expect(executed.execution.errors).toEqual([]);
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.confirm).not.toHaveBeenCalled();
+
+    // Dropping the decision from the reviewed call is drift.
+    const drift = setupWiseTool([], undefined, options());
+    const reviewed = parseWiseResponse(await drift.handler({ ...runArgs, execute: false }));
+    clearWiseCallHistory(drift.api);
+    const drifted = parseWiseResponse<WiseFailurePayload>(await drift.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted.code).toBe("plan_drift");
+    expectNoWiseMutations(drift.api);
+  });
+
+  it("an empty list leaves the plan byte-identical to omitting it", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut()]));
+    const setup = setupWiseTool([], undefined, options());
+    const omitted = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    const empty = parseWiseResponse(await setup.handler({ ...args, not_own_transfer_ids: [], execute: false }));
+    expect(empty.approved_command_digest).toBe(omitted.approved_command_digest);
+  });
+
+  it("refuses a duplicate, unknown, filtered-out or non-transfer ID and an overlap with confirm_own_transfer_ids", async () => {
+    const cases: Array<{ label: string; extra: Record<string, unknown>; message: string }> = [
+      { label: "duplicate", extra: { not_own_transfer_ids: ["TRANSFER-900011", "TRANSFER-900011"] }, message: "not_own_transfer_ids must contain unique" },
+      { label: "unknown", extra: { not_own_transfer_ids: ["TRANSFER-ABSENT"] }, message: "not_own_transfer_ids must reference eligible" },
+      { label: "filtered out by the date range", extra: { not_own_transfer_ids: ["TRANSFER-900011"], date_from: "2026-10-16" }, message: "not_own_transfer_ids must reference eligible" },
+      { label: "not a transfer row", extra: { not_own_transfer_ids: ["CARD_TRANSACTION-PLAN-1"] }, message: "not_own_transfer_ids must reference eligible" },
+      {
+        label: "also in confirm_own_transfer_ids",
+        extra: { not_own_transfer_ids: ["TRANSFER-900011"], confirm_own_transfer_ids: ["TRANSFER-900011"] },
+        message: "cannot be in both confirm_own_transfer_ids and not_own_transfer_ids",
+      },
+    ];
+    for (const { label, extra, message } of cases) {
+      mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+      const setup = setupWiseTool([], undefined, options());
+      const outcome = await captureM03Outcome(setup.handler, { ...args, ...extra, execute: false });
+      expect(String((outcome.error as Error | undefined)?.message ?? JSON.stringify(outcome.payload)), label).toContain(message);
+      expectNoWiseMutations(setup.api);
+    }
+  });
+
+  it("a row held for its counterpart stays held, with an unbound not_own_transfer_conflicts_evidence review", async () => {
+    // Three banks and no inter_account_dimension_id: the counterpart is unresolved.
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options({
+      accountDimensions: [...configuredTransferDimensions(), { id: 30, accounts_id: 1030, title_est: "Coop", is_deleted: false }, FEE_DIMENSION],
+      bankAccounts: [...configuredTransferBankAccounts(5, 20, COMPANY, "LHV Own Account"), { accounts_dimensions_id: 30, beneficiary_name: "Coop Own Account" }],
+    }));
+    const dry = parseWiseResponse(await setup.handler({
+      file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, not_own_transfer_ids: ["TRANSFER-900011"], execute: false,
+    }));
+
+    expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+    expect(dry.ownership_reviews).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "wise_transfer_dimensions_unverified" }),
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
+    ]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (wise_transfer_dimensions_unverified)");
+  });
+
+  it("a row whose counterpart own-account evidence decided is held with not_own_transfer_conflicts_evidence", async () => {
+    // A stored LHV row naming the company, the same amount the same day, money
+    // in: strong own-account evidence.
+    const lhvEvidence = {
+      id: 702, status: "PROJECT", is_deleted: false, type: "C", amount: 100, cl_currencies_id: "EUR", date: "2026-10-15",
+      accounts_dimensions_id: 20, bank_account_name: COMPANY, bank_account_no: null, bank_ref_number: null,
+      description: buildCamtDescriptionWithMetadata("Transfer", {
+        date: "2026-10-15", amount: 100, currency: "EUR", direction: "CRDT",
+        counterparty_name: COMPANY, counterparty_iban: "EE999999999999999999", bank_reference: "REF702",
+        description: "Transfer",
+      }),
+    };
+    const ownName = { invoiceInfo: { invoice_company_name: COMPANY } };
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const evidenced = setupWiseTool([lhvEvidence], undefined, options(ownName));
+    const plain = parseWiseResponse(await evidenced.handler({ ...args, execute: false }));
+    expect(plain.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", counterpart_basis: "evidence" }),
+    ]));
+
+    const setup = setupWiseTool([lhvEvidence], undefined, options(ownName));
+    const dry = parseWiseResponse(await setup.handler({ ...args, not_own_transfer_ids: ["TRANSFER-900011"], execute: false }));
+    expect(commandsOf(dry)).toEqual([["main_create", "CARD_TRANSACTION-PLAN-1"]]);
+    expect(dry.ownership_reviews).toEqual([
+      expect.objectContaining({ wise_id: "TRANSFER-900011", code: "not_own_transfer_conflicts_evidence" }),
+    ]);
+    expect(dry.transfers_treated_as_payments).toBeUndefined();
+    expect(JSON.stringify(dry.skipped_details)).toContain("Held for review (not_own_transfer_conflicts_evidence)");
+  });
+
+  it("the guided next_action carries not_own_transfer_ids", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([transferOut(), cardPaymentValues("2026-10-16")]));
+    const setup = setupWiseTool([], undefined, options());
+    const dry = await runWithToolProfile("guided", async () =>
+      parseWiseResponse<WiseImportCompactPayload>(await setup.handler({ ...args, not_own_transfer_ids: ["TRANSFER-900011"], execute: false })));
+    expect(dry.summary.next_action!.args).toHaveProperty("not_own_transfer_ids", ["TRANSFER-900011"]);
+    expect(dry.summary.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ item_id: "TRANSFER-900011", code: "wise_transfer_treated_as_payment" }),
+    ]));
+  });
+});

@@ -334,6 +334,7 @@ export interface WiseImportRenderData {
     feeAccountRelationId: number | undefined;
     interAccountDimensionId: number | undefined;
     confirmOwnTransferIds: string[] | undefined;
+    notOwnTransferIds?: readonly string[];
     journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
     acknowledgedJournalHolds?: readonly WiseAcknowledgedJournalHold[];
     counterpartOverrides?: readonly WiseCounterpartOverride[];
@@ -463,6 +464,7 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     ...(fee_account_relation_id !== undefined ? { fee_account_relation_id } : {}),
     ...(inter_account_dimension_id !== undefined ? { inter_account_dimension_id } : {}),
     ...(confirm_own_transfer_ids !== undefined ? { confirm_own_transfer_ids } : {}),
+    ...(data.args.notOwnTransferIds !== undefined ? { not_own_transfer_ids: data.args.notOwnTransferIds } : {}),
     ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
     ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
     ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),
@@ -902,6 +904,7 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
           ...(data.args.feeAccountDimensionsId !== undefined ? { fee_account_dimensions_id: data.args.feeAccountDimensionsId } : {}),
           ...(data.args.interAccountDimensionId !== undefined ? { inter_account_dimension_id: data.args.interAccountDimensionId } : {}),
           ...(data.args.confirmOwnTransferIds !== undefined ? { confirm_own_transfer_ids: data.args.confirmOwnTransferIds } : {}),
+          ...(data.args.notOwnTransferIds !== undefined ? { not_own_transfer_ids: data.args.notOwnTransferIds } : {}),
           ...(data.args.journalizedTransferIds !== undefined ? { journalized_transfer_ids: data.args.journalizedTransferIds } : {}),
           ...(data.args.acknowledgedJournalHolds !== undefined ? { acknowledged_journal_holds: data.args.acknowledgedJournalHolds } : {}),
           ...(data.args.counterpartOverrides !== undefined ? { counterpart_overrides: data.args.counterpartOverrides } : {}),

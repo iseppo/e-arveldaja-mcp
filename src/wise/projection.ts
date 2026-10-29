@@ -1997,6 +1997,14 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     });
   }
 
+  // not_own_transfer_ids on a row held for its counterpart: the hold stays,
+  // and the conflict is reported unbound to the row (as an unused
+  // acknowledgement is), so holdRow never replaces it.
+  for (const row of eligible) {
+    const conflict = transferDecisions.get(row)?.notOwnConflict;
+    if (conflict !== undefined && heldCodes.has(row) && !ownershipReviews.includes(conflict)) ownershipReviews.push(conflict);
+  }
+
   // Transfer rows imported as ordinary payments, once per Wise ID: info for
   // the owner, not a review. A held row has lost its create and is not listed.
   const transfersTreatedAsPayments: WiseTransferTreatedAsPayment[] = [];

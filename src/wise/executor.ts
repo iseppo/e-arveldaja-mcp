@@ -85,6 +85,7 @@ import type {
   WiseRow,
   WiseSkippedJarRow,
   WiseTransferDecision,
+  WiseTransferReview,
 } from "./types.js";
 import type { WiseImportRenderData } from "./presenter.js";
 
@@ -141,6 +142,23 @@ export class WiseOperationFailedError extends Error {
   }
 }
 
+const WISE_NOT_OWN_TRANSFER_HELD_REASON =
+  "not_own_transfer_ids lists this transfer, but the row is held for its counterpart bank account (see its own review), so the decision is not applied and the row is not imported. Resolve that hold with the owner first.";
+const WISE_NOT_OWN_TRANSFER_EVIDENCE_REASON = (dimensionId: number) =>
+  `not_own_transfer_ids lists this transfer, but own-account evidence (or the counterpart_overrides choice) shows it goes to or from own bank account ${dimensionId}. The row is not imported. Check that bank's rows with the owner: if it is an own transfer, drop the ID from not_own_transfer_ids; otherwise book it with the owner.`;
+
+/** The review for an owner's not_own_transfer_ids decision the evidence contradicts. */
+function notOwnConflictReview(row: WiseRow, reason: string, decision: WiseTransferDecision): WiseTransferReview {
+  return {
+    wise_id: row.id,
+    code: "not_own_transfer_conflicts_evidence",
+    reason,
+    source_verified: decision.sourceVerified,
+    target_verified: decision.targetVerified,
+    approval_required: false,
+  };
+}
+
 export interface WiseRunInput {
   readonly source: FileInputSource;
   readonly accountsDimensionsId: number;
@@ -148,6 +166,9 @@ export interface WiseRunInput {
   readonly feeAccountRelationId: number | undefined;
   readonly interAccountDimensionId: number | undefined;
   readonly confirmOwnTransferIds: string[] | undefined;
+  /** Exact Wise IDs the owner says are not own transfers (not_own_transfer_ids):
+   * imported as ordinary payments unless own-account evidence contradicts it. */
+  readonly notOwnTransferIds?: readonly string[];
   /** Operator-reviewed Wise ID → labelled journal mappings (journalized_transfer_ids). */
   readonly journalizedTransferIds?: readonly WiseJournalizedTransferMapping[];
   /** Owner acknowledgements (acknowledged_journal_holds): journals that do not
@@ -195,6 +216,7 @@ async function runWiseImport(
     feeAccountRelationId: fee_account_relation_id,
     interAccountDimensionId: inter_account_dimension_id,
     confirmOwnTransferIds: confirm_own_transfer_ids,
+    notOwnTransferIds: not_own_transfer_ids,
     journalizedTransferIds: journalized_transfer_ids,
     acknowledgedJournalHolds: acknowledged_journal_holds,
     counterpartOverrides: counterpart_overrides,
@@ -294,6 +316,18 @@ async function runWiseImport(
       "confirm_own_transfer_ids must reference eligible TRANSFER-* or BANK_DETAILS_PAYMENT_RETURN-* rows in this CSV exactly."
     );
   }
+  const notOwnTransferIds = not_own_transfer_ids ?? [];
+  if (new Set(notOwnTransferIds).size !== notOwnTransferIds.length) {
+    throw new Error("not_own_transfer_ids must contain unique exact Wise transfer IDs.");
+  }
+  if (notOwnTransferIds.some(id => !eligibleHintIds.has(id))) {
+    throw new Error(
+      "not_own_transfer_ids must reference eligible TRANSFER-* or BANK_DETAILS_PAYMENT_RETURN-* rows in this CSV exactly."
+    );
+  }
+  if (notOwnTransferIds.some(id => approvedTransferIds.includes(id))) {
+    throw new Error("A Wise ID cannot be in both confirm_own_transfer_ids and not_own_transfer_ids.");
+  }
 
   // Bank accounts and the posting dimensions are read for every run: the Wise
   // dimension itself must be a configured bank account (Step 1 gate below).
@@ -354,6 +388,7 @@ async function runWiseImport(
     });
     const ownCompanyIdentity = normalizeWiseCompanyName(invoiceInfoSnapshot.invoice_company_name);
     const approvedSet = new Set(approvedTransferIds);
+    const notOwnSet = new Set(notOwnTransferIds);
 
     // No other configured bank account (e.g. a Wise-only company): unchanged
     // from before, the explicit / auto-detected value is classified as given
@@ -384,6 +419,31 @@ async function runWiseImport(
           targetVerified: decision.targetVerified,
           counterpartHold: wiseCounterpartHoldReview(row, resolution.hold, decision.sourceVerified, decision.targetVerified),
           ...(resolution.hold.selected_by_override === true ? { counterpartOverrideApplied: true as const } : {}),
+          // The counterpart hold stays; the owner's decision is reported on
+          // its own, unbound to the row (holdRow replaces a row's reviews).
+          ...(notOwnSet.has(row.id)
+            ? { notOwnConflict: notOwnConflictReview(row, WISE_NOT_OWN_TRANSFER_HELD_REASON, decision) }
+            : {}),
+        });
+        continue;
+      }
+      // Own-account evidence (or the owner's pick among the evidenced banks)
+      // says the row is an own transfer: the owner's not-own decision
+      // contradicts it, so the row is held rather than booked either way.
+      if (notOwnSet.has(row.id) && resolution !== undefined && (resolution.basis === "evidence" || resolution.basis === "owner_selected")) {
+        transferDecisions.set(row, {
+          sourceVerified: decision.sourceVerified,
+          targetVerified: decision.targetVerified,
+          counterpartHold: notOwnConflictReview(row, WISE_NOT_OWN_TRANSFER_EVIDENCE_REASON(resolution.dim), decision),
+          ...(resolution.basis === "owner_selected" ? { counterpartOverrideApplied: true as const } : {}),
+        });
+        continue;
+      }
+      if (notOwnSet.has(row.id)) {
+        transferDecisions.set(row, {
+          sourceVerified: decision.sourceVerified,
+          targetVerified: decision.targetVerified,
+          externalPayment: "owner",
         });
         continue;
       }
@@ -492,6 +552,10 @@ async function runWiseImport(
     inter_account_dimension_id,
     resolved_inter_account_dimension_id: inter_account_dimension_id ?? autoDetectedInterAccountDimId,
     confirm_own_transfer_ids: [...approvedTransferIds].sort(),
+    // The owner's not-own decision changes how rows are presented and held,
+    // so it binds the digest and the plan scope. Omitted when empty, keeping
+    // earlier plans byte-identical.
+    ...(notOwnTransferIds.length > 0 ? { not_own_transfer_ids: [...notOwnTransferIds].sort() } : {}),
     // The mapping changes which rows are created, so it binds the digest and
     // the plan scope. Omitted when empty, keeping earlier plans byte-identical.
     ...(journalized_transfer_ids !== undefined && journalized_transfer_ids.length > 0
@@ -1115,6 +1179,7 @@ async function runWiseImport(
       feeAccountRelationId: fee_account_relation_id,
       interAccountDimensionId: inter_account_dimension_id,
       confirmOwnTransferIds: confirm_own_transfer_ids,
+      ...(not_own_transfer_ids !== undefined ? { notOwnTransferIds: not_own_transfer_ids } : {}),
       journalizedTransferIds: journalized_transfer_ids,
       acknowledgedJournalHolds: acknowledged_journal_holds,
       counterpartOverrides: counterpart_overrides,

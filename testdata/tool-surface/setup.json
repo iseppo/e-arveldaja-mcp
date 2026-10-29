@@ -2,12 +2,12 @@
   "profile": "setup",
   "measurement": {
     "toolCount": 129,
-    "toolsListBytes": 140182,
+    "toolsListBytes": 140592,
     "descriptionsBytes": 18705,
-    "inputSchemasBytes": 90415,
+    "inputSchemasBytes": 90825,
     "largestTool": {
       "name": "import_wise_transactions",
-      "bytes": 5217
+      "bytes": 5627
     },
     "serverInstructionsBytes": 765,
     "promptMetadataBytes": 11702,
@@ -5400,6 +5400,14 @@
                 "journal_id"
               ],
               "type": "object"
+            },
+            "type": "array"
+          },
+          "not_own_transfer_ids": {
+            "description": "Owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party, not own transfers: imported as ordinary unconfirmed rows without an ownership review. Must not overlap confirm_own_transfer_ids; a row whose own-account evidence says otherwise is held (not_own_transfer_conflicts_evidence).",
+            "items": {
+              "minLength": 1,
+              "type": "string"
             },
             "type": "array"
           },

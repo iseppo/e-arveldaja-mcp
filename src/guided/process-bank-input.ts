@@ -298,6 +298,7 @@ export function registerProcessBankInputTool(
     fee_account_dimensions_id?: number;
     inter_account_dimension_id?: number;
     confirm_own_transfer_ids?: string[];
+    not_own_transfer_ids?: string[];
     journalized_transfer_ids?: Array<{ wise_id: string; journal_id: number }>;
     acknowledged_journal_holds?: Array<{ wise_id: string; journal_ids: number[] }>;
     counterpart_overrides?: Array<{ wise_id: string; dimension_id: number }>;
@@ -356,6 +357,7 @@ export function registerProcessBankInputTool(
       feeAccountRelationId: undefined,
       interAccountDimensionId: args.inter_account_dimension_id,
       confirmOwnTransferIds: args.confirm_own_transfer_ids,
+      notOwnTransferIds: args.not_own_transfer_ids,
       journalizedTransferIds: args.journalized_transfer_ids,
       acknowledgedJournalHolds: args.acknowledged_journal_holds,
       counterpartOverrides: args.counterpart_overrides,
@@ -393,6 +395,7 @@ export function registerProcessBankInputTool(
       fee_account_dimensions_id: z.number().optional().describe("Wise only: account dimension ID for the Wise fee expense account."),
       inter_account_dimension_id: coerceId.optional().describe("Wise only: other bank account dimension ID for inter-account transfers. Fallback for transfer rows without own-account evidence on another bank; with several other bank accounts such rows are held (not imported) until it is given."),
       confirm_own_transfer_ids: z.array(z.string().min(1)).optional().describe("Wise only: exact Wise IDs explicitly approved as own transfers."),
+      not_own_transfer_ids: z.array(z.string().min(1)).optional().describe("Wise only, owner-confirmed only: exact transfer Wise IDs that are payments to or from a third party; imported as ordinary unconfirmed rows."),
       journalized_transfer_ids: z.array(z.object({ wise_id: z.string().min(1), journal_id: coerceId })).optional().describe("Wise only: checked { wise_id, journal_id } pairs whose labelled journal already books that transfer; each is validated."),
       acknowledged_journal_holds: z.array(z.object({ wise_id: z.string().min(1), journal_ids: z.array(coerceId).min(1) })).optional().describe("Wise only, owner-confirmed only: { wise_id, journal_ids } stating those journals do not book that held transfer; releases the row only when it lists every required_acknowledgement_ids journal."),
       counterpart_overrides: z.array(z.object({ wise_id: z.string().min(1), dimension_id: coerceId })).optional().describe("Wise only, owner-confirmed only: { wise_id, dimension_id } picking the own bank account of a transfer whose evidence points to several; must be one of the evidenced accounts."),
