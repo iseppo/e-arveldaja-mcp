@@ -563,6 +563,8 @@ interface LayoutLabelCell {
   row: LayoutRow;
   columnIndex: number;
   centerX: number;
+  /** The label sits on a positively identified reverse-charge footnote body. */
+  footnoteBody?: true;
 }
 
 interface LayoutTextCell {
@@ -1781,6 +1783,43 @@ function isLayoutIdentifierCell(item: LayoutTextItem, row: LayoutRow, rows: read
   return heading !== undefined && isIdentifierLabelSpan(clampTextLine(heading.text));
 }
 
+const FOOTNOTE_BODY_RE = /^\s*\[(\d{1,2})\]\s+(.*)$/su;
+const FOOTNOTE_REVERSE_CHARGE_RE = /reverse[\s-]*charge|p[öo]ördmaksustami|p[öo]ördk[äa]ibemaks/i;
+
+function layoutRowText(row: LayoutRow): string {
+  return [...row.items].sort((a, b) => a.x - b.x).map(item => clampTextLine(item.text)).join(" ");
+}
+
+/**
+ * Okt 2026 finding 3: a row is a reverse-charge footnote BODY only when all
+ * hold: it starts with a `[n]` marker that an earlier row references (a
+ * standalone superscript item `[n]` or one attached to a value, `0%[n]`), it
+ * states reverse charge, it carries no amount of its own, and at least four
+ * words follow the marker (a sentence, not a column header). Such a row is no
+ * label for the column below it (a footer repeating the amount due).
+ */
+function isReverseChargeFootnoteBody(row: LayoutRow, rows: readonly LayoutRow[]): boolean {
+  const match = FOOTNOTE_BODY_RE.exec(layoutRowText(row));
+  if (!match) return false;
+  const [, marker, body] = match;
+  if (!FOOTNOTE_REVERSE_CHARGE_RE.test(body!)) return false;
+  if (body!.split(/\s+/).filter(word => /\p{L}/u.test(word)).length < 4) return false;
+  const markerToken = `[${marker}]`;
+  const ownItems = [...row.items].sort((a, b) => a.x - b.x);
+  if (ownItems.some((item, index) => {
+    const text = clampTextLine(item.text);
+    const withoutMarker = index === 0 ? text.replace(FOOTNOTE_BODY_RE, "$2") : text;
+    return withoutMarker.trim() !== markerToken && extractAmountsFromLine(withoutMarker).length > 0;
+  })) return false;
+  return rows.some(other =>
+    (other.pageNum < row.pageNum || (other.pageNum === row.pageNum && other.y < row.y)) &&
+    !FOOTNOTE_BODY_RE.test(layoutRowText(other)) &&
+    other.items.some(item => {
+      const text = clampTextLine(item.text);
+      return text.trim() === markerToken || text.includes(markerToken) && /\S/.test(text.slice(0, text.indexOf(markerToken)).slice(-1));
+    }));
+}
+
 function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<LayoutTextItem, number>): {
   labels: LayoutLabelCell[];
   amounts: LayoutAmountCell[];
@@ -1824,15 +1863,18 @@ function buildLayoutCells(rows: readonly LayoutRow[], columnByItem: ReadonlyMap<
       }
     }
 
+    let footnoteBody: boolean | undefined;
     for (const cell of buildLayoutTextCells(row, columnByItem)) {
       const field = classifyLayoutAmountLabel(cell.text);
       if (field) {
+        footnoteBody ??= isReverseChargeFootnoteBody(row, rows);
         labels.push({
           field,
           item: cell.item,
           row: cell.row,
           columnIndex: cell.columnIndex,
           centerX: cell.centerX,
+          ...(footnoteBody ? { footnoteBody: true as const } : {}),
         });
       }
     }
@@ -1935,7 +1977,7 @@ function hasOwnRowValue(label: LayoutLabelCell): boolean {
 
 function findLayoutAmountForLabel(label: LayoutLabelCell, amounts: readonly LayoutAmountCell[]): LayoutAmountCell | undefined {
   return findSameRowLayoutAmount(label, amounts) ??
-    (hasOwnRowValue(label) ? undefined : findBelowColumnLayoutAmount(label, amounts));
+    (hasOwnRowValue(label) || label.footnoteBody ? undefined : findBelowColumnLayoutAmount(label, amounts));
 }
 
 function shouldReplaceLayoutBinding(current: LayoutAmountCell | undefined, next: LayoutAmountCell): boolean {
