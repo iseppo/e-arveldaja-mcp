@@ -3478,15 +3478,19 @@ const ORDER_REFERENCE_RE =
 
 /** The label-anchored order / shopping-cart references in `text`, distinct (never an amount, date or IBAN). */
 export function extractOrderReferences(text: string): string[] {
-  return extractLabelledReferences(text, ORDER_REFERENCE_RE);
+  // A value the line continues past a delimiter ("123456.ABC") may be cut
+  // short: two such numbers would collapse into one shared value, so it is
+  // not taken at all.
+  return extractLabelledReferences(text, ORDER_REFERENCE_RE, { rejectCutShort: true });
 }
 
-function extractLabelledReferences(text: string, labelledValueRe: RegExp): string[] {
+function extractLabelledReferences(text: string, labelledValueRe: RegExp, options: { rejectCutShort?: boolean } = {}): string[] {
   const references = new Set<string>();
   for (const line of text.split(/\r?\n/)) {
     for (const match of line.matchAll(labelledValueRe)) {
       const rest = line.slice((match.index ?? 0) + match[0].length);
       if (/^[.,]\d/.test(rest)) continue;
+      if (options.rejectCutShort && continuesPastCapture(rest)) continue;
       const candidate = acceptInvoiceNumberCandidate(match[1]);
       if (candidate) references.add(candidate);
     }

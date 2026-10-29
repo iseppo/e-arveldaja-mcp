@@ -5017,6 +5017,16 @@ describe("extractOrderReferences (okt 2026 finding 5)", () => {
     expect(extractOrderReferences("Ostukorvi nr: 100000000002\nOstukorvi nr: 100000000003")).toEqual(["100000000002", "100000000003"]);
   });
 
+  it("does not take a value the line continues past a delimiter (it may be cut short)", () => {
+    expect(extractOrderReferences("Order no: 123456.ABC")).toEqual([]);
+    expect(extractOrderReferences("Order no: 123456.ABC\nOrder no: 123456.DEF")).toEqual([]);
+    expect(extractOrderReferences("Order no: 123456.ABC\nOrder no: 1234567")).toEqual(["1234567"]);
+  });
+
+  it("keeps the prepayment-reference reading of a continued value unchanged", () => {
+    expect(extractPaymentReferences("Ettemaksuarve nr EMSS70002960.A")).toEqual(["EMSS70002960"]);
+  });
+
   it.each([
     ["an amount", "Ostukorvi nr: 25,20"],
     ["a date", "Tellimuse nr 18.10.2026"],
