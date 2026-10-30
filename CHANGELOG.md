@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-30
+
 ### Fixed
 
 - **A bank payment that names an open purchase invoice's number or order/cart number is no longer booked as a new expense.** Before, reconciliation showed such a payment only as a low-score suggestion, the row still counted as unmatched, and classification could book the cost a second time while the invoice stayed open. Details: `existingInvoiceMatch` (classify partition, plan drift check and apply re-check) treats an exact-amount purchase invoice whose document reference appears in the bank description as a match, reusing reconcile's `documentReferenceOnTransaction` (moved to `src/banking/reconciliation/document-reference.ts`); `reconcile-bank` and `classify-unmatched` prompts present `document_reference_candidates` for owner approval and never classify them.
