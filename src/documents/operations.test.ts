@@ -566,6 +566,69 @@ describe("AccountingDocumentOperations.create", () => {
     expectNoWrites(api);
   });
 
+  // The acknowledged supplier must still not be the active company: create
+  // re-reads the own identifiers live and reapplies the own-ID exclusion.
+  it("create refuses an acknowledged registry-code supplier that now carries the company's own VAT number", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    // Same acknowledged code 17487472; the fixture company's own VAT is EE123456789.
+    const ownVat = fixtureClient({ id: 4242, name: "ACME OÜ", code: REG_CODE, invoice_vat_no: "EE123456789", is_supplier: true });
+    vi.mocked(api.clients.get).mockResolvedValueOnce(supplier()).mockResolvedValueOnce(ownVat);
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(drift).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expectNoWrites(api);
+  });
+
+  it("create refuses an acknowledged VAT-number supplier that now carries the company's own registry code", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([
+      ...contestedHead, "KMKR: EE123456007", "Beeta Teenused AS", "Reg. nr 12345610", "KMKR: EE123456010",
+    ]));
+    const { path, sha256, api, ops } = createSetup();
+    // The company's own client record gives its registry code 16000001.
+    const ownCompany = fixtureClient({ id: 9999, name: "Seppo AI OÜ", code: "16000001", invoice_vat_no: "EE123456789" });
+    api.clients.listAll.mockResolvedValue([supplier(), ownCompany]);
+    const beeta = fixtureClient({ id: 5252, name: "Beeta Teenused AS", code: null, invoice_vat_no: "EE123456010", is_supplier: true });
+    vi.mocked(api.clients.get).mockResolvedValue(beeta);
+    const handle = await prepareBookingHandle(ops, path, { supplierClientId: 5252 });
+    const ownCode = fixtureClient({ id: 5252, name: "Beeta Teenused AS", code: "16000001", invoice_vat_no: "EE123456010", is_supplier: true });
+    vi.mocked(api.clients.get).mockResolvedValueOnce(beeta).mockResolvedValueOnce(ownCode);
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), supplierClientId: 5252, planHandle: handle });
+    expect(drift).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expectNoWrites(api);
+  });
+
+  it("create still books an acknowledged supplier when only the client list cannot be re-read", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    // The fresh own VAT (EE123456789) still answers; supplier 4242 carries neither own id.
+    api.clients.listAll.mockRejectedValue(new Error("clients unavailable"));
+    const created = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(created.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("create refuses an acknowledged supplier when the company's own identifiers cannot be read live", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    // Only the live re-read fails; every cached read the booking model uses still answers.
+    const vatInfo: unknown = await api.readonly.getVatInfo();
+    const invoiceInfo: unknown = await api.readonly.getInvoiceInfo();
+    api.readonly.getVatInfo.mockImplementation(async (options?: { fresh?: boolean }) => {
+      if (options?.fresh) throw new Error("offline");
+      return vatInfo;
+    });
+    api.readonly.getInvoiceInfo.mockImplementation(async (options?: { fresh?: boolean }) => {
+      if (options?.fresh) throw new Error("offline");
+      return invoiceInfo;
+    });
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(drift).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+    expectNoWrites(api);
+  });
+
   it("without booking fields the contested ids stay a blocker even for a printed supplier", async () => {
     mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
     const { path, ops } = createSetup();

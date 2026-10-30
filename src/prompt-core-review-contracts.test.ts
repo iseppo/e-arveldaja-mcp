@@ -72,12 +72,26 @@ describe("setup prompts handle secrets (core prompt review 2026-10-30)", () => {
     }
   });
 
-  it("reviews the full import projection and suggests removing the apikey file after import", () => {
+  it("reviews the full import projection and suggests removing the apikey file only after the stored credential is proven", () => {
     const body = render("setup-credentials", "standard", NORMAL_EXPOSURE, true);
     expect(body).toContain("`masked_api_key_id`, `env_file`, `storage_scope`, `target`, any `profile`, and any `legacy_exposure_keys_removed`");
     expect(body).toContain("Pass `profile` only when the user explicitly asks");
-    expect(body).toContain("suggest moving the `apikey*.txt` out of the working directory or deleting it");
     expect(body).toContain("This workflow can inspect, append, replace, or remove stored `.env` credentials.");
+    // An explicit key file wins over the stored .env and fails startup once it is gone,
+    // and raw apikey*.txt scanning hides whether the stored credential works.
+    expect(body).not.toContain("After the import is verified, suggest moving the `apikey*.txt` out of the working directory or deleting it");
+    const steps = [
+      "Keep the source `apikey*.txt` in place until the restarted server is proven to use the stored credential:",
+      "1. If `EARVELDAJA_API_KEY_FILE` is set in the MCP launch configuration or environment, remove it there first",
+      "2. Restart the MCP server with the source file still in place.",
+      "3. Verify the stored credential the import reported (`env_file`, `storage_scope`, `target`; `list_stored_credentials` shows the stored inventory) and make one authenticated read that returns the intended company's data.",
+      "A successful restart or a non-empty `list_connections` is not proof",
+      "4. Only then suggest moving the `apikey*.txt` out of the working directory or deleting it.",
+      "If the stored credential's use cannot be established, keep the file",
+    ];
+    const positions = steps.map(step => body.indexOf(step));
+    for (const [index, step] of steps.entries()) expect(positions[index], step).toBeGreaterThanOrEqual(0);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
   });
 });
 

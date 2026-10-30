@@ -4,7 +4,7 @@ import { isCompanyVatRegistered, safeJsonParse, tagNotes } from "../tools/crud-t
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import type { ExecutionPlanInput, PlanData, PlanRecord } from "../plan-store.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
+import type { Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, SaleInvoice, Transaction } from "../types/api.js";
 import { roundMoney } from "../money.js";
 import { snapshotBankTransaction, compareBankTransactionMaterial, snapshotLinkedInvoice, TransactionMaterialDriftError } from "../banking/transaction-material-snapshot.js";
 import { withPurchaseInvoiceLock, scanPurchaseIntakeDuplicates } from "../documents/purchase-invoice-lock.js";
@@ -59,7 +59,7 @@ import {
   getBookingSuggestionVatConfig,
 } from "../tools/receipt-extraction.js";
 import { buildClassificationReviewGuidance } from "../estonian-accounting-guidance.js";
-import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
+import { DEFAULT_ACCOUNTS_RECEIVABLE, DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 // Shared classify helpers stay in receipt-inbox.ts (several are exported for the
 // pure-unit tests). Importing them here forms the same runtime-safe body-only
 // import cycle that batch-operations.ts already relies on: every cross-reference
@@ -238,7 +238,18 @@ interface LedgerPartition {
   ownTransfers: OwnTransferRow[];
   possibleDuplicates: PossibleDuplicateRow[];
   remaining: Transaction[];
-  history: CounterpartyBookingHistory;
+}
+
+/**
+ * Every account an invoice settles on: the default payable/receivable plus the
+ * liability and receivable accounts of all purchase and sale invoices, paid
+ * included. A payment booked there settles an invoice, not a direct booking.
+ */
+function invoiceLedgerAccountIds(purchases: readonly PurchaseInvoice[], sales: readonly SaleInvoice[]): ReadonlySet<number> {
+  const ids = new Set<number>([DEFAULT_LIABILITY_ACCOUNT, DEFAULT_ACCOUNTS_RECEIVABLE]);
+  for (const invoice of purchases) if (typeof invoice.liability_accounts_id === "number") ids.add(invoice.liability_accounts_id);
+  for (const invoice of sales) if (typeof invoice.receivable_accounts_id === "number") ids.add(invoice.receivable_accounts_id);
+  return ids;
 }
 
 async function loadLedgerContext(api: ApiContext): Promise<LedgerContext | undefined> {
@@ -348,11 +359,6 @@ function partitionByLedgerContext(
     ownTransfers: [],
     possibleDuplicates: [],
     remaining: [],
-    history: buildCounterpartyBookingHistory({
-      transactions: ledgerTransactions,
-      journals: ledger.journals,
-      ownBankDimensionIds: lookups.ownDimensionIds,
-    }),
   };
   const storedKeyCounts = new Map<string, number>();
   for (const transaction of competing) {
@@ -796,6 +802,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       let clientWritten = false;
       try {
         if (distribution.set_clients_id) {
+          // The client comes from history, so it is set only on the approved
+          // material: a row changed elsewhere since the gather is never overwritten.
+          api.transactions.invalidateListCache();
+          const beforeUpdate = await api.transactions.get(id);
+          const check = compareBankTransactionMaterial(approvedSnapshot, beforeUpdate);
+          if (!check.ok || !isProjectTransaction(beforeUpdate) || check.snapshot.trusted_direction !== direction) {
+            throw new TransactionMaterialDriftError(id, check.ok ? ["trusted_direction", "status"] : check.changedFields);
+          }
           await api.transactions.update(id, { clients_id: distribution.clients_id });
           clientWritten = true;
         }
@@ -900,10 +914,18 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     const classifiable = typeof partition === "string" ? unmatched : partition.remaining;
     // Only rows the ledger partition left over reach classification: the
     // inter-account matcher found no own-transfer target for them. The history
-    // reuses the journals and transactions already read (no extra API call).
-    const historyOf = (transaction: Transaction) => typeof partition === "string"
+    // reuses the journals, transactions and invoices already read (no extra API call).
+    const history = typeof partition === "string" || !ledger
       ? undefined
-      : historyLookup(partition.history, transaction).suggestion;
+      : buildCounterpartyBookingHistory({
+          transactions,
+          journals: ledger.journals,
+          ownBankDimensionIds: buildBankAccountLookups(ledger.bankAccounts, ledger.accountDimensions).ownDimensionIds,
+          invoiceLedgerAccountIds: invoiceLedgerAccountIds(purchaseInvoices, saleInvoices),
+        });
+    const historyOf = (transaction: Transaction) => history
+      ? historyLookup(history, transaction).suggestion
+      : undefined;
     const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
     const context = {
       purchaseInvoices,
@@ -1071,26 +1093,27 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       if (!dryRun) api.journals.invalidateListCache();
       const ledger = await loadLedgerContext(api);
       const ledgerTransactions = ledger ? await api.transactions.listAll().catch(() => undefined) : undefined;
-      // An incoming row may pay an open sale invoice: read those only when a
-      // history distribution could book one.
-      const openSales = distributionRows.length > 0
-        ? await api.saleInvoices.listAll()
-          .then(invoices => invoices.filter(invoice => invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID"))
-          .catch(() => undefined)
+      // An incoming row may pay an open sale invoice, and every sale invoice's
+      // receivable account is settlement, not direct-booking history: read them
+      // only when a history distribution could book a row.
+      const saleInvoices = distributionRows.length > 0
+        ? await api.saleInvoices.listAll().catch(() => undefined)
         : [];
       if (!ledger || !ledgerTransactions) {
         ledgerCheck = "unavailable";
         if (distributionRows.length > 0) historyCheck = "unavailable";
       } else {
         if (distributionRows.length > 0) {
-          if (!openSales) {
+          if (!saleInvoices) {
             historyCheck = "unavailable";
           } else {
             historyCheck = {};
+            const openSales = saleInvoices.filter(invoice => invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID");
             const history = buildCounterpartyBookingHistory({
               transactions: ledgerTransactions,
               journals: ledger.journals,
               ownBankDimensionIds: buildBankAccountLookups(ledger.bankAccounts, ledger.accountDimensions).ownDimensionIds,
+              invoiceLedgerAccountIds: invoiceLedgerAccountIds(purchaseInvoices, saleInvoices),
             });
             // A saved rule or a statutory category default outranks history
             // (as in classify): re-derived from the fresh rows themselves, so an

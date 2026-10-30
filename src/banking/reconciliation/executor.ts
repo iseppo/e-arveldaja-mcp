@@ -71,6 +71,8 @@ import {
   wiseReferenceInstructionIdOf,
   getSameTypeReciprocalEvidence,
   hasMirrorOwnOriginEvidence,
+  hasMirrorPostingEvidence,
+  journalMovesTransfer,
   type InterAccountMatchLookups,
   type OneSidedInference,
   type TransferResolution,
@@ -1554,8 +1556,6 @@ export async function runInterAccountMatching(
   // Positive evidence that `tx` (a Phase 2 row already covered by `journalId`)
   // mirrors that journal's confirmed counterpart transaction, or undefined.
   // Report-only: the operator resolves a proposal with delete_transaction.
-  const isPlainEur = (row: Transaction) =>
-    row.cl_currencies_id === "EUR" && (row.base_amount == null || sameAmountToTheCent(row.base_amount, row.amount));
   async function mirrorProposalFor(tx: Transaction, targetDimension: number, journalId: number): Promise<NonNullable<SkippedAlreadyHandledRow["mirror_proposal"]> | undefined> {
     const journal = guard.journals.find(j => j.id === journalId);
     if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION") return undefined;
@@ -1568,17 +1568,7 @@ export async function runInterAccountMatching(
     const counterpart = journal.operations_id != null ? allTx.get(journal.operations_id) : undefined;
     if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED") return undefined;
     if (counterpart.accounts_dimensions_id !== targetDimension || !sameAmountToTheCent(counterpart.amount, tx.amount)) return undefined;
-    if (!isPlainEur(tx) || !isPlainEur(counterpart)) return undefined;
-    if (!hasMirrorOwnOriginEvidence(tx, counterpart, lookups)) return undefined;
-    const direction = signedBankTransactionDirection(tx);
-    if (!direction) return undefined;
-    const ownSide = direction === "incoming" ? "D" : "C";
-    const legsOn = (dim: number) => journal.postings.filter(p => !p.is_deleted && p.accounts_dimensions_id === dim);
-    const ownLegs = legsOn(tx.accounts_dimensions_id);
-    const targetLegs = legsOn(targetDimension);
-    if (ownLegs.length === 0 || ownLegs.some(p => p.type !== ownSide)) return undefined;
-    if (targetLegs.length === 0 || targetLegs.some(p => p.type === ownSide)) return undefined;
-    if (signedBankTransactionDirection(counterpart) === direction) return undefined;
+    if (!hasMirrorPostingEvidence(tx, counterpart, targetDimension, journal, lookups)) return undefined;
     return {
       counterpart_transaction_id: counterpart.id!,
       journal_id: journalId,
@@ -2060,8 +2050,15 @@ export async function executeInterAccount(
 
   for (const action of match.mirrorDeleteActions ?? []) {
     // Every read gates the delete: the row must still be the reviewed PROJECT
-    // row, and the journal must still book its confirmed counterpart.
+    // row, and the journal must still book its confirmed counterpart with the
+    // same posting, currency, origin and direction evidence as the proposal.
     const verifyMirror = async (): Promise<string | undefined> => {
+      const [bankAccounts, accountDimensions] = await Promise.all([
+        api.readonly.getBankAccounts({ fresh: true }),
+        // The matching's own fresh read; the proof uses no dimension-to-account mapping.
+        api.readonly.getAccountDimensions(),
+      ]);
+      const lookups = { ...buildBankAccountLookups(bankAccounts, accountDimensions), companyLegalName: match.invoiceInfo.invoice_company_name ?? "" };
       api.transactions.invalidateListCache();
       const row = await api.transactions.get(action.transactionId);
       if (!row || !isProjectTransaction(row)) return "mirror_not_project";
@@ -2074,6 +2071,10 @@ export async function executeInterAccount(
       const journal = (await api.journals.listAllWithPostings()).find(j => j.id === action.journalId);
       if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION"
         || journal.operations_id !== action.counterpartTransactionId) return "mirror_journal_drift";
+      // Sides alone are not enough: the journal must still move the reviewed
+      // plain-EUR amount (the matching pass's journalMovesTransfer coverage).
+      if (!hasMirrorPostingEvidence(row, counterpart, action.targetDimensionId, journal, lookups)
+        || !journalMovesTransfer(journal, row, action.targetDimensionId, action.material.amount ?? Number.NaN)) return "mirror_journal_drift";
       return undefined;
     };
     commands.push({

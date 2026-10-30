@@ -187,6 +187,21 @@ describe("counterparty booking history — chronological streak", () => {
     }
   });
 
+  it("(3d) an explicit invoice-ledger set excludes custom payable and receivable settlements", () => {
+    const invoiceLedgerAccountIds = new Set([2310, 1210, 2991, 1991]);
+    for (const [side, account, direction] of [["C", 2991, "outgoing"], ["D", 1991, "incoming"]] as const) {
+      const index = buildCounterpartyBookingHistory({
+        ...ledger([1, 2].map(m => ({ date: month(m), side, contra: [[account, null]] }))),
+        ownBankDimensionIds: OWN_DIMS,
+        invoiceLedgerAccountIds,
+      });
+      const result = lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction });
+      expect(result.history_total).toBe(2);
+      expect(result.breakdown).toEqual([]);
+      expect(result.suggestion).toBeUndefined();
+    }
+  });
+
   it("(4) keeps directions separate", () => {
     const index = history([
       { date: month(1) }, { date: month(2) }, { date: month(3) },

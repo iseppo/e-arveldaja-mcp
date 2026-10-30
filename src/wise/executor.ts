@@ -36,7 +36,6 @@ import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
   classifyWiseOwnTransfer,
-  counterpartyNameForWiseRow,
   isJarTransfer,
   isPositiveSafeInteger,
   isWiseClientName,
@@ -503,7 +502,14 @@ async function runWiseImport(
   const clientResolutionsByName = new Map<string, WiseClientResolution>();
   for (const row of eligible) {
     if (!wiseRowNeedsClientResolution(transferDecisions.get(row))) continue;
-    const name = counterpartyNameForWiseRow(row);
+    // Only the counterparty endpoint names the client: the recipient of an
+    // outgoing row, the sender of an incoming one. A blank one leaves the
+    // client unresolved rather than falling back to the own-company endpoint.
+    const direction = sourceDirectionForWiseDirection(row.direction);
+    const name =
+      direction === "OUT" ? row.targetName :
+      direction === "IN" ? row.sourceName :
+      undefined;
     const normalizedName = normalizeCompanyName(name);
     if (!name || !normalizedName) continue;
     // The lookup is a substring match on the name as written: key the cache

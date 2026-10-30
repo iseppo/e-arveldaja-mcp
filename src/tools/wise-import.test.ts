@@ -8662,3 +8662,52 @@ describe("Wise ownership reviews do not block approval; every other review does 
     expect(blockedDry.summary.status).toBe("needs_review");
   });
 });
+
+describe("wise ordinary-payment client comes only from the counterparty endpoint", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  // Zero-fee ordinary payments: one main_create each, no fee leg to mask the client.
+  const OWN = "Seppo AI OÜ";
+  const outPayment = (targetName: string) => buildM04Values({ id: "CARD_TRANSACTION-CLIENT-OUT", direction: "OUT", sourceName: OWN, targetName, sourceAmount: "40" });
+  const inPayment = (sourceName: string) => buildM04Values({ id: "CARD_TRANSACTION-CLIENT-IN", direction: "IN", sourceName, targetName: OWN, sourceAmount: "40" });
+
+  async function run(values: string[], clients: Array<{ id: number; name: string }>) {
+    mockedReadFile.mockResolvedValue(buildCsvRows([values]));
+    const setup = setupWiseTool([], undefined, { invoiceInfo: { invoice_company_name: OWN }, clients });
+    const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+    const previewCreate = dry.execution.commands.find(command => command.action === "main_create");
+    expect(previewCreate, JSON.stringify(dry.skipped_details ?? dry)).toBeDefined();
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    const created = setup.api.transactions.create.mock.calls[0]![0] as Record<string, unknown>;
+    return { previewPayload: previewCreate!.create_payload as Record<string, unknown>, created, executed };
+  }
+
+  const missing: Array<[string, string[]]> = [
+    ["an outgoing payment with a blank recipient", outPayment("")],
+    ["an incoming payment with a blank sender", inPayment("")],
+  ];
+  it.each(missing)("%s gets no client from the own-company endpoint", async (_label, values) => {
+    const { previewPayload, created } = await run(values, [{ id: 55, name: OWN }]);
+    expect(previewPayload).not.toHaveProperty("clients_id");
+    expect(created).not.toHaveProperty("clients_id");
+    // The display name still falls back to the endpoint that is present.
+    expect(previewPayload.bank_account_name).toMatch(wrapped(OWN));
+  });
+
+  const present: Array<[string, string[]]> = [
+    ["an outgoing payment", outPayment("Vendor OÜ")],
+    ["an incoming payment", inPayment("Vendor OÜ")],
+  ];
+  it.each(present)("%s gets the counterparty's client, not the own company's", async (_label, values) => {
+    const { previewPayload, created } = await run(values, [{ id: 55, name: OWN }, { id: 77, name: "Vendor OÜ" }]);
+    expect(previewPayload.clients_id).toBe(77);
+    expect(created.clients_id).toBe(77);
+  });
+});

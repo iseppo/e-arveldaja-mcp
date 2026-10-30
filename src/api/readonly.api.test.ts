@@ -49,6 +49,26 @@ describe("ReferenceDataApi writes use the shared mutation-outcome classifier", (
     expect(await api.getAccountDimensions({fresh:true})).toEqual([{id:9,accounts_id:1021}]);
     expect(client.get).toHaveBeenCalledTimes(2);
   });
+  it("fresh VAT and invoice info re-read only their own entries; unrelated cached reference data survives", async () => {
+    readonlyCache.invalidate();
+    const client = makeClient();
+    readonlyCache.set("connection:0:/vat_info", { vat_number: "EE100000001" });
+    readonlyCache.set("connection:0:/invoice_info", { invoice_company_name: "Vana OÜ" });
+    readonlyCache.set("connection:0:/accounts:all", ["cached accounts"]);
+    readonlyCache.set("connection:1:/vat_info", { vat_number: "EE100000002" });
+    vi.mocked(client.get).mockImplementation(async (path: string) =>
+      path === "/vat_info" ? { vat_number: "EE123456789" } : { invoice_company_name: "Seppo AI OÜ" });
+    const api = new ReferenceDataApi(client);
+    expect(await api.getVatInfo()).toEqual({ vat_number: "EE100000001" });
+    expect(await api.getInvoiceInfo()).toEqual({ invoice_company_name: "Vana OÜ" });
+    expect(client.get).not.toHaveBeenCalled();
+    expect(await api.getVatInfo({ fresh: true })).toEqual({ vat_number: "EE123456789" });
+    expect(await api.getInvoiceInfo({ fresh: true })).toEqual({ invoice_company_name: "Seppo AI OÜ" });
+    expect(vi.mocked(client.get).mock.calls.map(call => call[0])).toEqual(["/vat_info", "/invoice_info"]);
+    expect(await api.getAccounts()).toEqual(["cached accounts"]);
+    expect(readonlyCache.get("connection:1:/vat_info")).toEqual({ vat_number: "EE100000002" });
+    expect(client.get).toHaveBeenCalledTimes(2);
+  });
   beforeEach(() => {
     readonlyCache.invalidate();
   });
