@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-10-30
+
 ### Fixed
 
 - **A bank payment that names an invoice's order or cart number is now suggested for that invoice, even when another invoice has the same amount.** Before, two same-amount ticket payments were both suggested for the older ticket and the right invoice was hidden. Details: reconcile suggest adds the match reason `document_reference` when the description carries an exact-amount purchase invoice's number or its notes order/cart reference, raising confidence by 30 and capping it at 85 (a document reference alone never reaches the 90 auto-confirm threshold; the auto-confirm path is unchanged); `document_reference_candidates` also lists such an invoice when a different invoice won the row. Suggest now re-reads the transaction and invoice lists instead of using the short list cache, so changes made elsewhere (web UI, another client) are seen — three extra list reads per suggest.
