@@ -75,7 +75,13 @@ export type WiseImportSummary = {
 };
 
 /** A created / would-create row (description and source row stay internal). */
-export type WiseImportResultRow = Omit<WiseCreatedEntry, "description" | "source_row">;
+export type WiseImportResultRow = Omit<WiseCreatedEntry, "description" | "source_row"> & {
+  /** Set with client_ambiguous: the row needs a client before confirmation. */
+  client_note?: string;
+};
+
+const WISE_CLIENT_AMBIGUOUS_MESSAGE =
+  "Several clients have exactly this counterparty name, so the row is created without a client. It cannot be confirmed until it has one: pass clients_id when confirming (or set it on the transaction first).";
 
 /** A skipped / errored row with its reason sandbox-wrapped (kind and record_id stay internal). */
 export type WiseImportSkippedRow = Omit<WiseSkippedEntry, "kind" | "record_id">;
@@ -402,7 +408,11 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
     created: created.length,
     skipped: executionSkipped.length,
     error_count: executionErrors.length,
-    inter_account_total: interAccountResults.length,
+    // Preview: the planned inter-account confirmations (results exist only
+    // after execute). Execute: the inter-account results.
+    inter_account_total: mode === "DRY_RUN"
+      ? commands.filter(command => command.action === "inter_account").length
+      : interAccountResults.length,
     needs_review: ownershipReviews.length,
     blocking_review_count: ownershipReviews.filter(review => wiseReviewBlocksApproval(review.code)).length,
   };
@@ -497,7 +507,13 @@ export function renderWiseImportFull(data: WiseImportRenderData): { content: Arr
         }]
       : [],
   });
-  const outputResults = created.map(({ description: _description, source_row: _sourceRow, ...rest }) => rest);
+  // matched_client_name is a stored client name, which receipt OCR can have
+  // auto-created: sandbox it like the other counterparty text.
+  const outputResults = created.map(({ description: _description, source_row: _sourceRow, ...rest }) => ({
+    ...rest,
+    ...(rest.matched_client_name !== undefined ? { matched_client_name: wrapUntrustedOcr(rest.matched_client_name) ?? rest.matched_client_name } : {}),
+    ...(rest.client_ambiguous === true ? { client_note: WISE_CLIENT_AMBIGUOUS_MESSAGE } : {}),
+  }));
 
   return {
     content: [{
@@ -768,6 +784,11 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
     code: "wise_transfer_treated_as_payment",
     message: `Imported as an ordinary unconfirmed payment, not an own transfer (${entry.basis === "owner" ? "not_own_transfer_ids" : "the other party is not an own account"}). If it is an own transfer after all, re-run the preview with this ID in confirm_own_transfer_ids.`,
   })), "they are plain unconfirmed rows in the plan; re-run the preview with a narrower date_from/date_to to list them."));
+  warnings.push(...cappedWarnings("wise_client_ambiguous", data.created.filter(entry => entry.client_ambiguous === true).map(entry => ({
+    item_id: entry.wise_id,
+    code: "wise_client_ambiguous",
+    message: WISE_CLIENT_AMBIGUOUS_MESSAGE,
+  })), "each such row needs a client before confirmation; re-run the preview with a narrower date_from/date_to to list them."));
   if (counterpartInfo !== undefined) {
     warnings.unshift({
       item_id: "wise-import",

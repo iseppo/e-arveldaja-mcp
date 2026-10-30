@@ -8,6 +8,7 @@ import type { ToolExposureConfig } from "../config.js";
 import { createReportingOperations } from "../reporting/operations.js";
 import { isStrictDate, parseStrictMonth } from "../strict-date.js";
 import { wrapMissingDocuments } from "../tools/document-audit.js";
+import { cacheClearMetadata, clearRuntimeCaches } from "../cache-control.js";
 import type {
   AccountingReportResult,
   AgingSide,
@@ -182,12 +183,14 @@ interface ReportArgs {
   as_of_date?: string;
   month?: string;
   detail?: "compact" | "full";
+  fresh?: boolean;
 }
 
 export function registerRunAccountingReportTool(
   server: McpServer,
   api: ApiContext,
   toolExposure: Pick<ToolExposureConfig, "enableSales">,
+  options: { getActiveConnectionIndex?: () => number | undefined } = {},
 ): void {
   const operations = createReportingOperations(api, toolExposure.enableSales !== false);
 
@@ -201,6 +204,7 @@ export function registerRunAccountingReportTool(
       as_of_date: z.string().optional().describe("aging only: cutoff date (YYYY-MM-DD, default today)."),
       month: z.string().optional().describe("month_end only: month (YYYY-MM)."),
       detail: z.enum(["compact", "full"]).optional().describe("compact (default) caps long line lists; full returns every line."),
+      fresh: z.boolean().optional().describe("Clear the active connection's cached API/reference data before computing (use after web UI changes)."),
     },
     { ...readOnly, title: "Run Accounting Report" },
     async (args: ReportArgs) => {
@@ -216,6 +220,12 @@ export function registerRunAccountingReportTool(
       if (args.month !== undefined && parseStrictMonth(args.month) === undefined) {
         return textResult({ error: "month must be a real calendar month in canonical YYYY-MM form", category: "invalid_month" }, true);
       }
+      // Active-connection scope, like clear_cache's default: a guided user
+      // refreshing one company's report must not drop the other companies' caches.
+      const activeConnectionIndex = args.fresh ? options.getActiveConnectionIndex?.() : undefined;
+      const cacheClear = args.fresh
+        ? clearRuntimeCaches(activeConnectionIndex !== undefined ? { connectionIndex: activeConnectionIndex } : {})
+        : undefined;
       const outcome = await operations.run({
         report: args.report as AccountingReportResult["report"],
         period: { ...(args.date_from !== undefined ? { from: args.date_from } : {}), ...(args.date_to !== undefined ? { to: args.date_to } : {}) },
@@ -223,7 +233,7 @@ export function registerRunAccountingReportTool(
         ...(args.month !== undefined ? { month: args.month } : {}),
       });
       if (!outcome.ok) return textResult({ error: outcome.error.message, category: outcome.error.code }, true);
-      return textResult(renderReport(outcome.value, detail));
+      return textResult({ ...renderReport(outcome.value, detail), ...cacheClearMetadata(cacheClear) });
     },
   );
 }

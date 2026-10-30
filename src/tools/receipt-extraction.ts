@@ -451,7 +451,8 @@ export interface InvoiceSummaryForMatching {
   status?: string;
 }
 
-export type ClassificationApplyMode = "purchase_invoice" | "review_only";
+/** account_distribution: confirm each row straight to the account its counterparty's consistent history names (plan-bound apply only). */
+export type ClassificationApplyMode = "purchase_invoice" | "account_distribution" | "review_only";
 
 interface ReceiptAmountCandidate {
   amount: number;

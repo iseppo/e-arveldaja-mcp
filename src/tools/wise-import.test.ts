@@ -257,7 +257,15 @@ function setupWiseTool(
   const api = {
     clients: {
       listAll: vi.fn().mockResolvedValue(options.clients ?? [{ id: 77, name: "Wise" }]),
-      findByName: vi.fn().mockResolvedValue(options.findByNameResult ?? []),
+      // findByNameResult answers the own-company lookup (invoice_company_name);
+      // any other name gets the real substring filter over `clients`.
+      findByName: vi.fn().mockImplementation(async (name: string) => {
+        const ownName = (options.invoiceInfo as { invoice_company_name?: string } | undefined)?.invoice_company_name;
+        if (options.findByNameResult !== undefined && name === ownName) return options.findByNameResult;
+        const lower = name.toLowerCase();
+        return ((options.clients ?? [{ id: 77, name: "Wise" }]) as Array<{ name: string }>)
+          .filter(client => client.name.toLowerCase().includes(lower));
+      }),
     },
     readonly: {
       // Default: the Wise account (dimension 5) is a linked bank account, plus
@@ -3342,13 +3350,14 @@ describe("wise import tool", () => {
     const planningReads = [
       baseline.setup.api.transactions.listAll,
       baseline.setup.api.clients.listAll,
-      baseline.setup.api.clients.findByName,
       baseline.setup.api.purchaseInvoices.listAll,
       baseline.setup.api.readonly.getAccountDimensions,
       baseline.setup.api.readonly.getBankAccounts,
       baseline.setup.api.readonly.getInvoiceInfo,
       baseline.setup.api.journals.listAllWithPostings,
     ];
+    // The own-company lookup, then the card payment's counterparty client.
+    expect(baseline.setup.api.clients.findByName.mock.calls).toEqual([["Seppo AI OÜ"], ["OpenAI"]]);
     for (const read of planningReads) {
       expect(read).toHaveBeenCalledTimes(1);
       expect(read.mock.invocationCallOrder[0]).toBeGreaterThan(baseline.flushOrder!);
@@ -3861,9 +3870,9 @@ describe("wise import tool", () => {
       setup.api.transactions.confirm.mock.invocationCallOrder[1],
     ];
     expect(mutationOrder).toEqual([...mutationOrder].sort((left, right) => left! - right!));
+    expect(setup.api.clients.findByName.mock.calls).toEqual([["Seppo AI OÜ"], ["OpenAI"]]);
     for (const read of [
       setup.api.clients.listAll,
-      setup.api.clients.findByName,
       setup.api.readonly.getAccountDimensions,
       setup.api.readonly.getBankAccounts,
       setup.api.readonly.getInvoiceInfo,
@@ -8321,6 +8330,76 @@ describe("Wise transfer to a third party is imported as an ordinary payment (okt
     expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900001"], ["inter_account", "TRANSFER-900001"]]);
     expect(dry.transfers_treated_as_payments).toBeUndefined();
     expect(dry.ownership_reviews).toBeUndefined();
+  });
+
+  it("live 2026-10-30 #2: a transfer to the owner gets the owner's client (CAMT exact-name rule, case-insensitive), bound in the reviewed payload", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ targetName: "indrek seppo", sourceFeeAmount: "0.5" })]));
+    const setup = setupWiseTool([], undefined, options({
+      clients: [{ id: 77, name: "Wise" }, { id: 1968132, name: "Indrek Seppo" }, { id: 1968133, name: "Indrek Seppo Consulting OÜ" }],
+    }));
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(dry.transfers_treated_as_payments).toEqual([{ wise_id: "TRANSFER-900001", basis: "automatic" }]);
+    const main = dry.execution.commands.find(command => command.action === "main_create");
+    expect(main?.create_payload?.clients_id).toBe(1968132);
+    const row = dry.results.find(result => result.wise_id === "TRANSFER-900001");
+    expect(row).toMatchObject({ clients_id: 1968132, client_match: "exact_name", matched_client_name: expect.stringMatching(wrapped("Indrek Seppo")) });
+    expect(row).not.toHaveProperty("client_note");
+
+    expect(setup.api.transactions.create.mock.calls[0][0]).toMatchObject({ amount: 100, type: "C", clients_id: 1968132 });
+    expect(executed.execution.errors).toEqual([]);
+    expect(executed.results.find(result => result.wise_id === "TRANSFER-900001")).toMatchObject({ clients_id: 1968132, status: "created" });
+  });
+
+  it("live 2026-10-30 #2: several clients matching the counterparty leave clients_id null with a note", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut()]));
+    const setup = setupWiseTool([], undefined, options({
+      clients: [{ id: 77, name: "Wise" }, { id: 1, name: "Indrek Seppo" }, { id: 2, name: "Indrek Seppo" }],
+    }));
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    const main = dry.execution.commands.find(command => command.action === "main_create");
+    expect(main?.create_payload).not.toHaveProperty("clients_id");
+    const row = dry.results.find(result => result.wise_id === "TRANSFER-900001");
+    expect(row).toMatchObject({ client_ambiguous: true, client_note: expect.stringContaining("Several clients have exactly this counterparty name") });
+    expect(row).not.toHaveProperty("clients_id");
+    expect(setup.api.transactions.create.mock.calls[0][0]).not.toHaveProperty("clients_id");
+    expect(executed.results.find(result => result.wise_id === "TRANSFER-900001")).toMatchObject({ client_ambiguous: true });
+  });
+
+  it("live 2026-10-30 #2 review: only an exact (case-insensitive) name match sets the client; a substring-only match leaves it null", async () => {
+    const clients = [{ id: 77, name: "Wise" }, { id: 1968132, name: "Indrek Seppo" }];
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ targetName: "Seppo" })]));
+    const partial = setupWiseTool([], undefined, options({ clients }));
+    const partialRun = await runApprovedWiseImport(partial, args);
+    expect(partial.api.clients.findByName).toHaveBeenCalledWith("Seppo");
+    expect(partialRun.dry.execution.commands.find(command => command.action === "main_create")?.create_payload).not.toHaveProperty("clients_id");
+    const partialRow = partialRun.dry.results.find(result => result.wise_id === "TRANSFER-900001");
+    expect(partialRow).not.toHaveProperty("clients_id");
+    expect(partialRow).not.toHaveProperty("client_ambiguous");
+    expect(partial.api.transactions.create.mock.calls[0][0]).not.toHaveProperty("clients_id");
+
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ targetName: "indrek seppo" })]));
+    const exact = setupWiseTool([], undefined, options({ clients }));
+    const exactRun = await runApprovedWiseImport(exact, args);
+    expect(exactRun.dry.execution.commands.find(command => command.action === "main_create")?.create_payload?.clients_id).toBe(1968132);
+    expect(exactRun.dry.results.find(result => result.wise_id === "TRANSFER-900001")).toMatchObject({ clients_id: 1968132, client_match: "exact_name" });
+    expect(exact.api.transactions.create.mock.calls[0][0]).toMatchObject({ clients_id: 1968132 });
+  });
+
+  it("live 2026-10-30 #5: the dry run reports the planned inter-account count, and an own transfer gets no name-matched client", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([personOut({ targetName: "LHV Own Account" })]));
+    const setup = setupWiseTool([], undefined, options({
+      clients: [{ id: 77, name: "Wise" }, { id: 31, name: "LHV Own Account" }],
+    }));
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+
+    expect(commandsOf(dry)).toEqual([["main_create", "TRANSFER-900001"], ["inter_account", "TRANSFER-900001"]]);
+    expect(dry.summary.inter_account_total).toBe(1);
+    expect(dry.execution.summary.inter_account_total).toBe(1);
+    expect(dry.execution.commands[0]?.create_payload).not.toHaveProperty("clients_id");
+    expect(executed.summary.inter_account_total).toBe(1);
+    expect(setup.api.clients.findByName).not.toHaveBeenCalledWith("LHV Own Account");
   });
 
   it("O4 acceptance: a hand-booked journal D 1010 / C 1020-Wise labelled WISE:<id>, without a bank row, reads as already_journalized", async () => {

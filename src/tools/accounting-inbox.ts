@@ -1272,7 +1272,7 @@ function isReviewMachineEnum(key: string, value: string): boolean {
     case "type":
       return value === "C" || value === "D" || value === "tool_call" || value === "rule_save";
     case "apply_mode":
-      return value === "purchase_invoice" || value === "review_only";
+      return value === "purchase_invoice" || value === "account_distribution" || value === "review_only";
     case "category":
       return (AUTO_BOOKING_CATEGORIES as readonly string[]).includes(value);
     case "currency":

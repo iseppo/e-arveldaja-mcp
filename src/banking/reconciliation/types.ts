@@ -168,10 +168,10 @@ export interface ReconciliationSuggestCompact {
 }
 
 /**
- * A purchase invoice below the suggestion threshold whose exact amount and a
- * strong document reference (invoice number or the notes' order / cart number
- * line) both appear on the transaction. Kept apart from `matches`: it never
- * changes a best match, a distribution or the auto-confirm set.
+ * A purchase invoice whose exact amount and a strong document reference
+ * (invoice number or the notes' order / cart number line) both appear on the
+ * transaction, but which another candidate outranked as the row's best match.
+ * Listed so it is not hidden; it never changes the auto-confirm set.
  */
 export interface DocumentReferenceCandidateRow {
   transaction_id: number | undefined;
@@ -277,6 +277,8 @@ export interface SkippedAlreadyHandledRow {
    * journal's confirmed counterpart. Never deleted automatically. */
   mirror_proposal?: { counterpart_transaction_id: number; journal_id: number; evidence: string[] };
   next_action?: { tool: "delete_transaction"; args: { id: number }; approval_required: true };
+  /** Execute only: the plan's opt-in proposed-mirror deletion completed. */
+  mirror_deleted?: boolean;
 }
 
 export interface AmbiguousReflessRow {
@@ -320,6 +322,21 @@ export interface InterAccountConfirmAction {
   deleteAuditDetails?: Record<string, unknown>;
 }
 
+/**
+ * A proposed mirror deletion bound into the plan by the opt-in
+ * `delete_proposed_mirrors` argument. Execute deletes the row only while it is
+ * still PROJECT with this exact material (id, dimension, amount, date, signed
+ * direction, ...) and journal `journalId` still books confirmed transaction
+ * `counterpartTransactionId`.
+ */
+export interface InterAccountMirrorDeleteAction {
+  transactionId: number;
+  journalId: number;
+  counterpartTransactionId: number;
+  targetDimensionId: number;
+  material: BankTransactionMaterialSnapshot;
+}
+
 /** The read-only matching projection shared by inter-account dry run + execute. */
 export interface InterAccountMatchResult {
   totalUnconfirmed: number;
@@ -336,6 +353,8 @@ export interface InterAccountMatchResult {
   crossCurrencyPairs: CrossCurrencyRow[];
   errors: InterAccountErrorRow[];
   confirmActions: InterAccountConfirmAction[];
+  /** Present (possibly empty) only when `delete_proposed_mirrors` was requested. */
+  mirrorDeleteActions?: InterAccountMirrorDeleteAction[];
   companyClientsId: number | null;
   normalizedArgs: Record<string, unknown>;
   fingerprint: string;
@@ -375,6 +394,9 @@ export interface ExactConfirmExecution {
 export interface InterAccountInput {
   readonly maxDateGap: number | undefined;
   readonly targetAccountsDimensionsId: number | undefined;
+  /** Opt-in: bind each proposed mirror deletion into the plan as a command.
+   * Part of the plan's normalized args, so execute must resend it. */
+  readonly deleteProposedMirrors?: boolean;
   /** false = preview only: no consume-once plan handle is minted (accounting
    * inbox dry run, which discards it). Default true. */
   readonly mintPlanHandles?: boolean;

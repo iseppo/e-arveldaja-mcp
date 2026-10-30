@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 171132,
+    "toolsListBytes": 171894,
     "descriptionsBytes": 23554,
-    "inputSchemasBytes": 112345,
+    "inputSchemasBytes": 113107,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4073,6 +4073,10 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
+          "delete_proposed_mirrors": {
+            "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
+            "type": "boolean"
+          },
           "execute": {
             "description": "Actually confirm matched pairs (default false = dry run)",
             "type": "boolean"
@@ -4114,6 +4118,10 @@
         "properties": {
           "block_on_duplicate": {
             "description": "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only.",
+            "type": "boolean"
+          },
+          "delete_proposed_mirrors": {
+            "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
             "type": "boolean"
           },
           "max_date_gap": {
@@ -6259,6 +6267,10 @@
               "full"
             ],
             "type": "string"
+          },
+          "fresh": {
+            "description": "Clear the active connection's cached API/reference data before computing (use after web UI changes).",
+            "type": "boolean"
           },
           "month": {
             "description": "month_end only: month (YYYY-MM).",

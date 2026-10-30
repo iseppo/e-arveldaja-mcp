@@ -205,6 +205,43 @@ export async function assertStatementAccountMatchesDimension(
   );
 }
 
+/**
+ * The counterparty-name client rule, shared with the Wise importer: among the
+ * `findByName` matches, the single one whose normalized name equals the
+ * counterparty's (`exact_name`), else the only match (`single_name_match`).
+ * A selection whose stored registry code contradicts `regCode` is dropped.
+ * `ambiguous` is true when several clients matched and none was selected;
+ * `exact_match_count` counts the normalized-name matches.
+ */
+export function selectClientByName(
+  normalizedName: string,
+  matches: readonly Client[],
+  regCode?: string | null,
+): { selected?: Client; match_type?: ClientResolution["match_type"]; ambiguous: boolean; exact_match_count: number } {
+  const exactMatches = matches.filter(client => normalizeCompanyName(client.name) === normalizedName);
+
+  let selected: Client | undefined;
+  let matchType: ClientResolution["match_type"];
+  if (exactMatches.length === 1) {
+    selected = exactMatches[0];
+    matchType = "exact_name";
+  } else if (matches.length === 1) {
+    selected = matches[0];
+    matchType = "single_name_match";
+  }
+  // A name match whose stored registry code contradicts the statement's code
+  // is a different legal entity — do not attach it. Codes compare by digits
+  // only, so "1111 1111" and "11111111" are the same code.
+  const registryDigits = (code: string | null | undefined) => code?.replace(/\D/g, "") || code?.trim() || undefined;
+  const selectedCode = registryDigits(selected?.code);
+  if (regCode && selectedCode && selectedCode !== registryDigits(regCode)) {
+    return { ambiguous: false, exact_match_count: exactMatches.length };
+  }
+  return selected
+    ? { selected, match_type: matchType, ambiguous: false, exact_match_count: exactMatches.length }
+    : { ambiguous: matches.length > 1, exact_match_count: exactMatches.length };
+}
+
 async function resolveClientForEntry(
   api: ApiContext,
   entry: ParsedCamtEntry,
@@ -240,25 +277,7 @@ async function resolveClientForEntry(
   if (cached) return cached;
 
   const matches = await api.clients.findByName(entry.counterparty_name!);
-  const exactMatches = matches.filter(client => normalizeCompanyName(client.name) === normalizedName);
-
-  let selected: Client | undefined;
-  let matchType: ClientResolution["match_type"];
-  if (exactMatches.length === 1) {
-    selected = exactMatches[0];
-    matchType = "exact_name";
-  } else if (matches.length === 1) {
-    selected = matches[0];
-    matchType = "single_name_match";
-  }
-  // A name match whose stored registry code contradicts the statement's code
-  // is a different legal entity — do not attach it. Codes compare by digits
-  // only, so "1111 1111" and "11111111" are the same code.
-  const registryDigits = (code: string | null | undefined) => code?.replace(/\D/g, "") || code?.trim() || undefined;
-  const selectedCode = registryDigits(selected?.code);
-  if (entry.counterparty_reg_code && selectedCode && selectedCode !== registryDigits(entry.counterparty_reg_code)) {
-    selected = undefined;
-  }
+  const { selected, match_type: matchType } = selectClientByName(normalizedName, matches, entry.counterparty_reg_code);
 
   const resolution: ClientResolution = selected?.id
     ? {

@@ -9,6 +9,7 @@ import { currentToolProfile, isToolVisibleForProfile } from "../tool-profile.js"
 import type { PartialClassificationMutation } from "../tools/receipt-inbox.js";
 import type {
   ApplyClassificationsResult,
+  InvoiceMatchedRow,
   UnmatchedAnalysisResult,
 } from "./classification-operations.js";
 
@@ -66,8 +67,10 @@ export function renderUnmatchedAnalysisFull(input: { result: UnmatchedAnalysisRe
     total_unmatched: result.totalUnmatched,
     category_counts: result.categoryCounts,
     groups: sanitizedGroups,
-    // F6: rows the ledger check took out of classification (never dropped).
+    // F6: rows taken out of classification (never dropped): open-invoice
+    // payments first, then the ledger check's rows.
     total_partitioned_out: result.totalPartitionedOut,
+    invoice_matched: result.invoiceMatched.map(wrapInvoiceMatchedRow),
     already_booked: result.alreadyBooked.map(wrapPartitionedRow),
     own_transfers: result.ownTransfers.map(wrapPartitionedRow),
     possible_duplicates: result.possibleDuplicates.map(wrapPartitionedRow),
@@ -80,14 +83,32 @@ function wrapPartitionedRow<T extends { counterparty?: string }>(row: T): T {
   return row.counterparty !== undefined ? { ...row, counterparty: wrapUntrustedOcr(row.counterparty) ?? row.counterparty } : row;
 }
 
+/** The invoice number and the matched order/cart reference can come from a PDF. */
+function wrapInvoiceMatchedRow(row: InvoiceMatchedRow): InvoiceMatchedRow {
+  return {
+    ...wrapPartitionedRow(row),
+    ...(row.invoice_number !== undefined ? { invoice_number: wrapUntrustedOcr(row.invoice_number) ?? row.invoice_number } : {}),
+    ...(row.matched_reference !== undefined ? { matched_reference: wrapUntrustedOcr(row.matched_reference) ?? row.matched_reference } : {}),
+  };
+}
+
 /** One aggregate warning per non-empty partition list, so the size stays constant. */
 function partitionWarnings(result: UnmatchedAnalysisResult): CompactWarning[] {
+  const invoiceList = (rows: InvoiceMatchedRow[]) => rows.slice(0, 5)
+    .map(row => `${row.transaction_id} → ${row.invoice_type === "sale_invoice" ? "sale" : "purchase"} invoice ${row.invoice_id ?? "?"} by ${row.matched_by}`)
+    .join("; ");
+  const warnings: CompactWarning[] = result.invoiceMatched.length > 0
+    ? [{
+        code: "invoice_matched",
+        message: `${result.invoiceMatched.length} transaction(s) may pay an open invoice and were not classified; reconcile them with reconcile_bank_transactions mode="suggest" (${invoiceList(result.invoiceMatched)}${result.invoiceMatched.length > 5 ? "; …" : ""})`,
+      }]
+    : [];
   const lists: Array<[string, Array<{ transaction_id: number }>, string]> = [
     ["already_booked", result.alreadyBooked, "already booked by a journal carrying their bank reference; verify, then delete the PROJECT row"],
     ["own_transfers", result.ownTransfers, "transfers between own accounts; reconcile with reconcile_bank_transactions mode=\"inter_account_dry_run\""],
     ["possible_duplicates", result.possibleDuplicates, "may already be booked by a journal; compare before deleting or classifying"],
   ];
-  const warnings: CompactWarning[] = lists
+  warnings.push(...lists
     .filter(([, rows]) => rows.length > 0)
     .map(([code, rows, text]) => {
       const shown = rows.slice(0, 5).map(row => row.transaction_id).join(", ");
@@ -95,7 +116,7 @@ function partitionWarnings(result: UnmatchedAnalysisResult): CompactWarning[] {
         code,
         message: `${rows.length} transaction(s) ${text} (${shown}${rows.length > 5 ? ", …" : ""})`,
       };
-    });
+    }));
   if (result.ledgerContextUnavailable !== undefined) {
     warnings.push({ code: "ledger_context_unavailable", message: result.ledgerContextUnavailable });
   }
@@ -204,14 +225,17 @@ export function renderClassificationAnalysisCompact(
 ): { summary: OperationSummaryV1 } {
   const { result } = input;
   const groups = result.groups;
-  const unresolvedGroups = groups.filter(group => group.apply_mode !== "purchase_invoice");
+  const unresolvedGroups = groups.filter(group => group.apply_mode === "review_only");
+  const historyGroups = groups.filter(group => group.apply_mode === "account_distribution");
 
   const counts: Record<string, number> = {
     unconfirmed: result.totalUnconfirmed,
     unmatched: result.totalUnmatched,
     groups: groups.length,
     unresolved: unresolvedGroups.length,
+    history_distribution: historyGroups.length,
     partitioned_out: result.totalPartitionedOut,
+    invoice_matched: result.invoiceMatched.length,
     already_booked: result.alreadyBooked.length,
     own_transfers: result.ownTransfers.length,
     possible_duplicates: result.possibleDuplicates.length,
@@ -229,6 +253,21 @@ export function renderClassificationAnalysisCompact(
     })),
     "the standard/full profile lists every group; or narrow date_from/date_to to see them here.",
   );
+  // A history-based group is auto-bookable through the plan-bound apply; the
+  // proposed account and its evidence are shown so the approval names them.
+  const historyWarnings: CompactWarning[] = cappedWarnings(
+    "history_distribution",
+    historyGroups.map(group => {
+      const history = group.suggested_booking.transaction_history;
+      const dimension = group.suggested_booking.purchase_account_dimensions_id;
+      return {
+        item_id: wrapUntrustedOcr(group.display_counterparty) ?? "",
+        code: "history_distribution",
+        message: `${group.transactions.length} transaction(s) would be confirmed to account ${group.suggested_booking.purchase_account_id}${dimension !== undefined ? ` dimension ${dimension}` : ""}: all ${history?.history_total ?? 0} earlier confirmed rows of this counterparty were booked there (journals ${history?.last_journal_ids.join(", ") ?? ""}).`,
+      };
+    }),
+    "the standard/full profile lists every group; or narrow date_from/date_to to see them here.",
+  );
 
   const samples = groups.slice(0, 3).map((group, index) => ({
     i: index,
@@ -242,8 +281,9 @@ export function renderClassificationAnalysisCompact(
   const ledgerWarnings = partitionWarnings(result);
   const status: OperationSummaryV1["status"] = unresolvedGroups.length > 0 || ledgerWarnings.length > 0 ? "needs_review" : "completed";
   const message = `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s); ${unresolvedGroups.length} need manual review.`
+    + (historyGroups.length > 0 ? ` ${historyGroups.length} group(s) can be booked from consistent booking history after one approval.` : "")
     + (result.totalPartitionedOut > 0
-      ? ` ${result.totalPartitionedOut} more were taken out by the ledger check: ${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s).`
+      ? ` ${result.totalPartitionedOut} more were taken out: ${result.invoiceMatched.length} may pay an open invoice, ${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s).`
       : "");
 
   const period = {
@@ -263,7 +303,7 @@ export function renderClassificationAnalysisCompact(
   // Counterparty text is OCR-sandbox-wrapped; apply canonicalizes it (M10).
   // Review-only groups stay out (apply would skip them) and surface as warnings.
   // When nothing is auto-bookable there is no apply step, so no next_action.
-  const bookableGroups = groups.filter(group => group.apply_mode === "purchase_invoice");
+  const bookableGroups = groups.filter(group => group.apply_mode !== "review_only");
   const applyGroups = bookableGroups.map(group => ({
     category: group.category,
     apply_mode: group.apply_mode,
@@ -276,6 +316,7 @@ export function renderClassificationAnalysisCompact(
     suggested_booking: {
       ...(group.suggested_booking.purchase_article_id !== undefined ? { purchase_article_id: group.suggested_booking.purchase_article_id } : {}),
       ...(group.suggested_booking.purchase_account_id !== undefined ? { purchase_account_id: group.suggested_booking.purchase_account_id } : {}),
+      ...(group.suggested_booking.purchase_account_dimensions_id !== undefined ? { purchase_account_dimensions_id: group.suggested_booking.purchase_account_dimensions_id } : {}),
     },
     transactions: group.transactions.map(transaction => ({
       ...(transaction.id !== undefined ? { id: transaction.id } : {}),
@@ -288,7 +329,7 @@ export function renderClassificationAnalysisCompact(
     message,
     counts,
     scope,
-    warnings: [...extraWarnings, ...ledgerWarnings, ...warnings],
+    warnings: [...extraWarnings, ...ledgerWarnings, ...historyWarnings, ...warnings],
     samples,
     // Without the inlined groups a dry_run_apply call cannot succeed, and a
     // re-classify with the same dates would return the same oversized result,

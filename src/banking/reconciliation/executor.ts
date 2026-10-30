@@ -40,9 +40,11 @@ import {
   reconInvoiceConfirmCommandId,
   reconTransferConfirmCommandId,
   reconDeleteDuplicateCommandId,
+  reconDeleteProposedMirrorCommandId,
   RECON_CONFIRM_INVOICE_CATEGORY,
   RECON_CONFIRM_TRANSFER_CATEGORY,
   RECON_DELETE_DUPLICATE_CATEGORY,
+  RECON_DELETE_PROPOSED_MIRROR_CATEGORY,
   RECON_UPDATE_CLIENT_CATEGORY,
   stripUndefinedDeep,
   type ReconciliationExecutionCommand,
@@ -100,6 +102,7 @@ import type {
   InterAccountExecutionInput,
   InterAccountInput,
   InterAccountMatchResult,
+  InterAccountMirrorDeleteAction,
   InterAccountPreview,
   PairResult,
   AmbiguousPairResult,
@@ -174,16 +177,33 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 /** The suggestion path's default minimum confidence. */
 export const SUGGEST_DEFAULT_MIN_CONFIDENCE = 50;
 
+/**
+ * Suggest-only bonus for an exact-amount purchase invoice whose number or notes
+ * order / cart reference the bank description carries as a whole token.
+ * exact_amount (40) + 30 = 70 outranks every amount/name-only candidate
+ * (max 40 + 15 = 55). The cap 85 keeps it strictly below the 90 auto-confirm
+ * threshold (owner decision: a document reference alone never auto-confirms)
+ * and equals the Tier A cap. The exact-confirm path scores with matchScore
+ * alone, so ref_number_exact and >= 90 admission are untouched.
+ */
+const DOCUMENT_REFERENCE_POINTS = 30;
+const DOCUMENT_REFERENCE_CONFIDENCE_CAP = 85;
+
 export async function runSuggestMatches(
   api: ApiContext,
   input: SuggestMatchesInput,
 ): Promise<ReconciliationSuggestions> {
   const threshold = input.minConfidence ?? SUGGEST_DEFAULT_MIN_CONFIDENCE;
-  // A caller asking for a stricter threshold than the default gets no
-  // below-threshold document-reference group (okt 2026 finding 5).
-  const documentReferenceGroupEnabled = input.minConfidence === undefined || input.minConfidence <= SUGGEST_DEFAULT_MIN_CONFIDENCE;
   const documentReferenceCandidates: DocumentReferenceCandidateRow[] = [];
   const block_on_duplicate = input.blockOnDuplicate;
+
+  // Read uncached: the 120 s list cache does not see invoices created or paid
+  // by another process (a second MCP server, the e-arveldaja UI), so two
+  // surfaces over the same books could report different matches (live
+  // 2026-10-30: an invoice confirmed 9 s earlier elsewhere was missing).
+  api.transactions.invalidateListCache();
+  api.saleInvoices.invalidateListCache();
+  api.purchaseInvoices.invalidateListCache();
 
   // Get all unconfirmed transactions
   const allTx = await api.transactions.listAll();
@@ -218,6 +238,7 @@ export async function runSuggestMatches(
 
   for (const tx of unconfirmed) {
     const candidates: MatchCandidate[] = [];
+    const documentReferenceByInvoiceId = new Map<number, { inv: PurchaseInvoice; matchedReference: string }>();
     const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
 
     if (allowSaleInvoices) {
@@ -243,8 +264,18 @@ export async function runSuggestMatches(
 
     if (allowPurchaseInvoices) {
       for (const inv of getIndexedCandidates(purchaseIndex, tx.ref_number, tx.amount, tx.base_amount)) {
-        const { confidence, reasons, partiallyPaidWarning } = matchScore(tx, inv, tx.amount);
+        const scored = matchScore(tx, inv, tx.amount);
+        const { reasons, partiallyPaidWarning } = scored;
+        let confidence = scored.confidence;
+        const matchedReference = reasons.includes("exact_amount")
+          ? documentReferenceOnTransaction(tx.description, inv)
+          : undefined;
+        if (matchedReference !== undefined) {
+          reasons.push("document_reference");
+          confidence = Math.max(confidence, Math.min(confidence + DOCUMENT_REFERENCE_POINTS, DOCUMENT_REFERENCE_CONFIDENCE_CAP));
+        }
         if (confidence >= threshold) {
+          if (matchedReference !== undefined) documentReferenceByInvoiceId.set(inv.id!, { inv, matchedReference });
           candidates.push({
             type: "purchase_invoice",
             id: inv.id!,
@@ -258,28 +289,6 @@ export async function runSuggestMatches(
             confidence,
             match_reasons: reasons,
           });
-        } else if (documentReferenceGroupEnabled && reasons.includes("exact_amount")) {
-          const matchedReference = documentReferenceOnTransaction(tx.description, inv);
-          if (matchedReference !== undefined) {
-            // RAW domain strings — the presenter wraps the free-text fields.
-            documentReferenceCandidates.push({
-              transaction_id: tx.id,
-              date: tx.date,
-              amount: tx.amount,
-              description: tx.description ?? undefined,
-              bank_account_name: tx.bank_account_name ?? undefined,
-              invoice: {
-                type: "purchase_invoice",
-                id: inv.id!,
-                number: inv.number,
-                client_name: inv.client_name,
-                gross_price: inv.gross_price ?? 0,
-                payment_status: inv.payment_status ?? "NOT_PAID",
-              },
-              matched_reference: matchedReference,
-              match_reasons: [...reasons, "document_reference"],
-            });
-          }
         }
       }
     }
@@ -287,6 +296,30 @@ export async function runSuggestMatches(
     if (candidates.length > 0) {
       candidates.sort((a, b) => b.confidence - a.confidence);
       const bestMatch = candidates[0]!;
+      // A document-reference invoice that did not win this row is listed
+      // separately so it is not hidden behind the chosen best match.
+      for (const candidate of candidates.slice(1)) {
+        const docRef = candidate.type === "purchase_invoice" ? documentReferenceByInvoiceId.get(candidate.id) : undefined;
+        if (docRef === undefined) continue;
+        // RAW domain strings — the presenter wraps the free-text fields.
+        documentReferenceCandidates.push({
+          transaction_id: tx.id,
+          date: tx.date,
+          amount: tx.amount,
+          description: tx.description ?? undefined,
+          bank_account_name: tx.bank_account_name ?? undefined,
+          invoice: {
+            type: "purchase_invoice",
+            id: docRef.inv.id!,
+            number: docRef.inv.number,
+            client_name: docRef.inv.client_name,
+            gross_price: docRef.inv.gross_price ?? 0,
+            payment_status: docRef.inv.payment_status ?? "NOT_PAID",
+          },
+          matched_reference: docRef.matchedReference,
+          match_reasons: candidate.match_reasons,
+        });
+      }
       const crossCurrency =
         (bestMatch.match_reasons.includes("exact_base_amount") ||
           bestMatch.match_reasons.includes("cross_currency_conflict")) &&
@@ -898,10 +931,13 @@ export async function runInterAccountMatching(
   const errors: InterAccountErrorRow[] = [];
   const consumedTxIds = new Set<number>();
   const blockedOneSidedTxIds = new Set<number>();
+  const deleteProposedMirrors = input.deleteProposedMirrors === true;
+  const mirrorDeleteActions: InterAccountMirrorDeleteAction[] = [];
 
   function finish(companyClientsId: number | null): InterAccountMatchResult {
-    const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId);
-    const normalizedArgs = stripUndefinedDeep({ max_date_gap: maxGap, target_accounts_dimensions_id }) as PlanRecord;
+    const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId, mirrorDeleteActions);
+    const normalizedArgs = stripUndefinedDeep({ max_date_gap: maxGap, target_accounts_dimensions_id,
+      ...(deleteProposedMirrors ? { delete_proposed_mirrors: true } : {}) }) as PlanRecord;
     const fingerprint = interAccountFingerprint({ normalizedArgs, planCommandProjections, skippedAlreadyHandled,
       ambiguousPairs, ambiguousRefless, crossCurrencyPairs });
     const companyLegalName = (invoiceInfo.invoice_company_name ?? "").trim();
@@ -909,7 +945,8 @@ export async function runInterAccountMatching(
       ? ["Company name has no legal form; own-transfer detection relies on IBANs only."] : [];
     return { totalUnconfirmed: unconfirmed.length, invoiceInfo, dimensionToIban, dimensionToTitle,
       dimensionToAccountsId, matchedPairs, matchedOneSided, ambiguousPairs, skippedAlreadyHandled,
-      ambiguousRefless, crossCurrencyPairs, errors, confirmActions, companyClientsId, normalizedArgs,
+      ambiguousRefless, crossCurrencyPairs, errors, confirmActions,
+      ...(deleteProposedMirrors ? { mirrorDeleteActions } : {}), companyClientsId, normalizedArgs,
       fingerprint, ...(warnings.length > 0 ? { warnings } : {}) };
   }
 
@@ -1743,6 +1780,18 @@ export async function runInterAccountMatching(
     row.mirror_proposal = proposal;
     row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };
     row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction only after the owner explicitly approves; reconcile never deletes it automatically.`;
+    if (deleteProposedMirrors) {
+      // Opt-in: the reviewed plan carries this deletion; execute re-verifies it.
+      mirrorDeleteActions.push({
+        transactionId: row.transaction_id,
+        journalId: proposal.journal_id,
+        counterpartTransactionId: proposal.counterpart_transaction_id,
+        targetDimensionId: row.target_dimension_id!,
+        material: snapshotBankTransaction(allTx.get(row.transaction_id)!),
+      });
+      row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. delete_proposed_mirrors put its deletion in this plan: verify against the bank statements before approving execute.`;
+      delete row.next_action;
+    }
   }
 
   const companyClientsId = await resolveCompanyClientsId();
@@ -1789,7 +1838,7 @@ export async function prepareInterAccount(
 ): Promise<InterAccountPreview> {
   const match = await runInterAccountMatching(api, input);
   if (input.mintPlanHandles === false) return { match };
-  const planCommandProjections = buildInterAccountPlanCommandProjections(match.confirmActions, match.companyClientsId);
+  const planCommandProjections = buildInterAccountPlanCommandProjections(match.confirmActions, match.companyClientsId, match.mirrorDeleteActions);
 
   const planHandle = runtimeSafetyContext.planStore.issue(
     BANK_RECONCILIATION_PLAN_DOMAIN,
@@ -1807,6 +1856,7 @@ export async function prepareInterAccount(
         total_unconfirmed: match.totalUnconfirmed,
         matched_pairs: match.matchedPairs.length,
         matched_one_sided: match.matchedOneSided.length,
+        ...(match.mirrorDeleteActions !== undefined ? { proposed_mirror_deletes: match.mirrorDeleteActions.length } : {}),
       },
       totals: {},
       exclusions: [...match.skippedAlreadyHandled, ...match.ambiguousRefless, ...match.crossCurrencyPairs].map(row => stripUndefinedDeep(row as unknown as PlanRecord)),
@@ -2008,8 +2058,61 @@ export async function executeInterAccount(
     }
   }
 
+  for (const action of match.mirrorDeleteActions ?? []) {
+    // Every read gates the delete: the row must still be the reviewed PROJECT
+    // row, and the journal must still book its confirmed counterpart.
+    const verifyMirror = async (): Promise<string | undefined> => {
+      api.transactions.invalidateListCache();
+      const row = await api.transactions.get(action.transactionId);
+      if (!row || !isProjectTransaction(row)) return "mirror_not_project";
+      if (!compareBankTransactionMaterial(action.material, row).ok) return "mirror_material_drift";
+      const counterpart = await api.transactions.get(action.counterpartTransactionId);
+      if (!counterpart || counterpart.is_deleted || counterpart.status !== "CONFIRMED"
+        || counterpart.accounts_dimensions_id !== action.targetDimensionId
+        || !sameAmountToTheCent(counterpart.amount, action.material.amount ?? Number.NaN)) return "mirror_counterpart_drift";
+      api.journals.invalidateListCache();
+      const journal = (await api.journals.listAllWithPostings()).find(j => j.id === action.journalId);
+      if (!journal || journal.is_deleted || journal.registered !== true || journal.operation_type !== "TRANSACTION"
+        || journal.operations_id !== action.counterpartTransactionId) return "mirror_journal_drift";
+      return undefined;
+    };
+    commands.push({
+      id: reconDeleteProposedMirrorCommandId(action.transactionId),
+      category: RECON_DELETE_PROPOSED_MIRROR_CATEGORY,
+      prepare: async () => {
+        const drift = await verifyMirror();
+        if (drift) return { outcome: "drift", error_code: drift };
+        // The journal read may await another actor: make the row the final read.
+        api.transactions.invalidateListCache();
+        const row = await api.transactions.get(action.transactionId);
+        if (!row || !isProjectTransaction(row) || !compareBankTransactionMaterial(action.material, row).ok) {
+          return { outcome: "drift", error_code: "mirror_material_drift" };
+        }
+        return { outcome: "ready" };
+      },
+      mutate: async () => {
+        try {
+          await api.transactions.delete(action.transactionId);
+          logAudit({
+            tool: "reconcile_inter_account_transfers", action: "DELETED", entity_type: "transaction",
+            entity_id: action.transactionId,
+            summary: `Deleted proposed mirror row ${action.transactionId} of confirmed transaction ${action.counterpartTransactionId} (journal ${action.journalId})`,
+            details: { journal_id: action.journalId, counterpart_transaction_id: action.counterpartTransactionId, delete_proposed_mirrors: true },
+          });
+          return { outcome: "completed", known_objects: [{ entity_type: "transaction", entity_id: action.transactionId, outcome: "deleted" }] };
+        } catch (err) {
+          if (err instanceof MutationIndeterminateError) return { outcome: "indeterminate", error_code: "mutation_outcome_unknown" };
+          return { outcome: "failed", error_code: "delete_failed", mutation_occurred: false };
+        }
+      },
+    });
+  }
+
   const executionReport = await executeReconciliationCommands(commands);
   const completedIds = new Set(executionReport.command_partitions.completed.map(item => item.command_id));
+  for (const row of match.skippedAlreadyHandled) {
+    if (completedIds.has(reconDeleteProposedMirrorCommandId(row.transaction_id))) row.mirror_deleted = true;
+  }
   for (const pair of match.matchedPairs) {
     const action=match.confirmActions.find(action=>action.confirmedTxId===pair.outgoing_transaction_id);
     if(action?.registrationJournalId!=null)pair.registration_journal_id=action.registrationJournalId;

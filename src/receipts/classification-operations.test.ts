@@ -937,6 +937,21 @@ describe("classification operations — a document-reference candidate is never 
     expect(analysis.value.totalUnconfirmed).toBe(1);
     expect(analysis.value.totalUnmatched).toBe(0);
     expect(analysis.value.groups).toEqual([]);
+    // Live 2026-10-30: the row is reported with its invoice, never dropped silently.
+    expect(analysis.value.totalPartitionedOut).toBe(1);
+    expect(analysis.value.invoiceMatched).toEqual([{
+      transaction_id: 43, date: "2026-03-18", amount: 25.2,
+      invoice_type: "purchase_invoice", invoice_id: 701, invoice_number: "BL-990011701",
+      matched_by: "document_reference", matched_reference: CART,
+      next_action: 'reconcile_bank_transactions mode="suggest" and confirm the row against open purchase invoice 701 if it pays it; never book it as a new expense',
+    }]);
+    const compact = renderClassificationAnalysisCompact({ result: analysis.value, accountsDimensionsId: 100 });
+    expect(compact.summary.status).toBe("needs_review");
+    expect(compact.summary.counts).toMatchObject({ unconfirmed: 1, unmatched: 0, partitioned_out: 1, invoice_matched: 1 });
+    expect(compact.summary.warnings).toContainEqual({
+      code: "invoice_matched",
+      message: '1 transaction(s) may pay an open invoice and were not classified; reconcile them with reconcile_bank_transactions mode="suggest" (43 → purchase invoice 701 by document_reference)',
+    });
   });
 
   it("still classifies the same exact-amount payment when its description carries no reference of that invoice", async () => {
@@ -981,6 +996,7 @@ describe("classification operations — ledger context (F6)", () => {
     { id: 200, accounts_id: 1020, is_deleted: false },
     { id: 900, accounts_id: 2110, is_deleted: false },
     { id: 901, accounts_id: 1410, is_deleted: false },
+    { id: 391, accounts_id: 1010, is_deleted: false },
   ];
   const LOAN_ACCOUNTS = [
     { id: 2110, name_est: "Laenud", account_type_est: "Kohustused" },
@@ -991,12 +1007,12 @@ describe("classification operations — ledger context (F6)", () => {
   function camtRow(spec: {
     id: number; amount: number; date: string; direction: "CRDT" | "DBIT"; name: string;
     iban?: string; reference?: string; description?: string; dim?: number;
-    render?: typeof buildCamtDescriptionWithMetadataV1;
+    render?: typeof buildCamtDescriptionWithMetadataV1; currency?: string;
   }) {
     const description = (spec.render ?? buildCamtDescriptionWithMetadata)(spec.description ?? "laen", {
       date: spec.date,
       amount: spec.amount,
-      currency: "EUR",
+      currency: spec.currency ?? "EUR",
       direction: spec.direction,
       counterparty_name: spec.name,
       counterparty_iban: spec.iban,
@@ -1007,7 +1023,7 @@ describe("classification operations — ledger context (F6)", () => {
     return {
       id: spec.id, status: "PROJECT", is_deleted: false, type: "C", amount: spec.amount, date: spec.date,
       accounts_id: 1020, accounts_dimensions_id: spec.dim ?? 100, bank_account_name: spec.name,
-      bank_account_no: null, bank_ref_number: null, ref_number: null, cl_currencies_id: "EUR", description,
+      bank_account_no: null, bank_ref_number: null, ref_number: null, cl_currencies_id: spec.currency ?? "EUR", description,
     };
   }
 
@@ -1030,9 +1046,13 @@ describe("classification operations — ledger context (F6)", () => {
 
   function ledgerOperations(options: {
     rows: unknown[]; journals?: unknown[]; bankAccounts?: unknown[]; companyName?: string;
-    purchaseArticles?: unknown[]; accounts?: unknown[];
+    purchaseArticles?: unknown[]; accounts?: unknown[]; allowWrites?: boolean; saleInvoiceRows?: unknown[];
+    purchaseInvoiceRows?: unknown[];
   }) {
     return makeOperations({
+      ...(options.purchaseInvoiceRows ? { purchaseInvoiceRows: options.purchaseInvoiceRows } : {}),
+      ...(options.allowWrites ? { allowWrites: true } : {}),
+      ...(options.saleInvoiceRows ? { saleInvoiceRows: options.saleInvoiceRows } : {}),
       transactionRows: options.rows,
       clientRows: [],
       purchaseArticles: options.purchaseArticles ?? [],
@@ -1288,6 +1308,242 @@ describe("classification operations — ledger context (F6)", () => {
       transaction_id: 17, code: "camt_marker_unverified",
       next_action: expect.stringMatching(/^legacy_truncated_camt_marker: .*confirm it manually/),
     })]);
+  });
+
+  describe("history-based account distribution (live 2026-10-30 'Kassasse')", () => {
+    // A person without legal form; earlier payments were all confirmed to the
+    // cash account 1010 / dimension 391 under client 77, with no invoice.
+    const PERSON_IBAN = "EE947700771000826270";
+    const KASSA_ACCOUNTS = [...LOAN_ACCOUNTS, { id: 1010, name_est: "Sularaha kassas", account_type_est: "Varad" }];
+    const kassaHistory = (contras: Array<[number, number | null]>) => {
+      const built = historyRows("Mari Maasikas", "C", [1010, 391], contras.map((_, index) => `2026-0${index + 5}-01`), 950);
+      built.transactions.forEach((row, index) => Object.assign(row, {
+        clients_id: 77,
+        description: buildCamtDescriptionWithMetadata("Kassasse", {
+          date: row.date, amount: row.amount, currency: "EUR", direction: "DBIT", counterparty_name: "Mari Maasikas",
+          counterparty_iban: PERSON_IBAN, bank_reference: `HIST${row.id}`, description: "Kassasse",
+        }),
+      }) && Object.assign(built.journals[index]!.postings[1]!, { accounts_id: contras[index]![0], accounts_dimensions_id: contras[index]![1] }));
+      return built;
+    };
+    const payments = () => [
+      { ...camtRow({ id: 61, amount: 19, date: "2026-10-19", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }), clients_id: 77 },
+      { ...camtRow({ id: 62, amount: 25, date: "2026-10-20", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }), clients_id: null },
+    ];
+
+    it("proposes the account and dimension with its evidence and books it after one reviewed plan", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const rows = payments();
+      const { api, operations } = ledgerOperations({
+        rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+      });
+      api.transactions.update.mockImplementation(async (id: number, data: Record<string, unknown>) => {
+        Object.assign(rows.find(row => row.id === id)!, data);
+        return {};
+      });
+      const result = await analyze(operations);
+      expect(result.groups).toHaveLength(1);
+      const group = result.groups[0]!;
+      expect(group.apply_mode).toBe("account_distribution");
+      expect(group.transactions.map(tx => tx.id)).toEqual([61, 62]);
+      expect(group.suggested_booking).toMatchObject({
+        source: "transaction_history",
+        purchase_account_id: 1010,
+        purchase_account_dimensions_id: 391,
+        suggested_distribution: { related_table: "accounts", related_id: 1010, related_sub_id: 391 },
+        transaction_history: { history_total: 2, consistent: true, clients_id: 77, last_journal_ids: [9510, 9500] },
+      });
+      expect(group.suggested_booking.reason).toContain("journals 9510, 9500");
+
+      // The guided summary offers the dry run and names the proposed account.
+      const compact = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
+      expect(compact.summary.counts).toMatchObject({ unresolved: 0, history_distribution: 1 });
+      expect(compact.summary.next_action?.args.mode).toBe("dry_run_apply");
+      expect(compact.summary.warnings?.find(warning => warning.code === "history_distribution")?.message)
+        .toBe("2 transaction(s) would be confirmed to account 1010 dimension 391: all 2 earlier confirmed rows of this counterparty were booked there (journals 9510, 9500).");
+
+      const classificationsJson = compact.summary.next_action!.args.classifications_json;
+      const dry = await operations.applyClassifications({ classificationsJson });
+      expect(dry.ok).toBe(true);
+      if (!dry.ok) return;
+      expect(dry.value.results[0]).toMatchObject({ status: "dry_run_preview" });
+      expect(dry.value.results[0]!.notes).toEqual([
+        "Dry run: would confirm transaction 61 to account 1010 dimension 391 with amount 19 (history: 2 earlier row(s), journals 9510, 9500).",
+        "Dry run: would set client 77, then confirm transaction 62 to account 1010 dimension 391 with amount 25 (history: 2 earlier row(s), journals 9510, 9500).",
+      ]);
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+      // Without the reviewed plan nothing is written.
+      const unplanned = await operations.applyClassifications({ classificationsJson, execute: true });
+      expect(unplanned.ok).toBe(false);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      expect(executed.ok).toBe(true);
+      if (!executed.ok) return;
+      expect(executed.value.results[0]).toMatchObject({ status: "applied", linked_transaction_ids: [61, 62] });
+      // Execute reads open sale invoices live, not from the 120 s list cache.
+      expect(api.saleInvoices.invalidateListCache).toHaveBeenCalled();
+      expect(api.transactions.update).toHaveBeenCalledTimes(1);
+      expect(api.transactions.update).toHaveBeenCalledWith(62, { clients_id: 77 });
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
+      expect(api.transactions.confirm).toHaveBeenNthCalledWith(1, 61,
+        [{ related_table: "accounts", related_id: 1010, related_sub_id: 391, amount: 19 }],
+        expect.objectContaining({ expectedLinkedInvoices: {}, expectedTransaction: expect.objectContaining({ clients_id: 77 }) }));
+      expect(api.transactions.confirm).toHaveBeenNthCalledWith(2, 62,
+        [{ related_table: "accounts", related_id: 1010, related_sub_id: 391, amount: 25 }],
+        expect.objectContaining({ expectedLinkedInvoices: {}, expectedTransaction: expect.objectContaining({ clients_id: 77 }) }));
+    });
+
+    it("a history change after the dry run drifts the plan with zero writes", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const { api, operations } = ledgerOperations({
+        rows: [...payments(), ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+      });
+      const classificationsJson = { groups: (await analyze(operations)).groups };
+      const dry = await operations.applyClassifications({ classificationsJson });
+      if (!dry.ok) throw new Error("dry run failed");
+      // A newer confirmed row of the same client went elsewhere: the history is mixed now.
+      history.journals[1]!.postings[1]!.accounts_id = 2110;
+      history.journals[1]!.postings[1]!.accounts_dimensions_id = 900;
+      const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+      expect(executed).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("a mixed history stays review-only and shows the split; the apply path skips it", async () => {
+      const history = kassaHistory([[2110, 900], [1010, 391], [1010, 391], [1010, 391]]);
+      const { api, operations } = ledgerOperations({
+        rows: [...payments(), ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+      });
+      const result = await analyze(operations);
+      const group = result.groups[0]!;
+      expect(group.apply_mode).toBe("review_only");
+      expect(group.suggested_booking.transaction_history).toMatchObject({ streak: 3, history_total: 4, consistent: false });
+      expect(group.suggested_booking.reason).toContain("Earlier rows were booked differently (3× 1010/391, 1× 2110/900).");
+      const forced = { groups: [{ ...group, apply_mode: "account_distribution" }] };
+      const dry = await operations.applyClassifications({ classificationsJson: forced });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]!.status).toBe("skipped");
+      const executed = await operations.applyClassifications({ classificationsJson: forced, execute: true, planHandle: dry.value.planHandle });
+      if (!executed.ok) throw new Error("execute failed");
+      expect(executed.value.results[0]!.status).toBe("skipped");
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("a client on the new row never vouches for client-less history rows tied to it by name alone", async () => {
+      // Review r1 M1: same name, no IBAN, no legal form, history rows without a client.
+      const byName = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01"], 980);
+      const withClient = { ...camtRow({ id: 68, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: 77 };
+      const first = ledgerOperations({ rows: [withClient, ...byName.transactions], journals: byName.journals, accounts: KASSA_ACCOUNTS });
+      const result = await analyze(first.operations);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]!.apply_mode).toBe("review_only");
+
+      // The same rows linked to client 77 are client evidence: bookable.
+      const linked = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01"], 980);
+      linked.transactions.forEach(row => Object.assign(row, { clients_id: 77 }));
+      const second = ledgerOperations({ rows: [withClient, ...linked.transactions], journals: linked.journals, accounts: KASSA_ACCOUNTS });
+      const group = (await analyze(second.operations)).groups[0]!;
+      expect(group.apply_mode).toBe("account_distribution");
+      expect(group.suggested_booking.transaction_history).toMatchObject({ history_total: 2, consistent: true, clients_id: 77 });
+      expect(group.suggested_booking.transaction_history?.identity).toBeUndefined();
+    });
+
+    it("refuses a forced account_distribution group that a saved rule decides (review r1 MINOR 2)", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "earv-history-rules-"));
+      const rulesFile = join(dir, "accounting-rules.md");
+      writeFileSync(rulesFile, "# Accounting Rules\n\n## Auto Booking\n| match | purchase_account_id |\n| --- | --- |\n| Mari Maasikas | 1410 |\n", "utf-8");
+      const previous = process.env.EARVELDAJA_RULES_FILE;
+      process.env.EARVELDAJA_RULES_FILE = rulesFile;
+      resetAccountingRulesCache();
+      try {
+        const history = kassaHistory([[1010, 391], [1010, 391]]);
+        const rows = payments();
+        const { api, operations } = ledgerOperations({
+          rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+        });
+        const group = (await analyze(operations)).groups[0]!;
+        expect(group.suggested_booking.source).toBe("local_rules");
+        expect(group.apply_mode).toBe("review_only");
+        const forced = { groups: [{ ...group, apply_mode: "account_distribution" }] };
+        const dry = await operations.applyClassifications({ classificationsJson: forced });
+        if (!dry.ok) throw new Error("dry run failed");
+        expect(dry.value.results[0]!.status).toBe("skipped");
+        expect(dry.value.results[0]!.notes).toContain("Transaction 61 skipped — a saved booking rule or the statutory category treatment decides this counterparty, not its booking history; re-classify.");
+        const executed = await operations.applyClassifications({ classificationsJson: forced, execute: true, planHandle: dry.value.planHandle });
+        if (!executed.ok) throw new Error("execute failed");
+        expect(executed.value.results[0]!.status).toBe("skipped");
+        expect(api.transactions.update).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      } finally {
+        if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+        else process.env.EARVELDAJA_RULES_FILE = previous;
+        resetAccountingRulesCache();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a name-only or own-bank-account history review-only even when its rows carry a client", async () => {
+      // Name only: neither the history rows nor the new row has an IBAN or a legal form.
+      const nameOnly = historyRows("Mari Maasikas", "C", [1010, 391], ["2026-05-01", "2026-06-01", "2026-07-01"], 960);
+      nameOnly.transactions.forEach(row => Object.assign(row, { clients_id: 77 }));
+      const bare = { ...camtRow({ id: 66, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: null };
+      const first = ledgerOperations({ rows: [bare, ...nameOnly.transactions], journals: nameOnly.journals, accounts: KASSA_ACCOUNTS });
+      const nameGroup = (await analyze(first.operations)).groups[0]!;
+      expect(nameGroup.suggested_booking.transaction_history).toMatchObject({ identity: "name_only", consistent: true, clients_id: 77 });
+      expect(nameGroup.apply_mode).toBe("review_only");
+
+      // Own bank account: top-ups to a broker's pooled IBAN booked against own bank dimension 200.
+      const POOLED = "DE25502109000222308186";
+      const topUps = historyRows("Maakler AS", "C", [1020, 200], ["2026-06-01", "2026-07-01", "2026-08-01"], 970);
+      topUps.transactions.forEach(row => Object.assign(row, { clients_id: 88 }));
+      const topUp = { ...camtRow({ id: 67, amount: 300, date: "2026-09-10", direction: "DBIT", name: "Maakler AS", iban: POOLED, description: "top-up" }), clients_id: 88 };
+      const second = ledgerOperations({ rows: [topUp, ...topUps.transactions], journals: topUps.journals });
+      const bankGroup = (await analyze(second.operations)).groups[0]!;
+      expect(bankGroup.suggested_booking.transaction_history).toMatchObject({ own_bank_account: true, consistent: true, clients_id: 88 });
+      expect(bankGroup.apply_mode).toBe("review_only");
+    });
+
+    it("skips a forced row that pays an open purchase invoice, with zero writes", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const paying = { ...camtRow({ id: 65, amount: 25.2, date: "2026-10-22", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse BL-990011701" }), clients_id: 77 };
+      const invoice = { id: 701, status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 99, client_name: "Bussiliin OÜ", number: "BL-990011701", create_date: "2026-08-01", gross_price: 25.2, base_gross_price: 25.2, cl_currencies_id: "EUR" };
+      const { api, operations } = ledgerOperations({
+        rows: [paying, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+        purchaseInvoiceRows: [invoice],
+      });
+      const result = await analyze(operations);
+      expect(result.groups).toEqual([]);
+      expect(result.invoiceMatched).toMatchObject([{ transaction_id: 65, invoice_id: 701, matched_by: "document_reference" }]);
+      const forced = { groups: [{
+        category: "unknown", apply_mode: "account_distribution", normalized_counterparty: "mari maasikas", display_counterparty: "Mari Maasikas",
+        recurring: false, similar_amounts: false, total_amount: 25.2, suggested_booking: { reason: "forced" }, reasons: [], transactions: [paying],
+      }] };
+      const dry = await operations.applyClassifications({ classificationsJson: forced });
+      if (!dry.ok) throw new Error("dry run failed");
+      expect(dry.value.results[0]).toMatchObject({ status: "skipped" });
+      expect(dry.value.results[0]!.notes.join("\n")).toContain("Transaction 65 skipped — it may pay an open invoice");
+      const executed = await operations.applyClassifications({ classificationsJson: forced, execute: true, planHandle: dry.value.planHandle });
+      if (!executed.ok) throw new Error("execute failed");
+      expect(executed.value.results[0]!.status).toBe("skipped");
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("never proposes it for a name-only or a non-EUR row", async () => {
+      const history = kassaHistory([[1010, 391], [1010, 391]]);
+      const bare = { ...camtRow({ id: 63, amount: 7, date: "2026-10-21", direction: "DBIT", name: "Mari Maasikas", description: "Kassasse" }), clients_id: null };
+      const usd = { ...camtRow({ id: 64, amount: 19, date: "2026-10-19", direction: "DBIT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse", currency: "USD" }), clients_id: 77 };
+      const { operations } = ledgerOperations({
+        rows: [bare, usd, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS,
+      });
+      const result = await analyze(operations);
+      for (const group of result.groups) expect(group.apply_mode).toBe("review_only");
+      expect(result.groups.flatMap(group => group.transactions.map(tx => tx.id)).sort()).toEqual([63, 64]);
+    });
   });
 
   it("(A6) a 'Näide OÜ' / 'Näide AS' group is split so only the identity-compatible rows carry the history", async () => {

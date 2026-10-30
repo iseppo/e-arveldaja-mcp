@@ -56,7 +56,8 @@ import { DEFAULT_LIABILITY_ACCOUNT } from "../accounting-defaults.js";
 import { logAudit } from "../audit-log.js";
 import { desandboxAllStrings, desandboxText } from "../external-text-renderer.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
-import type { Account, CreatePurchaseInvoiceData, PurchaseInvoice } from "../types/api.js";
+import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice } from "../types/api.js";
+import { normalizeVatValue } from "../document-identifiers.js";
 import { draftFingerprint, draftReadbackMismatches } from "./purchase-draft-verification.js";
 import { scanPurchaseIntakeDuplicates, withPurchaseInvoiceLock } from "./purchase-invoice-lock.js";
 import type {
@@ -68,6 +69,7 @@ import type {
   ConfirmAccountingDocumentInput,
   ExecuteAccountingDocumentInput,
   PrepareAccountingDocumentInput,
+  SupplierIdentifierAcknowledgement,
 } from "./types.js";
 
 /**
@@ -315,6 +317,43 @@ export async function computeEffectiveBooking(
   });
 }
 
+// Registry codes compare as their digits; VAT numbers through normalizeVatValue.
+function normalizeRegistryCode(value: string | null | undefined): string | undefined {
+  const digits = value?.replace(/\D/g, "");
+  return digits || undefined;
+}
+
+// The client's identifier of `kind`, normalized as acknowledgements compare it.
+function clientIdentifier(client: Pick<Client, "code" | "invoice_vat_no">, kind: SupplierIdentifierAcknowledgement["matched"]): string | undefined {
+  return kind === "reg_code" ? normalizeRegistryCode(client.code) : normalizeVatValue(client.invoice_vat_no);
+}
+
+// The client's registry code or VAT number among the identifiers the document
+// prints, registry code first. Never the active company itself, and nothing
+// when neither of its own identifiers could be read (offline / unconfigured):
+// then nothing proves the client is not the buyer. (The own registry code is
+// derived from an own-company client record, so a VAT-registered company may
+// know only its VAT number; a client carrying either own id is refused.)
+function printedSupplierIdentifierMatch(
+  client: Pick<Client, "code" | "invoice_vat_no">,
+  extracted: Pick<ExtractedReceiptFields, "supplier_reg_code" | "supplier_vat_no" | "all_reg_code_candidates" | "all_vat_candidates">,
+  own: { ownCompanyVat?: string; ownCompanyRegistryCode?: string },
+): Omit<SupplierIdentifierAcknowledgement, "client_id"> | undefined {
+  const ownRegCode = normalizeRegistryCode(own.ownCompanyRegistryCode);
+  const ownVat = normalizeVatValue(own.ownCompanyVat);
+  const regCode = clientIdentifier(client, "reg_code");
+  const vatNo = clientIdentifier(client, "vat_no");
+  if (ownRegCode === undefined && ownVat === undefined) return undefined;
+  if ((regCode !== undefined && regCode === ownRegCode) || (vatNo !== undefined && vatNo === ownVat)) return undefined;
+  if (regCode && [extracted.supplier_reg_code, ...(extracted.all_reg_code_candidates ?? [])].map(normalizeRegistryCode).includes(regCode)) {
+    return { matched: "reg_code", identifier: regCode };
+  }
+  if (vatNo && [extracted.supplier_vat_no, ...(extracted.all_vat_candidates ?? [])].map(value => normalizeVatValue(value)).includes(vatNo)) {
+    return { matched: "vat_no", identifier: vatNo };
+  }
+  return undefined;
+}
+
 /** The wrong-company signal the document raises for the active company, if any. */
 export async function wrongCompanySignal(api: ApiContext, path: string, fileName: string): Promise<typeof WRONG_COMPANY_SIGNALS[number] | undefined> {
   const parsedDocument = await parseDocument(path);
@@ -491,6 +530,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       // Blockers / warnings surfaced compactly.
       const blockers: CompactReviewItem[] = [];
       const warnings: CompactWarning[] = [];
+      let supplierIdentifierAcknowledged: SupplierIdentifierAcknowledgement | undefined;
       if (!vatValid) {
         // Regex-extracted totals are frequently incomplete (net/VAT often absent),
         // so this is advisory — the operator supplies the reviewed totals at
@@ -515,6 +555,24 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
         // the wrong books — no reviewed amounts fix that, so no plan handle.
         // A footer-derived or contested supplier id is only a suggestion: no
         // plan handle either (a wrong id resolves or creates the wrong client).
+        // An explicit booking supplier whose registry code or VAT number is one
+        // the document prints acknowledges the contested id (owner decision,
+        // live 2026-10-30: a ticket names seller and carrier): a warning, and
+        // the match is recorded in the bound booking projection.
+        if (signal === "supplier_identifier_ambiguous" && input.booking !== undefined) {
+          const supplierClientId = input.booking.supplierClientId;
+          const client = allClients.find(entry => entry.id === supplierClientId)
+            ?? await this.api.clients.get(supplierClientId).catch(() => undefined);
+          const match = client ? printedSupplierIdentifierMatch(client, extracted, { ownCompanyVat, ownCompanyRegistryCode }) : undefined;
+          if (match) {
+            supplierIdentifierAcknowledged = { client_id: supplierClientId, ...match };
+            warnings.push({
+              code: "supplier_identifier_acknowledged",
+              message: `${CREATION_GATING_SIGNAL_WARNINGS[signal]} The booking supplier (client ${supplierClientId}) carries the ${match.matched === "vat_no" ? "VAT number" : "registry code"} ${match.identifier} the document prints, which acknowledges it.`,
+            });
+            continue;
+          }
+        }
         if (
           (WRONG_COMPANY_SIGNALS as readonly string[]).includes(signal) ||
           signal === "supplier_from_footer_block" ||
@@ -562,12 +620,17 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       // fingerprint becomes the plan's normalizedArgs; create recomputes the
       // same model fresh and drift-compares before any write.
       let planHandle: string | undefined;
-      let bookingProjection: PlanData | undefined;
+      let bookingProjection: AccountingDocumentPreview["bookingProjection"];
       if (input.booking !== undefined) {
         const booking = { ...input.booking, notes: appendOrderReferenceNote(input.booking.notes, orderReferenceNote) };
         const effective = await this.computeEffectiveBooking(booking, material.source_sha256, material.fileName);
         if (!effective.ok) return effective;
-        bookingProjection = effective.value.fingerprint;
+        // The acknowledgement rides in the reviewed projection and the stored
+        // plan; the fingerprint already binds supplier_client_id, and create
+        // re-checks the acknowledged client against its booking supplier.
+        bookingProjection = supplierIdentifierAcknowledged
+          ? { ...effective.value.fingerprint, supplier_identifier_acknowledged: { ...supplierIdentifierAcknowledged } }
+          : effective.value.fingerprint;
         // The extraction-level duplicate check above keys on the OCR number and
         // OCR-resolved supplier; the create writes the REVIEWED supplier+number.
         // An exact live match on those is a blocker (no plan handle is issued)
@@ -609,6 +672,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
           privatePayload: {
             source_sha256: material.source_sha256,
             ...(orderReferenceNote !== undefined ? { order_reference_note: orderReferenceNote } : {}),
+            ...(supplierIdentifierAcknowledged ? { supplier_identifier_acknowledged: { ...supplierIdentifierAcknowledged } } : {}),
           },
         };
         // ...but a bound booking is not by itself approval. When the supplier
@@ -728,8 +792,22 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       const booking = { ...input, notes: appendOrderReferenceNote(input.notes, storedOrderReferenceNote) };
       const effective = await this.computeEffectiveBooking(booking, material.source_sha256, material.fileName);
       if (!effective.ok) return effective;
-      if (canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint)) {
+      const acknowledged = isRecord(stored.supplier_identifier_acknowledged) ? stored.supplier_identifier_acknowledged : undefined;
+      if (
+        canonicalPlanJson(storedPlan.normalizedArgs) !== canonicalPlanJson(effective.value.fingerprint) ||
+        (acknowledged !== undefined && acknowledged.client_id !== input.supplierClientId)
+      ) {
         return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");
+      }
+      // The acknowledged client must still carry the printed identifier: re-read
+      // it past the cache (it may have been edited in the UI since prepare).
+      if (acknowledged !== undefined) {
+        this.api.clients.invalidateListCache();
+        const client = await this.api.clients.get(input.supplierClientId);
+        const kind = acknowledged.matched === "vat_no" ? "vat_no" : "reg_code";
+        if (clientIdentifier(client, kind) !== acknowledged.identifier) {
+          return fail("plan_drift", "The supplier's registry code or VAT number no longer matches the printed identifier that acknowledged the contested supplier ids. Re-run mode='prepare' and review again.", "never");
+        }
       }
       // Re-check the document's addressee before any write: a handle issued
       // earlier (other own-company identity, older extraction) must not book

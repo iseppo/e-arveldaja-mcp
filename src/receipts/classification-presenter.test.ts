@@ -45,6 +45,7 @@ function analysis(groupCount: number): UnmatchedAnalysisResult {
     totalUnmatched: groupCount,
     categoryCounts: { bank_fees: groupCount },
     groups,
+    invoiceMatched: [],
     alreadyBooked: [],
     ownTransfers: [],
     possibleDuplicates: [],
@@ -136,7 +137,13 @@ describe("classification analysis — ledger partitions (F6)", () => {
       transaction_id: 43, date: "2026-09-24", amount: 50, counterparty: "Laenaja OÜ",
       journal_ids: [7002], code: "camt_journal_posting_review", next_action: "compare with journal 7002; if it books this movement, delete the PROJECT row; otherwise classify normally",
     }];
-    result.totalPartitionedOut = 3;
+    result.invoiceMatched = [{
+      transaction_id: 44, date: "2026-10-25", amount: 25.2, counterparty: "Bussiliin OÜ",
+      invoice_type: "purchase_invoice", invoice_id: 701, invoice_number: "BL-701", matched_by: "document_reference",
+      matched_reference: "990011223344",
+      next_action: 'reconcile_bank_transactions mode="suggest" and confirm the row against open purchase invoice 701 if it pays it; never book it as a new expense',
+    }];
+    result.totalPartitionedOut = 4;
     return result;
   }
 
@@ -144,11 +151,11 @@ describe("classification analysis — ledger partitions (F6)", () => {
     const compact = renderClassificationAnalysisCompact({ result: partitioned(), accountsDimensionsId: 100 });
     expect(compact.summary.status).toBe("needs_review");
     expect(compact.summary.counts).toMatchObject({
-      unmatched: 1, unresolved: 0, partitioned_out: 3, already_booked: 1, own_transfers: 1, possible_duplicates: 1,
+      unmatched: 1, unresolved: 0, partitioned_out: 4, invoice_matched: 1, already_booked: 1, own_transfers: 1, possible_duplicates: 1,
     });
-    expect(compact.summary.message).toContain("3");
+    expect(compact.summary.message).toContain("4 more were taken out: 1 may pay an open invoice, 1 already booked");
     const codes = compact.summary.warnings!.map(warning => warning.code);
-    expect(codes).toEqual(expect.arrayContaining(["already_booked", "own_transfers", "possible_duplicates"]));
+    expect(codes).toEqual(expect.arrayContaining(["invoice_matched", "already_booked", "own_transfers", "possible_duplicates"]));
     // The bookable group is still offered for dry_run_apply.
     expect(compact.summary.next_action?.args.mode).toBe("dry_run_apply");
   });
@@ -164,7 +171,12 @@ describe("classification analysis — ledger partitions (F6)", () => {
   it("lists every partition in the full envelope with the counterparty sandboxed", () => {
     const full = renderUnmatchedAnalysisFull({ result: partitioned() });
     expect(full.total_unmatched).toBe(1);
-    expect(full.total_partitioned_out).toBe(3);
+    expect(full.total_partitioned_out).toBe(4);
+    const invoiceMatched = (full.invoice_matched as Array<Record<string, unknown>>)[0]!;
+    expect(invoiceMatched).toMatchObject({ transaction_id: 44, invoice_id: 701, matched_by: "document_reference" });
+    for (const field of ["counterparty", "invoice_number", "matched_reference"]) {
+      expect(invoiceMatched[field]).toContain("UNTRUSTED_OCR_START");
+    }
     const ownTransfers = full.own_transfers as Array<Record<string, unknown>>;
     expect(ownTransfers[0]).toMatchObject({ transaction_id: 41, target_dimension_id: 200 });
     expect(ownTransfers[0]!.counterparty).toContain("UNTRUSTED_OCR_START");

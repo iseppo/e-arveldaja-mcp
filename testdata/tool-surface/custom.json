@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 92016,
+    "toolsListBytes": 92634,
     "descriptionsBytes": 11937,
-    "inputSchemasBytes": 59685,
+    "inputSchemasBytes": 60303,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -2718,6 +2718,10 @@
         "$schema": "http://json-schema.org/draft-07/schema#",
         "additionalProperties": false,
         "properties": {
+          "delete_proposed_mirrors": {
+            "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
+            "type": "boolean"
+          },
           "execute": {
             "description": "Actually confirm matched pairs (default false = dry run)",
             "type": "boolean"
@@ -2759,6 +2763,10 @@
         "properties": {
           "block_on_duplicate": {
             "description": "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only.",
+            "type": "boolean"
+          },
+          "delete_proposed_mirrors": {
+            "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
             "type": "boolean"
           },
           "max_date_gap": {

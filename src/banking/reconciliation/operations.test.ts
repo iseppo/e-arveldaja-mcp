@@ -587,53 +587,66 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
     return outcome.value;
   }
 
-  it("lists the invoice whose notes carry the cart number printed in the card payment description, outside matches", async () => {
+  it("ranks the invoice whose notes carry the cart number into matches with document_reference, below auto-confirm", async () => {
     const result = await suggest(
       [cardTx(7, `Kaardimakse 18.03.2026 ostukorv ${CART} Tallinn`)],
       [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)],
     );
-    expect(result.matches).toEqual([]);
-    expect(result.documentReferenceCandidates).toEqual([expect.objectContaining({
-      transaction_id: 7,
-      amount: 25.2,
-      matched_reference: CART,
-      invoice: expect.objectContaining({ type: "purchase_invoice", id: 701 }),
-      match_reasons: expect.arrayContaining(["exact_amount", "document_reference"]),
-    })]);
-  });
-
-  it("lists nothing without the notes line", async () => {
-    const result = await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}`)], [ticketInvoice(701, "Bus ticket")]);
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({
+      id: 701, confidence: 70, match_reasons: ["exact_amount", "document_reference"],
+    }));
+    expect(result.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 701, amount: 25.2 });
     expect(result.documentReferenceCandidates).toBeUndefined();
   });
 
-  it("picks only the invoice with this row's cart number among two same-amount invoices", async () => {
+  it("scores nothing extra without the notes line", async () => {
+    const result = await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}`)], [ticketInvoice(701, "Bus ticket")]);
+    expect(result.matches).toEqual([]);
+    expect(result.documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("picks the invoice with this row's cart number among two same-amount invoices", async () => {
     const result = await suggest(
       [cardTx(7, `Kaardimakse ostukorv ${CART}`)],
-      [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`), ticketInvoice(702, "Ostukorvi/tellimuse nr: 990011225566")],
+      [ticketInvoice(702, "Ostukorvi/tellimuse nr: 990011225566"), ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)],
+      30,
     );
-    expect(result.documentReferenceCandidates?.map(row => row.invoice.id)).toEqual([701]);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({ id: 701, confidence: 70 }));
+    expect(result.matches[0]!.other_candidate_count).toBe(1);
+    expect(result.documentReferenceCandidates).toBeUndefined();
   });
 
   it("also matches the invoice number itself as a whole token", async () => {
     const result = await suggest([cardTx(7, "Payment INV-2026-000431 card")], [ticketInvoice(701, null, "INV-2026-000431")]);
-    expect(result.documentReferenceCandidates?.map(row => row.matched_reference)).toEqual(["INV-2026-000431"]);
+    expect(result.matches[0]!.best_match.match_reasons).toEqual(["exact_amount", "document_reference"]);
   });
 
-  it("forms the group at the default and min_confidence 50, never at 51 or 90", async () => {
-    const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`)];
-    const purchases = [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)];
-    expect((await suggest(tx, purchases, undefined)).documentReferenceCandidates).toHaveLength(1);
-    expect((await suggest(tx, purchases, 50)).documentReferenceCandidates).toHaveLength(1);
-    expect((await suggest(tx, purchases, 51)).documentReferenceCandidates).toBeUndefined();
-    expect((await suggest(tx, purchases, 90)).documentReferenceCandidates).toBeUndefined();
+  it("caps document_reference at 85 so it never reaches the 90 auto-confirm threshold", async () => {
+    // exact_amount 40 + client_id 15 + document_reference 30 = 85 (cap).
+    const tx = [{ ...cardTx(7, `Kaardimakse ostukorv ${CART}`), clients_id: 77 }];
+    const result = await suggest(tx, [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)]);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({
+      confidence: 85, match_reasons: ["exact_amount", "client_id", "document_reference"],
+    }));
+    expect((await suggest(tx, [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)], 86)).matches).toEqual([]);
+    expect((await suggest(tx, [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)], 90)).matches).toEqual([]);
+    // exact_amount 40 + ref_number 40 = 80; the document reference lifts it to
+    // the cap 85, never to 100.
+    const refRow = [{ ...cardTx(8, `Kaardimakse ostukorv ${CART}`), ref_number: "77123" }];
+    const withRef = await suggest(refRow, [{ ...ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`), bank_ref_number: "77123" }]);
+    expect(withRef.matches[0]!.best_match).toEqual(expect.objectContaining({
+      confidence: 85, match_reasons: ["exact_amount", "ref_number", "document_reference"],
+    }));
   });
 
   it("matches the cart number as a token, never as a substring", async () => {
     const purchases = [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)];
-    expect((await suggest([cardTx(7, `Kaardimakse ostukorv 9${CART}`)], purchases)).documentReferenceCandidates).toBeUndefined();
-    expect((await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}7`)], purchases)).documentReferenceCandidates).toBeUndefined();
-    expect((await suggest([cardTx(7, `Kaardimakse ostukorvX${CART}`)], purchases)).documentReferenceCandidates).toBeUndefined();
+    for (const description of [`Kaardimakse ostukorv 9${CART}`, `Kaardimakse ostukorv ${CART}7`, `Kaardimakse ostukorvX${CART}`]) {
+      const result = await suggest([cardTx(7, description)], purchases);
+      expect(result.matches).toEqual([]);
+      expect(result.documentReferenceCandidates).toBeUndefined();
+    }
   });
 
   it("does not count a weak reference", async () => {
@@ -641,16 +654,83 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
       [cardTx(7, "Kaardimakse ostukorv 12345 kuupäev 20260318")],
       [ticketInvoice(701, "Ostukorvi/tellimuse nr: 12345"), ticketInvoice(702, "Ostukorvi/tellimuse nr: 20260318")],
     );
+    expect(result.matches).toEqual([]);
     expect(result.documentReferenceCandidates).toBeUndefined();
   });
 
-  it("leaves matches, best matches and distributions unchanged", async () => {
+  it("leaves an unrelated reference-number match unchanged", async () => {
     const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`), refTx()];
     const withLine = await suggest(tx, [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`), rentInvoice()]);
     const withoutLine = await suggest(tx, [ticketInvoice(701, null), rentInvoice()]);
-    expect(withLine.documentReferenceCandidates).toHaveLength(1);
-    expect(withLine.matches).toEqual(withoutLine.matches);
-    expect(withLine.matches.map(row => row.best_match.id)).toEqual([900]);
+    expect(withLine.matches.find(row => row.transaction_id === 2)).toEqual(withoutLine.matches.find(row => row.transaction_id === 2));
+    expect(withLine.matches.map(row => row.best_match.id)).toEqual([701, 900]);
+    expect(withoutLine.matches.map(row => row.best_match.id)).toEqual([900]);
+  });
+
+  it("lists a document-reference invoice that a reference-number match outranked", async () => {
+    // Invoice 900 carries the row's ref_number (40 + 40 = 80); invoice 701 only
+    // the cart number in the description (40 + 30 = 70).
+    const tx = [{ ...cardTx(7, `Kaardimakse ostukorv ${CART}`), ref_number: "77123" }];
+    const result = await suggest(tx, [
+      ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`),
+      { ...rentInvoice(), clients_id: 99, gross_price: 25.2, base_gross_price: 25.2 },
+    ]);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({ id: 900, confidence: 80 }));
+    expect(result.documentReferenceCandidates).toEqual([expect.objectContaining({
+      transaction_id: 7,
+      matched_reference: CART,
+      invoice: expect.objectContaining({ id: 701 }),
+      match_reasons: ["exact_amount", "document_reference"],
+    })]);
+  });
+
+  // Live 2026-10-30 (Seppo AI): two 25.20 Lux Express payments both best-matched
+  // the older invoice; the second one's description is the newer invoice's cart number.
+  it("splits two same-amount supplier payments by the cart number (live Lux Express case)", async () => {
+    const luxTx = (id: number, date: string, description: string) => ({
+      ...cardTx(id, description), date, bank_account_name: "Lux Express Estonia AS",
+    });
+    const luxInvoice = (id: number, number: string, notes: string) => ({
+      ...ticketInvoice(id, notes, number), client_name: "AS Lux Express Estonia", payment_status: "",
+    });
+    const result = await suggest(
+      [luxTx(14376580, "2026-10-18", "261018825247"), luxTx(14376588, "2026-10-25", "261025922842")],
+      [luxInvoice(5577728, "261018890982", ""), luxInvoice(5581992, "261025943002", "Ostukorvi/tellimuse nr: 261025922842")],
+      30,
+    );
+    const best = (id: number) => result.matches.find(row => row.transaction_id === id)!.best_match;
+    expect(best(14376580)).toEqual(expect.objectContaining({ id: 5577728, confidence: 50, match_reasons: ["exact_amount", "client_name_partial"] }));
+    expect(best(14376588)).toEqual(expect.objectContaining({
+      id: 5581992, confidence: 80, match_reasons: ["exact_amount", "client_name_partial", "document_reference"],
+    }));
+    expect(result.documentReferenceCandidates).toBeUndefined();
+  });
+
+  it("reads transactions and invoices uncached, so a suggest sees an invoice created by another process", async () => {
+    // Models the 120 s list cache: listAll serves the stale snapshot until the
+    // resource's list cache is invalidated.
+    const cachedResource = (stale: unknown[], live: unknown[]) => {
+      let cached: unknown[] | undefined = stale;
+      return {
+        invalidateListCache: vi.fn(() => { cached = undefined; }),
+        listAll: vi.fn(async () => cached ?? live),
+      };
+    };
+    const tx = cardTx(7, `Kaardimakse ostukorv ${CART}`);
+    const { operations } = setup({
+      transactions: {
+        ...cachedResource([], [tx]),
+        get: vi.fn(async () => tx),
+        update: vi.fn(), confirm: vi.fn(), delete: vi.fn(),
+      },
+      saleInvoices: cachedResource([], []),
+      purchaseInvoices: cachedResource([], [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)]),
+    });
+    const outcome = await operations.suggestMatches({ minConfidence: undefined, blockOnDuplicate: undefined });
+    if (!outcome.ok) throw new Error("suggest failed");
+    expect(outcome.value.totalUnconfirmed).toBe(1);
+    expect(outcome.value.matched).toBe(1);
+    expect(outcome.value.matches[0]!.best_match.id).toBe(701);
   });
 
   it("keeps the auto-confirm set unchanged at the default and a custom threshold", async () => {

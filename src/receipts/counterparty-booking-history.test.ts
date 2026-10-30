@@ -20,6 +20,7 @@ interface RowSpec {
   contra?: Array<[number, number | null]>;
   /** Number of registered TRANSACTION journals joined to the row (default 1). */
   journals?: number;
+  clients_id?: number;
 }
 
 function ledger(rows: RowSpec[]): { transactions: Transaction[]; journals: Journal[] } {
@@ -40,6 +41,7 @@ function ledger(rows: RowSpec[]): { transactions: Transaction[]; journals: Journ
       date: row.date,
       bank_account_name: row.name ?? "Laenaja OÜ",
       bank_account_no: row.iban ?? null,
+      ...(row.clients_id !== undefined ? { clients_id: row.clients_id } : {}),
     });
     const side = row.side ?? "D";
     const contra = row.contra ?? [[2110, 900]];
@@ -95,11 +97,13 @@ describe("counterparty booking history — chronological streak", () => {
   });
 
   it("(1) suggests only the most recent unbroken run: 5× 1410/901 then 3× 2110/900 → 2110/900, streak 3, total 8", () => {
-    const index = history([
+    const rows = ledger([
       ...[1, 2, 3, 4, 5].map((m) => ({ date: month(m), contra: [[1410, 901]] as Array<[number, number]> })),
       ...[6, 7, 8].map((m) => ({ date: month(m) })),
     ]);
+    const index = buildCounterpartyBookingHistory({ ...rows, ownBankDimensionIds: OWN_DIMS });
     const result = lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "incoming" });
+    const runJournals = rows.journals.slice(-3).map((journal) => journal.id!).reverse();
     expect(result.suggestion).toEqual({
       account_id: 2110,
       dimension_id: 900,
@@ -110,15 +114,32 @@ describe("counterparty booking history — chronological streak", () => {
         { account_id: 1410, dimension_id: 901, count: 5 },
         { account_id: 2110, dimension_id: 900, count: 3 },
       ],
+      // The newest run over a different past: a review hint, never consistent.
+      consistent: false,
+      last_journal_ids: runJournals,
     });
   });
 
-  it("(2) two recent rows are not enough: no suggestion, breakdown shown", () => {
-    const index = history([{ date: month(1) }, { date: month(2) }]);
+  it("(2) two recent rows after a different past are not enough: no suggestion, breakdown shown", () => {
+    const index = history([{ date: month(1), contra: [[1410, 901]] }, { date: month(2) }, { date: month(3) }]);
     const result = lookupCounterpartyHistory(index, { name: "Laenaja OÜ", direction: "incoming" });
     expect(result.suggestion).toBeUndefined();
-    expect(result.history_total).toBe(2);
-    expect(result.breakdown).toEqual([{ account_id: 2110, dimension_id: 900, count: 2 }]);
+    expect(result.history_total).toBe(3);
+    expect(result.breakdown).toEqual([{ account_id: 2110, dimension_id: 900, count: 2 }, { account_id: 1410, dimension_id: 901, count: 1 }]);
+  });
+
+  it("(2b) two rows that are the whole history, booked alike, are a consistent suggestion; one row is not", () => {
+    const pair = history([{ date: month(1) }, { date: month(2) }]);
+    expect(lookupCounterpartyHistory(pair, { name: "Laenaja OÜ", direction: "incoming" }).suggestion).toMatchObject({
+      account_id: 2110, dimension_id: 900, streak: 2, history_total: 2, consistent: true,
+    });
+    const single = history([{ date: month(1) }]);
+    expect(lookupCounterpartyHistory(single, { name: "Laenaja OÜ", direction: "incoming" }).suggestion).toBeUndefined();
+    // An invoice-linked row anywhere in the history makes it inconsistent.
+    const withInvoice = history([{ date: month(1), contra: [[2310, null]] }, { date: month(2) }, { date: month(3) }, { date: month(4) }]);
+    expect(lookupCounterpartyHistory(withInvoice, { name: "Laenaja OÜ", direction: "incoming" }).suggestion).toMatchObject({
+      streak: 3, history_total: 4, consistent: false,
+    });
   });
 
   it("(3) a contra on another own bank dimension breaks the run", () => {
@@ -144,6 +165,8 @@ describe("counterparty booking history — chronological streak", () => {
       history_total: 3,
       latest_date: month(3),
       breakdown: [{ account_id: 1020, dimension_id: 200, own_bank_account: true, count: 3 }],
+      consistent: true,
+      last_journal_ids: expect.any(Array),
     });
 
     // The same run under a bare display name (no IBAN, no legal form) is never enough.
@@ -347,5 +370,65 @@ describe("counterparty booking history — name-only identity (A4)", () => {
     const result = lookupCounterpartyHistory(index, { name: "TransferWise", accounts_dimensions_id: 100, direction: "outgoing" });
     expect(result.history_total).toBe(2);
     expect(result.suggestion).toBeUndefined();
+  });
+});
+
+describe("counterparty booking history — client identity", () => {
+  // Live shape: a person without legal form whose older rows carry no IBAN,
+  // while the new CAMT row has one; both rows are linked to the same client.
+  const kassa = (m: number, spec: Partial<RowSpec> = {}): RowSpec =>
+    ({ date: month(m), name: "Mari Maasikas", side: "C", contra: [[1010, 391]], clients_id: 77, ...spec });
+
+  it("matches the query's client across IBAN-less rows, name spellings and own bank dimensions, with evidence", () => {
+    const rows = ledger([kassa(1), kassa(2, { name: "MARI MAASIKAS", dim: 200 }), kassa(3, { name: "Maasikas Mari" })]);
+    const index = buildCounterpartyBookingHistory({ ...rows, ownBankDimensionIds: OWN_DIMS });
+    const query = { name: "Mari Maasikas", iban: "EE947700771000826270", clients_id: 77, accounts_dimensions_id: 100, direction: "outgoing" as const };
+    const result = lookupCounterpartyHistory(index, query);
+    expect(result.history_total).toBe(3);
+    expect(result.suggestion).toEqual({
+      account_id: 1010, dimension_id: 391, streak: 3, history_total: 3, latest_date: month(3),
+      breakdown: [{ account_id: 1010, dimension_id: 391, count: 3 }],
+      consistent: true,
+      clients_id: 77,
+      last_journal_ids: rows.journals.map((journal) => journal.id!).reverse(),
+    });
+    // Without the client the same rows do not answer (no IBAN on the history rows).
+    expect(lookupCounterpartyHistory(index, { ...query, clients_id: undefined }).history_total).toBe(0);
+  });
+
+  it("never matches rows of another client, nor rows whose stored IBAN differs", () => {
+    const index = history([
+      kassa(1, { clients_id: 78 }),
+      kassa(2, { iban: "EE111111111111111111" }),
+      kassa(3),
+      kassa(4),
+    ]);
+    const result = lookupCounterpartyHistory(index, {
+      name: "Mari Maasikas", iban: "EE947700771000826270", clients_id: 77, accounts_dimensions_id: 100, direction: "outgoing",
+    });
+    expect(result.history_total).toBe(2);
+    expect(result.suggestion).toMatchObject({ streak: 2, consistent: true, clients_id: 77 });
+  });
+
+  it("a client on the query never vouches for client-less rows matched by name: the suggestion is name_only", () => {
+    const query = { name: "Mari Maasikas", clients_id: 77, accounts_dimensions_id: 100, direction: "outgoing" as const };
+    const byName = history([kassa(1, { clients_id: undefined }), kassa(2, { clients_id: undefined })]);
+    // Two consistent name-only rows are below MIN_STREAK: no suggestion at all.
+    expect(lookupCounterpartyHistory(byName, query)).toMatchObject({ history_total: 2 });
+    expect(lookupCounterpartyHistory(byName, query).suggestion).toBeUndefined();
+    // One name-only row among client rows taints the whole history.
+    const mixed = history([kassa(1, { clients_id: undefined }), kassa(2), kassa(3)]);
+    expect(lookupCounterpartyHistory(mixed, query).suggestion).toMatchObject({ streak: 3, consistent: true, identity: "name_only" });
+    // Client rows only: strong evidence, no identity flag.
+    const linked = history([kassa(1), kassa(2)]);
+    expect(lookupCounterpartyHistory(linked, query).suggestion).toMatchObject({ streak: 2, consistent: true, clients_id: 77 });
+    expect(lookupCounterpartyHistory(linked, query).suggestion?.identity).toBeUndefined();
+  });
+
+  it("a mixed client history stays a review hint with the split", () => {
+    const index = history([kassa(1, { contra: [[2110, 384]] }), kassa(2), kassa(3), kassa(4)]);
+    const result = lookupCounterpartyHistory(index, { name: "Mari Maasikas", clients_id: 77, direction: "outgoing" });
+    expect(result.suggestion).toMatchObject({ account_id: 1010, streak: 3, history_total: 4, consistent: false });
+    expect(result.breakdown).toEqual([{ account_id: 1010, dimension_id: 391, count: 3 }, { account_id: 2110, dimension_id: 384, count: 1 }]);
   });
 });

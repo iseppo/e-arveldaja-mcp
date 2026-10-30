@@ -1,5 +1,5 @@
 import type { CompactReviewItem, CompactWarning, OperationOutcome } from "../operation-outcome.js";
-import type { PlanData } from "../plan-store.js";
+import type { PlanData, PlanRecord } from "../plan-store.js";
 import type { Resolution } from "../resolution/types.js";
 import type { SupplierRef } from "../resolution/supplier-default-resolution.js";
 import type { ExtractedReceiptFields } from "../tools/receipt-extraction.js";
@@ -116,8 +116,18 @@ export interface AccountingDocumentPreview {
    * extraction-only preview is NOT create approval and mints no handle. */
   readonly planHandle?: string;
   /** The canonical effective booking model the plan fingerprint binds —
-   * the exact write model create will execute. Present only with booking. */
-  readonly bookingProjection?: PlanData;
+   * the exact write model create will execute. Present only with booking.
+   * `supplier_identifier_acknowledged` records the printed identifier the
+   * booking supplier carries when it acknowledged contested supplier ids. */
+  readonly bookingProjection?: PlanRecord & { readonly supplier_identifier_acknowledged?: SupplierIdentifierAcknowledgement };
+}
+
+/** The document-printed identifier an explicit booking supplier carries, when
+ * it acknowledges `supplier_identifier_ambiguous`. */
+export interface SupplierIdentifierAcknowledgement {
+  readonly client_id: number;
+  readonly matched: "reg_code" | "vat_no";
+  readonly identifier: string;
 }
 
 /** Create input: the SAME booking fields the prepare bound (the server

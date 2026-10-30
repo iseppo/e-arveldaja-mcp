@@ -75,6 +75,7 @@ async function summarizePipelineWithClassificationGroups(
     totalUnmatched: resolvedGroups.length,
     categoryCounts: {},
     groups: resolvedGroups,
+    invoiceMatched: [],
     alreadyBooked: [],
     ownTransfers: [],
     possibleDuplicates: [],
@@ -353,6 +354,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
 
   it("raises a resumable follow-up for every row the classify ledger check partitioned out (F6)", async () => {
     const output = await summarizePipelineWithClassificationGroups(0, {
+      invoiceMatched: [],
       alreadyBooked: [{ transaction_id: 42, date: "2026-09-24", amount: 10500, counterparty: "Laenaja OÜ", journal_ids: [7001], strength: "reference", next_action: "verify that journal 7001 books this movement, then delete_transaction 42 (the PROJECT row)" }],
       ownTransfers: [
         { transaction_id: 41, date: "2026-09-14", amount: 900, counterparty: "Näide OU", target_dimension_id: 200, confidence: 90, reasons: [], next_action: "reconcile_bank_transactions mode=\"inter_account_dry_run\" (target dimension 200)" },
@@ -378,6 +380,24 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(reviews[3]!.recommendation).toContain("compare with journal 7002");
     // The remitter-controlled counterparty is sandboxed in the summary.
     expect(reviews[1]!.summary).toContain("UNTRUSTED_OCR_START");
+  });
+
+  it("raises a follow-up for a row kept out of classification because it may pay an open invoice", async () => {
+    const output = await summarizePipelineWithClassificationGroups(0, {
+      invoiceMatched: [{
+        transaction_id: 45, date: "2026-10-25", amount: 25.2, counterparty: "Bussiliin OÜ",
+        invoice_type: "purchase_invoice", invoice_id: 5581992, invoice_number: "261025922842", matched_by: "document_reference",
+        matched_reference: "261025922842",
+        next_action: 'reconcile_bank_transactions mode="suggest" and confirm the row against open purchase invoice 5581992 if it pays it; never book it as a new expense',
+      }],
+      totalPartitionedOut: 1,
+    });
+    const [review] = output.needs_accountant_review;
+    expect(output.needs_accountant_review).toHaveLength(1);
+    expect(review!.summary).toContain("Transaction 45 (2026-10-25 25.2");
+    expect(review!.summary).toContain("may pay open purchase invoice 5581992 (document_reference); reconcile it instead of classifying.");
+    expect(review!.summary).toContain("UNTRUSTED_OCR_START");
+    expect(review!.recommendation).toContain("open purchase invoice 5581992");
   });
 
   it("raises a follow-up when the classify ledger check could not run (F6)", async () => {
@@ -473,6 +493,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
       totalUnmatched: 1,
       categoryCounts: {},
       groups: classificationReviewGroups(1),
+      invoiceMatched: [],
       alreadyBooked: [],
       ownTransfers: [],
       possibleDuplicates: [],

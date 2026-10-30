@@ -70,9 +70,11 @@ import {
   type PartialClassificationMutation,
   type PartialClassificationStatus,
   type TransactionGroup,
+  type ExistingInvoiceMatch,
   buildOwnerCounterpartySet,
   existingInvoiceMatch,
   extractClassificationGroups,
+  findExistingInvoiceMatch,
   groupTransactionsByCounterparty,
   invoiceClassificationStatus,
   isAmbiguousPostCreateFailure,
@@ -145,6 +147,10 @@ export interface PossibleDuplicateRow extends PartitionedRowBase {
   code: string;
 }
 
+/** The row may pay an open invoice: reconcile it, never classify or book it here.
+ * `invoice_number` / `matched_reference` are import-origin text — the presenter wraps them. */
+export interface InvoiceMatchedRow extends PartitionedRowBase, ExistingInvoiceMatch {}
+
 /** UNWRAPPED analysis result. `groups[].{normalized_counterparty,
  * display_counterparty}` and `transactions[].{description,bank_account_name}`
  * carry raw bank-statement text — the presenter wraps them. */
@@ -157,10 +163,12 @@ export interface UnmatchedAnalysisResult {
   totalUnmatched: number;
   categoryCounts: Record<string, number>;
   groups: ClassifiedTransactionGroupResult[];
+  /** Rows that may pay an open sale/purchase invoice, taken out before the ledger check. */
+  invoiceMatched: InvoiceMatchedRow[];
   alreadyBooked: AlreadyBookedRow[];
   ownTransfers: OwnTransferRow[];
   possibleDuplicates: PossibleDuplicateRow[];
-  /** alreadyBooked + ownTransfers + possibleDuplicates. */
+  /** invoiceMatched + alreadyBooked + ownTransfers + possibleDuplicates. */
   totalPartitionedOut: number;
   /** Set when journals/bank accounts could not be read: no partition and no history ran. */
   ledgerContextUnavailable?: string;
@@ -450,7 +458,7 @@ function splitGroupByHistory(
   const parts = new Map<string, { rows: Transaction[]; history?: CounterpartyHistorySuggestion }>();
   for (const transaction of group.transactions) {
     const history = historyOf(transaction);
-    const key = history ? JSON.stringify([history.account_id, history.dimension_id, history.streak, history.history_total, history.identity ?? ""]) : "";
+    const key = history ? JSON.stringify([history.account_id, history.dimension_id, history.streak, history.history_total, history.identity ?? "", history.consistent, history.clients_id ?? null]) : "";
     const part = parts.get(key) ?? { rows: [], history };
     part.rows.push(transaction);
     parts.set(key, part);
@@ -459,9 +467,65 @@ function splitGroupByHistory(
   return [...parts.values()].map(part => ({ group: groupTransactionsByCounterparty(part.rows)[0]!, history: part.history }));
 }
 
+/** The history lookup for a row the ledger partition left over (no own-transfer target was found). */
+function historyLookup(history: CounterpartyBookingHistory, transaction: Transaction) {
+  return lookupCounterpartyHistory(history, {
+    name: transaction.bank_account_name,
+    iban: counterpartyIbanOf(transaction) || undefined,
+    iban_omitted: isCamtCounterpartyIbanOmitted(transaction),
+    accounts_dimensions_id: transaction.accounts_dimensions_id,
+    clients_id: transaction.clients_id,
+    direction: trustedDirection(transaction) ?? "unknown",
+    allow_own_bank_contra: true,
+  });
+}
+
+/**
+ * A history the plan-bound apply may book: every earlier confirmed row of this
+ * counterparty (two or more, identified by client, IBAN or legal form — never by
+ * name alone) went straight to one account that is not another own bank account.
+ * The row itself must be EUR (the distribution carries the row's own amount) and
+ * have a client to book under (its own, or the history's single client).
+ */
+function historyApplicable(history: CounterpartyHistorySuggestion, transaction: Transaction): boolean {
+  return history.consistent &&
+    history.own_bank_account !== true &&
+    history.identity !== "name_only" &&
+    (transaction.cl_currencies_id ?? "EUR").trim().toUpperCase() === "EUR" &&
+    (transaction.clients_id ?? history.clients_id) != null;
+}
+
+/** The distribution a plan-bound apply confirms the row with, re-derived from fresh history. */
+interface HistoryDistribution {
+  account_id: number;
+  dimension_id: number | null;
+  amount: number;
+  /** The client the row is confirmed under; set on the row first when it has none. */
+  clients_id: number;
+  set_clients_id: boolean;
+  history_count: number;
+  last_journal_ids: number[];
+}
+
+function historyDistributionFor(history: CounterpartyBookingHistory, transaction: Transaction): HistoryDistribution | undefined {
+  const suggestion = historyLookup(history, transaction).suggestion;
+  if (!suggestion || !historyApplicable(suggestion, transaction)) return undefined;
+  const clientsId = (transaction.clients_id ?? suggestion.clients_id)!;
+  return {
+    account_id: suggestion.account_id,
+    dimension_id: suggestion.dimension_id,
+    amount: transaction.amount,
+    clients_id: clientsId,
+    set_clients_id: transaction.clients_id == null,
+    history_count: suggestion.history_total,
+    last_journal_ids: suggestion.last_journal_ids,
+  };
+}
+
 function historyBookingSuggestion(
   history: CounterpartyHistorySuggestion,
   accounts: Array<{ id?: number; name_est?: string }>,
+  applicable = false,
 ): ClassifiedTransactionSuggestion {
   const account = accounts.find(candidate => candidate.id === history.account_id);
   const dimension = history.dimension_id !== null ? ` dimension ${history.dimension_id}` : "";
@@ -476,7 +540,9 @@ function historyBookingSuggestion(
     purchase_account_name: account ? `${history.account_id} ${account.name_est}` : undefined,
     ...(history.dimension_id !== null ? { purchase_account_dimensions_id: history.dimension_id } : {}),
     source: "transaction_history",
-    reason: `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly}${ownBank} Review-only: confirm the substance before booking. suggested_distribution carries no amount: book each transaction separately, adding amount = that transaction's own amount.`,
+    reason: applicable
+      ? `All ${history.history_total} confirmed bank rows of this counterparty in this direction were booked to account ${history.account_id}${dimension} with no invoice (journals ${history.last_journal_ids.join(", ")}). dry_run_apply previews confirming each row to that account with its own amount; execute_apply books it only with the reviewed plan_handle.`
+      : `The last ${history.streak} confirmed bank rows of this counterparty in this direction (of ${history.history_total}) were booked to account ${history.account_id}${dimension}.${nameOnly}${ownBank}${history.consistent ? "" : ` Earlier rows were booked differently (${history.breakdown.map(entry => `${entry.count}× ${entry.account_id}${entry.dimension_id !== null ? `/${entry.dimension_id}` : ""}`).join(", ")}).`} Review-only: confirm the substance before booking. suggested_distribution carries no amount: book each transaction separately, adding amount = that transaction's own amount.`,
     transaction_history: history,
     suggested_distribution: {
       related_table: "accounts",
@@ -668,6 +734,121 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     }) as PlanRecord;
   }
 
+  /**
+   * Book an account_distribution group: confirm each row straight to the account
+   * (and dimension) its counterparty's consistent history names, with the row's
+   * own amount, under its client (set first when the row has none). Every guard
+   * of the purchase-invoice path applies: trusted direction, ledger coverage,
+   * open-invoice match, and a fresh material re-read right before the confirm.
+   * Failures never retry; an ambiguous write is reported for a fresh read.
+   */
+  private async applyHistoryDistributions(input: {
+    group: ClassifiedTransactionGroupResult;
+    transactionIds: number[];
+    freshTransactions: Transaction[];
+    notes: string[];
+    dryRun: boolean;
+    ledgerCheck: Record<string, string> | "unavailable" | null;
+    ledgerBlocks: Map<number, { code: string; next_action: string }>;
+    historyUnavailable: boolean;
+    historyDistributions: Map<number, HistoryDistribution>;
+    ruleDecided: ReadonlySet<number>;
+  }): Promise<ApplyClassificationGroupResult> {
+    const api = this.api;
+    const { group, transactionIds, freshTransactions, notes, dryRun, ledgerBlocks, historyDistributions } = input;
+    const linkedTransactionIds: number[] = [];
+    let previewCount = 0;
+    let failedCount = 0;
+    for (const transaction of freshTransactions) {
+      const id = transaction.id!;
+      const approvedSnapshot = snapshotBankTransaction(transaction);
+      const direction = approvedSnapshot.trusted_direction;
+      if (direction !== "outgoing" && direction !== "incoming") {
+        notes.push(`Transaction ${id} has no proven direction; skipped.`);
+        continue;
+      }
+      if (input.ledgerCheck === "unavailable" || input.historyUnavailable) {
+        notes.push(`Transaction ${id} skipped — journals or invoices could not be read, so its booking history and existing bookings cannot be checked. Retry later.`);
+        continue;
+      }
+      const ledgerBlock = ledgerBlocks.get(id);
+      if (ledgerBlock) {
+        notes.push(`Transaction ${id} is already booked or needs ledger review (${ledgerBlock.code}); skipped — ${ledgerBlock.next_action}.`);
+        continue;
+      }
+      if (input.ruleDecided.has(id)) {
+        notes.push(`Transaction ${id} skipped — a saved booking rule or the statutory category treatment decides this counterparty, not its booking history; re-classify.`);
+        continue;
+      }
+      const distribution = historyDistributions.get(id);
+      if (!distribution) {
+        notes.push(`Transaction ${id} skipped — it may pay an open invoice, or its counterparty's confirmed history no longer books every row to one account; re-classify.`);
+        continue;
+      }
+      const target = `account ${distribution.account_id}${distribution.dimension_id !== null ? ` dimension ${distribution.dimension_id}` : ""}`;
+      const evidence = `${distribution.history_count} earlier row(s), journals ${distribution.last_journal_ids.join(", ")}`;
+      const clientStep = distribution.set_clients_id ? `set client ${distribution.clients_id}, then ` : "";
+      if (dryRun) {
+        previewCount += 1;
+        notes.push(`Dry run: would ${clientStep}confirm transaction ${id} to ${target} with amount ${distribution.amount} (history: ${evidence}).`);
+        continue;
+      }
+      let clientWritten = false;
+      try {
+        if (distribution.set_clients_id) {
+          await api.transactions.update(id, { clients_id: distribution.clients_id });
+          clientWritten = true;
+        }
+        api.transactions.invalidateListCache();
+        const fresh = await api.transactions.get(id);
+        const comparison = compareBankTransactionMaterial(
+          approvedSnapshot, fresh, clientWritten ? { client: { from: null, to: distribution.clients_id } } : {},
+        );
+        if (!comparison.ok || !isProjectTransaction(fresh) || comparison.snapshot.trusted_direction !== direction) {
+          throw new TransactionMaterialDriftError(id, comparison.ok ? ["trusted_direction", "status"] : comparison.changedFields);
+        }
+        await api.transactions.confirm(id, [{
+          related_table: "accounts",
+          related_id: distribution.account_id,
+          ...(distribution.dimension_id !== null ? { related_sub_id: distribution.dimension_id } : {}),
+          amount: distribution.amount,
+        }], { expectedTransaction: comparison.snapshot, expectedLinkedInvoices: {} });
+        logAudit({
+          tool: "apply_transaction_classifications", action: "CONFIRMED", entity_type: "transaction",
+          entity_id: id,
+          summary: `Confirmed transaction ${id} to ${target} from its counterparty's booking history`,
+          details: {
+            amount: distribution.amount, account_id: distribution.account_id, dimension_id: distribution.dimension_id,
+            clients_id: distribution.clients_id, ...(clientWritten ? { client_set: true } : {}),
+            history_count: distribution.history_count, history_journal_ids: distribution.last_journal_ids,
+          },
+        });
+        linkedTransactionIds.push(id);
+      } catch (error) {
+        failedCount += 1;
+        const ambiguous = isAmbiguousPostCreateFailure(error);
+        const clientNote = clientWritten ? ` Its client was set to ${distribution.clients_id} before the failure.` : "";
+        const message = error instanceof Error ? error.message : String(error);
+        notes.push(`Transaction ${id} was not booked${ambiguous ? " (the write may or may not have committed)" : ""}.${clientNote} Freshly read transaction ${id} before any further action; never retry automatically.`);
+        notes.push(this.wrapUntrustedText(message) ?? message);
+      }
+    }
+    const status: ApplyClassificationGroupResult["status"] = dryRun
+      ? (previewCount > 0 ? "dry_run_preview" : "skipped")
+      : failedCount > 0 ? "failed" : linkedTransactionIds.length > 0 ? "applied" : "skipped";
+    if (status === "failed" && linkedTransactionIds.length > 0) {
+      notes.push(`Group reported as failed; the following transactions were already booked successfully and were left in place: ${linkedTransactionIds.join(", ")}.`);
+    }
+    return {
+      category: group.category,
+      counterparty: group.display_counterparty,
+      status,
+      notes,
+      transactions: transactionIds,
+      ...(dryRun ? {} : { linked_transaction_ids: linkedTransactionIds }),
+    };
+  }
+
   async analyzeUnmatched(input: UnmatchedAnalysisInput): Promise<OperationOutcome<UnmatchedAnalysisResult>> {
     const api = this.api;
     const { accountsDimensionsId, dateFrom, dateTo } = input;
@@ -696,24 +877,33 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       (!dateTo || transaction.date <= dateTo),
     );
 
-    const unmatched = unconfirmed.filter(transaction => !existingInvoiceMatch(transaction, openSales, openPurchases));
+    const invoiceMatched: InvoiceMatchedRow[] = [];
+    const unmatched = unconfirmed.filter(transaction => {
+      const match = findExistingInvoiceMatch(transaction, openSales, openPurchases);
+      if (!match) return true;
+      if (transaction.id === undefined) return false;
+      const invoice = `${match.invoice_type === "sale_invoice" ? "sale" : "purchase"} invoice ${match.invoice_id ?? "(no id)"}`;
+      invoiceMatched.push({
+        transaction_id: transaction.id!,
+        date: transaction.date,
+        amount: transaction.amount,
+        ...(transaction.bank_account_name ? { counterparty: transaction.bank_account_name } : {}),
+        ...match,
+        next_action: `reconcile_bank_transactions mode="suggest" and confirm the row against open ${invoice} if it pays it; never book it as a new expense`,
+      });
+      return false;
+    });
     const partition = ledger
       ? partitionByLedgerContext(api, unmatched, transactions, ledger, accountsDimensionsId)
       : "The journals or bank accounts could not be read, so already-booked rows, own transfers and booking history were not checked.";
     const ledgerContextUnavailable = typeof partition === "string" ? partition : undefined;
     const classifiable = typeof partition === "string" ? unmatched : partition.remaining;
+    // Only rows the ledger partition left over reach classification: the
+    // inter-account matcher found no own-transfer target for them. The history
+    // reuses the journals and transactions already read (no extra API call).
     const historyOf = (transaction: Transaction) => typeof partition === "string"
       ? undefined
-      : lookupCounterpartyHistory(partition.history, {
-          name: transaction.bank_account_name,
-          iban: counterpartyIbanOf(transaction) || undefined,
-          iban_omitted: isCamtCounterpartyIbanOmitted(transaction),
-          accounts_dimensions_id: transaction.accounts_dimensions_id,
-          direction: trustedDirection(transaction) ?? "unknown",
-          // Only rows the ledger partition left over reach classification: the
-          // inter-account matcher found no own-transfer target for them.
-          allow_own_bank_contra: true,
-        }).suggestion;
+      : historyLookup(partition.history, transaction).suggestion;
     const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
     const context = {
       purchaseInvoices,
@@ -736,8 +926,12 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       // supplier-invoice history > keyword. History is review-only, never a rule.
       const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
       if (!fixedBySource && history) {
-        suggestion = historyBookingSuggestion(history, accounts);
-        applyMode = "review_only";
+        // A consistent history is offered for the plan-bound apply; anything
+        // weaker (a recent run over a mixed past, a name-only or own-bank match)
+        // stays a review-only hint.
+        const applicable = group.transactions.every(transaction => historyApplicable(history, transaction));
+        suggestion = historyBookingSuggestion(history, accounts, applicable);
+        applyMode = applicable ? "account_distribution" : "review_only";
       } else if (
         !fixedBySource &&
         (suggestion.source === "keyword_match" || suggestion.source === "fallback") &&
@@ -808,10 +1002,11 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       totalUnmatched: classifiable.length,
       categoryCounts,
       groups: classifiedGroups,
+      invoiceMatched,
       alreadyBooked: typeof partition === "string" ? [] : partition.alreadyBooked,
       ownTransfers: typeof partition === "string" ? [] : partition.ownTransfers,
       possibleDuplicates: typeof partition === "string" ? [] : partition.possibleDuplicates,
-      totalPartitionedOut: unmatched.length - classifiable.length,
+      totalPartitionedOut: unconfirmed.length - classifiable.length,
       ...(ledgerContextUnavailable !== undefined ? { ledgerContextUnavailable } : {}),
     });
   }
@@ -832,6 +1027,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       // transaction gets, so the fingerprint pass below reads each one live.
       api.clients.invalidateListCache();
       api.purchaseInvoices.invalidateListCache();
+      api.saleInvoices.invalidateListCache();
       api.transactions.invalidateListCache();
     }
     const [clients, purchaseArticlesWithVat, purchaseInvoices, accounts] = await Promise.all([
@@ -858,17 +1054,66 @@ class ClassificationOperationsImpl implements ClassificationOperations {
     // drifts the plan, and a blocked row is skipped. Unreadable ledger fails closed.
     const ledgerBlocks = new Map<number, { code: string; next_action: string }>();
     let ledgerCheck: Record<string, string> | "unavailable" | null = null;
-    const bookableRows = groups
-      .filter(group => group.apply_mode === "purchase_invoice" && shouldProcessExpenseAsPurchaseInvoice(group.category))
+    const rowsOf = (selected: ClassifiedTransactionGroupResult[]) => selected
       .flatMap(group => group.transactions.map(stub => stub.id === undefined ? undefined : gatherCache.get(stub.id)))
       .flatMap(outcome => outcome?.kind === "ok" ? [outcome.transaction] : []);
+    // account_distribution rows are booked from the counterparty's history,
+    // re-derived here from the fresh ledger; the caller's suggestion is ignored.
+    const distributionRows = rowsOf(groups.filter(group => group.apply_mode === "account_distribution"));
+    const historyDistributions = new Map<number, HistoryDistribution>();
+    const ruleDecided = new Set<number>();
+    let historyCheck: Record<string, PlanData> | "unavailable" | null = null;
+    const bookableRows = [
+      ...rowsOf(groups.filter(group => group.apply_mode === "purchase_invoice" && shouldProcessExpenseAsPurchaseInvoice(group.category))),
+      ...distributionRows,
+    ];
     if (bookableRows.length > 0) {
       if (!dryRun) api.journals.invalidateListCache();
       const ledger = await loadLedgerContext(api);
       const ledgerTransactions = ledger ? await api.transactions.listAll().catch(() => undefined) : undefined;
+      // An incoming row may pay an open sale invoice: read those only when a
+      // history distribution could book one.
+      const openSales = distributionRows.length > 0
+        ? await api.saleInvoices.listAll()
+          .then(invoices => invoices.filter(invoice => invoice.status === "CONFIRMED" && invoice.payment_status !== "PAID"))
+          .catch(() => undefined)
+        : [];
       if (!ledger || !ledgerTransactions) {
         ledgerCheck = "unavailable";
+        if (distributionRows.length > 0) historyCheck = "unavailable";
       } else {
+        if (distributionRows.length > 0) {
+          if (!openSales) {
+            historyCheck = "unavailable";
+          } else {
+            historyCheck = {};
+            const history = buildCounterpartyBookingHistory({
+              transactions: ledgerTransactions,
+              journals: ledger.journals,
+              ownBankDimensionIds: buildBankAccountLookups(ledger.bankAccounts, ledger.accountDimensions).ownDimensionIds,
+            });
+            // A saved rule or a statutory category default outranks history
+            // (as in classify): re-derived from the fresh rows themselves, so an
+            // edited apply_mode, category or counterparty cannot bypass it.
+            const ownerCounterparties = buildOwnerCounterpartySet(clients);
+            for (const freshGroup of groupTransactionsByCounterparty(distributionRows)) {
+              const classification = categorizeTransactionGroup({ ...freshGroup, owner_counterparties: ownerCounterparties });
+              const { suggestion } = await resolveClassificationSuggestion(
+                api, { purchaseInvoices, purchaseArticlesWithVat, accounts }, clients, freshGroup, classification,
+              );
+              if (suggestion.source === "category_default" || suggestion.source === "local_rules") {
+                for (const transaction of freshGroup.transactions) ruleDecided.add(transaction.id!);
+              }
+            }
+            for (const transaction of distributionRows) {
+              const distribution = existingInvoiceMatch(transaction, openSales, openPurchases) || ruleDecided.has(transaction.id!)
+                ? undefined
+                : historyDistributionFor(history, transaction);
+              if (distribution) historyDistributions.set(transaction.id!, distribution);
+              historyCheck[String(transaction.id)] = distribution ? { ...distribution } : null;
+            }
+          }
+        }
         ledgerCheck = {};
         const fresh = new Map(bookableRows.map(transaction => [transaction.id!, transaction]));
         for (const dimensionId of [...new Set(bookableRows.map(transaction => transaction.accounts_dimensions_id))]) {
@@ -896,7 +1141,11 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         }
       }
     }
-    const fingerprint: PlanRecord = { ...liveFingerprint, ledger_check: ledgerCheck };
+    const fingerprint: PlanRecord = {
+      ...liveFingerprint,
+      ledger_check: ledgerCheck,
+      ...(historyCheck !== null ? { history_distributions: historyCheck } : {}),
+    };
 
     // P0-2 execute gate: consume the reviewed plan (consume-once, scope-bound)
     // and compare the FRESH canonical effect. Any material difference vs the
@@ -975,6 +1224,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             notes,
             transactions: transactionIds,
           });
+          continue;
+        }
+
+        if (group.apply_mode === "account_distribution") {
+          results.push(await this.applyHistoryDistributions({
+            group, transactionIds, freshTransactions, notes, dryRun, ledgerCheck, ledgerBlocks,
+            historyUnavailable: historyCheck === "unavailable", historyDistributions, ruleDecided,
+          }));
           continue;
         }
 
@@ -1381,7 +1638,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             group => typeof group === "object" && group !== null && !Array.isArray(group) && (group as Record<string, PlanData>).bookable === true,
           ).length ?? 0,
         },
-        commands: [{ id: "bank-classification-apply", category: "bank_classification_apply", reviewProjection: { groups: groups.length } }],
+        commands: [{ id: "bank-classification-apply", category: "bank_classification_apply", reviewProjection: { groups: groups.length, history_distributions: historyDistributions.size } }],
         counts: { groups: groups.length },
         totals: {},
         exclusions: [],
