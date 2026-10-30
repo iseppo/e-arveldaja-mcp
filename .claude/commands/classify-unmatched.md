@@ -76,6 +76,8 @@ Show the compact `result.summary`: `counts` (unmatched transactions, groups, aut
 
 ### Step 2: Explain what can be applied and choose the groups
 
+Rows that may pay an open invoice never reach the groups: a possible invoice match, a residual on a partially paid purchase invoice, or a document-reference candidate (exact amount plus the purchase invoice's number or `Ostukorvi/tellimuse nr:` order/cart number in the description). The purchase invoice already exists, so booking such a row here would double the expense: reconcile it with the **Reconcile Bank** workflow (`reconcile_bank_transactions` `mode: "suggest"` lists it), and drop any such transaction ID a user asks to add. Apply re-checks and skips it ("matches an open purchase invoice; skipped — reconcile instead").
+
 Rows the ledger check took out of the groups are never applied here; report each with its `next_action`:
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `list_account_dimensions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -196,8 +198,7 @@ Report:
 - `result.execution.summary.applied`
 - `result.execution.summary.skipped`
 - `result.execution.summary.failed`
-- `created_invoice_ids`
-- `linked_transaction_ids`
+- per group in `result.execution.results[]`: `created_invoice_ids` and `linked_transaction_ids`
 - which groups still need manual review
 - mention that side effects can be reviewed via `result.execution.audit_reference`
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->

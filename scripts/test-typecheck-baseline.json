@@ -1,6 +1,6 @@
 {
   "by_code": {
-    "ANY": 1526,
+    "ANY": 1525,
     "UNTYPED_PAYLOAD": 181
   },
   "errors": {
@@ -188,7 +188,7 @@
       "ANY": 2
     },
     "src/tools/accounting-inbox.test.ts": {
-      "ANY": 248
+      "ANY": 247
     },
     "src/tools/analyze-unconfirmed.test.ts": {
       "ANY": 6
@@ -298,6 +298,6 @@
       "ANY": 9
     }
   },
-  "total": 1707,
+  "total": 1706,
   "version": 1
 }

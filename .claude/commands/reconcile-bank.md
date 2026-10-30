@@ -44,12 +44,12 @@ Call `reconcile_bank_transactions` with `mode: "suggest"` and `min_confidence: 3
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Review the output: `result.total_unconfirmed` (bank transactions needing attention), `result.matched` (at least one candidate), `result.unmatched` (no match), and the per-transaction candidates in `result.matches`.
+Review the output: `result.total_unconfirmed` (bank transactions needing attention), `result.matched` (at least one candidate), `result.unmatched` (no match), the per-transaction candidates in `result.matches`, and `result.document_reference_candidates` when present (Step 2).
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Review the compact `summary`: `summary.counts` (`total_unconfirmed`, `matched`, `unmatched`, `duplicates`, `needs_review`), `summary.samples` (transaction, amount, best match and its confidence), and `summary.warnings` (third-party-payer and duplicate-scan notes — never dropped).
+Review the compact `summary`: `summary.counts` (`total_unconfirmed`, `matched`, `unmatched`, `duplicates`, `needs_review`), `summary.samples` (transaction, amount, best match and its confidence), and `summary.warnings` (third-party-payer, possible-duplicate, duplicate-scan and `document_reference_candidate` notes — never dropped).
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 If the unconfirmed total is 0, everything is reconciled — stop here.
@@ -72,13 +72,49 @@ If no `distribution` key is present or there is a partially paid warning, say cl
 
 **Third-party payer.** When a match carries `manual_review_required`, or the exact-confirm plan lists it under `third_party_payer_reviews`, the transaction's client (the bank payer) differs from the invoice's client. e-arveldaja books the receipt under the transaction's client, so a plain confirm would leave the invoice client's receivable open. Such matches are withheld from the exact-confirm batch; show both clients and ask the user whether this payment settles that invoice.
 
+**Document-reference candidates** (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`result.document_reference_candidates`, explained by `document_reference_note`
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`document_reference_candidate` warnings
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->): the exact amount plus the purchase invoice's number or its `Ostukorvi/tellimuse nr:` order/cart number in the bank description, scored below the threshold. They are NOT unmatched rows and are never auto-confirmed: show each one (transaction, invoice, matched reference) and ask the owner whether it is that invoice's payment.<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+ If approved, call `confirm_transaction` with `distributions: [{ related_table: "purchase_invoices", related_id: <invoice.id>, amount: <open balance> }]` (no `distribution` key is provided; check a partially paid invoice's open balance first).
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+ If approved, list the proposed distribution and route the row to the `standard` or `full` profile (`EARVELDAJA_PROFILE`).
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided --> Never send these rows to Step 5 or Classify Unmatched: booking them as a new expense would double the cost while the invoice stays open.
+
+**Possible duplicates.** A match with <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`possible_duplicate_postings`
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`possible_duplicate: true` (counted in `summary.counts.duplicates`; the suspect journals are listed in the `possible_duplicate` warnings of the Auto-mode dry run)
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided --> may already be booked by a manual journal or another import: show each suspect journal (id, date, title) before approval. A suspect marked `distinct_source_reference` ("Likely a different movement (different source reference)") carries a different source reference but is still a suspect: show it, never drop or auto-clear it. A <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`duplicate_scan_note`
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`duplicate_scan_unavailable` warning
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided --> means the scan could not run — say so; the rows are then unchecked, not clean.
+
 **One payment, several clients.** A single bank transaction whose distribution links invoices of MORE than one client is always refused (`linked_invoice_clients_ambiguous`): one registration journal carries one client, so no reassignment can fix it. Tell the user to split the payment into per-client transactions (one per invoice client) and reconcile each separately.
 
 ## Step 3: Handle based on mode
 
 ### Auto mode
 
-Call `reconcile_bank_transactions` with `mode: "dry_run_auto_confirm"` and `min_confidence: 90`.
+Call `reconcile_bank_transactions` with `mode: "dry_run_auto_confirm"`, `min_confidence: 90` and `block_on_duplicate: true`. Every row with a possible-duplicate suspect (including `distinct_source_reference` ones) is then held as `blocked_duplicate_suspect`: it is not in the plan and is never confirmed by execute. Present those rows as in Review mode once the owner has checked the suspect journal.
 
 The dry run returns a `plan_handle` (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -107,14 +143,31 @@ Show what would be confirmed. Ask user for approval. The approval card must incl
 - how many bank transactions would be confirmed
 - invoice numbers and counterparties
 - source confidence and match reasons
-- the rows admitted by `auto_confirm_rule: "ref_number_exact"` (count and transaction IDs; page the full plan with `get_execution_plan_page` when the preview shows only samples). To exclude them, re-run the dry run with `min_confidence` above 90; there is no other switch
-- skipped rows and their reasons, including `direction_unproven` (an exact match whose direction is not proven by a checksum-verified CAMT marker or the invoice's own client): they are not confirmed and are presented as in Review mode
+- the rows admitted by `auto_confirm_rule: "ref_number_exact"` (count and transaction IDs; page the full plan with `get_execution_plan_page` when the preview shows only samples). To exclude them, re-run the dry run with `min_confidence` above 90 (this also drops confidence-90 matches); there is no other switch
+- skipped rows and their reasons (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+per row in `result.errors`; `result.skipped` is only a count
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+the `direction_unproven` warnings and plan `section: "exclusions"`
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->), including `direction_unproven` (an exact match whose direction is not proven by a checksum-verified CAMT marker or the invoice's own client): they are not confirmed and are presented as in Review mode
+- every possible-duplicate suspect and `blocked_duplicate_suspect` row (with the suspect journal IDs), plus any <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`duplicate_scan_note`
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard --><!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
+Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+`duplicate_scan_unavailable` warning
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 - side effect: confirmed bank transaction distributions
 - audit reference when available
 
 If the user does not explicitly approve, stop. The plan handle is not approval — never treat holding it as permission to execute.
 
-If approved, call `reconcile_bank_transactions` with `mode: "execute_auto_confirm"` and `plan_handle`: the handle from the reviewed dry run (required; consumed once).
+If approved, call `reconcile_bank_transactions` with `mode: "execute_auto_confirm"`, `plan_handle` (the handle from the reviewed dry run; required, consumed once) and the dry run's `min_confidence` and `block_on_duplicate` unchanged — execute recomputes the reviewed set with them, and a different value is refused with `plan_drift`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
@@ -128,20 +181,22 @@ After execute, tell the owner which transactions were confirmed by `ref_number_e
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Report: how many confirmed, how many skipped, any errors — prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`. Inspect `result.execution.execution_report` when present — its `status` (`completed` or `partial_execution`), `command_partitions`, and `stop_reason` show whether every reviewed confirm ran; if it stopped part-way, do not retry automatically, re-run the dry run for a fresh preview.
+Report: how many confirmed, how many skipped, any errors — prefer `result.execution.summary`, `result.execution.results`, `result.execution.errors`, and `result.execution.audit_reference`. Inspect `result.execution.execution_report` when present — its `status` (`completed` or `partial_execution`), `command_partitions`, and `stop_reason` show whether every reviewed confirm ran; if it stopped part-way, do not retry automatically, re-run the dry run for a fresh preview. `accounting_status: "unverified"` (with ledger-check `warnings`) means the rows ARE confirmed but the post-confirm ledger check could not verify them: list them for the owner and do not retry.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Report from the executed `summary`: `summary.counts`, `summary.status` (`completed` or `partial`), and every `summary.blockers` entry; if it stopped part-way, do not retry automatically, re-run the dry run for a fresh preview. Page per-row detail with `get_operation_result_page` when `summary.details` references it.
+Report from the executed `summary`: `summary.counts`, `summary.status` (`completed` or `partial`), and every `summary.blockers` entry; if it stopped part-way, do not retry automatically, re-run the dry run for a fresh preview. Page per-row detail with `get_operation_result_page` when `summary.details` references it. `ledger_check_unverified` / `ledger_check_unavailable` warnings mean the rows ARE confirmed but unverified: list them and do not retry.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 ### Review mode
 
-Show matches grouped by confidence and counterparty. If there are many similar high-confidence matches, show the first 10 plus counts and ask for one batch approval with exceptions; otherwise ask the user to confirm or skip one match at a time.
+Show matches grouped by confidence and counterparty.
 
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+If there are many similar high-confidence matches, show the first 10 plus counts and ask for one batch approval with exceptions; otherwise ask the user to confirm or skip one match at a time.
 
 For approved matches, call `confirm_transaction`:
 - `id`: transaction ID
@@ -163,7 +218,7 @@ This profile confirms invoice matches only through the reviewed exact-match plan
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:alignment-report -->
 Capability condition for `alignment-report`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `run_accounting_report`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- `run_accounting_report` with `report: "receipt_client_alignment"` lists every existing receipt booked under the wrong client.
+To find receipts already booked under the wrong client (earlier third-party payments), run `run_accounting_report` with `report: "receipt_client_alignment"`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:alignment-report -->
 
 ### Single transaction mode
@@ -246,7 +301,7 @@ Ask for approval. If the user does not explicitly approve, stop — the plan han
 - After execute, inspect the execution report (`status`, `command_partitions`, `stop_reason`) — on a partial execution do not retry automatically, re-run the dry run.
 - In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
 
-**WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via LHV CAMT — this creates duplicate journal entries.
+**WARNING:** Do not manually confirm Wise-side transfers that were already confirmed via the other bank's CAMT import — this creates duplicate journal entries.
 
 ## Step 5: Unmatched transactions
 
@@ -255,10 +310,11 @@ List transactions with no matches and offer inline actions in compact groups —
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-These are existing PROJECT bank transactions, so book them by CONFIRMING the transaction against a GL account with `confirm_transaction` (an `accounts` distribution: `distributions: [{ related_table: "accounts", related_id: <account id>, amount: <tx amount>, related_sub_id: <dimension id if the account has dimensions> }]`). Do NOT use a standalone `create_journal` for these rows: confirming ties the journal to the bank transaction and reconciles the bank balance in one step, whereas a separate `create_journal` leaves the bank row unreconciled and risks double-counting the bank movement. Reserve `create_journal` for adjustments that are NOT tied to any existing bank transaction.
+These are existing PROJECT bank transactions, so book them by CONFIRMING the transaction against a GL account with `confirm_transaction` (an `accounts` distribution: `distributions: [{ related_table: "accounts", related_id: <account id>, amount: <tx amount>, related_sub_id: <dimension id if the account has dimensions> }]`, plus `clients_id` when the row has none — CAMT rows often have `clients_id: null`, and an accounts confirm then fails with "buyer or supplier is missing"). Do NOT use a standalone `create_journal` for these rows: confirming ties the journal to the bank transaction and reconciles the bank balance in one step, whereas a separate `create_journal` leaves the bank row unreconciled and risks double-counting the bank movement. Reserve `create_journal` for adjustments that are NOT tied to any existing bank transaction.
 - Small amounts (<1 EUR): likely bank fees or interest. Offer `confirm_transaction` with a distribution to the appropriate contra-account (e.g. 8610 "Muud finantskulud" for bank/transfer fees — consistent with how Wise fees are booked — and 8400 "Intressitulu" for interest credits — financial income, 8xxx range, not a 6xxx staff-cost account) and ask the user to approve the proposed contra before executing.
 - Description contains "teenustasu", "intress", "service fee": same as above; pre-fill the contra account based on the keyword and ask for approval.
 - Larger amounts: check if the corresponding invoice exists in the system; if it does, offer `confirm_transaction` against that invoice; if it does not, offer `confirm_transaction` against a suggested expense/income account (accounts distribution) after the user approves the proposed account.
+- Recurring expenses with no invoice (subscriptions, card purchases): the **Classify Unmatched** workflow (`classify_bank_transactions`) previews purchase-invoice bookings for them in one approved batch.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `reconcile_bank_transactions`, and none of these is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.

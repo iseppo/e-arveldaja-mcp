@@ -151,9 +151,11 @@ function renderPreview(preview: AccountingDocumentPreview) {
         description: wrapUntrustedOcr((fields.description as string | undefined) ?? undefined),
         supplier_reg_code: fields.supplier_reg_code,
         supplier_vat_no: fields.supplier_vat_no,
+        supplier_iban: fields.supplier_iban,
         invoice_number: fields.invoice_number,
         invoice_date: fields.invoice_date,
         due_date: fields.due_date,
+        ref_number: fields.ref_number,
         total_net: fields.total_net,
         total_vat: fields.total_vat,
         total_gross: fields.total_gross,
@@ -189,9 +191,9 @@ function renderPreview(preview: AccountingDocumentPreview) {
       blockers: preview.blockers,
       warnings: preview.warnings,
       next_step: status === "ready_for_approval"
-        ? "Review the bound booking_review model above — it is the EXACT write model create will execute. After explicit approval, call mode='create' with this plan_handle, the same source, source_sha256, and the SAME booking fields; any changed field is rejected as plan_drift. Confirm separately afterward."
+        ? "Review the bound booking_review model above — it is the EXACT write model create will execute. After explicit approval, call mode='create' with this plan_handle, the same source, source_sha256, and the SAME booking fields; any changed field is rejected as plan_drift. That approval also covers mode='confirm' afterward unless create reports changed effects or new warnings/duplicate signals."
         : status === "extracted"
-          ? "Review these extracted values with the operator. This extraction preview is NOT create approval and carries no plan handle. When the operator has confirmed the final booking values, call mode='prepare' again with the same source PLUS the final booking fields (supplier_client_id, invoice_number, invoice_date, journal_date, term_days, items, vat_price, gross_price, …) to obtain the create plan handle."
+          ? "Review these extracted values with the operator. This extraction preview is NOT create approval and carries no plan handle. When the operator has confirmed the final booking values, call mode='prepare' again with the same source PLUS the final booking fields (supplier_client_id, invoice_number, invoice_date, journal_date, term_days, items, vat_price, gross_price, ref_number, bank_account_no, …) to obtain the create plan handle."
           : "Resolve the flagged items (supplier/validation) before booking.",
     },
     mutation_occurred: false,
@@ -243,7 +245,7 @@ export interface ProcessAccountingDocumentDeps {
   blankLeaderProof?: BlankLeaderProof;
 }
 
-const LEGACY_DESCRIPTION = "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft separately.";
+const LEGACY_DESCRIPTION = "Unified single-document purchase-invoice entry point. Give it one supplier invoice (PDF/JPG/PNG) and it extracts the data, validates totals, safely resolves the supplier, checks duplicate risk, and proposes a booking. Flow: (1) mode='prepare' with only the file → extraction preview (NO plan handle — an OCR preview is never create approval); (2) after the operator reviews the values, mode='prepare' again with the file PLUS the final booking fields (supplier_client_id, invoice_number, dates, term_days, items, totals, ref_number, bank_account_no, notes) → the server binds the exact write model and returns the plan_handle; (3) after explicit approval, mode='create' with that plan_handle, source_sha256 and the SAME booking fields — any changed field is rejected as plan_drift; (4) mode='confirm' with the returned confirm_plan handle and invoice_id registers the draft; the create approval covers it unless create reports changed effects or new warnings/duplicate signals.";
 
 const READING_DESCRIPTION = " Verified reading (you read the document yourself): (a) mode='read' with the file → the text packet, reading instructions and proof questions; (b) mode='verify' with the file, document_reading and proof → the server checks every value against the printed text and returns a review card and, when nothing blocks, the create plan_handle; (c) after the owner's approval, mode='create' with that plan_handle, the same file and owner_answers (one answer per card row) → a DRAFT and a confirm_plan; (d) mode='confirm' with confirm_plan registers the draft only if it is unchanged since create. When the text layer lost a dot-leader value, read also returns image crops of those rows: give the date or number printed there in lost_value_reading at verify, and the server accepts it only when its own OCR of the same crop reads the same.";
 
@@ -438,9 +440,9 @@ export function registerProcessAccountingDocumentTool(
       vat_price: z.number().optional().describe("mode='create': EXACT total VAT from the invoice; never recalculate."),
       gross_price: z.number().optional().describe("mode='create': EXACT total gross from the invoice; never recalculate."),
       liability_accounts_id: z.number().optional().describe("mode='create': liability account (default 2310)."),
-      notes: z.string().optional().describe("mode='create': optional notes. Do NOT use the source document filename."),
-      ref_number: z.string().optional().describe("mode='create': reference number."),
-      bank_account_no: z.string().optional().describe("mode='create': supplier bank account."),
+      notes: z.string().optional().describe("Booking-binding prepare + mode='create': optional notes. Do NOT use the source document filename."),
+      ref_number: z.string().optional().describe("Booking-binding prepare + mode='create': the printed payment reference (viitenumber; summary.extraction.ref_number)."),
+      bank_account_no: z.string().optional().describe("Booking-binding prepare + mode='create': supplier IBAN (summary.extraction.supplier_iban)."),
       currency: z.string().optional().describe("mode='create': currency code (default EUR)."),
       currency_rate: z.number().positive().optional().describe("mode='create': foreign units per 1 EUR (e.g. USD 1.08); required when currency != EUR."),
       base_net_price: z.number().optional().describe("mode='create': EUR equivalent of net_price."),
@@ -503,7 +505,7 @@ export function registerProcessAccountingDocumentTool(
           return textResult(failureResponsePayload(outcome.error), true);
         }
         // Post-register receipt: echo the supplier + gross read back from the
-        // registered invoice so APPROVAL TWO names WHO and HOW MUCH, not a bare
+        // registered invoice so the confirm result names WHO and HOW MUCH, not a bare
         // id. `total_gross` is the invoice-currency face value, labelled by
         // `currency`; `total_gross_eur` is the EUR figure the ledger moved,
         // surfaced only for a non-EUR invoice (for EUR it equals total_gross).
@@ -514,7 +516,7 @@ export function registerProcessAccountingDocumentTool(
         const showEurGross = grossKnown
           && outcome.value.echoedBaseGross !== undefined
           && outcome.value.echoedCurrency !== "EUR";
-        const base = "Purchase invoice confirmed (registered) into the ledger. This is APPROVAL TWO (confirm).";
+        const base = "Purchase invoice confirmed (registered) into the ledger.";
         const note = supplierKnown && grossKnown
           ? `${base} The supplier and gross above are the ledger-affecting values read back from the registered invoice; total_gross is in \`currency\`, and total_gross_eur (when shown) is the EUR amount booked.`
           : supplierKnown
@@ -853,8 +855,8 @@ export function registerProcessAccountingDocumentTool(
           : {}),
         ...(referencingJournalIds.length > 0 ? { referencing_journal_ids: referencingJournalIds } : {}),
         note: execution.confirmPlan
-          ? "Purchase invoice created as DRAFT and the source document uploaded. This is APPROVAL ONE (create/upload). Review the actual draft below and obtain APPROVAL TWO before mode='confirm' with this invoice_id and confirm_plan."
-          : "Purchase invoice created and the source document uploaded, but no confirm authority was issued. Review this existing invoice in e-arveldaja or use get_purchase_invoice and explicitly confirm after a fresh review. Do not create it again.",
+          ? "Purchase invoice created as DRAFT and the source document uploaded. The approval that covered create also covers registration: call mode='confirm' with this invoice_id and confirm_plan, unless draft_review differs from the approved booking or this result carries warnings or duplicate signals (referencing_journal_ids, possible_duplicate_postings) that were not on the approved card — then show them and ask first."
+          : "Purchase invoice created and the source document uploaded, but no confirm authority was issued. Stop at this invoice id: do not create it again or retry automatically. Report the retained draft and the reason (draft_readback_mismatch / draft_readback_unavailable); it needs a fresh review before anyone confirms it in e-arveldaja.",
         ...(execution.readbackMismatch ? { draft_readback_mismatch: execution.readbackMismatch } : {}),
         ...(execution.draftReadbackUnavailable ? { draft_readback_unavailable: true } : {}),
         ...(execution.confirmPlan ? { draft_review: wrapBookingReview(execution.result) } : {}),

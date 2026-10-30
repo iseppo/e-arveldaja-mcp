@@ -3,6 +3,8 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { registerWorkflowRecommendationTools } from "./workflow-recommendations.js";
 import type { ToolExposureConfig } from "../config.js";
 import { ESTONIAN_VAT_METADATA, VAT_REGISTRATION_THRESHOLD_DISPLAY } from "../estonian-tax-rules.js";
+import { runWithToolProfile, type ToolProfile } from "../tool-profile.js";
+import { enabledPromptDefinitions, promptToolAvailability } from "../prompt-registry.js";
 
 const ALL_ENABLED: ToolExposureConfig = {
   enableLightyear: true,
@@ -15,9 +17,9 @@ const ALL_ENABLED: ToolExposureConfig = {
   enableProducts: true,
 };
 
-function getRecommendWorkflowHarness(exposure?: Partial<ToolExposureConfig>) {
+function getRecommendWorkflowHarness(exposure?: Partial<ToolExposureConfig>, options: { setupMode?: boolean } = {}) {
   const server = { registerTool: vi.fn() };
-  registerWorkflowRecommendationTools(server as never, { ...ALL_ENABLED, ...exposure });
+  registerWorkflowRecommendationTools(server as never, { ...ALL_ENABLED, ...exposure }, options);
   const call = server.registerTool.mock.calls.find(([name]) => name === "recommend_workflow");
   if (!call) throw new Error("recommend_workflow tool was not registered");
   return {
@@ -354,5 +356,87 @@ describe("recommend_workflow", () => {
       tool: "extract_pdf_invoice",
       args: { file_path: "<absolute invoice PDF/image path>" },
     });
+  });
+  interface CompactWorkflow { id: string; prompt: string; default_mode: string; primary_tools: string[]; required_inputs: string[] }
+  interface RecommendPayload {
+    available_workflows: CompactWorkflow[];
+    recommended_workflow: CompactWorkflow;
+    raw: CompactWorkflow;
+    next_actions: Array<{ tool: string; args: Record<string, unknown>; why: string }>;
+  }
+
+  async function callOnProfile(profile: ToolProfile, args: Record<string, unknown>, options: { setupMode?: boolean } = {}) {
+    const { handler } = getRecommendWorkflowHarness(undefined, options);
+    const result = await runWithToolProfile(profile, () => handler(args));
+    return parseMcpResponse(result.content[0]!.text) as RecommendPayload;
+  }
+
+  it.each(["guided", "guided-sales", "standard", "full"] as const)(
+    "lists exactly the workflows whose prompt is registered on %s, naming only registered tools",
+    async (profile) => {
+      const listed = await callOnProfile(profile, {});
+      const ids = listed.available_workflows.map(workflow => workflow.prompt);
+      const prompts = enabledPromptDefinitions(ALL_ENABLED, { toolProfile: profile, setupMode: false }).map(definition => definition.name);
+      expect([...ids].sort()).toEqual([...prompts].sort());
+      const hasTool = promptToolAvailability({ toolProfile: profile, toolExposure: ALL_ENABLED, setupMode: false });
+      for (const workflow of listed.available_workflows) {
+        for (const tool of workflow.primary_tools) expect(hasTool(tool), `${workflow.id}: ${tool}`).toBe(true);
+        if (!hasTool("list_account_dimensions")) {
+          expect(workflow.required_inputs.join(" "), workflow.id).not.toContain("list_account_dimensions");
+        }
+      }
+    },
+  );
+
+  it("routes month-end close on guided to run_accounting_report month_end", async () => {
+    const payload = await callOnProfile("guided", { goal: "month end close" });
+    expect(payload.recommended_workflow.id).toBe("month-end-close");
+    expect(payload.raw.primary_tools).toEqual(["run_accounting_report"]);
+    expect(payload.next_actions).toEqual([{
+      tool: "run_accounting_report",
+      args: { report: "month_end", month: "<YYYY-MM>" },
+      why: "Start with the month-end checklist to identify blockers before computing reports.",
+    }]);
+  });
+
+  it("keeps the granular month-end checklist on full without the guided alternative", async () => {
+    const payload = await callOnProfile("full", { goal: "month end close" });
+    expect(payload.next_actions.map(action => action.tool)).toEqual(["month_end_close_checklist"]);
+  });
+
+  it("routes company overview on guided-sales to run_accounting_report balance_sheet", async () => {
+    const payload = await callOnProfile("guided-sales", { goal: "financial overview dashboard" });
+    expect(payload.recommended_workflow.id).toBe("company-overview");
+    expect(payload.next_actions).toEqual([expect.objectContaining({
+      tool: "run_accounting_report",
+      args: { report: "balance_sheet", date_to: "<YYYY-MM-DD>" },
+    })]);
+  });
+
+  it("routes CAMT import on guided to process_bank_input and drops the unregistered dimension hint", async () => {
+    const payload = await callOnProfile("guided", { goal: "import bank statement CAMT file" });
+    expect(payload.recommended_workflow.id).toBe("import-camt");
+    expect(payload.raw.primary_tools).toEqual(["process_bank_input"]);
+    expect(payload.next_actions[0]).toMatchObject({
+      tool: "process_bank_input",
+      args: { file_path: "<absolute CAMT.053 XML path>", accounts_dimensions_id: "<bank dimension id>" },
+    });
+    expect(payload.raw.required_inputs).toEqual(["absolute CAMT.053 XML path", "optional bank account dimension id"]);
+  });
+
+  it("names credential tools only when they are registered (setup mode vs configured)", async () => {
+    const configured = await callOnProfile("standard", { goal: "set up API credentials from apikey file" });
+    expect(configured.recommended_workflow.id).toBe("setup-credentials");
+    expect(configured.raw.primary_tools).toEqual(["get_setup_instructions", "list_connections"]);
+
+    const setup = await callOnProfile("standard", { goal: "set up API credentials from apikey file" }, { setupMode: true });
+    expect(setup.raw.primary_tools).toEqual([
+      "get_setup_instructions", "import_apikey_credentials", "list_stored_credentials", "remove_stored_credentials", "list_connections",
+    ]);
+  });
+
+  it("uses confirm_once for the setup-e-arveldaja workflow", async () => {
+    const payload = await callOnProfile("standard", { goal: "setup e-arveldaja" });
+    expect(payload.recommended_workflow).toMatchObject({ id: "setup-e-arveldaja", default_mode: "confirm_once" });
   });
 });

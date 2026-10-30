@@ -29,12 +29,14 @@ Run the month-end close checklist, compute financial statements, and flag issues
 **Input:** Month in YYYY-MM format (e.g. `2026-02`).
 
 User-facing phases:
-1. Identify close blockers.
-2. Check missing documents and duplicate invoices.
+1. Identify close blockers and duplicate invoices.
+2. Check missing documents.
 3. Compute statements.
 4. Show READY TO CLOSE or HAS BLOCKERS with concrete inline next actions.
 
 Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: the unconfirmed (PROJECT) records surfaced as blockers below are not yet in the ledger, so the computed statements do not reflect them until they are confirmed.
+
+e-arveldaja itself books the VAT return (KMD) settlement with the tax authority and the prepayment-account (1516) entries. Do not compute, propose, or book those entries here.
 
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -52,15 +54,27 @@ Reports read through a short-lived cache (a few minutes): if the user just chang
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Call `month_end_close_checklist` with `month`: the YYYY-MM value.
+Call `month_end_close_checklist` with `month`: the YYYY-MM value. Overdue and due-before-month-end lists show at most 10 rows (`truncated`); report their `count` and `total`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `run_accounting_report`, and none of these is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Call `run_accounting_report` with `report`: `month_end` and `month`: the YYYY-MM value.
+Call `run_accounting_report` with `report`: `month_end` and `month`: the YYYY-MM value. Compact output cuts long lists (`truncated`): report the `count` values, and call again with `detail: "full"` when you need every row.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
-## Step 2: Flag blocking issues
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
+Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+## Step 2: Check for duplicate invoices
+
+Run this before offering any purchase-invoice action. Call `detect_duplicate_purchase_invoice`:
+- `date_from`: the first day of the PREVIOUS month (catches re-bookings across the month boundary)
+- `date_to`: last day of the month
+
+Report `exact_duplicates` (same supplier + invoice number) and `suspicious_same_amount_date` (same supplier + amount + date with different numbers).
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+
+## Step 3: Flag blocking issues
 
 Present in priority order:
 
@@ -72,15 +86,17 @@ Present in priority order:
 
 Report ALL returned blocker lists, including `unconfirmed_sale_invoices`, regardless of which confirmation actions this profile exposes. Determine sales coverage by the PRESENCE of `unconfirmed_sale_invoices`, even when its count is zero; absence means a purchase-side check only. A returned `ready_to_close: false` always means HAS BLOCKERS. Never convert it to READY because a blocker lacks an available action. Show overdue receivables as a warning whenever returned.
 
-For blockers, show ID, date, amount/title, then offer concrete inline actions. If there are many blockers of the same low-risk type, show the first 10 plus counts and ask for one batch approval with exceptions instead of one yes/no question per item. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+For blockers, show ID, date, amount/title, then offer concrete inline actions. Never batch-approve purchase invoices or journals: confirm them one at a time. For many bank-transaction rows, show the first 10 plus counts and use the reconcile workflow's own batch review. Do NOT close the workflow with "go fix these in the e-arveldaja UI". That is a last-resort fallback only when no MCP tool can perform the action and the API has already rejected the inline attempt.
+
+Journals numbered `DIV-…` (dividend) or `YEC-…` (year-end close): do not confirm them here. They belong to the dividend or year-end close workflow and need its prerequisites (an approved annual report and a distribution decision for dividends). Name them and point the user there.
 
 Inline actions per blocker type:
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- Purchase invoices: offer `confirm_purchase_invoice`, or `delete_purchase_invoice` if the user confirms it is a duplicate
-- Journals: offer `confirm_journal`
-- Transactions: prefer the **Reconcile Bank** workflow for unmatched rows; for already-matched single rows offer `confirm_transaction` directly
+- Purchase invoices: a draft listed in `exact_duplicates` / `suspicious_same_amount_date`, or one a document workflow left held, is NOT confirmed here — route it back to the **Book Invoice** workflow (or offer `delete_purchase_invoice` if the user confirms it is a duplicate). For any other draft, show supplier, invoice number, net/VAT/gross, whether a source document is attached (`get_purchase_invoice`) and the Step 2 result, then offer `confirm_purchase_invoice` for that one invoice.
+- Journals: call `get_journal`, show its number and postings (account, debit/credit, amount), then offer `confirm_journal` for that one journal.
+- Transactions: prefer the **Reconcile Bank** workflow for unmatched rows. A row whose distribution goes to another own bank account is an inter-account transfer: use `reconcile_inter_account_transfers`, never `confirm_transaction`. For other single rows with a known distribution, offer `confirm_transaction` with `block_on_duplicate: true`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `run_accounting_report`, and none of these is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -107,7 +123,7 @@ Capability condition for `guided-sales`: inspect the connected MCP server's adve
 - Show each sale-invoice ID, date, and amount, and offer to confirm it with `manage_sale_invoice` (`action: "confirm"`: `mode: "prepare"` first, then `mode: "execute"` with the returned `plan_handle` after explicit approval).
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided-sales -->
 
-## Step 3: Check for missing documents
+## Step 4: Check for missing documents
 
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -120,19 +136,7 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 Call `run_accounting_report` with report="missing_documents", `date_from`: YYYY-MM-01 and `date_to`: the last day of the month.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
-Report every confirmed record without an attached source document — purchase invoices, manual journals, and directly booked bank transactions alike (RPS requires a source document on every entry).
-
-<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
-Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
-
-## Step 4: Check for duplicate invoices
-
-Call `detect_duplicate_purchase_invoice`:
-- `date_from`: YYYY-MM-01
-- `date_to`: last day of the month
-
-Report exact duplicates (same supplier + invoice number) and suspicious matches (same supplier + amount + date with different numbers).
-<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
+Report the per-section counts of confirmed records without an attached source document — purchase invoices, manual journals, and directly booked bank transactions alike (RPS requires a source document on every entry); list the returned rows, and call again with `detail: "full"` when a section is `truncated`.
 
 ## Step 5: Compute financial statements
 
@@ -184,7 +188,7 @@ Blockers:        X issues
 Coverage:        Purchase-side only / Purchases and sales read
 Warnings:        X items
 Missing docs:    X records
-Duplicates:      X found (or "not checked" when Step 4 did not run)
+Duplicates:      X found (or "not checked" when Step 2 did not run)
 
 Trial Balance:   BALANCED / IMBALANCED by X EUR
 Balance Sheet:   BALANCED / IMBALANCED
@@ -193,4 +197,12 @@ YTD Net Profit:  X.XX EUR
 Status: READY TO CLOSE (within the checked coverage) / HAS BLOCKERS
 ```
 
+Status is HAS BLOCKERS when `ready_to_close` is false, OR the trial balance or balance sheet is off by more than 0.01 EUR, OR exact duplicates were found — even if the tool reported `ready_to_close: true`. Missing documents, suspicious duplicate matches and overdue items are WARNINGS.
+
 If blockers exist, list specific actions needed. Offer to help fix them.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:year-end -->
+Capability condition for `year-end`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `prepare_year_end_close`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+
+For December (the last month of a calendar fiscal year), offer the year-end close next: `prepare_year_end_close` with `year` (RIK method; dry run).
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:year-end -->

@@ -909,6 +909,60 @@ describe("classification operations — a payment matching an open purchase invo
   });
 });
 
+// Reconcile lists an exact-amount payment whose description carries the open
+// purchase invoice's order/cart number as a document-reference candidate; the
+// classification partition must not book it as a second expense (prompt
+// review M1). Synthetic numbers only.
+describe("classification operations — a document-reference candidate is never auto-booked", () => {
+  const CART = "990011223344";
+  const cardTx = (description: string) => withSignedCamtMarker({ id: 43, status: "PROJECT", is_deleted: false, type: "C", amount: 25.2, date: "2026-03-18", accounts_dimensions_id: 100, bank_account_name: null, clients_id: null, cl_currencies_id: "EUR", description }, "DBIT");
+  // Issued six weeks before the payment: exact amount alone scores 50, below
+  // the classification's possible-match threshold 70.
+  const TICKET = { id: 701, status: "CONFIRMED", payment_status: "NOT_PAID", clients_id: 77, client_name: "Bussiliin OÜ", number: "BL-990011701", create_date: "2026-02-01", gross_price: 25.2, base_gross_price: 25.2, cl_currencies_id: "EUR", notes: `Ostukorvi/tellimuse nr: ${CART}` };
+  const ARTS = [{ id: 501, name_est: "Travel", name_eng: "Travel", accounts_id: 5230, vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1 }];
+  const ACCS = [{ id: 5230, name_est: "Travel expense", name_eng: "Travel expense", account_type_est: "Kulud", account_type_eng: "Expenses" }];
+
+  function setup(tx: ReturnType<typeof cardTx>) {
+    return makeOperations({
+      transactionRows: [tx], transactionDetails: { 43: tx }, clientRows: [],
+      purchaseArticles: ARTS, accounts: ACCS, purchaseInvoiceRows: [TICKET],
+    } as unknown as AccountingWorkflowApiOptions);
+  }
+
+  it("leaves a card payment naming the invoice's cart number out of the unmatched rows", async () => {
+    const { operations } = setup(cardTx(`Kaardimakse 18.03.2026 ostukorv ${CART} Tallinn`));
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (!analysis.ok) return;
+    expect(analysis.value.totalUnconfirmed).toBe(1);
+    expect(analysis.value.totalUnmatched).toBe(0);
+    expect(analysis.value.groups).toEqual([]);
+  });
+
+  it("still classifies the same exact-amount payment when its description carries no reference of that invoice", async () => {
+    const { operations } = setup(cardTx("Kaardimakse 18.03.2026 Tallinn"));
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (!analysis.ok) return;
+    expect(analysis.value.totalUnmatched).toBe(1);
+  });
+
+  it("skips the row at apply with zero writes when a caller sends it anyway", async () => {
+    const tx = cardTx(`Kaardimakse 18.03.2026 ostukorv ${CART} Tallinn`);
+    const { api, operations } = setup(tx);
+    const group = { category: "saas_subscriptions", apply_mode: "purchase_invoice", normalized_counterparty: "kaardimakse", display_counterparty: "Kaardimakse", recurring: false, similar_amounts: true, total_amount: 25.2, suggested_booking: { purchase_article_id: 501, purchase_account_id: 5230, liability_account_id: 2310, reason: "Ticket" }, reasons: ["keyword"], transactions: [tx] };
+    const dry = await operations.applyClassifications({ classificationsJson: { groups: [group] } });
+    expect(dry.ok).toBe(true);
+    if (!dry.ok) return;
+    const out = await operations.applyClassifications({ classificationsJson: { groups: [group] }, execute: true, planHandle: dry.value.planHandle });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.value.results.flatMap(r => r.notes).join("\n")).toContain("Transaction 43 matches an open purchase invoice; skipped — reconcile instead.");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // F6: ledger context. Anonymised: company "Näide OÜ" with own IBANs on dims
 // 100/200, related company "Laenaja OÜ", loan dim 900 on account 2110.

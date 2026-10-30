@@ -19,11 +19,12 @@ If the user says they recently changed data in the e-arveldaja web UI or asks fo
 Reports read through a short-lived cache (a few minutes): if the user just changed data in the e-arveldaja web UI, say the figures may lag those edits briefly.
 <!-- E_ARVELDAJA_FEATURE_END:guided -->
 
-Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: unconfirmed (PROJECT) records are not yet in the ledger. If recent activity may still be unconfirmed, say so in the summary rather than presenting the figures as final.
+Reporting is only accurate after the relevant journals, invoices, and transactions are confirmed: unconfirmed (PROJECT) records are not yet in the ledger. Read the reporting month's unconfirmed counts (step 0 below); when any `unconfirmed_*` count is non-zero, say so in the summary rather than presenting the figures as final.
 
 Pass the SAME operator-selected reporting date to every report, including `as_of_date` for aging. Historical aging uses current payment status; it does not reconstruct settlements at the historical cutoff. Display this limitation next to historical payables and receivables: an invoice paid after the cutoff may be absent from the historical outstanding list. Do not present historical AP/AR as a fully reconstructed historical balance.
 
 <!-- E_ARVELDAJA_FEATURE_START:standard -->
+0. Call `month_end_close_checklist` with `month`: the reporting date's YYYY-MM; use only its `unconfirmed_*` counts.
 1. Call `compute_balance_sheet` with `date_to`: the selected reporting date.
 2. Call `compute_profit_and_loss` with `date_from`: the selected period start and `date_to`: the selected reporting date.
 3. Call `compute_payables_aging` with `as_of_date`: the selected reporting date.
@@ -32,6 +33,7 @@ Pass the SAME operator-selected reporting date to every report, including `as_of
 4. Call `compute_receivables_aging` with `as_of_date`: the selected reporting date.
 <!-- E_ARVELDAJA_FEATURE_END:sales -->
 <!-- E_ARVELDAJA_FEATURE_START:guided -->
+0. Call `run_accounting_report` with report="month_end" and month: the reporting date's YYYY-MM; use only its `unconfirmed_*` counts.
 1. Call `run_accounting_report` with report="balance_sheet" and date_to: the selected reporting date.
 2. Call `run_accounting_report` with report="profit_and_loss", date_from: the selected period start and date_to: the selected reporting date.
 3. Call `run_accounting_report` with report="aging" and as_of_date: the selected reporting date; read the payables side, and the receivables side when the result includes one.

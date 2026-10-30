@@ -29,6 +29,7 @@ Treat the tool response as the first-pass source of truth:
 - `autopilot.next_recommended_action`
 - `autopilot.next_question`
 - `autopilot.user_summary`
+- on the guided profiles, `workflow` (compact `workflow_action_v2`): `next_action` is the ready-to-run next call and `blockers` the open items; to move past an item, call `continue_accounting_workflow` with `action: "next"`, the `workflow_handle` and that item's `item_id`. A handle is never approval.
 
 ### Step 2: Explain the plan in plain language
 
@@ -57,13 +58,13 @@ If `autopilot.needs_one_decision` is non-empty:
 Overlapping CAMT statements raise the same review item once per file. An item for the same statement leg (same bank reference, leg, review code, journals or transactions, and bank account) is listed once, with `seen_in_steps` naming the dry-run steps that raised it; items without a bank reference are never merged, so a repeat of one of those may still be listed per file.
 
 A receipt follow-up that names journal ids ("the payment may already be booked by journal(s) N") is a receipt `receipt_batch` held as a possible duplicate: ask whether that journal is this receipt's payment before booking anything.
-A receipt follow-up saying "journal(s) N already reference its invoice number" is a receipt `receipt_batch` held because a live journal already carries its invoice number: ask whether that journal is this document's booking (then attach the document to it) before booking anything.
+A receipt follow-up saying "journal(s) N already reference its invoice number" is a receipt `receipt_batch` held because a live journal already carries its invoice number: ask whether that journal is this document's booking before booking anything; if it is, attach the document to that journal instead of booking it again (the **Book Invoice** workflow says how on this profile).
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row
 - `compliance_basis`: summarize it briefly in plain language
 - `follow_up_questions`: ask only those questions that the payload itself did not already answer
-- `resolver_input`: pass that object to `continue_accounting_workflow` with `action: "resolve_review"` before inventing your own follow-up plan
+- `resolver_input`: pass that object as `review_item_json` to `continue_accounting_workflow` with `action: "resolve_review"` before inventing your own follow-up plan
 
 If there are no unresolved questions, continue immediately.
 
@@ -76,7 +77,7 @@ The autopilot already ran the safe default dry-run steps.
 - do not repeat them unless the user asks
 - continue from the next unresolved item
 - use more specific workflows only for focused follow-up
-- do not use any `execute: true` mutation without explicit approval
+- do not run any mutating mode (`create`, `execute`, `create_and_confirm`, …) without explicit approval
 
 ### Step 5: Keep the interaction decision-light
 

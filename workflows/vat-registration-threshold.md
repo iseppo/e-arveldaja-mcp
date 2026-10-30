@@ -38,17 +38,17 @@ Official EMTA sources:
    - `exempt_social_turnover`
    - `incidental_excluded_turnover`
    - `taxable_turnover_adjustment`
-   - `manual_bucket_source`
-3. Set `manual_bucket_source` carefully:
+3. Set `manual_bucket_source` (it describes the amounts above, it is not one) carefully:
    - use `outside_sale_invoices` when the manual bucket amounts are not already included in confirmed sale invoices
    - use `included_in_sale_invoices` when the manual bucket amounts are a reclassification of confirmed sale-invoice turnover; this prevents double counting
 4. Review `status`:
    - `already_registered`: company already has a VAT number
    - `exceeded`: ordinary taxable/0% turnover alone exceeds {{E_ARVELDAJA_VAT:THRESHOLD_DISPLAY}}
    - `needs_manual_review`: threshold depends on non-incidental finance, insurance, or real-estate turnover
-   - `approaching`: monitor the next invoices and turnover buckets
+   - `approaching`: counted turnover is at least 80% of the threshold; monitor the next invoices and turnover buckets
    - `ok`: no threshold issue from supplied data
-5. If `needs_manual_review`, ask the user to classify the relevant turnover as incidental or non-incidental before concluding registration duty.
+5. The tool counts every confirmed sale invoice. Before concluding `exceeded`, `needs_manual_review` or `approaching`, ask the user whether any sale invoices are fixed-asset disposals or have a non-Estonian place of supply (for example B2B services to businesses in other EU countries), and whether there is taxable turnover without sale invoices. If so, re-run with `taxable_turnover_adjustment` (negative to exclude, positive to add) and report both runs.
+6. If `needs_manual_review`, ask the user to classify the relevant turnover as incidental or non-incidental before concluding registration duty.
 
 ## Output
 
@@ -57,6 +57,7 @@ Summarize:
 - VAT registration status
 - confirmed sale-invoice turnover for the year
 - whether manual bucket amounts were outside sale invoices or reclassified from sale invoices
+- any `taxable_turnover_adjustment` and what it excludes or adds
 - ordinary sale-invoice turnover after any manual bucket reclassification
 - finance, insurance, and real-estate turnover that would count if not incidental
 - turnover explicitly not counted

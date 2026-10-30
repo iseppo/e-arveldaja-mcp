@@ -187,6 +187,7 @@ const MONTH_END_VARIANTS: readonly PromptVariant[] = [
   ...surfaceVariants("month_end_close_checklist", "run_accounting_report"),
   { name: "sales", advertisedTools: ["confirm_sale_invoice"] },
   { name: "guided-sales", advertisedTools: ["manage_sale_invoice"], unlessTools: ["confirm_sale_invoice"] },
+  { name: "year-end", advertisedTools: ["prepare_year_end_close"] },
 ];
 const CREDENTIAL_TOOL_VARIANTS: readonly PromptVariant[] = [
   { name: "credential-tools", advertisedTools: ["import_apikey_credentials", "list_stored_credentials", "remove_stored_credentials"] },
@@ -428,7 +429,7 @@ const PROMPT_DEFINITIONS = [
   {
     name: "company-overview",
     slug: "company-overview",
-    description: "Get a comprehensive dashboard overview of the company's current financial state.",
+    description: "Get a compact dashboard overview of the company's current financial state.",
     argsSchema: undefined,
     setupOptions: {
       note: "This dashboard depends on live company settings and financial reports from e-arveldaja, so it cannot run before credentials are configured.",

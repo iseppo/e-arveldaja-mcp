@@ -98,7 +98,7 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   if (toolExposure.enableSales) registerManageSaleInvoiceTool(publicServer, api, runtimeSafetyContext);
   registerAccountingInboxTools(publicServer, api, runtimeSafetyContext, toolExposure);
   registerAnalyzeUnconfirmedTools(publicServer, api);
-  registerWorkflowRecommendationTools(publicServer, toolExposure);
+  registerWorkflowRecommendationTools(publicServer, toolExposure, { setupMode });
   registerPlanTools(publicServer, runtimeSafetyContext, { profile: toolProfile });
   registerOperationResultTools(publicServer, runtimeSafetyContext);
   // Registered unconditionally (mirrors the operation-result page tool); the

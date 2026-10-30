@@ -52,7 +52,7 @@ For Estonian registry codes, the tool queries the business registry (äriregiste
 
 If `resolve_supplier` returns `needs_name_confirmation`, the registry did not confirm the name: show the user the exact `proposed_name` and use it in step 6 only after the user approves that exact name (or gives the correct one).
 
-A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for the VAT number separately when needed.
+A name-only lookup does not fetch Estonian Business Registry data, and `resolve_supplier` does not fetch a VAT number from the registry lookup — ask for the VAT number separately when needed. For an Estonian company found by name only, ask the user for its 8-digit registry code before step 6: creation is refused without it.
 
 ## Step 4: Gather additional information
 
