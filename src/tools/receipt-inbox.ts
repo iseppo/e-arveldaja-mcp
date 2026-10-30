@@ -40,7 +40,8 @@ import {
   type SupplierResolution,
   resolveSupplierInternal,
 } from "./supplier-resolution.js";
-import { getInvoiceMatchEligibility } from "./bank-reconciliation.js";
+import { getInvoiceMatchEligibility, matchScore } from "./bank-reconciliation.js";
+import { documentReferenceOnTransaction } from "../banking/reconciliation/document-reference.js";
 import {
   type AccountingAutoBookingRule,
   findAutoBookingRule,
@@ -1009,6 +1010,12 @@ export function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], 
         return true;
       }
       if (mayPayPartialResidual(tx, invoice)) return true;
+      // Reconcile's document-reference candidate: exact amount plus the
+      // invoice's number or order/cart reference in the bank description.
+      if (
+        matchScore(tx, invoice, tx.amount).reasons.includes("exact_amount") &&
+        documentReferenceOnTransaction(tx.description, invoice) !== undefined
+      ) return true;
     }
   }
 

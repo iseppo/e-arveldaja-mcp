@@ -309,6 +309,44 @@ describe("process_accounting_document", () => {
     expect(created.result.created_invoice_id).toBe(90_001);
     expect(created.result.document_uploaded).toBe(true);
     expect(created.confirm_plan.invoice_id).toBe(90_001);
+    // One approval card covers create AND confirm; only new signals re-open it.
+    expect(created.note).toContain("The approval that covered create also covers registration");
+    expect(created.note).not.toContain("APPROVAL TWO");
+  });
+
+  it("shows the printed viitenumber and supplier IBAN in the extraction and binds them at prepare (M1)", async () => {
+    const doc = docWithRegCode();
+    mockedParseDocument.mockResolvedValue({ ...doc, text: `${doc.text}\nIBAN EE382200221020145685\nViitenumber 1234561` });
+    const { path, sha256 } = writeTempPdf();
+    const { handler, api } = setup({
+      clientRows: [supplier()],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+      purchaseInvoices: {
+        listAll: vi.fn().mockResolvedValue([]),
+        get: vi.fn(),
+        createAndSetTotals: vi.fn().mockResolvedValue({ id: 90_001, status: "SAVED" }),
+        confirmWithTotals: vi.fn(),
+        confirm: vi.fn(),
+        invalidate: vi.fn().mockResolvedValue({}),
+        uploadDocument: vi.fn().mockResolvedValue({}),
+      },
+    });
+    const extracted = parseToolPayload<ProcessAccountingDocumentPreviewPayload>((await handler({ mode: "prepare", file_path: path })).content[0]!.text);
+    expect(extracted.summary.extraction.ref_number).toBe("1234561");
+    expect(extracted.summary.extraction.supplier_iban).toBe("EE382200221020145685");
+
+    const binding = { ...bookingArgs(), ref_number: "1234561", bank_account_no: "EE382200221020145685" };
+    const prepared = parseToolPayload<ProcessAccountingDocumentPreviewPayload>(
+      (await handler({ mode: "prepare", file_path: path, ...binding })).content[0]!.text,
+    );
+    const planHandle = prepared.summary.plan_handle;
+    expect(planHandle).toBeTruthy();
+    // A create that adds the reference only now drifts from the bound plan.
+    const drifted = await handler({ mode: "create", file_path: path, plan_handle: planHandle, source_sha256: sha256, ...bookingArgs(), bank_account_no: "EE382200221020145685" });
+    expect(drifted.isError).toBe(true);
+    expect(parse(drifted).category).toBe("plan_drift");
+    expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
   });
 
   it("carries the document's cart number into the notes through prepare and create (okt 2026 finding 5)", async () => {

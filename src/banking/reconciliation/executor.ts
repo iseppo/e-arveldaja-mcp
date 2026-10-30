@@ -48,8 +48,7 @@ import {
   type ReconciliationExecutionCommand,
 } from "../../tools/bank-reconciliation-plan.js";
 import { buildInvoiceIndex, getIndexedCandidates } from "./invoice-index.js";
-import { textCarriesStrongReference } from "../../journal-reference-scan.js";
-import { orderReferencesFromNotes } from "../../order-reference-note.js";
+import { documentReferenceOnTransaction } from "./document-reference.js";
 import { legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
 import { matchScore, getInvoiceMatchEligibility, buildSuggestedDistribution, comparableTransactionAmount, sameAmountToTheCent, isAmbiguousForeignInvoiceBase, type MatchCandidate } from "./match-score.js";
 import { hasMeaningfulComparableAmount, resolveOneSidedTransferAmount, transactionCurrency } from "./amount-resolution.js";
@@ -174,15 +173,6 @@ function validateInterAccountDateGap(maxDateGap: number | undefined): number {
 
 /** The suggestion path's default minimum confidence. */
 export const SUGGEST_DEFAULT_MIN_CONFIDENCE = 50;
-
-/**
- * The strong document reference (invoice number, then the notes' order / cart
- * number lines) that `description` carries as a whole token, if any.
- */
-function documentReferenceOnTransaction(description: string | null | undefined, inv: PurchaseInvoice): string | undefined {
-  const references = [inv.number, ...orderReferencesFromNotes(inv.notes)];
-  return references.find(reference => textCarriesStrongReference(description, reference));
-}
 
 export async function runSuggestMatches(
   api: ApiContext,

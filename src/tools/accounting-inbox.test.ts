@@ -1257,7 +1257,7 @@ ${entryXml}
 
     expect(desandboxAllStrings(payload)).toMatchObject({
       review_type: "receipt_review",
-      suggested_tools: ["create_owner_expense_reimbursement"],
+      suggested_tools: ["continue_accounting_workflow"],
       unresolved_questions: ["Kas kulu oli 100% ettevõtluseks?"],
     });
     expect(payload.suggested_workflow).toBeUndefined();
@@ -2862,49 +2862,35 @@ ${entryXml}
     },
   };
 
-  it("resolve_review names create_owner_expense_reimbursement when the tax tools are enabled", async () => {
+  it("resolve_review points owner expenses at the plan-gated prepare_action continuation", async () => {
     const handler = continueWorkflowHandler(DEFAULT_EXPOSURE);
     const result = await handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
-    expect(payload.suggested_tools).toEqual(["create_owner_expense_reimbursement"]);
-    expect(payload.next_step_summary).toContain("create_owner_expense_reimbursement");
+    expect(payload.suggested_tools).toEqual(["continue_accounting_workflow"]);
+    expect(payload.next_step_summary).toContain("action='prepare_action'");
+    expect(payload.next_step_summary).toContain("action='execute_review_action'");
+    expect(JSON.stringify(payload)).not.toContain("create_owner_expense_reimbursement");
   });
 
-  it("guided resolve_review turns the owner-expense helper into a non-executable review proposal", async () => {
+  it("guided resolve_review keeps the owner-expense continuation executable", async () => {
     const handler = continueWorkflowHandler(DEFAULT_EXPOSURE);
     const result = await runWithToolProfile("guided", () => handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem }));
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
-    expect(payload.status).toBe("needs_review");
-    expect(payload.blocker.code).toBe("advanced_action_unavailable_in_profile");
-    expect(payload.accounting_proposal.tool).toBe("create_owner_expense_reimbursement");
-    expect(payload.suggested_tools).toEqual(["get_setup_instructions"]);
-    expect(payload.next_actions).toEqual([{ tool: "get_setup_instructions", args: {}, approval_required: false }]);
+    expect(payload.status).toBe("ready_for_action");
+    expect(payload.blocker).toBeUndefined();
+    expect(payload.suggested_tools).toEqual(["continue_accounting_workflow"]);
   });
 
-  it("resolve_review falls back to create_journal when the tax tools are disabled (DISABLE_TAX_TOOLS)", async () => {
+  it("resolve_review names the same continuation when the tax tools are disabled (DISABLE_TAX_TOOLS)", async () => {
     const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
     const result = await handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem });
     const payload = parseMcpResponse(result.content[0]!.text) as any;
 
-    // Must not name a tool that DISABLE_TAX_TOOLS has unregistered.
-    expect(payload.suggested_tools).toEqual(["create_journal"]);
-    expect(payload.suggested_tools).not.toContain("create_owner_expense_reimbursement");
+    // The continuation needs no tax-group tool, so DISABLE_TAX_TOOLS changes nothing.
+    expect(payload.suggested_tools).toEqual(["continue_accounting_workflow"]);
     expect(payload.next_step_summary).not.toContain("create_owner_expense_reimbursement");
-    expect(payload.next_step_summary).toContain("create_journal");
-    expect(payload.next_step_summary).toContain("2110");
-  });
-
-  it("guided resolve_review also blocks the create_journal tax-disabled fallback", async () => {
-    const handler = continueWorkflowHandler({ ...DEFAULT_EXPOSURE, enableTaxTools: false });
-    const result = await runWithToolProfile("guided", () => handler({ action: "resolve_review", review_item_json: ownerExpenseReviewItem }));
-    const payload = parseMcpResponse(result.content[0]!.text) as any;
-
-    expect(payload.status).toBe("needs_review");
-    expect(payload.blocker.code).toBe("advanced_action_unavailable_in_profile");
-    expect(payload.accounting_proposal.tool).toBe("create_journal");
-    expect(payload.suggested_tools).toEqual(["get_setup_instructions"]);
   });
 
   it("prepare_action also honors DISABLE_TAX_TOOLS for the owner-expense fallback", async () => {

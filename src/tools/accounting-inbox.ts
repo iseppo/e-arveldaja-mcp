@@ -1736,7 +1736,6 @@ function mergeRuleOverrides(
 
 export function resolveReviewItemPlan(
   reviewItem: Record<string, unknown>,
-  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): ReviewResolutionResult {
   const reviewType = stringAt(reviewItem, "review_type");
   const item = recordAt(reviewItem, "item");
@@ -1752,18 +1751,10 @@ export function resolveReviewItemPlan(
       stringAt(file ?? {}, "file_ref") ?? stringAt(file ?? {}, "path"),
     );
     const isOwnerExpense = classification === "owner_paid_expense_reimbursement";
-    // create_owner_expense_reimbursement is part of the tax-tool group and is
-    // unregistered when EARVELDAJA_DISABLE_TAX_TOOLS=1. Do not name a tool the
-    // caller cannot invoke (same contract rule as the merged/granular remap):
-    // fall back to a manual owner-payable journal via the always-registered
-    // create_journal, keeping the accounting treatment explicit.
-    const ownerReimbursementToolAvailable = exposure.enableTaxTools;
-    const ownerExpenseTools = ownerReimbursementToolAvailable
-      ? ["create_owner_expense_reimbursement"]
-      : ["create_journal"];
-    const ownerExpenseSummary = ownerReimbursementToolAvailable
-      ? "After the missing VAT/business-use answers are known, continue with create_owner_expense_reimbursement instead of forcing this through purchase-invoice booking."
-      : `After the missing VAT/business-use answers are known, book it as an owner reimbursement with create_journal — debit the business expense (net, plus non-deductible VAT) and credit the owner-payable account (default ${DEFAULT_OWNER_PAYABLE_ACCOUNT}). The Estonian tax helpers are disabled in this deployment (EARVELDAJA_DISABLE_TAX_TOOLS); do not force it through purchase-invoice booking.`;
+    // Owner-paid expenses book through the plan-gated continuation on every
+    // profile (it needs no tax-group tool): prepare_action mints a drift-bound
+    // plan handle for the full journal, execute_review_action books it.
+    const ownerExpenseSummary = "After the missing VAT/business-use answers are known, call continue_accounting_workflow action='prepare_action' with this review item and the answers under item.owner_expense (it asks for any that are missing); after the user approves the returned journal, book it with action='execute_review_action' and the returned plan_handle. Do not force it through purchase-invoice booking.";
     return {
       review_type: "receipt_review",
       status: (guidance?.follow_up_questions.length ?? 0) > 0 ? "needs_answers" : "ready_for_action",
@@ -1773,7 +1764,7 @@ export function resolveReviewItemPlan(
       policy_hint: guidance?.policy_hint,
       suggested_workflow: isOwnerExpense ? undefined : "book-invoice",
       suggested_tools: isOwnerExpense
-        ? ownerExpenseTools
+        ? ["continue_accounting_workflow"]
         : ["receipt_batch"],
       next_step_summary: isOwnerExpense
         ? ownerExpenseSummary
@@ -1877,9 +1868,8 @@ function prepareReviewAction(
     saveAsRule?: boolean;
     ruleOverride?: Record<string, unknown>;
   } = {},
-  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): ReviewActionPreparationResult {
-  const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  const resolution = resolveReviewItemPlan(reviewItem);
   if (resolution.unresolved_questions.length > 0) {
     return {
       status: "needs_answers",
@@ -2244,9 +2234,8 @@ function parseRequiredJsonObject(input: unknown, label: string): Record<string, 
 
 function buildReviewResolutionResponse(
   reviewItem: Record<string, unknown>,
-  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
-  const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  const resolution = resolveReviewItemPlan(reviewItem);
   const sandboxed = sandboxReviewFields(resolution) as ReviewResolutionResult;
   const publicResolution: ReviewResolutionResult = {
     ...sandboxed,
@@ -2317,9 +2306,8 @@ function buildReviewActionResponse(
     saveAsRule?: boolean;
     ruleOverride?: Record<string, unknown>;
   } = {},
-  exposure: ToolExposureConfig = getToolExposureConfig(),
 ): { content: Array<{ type: "text"; text: string }> } {
-  const prepared = prepareReviewAction(reviewItem, options, exposure);
+  const prepared = prepareReviewAction(reviewItem, options);
   const sandboxed = sandboxReviewFields(prepared) as ReviewActionPreparationResult;
   const publicPrepared: ReviewActionPreparationResult = {
     ...sandboxed,
@@ -2632,9 +2620,8 @@ async function buildOwnerExpenseContinuationPrepareResponse(
   reviewItem: Record<string, unknown>,
   api: ApiContext,
   runtimeSafetyContext: RuntimeSafetyContext,
-  exposure: ToolExposureConfig,
 ): Promise<CallToolResult> {
-  const resolution = resolveReviewItemPlan(reviewItem, exposure);
+  const resolution = resolveReviewItemPlan(reviewItem);
   const answers = readOwnerExpenseAnswers(reviewItem, resolution.unresolved_questions);
   // Recommendation/compliance text and the review questions are echoed from the
   // caller's review item; the booking-field questions are server-authored.
@@ -2950,7 +2937,7 @@ export function registerAccountingInboxTools(
     async ({ action, workflow_handle, item_id, workflow_state_json, review_item_json, save_as_rule, rule_override_json, plan_handle }) => {
       if (action === "resolve_review") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
-        return buildReviewResolutionResponse(reviewItem, exposure);
+        return buildReviewResolutionResponse(reviewItem);
       }
 
       if (action === "execute_review_action") {
@@ -2965,7 +2952,7 @@ export function registerAccountingInboxTools(
         // returns needs_answers naming the missing owner_expense fields. A rule
         // save and every other review type keep the read-only planning below.
         if (isOwnerExpenseReviewItem(reviewItem) && !save_as_rule) {
-          return buildOwnerExpenseContinuationPrepareResponse(reviewItem, api, runtimeSafetyContext, exposure);
+          return buildOwnerExpenseContinuationPrepareResponse(reviewItem, api, runtimeSafetyContext);
         }
         const ruleOverride = rule_override_json
           ? parseJsonObject(rule_override_json, "rule_override_json")
@@ -2973,7 +2960,7 @@ export function registerAccountingInboxTools(
         return buildReviewActionResponse(reviewItem, {
           saveAsRule: save_as_rule,
           ruleOverride,
-        }, exposure);
+        });
       }
 
       if (workflow_handle !== undefined) {
@@ -3030,7 +3017,7 @@ export function registerAccountingInboxTools(
     { ...readOnly, title: "Resolve Accounting Review Item" },
     async ({ review_item_json }) => {
       const reviewItem = parseJsonObject(review_item_json, "review_item_json");
-      return buildReviewResolutionResponse(reviewItem, exposure);
+      return buildReviewResolutionResponse(reviewItem);
     },
   );
 
@@ -3053,7 +3040,7 @@ export function registerAccountingInboxTools(
       return buildReviewActionResponse(reviewItem, {
         saveAsRule: save_as_rule,
         ruleOverride,
-      }, exposure);
+      });
     },
   );
 

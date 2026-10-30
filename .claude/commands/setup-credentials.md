@@ -29,6 +29,11 @@ Inspect the current credential setup, import credentials from an `apikey*.txt` f
 - Optional `file_path`: absolute path to an `apikey*.txt` file to import
 - Optional `storage_scope`: `local` or `global`
 
+## Secrets
+
+- Never read, print, or quote the contents of `apikey*.txt` or `.env` files, and never ask the user to paste the API password or public value into chat. The tools show only `masked_api_key_id`.
+- Never `git add` or commit `.env` or `apikey*.txt`. Before a `local` import in a git repository, check that both are git-ignored (for example `git check-ignore .env apikey.txt`); if not, have the user add them to `.gitignore` or choose `global`.
+
 ## Step 1: Inspect the current setup state
 
 Call `get_setup_instructions` first.
@@ -44,12 +49,17 @@ Treat its response as the source of truth for:
 ## Step 2: Explain the current status
 
 - If `mode="setup"`, say clearly that API-backed workflows are blocked until credentials are configured.
-- If `mode="configured"`, say clearly that credentials already exist and this workflow can be used to inspect, append, replace, or remove stored `.env` credentials.
+- If `mode="configured"`, say clearly that credentials already exist.
 
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:credential-tools -->
+Capability condition for `credential-tools`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `import_apikey_credentials`, `list_stored_credentials`, `remove_stored_credentials`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
+
+This workflow can inspect, append, replace, or remove stored `.env` credentials.
+<!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:credential-tools -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:no-credential-tools -->
 Capability condition for `no-credential-tools`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `get_setup_instructions`, and none of these is advertised: `import_apikey_credentials`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-The credential-management tools (import, list, and remove stored credentials) are not registered on this server's current tool surface: they appear in `setup` mode on the `standard`/`full` profiles, or when the server is started with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1`. Explain the setup paths from `get_setup_instructions` (environment variables, a `.env` file in the local or global config directory, or `EARVELDAJA_API_KEY_FILE`). On `EARVELDAJA_PROFILE=guided` / `guided-sales`, add the credentials through the environment variables or a local or shared `.env` file (no profile change needed), or — to import an `apikey*.txt` file from a tool call — start the server temporarily with `EARVELDAJA_PROFILE=full` (it includes the credential tools) and switch back to the guided profile afterwards. Do NOT suggest `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` there: setting any legacy exposure flag switches the profile to `custom` and replaces the guided tool surface. On the `standard` profile, restarting with `EARVELDAJA_EXPOSE_SETUP_TOOLS=1` adds the import tool (the profile then normalizes to `custom`: the standard tool set plus the credential tools), as does `EARVELDAJA_PROFILE=full`. Follow the `next_steps` from `get_setup_instructions`, which already names the right path for the running profile. Skip Steps 3–6.
+The credential-management tools are not registered on this tool surface. Explain the setup paths and follow the `next_steps` from `get_setup_instructions`, which name the right way to add credentials for the running profile. On `guided` / `guided-sales`, never suggest `EARVELDAJA_EXPOSE_SETUP_TOOLS`: it switches the profile to `custom` and replaces the guided tool surface.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:no-credential-tools -->
 
 Explain the two storage scopes:
@@ -84,7 +94,7 @@ By default, different credentials are projected as an additional stored connecti
 
 ### Review and execute
 
-Show the user the previewed `company_name`, `env_file`, `storage_scope`, and `target`. After they approve, call `import_apikey_credentials` again with:
+Show the user the previewed `action` (`created`, `appended`, `replaced`, or `profile_updated`), `company_name`, `masked_api_key_id`, `env_file`, `storage_scope`, `target`, any `profile`, and any `legacy_exposure_keys_removed`. Pass `profile` only when the user explicitly asks to store a tool profile: it also removes legacy exposure flags (such as `EARVELDAJA_DISABLE_*`) from that `.env`. After they approve, call `import_apikey_credentials` again with:
 - the same `file_path` / `storage_scope` / `overwrite`
 - `execute: true`
 - `plan_handle`: the handle from the preview (the preview's `suggested_execute_args` already contains these)
@@ -116,15 +126,15 @@ If import succeeds, report:
 - `company_name`
 - `verified_at`
 - `source_file`
+
+After the import is verified, suggest moving the `apikey*.txt` out of the working directory or deleting it: the `.env` now holds the credential.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:credential-tools -->
 
-## Step 7: Restart requirement
+## Restart requirement
 
-State clearly:
-- the MCP server must be restarted before the stored credentials become active
-- the newly imported credentials are not yet active in the current server process
+State clearly that the MCP server must be restarted before newly stored or changed credentials become active; the current server process does not pick them up.
 
-## Step 8: First verification after restart
+## First verification after restart
 
 After restart, recommend:
 - call `list_connections`

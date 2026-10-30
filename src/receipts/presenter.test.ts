@@ -310,6 +310,8 @@ describe("receipt batch — journal already references the invoice number", () =
     const { summary } = renderReceiptBatchCompact(compactInput(makeBatch(0, { extraRows: [referencingRow()] })));
     const warning = summary.warnings?.find(w => w.code === "invoice_referenced_by_journal");
     expect(warning?.message).toContain("29551084");
+    expect(warning?.message).toContain("ask the user whether that journal is this document's booking");
+    expect(warning?.message).not.toContain("attach the document to that journal instead");
     expect(String(warning?.item_id)).toMatch(OCR);
   });
 

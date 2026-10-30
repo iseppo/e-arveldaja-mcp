@@ -458,7 +458,7 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
         return {
           item_id: itemId,
           code: "invoice_referenced_by_journal",
-          message: `Journal(s) ${referencingIds.join(", ")} already reference this invoice number; attach the document to that journal instead of booking it again.`,
+          message: `Journal(s) ${referencingIds.join(", ")} already reference this invoice number, so it may already be booked there; ask the user whether that journal is this document's booking: if it is, do not book it again (the document belongs on that journal); if not, book this document on its own.`,
         };
       }
       if (row.journal_reference_scan_unavailable) {

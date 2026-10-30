@@ -5,7 +5,9 @@ import { registerTool } from "../mcp-compat.js";
 import { toolResponse } from "../tool-response.js";
 import { buildWorkflowEnvelope } from "../workflow-response.js";
 import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
-import { currentToolProfile, isToolVisibleForProfile, projectActionForProfile } from "../tool-profile.js";
+import { currentToolProfile, projectActionForProfile, type ToolProfile } from "../tool-profile.js";
+import { toolMeta } from "../tool-catalog.js";
+import { enabledPromptDefinitions, promptToolAvailability, type PromptToolAvailability } from "../prompt-registry.js";
 import {
   ESTONIAN_VAT_METADATA,
   VAT_REGISTRATION_THRESHOLD_DISPLAY,
@@ -26,12 +28,17 @@ interface WorkflowGuide {
     default_mode: RiskMode;
     interrupt_when: string[];
   };
-  next_actions: Array<{
-    tool: string;
-    args: Record<string, unknown>;
-    why: string;
+  next_actions: Array<WorkflowAction & {
+    /** Surface alternative: dropped when this tool is registered. */
+    unless_tool?: string;
   }>;
   keywords: string[];
+}
+
+interface WorkflowAction {
+  tool: string;
+  args: Record<string, unknown>;
+  why: string;
 }
 
 const WORKFLOWS: WorkflowGuide[] = [
@@ -82,7 +89,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     required_inputs: [],
     primary_tools: ["get_setup_instructions", "import_apikey_credentials"],
     risk_policy: {
-      default_mode: "automatic",
+      default_mode: "confirm_once",
       interrupt_when: ["credentials need importing", "multiple candidate files"],
     },
     next_actions: [{
@@ -165,6 +172,7 @@ const WORKFLOWS: WorkflowGuide[] = [
       "suggest_booking",
       "create_purchase_invoice_from_pdf",
       "confirm_purchase_invoice",
+      "process_accounting_document",
     ],
     risk_policy: {
       default_mode: "confirm_once",
@@ -180,6 +188,12 @@ const WORKFLOWS: WorkflowGuide[] = [
         tool: "extract_pdf_invoice",
         args: { file_path: "<absolute invoice PDF/image path>" },
         why: "Extract the document after VAT status is known so the user can review source-derived fields before booking.",
+      },
+      {
+        tool: "process_accounting_document",
+        args: { mode: "prepare", file_path: "<absolute invoice PDF/image path>" },
+        why: "Extract and duplicate-check the document so the user can review source-derived fields before booking.",
+        unless_tool: "extract_pdf_invoice",
       },
     ],
     keywords: ["invoice", "pdf", "supplier invoice", "purchase invoice", "book invoice", "book one invoice", "arve", "attach document"],
@@ -214,7 +228,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Parse ISO 20022 CAMT.053 bank statements, detect duplicates, and import bank transactions.",
     when_to_use: ["LHV/Swedbank/SEB/Coop/Luminor CAMT XML", "bank statement import", "bank transactions"],
     required_inputs: ["absolute CAMT.053 XML path", "optional bank account dimension id (discover with list_account_dimensions when omitted)"],
-    primary_tools: ["process_camt053"],
+    primary_tools: ["process_camt053", "process_bank_input"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["possible duplicate", "unknown bank dimension", "inter-account transfer ambiguity"],
@@ -233,7 +247,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Import regular Wise transaction-history CSV exports with fee splitting and transfer safeguards.",
     when_to_use: ["Wise CSV", "transaction-history.csv", "Wise fees", "Wise bank account"],
     required_inputs: ["absolute Wise transaction-history.csv path", "optional Wise bank account dimension id (discover with list_account_dimensions when omitted)", "optional fee expense dimension id"],
-    primary_tools: ["import_wise_transactions"],
+    primary_tools: ["import_wise_transactions", "process_bank_input"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["missing fee dimension", "ambiguous transfer target", "unsupported CSV export"],
@@ -290,7 +304,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Run the month-end checklist, find blockers, missing documents, duplicates, and financial statements.",
     when_to_use: ["month-end close", "close a month", "period checklist", "missing documents", "trial balance"],
     required_inputs: ["month in YYYY-MM format"],
-    primary_tools: ["month_end_close_checklist", "find_missing_documents", "detect_duplicate_purchase_invoice", "compute_trial_balance", "compute_profit_and_loss", "compute_balance_sheet"],
+    primary_tools: ["month_end_close_checklist", "find_missing_documents", "detect_duplicate_purchase_invoice", "compute_trial_balance", "compute_profit_and_loss", "compute_balance_sheet", "run_accounting_report"],
     risk_policy: {
       default_mode: "dry_run",
       interrupt_when: ["ledger blockers", "imbalanced statements", "duplicates", "missing source documents"],
@@ -299,6 +313,11 @@ const WORKFLOWS: WorkflowGuide[] = [
       tool: "month_end_close_checklist",
       args: { month: "<YYYY-MM>" },
       why: "Start with the checklist to identify blockers before computing reports.",
+    }, {
+      tool: "run_accounting_report",
+      args: { report: "month_end", month: "<YYYY-MM>" },
+      why: "Start with the month-end checklist to identify blockers before computing reports.",
+      unless_tool: "month_end_close_checklist",
     }],
     keywords: ["month end", "month-end", "close month", "close March", "closing", "checklist", "trial balance", "missing documents", "duplicates", "period close"],
   },
@@ -328,7 +347,7 @@ const WORKFLOWS: WorkflowGuide[] = [
     summary: "Build a financial dashboard using balance sheet, P&L, receivables, and payables.",
     when_to_use: ["financial overview", "dashboard", "company status", "P&L", "balance sheet"],
     required_inputs: ["optional reporting date and period start"],
-    primary_tools: ["compute_balance_sheet", "compute_profit_and_loss", "compute_receivables_aging", "compute_payables_aging"],
+    primary_tools: ["compute_balance_sheet", "compute_profit_and_loss", "compute_receivables_aging", "compute_payables_aging", "run_accounting_report"],
     risk_policy: {
       default_mode: "automatic",
       interrupt_when: ["unconfirmed transactions materially affect the period", "reporting period unclear"],
@@ -337,6 +356,11 @@ const WORKFLOWS: WorkflowGuide[] = [
       tool: "compute_balance_sheet",
       args: { date_to: "<YYYY-MM-DD>" },
       why: "Start with the balance sheet for the requested reporting date.",
+    }, {
+      tool: "run_accounting_report",
+      args: { report: "balance_sheet", date_to: "<YYYY-MM-DD>" },
+      why: "Start with the balance sheet for the requested reporting date.",
+      unless_tool: "compute_balance_sheet",
     }],
     keywords: ["overview", "dashboard", "report", "balance", "profit", "loss", "aging", "financial"],
   },
@@ -409,63 +433,50 @@ function compactWorkflow(workflow: WorkflowGuide): Record<string, unknown> {
   };
 }
 
-/**
- * Tool names named by the recipes above that the tool-exposure config can
- * unregister, so `recommend_workflow` never advertises a tool that is absent
- * from `tools/list`. Keep in sync with the recipes: only tools that both appear
- * in a recipe and can be gated by an env flag need an entry.
- *
- * The setup/credential tools (`import_apikey_credentials` etc.) are intentionally
- * NOT filtered here: they are hidden only in configured mode, not setup mode, and
- * this tool cannot see the connection state — filtering them would wrongly hide
- * the setup workflow from a first-time user who needs exactly that.
- */
-function hiddenRecipeTools(exposure: ToolExposureConfig): Set<string> {
-  const hidden = new Set<string>();
-  if (!exposure.enableLightyear) {
-    for (const tool of [
-      "parse_lightyear_statement", "parse_lightyear_capital_gains",
-      "lightyear_portfolio_summary", "book_lightyear_trades", "book_lightyear_distributions",
-    ]) hidden.add(tool);
-  }
-  if (!exposure.enableTaxTools) hidden.add("check_vat_registration_threshold");
-  if (!exposure.enableSales) hidden.add("compute_receivables_aging");
-  return hidden;
+/** True when `token` is a catalog tool name (registered on some surface). */
+function isCatalogTool(token: string): boolean {
+  try { toolMeta(token); return true; } catch { return false; }
 }
 
 /**
- * Return the workflow with any hidden tools stripped from `primary_tools` and
- * `next_actions`, or `null` when every primary tool is hidden (the whole
- * workflow is unavailable, e.g. `lightyear-booking` when Lightyear is disabled).
+ * Project a recipe onto the active surface, or `null` when its prompt is not
+ * registered there. The workflow is visible iff `prompts/list` carries its
+ * prompt (the same `enabledPromptDefinitions` gate), and it names only tools
+ * registered on that surface: next actions are first projected to the guided
+ * façades, an action with `unless_tool` is a surface alternative dropped when
+ * that tool is registered, and an input hint naming an absent tool is cut.
  */
-function visibleWorkflow(workflow: WorkflowGuide, hidden: Set<string>): WorkflowGuide | null {
-  if (hidden.size === 0) return workflow;
-  const primary_tools = workflow.primary_tools.filter(tool => !hidden.has(tool));
-  if (primary_tools.length === 0) return null;
+function surfaceWorkflow(
+  workflow: WorkflowGuide,
+  enabledPrompts: ReadonlySet<string>,
+  hasTool: PromptToolAvailability,
+  profile: ToolProfile,
+): WorkflowGuide | null {
+  if (!enabledPrompts.has(workflow.prompt)) return null;
+  const seen = new Set<string>();
+  const next_actions = workflow.next_actions
+    .filter(action => !(action.unless_tool && hasTool(action.unless_tool)))
+    .map(({ unless_tool: _unless, ...action }) => projectActionForProfile(action, profile))
+    .filter((action): action is WorkflowAction => typeof action.tool === "string" && hasTool(action.tool))
+    .filter(action => {
+      const key = `${action.tool}:${JSON.stringify(action.args)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   return {
     ...workflow,
-    primary_tools,
-    next_actions: workflow.next_actions.filter(action => !hidden.has(action.tool)),
+    required_inputs: workflow.required_inputs.map(input => input.replace(/ \(([^)]*)\)/g, (hint, text: string) =>
+      (text.match(/[a-z]+(?:_[a-z0-9]+)+/g) ?? []).some(token => isCatalogTool(token) && !hasTool(token)) ? "" : hint)),
+    primary_tools: workflow.primary_tools.filter(hasTool),
+    next_actions,
   };
-}
-
-function profileVisibleWorkflow(workflow: WorkflowGuide): WorkflowGuide | null {
-  const profile = currentToolProfile();
-  if (profile !== "guided" && profile !== "guided-sales") return workflow;
-  const primary_tools = workflow.primary_tools.filter((tool) => {
-    try { return isToolVisibleForProfile(tool, profile); } catch { return false; }
-  });
-  const next_actions = workflow.next_actions.map((action) => projectActionForProfile(action, profile))
-    .flatMap((action) => action.status === "needs_review"
-      ? [{ tool: "get_setup_instructions", args: {}, why: action.blocker.message }]
-      : [action]);
-  if (primary_tools.length === 0 && next_actions.every((action) => action.tool === "get_setup_instructions")) return null;
-  return { ...workflow, primary_tools, next_actions };
 }
 
 export function registerWorkflowRecommendationTools(
   server: McpServer,
   exposure: ToolExposureConfig = getToolExposureConfig(),
+  options: { setupMode?: boolean } = {},
 ): void {
   registerTool(server, "recommend_workflow",
     "Recommend the safest e-arveldaja workflow for a user goal. Use this when the user asks what to do next or when choosing among many tools.",
@@ -483,10 +494,11 @@ export function registerWorkflowRecommendationTools(
         : risk_tolerance === "balanced" ? "guided"
         : undefined;
       const resolvedInteractionStyle = interaction_style ?? mappedFromRisk ?? "guided";
+      const surface = { toolProfile: currentToolProfile(), setupMode: options.setupMode === true };
+      const enabledPrompts = new Set<string>(enabledPromptDefinitions(exposure, surface).map(definition => definition.name));
+      const hasTool = promptToolAvailability({ ...surface, toolExposure: exposure });
       const visibleWorkflows = WORKFLOWS
-        .map(workflow => visibleWorkflow(workflow, hiddenRecipeTools(exposure)))
-        .filter((workflow): workflow is WorkflowGuide => workflow !== null)
-        .map(profileVisibleWorkflow)
+        .map(workflow => surfaceWorkflow(workflow, enabledPrompts, hasTool, surface.toolProfile))
         .filter((workflow): workflow is WorkflowGuide => workflow !== null);
       const normalizedGoal = normalizeGoal(goal);
       const ranked = visibleWorkflows
