@@ -65,7 +65,7 @@ export type ReconSuggestPayload = {
   matched: number;
   unmatched: number;
   matches: ReconSuggestMatch[];
-  /** Below-threshold purchase invoices with an exact amount and a document reference on the row; never auto-confirmed. */
+  /** Purchase invoices with an exact amount and a document reference on the row that did not become its best match; never auto-confirmed. */
   document_reference_candidates?: DocumentReferenceCandidateRow[];
   document_reference_note?: string;
   duplicate_scan_note?: string;
@@ -304,7 +304,7 @@ function wrapSuggestMatch(match: SuggestMatchRow): ReconSuggestMatch {
 
 const DOCUMENT_REFERENCE_NOTE =
   "These purchase invoices match a transaction's exact amount and a document reference (invoice number or order / cart number) "
-  + "in its description, but scored below the suggestion threshold. They are not auto-confirmed: check each one and "
+  + "in its description, but another invoice ranked higher for that transaction. They are not auto-confirmed: check each one and "
   + "confirm the transaction against that invoice only when it is that invoice's payment.";
 
 // Wrap every untrusted free-text field on a RAW document-reference row.
@@ -607,7 +607,7 @@ export function renderSuggestCompact(
     item_id: String(row.transaction_id ?? ""),
     code: "document_reference_candidate",
     message: `Transaction ${row.transaction_id ?? "?"} (${row.amount}) carries the exact amount and a document reference of purchase invoice #${row.invoice.id}, `
-      + "but scored below the suggestion threshold; it is not auto-confirmed. Check it before confirming the payment against that invoice.",
+      + "but another invoice ranked higher for it; it is not auto-confirmed. Check it before confirming the payment against that invoice.",
   })), "each needs the same check before confirming."));
 
   // Suggest is read-only (no execution) — it never produces execution blockers.
@@ -950,6 +950,7 @@ export interface InterAccountCompactInput {
    * execute_inter_account next_action must resend them unchanged (plan_drift). */
   readonly maxDateGap?: number;
   readonly targetAccountsDimensionsId?: number;
+  readonly deleteProposedMirrors?: boolean;
 }
 
 /** Scalar-only per-transfer details for the operation-result store. */
@@ -978,8 +979,10 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
   const m = input.match;
   const dryRun = input.mode === "DRY_RUN";
   const errorCount = m.errors.length;
-  // Report-only: the operator deletes a proposed mirror with delete_transaction.
+  // Report-only unless delete_proposed_mirrors bound their deletions into the plan.
   const proposedMirrors = m.skippedAlreadyHandled.filter(row => row.mirror_proposal !== undefined);
+  const mirrorDeletesPlanned = m.mirrorDeleteActions?.length ?? 0;
+  const mirrorsDeleted = m.skippedAlreadyHandled.filter(row => row.mirror_deleted === true).length;
 
   const counts = {
     total_unconfirmed: m.totalUnconfirmed,
@@ -988,6 +991,8 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
     skipped_ambiguous: m.ambiguousPairs.length,
     duplicates: m.skippedAlreadyHandled.length,
     proposed_mirrors: proposedMirrors.length,
+    ...(m.mirrorDeleteActions !== undefined ? { proposed_mirror_deletes: mirrorDeletesPlanned } : {}),
+    ...(!dryRun && mirrorsDeleted > 0 ? { mirrors_deleted: mirrorsDeleted } : {}),
     needs_review_ambiguous_refless: m.ambiguousRefless.length,
     needs_review_cross_currency: m.crossCurrencyPairs.length,
     errors: errorCount,
@@ -1086,9 +1091,21 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
     ]),
   });
 
+  const mirrorNote = proposedMirrors.length === 0
+    ? ""
+    : m.mirrorDeleteActions !== undefined
+      ? `; this plan deletes ${mirrorDeletesPlanned} proposed mirror row(s) (verify each against the bank statements before approving)`
+      : `; ${proposedMirrors.length} proposed mirror deletion(s) for owner review (to delete them after explicit approval, re-run this dry run with delete_proposed_mirrors: true)`;
   const message = dryRun
-    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s)${proposedMirrors.length > 0 ? `; ${proposedMirrors.length} proposed mirror deletion(s) for owner review (delete each only after explicit approval, with delete_transaction on the standard/full profile)` : ""}.`
-    : `Inter-account reconcile handled ${m.matchedPairs.length} transfer pair(s) and ${m.matchedOneSided.length} one-sided transfer(s); ${errorCount} error(s).`;
+    ? `Inter-account dry run would reconcile ${m.matchedPairs.length} transfer pair(s), ${m.matchedOneSided.length} one-sided transfer(s), skip ${m.ambiguousPairs.length} ambiguous, and report ${errorCount} error(s)${mirrorNote}.`
+    : `Inter-account reconcile handled ${m.matchedPairs.length} transfer pair(s) and ${m.matchedOneSided.length} one-sided transfer(s)${mirrorsDeleted > 0 ? `, deleted ${mirrorsDeleted} proposed mirror row(s)` : ""}; ${errorCount} error(s).`;
+  // A plan with nothing to execute but proposed mirrors points at the opt-in
+  // re-preview that binds their deletions, not at an empty execute.
+  const previewMirrorDeletes = dryRun && m.mirrorDeleteActions === undefined && proposedMirrors.length > 0 && m.confirmActions.length === 0;
+  const matchingArgs = {
+    ...(input.maxDateGap !== undefined ? { max_date_gap: input.maxDateGap } : {}),
+    ...(input.targetAccountsDimensionsId !== undefined ? { target_accounts_dimensions_id: input.targetAccountsDimensionsId } : {}),
+  };
 
   const status = dryRun
     ? "ready_for_approval" as const
@@ -1120,16 +1137,22 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
     // executed through reconcile_bank_transactions mode="execute_inter_account".
     ...(dryRun && input.planHandle !== undefined
       ? {
-          next_action: {
-            tool: "reconcile_bank_transactions",
-            args: {
-              mode: "execute_inter_account",
-              plan_handle: input.planHandle,
-              ...(input.maxDateGap !== undefined ? { max_date_gap: input.maxDateGap } : {}),
-              ...(input.targetAccountsDimensionsId !== undefined ? { target_accounts_dimensions_id: input.targetAccountsDimensionsId } : {}),
-            },
-            approval_required: true,
-          },
+          next_action: previewMirrorDeletes
+            ? {
+                tool: "reconcile_bank_transactions",
+                args: { mode: "inter_account_dry_run", ...matchingArgs, delete_proposed_mirrors: true },
+                approval_required: false,
+              }
+            : {
+                tool: "reconcile_bank_transactions",
+                args: {
+                  mode: "execute_inter_account",
+                  plan_handle: input.planHandle,
+                  ...matchingArgs,
+                  ...(input.deleteProposedMirrors === true ? { delete_proposed_mirrors: true } : {}),
+                },
+                approval_required: true,
+              },
         }
       : {}),
     ...(details ? { details } : {}),

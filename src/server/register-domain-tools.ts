@@ -49,6 +49,8 @@ export interface RegisterDomainToolsContext {
   readonly toolProfile: ToolProfile;
   readonly setupMode: boolean;
   readonly setupInfo: CredentialSetupInfo;
+  /** The active connection's index for connection-scoped cache clears; undefined in setup mode. */
+  readonly getActiveConnectionIndex?: () => number | undefined;
 }
 
 /**
@@ -59,7 +61,7 @@ export interface RegisterDomainToolsContext {
  * server. Moved verbatim from `createMcpServer` — only its file location changed.
  */
 export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
-  const { publicServer, server, api, toolExposure, runtimeSafetyContext, toolProfile, setupMode, setupInfo } = ctx;
+  const { publicServer, server, api, toolExposure, runtimeSafetyContext, toolProfile, setupMode, setupInfo, getActiveConnectionIndex } = ctx;
 
   // Every public tool registration crosses the same profile/catalog boundary;
   // that boundary delegates into the scoped server above.
@@ -92,7 +94,7 @@ export function registerDomainTools(ctx: RegisterDomainToolsContext): void {
   registerProcessAccountingDocumentTool(publicServer, api, runtimeSafetyContext, {
     elicit: guidedElicitor,
   });
-  registerRunAccountingReportTool(publicServer, api, toolExposure);
+  registerRunAccountingReportTool(publicServer, api, toolExposure, { getActiveConnectionIndex });
   registerSearchAccountingRecordsTool(publicServer, api, toolExposure);
   registerInspectAccountingRecordTool(publicServer, api, toolExposure);
   if (toolExposure.enableSales) registerManageSaleInvoiceTool(publicServer, api, runtimeSafetyContext);

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { registerRunAccountingReportTool } from "./run-accounting-report.js";
 import { parseMcpResponse } from "../mcp-json.js";
 import type { ApiContext } from "../tools/crud-tools.js";
+import { cache } from "../api/base-resource.js";
+import { readonlyCache } from "../api/readonly.api.js";
 
 type Handler = (args: Record<string, unknown>) => Promise<{ isError?: boolean; content: Array<{ text: string }> }>;
 
@@ -17,9 +19,9 @@ function makeApi(overrides: Record<string, unknown> = {}): ApiContext {
   } as unknown as ApiContext;
 }
 
-function setup(api: ApiContext, enableSales = true): Handler {
+function setup(api: ApiContext, enableSales = true, getActiveConnectionIndex?: () => number | undefined): Handler {
   const server = { registerTool: vi.fn() } as any;
-  registerRunAccountingReportTool(server, api, { enableSales });
+  registerRunAccountingReportTool(server, api, { enableSales }, { getActiveConnectionIndex });
   const reg = server.registerTool.mock.calls.find(([n]: [string]) => n === "run_accounting_report");
   if (!reg) throw new Error("not registered");
   return reg[2] as Handler;
@@ -46,6 +48,57 @@ describe("run_accounting_report façade", () => {
       }
     } finally {vi.useRealTimers();}
   });
+  it("fresh clears only the active connection's caches before computing", async () => {
+    cache.set("connection:0:/journals", "other-company");
+    cache.set("connection:1:/journals", "stale");
+    readonlyCache.set("connection:0:/accounts", "other-company-reference");
+    readonlyCache.set("connection:1:/accounts", "stale-reference");
+    try {
+      const api = makeApi({
+        readonly: { getAccounts: vi.fn(async () => {
+          // The clear ran BEFORE the report read its data.
+          expect(cache.get("connection:1:/journals")).toBeUndefined();
+          return [];
+        }) },
+      });
+      const payload = parse(await setup(api, true, () => 1)({ report: "trial_balance", fresh: true }));
+      expect(payload.report).toBe("trial_balance");
+      expect(payload.cache).toEqual({ fresh: true, cleared: true, scope: "connection", connection_index: 1 });
+      expect(api.readonly.getAccounts).toHaveBeenCalled();
+      expect(cache.get("connection:1:/journals")).toBeUndefined();
+      expect(readonlyCache.get("connection:1:/accounts")).toBeUndefined();
+      expect(cache.get("connection:0:/journals")).toBe("other-company");
+      expect(readonlyCache.get("connection:0:/accounts")).toBe("other-company-reference");
+    } finally {
+      cache.invalidate();
+      readonlyCache.invalidate();
+    }
+  });
+
+  it("without fresh no cache is cleared and no cache metadata is reported", async () => {
+    cache.set("connection:1:/journals", "cached");
+    try {
+      const payload = parse(await setup(makeApi(), true, () => 1)({ report: "trial_balance" }));
+      expect(payload.cache).toBeUndefined();
+      expect(cache.get("connection:1:/journals")).toBe("cached");
+    } finally {
+      cache.invalidate();
+    }
+  });
+
+  it("fresh with no active connection (setup mode) clears every cache", async () => {
+    cache.set("connection:0:/journals", "a");
+    cache.set("connection:1:/journals", "b");
+    try {
+      const payload = parse(await setup(makeApi(), true, () => undefined)({ report: "trial_balance", fresh: true }));
+      expect(payload.cache).toEqual({ fresh: true, cleared: true, scope: "all" });
+      expect(cache.get("connection:0:/journals")).toBeUndefined();
+      expect(cache.get("connection:1:/journals")).toBeUndefined();
+    } finally {
+      cache.invalidate();
+    }
+  });
+
   it("runs trial_balance without a delegated tool name or MCP-response parsing", async () => {
     const api = makeApi({
       readonly: { getAccounts: vi.fn().mockResolvedValue([{ id: 1020, name_est: "Pank", name_eng: "Bank", balance_type: "D", account_type_est: "Varad" }]) },

@@ -577,6 +577,52 @@ describe("renderInterAccountCompact", () => {
     expect(executed.summary.next_action).toBeUndefined();
   });
 
+  describe("proposed mirrors (live 2026-10-30: guided could not act on them)", () => {
+    const mirrorRow = (id: number) => ({
+      transaction_id: id, amount: 100, date: "2026-10-20", source_account: "LHV", source_dimension_id: 7,
+      target_account: "Wise", target_dimension_id: 8, existing_journal_id: 9000 + id, reason: "Already journalized",
+      mirror_proposal: { counterpart_transaction_id: 5000 + id, journal_id: 9000 + id, evidence: ["journal_is_counterpart_transaction"] },
+    });
+
+    it("points an otherwise empty plan at the opt-in re-preview instead of an empty execute", () => {
+      const { summary } = renderInterAccountCompact({
+        mode: "DRY_RUN", match: makeInterAccount(0, { skippedAlreadyHandled: [mirrorRow(1), mirrorRow(2)] }), planHandle: "P", maxDateGap: 2,
+      });
+      expect(summary.next_action).toEqual({
+        tool: "reconcile_bank_transactions",
+        args: { mode: "inter_account_dry_run", max_date_gap: 2, delete_proposed_mirrors: true },
+        approval_required: false,
+      });
+      expect(summary.message).toContain("re-run this dry run with delete_proposed_mirrors: true");
+      expect(summary.message).not.toContain("delete_transaction");
+    });
+
+    it("resends delete_proposed_mirrors with the execute next_action when the plan carries the deletions", () => {
+      const match = makeInterAccount(0, {
+        skippedAlreadyHandled: [mirrorRow(1)],
+        mirrorDeleteActions: [{ transactionId: 1, journalId: 9001, counterpartTransactionId: 5001, targetDimensionId: 8, material: {} as never }],
+      });
+      const { summary } = renderInterAccountCompact({ mode: "DRY_RUN", match, planHandle: "P", deleteProposedMirrors: true });
+      expect(summary.next_action).toEqual({
+        tool: "reconcile_bank_transactions",
+        args: { mode: "execute_inter_account", plan_handle: "P", delete_proposed_mirrors: true },
+        approval_required: true,
+      });
+      expect(summary.counts).toEqual(expect.objectContaining({ proposed_mirrors: 1, proposed_mirror_deletes: 1 }));
+      expect(summary.message).toContain("this plan deletes 1 proposed mirror row(s)");
+    });
+
+    it("reports deleted mirrors after execute", () => {
+      const match = makeInterAccount(0, {
+        skippedAlreadyHandled: [{ ...mirrorRow(1), mirror_deleted: true }],
+        mirrorDeleteActions: [{ transactionId: 1, journalId: 9001, counterpartTransactionId: 5001, targetDimensionId: 8, material: {} as never }],
+      });
+      const { summary } = renderInterAccountCompact({ mode: "EXECUTED", match, operationHandle: "op" });
+      expect(summary.counts).toEqual(expect.objectContaining({ mirrors_deleted: 1 }));
+      expect(summary.message).toContain("deleted 1 proposed mirror row(s)");
+    });
+  });
+
   it("NEVER hides blockers: a stopped execute surfaces a blocker + references the result page", () => {
     const match = makeInterAccount(2);
     const report: PlanExecutionReport = {

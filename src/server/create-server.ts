@@ -547,6 +547,11 @@ export async function createMcpServer(
     toolProfile,
     setupMode,
     setupInfo,
+    // The connection this invocation's API reads are pinned to (clear_cache's
+    // active_connection scope), or undefined in setup mode.
+    getActiveConnectionIndex: () => allConfigs.length > 0
+      ? (invocationStorage.getStore()?.index ?? connectionState.activeIndex)
+      : undefined,
   });
 
   if (!shouldConnect) {

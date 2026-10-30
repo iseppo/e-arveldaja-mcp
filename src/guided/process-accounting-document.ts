@@ -194,7 +194,9 @@ function renderPreview(preview: AccountingDocumentPreview) {
         ? "Review the bound booking_review model above — it is the EXACT write model create will execute. After explicit approval, call mode='create' with this plan_handle, the same source, source_sha256, and the SAME booking fields; any changed field is rejected as plan_drift. That approval also covers mode='confirm' afterward unless create reports changed effects or new warnings/duplicate signals."
         : status === "extracted"
           ? "Review these extracted values with the operator. This extraction preview is NOT create approval and carries no plan handle. When the operator has confirmed the final booking values, call mode='prepare' again with the same source PLUS the final booking fields (supplier_client_id, invoice_number, invoice_date, journal_date, term_days, items, vat_price, gross_price, ref_number, bank_account_no, …) to obtain the create plan handle."
-          : "Resolve the flagged items (supplier/validation) before booking.",
+          : preview.blockers.some(blocker => blocker.code === "supplier_identifier_ambiguous")
+            ? "Resolve the flagged items (supplier/validation) before booking. supplier_identifier_ambiguous: when the operator confirms the supplier is the client whose registry code or VAT number this document prints, call mode='prepare' again with the final booking fields and that client's supplier_client_id — it acknowledges the contested identifier (recorded in booking_review.supplier_identifier_acknowledged). A client matching none of the printed identifiers keeps the blocker."
+            : "Resolve the flagged items (supplier/validation) before booking.",
     },
     mutation_occurred: false,
   };

@@ -4513,6 +4513,140 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
 
+    // Live 2026-10-30: guided had no delete_transaction, so proposed mirrors
+    // could not be acted on. The opt-in flag binds them into the plan.
+    describe("delete_proposed_mirrors (opt-in)", () => {
+      it("binds the proposed mirror into the plan and deletes exactly it at execute", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        expect(dry.already_handled).toEqual([expect.objectContaining({ transaction_id: 5002, mirror_proposal: expect.any(Object) })]);
+        expect(dry.already_handled[0]!.next_action).toBeUndefined();
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+        expect(api.transactions.delete).toHaveBeenCalledWith(5002);
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(executed.already_handled[0]!.mirror_deleted).toBe(true);
+        expect(executed.execution.execution_report!.command_partitions.completed.map(c => c.command_id))
+          .toEqual(["recon-delete-proposed-mirror-tx-5002"]);
+      });
+
+      it("refuses with plan_drift when execute does not resend the flag", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const res = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
+        expect(res.category).toBe("plan_drift");
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      });
+
+      it("refuses with plan_drift when the reviewed mirror row changed before execute", async () => {
+        const rows = [counterpart(), camtRow(5002)];
+        const { handler, api } = setup(rows);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const original = api.transactions.get.getMockImplementation()!;
+        api.transactions.get.mockImplementation(async (id: number) => {
+          const row = await original(id);
+          return id === 5002 ? { ...row, bank_account_name: "Someone Else" } : row;
+        });
+        api.transactions.listAll.mockResolvedValue(rows.map(row => row.id === 5002 ? { ...row, bank_account_name: "Someone Else" } : row));
+        const res = parseToolPayload<ReconPlanErrorPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(res.category).toBe("plan_drift");
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      });
+
+      it("skips the delete when the journal is gone by the time its command runs", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        // Execute's matching reads the journals as the dry run did; the read
+        // inside the delete command's prepare then sees the journal deleted.
+        const matchingReads = api.journals.listAllWithPostings.mock.calls.length;
+        const reads = api.journals.listAllWithPostings.getMockImplementation()!;
+        let call = 0;
+        api.journals.listAllWithPostings.mockImplementation(async () => {
+          call += 1;
+          const journals = await reads();
+          return call > matchingReads ? journals.map((j: { id: number }) => j.id === 9001 ? { ...j, is_deleted: true } : j) : journals;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(executed.execution.execution_report!.status).toBe("plan_drift");
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_journal_drift");
+        expect(executed.already_handled[0]!.mirror_deleted).toBeUndefined();
+      });
+
+      it("refuses the delete when the row is no longer PROJECT at its command", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const original = api.transactions.get.getMockImplementation()!;
+        let gets = 0;
+        // Execute's matching reads 5002 once (pending-row detail); the command's reads then see it confirmed.
+        api.transactions.get.mockImplementation(async (id: number) => {
+          const row = await original(id);
+          if (id !== 5002) return row;
+          gets += 1;
+          return gets > 1 ? { ...row, status: "CONFIRMED" } : row;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_not_project");
+      });
+
+      it("refuses the delete when the counterpart is no longer CONFIRMED at its command", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const original = api.transactions.get.getMockImplementation()!;
+        let gets = 0;
+        // Execute's matching reads the counterpart once; the command's read sees it invalidated.
+        api.transactions.get.mockImplementation(async (id: number) => {
+          const row = await original(id);
+          if (id !== 5001) return row;
+          gets += 1;
+          return gets > 1 ? { ...row, status: "PROJECT" } : row;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(gets).toBe(2);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_counterpart_drift");
+      });
+
+      it("refuses the delete when the row changes between the pre-check and the final re-read", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const original = api.transactions.get.getMockImplementation()!;
+        let gets = 0;
+        // Reads of 5002 at execute: matching (1), pre-check (2), final re-read (3).
+        api.transactions.get.mockImplementation(async (id: number) => {
+          const row = await original(id);
+          if (id !== 5002) return row;
+          gets += 1;
+          return gets >= 3 ? { ...row, bank_account_name: "Someone Else" } : row;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(gets).toBe(3);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_material_drift");
+      });
+
+      it("adds nothing to the plan without the flag (report-only)", async () => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const executed = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);
+        expect(executed.execution.execution_report!.command_partitions.completed).toEqual([]);
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+      });
+    });
+
     it("Codex counterexample: two same-day outgoings to the own Wise IBAN and one journal → no proposal, both reviewed", async () => {
       for (const order of [[5002, 5003], [5003, 5002]]) {
         const rows = order.map(id => camtRow(id));

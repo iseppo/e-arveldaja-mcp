@@ -29,11 +29,14 @@ import { BookingGuard } from "../booking-guard.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBankDimensionCandidates } from "../resolution/bank-account-resolution.js";
 import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
+import { selectClientByName } from "../camt/executor.js";
+import { normalizeCompanyName } from "../company-name.js";
 import { resolveWiseRowCounterparts, wiseCounterpartHoldReview } from "./counterpart.js";
 import {
   bankIdentitiesByDimension,
   bookedAmountForWiseRow,
   classifyWiseOwnTransfer,
+  counterpartyNameForWiseRow,
   isJarTransfer,
   isPositiveSafeInteger,
   isWiseClientName,
@@ -65,6 +68,7 @@ import {
   transactionCommandExists,
   wisePlanCommandId,
   wisePlanReviewProjection,
+  wiseRowNeedsClientResolution,
   wiseLegEvidence,
   WISE_APPROVAL_DOMAIN,
   WISE_COMMAND_VERSION,
@@ -81,6 +85,7 @@ import type {
   WiseImportCommand,
   WiseInterAccountResult,
   WiseAcknowledgedJournalHold,
+  WiseClientResolution,
   WiseJournalizedTransferMapping,
   WiseRow,
   WiseSkippedJarRow,
@@ -490,6 +495,34 @@ async function runWiseImport(
     ownCompanyClientMatches,
   );
 
+  // Rows booked as ordinary payments get their client by the CAMT
+  // counterparty-name rule, so they can be confirmed without a manual
+  // clients_id (the API refuses a payment with no buyer/supplier). The
+  // resolved id joins the create payload and so binds the digest.
+  const clientResolutions = new Map<WiseRow, WiseClientResolution>();
+  const clientResolutionsByName = new Map<string, WiseClientResolution>();
+  for (const row of eligible) {
+    if (!wiseRowNeedsClientResolution(transferDecisions.get(row))) continue;
+    const name = counterpartyNameForWiseRow(row);
+    const normalizedName = normalizeCompanyName(name);
+    if (!name || !normalizedName) continue;
+    // The lookup is a substring match on the name as written: key the cache
+    // on that (as CAMT does), not on the normalized form.
+    const cacheKey = name.trim().replace(/\s+/g, " ").toLowerCase();
+    let resolution = clientResolutionsByName.get(cacheKey);
+    if (resolution === undefined) {
+      // Exact normalized name only (owner decision): CAMT's single substring
+      // match is not taken here, since a Wise row has no registry code to
+      // veto a similar but different client ("Seppo" vs "Indrek Seppo").
+      const { selected, match_type, exact_match_count } = selectClientByName(normalizedName, await api.clients.findByName(name));
+      resolution = selected?.id !== undefined && match_type === "exact_name"
+        ? { clients_id: selected.id, match_type, matched_client_name: selected.name }
+        : exact_match_count > 1 ? { ambiguous: true } : {};
+      clientResolutionsByName.set(cacheKey, resolution);
+    }
+    clientResolutions.set(row, resolution);
+  }
+
   const paymentRows = eligible.filter(r => sourceDirectionForWiseDirection(r.direction) === "OUT" && bookedAmountForWiseRow(r) > 0);
   const purchaseInvoicesApi = api.purchaseInvoices;
   const hasPaymentCandidates = paymentRows.length > 0 && purchaseInvoicesApi !== undefined;
@@ -515,6 +548,7 @@ async function runWiseImport(
     counterpartOverrides: canonicalOverrides,
     ownCompanyClientId,
     allPurchaseInvoices,
+    clientResolutions,
   };
   let projected = projectWiseCommands(projectionInput);
 
@@ -871,7 +905,15 @@ async function runWiseImport(
               command_version: WISE_COMMAND_VERSION,
             },
           });
-          created.push({ ...createdEntryFor(command, apiId, "created"), source_row: rowsByIndex.get(command.row_index) });
+          const sourceRow = rowsByIndex.get(command.row_index);
+          const clientsId = command.create_payload.clients_id;
+          created.push({
+            ...createdEntryFor(command, apiId, "created"),
+            source_row: sourceRow,
+            ...(clientsId !== undefined && clientsId !== null
+              ? { clients_id: clientsId }
+              : sourceRow !== undefined && clientResolutions.get(sourceRow)?.ambiguous === true ? { client_ambiguous: true as const } : {}),
+          });
           continue;
         }
 

@@ -19,6 +19,7 @@ export const RECON_UPDATE_CLIENT_CATEGORY = "reconcile_update_client";
 export const RECON_CONFIRM_INVOICE_CATEGORY = "reconcile_confirm_invoice";
 export const RECON_CONFIRM_TRANSFER_CATEGORY = "reconcile_confirm_transfer";
 export const RECON_DELETE_DUPLICATE_CATEGORY = "reconcile_delete_duplicate";
+export const RECON_DELETE_PROPOSED_MIRROR_CATEGORY = "reconcile_delete_proposed_mirror";
 
 /** Stable, transaction-identity-derived command ids. Deterministic across dry run and execute. */
 export function reconClientUpdateCommandId(transactionId: number): string {
@@ -32,6 +33,9 @@ export function reconTransferConfirmCommandId(transactionId: number): string {
 }
 export function reconDeleteDuplicateCommandId(transactionId: number): string {
   return `recon-delete-duplicate-tx-${transactionId}`;
+}
+export function reconDeleteProposedMirrorCommandId(transactionId: number): string {
+  return `recon-delete-proposed-mirror-tx-${transactionId}`;
 }
 
 export type ReconciliationReviewCommand = PlanReviewCommand;

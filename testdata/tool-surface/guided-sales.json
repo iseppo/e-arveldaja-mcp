@@ -2,9 +2,9 @@
   "profile": "guided-sales",
   "measurement": {
     "toolCount": 20,
-    "toolsListBytes": 36998,
+    "toolsListBytes": 37451,
     "descriptionsBytes": 5192,
-    "inputSchemasBytes": 26936,
+    "inputSchemasBytes": 27389,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5425
@@ -177,6 +177,10 @@
         "properties": {
           "block_on_duplicate": {
             "description": "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only.",
+            "type": "boolean"
+          },
+          "delete_proposed_mirrors": {
+            "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
             "type": "boolean"
           },
           "max_date_gap": {
@@ -777,6 +781,10 @@
               "full"
             ],
             "type": "string"
+          },
+          "fresh": {
+            "description": "Clear the active connection's cached API/reference data before computing (use after web UI changes).",
+            "type": "boolean"
           },
           "month": {
             "description": "month_end only: month (YYYY-MM).",

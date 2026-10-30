@@ -192,6 +192,36 @@ describe("process_accounting_document", () => {
     expect(Array.isArray(review.items)).toBe(true);
   });
 
+  // Owner decision 2026-10-30 (Tpilet bus ticket: seller and carrier ids both printed).
+  it("contested supplier ids: extraction prepare says how to acknowledge; a booking prepare with a printed supplier proceeds", async () => {
+    mockedParseDocument.mockResolvedValue({
+      text: ["ACME OÜ", "Reg. nr 17487472", "Arve INV-1", "Summa 12.00 EUR", "Beeta Teenused AS", "Reg. nr 12345610"].join("\n"),
+      pageCount: 1,
+      ocrPartialFailure: false,
+    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+    const { path } = writeTempPdf();
+    const { handler } = setup({
+      clientRows: [supplier()],
+      purchaseInvoiceRows: [],
+      accounts: [fixtureAccount({ id: 5000, name_est: "Teenused" }), fixtureAccount({ id: 1510, name_est: "Sisendkm", is_vat_account: true })],
+      clients: { get: vi.fn().mockResolvedValue(supplier()) },
+    });
+
+    const extracted = parseToolPayload<ProcessAccountingDocumentPreviewPayload>((await handler({ mode: "prepare", file_path: path })).content[0]!.text);
+    expect(extracted.summary.status).toBe("needs_input");
+    expect(extracted.summary.blockers.map(b => b.code)).toContain("supplier_identifier_ambiguous");
+    expect(extracted.summary.next_step).toContain("supplier_identifier_ambiguous: when the operator confirms the supplier");
+    expect(extracted.summary.next_step).toContain("booking_review.supplier_identifier_acknowledged");
+
+    const bound = parseToolPayload<ProcessAccountingDocumentPreviewPayload>((await handler({ mode: "prepare", file_path: path, ...bookingArgs() })).content[0]!.text);
+    expect(bound.summary.status).toBe("ready_for_approval");
+    expect(typeof bound.summary.plan_handle).toBe("string");
+    expect(bound.summary.blockers).toEqual([]);
+    expect(bound.summary.warnings.map(w => w.code)).toContain("supplier_identifier_acknowledged");
+    expect((bound.summary.booking_review as Record<string, unknown> | undefined)?.supplier_identifier_acknowledged)
+      .toEqual({ client_id: 4242, matched: "reg_code", identifier: "17487472" });
+  });
+
   it("booking-binding prepare threads allow_duplicate_invoice_number: a reused supplier number is a bound warning, not a blocker", async () => {
     const { path } = writeTempPdf();
     const { handler } = setup({

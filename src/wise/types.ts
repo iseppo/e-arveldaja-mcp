@@ -145,6 +145,15 @@ export interface WiseTransferTreatedAsPayment {
   basis: WiseExternalPaymentBasis;
 }
 
+/** A row's counterparty-name client lookup (the CAMT rule, selectClientByName). */
+export interface WiseClientResolution {
+  clients_id?: number;
+  match_type?: "exact_name";
+  matched_client_name?: string;
+  /** Several clients have exactly this normalized name: clients_id stays null. */
+  ambiguous?: true;
+}
+
 export interface WiseTransferDecision {
   targetDimensionId?: number;
   /** Set when targetDimensionId came from the per-row counterpart resolution. */
@@ -286,6 +295,14 @@ export interface WiseCreatedEntry {
    * (fee rows are synthesised, not lifted from a CSV line). Presentation only —
    * the amount is already the booked figure. */
   booked_currency?: string;
+  /** The client set on the created row (create_payload.clients_id). */
+  clients_id?: number;
+  /** Dry run: how clients_id was found from the counterparty name. */
+  client_match?: "exact_name";
+  matched_client_name?: string;
+  /** Several clients have exactly the counterparty name: the row is created without
+   * a client and needs one before it can be confirmed. */
+  client_ambiguous?: true;
 }
 
 /** Why a row was skipped. Every kind but "error" is a planned, non-error skip;

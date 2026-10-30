@@ -4,13 +4,16 @@ import {
   reconInvoiceConfirmCommandId,
   reconTransferConfirmCommandId,
   reconDeleteDuplicateCommandId,
+  reconDeleteProposedMirrorCommandId,
   RECON_UPDATE_CLIENT_CATEGORY,
   RECON_CONFIRM_TRANSFER_CATEGORY,
   RECON_DELETE_DUPLICATE_CATEGORY,
+  RECON_DELETE_PROPOSED_MIRROR_CATEGORY,
 } from "../../tools/bank-reconciliation-plan.js";
 import type {
   ExactMatchProjection,
   InterAccountConfirmAction,
+  InterAccountMirrorDeleteAction,
   AmbiguousPairResult,
   AmbiguousReflessRow,
   CrossCurrencyRow,
@@ -87,8 +90,9 @@ export interface InterAccountPlanCommandProjection {
 export function buildInterAccountPlanCommandProjections(
   confirmActions: readonly InterAccountConfirmAction[],
   companyClientsId: number | null,
+  mirrorDeleteActions: readonly InterAccountMirrorDeleteAction[] = [],
 ): InterAccountPlanCommandProjection[] {
-  return confirmActions.flatMap(action => {
+  return [...confirmActions.flatMap(action => {
     const needsClientUpdate = action.confirmedClientsId == null && companyClientsId != null;
     return [
       ...(needsClientUpdate
@@ -99,7 +103,17 @@ export function buildInterAccountPlanCommandProjections(
         ? [{ id: reconDeleteDuplicateCommandId(action.deleteTxId), category: RECON_DELETE_DUPLICATE_CATEGORY, transaction_id: action.deleteTxId }]
         : []),
     ];
-  });
+  }),
+  // Opt-in proposed-mirror deletions run after every confirm.
+  ...mirrorDeleteActions.map(action => ({
+    id: reconDeleteProposedMirrorCommandId(action.transactionId),
+    category: RECON_DELETE_PROPOSED_MIRROR_CATEGORY,
+    transaction_id: action.transactionId,
+    journal_id: action.journalId,
+    counterpart_transaction_id: action.counterpartTransactionId,
+    target_dimension_id: action.targetDimensionId,
+    transaction_material: action.material,
+  }))];
 }
 
 export function interAccountFingerprint(input: {

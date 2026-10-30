@@ -990,36 +990,60 @@ export function selectBatchBankTransactions(
   );
 }
 
-export function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
-  if (tx.type !== "D" && tx.type !== "C") return false;
+/** Why a row was kept out of classification: the open invoice it may pay. */
+export interface ExistingInvoiceMatch {
+  invoice_type: "sale_invoice" | "purchase_invoice";
+  invoice_id?: number;
+  /** Import-origin text (the invoice number may come from a PDF): wrap at output. */
+  invoice_number?: string;
+  matched_by: "match_score" | "partial_payment_residual" | "document_reference";
+  /** match_score: the scorer's reason codes. */
+  match_reasons?: string[];
+  /** document_reference: the invoice number or order/cart reference found in the description (import-origin). */
+  matched_reference?: string;
+}
+
+export function findExistingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): ExistingInvoiceMatch | undefined {
+  if (tx.type !== "D" && tx.type !== "C") return undefined;
   const { allowSaleInvoices, allowPurchaseInvoices } = getInvoiceMatchEligibility(tx);
+  const identity = (invoice_type: ExistingInvoiceMatch["invoice_type"], invoice: { id?: number; number?: string | null }) => ({
+    invoice_type,
+    ...(invoice.id !== undefined ? { invoice_id: invoice.id } : {}),
+    ...(invoice.number ? { invoice_number: invoice.number } : {}),
+  });
 
   if (allowSaleInvoices) {
     for (const invoice of openSales) {
-      const { confidence } = scoreTransactionToInvoice(tx, invoice);
+      const { confidence, reasons } = scoreTransactionToInvoice(tx, invoice);
       if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
-        return true;
+        return { ...identity("sale_invoice", invoice), matched_by: "match_score", match_reasons: reasons };
       }
     }
   }
 
   if (allowPurchaseInvoices) {
     for (const invoice of openPurchases) {
-      const { confidence } = scoreTransactionToInvoice(tx, invoice);
+      const { confidence, reasons } = scoreTransactionToInvoice(tx, invoice);
       if (confidence >= POSSIBLE_MATCH_THRESHOLD) {
-        return true;
+        return { ...identity("purchase_invoice", invoice), matched_by: "match_score", match_reasons: reasons };
       }
-      if (mayPayPartialResidual(tx, invoice)) return true;
+      if (mayPayPartialResidual(tx, invoice)) return { ...identity("purchase_invoice", invoice), matched_by: "partial_payment_residual" };
       // Reconcile's document-reference candidate: exact amount plus the
       // invoice's number or order/cart reference in the bank description.
-      if (
-        matchScore(tx, invoice, tx.amount).reasons.includes("exact_amount") &&
-        documentReferenceOnTransaction(tx.description, invoice) !== undefined
-      ) return true;
+      if (matchScore(tx, invoice, tx.amount).reasons.includes("exact_amount")) {
+        const reference = documentReferenceOnTransaction(tx.description, invoice);
+        if (reference !== undefined) {
+          return { ...identity("purchase_invoice", invoice), matched_by: "document_reference", matched_reference: reference };
+        }
+      }
     }
   }
 
-  return false;
+  return undefined;
+}
+
+export function existingInvoiceMatch(tx: Transaction, openSales: SaleInvoice[], openPurchases: PurchaseInvoice[]): boolean {
+  return findExistingInvoiceMatch(tx, openSales, openPurchases) !== undefined;
 }
 
 /**

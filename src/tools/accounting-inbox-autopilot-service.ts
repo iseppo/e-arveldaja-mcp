@@ -700,6 +700,9 @@ function summarizeAutopilotToolResult(
         };
       };
       const partitionFollowUps: AutopilotFollowUp[] = [
+        ...result.invoiceMatched.map((row) => partitionFollowUp(
+          "classification_invoice_matched", row,
+          `may pay open ${row.invoice_type === "sale_invoice" ? "sale" : "purchase"} invoice ${row.invoice_id ?? ""} (${row.matched_by}); reconcile it instead of classifying.`)),
         ...result.alreadyBooked.map((row) => partitionFollowUp(
           "classification_already_booked", row, `is already booked by journal ${row.journal_ids.join(", ")} (same bank reference).`)),
         ...result.ownTransfers.map((row) => partitionFollowUp(
@@ -721,13 +724,14 @@ function summarizeAutopilotToolResult(
       return {
         summary: `Classified ${result.totalUnmatched} unmatched transaction(s) into ${groups.length} group(s), of which ${reviewGroups.length} still need accounting judgement instead of auto-booking.`
           + (result.totalPartitionedOut > 0
-            ? ` ${result.totalPartitionedOut} more were taken out by the ledger check (${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s)).`
+            ? ` ${result.totalPartitionedOut} more were taken out (${result.invoiceMatched.length} may pay an open invoice, ${result.alreadyBooked.length} already booked, ${result.ownTransfers.length} own transfer(s), ${result.possibleDuplicates.length} possible duplicate(s)).`
             : ""),
         preview: {
           total_unmatched: result.totalUnmatched,
           group_count: groups.length,
           category_counts: result.categoryCounts,
           total_partitioned_out: result.totalPartitionedOut,
+          invoice_matched: result.invoiceMatched.length,
           already_booked: result.alreadyBooked.length,
           own_transfers: result.ownTransfers.length,
           possible_duplicates: result.possibleDuplicates.length,

@@ -421,23 +421,36 @@ describe("AccountingDocumentOperations.create", () => {
   // suggestion — prepare issues no create plan handle for it.
   // Codex P0 code review: with a valid booking and a resolved supplier, only the
   // contested document is denied its handle; its clean twin gets one.
+  const contestedDocWith = (lines: string[]) => ({
+    text: lines.join("\n"),
+    pageCount: 1,
+    ocrPartialFailure: false,
+  } as unknown as Awaited<ReturnType<typeof parseDocument>>);
+  const contestedHead = ["ACME OÜ", "Reg. nr 17487472", "Arve INV-1", "Summa 12.00 EUR"];
+
+  // A booking supplier carrying none of the document's printed identifiers.
+  function setupWithUnprintedSupplier() {
+    const context = createSetup();
+    const unprinted = fixtureClient({ id: 5151, name: "Muu OÜ", code: "10000006", invoice_vat_no: "EE100000006", is_supplier: true });
+    vi.mocked(context.api.clients.get).mockResolvedValue(unprinted);
+    return context;
+  }
+
   it("withholds the plan handle for contested supplier ids, but not for the clean twin", async () => {
-    const docWith = (lines: string[]) => ({
-      text: lines.join("\n"),
-      pageCount: 1,
-      ocrPartialFailure: false,
-    } as unknown as Awaited<ReturnType<typeof parseDocument>>);
-    const head = ["ACME OÜ", "Reg. nr 17487472", "Arve INV-1", "Summa 12.00 EUR"];
+    const docWith = contestedDocWith;
+    const head = contestedHead;
 
     mockedParseDocument.mockResolvedValue(docWith([...head, "Beeta Teenused AS", "Reg. nr 12345610"]));
-    const contested = createSetup();
-    const held = await contested.ops.prepare({ source: { file_path: contested.path }, booking: bookingFields() });
+    const contested = setupWithUnprintedSupplier();
+    const held = await contested.ops.prepare({ source: { file_path: contested.path }, booking: { ...bookingFields(), supplierClientId: 5151 } });
     expect(held.ok).toBe(true);
     if (!held.ok) return;
     expect(held.value.extraction.fields.supplier_reg_code).toBe(REG_CODE);
     expect(held.value.supplierResolution.status).toBe("resolved");
     expect(held.value.extraction.fields.supplier_identifier_ambiguous).toBe(true);
     expect(held.value.blockers.map(b => b.code)).toContain("supplier_identifier_ambiguous");
+    expect(held.value.warnings.map(w => w.code)).not.toContain("supplier_identifier_acknowledged");
+    expect(held.value.bookingProjection?.supplier_identifier_acknowledged).toBeUndefined();
     expect(held.value.planHandle).toBeUndefined();
     expectNoWrites(contested.api);
 
@@ -450,6 +463,118 @@ describe("AccountingDocumentOperations.create", () => {
     expect(ok.value.extraction.fields.supplier_identifier_ambiguous).toBeUndefined();
     expect(ok.value.blockers).toEqual([]);
     expect(typeof ok.value.planHandle).toBe("string");
+  });
+
+  // Owner decision 2026-10-30 (Tpilet: seller and carrier both printed): an
+  // explicit booking supplier carrying one of the printed ids acknowledges it.
+  it("a booking supplier whose registry code the document prints acknowledges contested ids and creates", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.extraction.fields.supplier_identifier_ambiguous).toBe(true);
+    expect(outcome.value.blockers).toEqual([]);
+    expect(outcome.value.warnings.find(w => w.code === "supplier_identifier_acknowledged")?.message)
+      .toContain("client 4242) carries the registry code 17487472");
+    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged)
+      .toEqual({ client_id: 4242, matched: "reg_code", identifier: "17487472" });
+    expect(typeof outcome.value.planHandle).toBe("string");
+
+    const created = await ops.create({ ...baseCreateInput(path, sha256), planHandle: outcome.value.planHandle });
+    expect(created.ok).toBe(true);
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
+  it("the acknowledgement binds the supplier: another supplier at create is plan_drift", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), supplierClientId: 4343, planHandle: handle });
+    expect(drift.ok).toBe(false);
+    if (!drift.ok) expect(drift.error.code).toBe("plan_drift");
+    expectNoWrites(api);
+  });
+
+  it("a booking supplier whose VAT number the document prints (not the chosen one) acknowledges it", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([
+      ...contestedHead, "KMKR: EE123456007", "Beeta Teenused AS", "Reg. nr 12345610", "KMKR: EE123456010",
+    ]));
+    const { path, api, ops } = createSetup();
+    const beeta = fixtureClient({ id: 5252, name: "Beeta Teenused AS", code: null, invoice_vat_no: "ee 123456010", is_supplier: true });
+    vi.mocked(api.clients.get).mockResolvedValue(beeta);
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), supplierClientId: 5252 } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.extraction.fields.supplier_identifier_ambiguous).toBe(true);
+    expect(outcome.value.blockers).toEqual([]);
+    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged)
+      .toEqual({ client_id: 5252, matched: "vat_no", identifier: "EE123456010" });
+    expect(typeof outcome.value.planHandle).toBe("string");
+  });
+
+  it("registry codes compare as digits: a client code printed with spaces acknowledges", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, api, ops } = createSetup();
+    vi.mocked(api.clients.get).mockResolvedValue(fixtureClient({ id: 5353, name: "Beeta Teenused AS", code: " 1234 5610", is_supplier: true }));
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), supplierClientId: 5353 } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers).toEqual([]);
+    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged)
+      .toEqual({ client_id: 5353, matched: "reg_code", identifier: "12345610" });
+  });
+
+  it("with the active company's own identifiers unreadable, a printed supplier does not acknowledge", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, api, ops } = createSetup();
+    // Only the own-identity read fails; the later VAT-registration read succeeds.
+    api.readonly.getVatInfo.mockRejectedValueOnce(new Error("offline"));
+    api.readonly.getInvoiceInfo.mockRejectedValue(new Error("offline"));
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: bookingFields() });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers.map(b => b.code)).toContain("supplier_identifier_ambiguous");
+    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged).toBeUndefined();
+    expect(outcome.value.planHandle).toBeUndefined();
+  });
+
+  it("a client carrying the active company's own VAT number never acknowledges", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "KMKR: EE123456789", "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, api, ops } = createSetup();
+    // The fixture company's own VAT is EE123456789.
+    vi.mocked(api.clients.get).mockResolvedValue(fixtureClient({ id: 5454, name: "Seppo AI OÜ", code: null, invoice_vat_no: "EE123456789", is_supplier: true }));
+    const outcome = await ops.prepare({ source: { file_path: path }, booking: { ...bookingFields(), supplierClientId: 5454 } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.bookingProjection?.supplier_identifier_acknowledged).toBeUndefined();
+    expect(outcome.value.planHandle).toBeUndefined();
+  });
+
+  it("create re-reads the acknowledged client: a registry code edited since prepare is plan_drift, zero writes", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, sha256, api, ops } = createSetup();
+    const handle = await prepareBookingHandle(ops, path);
+    const edited = fixtureClient({ id: 4242, name: "ACME OÜ", code: "10000006", is_supplier: true });
+    const getCalls = vi.mocked(api.clients.get).mock.calls.length;
+    // computeEffectiveBooking still reads the reviewed client; the dedicated re-read sees the edit.
+    vi.mocked(api.clients.get).mockResolvedValueOnce(supplier()).mockResolvedValueOnce(edited);
+    const drift = await ops.create({ ...baseCreateInput(path, sha256), planHandle: handle });
+    expect(drift.ok).toBe(false);
+    if (!drift.ok) expect(drift.error.code).toBe("plan_drift");
+    expect(vi.mocked(api.clients.get).mock.calls.length).toBe(getCalls + 2);
+    expectNoWrites(api);
+  });
+
+  it("without booking fields the contested ids stay a blocker even for a printed supplier", async () => {
+    mockedParseDocument.mockResolvedValue(contestedDocWith([...contestedHead, "Beeta Teenused AS", "Reg. nr 12345610"]));
+    const { path, ops } = createSetup();
+    const outcome = await ops.prepare({ source: { file_path: path }, overrides: { supplier_client_id: 4242 } });
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok) return;
+    expect(outcome.value.blockers.map(b => b.code)).toContain("supplier_identifier_ambiguous");
+    expect(outcome.value.warnings.map(w => w.code)).not.toContain("supplier_identifier_acknowledged");
+    expect(outcome.value.planHandle).toBeUndefined();
   });
 
   it("withholds the plan handle when the supplier came from a footer identity block", async () => {

@@ -30,6 +30,7 @@ export interface MockAccountingWorkflowApi {
   products: Record<string, never>;
   saleInvoices: {
     listAll: ReturnType<typeof vi.fn>;
+    invalidateListCache: ReturnType<typeof vi.fn>;
   };
   purchaseInvoices: {
     listAll: ReturnType<typeof vi.fn>;
@@ -119,6 +120,7 @@ export function createAccountingWorkflowApi(options: AccountingWorkflowApiOption
     products: {},
     saleInvoices: {
       listAll: vi.fn().mockResolvedValue(options.saleInvoiceRows ?? []),
+      invalidateListCache: vi.fn(),
       ...options.saleInvoices,
     },
     purchaseInvoices: {

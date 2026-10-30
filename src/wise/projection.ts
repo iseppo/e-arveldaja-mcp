@@ -56,6 +56,7 @@ import {
   type WiseTransferJournalCandidate,
   type WiseTransferReview,
   type WiseTransferTreatedAsPayment,
+  type WiseClientResolution,
 } from "./types.js";
 
 // PURE projection: byte-stable command building + digest assembly + plan-review
@@ -345,6 +346,17 @@ export interface WiseProjectionInput {
   readonly counterpartOverrides?: readonly WiseCounterpartOverride[];
   readonly ownCompanyClientId: number | undefined;
   readonly allPurchaseInvoices: PurchaseInvoice[];
+  /** Counterparty-name client lookups for rows that are not own transfers
+   * (wiseRowNeedsClientResolution); a resolved clients_id joins the row's
+   * main create payload. */
+  readonly clientResolutions?: ReadonlyMap<WiseRow, WiseClientResolution>;
+}
+
+/** A row booked as an ordinary payment needs a client to be confirmable:
+ * every row except an own-transfer candidate (whose client is the own company,
+ * set by its inter_account command) and a row held for its counterpart. */
+export function wiseRowNeedsClientResolution(decision: WiseTransferDecision | undefined): boolean {
+  return decision === undefined || decision.externalPayment !== undefined;
 }
 
 export interface WiseProjectionOutput {
@@ -750,6 +762,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
     counterpartOverrides = [],
     ownCompanyClientId,
     allPurchaseInvoices,
+    clientResolutions,
   } = input;
   const accounts_dimensions_id = accountsDimensionsId;
   const knownWiseLabels = knownWiseLabelsFor(allRows, existingTx);
@@ -958,6 +971,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         }));
       }
     } else {
+      const clientResolution = clientResolutions?.get(row);
       const createPayload: TransactionCreatePayload = {
         accounts_dimensions_id,
         type,
@@ -967,6 +981,7 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         description: desc,
         bank_account_name: bankAccountName,
         ref_number: row.reference || undefined,
+        ...(clientResolution?.clients_id !== undefined ? { clients_id: clientResolution.clients_id } : {}),
       };
       commands.push({
         version: WISE_COMMAND_VERSION,
@@ -1004,6 +1019,13 @@ export function projectWiseCommands(input: WiseProjectionInput): WiseProjectionO
         ...(counterpartDecision?.counterpartBasis !== undefined && counterpartDecision.targetDimensionId !== undefined
           ? { counterpart_dimension_id: counterpartDecision.targetDimensionId, counterpart_basis: counterpartDecision.counterpartBasis }
           : {}),
+        ...(clientResolution?.clients_id !== undefined
+          ? {
+              clients_id: clientResolution.clients_id,
+              ...(clientResolution.match_type !== undefined ? { client_match: clientResolution.match_type } : {}),
+              ...(clientResolution.matched_client_name !== undefined ? { matched_client_name: clientResolution.matched_client_name } : {}),
+            }
+          : clientResolution?.ambiguous === true ? { client_ambiguous: true as const } : {}),
       });
       // Deliberately NOT feeding this row's signature back into the stored-row
       // set: within one statement the Wise ID is the identity, and seenWiseIds
