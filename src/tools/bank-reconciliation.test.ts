@@ -4639,6 +4639,64 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_material_drift");
       });
 
+      // EUR 600 out of dimension 100 (row 5002); journal 9001 books D300/C100 for
+      // confirmed incoming 5001 on 300. Execute's matching sees that journal; the
+      // delete command's own reads see the change, with the journal header unchanged.
+      const postingChanges: Array<[string, (postings: Array<Record<string, unknown>>) => Array<Record<string, unknown>>]> = [
+        ["the own leg moved to dimension 400", postings => postings.map(p => p.accounts_dimensions_id === 100 ? { ...p, accounts_dimensions_id: 400 } : p)],
+        ["the own leg on the wrong side", postings => postings.map(p => p.accounts_dimensions_id === 100 ? { ...p, type: "D" } : p)],
+        ["the target leg on the wrong side", postings => postings.map(p => p.accounts_dimensions_id === 300 ? { ...p, type: "C" } : p)],
+        ["the own leg deleted", postings => postings.map(p => p.accounts_dimensions_id === 100 ? { ...p, is_deleted: true } : p)],
+        ["both legs now EUR 10", postings => postings.map(p => ({ ...p, amount: 10, base_amount: 10 }))],
+      ];
+      it.each(postingChanges)("refuses the delete when the journal's postings no longer prove the mirror at its command: %s", async (_label, change) => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        expect(dry.already_handled[0]!.mirror_proposal).toBeDefined();
+        const matchingReads = api.journals.listAllWithPostings.mock.calls.length;
+        const reads = api.journals.listAllWithPostings.getMockImplementation()!;
+        let call = 0;
+        api.journals.listAllWithPostings.mockImplementation(async () => {
+          call += 1;
+          const journals: Array<{ id: number; postings: Array<Record<string, unknown>> }> = await reads();
+          return call > matchingReads ? journals.map(j => j.id === 9001 ? { ...j, postings: change(j.postings) } : j) : journals;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(executed.execution.execution_report!.status).toBe("plan_drift");
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_journal_drift");
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(executed.already_handled[0]!.mirror_deleted).toBeUndefined();
+      });
+
+      const counterpartChanges: Array<[string, Record<string, unknown>]> = [
+        ["changed to USD", { cl_currencies_id: "USD" }],
+        ["now signed in the row's own direction", { description: "WISE:TRANSFER-1 top-up [source_direction=OUT]" }],
+      ];
+      it.each(counterpartChanges)("refuses the delete when the counterpart is %s at its command", async (_label, change) => {
+        const { handler, api } = setup([counterpart(), camtRow(5002)]);
+        const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ delete_proposed_mirrors: true })).content[0]!.text);
+        const original = api.transactions.get.getMockImplementation()!;
+        let gets = 0;
+        // Execute's matching reads the counterpart once; the command's read sees the change.
+        api.transactions.get.mockImplementation(async (id: number) => {
+          const row = await original(id);
+          if (id !== 5001) return row;
+          gets += 1;
+          return gets > 1 ? { ...row, ...change } : row;
+        });
+        const executed = parseToolPayload<ReconInterAccountPayload>((await handler({
+          delete_proposed_mirrors: true, execute: true, plan_handle: dry.plan_handle,
+        })).content[0]!.text);
+        expect(gets).toBe(2);
+        expect(executed.execution.execution_report!.status).toBe("plan_drift");
+        expect(executed.execution.execution_report!.stop_reason!.code).toBe("mirror_journal_drift");
+        expect(api.transactions.delete).not.toHaveBeenCalled();
+        expect(executed.already_handled[0]!.mirror_deleted).toBeUndefined();
+      });
+
       it("adds nothing to the plan without the flag (report-only)", async () => {
         const { handler, api } = setup([counterpart(), camtRow(5002)]);
         const executed = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler)).content[0]!.text);

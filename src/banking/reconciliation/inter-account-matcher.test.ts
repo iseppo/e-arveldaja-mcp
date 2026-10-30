@@ -3,6 +3,7 @@ import type { Journal, Transaction } from "../../types/api.js";
 import { buildCamtDescriptionWithMetadata } from "../../camt/duplicate-identity.js";
 import {
   counterpartyIbanOf,
+  hasMirrorPostingEvidence,
   hasUnverifiableCamtMarker,
   inferOneSidedTransfer,
   journalEurNetCents,
@@ -166,5 +167,49 @@ describe("journalEurNetCents", () => {
     expect(journalEurNetCents(journal([{ type: "D", amount: 10, cl_currencies_id: "USD", accounts_dimensions_id: 5 }]), 5)).toBeUndefined();
     expect(journalEurNetCents(journal([{ type: "D", amount: 10, accounts_dimensions_id: 5 }], "USD"), 5)).toBeUndefined();
     expect(journalEurNetCents(journal([{ type: "D", amount: 10, base_amount: 9, cl_currencies_id: "USD", accounts_dimensions_id: 5 }]), 5)).toBe(900);
+  });
+});
+
+describe("hasMirrorPostingEvidence", () => {
+  // PROJECT row 5002: EUR 600 out of dimension 100, marker IBAN = the Wise account (300).
+  // Confirmed counterpart 5001: EUR 600 in on 300, booked by journal 9001 as D300/C100.
+  const row = camtRow(5002);
+  const counterpart = (overrides: Partial<Transaction> = {}): Transaction => ({
+    id: 5001, status: "CONFIRMED", is_deleted: false, type: "D", amount: 600, cl_currencies_id: "EUR", date: "2026-09-26",
+    accounts_dimensions_id: 300, bank_account_name: "Näide OÜ", bank_account_no: null,
+    description: "WISE:TRANSFER-1 top-up [source_direction=IN]", ...overrides,
+  } as Transaction);
+  const journal = (postings: Array<Partial<Journal["postings"][number]>> = [
+    { accounts_dimensions_id: 300, type: "D" }, { accounts_dimensions_id: 100, type: "C" },
+  ]): Journal => ({
+    id: 9001, effective_date: "2026-09-26", is_deleted: false, registered: true, operation_type: "TRANSACTION", operations_id: 5001,
+    postings: postings.map(p => ({ accounts_id: 1020, amount: 600, base_amount: 600, is_deleted: false, ...p })),
+  } as Journal);
+  const own = lookups(THREE_ACCOUNTS);
+
+  it("accepts the booked mirror, with a signed or an unsigned counterpart", () => {
+    expect(hasMirrorPostingEvidence(row, counterpart(), 300, journal(), own)).toBe(true);
+    expect(hasMirrorPostingEvidence(row, counterpart({ description: "top-up" }), 300, journal(), own)).toBe(true);
+  });
+
+  it("refuses non-EUR or FX-based amounts on either side", () => {
+    expect(hasMirrorPostingEvidence(row, counterpart({ cl_currencies_id: "USD" }), 300, journal(), own)).toBe(false);
+    expect(hasMirrorPostingEvidence({ ...row, base_amount: 599 }, counterpart(), 300, journal(), own)).toBe(false);
+  });
+
+  it("refuses a row without own-origin evidence or without a signed direction", () => {
+    expect(hasMirrorPostingEvidence(camtRow(5002, { iban: "EE999999999999999999" }), counterpart(), 300, journal(), own)).toBe(false);
+    expect(hasMirrorPostingEvidence({ ...row, description: "Näide OU" }, counterpart(), 300, journal(), own)).toBe(false);
+  });
+
+  it("refuses postings that do not book the row's side on its own dimension and the other side on the target", () => {
+    expect(hasMirrorPostingEvidence(row, counterpart(), 300, journal([{ accounts_dimensions_id: 300, type: "D" }, { accounts_dimensions_id: 400, type: "C" }]), own)).toBe(false);
+    expect(hasMirrorPostingEvidence(row, counterpart(), 300, journal([{ accounts_dimensions_id: 300, type: "D" }, { accounts_dimensions_id: 100, type: "D" }]), own)).toBe(false);
+    expect(hasMirrorPostingEvidence(row, counterpart(), 300, journal([{ accounts_dimensions_id: 300, type: "C" }, { accounts_dimensions_id: 100, type: "C" }]), own)).toBe(false);
+    expect(hasMirrorPostingEvidence(row, counterpart(), 300, journal([{ accounts_dimensions_id: 300, type: "D" }, { accounts_dimensions_id: 100, type: "C", is_deleted: true }]), own)).toBe(false);
+  });
+
+  it("refuses a counterpart signed in the row's own direction", () => {
+    expect(hasMirrorPostingEvidence(row, counterpart({ description: "WISE:TRANSFER-1 top-up [source_direction=OUT]" }), 300, journal(), own)).toBe(false);
   });
 });

@@ -47,11 +47,11 @@ export async function loadOwnIbans(api: ApiContext): Promise<string[] | undefine
  * may not implement it. Return an empty object on any failure so callers keep
  * working — we just lose the name-based registry-code fallback.
  */
-async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_name?: string | null }> {
+async function safeGetInvoiceInfo(api: ApiContext, fresh: boolean): Promise<{ invoice_company_name?: string | null }> {
   try {
     const fn = api.readonly.getInvoiceInfo;
     if (typeof fn !== "function") return {};
-    return await fn.call(api.readonly);
+    return await (fresh ? fn.call(api.readonly, { fresh: true }) : fn.call(api.readonly));
   } catch {
     return {};
   }
@@ -61,20 +61,23 @@ async function safeGetInvoiceInfo(api: ApiContext): Promise<{ invoice_company_na
  * Resolve the active company's own VAT number (from `vat_info`), registry
  * code (derived from the clients list + `invoice_info`) and bank-account IBANs. Best-effort: any
  * upstream failure degrades to `undefined` for that field so the caller falls
- * back to its prior no-exclusion behaviour rather than erroring.
+ * back to its prior no-exclusion behaviour rather than erroring. `fresh`
+ * re-reads `vat_info` and `invoice_info` past the reference-data cache.
  */
 export async function resolveOwnCompanyIdentifiers(
   api: ApiContext,
   clients: Client[],
+  options: { fresh?: boolean } = {},
 ): Promise<OwnCompanyIdentifiers> {
+  const fresh = options.fresh === true;
   let ownCompanyVat: string | undefined;
   try {
-    const vatInfo = await api.readonly.getVatInfo();
+    const vatInfo = await (fresh ? api.readonly.getVatInfo({ fresh: true }) : api.readonly.getVatInfo());
     ownCompanyVat = vatInfo.vat_number?.trim() || undefined;
   } catch {
     ownCompanyVat = undefined;
   }
-  const invoiceInfo = await safeGetInvoiceInfo(api);
+  const invoiceInfo = await safeGetInvoiceInfo(api, fresh);
   const ownCompanyName = invoiceInfo.invoice_company_name?.trim() || undefined;
   const ownCompanyRegistryCode = deriveOwnCompanyRegistryCode(
     clients,

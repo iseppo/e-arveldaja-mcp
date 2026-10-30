@@ -799,14 +799,28 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       ) {
         return fail("plan_drift", "The reviewed booking plan no longer matches the requested create model. Re-run mode='prepare' with the final booking fields and review again.", "never");
       }
-      // The acknowledged client must still carry the printed identifier: re-read
-      // it past the cache (it may have been edited in the UI since prepare).
+      // The acknowledged client must still carry the printed identifier and
+      // must still not be the active company: re-read it and the own
+      // identifiers past the cache (either may have changed since prepare).
       if (acknowledged !== undefined) {
         this.api.clients.invalidateListCache();
         const client = await this.api.clients.get(input.supplierClientId);
+        // A failed list read degrades as in wrongCompanySignal; with no own id left, the veto below refuses.
+        const allClients = await this.api.clients.listAll().catch(() => []);
+        const own = await resolveOwnCompanyIdentifiers(this.api, allClients, { fresh: true });
         const kind = acknowledged.matched === "vat_no" ? "vat_no" : "reg_code";
         if (clientIdentifier(client, kind) !== acknowledged.identifier) {
           return fail("plan_drift", "The supplier's registry code or VAT number no longer matches the printed identifier that acknowledged the contested supplier ids. Re-run mode='prepare' and review again.", "never");
+        }
+        // The same own-ID veto as at prepare, over the acknowledged identifier
+        // alone; nothing is acknowledged when neither own id can be read.
+        const recheck = printedSupplierIdentifierMatch(
+          client,
+          kind === "vat_no" ? { supplier_vat_no: acknowledged.identifier } : { supplier_reg_code: acknowledged.identifier },
+          own,
+        );
+        if (recheck?.matched !== kind || recheck.identifier !== acknowledged.identifier) {
+          return fail("plan_drift", "The acknowledged supplier now carries one of the active company's own identifiers, or the company's own identifiers cannot be read. Re-run mode='prepare' and review again.", "never");
         }
       }
       // Re-check the document's addressee before any write: a handle issued

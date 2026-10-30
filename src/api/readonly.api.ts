@@ -169,8 +169,10 @@ export class ReferenceDataApi {
     return readonlyCachedGetAll<Template>(this.client, "/templates");
   }
 
-  // Invoice info
-  async getInvoiceInfo(): Promise<CompanyInvoiceInfo> {
+  // Invoice info. `fresh` drops only this key first (the own-company identity
+  // re-check before a booking needs it as it is now).
+  async getInvoiceInfo(options: { fresh?: boolean } = {}): Promise<CompanyInvoiceInfo> {
+    if (options.fresh === true) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/invoice_info"));
     return readonlyCachedGet<CompanyInvoiceInfo>(this.client, "/invoice_info");
   }
 
@@ -179,8 +181,9 @@ export class ReferenceDataApi {
       () => this.client.patch<ApiResponse>("/invoice_info", data));
   }
 
-  // VAT info
-  async getVatInfo(): Promise<CompanyVatInfo> {
+  // VAT info. `fresh` drops only this key first, as for invoice info.
+  async getVatInfo(options: { fresh?: boolean } = {}): Promise<CompanyVatInfo> {
+    if (options.fresh === true) readonlyCache.invalidateExact(readonlyCacheKey(this.client, "/vat_info"));
     return readonlyCachedGet<CompanyVatInfo>(this.client, "/vat_info");
   }
 

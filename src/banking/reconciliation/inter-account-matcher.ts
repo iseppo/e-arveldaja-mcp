@@ -1,6 +1,6 @@
 import type { Journal, Transaction } from "../../types/api.js";
 import type { BookingGuard, InterAccountQuery, InterAccountResolution } from "../../booking-guard.js";
-import { bankTransactionDirection } from "../../bank-transaction-direction.js";
+import { bankTransactionDirection, signedBankTransactionDirection } from "../../bank-transaction-direction.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../../company-name.js";
 import { toUtcDay } from "../../date-utils.js";
 import { normalizeIban } from "../../resolution/bank-account-resolution.js";
@@ -354,6 +354,37 @@ export function hasMirrorOwnOriginEvidence(
   // An `x=i` row left out a proven external IBAN: no name fallback.
   if (isCamtCounterpartyIbanOmitted(mirror)) return false;
   return sameCompanyIdentity(mirror.bank_account_name, lookups.companyLegalName);
+}
+
+const isPlainEur = (row: Transaction) =>
+  row.cl_currencies_id === "EUR" && (row.base_amount == null || sameAmountToTheCent(row.base_amount, row.amount));
+
+/**
+ * The booking evidence that PROJECT `row` is the mirror of `counterpart`, whose
+ * registration `journal` books it: both plain EUR, own-origin evidence, a
+ * signed row direction, every live leg on the row's dimension on that bank
+ * side and no live leg on `targetDimension` on it, and a counterpart not signed
+ * the same way (an unsigned counterpart is accepted). Shared by the mirror
+ * proposal and the execute-time re-check right before the delete.
+ */
+export function hasMirrorPostingEvidence(
+  row: Transaction,
+  counterpart: Transaction,
+  targetDimension: number,
+  journal: Journal,
+  lookups: Pick<InterAccountMatchLookups, "ownIbanToDimension" | "ownIbansWithoutDimension" | "companyLegalName">,
+): boolean {
+  if (!isPlainEur(row) || !isPlainEur(counterpart)) return false;
+  if (!hasMirrorOwnOriginEvidence(row, counterpart, lookups)) return false;
+  const direction = signedBankTransactionDirection(row);
+  if (!direction) return false;
+  const ownSide = direction === "incoming" ? "D" : "C";
+  const legsOn = (dim: number) => journal.postings.filter(p => !p.is_deleted && p.accounts_dimensions_id === dim);
+  const ownLegs = legsOn(row.accounts_dimensions_id);
+  const targetLegs = legsOn(targetDimension);
+  if (ownLegs.length === 0 || ownLegs.some(p => p.type !== ownSide)) return false;
+  if (targetLegs.length === 0 || targetLegs.some(p => p.type === ownSide)) return false;
+  return signedBankTransactionDirection(counterpart) !== direction;
 }
 
 /**

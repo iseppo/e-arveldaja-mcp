@@ -465,6 +465,18 @@ describe("classification operations — P0-2 plan binding", () => {
     expect(outcome.value.results[0]!.status).toBe("applied");
   });
 
+  it("a purchase-only apply still books when the sale-invoice list cannot be read", async () => {
+    const { operations, api } = makeSaasOperations(SAAS_TX, {
+      allowWrites: true,
+      saleInvoices: { listAll: vi.fn().mockRejectedValue(new Error("sale invoices unavailable")) },
+    });
+    const handle = await dryRunHandle(operations, [saasGroup()]);
+    const outcome = await operations.applyClassifications({ classificationsJson: { groups: [saasGroup()] }, execute: true, planHandle: handle });
+    if (!outcome.ok) throw new Error(outcome.error.code);
+    expect(outcome.value.results[0]!.status).toBe("applied");
+    expect(api.purchaseInvoices.createAndSetTotals).toHaveBeenCalledTimes(1);
+  });
+
   it("execute_apply re-reads clients/invoices/transactions uncached before the gating reads; dry_run_apply stays cached", async () => {
     const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
     const handle = await dryRunHandle(operations, [saasGroup()]);
@@ -1543,6 +1555,166 @@ describe("classification operations — ledger context (F6)", () => {
       const result = await analyze(operations);
       for (const group of result.groups) expect(group.apply_mode).toBe("review_only");
       expect(result.groups.flatMap(group => group.transactions.map(tx => tx.id)).sort()).toEqual([63, 64]);
+    });
+
+    describe("the history-derived client is set only on unchanged material", () => {
+      // Only row 62 (client null; history says 77), so any write would be this row's.
+      async function prepared() {
+        const history = kassaHistory([[1010, 391], [1010, 391]]);
+        const row = payments()[1]!;
+        const { api, operations, ctx } = ledgerOperations({
+          rows: [row, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
+        });
+        // The server returns copies, and the importer's own update changes the server row.
+        api.transactions.get.mockImplementation(async (id: number) => id === 62 ? { ...row } : undefined);
+        api.transactions.update.mockImplementation(async (_id: number, data: Record<string, unknown>) => {
+          Object.assign(row, data);
+          return {};
+        });
+        const classificationsJson = { groups: (await analyze(operations)).groups };
+        expect(classificationsJson.groups[0]!.apply_mode).toBe("account_distribution");
+        const dry = await operations.applyClassifications({ classificationsJson });
+        if (!dry.ok) throw new Error("dry run failed");
+        return { api, operations, ctx, row, classificationsJson, planHandle: dry.value.planHandle };
+      }
+
+      const drifts: Array<[string, (row: ReturnType<typeof payments>[number]) => void, Record<string, unknown>]> = [
+        ["another client", row => { row.clients_id = 88; }, { clients_id: 88 }],
+        ["the amount", row => { row.amount = 26; }, { amount: 26, clients_id: null }],
+        ["the status", row => { row.status = "CONFIRMED"; }, { status: "CONFIRMED", clients_id: null }],
+        ["the direction", row => {
+          row.description = camtRow({ id: 62, amount: 25, date: "2026-10-20", direction: "CRDT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Kassasse" }).description;
+        }, { clients_id: null }],
+      ];
+      it.each(drifts)("stops before setting the client when %s appeared after the plan was gathered", async (_label, drift, expected) => {
+        const { api, operations, ctx, row, classificationsJson, planHandle } = await prepared();
+        // The reviewed plan is consumed after the fresh gather matched it and before any write.
+        const consume = ctx.planStore.consume.bind(ctx.planStore);
+        vi.spyOn(ctx.planStore, "consume").mockImplementation((handle, domain) => {
+          const plan = consume(handle, domain);
+          drift(row);
+          return plan;
+        });
+        const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle });
+        if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+        expect(executed.value.results[0]!.status).toBe("failed");
+        expect(row).toMatchObject(expected);
+        expect(api.transactions.update).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      });
+
+      it("discloses the client write and does not confirm when the material changes after its own update", async () => {
+        const { api, operations, row, classificationsJson, planHandle } = await prepared();
+        api.transactions.update.mockImplementation(async (_id: number, data: Record<string, unknown>) => {
+          Object.assign(row, data, { amount: 26 });
+          return {};
+        });
+        const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle });
+        if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+        expect(executed.value.results[0]!.status).toBe("failed");
+        expect(api.transactions.update).toHaveBeenCalledWith(62, { clients_id: 77 });
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+        expect(executed.value.results[0]!.notes.join("\n")).toContain("Its client was set to 77 before the failure.");
+      });
+    });
+
+    describe("payments settling invoices on custom accounts are not direct-booking history", () => {
+      const SETTLEMENT_ACCOUNTS = [
+        ...KASSA_ACCOUNTS,
+        { id: 2991, name_est: "Muud võlad tarnijatele", account_type_est: "Kohustused" },
+        { id: 1991, name_est: "Muud nõuded ostjatele", account_type_est: "Varad" },
+      ];
+      // Paid, so open-invoice matching cannot mask the history decision.
+      const paidPurchase = (liability: number) => ({
+        id: 702, status: "CONFIRMED", payment_status: "PAID", clients_id: 77, client_name: "Mari Maasikas",
+        number: "MM-2026-1", create_date: "2026-04-01", gross_price: 100, base_gross_price: 100, cl_currencies_id: "EUR",
+        liability_accounts_id: liability,
+      });
+      const paidSale = {
+        id: 703, status: "CONFIRMED", payment_status: "PAID", clients_id: 77, client_name: "Mari Maasikas",
+        number: "A-2026-1", create_date: "2026-04-01", gross_price: 100, base_gross_price: 100, cl_currencies_id: "EUR",
+        receivable_accounts_id: 1991,
+      };
+      const incomingHistory = () => {
+        const built = historyRows("Mari Maasikas", "D", [1991, null], ["2026-05-01", "2026-06-01"], 950);
+        built.transactions.forEach(row => Object.assign(row, {
+          clients_id: 77,
+          description: buildCamtDescriptionWithMetadata("Arve", {
+            date: row.date, amount: row.amount, currency: "EUR", direction: "CRDT", counterparty_name: "Mari Maasikas",
+            counterparty_iban: PERSON_IBAN, bank_reference: `HIST${row.id}`, description: "Arve",
+          }),
+        }));
+        return built;
+      };
+      const receipts = () => [
+        { ...camtRow({ id: 71, amount: 40, date: "2026-10-19", direction: "CRDT", name: "Mari Maasikas", iban: PERSON_IBAN, description: "Arve" }), clients_id: 77 },
+      ];
+
+      const cases: Array<[string, () => { rows: unknown[]; journals: unknown[]; purchaseInvoiceRows?: unknown[]; saleInvoiceRows?: unknown[] }]> = [
+        ["a paid purchase invoice on payable 2991", () => {
+          const history = kassaHistory([[2991, null], [2991, null]]);
+          return { rows: [...payments(), ...history.transactions], journals: history.journals, purchaseInvoiceRows: [paidPurchase(2991)] };
+        }],
+        ["a paid sale invoice on receivable 1991", () => {
+          const history = incomingHistory();
+          return { rows: [...receipts(), ...history.transactions], journals: history.journals, saleInvoiceRows: [paidSale] };
+        }],
+      ];
+      it.each(cases)("%s: analysis offers no history distribution and a forced apply writes nothing", async (_label, scenario) => {
+        const { api, operations } = ledgerOperations({ ...scenario(), accounts: SETTLEMENT_ACCOUNTS, allowWrites: true });
+        const result = await analyze(operations);
+        expect(result.groups).toHaveLength(1);
+        const group = result.groups[0]!;
+        expect(group.apply_mode).not.toBe("account_distribution");
+        expect(group.suggested_booking.source).not.toBe("transaction_history");
+        const forced = { groups: [{ ...group, apply_mode: "account_distribution" }] };
+        const dry = await operations.applyClassifications({ classificationsJson: forced });
+        if (!dry.ok) throw new Error("dry run failed");
+        expect(dry.value.results[0]!.status).toBe("skipped");
+        const executed = await operations.applyClassifications({ classificationsJson: forced, execute: true, planHandle: dry.value.planHandle });
+        if (!executed.ok) throw new Error("execute failed");
+        expect(executed.value.results[0]!.status).toBe("skipped");
+        expect(api.transactions.update).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      });
+
+      it("an invoice moved onto the previewed account after the dry run drifts the plan with zero writes", async () => {
+        const history = kassaHistory([[1010, 391], [1010, 391]]);
+        const invoice = paidPurchase(2310);
+        const { api, operations } = ledgerOperations({
+          rows: [...payments(), ...history.transactions], journals: history.journals, accounts: SETTLEMENT_ACCOUNTS,
+          allowWrites: true, purchaseInvoiceRows: [invoice],
+        });
+        const group = (await analyze(operations)).groups[0]!;
+        expect(group.apply_mode).toBe("account_distribution");
+        const classificationsJson = { groups: [group] };
+        const dry = await operations.applyClassifications({ classificationsJson });
+        if (!dry.ok) throw new Error("dry run failed");
+        expect(dry.value.results[0]!.status).toBe("dry_run_preview");
+        invoice.liability_accounts_id = 1010;
+        const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+        expect(executed).toMatchObject({ ok: false, error: { code: "plan_drift" } });
+        expect(api.transactions.update).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      });
+
+      it("an unreadable sale-invoice list at apply leaves distribution rows unbooked", async () => {
+        const history = kassaHistory([[1010, 391], [1010, 391]]);
+        const { api, operations } = ledgerOperations({
+          rows: [...payments(), ...history.transactions], journals: history.journals, accounts: SETTLEMENT_ACCOUNTS, allowWrites: true,
+        });
+        const classificationsJson = { groups: (await analyze(operations)).groups };
+        api.saleInvoices.listAll.mockRejectedValue(new Error("sale invoices unavailable"));
+        const dry = await operations.applyClassifications({ classificationsJson });
+        if (!dry.ok) throw new Error("dry run failed");
+        expect(dry.value.results[0]!.status).toBe("skipped");
+        expect(dry.value.results[0]!.notes).toContain("Transaction 61 skipped — journals or invoices could not be read, so its booking history and existing bookings cannot be checked. Retry later.");
+        const executed = await operations.applyClassifications({ classificationsJson, execute: true, planHandle: dry.value.planHandle });
+        if (!executed.ok) throw new Error("execute failed");
+        expect(executed.value.results[0]!.status).toBe("skipped");
+        expect(api.transactions.update).not.toHaveBeenCalled();
+        expect(api.transactions.confirm).not.toHaveBeenCalled();
+      });
     });
   });
 
