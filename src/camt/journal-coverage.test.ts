@@ -580,4 +580,80 @@ describe("a row e-arveldaja's own bank import created (camt_native_import_match)
     expect(skipped).not.toBe(review);
     expect(camtPlanFingerprint(await project([native()], [registration("C", 42.5)]), args)).toBe(skipped);
   });
+
+  // L1 (live 2026-10-31): three natively imported LHV rows stayed a posting
+  // review although their journals book them. Each had a same-day,
+  // same-amount movement the OTHER way on the statement (900 in from the
+  // broker + 900 out to a loan; 300 / 100 loan repayments in + 300 / 100 out),
+  // and the twin check counted the outgoing row as a twin of the incoming one.
+  describe("a same-day same-amount movement the other way is no twin (L1)", () => {
+    const LIGHTYEAR_DIM = 11;
+    const LOAN_DIM = 70;
+    const incoming: ParsedCamtEntry = {
+      date: "2026-09-14", amount: 900, currency: "EUR", direction: "CRDT", counterparty_name: "Näidis Maakler AS",
+      counterparty_iban: "DE89370400440532013000", description: "WL-TEST0001", reference_number: "E2ETESTREF0001",
+      bank_reference: "STMT-IN-900", duplicate: false, duplicate_transaction_ids: [],
+    };
+    const outgoingTwin: ParsedCamtEntry = {
+      ...incoming, direction: "DBIT", counterparty_name: "Näidis Laenaja OÜ", counterparty_iban: "EE382200221020145685",
+      description: "laen", reference_number: undefined, bank_reference: "STMT-OUT-900",
+    };
+    const row = (id: number, from: ParsedCamtEntry, o: Partial<Transaction> = {}): Transaction => ({
+      id, status: "CONFIRMED", accounts_dimensions_id: DIM, type: "C", amount: from.amount, cl_currencies_id: "EUR",
+      date: from.date, description: from.description, bank_ref_number: null, bank_account_no: from.counterparty_iban,
+      bank_account_name: from.counterparty_name, ref_number: from.reference_number ?? null, is_deleted: false, ...o,
+    }) as Transaction;
+    const booked = (id: number, transactionId: number, bank: "D" | "C", other: Posting, o: Partial<Journal> = {}) =>
+      journal(id, [p(1020, DIM, bank, 900), other],
+        { operation_type: "TRANSACTION", operations_id: transactionId, effective_date: incoming.date, ...o });
+    // The 900 shape: the incoming leg is booked as an own-account transfer (C on the broker's bank dimension).
+    const inJournal = booked(9500, 9310, "D", p(1020, LIGHTYEAR_DIM, "C", 900));
+    const outJournal = booked(9501, 9311, "C", p(1410, LOAN_DIM, "D", 900));
+
+    it("the 900 in / 900 out shape: both rows are recognised as already imported", async () => {
+      const projection = await project([row(9310, incoming), row(9311, outgoingTwin)], [inJournal, outJournal], [incoming, outgoingTwin]);
+      expect(projection.descriptors).toHaveLength(0);
+      expect(projection.skipped.map(item => [item.bank_reference, item.skip_code, item.duplicate_transaction_ids])).toEqual([
+        ["STMT-IN-900", "camt_native_import_match", [9310]],
+        ["STMT-OUT-900", "camt_native_import_match", [9311]],
+      ]);
+    });
+
+    it("the loan-repayment shape (no payment reference, D bank / C loan): already imported", async () => {
+      const repayment: ParsedCamtEntry = { ...incoming, amount: 300, date: "2026-09-30", reference_number: undefined,
+        counterparty_iban: "EE471000001020145685", counterparty_name: "Näidis Laenaja OÜ", description: "laen tagasi", bank_reference: "STMT-IN-300" };
+      const payout: ParsedCamtEntry = { ...repayment, direction: "DBIT", counterparty_iban: "DE89370400440532013000",
+        counterparty_name: "Näidis Maakler AS", description: "LY-TEST", bank_reference: "STMT-OUT-300" };
+      const repaymentJournal = journal(9502, [p(1020, DIM, "D", 300), p(1410, LOAN_DIM, "C", 300)],
+        { operation_type: "TRANSACTION", operations_id: 9312, effective_date: repayment.date });
+      const payoutJournal = journal(9503, [p(1020, DIM, "C", 300), p(1020, LIGHTYEAR_DIM, "D", 300)],
+        { operation_type: "TRANSACTION", operations_id: 9313, effective_date: repayment.date });
+      const projection = await project([row(9312, repayment), row(9313, payout)], [repaymentJournal, payoutJournal], [repayment, payout]);
+      expect(projection.skipped.map(item => item.skip_code)).toEqual(["camt_native_import_match", "camt_native_import_match"]);
+    });
+
+    it("an opposite row with a signed outgoing marker and no journal yet is no twin", async () => {
+      const signedOut = row(9311, outgoingTwin, { status: "PROJECT", description: "WISE:TEST-1 laen [source_direction=OUT]" });
+      const projection = await project([row(9310, incoming), signedOut], [inJournal], [incoming]);
+      expect(projection.skipped).toEqual([expect.objectContaining({ bank_reference: "STMT-IN-900", skip_code: "camt_native_import_match" })]);
+    });
+
+    it.each([
+      ["has no registration journal and no marker", [row(9311, outgoingTwin, { status: "PROJECT" })], [inJournal]],
+      ["has a draft (unregistered) journal only", [row(9311, outgoingTwin)], [inJournal, { ...outJournal, registered: false }]],
+      ["is booked in the SAME direction", [row(9311, outgoingTwin)], [inJournal, booked(9501, 9311, "D", p(1410, LOAN_DIM, "C", 900))]],
+      ["has two registration journals", [row(9311, outgoingTwin)], [inJournal, outJournal, { ...outJournal, id: 9504 }]],
+      ["carries a signed INCOMING marker", [row(9311, outgoingTwin, { description: "WISE:TEST-2 [source_direction=IN]" })], [inJournal, outJournal]],
+    ])("a same-day same-amount row that %s still counts as a twin → review", async (_name, twins, journals) => {
+      const projection = await project([row(9310, incoming), ...twins as Transaction[]], journals as Journal[], [incoming]);
+      expect(projection.skipped.find(item => item.bank_reference === "STMT-IN-900")).toMatchObject({ review_code: "camt_journal_posting_review" });
+      expect(projection.skipped.some(item => item.skip_code === "camt_native_import_match")).toBe(false);
+    });
+
+    it("two same-direction ledger rows plus an opposite one → still review (the true twin hold stays)", async () => {
+      const ledger = [row(9310, incoming), row(9314, incoming, { bank_account_name: "Muu" }), row(9311, outgoingTwin)];
+      const projection = await project(ledger, [inJournal, outJournal], [incoming]);
+      expect(projection.skipped[0]).toMatchObject({ review_code: "camt_journal_posting_review" });
+    });
+  });
 });

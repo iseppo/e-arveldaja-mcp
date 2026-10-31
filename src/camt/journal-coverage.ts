@@ -308,7 +308,8 @@ export function classifyCamtJournalCoverage(
  * reference or contradicting signed marker on the row; no contradicting
  * payment reference (both sides carry one and they differ); and uniqueness
  * both ways — no other statement entry shares date + direction + amount, no
- * other ledger row on the dimension shares date + amount, and no entry matched
+ * other ledger row on the dimension shares date + amount (a row proven to move
+ * the money the other way does not count), and no entry matched
  * the transaction or claims the journal by reference.
  */
 export function findCamtNativeImportMatch(
@@ -335,8 +336,12 @@ export function findCamtNativeImportMatch(
   const registrations = context.journals.filter((other) =>
     other.operation_type === "TRANSACTION" && other.operations_id === transactionId);
   if (registrations.length !== 1) return undefined;
+  // A same-day same-amount row proven to move the money the other way (its
+  // signed marker, or its one registration journal posting the opposite net)
+  // is another movement, not a twin (L1: a 900 in and a 900 out on one day).
   const twins = [...context.sameDimensionTransactions.values()].filter((other) =>
-    !other.is_deleted && other.date === entry.date && cents(other.amount) === cents(entry.amount));
+    !other.is_deleted && other.date === entry.date && cents(other.amount) === cents(entry.amount) &&
+    !(other.id !== transactionId && provenOppositeMovement(other, expectedNet, context)));
   if (twins.length !== 1) return undefined;
   // Two different payment references are two payments; a row without one
   // (the common native-import case) does not contradict.
@@ -350,6 +355,20 @@ export function findCamtNativeImportMatch(
   const transactionName = normalizeCounterpartyName(transaction.bank_account_name);
   if (!entryName || entryName !== transactionName) return undefined;
   return { transaction_id: transactionId, journal_id: journal.id! };
+}
+
+/** The row moves `-expectedNet`: a signed marker the other way, or exactly one registration journal posting that net. */
+function provenOppositeMovement(transaction: Transaction, expectedNet: number, context: CamtJournalCoverageContext): boolean {
+  const direction = bankTransactionDirection(transaction);
+  if (direction !== "unknown") return direction === (expectedNet > 0 ? "outgoing" : "incoming");
+  const registrations = new Map<number, Journal>();
+  for (const journal of [...context.journals, ...context.registrationJournals.get(transaction.id!) ?? []]) {
+    if (journal.registered === true && journal.operation_type === "TRANSACTION" && journal.operations_id === transaction.id) {
+      registrations.set(journal.id!, journal);
+    }
+  }
+  const [only, ...rest] = [...registrations.values()];
+  return only !== undefined && rest.length === 0 && bankNetCents(only, context) === -expectedNet;
 }
 
 /** The stored (cap-enforced) payment reference, whitespace- and case-insensitive. */
