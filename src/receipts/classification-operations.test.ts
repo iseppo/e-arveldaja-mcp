@@ -2132,6 +2132,29 @@ describe("classification operations — ledger context (F6)", () => {
       expect(result.groups[0]!.suggested_booking.counterparty_history).toBeUndefined();
     });
 
+    it("keeps the existing suggestion when the members' unresolved histories differ", async () => {
+      // Row 4 is another client's (79) payment under the same name with its own mixed history.
+      const other = personHistory([[1360, 323], [2110, 900]], 700);
+      other.transactions.forEach(row => Object.assign(row, { clients_id: 79 }));
+      const otherRow = { ...camtRow({ id: 4, amount: 40, date: "2026-10-22", direction: "DBIT", name: PERSON, iban: PERSON_IBAN, description: "Kassasse" }), clients_id: 79 };
+      const { operations } = makeOperations({
+        transactionRows: [...CASH_ROWS, otherRow, ...MIXED.transactions, ...other.transactions],
+        clientRows: [PERSON_CLIENT],
+        purchaseArticles: REIMBURSEMENT_ARTICLES,
+        accounts: PERSON_ACCOUNTS,
+        bankAccounts: BANK_ACCOUNTS,
+        accountDimensions: [...DIMENSIONS, { id: 323, accounts_id: 1360, is_deleted: false }],
+        purchaseInvoiceRows: REIMBURSEMENT_INVOICE,
+        purchaseInvoiceDetails: REIMBURSEMENT_DETAILS,
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue([...MIXED.journals, ...other.journals]) },
+        readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Näide OÜ" }) },
+      });
+      const result = await analyze(operations);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]!.total_amount).toBe(114);
+      expect(result.groups[0]!.suggested_booking.counterparty_history).toBeUndefined();
+    });
+
     it("keeps a VAT-only saved rule's explicit hints on the accountless review suggestion", async () => {
       const dir = mkdtempSync(join(tmpdir(), "earv-history-review-rules-"));
       const rulesFile = join(dir, "accounting-rules.md");
@@ -2204,12 +2227,21 @@ describe("classification operations — ledger context (F6)", () => {
       const { operations, api } = personOperations(MIXED, CASH_ROWS, { allowWrites: true });
       const analysis = await analyze(operations);
       const groups = JSON.parse(JSON.stringify(analysis.groups));
-      const handle = await dryRunHandle(operations, groups);
+      const preview = await operations.applyClassifications({ classificationsJson: { groups } });
+      if (!preview.ok) throw new Error(preview.error.code);
+      const handle = preview.value.planHandle!;
+      // Descriptive evidence is not part of the executable fingerprint.
+      groups[0].suggested_booking.reason = "edited explanation";
       const executed = await operations.applyClassifications({ classificationsJson: { groups }, execute: true, planHandle: handle });
       expect(executed.ok).toBe(true);
       if (!executed.ok) throw new Error("execute failed");
-      expect(executed.value.results.every(entry => entry.status === "skipped")).toBe(true);
+      for (const outcome of [preview.value, executed.value]) {
+        expect(outcome.results).toHaveLength(1);
+        expect(outcome.results[0]).toMatchObject({ status: "skipped", transactions: [1, 2, 3] });
+        expect(outcome.results[0]!.notes.join(" ")).toContain("Category unknown is review-only");
+      }
       expectNoWrites(api);
+      expect(api.clients.create).not.toHaveBeenCalled();
       expect(api.transactions.update).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
     });
