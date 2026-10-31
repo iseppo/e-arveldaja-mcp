@@ -161,8 +161,10 @@ export interface OwnerExpenseReimbursementParams {
   vat_deduction_mode?: "none" | "full" | "partial";
   deductible_vat_amount?: number;
   expense_account: number;
+  expense_account_dimension_id?: number;
   vat_account?: number;
   payable_account?: number;
+  payable_account_dimension_id?: number;
   document_number?: string;
 }
 
@@ -213,6 +215,7 @@ export interface OwnerExpenseJournalProjection {
   // The VAT account only when a deductible-VAT posting is actually made, else null.
   readonly vat_account: number | null;
   readonly payable_account: number;
+  readonly payable_account_dimension_id: number | null;
   readonly total: number;
   readonly vat_registered: boolean;
   readonly postings: readonly OwnerExpensePosting[];
@@ -242,8 +245,10 @@ export async function computeOwnerExpenseJournalProjection(
     vat_deduction_mode,
     deductible_vat_amount,
     expense_account,
+    expense_account_dimension_id,
     vat_account,
     payable_account,
+    payable_account_dimension_id,
     document_number,
   } = params;
   // Canonicalize free-text that will be persisted to the journal + audit log:
@@ -282,6 +287,33 @@ export async function computeOwnerExpenseJournalProjection(
   // sub-cent-unbalanced journal reach the API.
   const grossVat = roundMoney(vat_amount ?? net_amount * vat_rate);
   const accounts = await api.readonly.getAccounts();
+  // An account with dimensions takes entries only on one of its dimensions:
+  // never post such an account without one (live 2026-10-31: the default 2110
+  // was a per-lender loan account). Refused here, before anything is written.
+  const liveDimensions = (await api.readonly.getAccountDimensions())
+    .filter(dimension => dimension.is_deleted !== true);
+  const postingDimension = (account: number, dimensionId: number | undefined, param: string | undefined): { ok: true; id: number | null } | { ok: false; error: CallToolResult } => {
+    const own = liveDimensions.filter(dimension => dimension.accounts_id === account);
+    const listed = own.map(dimension => `${dimension.id} (${dimension.title_est ?? dimension.title_eng ?? "untitled"})`).join(", ");
+    if (dimensionId === undefined) {
+      if (own.length === 0) return { ok: true, id: null };
+      return { ok: false, error: toolError({
+        error: `Account ${account} has dimensions, so an entry must name one of them.`,
+        hint: param !== undefined
+          ? `Pass ${param} with the right dimension of account ${account}: ${listed}. Or choose an account without dimensions.`
+          : `Choose an account without dimensions instead (dimensions of ${account}: ${listed}).`,
+      }) };
+    }
+    if (own.some(dimension => dimension.id === dimensionId)) return { ok: true, id: dimensionId };
+    return { ok: false, error: toolError({
+      error: `${param ?? "The dimension"} ${dimensionId} is not a dimension of account ${account}.`,
+      hint: own.length > 0 ? `Dimensions of account ${account}: ${listed}.` : `Account ${account} has no dimensions: leave ${param ?? "the dimension"} out.`,
+    }) };
+  };
+  const expenseDimension = postingDimension(expense_account, expense_account_dimension_id, "expense_account_dimension_id");
+  if (!expenseDimension.ok) return expenseDimension;
+  const payableDimension = postingDimension(payAcc, payable_account_dimension_id, "payable_account_dimension_id");
+  if (!payableDimension.ok) return payableDimension;
   const expenseAccountRecord = accounts.find(account => account.id === expense_account);
   const requiresReview = requiresOwnerExpenseVatReview(expenseAccountRecord?.name_est ?? expenseAccountRecord?.name_eng, description);
   const configuredMode = getOwnerExpenseVatDeductionModeForAccount(expense_account) ?? getDefaultOwnerExpenseVatDeductionMode();
@@ -407,12 +439,14 @@ export async function computeOwnerExpenseJournalProjection(
   }
 
   const postings: OwnerExpensePosting[] = [
-    { side: "D", account_id: expense_account, dimension_id: null, amount: expenseDebit, purpose: "expense" },
+    { side: "D", account_id: expense_account, dimension_id: expenseDimension.id, amount: expenseDebit, purpose: "expense" },
   ];
   if (deductibleVatPosted) {
+    const vatDimension = postingDimension(vatAcc, undefined, undefined);
+    if (!vatDimension.ok) return vatDimension;
     postings.push({ side: "D", account_id: vatAcc, dimension_id: null, amount: deductibleVat, purpose: "deductible_vat" });
   }
-  postings.push({ side: "C", account_id: payAcc, dimension_id: null, amount: total, purpose: "owner_payable" });
+  postings.push({ side: "C", account_id: payAcc, dimension_id: payableDimension.id, amount: total, purpose: "owner_payable" });
 
   return { ok: true, projection: {
     journal_date: effective_date,
@@ -431,6 +465,7 @@ export async function computeOwnerExpenseJournalProjection(
     expense_debit_amount: expenseDebit,
     vat_account: deductibleVatPosted ? vatAcc : null,
     payable_account: payAcc,
+    payable_account_dimension_id: payableDimension.id,
     total,
     vat_registered: vatRegistered,
     postings,
@@ -473,7 +508,12 @@ export async function bookOwnerExpenseFromProjection(
   options?: OwnerExpenseReimbursementOptions,
 ): Promise<CallToolResult> {
   const p = projection;
-  const apiPostings = p.postings.map(posting => ({ accounts_id: posting.account_id, type: posting.side, amount: posting.amount }));
+  const apiPostings = p.postings.map(posting => ({
+    accounts_id: posting.account_id,
+    ...(posting.dimension_id !== null ? { accounts_dimensions_id: posting.dimension_id } : {}),
+    type: posting.side,
+    amount: posting.amount,
+  }));
   const existingId = await findExistingOwnerExpenseJournal(api, p);
   const result: ApiResponse = existingId !== undefined
     ? { code: 200, messages: [`Existing owner-expense journal ${existingId} reused.`], created_object_id: existingId }
@@ -495,6 +535,9 @@ export async function bookOwnerExpenseFromProjection(
     },
   });
 
+  const payableLabel = p.payable_account_dimension_id !== null
+    ? `${p.payable_account} dimension ${p.payable_account_dimension_id}`
+    : String(p.payable_account);
   const suggestions: string[] = [];
   if (p.vat_registered && p.vat_amount > 0 && p.deductible_vat_amount === p.vat_amount) {
     suggestions.push("VAT was fully deducted by default. If this expense falls under passenger-car, representation, or mixed-use restrictions, rerun with vat_deduction_mode='partial' or 'none'.");
@@ -532,8 +575,8 @@ export async function bookOwnerExpenseFromProjection(
         note: existingId !== undefined
           ? `An owner-expense journal ${existingId} with the same document number, owner, date and total already exists — no new journal was created.`
           : p.vat_registered
-          ? `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Once confirmed, owner debt increases by ${p.total} EUR on account ${p.payable_account}.`
-          : `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Company is not VAT-registered, so the full gross amount is debited to expense account ${p.expense_account}. Once confirmed, owner debt increases by ${p.total} EUR on account ${p.payable_account}.`,
+          ? `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Once confirmed, owner debt increases by ${p.total} EUR on account ${payableLabel}.`
+          : `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Company is not VAT-registered, so the full gross amount is debited to expense account ${p.expense_account}. Once confirmed, owner debt increases by ${p.total} EUR on account ${payableLabel}.`,
         ...(suggestions.length > 0 ? { suggestions } : {}),
       }),
     }],
@@ -1314,8 +1357,10 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       vat_deduction_mode: z.enum(["none", "full", "partial"]).optional().describe("VAT deduction mode. Use partial with deductible_vat_amount."),
       deductible_vat_amount: z.number().finite().optional().describe("Deductible part of VAT when vat_deduction_mode=partial, or an explicit deductible VAT amount to override the default or configured ratio."),
       expense_account: z.number().describe("Expense account number (e.g. 5000, 6000)"),
+      expense_account_dimension_id: coerceId.optional().describe("Dimension ID of the expense account; required when that account has dimensions"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
+      payable_account_dimension_id: coerceId.optional().describe("Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions — the default 2110 often has one per lender"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
     { ...create, title: "Book Owner-Paid Expense" },

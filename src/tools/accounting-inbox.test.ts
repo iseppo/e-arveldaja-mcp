@@ -3329,9 +3329,39 @@ ${entryXml}
 
     expect(payload.status).toBe("needs_answers");
     expect(payload.plan_handle).toBeUndefined();
-    expect(payload.missing_answers).toEqual([expect.objectContaining({ field: "payable_account" })]);
+    expect(payload.missing_answers).toEqual([expect.objectContaining({ field: "payable_account_dimension_id" })]);
     expect(payload.missing_answers[0].question).toContain("1360");
+    expect(payload.missing_answers[0].question).toContain("555");
     expect(runtime.planStore.activeCount).toBe(before);
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+  });
+
+  it("owner-expense books the owner's dimension on a per-person payable account once it is answered", async () => {
+    const server = createMockToolServer();
+    const runtime = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({
+      accounts: [...ownerExpenseBookingAccounts, { id: 1360, name_est: "Arveldused aruandvate isikutega", name_eng: "Accountable persons" }],
+      accountDimensions: [{ id: 555, accounts_id: 1360, title_est: "Owner" }, { id: 556, accounts_id: 1360, title_est: "Other person" }],
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue([]), create: vi.fn().mockResolvedValue({ created_object_id: 42 }) } as never,
+    });
+    registerAccountingInboxTools(server, runtime, api, DEFAULT_EXPOSURE);
+    const handler = getRegisteredToolHandler(server, "continue_accounting_workflow");
+    const item = ownerExpenseBookingItem({ payable_account: 1360, payable_account_dimension_id: 555 });
+
+    const ready = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as { status: string; plan_handle?: string };
+    expect(ready.status).toBe("ready_for_approval");
+    expect(JSON.stringify(ready)).toContain("555");
+    await handler({ action: "execute_review_action", review_item_json: item, plan_handle: ready.plan_handle });
+    const payload = vi.mocked(api.journals.create).mock.calls[0]![0] as { postings: unknown[] };
+    expect(payload.postings).toContainEqual({ accounts_id: 1360, accounts_dimensions_id: 555, type: "C", amount: expect.any(Number) });
+
+    // A dimension of another account is refused before any write.
+    vi.mocked(api.journals.create).mockClear();
+    const wrong = parseMcpResponse((await handler({
+      action: "prepare_action",
+      review_item_json: ownerExpenseBookingItem({ payable_account: 1360, payable_account_dimension_id: 999 }),
+    })).content[0]!.text) as { plan_handle?: string };
+    expect(wrong.plan_handle).toBeUndefined();
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 

@@ -2199,6 +2199,77 @@ describe("create_owner_expense_reimbursement", () => {
     expect(metadata).not.toContain("restricted categories ask for confirmation");
   });
 
+  describe("accounts with dimensions (live 2026-10-31: default 2110 is a per-lender loan account)", () => {
+    const LOAN_DIMENSION = { id: 12637384, accounts_id: 2110, title_est: "Seppo OÜ", is_deleted: false };
+    const OWNER_DIMENSION = { id: 12637385, accounts_id: 2110, title_est: "Indrek Seppo", is_deleted: false };
+    const COST_DIMENSION = { id: 900, accounts_id: 5000, title_est: "Projekt A", is_deleted: false };
+    const base = { owner_client_id: 1, effective_date: "2026-10-31", description: "Taxi", net_amount: 10, vat_rate: 0, expense_account: 5000 };
+    function setupWithDimensions(dimensions: unknown[]) {
+      setup(false);
+      vi.mocked(api.readonly.getAccountDimensions).mockResolvedValue(dimensions as never);
+    }
+    const errorText = (result: unknown) => (result as { content: Array<{ text: string }> }).content[0]!.text;
+
+    it("refuses the default payable account when it has dimensions and none is given, before writing", async () => {
+      setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION]);
+      const result = await tools.get("create_owner_expense_reimbursement")!(base);
+      expect(isError(result)).toBe(true);
+      expect(errorText(result)).toContain("payable_account_dimension_id");
+      expect(errorText(result)).toContain("12637385");
+      expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    });
+
+    it("refuses an expense account with dimensions when no expense dimension is given", async () => {
+      setupWithDimensions([COST_DIMENSION]);
+      const result = await tools.get("create_owner_expense_reimbursement")!(base);
+      expect(isError(result)).toBe(true);
+      expect(errorText(result)).toContain("expense_account_dimension_id");
+      expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    });
+
+    it("refuses a dimension that does not belong to its account", async () => {
+      setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION, COST_DIMENSION]);
+      const result = await tools.get("create_owner_expense_reimbursement")!({
+        ...base, expense_account_dimension_id: 900, payable_account_dimension_id: 900,
+      });
+      expect(isError(result)).toBe(true);
+      expect(errorText(result)).toContain("payable_account_dimension_id");
+      expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    });
+
+    it("refuses a dimension on an account that has none", async () => {
+      setupWithDimensions([]);
+      const result = await tools.get("create_owner_expense_reimbursement")!({ ...base, payable_account_dimension_id: 12637385 });
+      expect(isError(result)).toBe(true);
+      expect(errorText(result)).toContain("payable_account_dimension_id");
+      expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    });
+
+    it("posts the given dimensions on the expense and payable lines", async () => {
+      setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION, COST_DIMENSION]);
+      const data = parseResult(await tools.get("create_owner_expense_reimbursement")!({
+        ...base, expense_account_dimension_id: 900, payable_account_dimension_id: 12637385,
+      }));
+      const payload = vi.mocked(api.journals.create).mock.calls[0]![0] as Journal;
+      expect(payload.postings).toEqual([
+        { accounts_id: 5000, accounts_dimensions_id: 900, type: "D", amount: 10 },
+        { accounts_id: 2110, accounts_dimensions_id: 12637385, type: "C", amount: 10 },
+      ]);
+      expect(data.note).toContain("account 2110 dimension 12637385");
+    });
+
+    it("posts no dimension field for accounts without dimensions (unchanged payload)", async () => {
+      setupWithDimensions([]);
+      const r = await tools.get("create_owner_expense_reimbursement")!(base);
+      if (isError(r)) throw new Error(errorText(r));
+      const payload = vi.mocked(api.journals.create).mock.calls[0]![0] as Journal;
+      expect(payload.postings).toEqual([
+        { accounts_id: 5000, type: "D", amount: 10 },
+        { accounts_id: 2110, type: "C", amount: 10 },
+      ]);
+    });
+  });
+
   it("reports the created journal as an unconfirmed draft, not as booked", async () => {
     for (const vatRegistered of [false, true]) {
       setup(vatRegistered);
