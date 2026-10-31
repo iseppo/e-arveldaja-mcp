@@ -99,6 +99,19 @@ describe("estonian accounting guidance", () => {
     expect(JSON.stringify(guidance)).not.toMatch(/sale invoice/i);
   });
 
+  it("gives accountless substance guidance when unresolved bank history withheld the account guess", () => {
+    const reason = "3 earlier confirmed bank rows of this counterparty in this direction do not establish a stable booking; direct bookings (up to 3 treatments shown): 2× 1010/391, 1× 1360/323. No account is suggested: choose it by the transaction's substance and source document.";
+    const guidance = buildClassificationReviewGuidance({
+      category: "unknown",
+      displayCounterparty: "Mari Maasikas",
+      historyReviewReason: reason,
+    });
+
+    expect(guidance!.recommendation).toBe(`Recommendation: ${reason} Do not book it until the substance and source document of the transaction are clear.`);
+    expect(guidance!.follow_up_questions).toEqual(["What is this transaction's substance, and which source document supports it?"]);
+    expect(JSON.stringify(guidance)).not.toMatch(/confirm_transaction|related_id|purchase invoice/i);
+  });
+
   it("does not ask extra questions for CAMT duplicates when the payload already determines the default", () => {
     const guidance = buildCamtDuplicateReviewGuidance({ hasConfirmedMatch: true });
 

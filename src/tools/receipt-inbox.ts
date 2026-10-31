@@ -79,7 +79,7 @@ import {
   type ReceiptBatchFileRefProjection,
 } from "../receipts/presenter.js";
 import { createClassificationOperations } from "../receipts/classification-operations.js";
-import type { CounterpartyHistorySuggestion } from "../receipts/counterparty-booking-history.js";
+import type { CounterpartyHistoryResult, CounterpartyHistorySuggestion } from "../receipts/counterparty-booking-history.js";
 import {
   renderApplyClassificationsCompact,
   renderApplyClassificationsFull,
@@ -141,6 +141,8 @@ export interface ClassifiedTransactionSuggestion {
   transaction_history?: CounterpartyHistorySuggestion;
   /** source "transaction_history": the confirm_transaction distribution the history points at. */
   suggested_distribution?: { related_table: "accounts"; related_id: number; related_sub_id?: number };
+  /** Accountless review evidence: earlier direct bank bookings that establish no stable treatment. */
+  counterparty_history?: CounterpartyHistoryResult;
 }
 
 export interface ClassifiedTransactionGroupResult {
@@ -603,6 +605,8 @@ export async function resolveClassificationSuggestion(
 ): Promise<{
   applyMode: ClassificationApplyMode;
   suggestion: ClassifiedTransactionSuggestion;
+  /** Explicit VAT/liability fields of a saved rule that names no booking target. */
+  ruleHints?: Pick<ClassifiedTransactionSuggestion, "vat_rate_dropdown" | "reversed_vat_id" | "liability_account_id">;
 }> {
   const sample = group.transactions[0];
   const defaultSuggestion = buildClassificationSuggestion(
@@ -673,14 +677,16 @@ export async function resolveClassificationSuggestion(
     );
     // Thread VAT hint fields from the rule so reviewers still see the reverse-charge
     // hint even when the rule lacks a stable article/account booking target.
+    const ruleHints: NonNullable<Awaited<ReturnType<typeof resolveClassificationSuggestion>>["ruleHints"]> = {};
     if (autoBookingRule) {
-      if (autoBookingRule.vat_rate_dropdown !== undefined) reviewSuggestion.vat_rate_dropdown = autoBookingRule.vat_rate_dropdown;
-      if (autoBookingRule.reversed_vat_id !== undefined) reviewSuggestion.reversed_vat_id = autoBookingRule.reversed_vat_id;
-      if (autoBookingRule.liability_account_id !== undefined) reviewSuggestion.liability_account_id = autoBookingRule.liability_account_id;
+      if (autoBookingRule.vat_rate_dropdown !== undefined) ruleHints.vat_rate_dropdown = autoBookingRule.vat_rate_dropdown;
+      if (autoBookingRule.reversed_vat_id !== undefined) ruleHints.reversed_vat_id = autoBookingRule.reversed_vat_id;
+      if (autoBookingRule.liability_account_id !== undefined) ruleHints.liability_account_id = autoBookingRule.liability_account_id;
     }
     return {
       applyMode: "review_only",
-      suggestion: reviewSuggestion,
+      suggestion: { ...reviewSuggestion, ...ruleHints },
+      ...(Object.keys(ruleHints).length > 0 ? { ruleHints } : {}),
     };
   }
 

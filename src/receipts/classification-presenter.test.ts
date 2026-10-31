@@ -119,6 +119,44 @@ describe("classification analysis compact", () => {
     // Nothing is auto-bookable, so there is no apply step to point at.
     expect(compact.summary.next_action).toBeUndefined();
   });
+
+  it("shows the unresolved-history reason on the review warning and inlines only the clean group", () => {
+    const result = analysis(2);
+    const reason = "4 earlier confirmed bank rows of this counterparty in this direction do not establish a stable booking; direct bookings (up to 3 treatments shown): 2× 1010/391, 1× 1360/323, 1× 2110/900. No account is suggested: choose it by the transaction's substance and source document.";
+    result.groups[1] = {
+      ...result.groups[1]!,
+      category: "unknown",
+      apply_mode: "review_only",
+      suggested_booking: {
+        source: "fallback",
+        reason,
+        counterparty_history: {
+          history_total: 4,
+          breakdown: [
+            { account_id: 1010, dimension_id: 391, count: 2 },
+            { account_id: 1360, dimension_id: 323, count: 1 },
+            { account_id: 2110, dimension_id: 900, count: 1 },
+          ],
+        },
+      },
+    };
+    const compact = renderClassificationAnalysisCompact({ result, accountsDimensionsId: 100 });
+    expect(compact.summary.counts).toMatchObject({ unresolved: 1, history_distribution: 0 });
+    const warning = compact.summary.warnings!.find(w => w.code === "needs_review")!;
+    expect(warning.message).toContain("2× 1010/391, 1× 1360/323, 1× 2110/900");
+    const payload = compact.summary.next_action!.args.classifications_json as { groups: Array<{ category: string }> };
+    expect(payload.groups.map(group => group.category)).toEqual(["bank_fees"]);
+    // The full payload carries the evidence unchanged.
+    const full = renderUnmatchedAnalysisFull({ result }) as { groups: Array<{ suggested_booking: { counterparty_history?: unknown } }> };
+    expect(full.groups[1]!.suggested_booking.counterparty_history).toEqual({
+      history_total: 4,
+      breakdown: [
+        { account_id: 1010, dimension_id: 391, count: 2 },
+        { account_id: 1360, dimension_id: 323, count: 1 },
+        { account_id: 2110, dimension_id: 900, count: 1 },
+      ],
+    });
+  });
 });
 
 describe("classification analysis — ledger partitions (F6)", () => {

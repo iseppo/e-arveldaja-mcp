@@ -38,6 +38,7 @@ import {
   buildCounterpartyBookingHistory,
   lookupCounterpartyHistory,
   type CounterpartyBookingHistory,
+  type CounterpartyHistoryResult,
   type CounterpartyHistorySuggestion,
 } from "./counterparty-booking-history.js";
 // canonicalBusinessText strips the display sandbox to recover the EXECUTABLE
@@ -558,6 +559,43 @@ function historyBookingSuggestion(
   };
 }
 
+/**
+ * The shared unresolved bank history of a group, when every member has earlier
+ * direct bookings that establish no history suggestion (mixed, or too short).
+ * undefined when any member lacks such evidence or the members' evidence differs.
+ */
+function unresolvedGroupHistory(results: ReadonlyArray<CounterpartyHistoryResult | undefined>): CounterpartyHistoryResult | undefined {
+  const first = results[0];
+  if (!first || first.suggestion || first.breakdown.length === 0) return undefined;
+  const key = JSON.stringify(first);
+  return results.every(result => result !== undefined && JSON.stringify(result) === key) ? first : undefined;
+}
+
+/**
+ * An accountless review suggestion over unresolved bank history: a weaker guess
+ * (one supplier invoice, a keyword) is withheld because the counterparty's own
+ * bank bookings point elsewhere or nowhere. The breakdown lists at most three
+ * treatments, so the text never calls it exhaustive.
+ */
+function historyReviewSuggestion(
+  history: CounterpartyHistoryResult,
+  ruleHints: Pick<ClassifiedTransactionSuggestion, "vat_rate_dropdown" | "reversed_vat_id" | "liability_account_id"> | undefined,
+): ClassifiedTransactionSuggestion {
+  const split = history.breakdown
+    .map(entry => `${entry.count}× ${entry.account_id}${entry.dimension_id !== null ? `/${entry.dimension_id}` : ""}`)
+    .join(", ");
+  const rows = `${history.history_total} earlier confirmed bank row${history.history_total === 1 ? "" : "s"} of this counterparty in this direction`;
+  const evidence = history.breakdown.length === 1 && history.breakdown[0]!.count < 2
+    ? `${rows} ${history.history_total === 1 ? "is" : "are"} not enough to establish a booking; the direct booking was ${split}.`
+    : `${rows} do not establish a stable booking; direct bookings (up to 3 treatments shown): ${split}.`;
+  return {
+    source: "fallback",
+    reason: `${evidence} No account is suggested: choose it by the transaction's substance and source document.`,
+    ...ruleHints,
+    counterparty_history: history,
+  };
+}
+
 class ClassificationOperationsImpl implements ClassificationOperations {
   constructor(
     private readonly api: ApiContext,
@@ -923,9 +961,10 @@ class ClassificationOperationsImpl implements ClassificationOperations {
           ownBankDimensionIds: buildBankAccountLookups(ledger.bankAccounts, ledger.accountDimensions).ownDimensionIds,
           invoiceLedgerAccountIds: invoiceLedgerAccountIds(purchaseInvoices, saleInvoices),
         });
-    const historyOf = (transaction: Transaction) => history
-      ? historyLookup(history, transaction).suggestion
+    const historyResultOf = (transaction: Transaction) => history
+      ? historyLookup(history, transaction)
       : undefined;
+    const historyOf = (transaction: Transaction) => historyResultOf(transaction)?.suggestion;
     const groups = groupTransactionsByCounterparty(classifiable).flatMap(group => splitGroupByHistory(group, historyOf));
     const context = {
       purchaseInvoices,
@@ -947,6 +986,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
       // Precedence: statutory category > saved rule > transaction history >
       // supplier-invoice history > keyword. History is review-only, never a rule.
       const fixedBySource = suggestion.source === "category_default" || suggestion.source === "local_rules";
+      const unresolvedHistory = history ? undefined : unresolvedGroupHistory(group.transactions.map(historyResultOf));
       if (!fixedBySource && history) {
         // A consistent history is offered for the plan-bound apply; anything
         // weaker (a recent run over a mixed past, a name-only or own-bank match)
@@ -954,6 +994,16 @@ class ClassificationOperationsImpl implements ClassificationOperations {
         const applicable = group.transactions.every(transaction => historyApplicable(history, transaction));
         suggestion = historyBookingSuggestion(history, accounts, applicable);
         applyMode = applicable ? "account_distribution" : "review_only";
+      } else if (
+        !fixedBySource &&
+        applyMode === "review_only" &&
+        (suggestion.source === "supplier_history" || suggestion.source === "keyword_match" || suggestion.source === "fallback") &&
+        unresolvedHistory !== undefined
+      ) {
+        // Earlier direct bank bookings exist but settle on no treatment: a weaker
+        // guess (e.g. one old reimbursement invoice's expense account) must not
+        // stand in for them. Review-only either way; nothing here books.
+        suggestion = historyReviewSuggestion(unresolvedHistory, resolved.ruleHints);
       } else if (
         !fixedBySource &&
         (suggestion.source === "keyword_match" || suggestion.source === "fallback") &&
@@ -976,6 +1026,7 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             ...(historyHint
               ? { history: { accountId: historyHint.account_id, dimensionId: historyHint.dimension_id, streak: historyHint.streak, historyTotal: historyHint.history_total } }
               : {}),
+            ...(suggestion.counterparty_history ? { historyReviewReason: suggestion.reason } : {}),
           })
         : undefined;
       // A name-only history match says so in the guidance too (A4).

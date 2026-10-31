@@ -1992,4 +1992,226 @@ describe("classification operations — ledger context (F6)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  describe("unresolved bank history withholds a weak account guess", () => {
+    const PERSON = "Mari Maasikas";
+    const PERSON_IBAN = "EE440000000000000391";
+    const PERSON_CLIENT = {
+      id: 77, name: PERSON, is_supplier: true, is_client: false, cl_code_country: "EE", is_member: false,
+      send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false,
+    };
+    const REIMBURSEMENT_ARTICLES = [{
+      id: 59, name_est: "Töökaitse", name_eng: "Occupational safety", accounts_id: 5630,
+      vat_accounts_id: 1510, cl_vat_articles_id: 1, is_disabled: false, priority: 1,
+    }];
+    const PERSON_ACCOUNTS = [
+      ...LOAN_ACCOUNTS,
+      { id: 5630, name_est: "Töökaitse", account_type_est: "Kulud" },
+      { id: 1010, name_est: "Kassa", account_type_est: "Varad" },
+      { id: 1360, name_est: "Aruandvad isikud", account_type_est: "Varad" },
+    ];
+    // One paid reimbursement invoice: the supplier-invoice history guesses 5630.
+    const REIMBURSEMENT_INVOICE = [{ id: 330, status: "CONFIRMED", payment_status: "PAID", clients_id: 77, client_name: PERSON, create_date: "2025-10-19" }];
+    const REIMBURSEMENT_DETAILS = {
+      330: {
+        id: 330, number: "33025", liability_accounts_id: 2310,
+        items: [{ custom_title: "Töökindad", cl_purchase_articles_id: 59, purchase_accounts_id: 5630, vat_rate_dropdown: "24", vat_accounts_id: 1510 }],
+      },
+    };
+
+    /** Confirmed outgoing rows of the person, oldest first, each booked to its own contra. */
+    function personHistory(contras: Array<[number, number | null]>, startId = 600) {
+      const transactions = contras.map((_, index) => ({
+        id: startId + index, status: "CONFIRMED", is_deleted: false, type: "C", amount: 100,
+        date: `2026-0${index + 1}-15`, accounts_id: 1020, accounts_dimensions_id: 100,
+        bank_account_name: PERSON, clients_id: 77, cl_currencies_id: "EUR",
+      }));
+      const journals = transactions.map((row, index) => ({
+        id: row.id * 10, operation_type: "TRANSACTION", operations_id: row.id, registered: true, is_deleted: false,
+        effective_date: row.date,
+        postings: [
+          { accounts_id: 1020, accounts_dimensions_id: 100, type: "C", amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+          { accounts_id: contras[index]![0], accounts_dimensions_id: contras[index]![1], type: "D", amount: 100, base_amount: 100, cl_currencies_id: "EUR" },
+        ],
+      }));
+      return { transactions, journals };
+    }
+
+    function personRow(id: number, amount: number, date: string) {
+      return { ...camtRow({ id, amount, date, direction: "DBIT", name: PERSON, iban: PERSON_IBAN, description: "Kassasse" }), clients_id: 77 };
+    }
+
+    function personOperations(history: { transactions: unknown[]; journals: unknown[] }, rows: unknown[], extra: { allowWrites?: boolean } = {}) {
+      return makeOperations({
+        ...(extra.allowWrites ? { allowWrites: true } : {}),
+        transactionRows: [...rows, ...history.transactions],
+        clientRows: [PERSON_CLIENT],
+        purchaseArticles: REIMBURSEMENT_ARTICLES,
+        accounts: PERSON_ACCOUNTS,
+        bankAccounts: BANK_ACCOUNTS,
+        accountDimensions: [...DIMENSIONS, { id: 323, accounts_id: 1360, is_deleted: false }],
+        purchaseInvoiceRows: REIMBURSEMENT_INVOICE,
+        purchaseInvoiceDetails: REIMBURSEMENT_DETAILS,
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue(history.journals) },
+        readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Näide OÜ" }) },
+      });
+    }
+
+    // Live shape (2026-10-31): mixed direct bookings plus one invoice settlement; newest run of 2.
+    const MIXED = personHistory([[1360, 323], [1010, 391], [1360, 323], [2110, 900], [2310, null], [1010, 391], [1010, 391]]);
+    const CASH_ROWS = [personRow(1, 19, "2026-10-19"), personRow(2, 25, "2026-10-19"), personRow(3, 30, "2026-10-21")];
+
+    it("replaces the supplier-invoice account with the bank-history split", async () => {
+      const result = await analyze(personOperations(MIXED, CASH_ROWS).operations);
+      expect(result.groups).toHaveLength(1);
+      const group = result.groups[0]!;
+      expect(group.category).toBe("unknown");
+      expect(group.apply_mode).toBe("review_only");
+      expect(group.total_amount).toBe(74);
+      const booking = group.suggested_booking;
+      expect(booking.source).toBe("fallback");
+      expect(booking.counterparty_history).toEqual({
+        history_total: 7,
+        breakdown: [
+          { account_id: 1010, dimension_id: 391, count: 3 },
+          { account_id: 1360, dimension_id: 323, count: 2 },
+          { account_id: 2110, dimension_id: 900, count: 1 },
+        ],
+      });
+      expect(booking.reason).toContain("3× 1010/391, 2× 1360/323, 1× 2110/900");
+      expect(booking.reason).toContain("7 earlier confirmed bank rows");
+      for (const field of [
+        "purchase_article_id", "purchase_article_name", "purchase_account_id", "purchase_account_name",
+        "purchase_account_dimensions_id", "liability_account_id", "vat_rate_dropdown", "reversed_vat_id",
+        "matched_invoice_id", "matched_invoice_number", "transaction_history", "suggested_distribution",
+      ] as const) {
+        expect(booking[field], field).toBeUndefined();
+      }
+      const guidance = JSON.stringify(group.review_guidance);
+      expect(guidance).toContain("3× 1010/391");
+      expect(guidance).not.toContain("5630");
+      expect(guidance).not.toContain("33025");
+    });
+
+    it("withholds the guess on a single earlier direct booking and says it is not enough", async () => {
+      const result = await analyze(personOperations(personHistory([[1010, 391]]), [CASH_ROWS[0]!]).operations);
+      const booking = result.groups[0]!.suggested_booking;
+      expect(booking.source).toBe("fallback");
+      expect(booking.purchase_account_id).toBeUndefined();
+      expect(booking.counterparty_history).toEqual({ history_total: 1, breakdown: [{ account_id: 1010, dimension_id: 391, count: 1 }] });
+      expect(booking.reason).toContain("1 earlier confirmed bank row");
+      expect(booking.reason).toContain("not enough");
+      expect(booking.reason).not.toMatch(/booked differently/);
+    });
+
+    it("withholds the guess even when the supplier's account is among the mixed treatments", async () => {
+      const history = personHistory([[5630, null], [1010, 391], [1360, 323], [1010, 391]]);
+      const result = await analyze(personOperations(history, CASH_ROWS).operations);
+      const booking = result.groups[0]!.suggested_booking;
+      expect(booking.source).toBe("fallback");
+      expect(booking.purchase_account_id).toBeUndefined();
+      expect(booking.counterparty_history?.breakdown).toContainEqual({ account_id: 5630, dimension_id: null, count: 1 });
+    });
+
+    it("keeps the supplier-invoice suggestion with no bank history or only invoice settlements", async () => {
+      for (const history of [personHistory([]), personHistory([[2310, null], [2310, null]])]) {
+        const result = await analyze(personOperations(history, CASH_ROWS).operations);
+        const booking = result.groups[0]!.suggested_booking;
+        expect(booking).toMatchObject({ source: "supplier_history", purchase_account_id: 5630, matched_invoice_number: "33025" });
+        expect(booking.counterparty_history).toBeUndefined();
+      }
+    });
+
+    it("keeps one group (no new split) when only some members have unresolved history", async () => {
+      // Row 4 carries another stored IBAN and no client: it matches none of the history rows.
+      const stranger = camtRow({ id: 4, amount: 40, date: "2026-10-22", direction: "DBIT", name: PERSON, iban: "EE550000000000000777", description: "Kassasse" });
+      const result = await analyze(personOperations(MIXED, [...CASH_ROWS, stranger]).operations);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]!.transactions).toHaveLength(4);
+      // Evidence does not hold for every member, so the group keeps its existing suggestion.
+      expect(result.groups[0]!.suggested_booking.counterparty_history).toBeUndefined();
+    });
+
+    it("keeps a VAT-only saved rule's explicit hints on the accountless review suggestion", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "earv-history-review-rules-"));
+      const rulesFile = join(dir, "accounting-rules.md");
+      writeFileSync(rulesFile, "# Accounting Rules\n\n## Auto Booking\n| match | category | vat_rate_dropdown | reversed_vat_id |\n| --- | --- | --- | --- |\n| Pilvetark | saas_subscriptions | 24 | 1 |\n", "utf-8");
+      const previous = process.env.EARVELDAJA_RULES_FILE;
+      process.env.EARVELDAJA_RULES_FILE = rulesFile;
+      resetAccountingRulesCache();
+      try {
+        const SAAS_IBAN = "IE290000000000000123";
+        const history = historyRows("Pilvetark Ltd", "C", [1360, 323], ["2026-05-01"], 900);
+        const rows = [1, 2, 3].map(index => camtRow({
+          id: 10 + index, amount: 20, date: `2026-0${6 + index}-05`, direction: "DBIT", name: "Pilvetark Ltd",
+          iban: SAAS_IBAN, description: "Pilvetark subscription",
+        }));
+        history.transactions.forEach(row => Object.assign(row, { bank_account_no: SAAS_IBAN }));
+        const { operations } = ledgerOperations({
+          rows: [...rows, ...history.transactions], journals: history.journals,
+          accounts: [...LOAN_ACCOUNTS, { id: 1360, name_est: "Aruandvad isikud", account_type_est: "Varad" }],
+        });
+        const result = await analyze(operations);
+        const group = result.groups[0]!;
+        expect(group.apply_mode).toBe("review_only");
+        expect(group.suggested_booking).toMatchObject({
+          source: "fallback",
+          vat_rate_dropdown: "24",
+          reversed_vat_id: 1,
+          counterparty_history: { history_total: 1, breakdown: [{ account_id: 1360, dimension_id: 323, count: 1 }] },
+        });
+        expect(group.suggested_booking.purchase_account_id).toBeUndefined();
+      } finally {
+        if (previous === undefined) delete process.env.EARVELDAJA_RULES_FILE;
+        else process.env.EARVELDAJA_RULES_FILE = previous;
+        resetAccountingRulesCache();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves an auto-bookable supplier-invoice group untouched by unresolved bank history", async () => {
+      const SAAS_IBAN = "IE290000000000000123";
+      const supplier = { ...PERSON_CLIENT, id: 78, name: "Pilvetark Ltd", cl_code_country: "IE" };
+      const history = historyRows("Pilvetark Ltd", "C", [1360, 323], ["2026-05-01"], 900);
+      history.transactions.forEach(row => Object.assign(row, { bank_account_no: SAAS_IBAN, clients_id: 78 }));
+      const rows = [1, 2, 3].map(index => ({
+        ...camtRow({
+          id: 10 + index, amount: 20, date: `2026-0${6 + index}-05`, direction: "DBIT", name: "Pilvetark Ltd",
+          iban: SAAS_IBAN, description: "Pilvetark subscription",
+        }),
+        clients_id: 78,
+      }));
+      const { operations } = makeOperations({
+        transactionRows: [...rows, ...history.transactions],
+        clientRows: [supplier],
+        purchaseArticles: SAAS_ARTICLES,
+        accounts: [...PERSON_ACCOUNTS, ...SAAS_ACCOUNTS],
+        bankAccounts: BANK_ACCOUNTS,
+        accountDimensions: [...DIMENSIONS, { id: 323, accounts_id: 1360, is_deleted: false }],
+        purchaseInvoiceRows: [{ ...SAAS_HISTORY_ROWS[0]!, clients_id: 78, client_name: "Pilvetark Ltd" }],
+        purchaseInvoiceDetails: SAAS_HISTORY_DETAILS,
+        journals: { listAllWithPostings: vi.fn().mockResolvedValue(history.journals) },
+        readonly: { getInvoiceInfo: vi.fn().mockResolvedValue({ invoice_company_name: "Näide OÜ" }) },
+      });
+      const result = await analyze(operations);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]!.apply_mode).toBe("purchase_invoice");
+      expect(result.groups[0]!.suggested_booking).toMatchObject({ source: "supplier_history", purchase_account_id: 5230 });
+      expect(result.groups[0]!.suggested_booking.counterparty_history).toBeUndefined();
+    });
+
+    it("skips the review-only group at dry run and execute with zero writes", async () => {
+      const { operations, api } = personOperations(MIXED, CASH_ROWS, { allowWrites: true });
+      const analysis = await analyze(operations);
+      const groups = JSON.parse(JSON.stringify(analysis.groups));
+      const handle = await dryRunHandle(operations, groups);
+      const executed = await operations.applyClassifications({ classificationsJson: { groups }, execute: true, planHandle: handle });
+      expect(executed.ok).toBe(true);
+      if (!executed.ok) throw new Error("execute failed");
+      expect(executed.value.results.every(entry => entry.status === "skipped")).toBe(true);
+      expectNoWrites(api);
+      expect(api.transactions.update).not.toHaveBeenCalled();
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+  });
 });
