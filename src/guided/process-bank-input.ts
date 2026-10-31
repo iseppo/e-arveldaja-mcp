@@ -37,8 +37,8 @@ import {
   resolveBankAccount,
   type BankResolutionInput,
 } from "../resolution/bank-account-resolution.js";
-import type { AccountDimension } from "../types/api.js";
-import type { Resolution } from "../resolution/types.js";
+import type { AccountDimension, BankAccount } from "../types/api.js";
+import { ambiguous, notFound, type Resolution } from "../resolution/types.js";
 import type { Elicitor } from "../elicitation.js";
 import type { ConnectionDefaultsStore } from "../connection-defaults-store.js";
 import { createOperationResultPageHandler } from "../operation-result-page.js";
@@ -128,6 +128,8 @@ export function registerProcessBankInputTool(
     input: BankResolutionInput;
     expectedLedgerAccountId: number | undefined;
     scope: ReturnType<RuntimeSafetyContext["getActiveScope"]>;
+    /** Bank dimensions whose own account data identifies them as Wise. */
+    wiseDimensionIds: ReadonlySet<number>;
   }
 
   // Build the full resolver input for the CURRENT fetch and run the ASYNC
@@ -170,7 +172,31 @@ export function registerProcessBankInputTool(
           }
         : {}),
     };
-    return { resolution: await resolveBankAccount(input), input, expectedLedgerAccountId, scope };
+    return {
+      resolution: await resolveBankAccount(input), input, expectedLedgerAccountId, scope,
+      wiseDimensionIds: wiseIdentifiedDimensionIds(bankAccounts, accountDimensions),
+    };
+  }
+
+  // A Wise CSV names no account, so an automatic pick (unique bank by count,
+  // saved default) proves nothing about Wise: it stands only when that account is
+  // itself identified as Wise. Otherwise ask, offering only Wise-identified
+  // accounts. An explicit accounts_dimensions_id is kept as given.
+  function requireWiseIdentity(first: DimensionResolution, override: number | undefined): DimensionResolution {
+    if (override !== undefined) return first;
+    const { resolution, wiseDimensionIds } = first;
+    if (resolution.status === "resolved" && wiseDimensionIds.has(resolution.value)) return first;
+    if (resolution.status === "not_found") return first;
+    const wiseCandidates = first.input.candidates.filter(c => wiseDimensionIds.has(c.accounts_dimensions_id));
+    const guarded: Resolution<number> = wiseCandidates.length === 0
+      ? notFound(
+          "No bank account is identified as the Wise account (name or bank \"Wise\", or BIC TRWI…), so this Wise CSV is not booked to another bank automatically. Pass the Wise bank account's accounts_dimensions_id explicitly.",
+        )
+      : ambiguous(
+          wiseCandidates.slice(0, 3).map(c => ({ id: String(c.accounts_dimensions_id), label: c.label })),
+          "Which bank account dimension is the Wise account for this CSV?",
+        );
+    return { ...first, resolution: guarded };
   }
 
   // F-RESOLVER-FACADE-WRAP: the pure resolver returns question / choice labels
@@ -214,7 +240,8 @@ export function registerProcessBankInputTool(
     statementCurrency: string | undefined,
     inputType: "camt" | "wise",
   ): Promise<{ ok: true; value: number } | { ok: false; response: ReturnType<typeof textResult> }> {
-    const first = await resolveDimension(override, statementIban, statementCurrency);
+    const resolvedFirst = await resolveDimension(override, statementIban, statementCurrency);
+    const first = inputType === "wise" ? requireWiseIdentity(resolvedFirst, override) : resolvedFirst;
     if (first.resolution.status === "resolved") return { ok: true, value: first.resolution.value };
 
     // No elicitor, or nothing to choose from ⇒ the existing compact question.
@@ -383,7 +410,7 @@ export function registerProcessBankInputTool(
 
   registerTool(server,
     "process_bank_input",
-    "Unified bank-statement entry point. Auto-detects CAMT.053 XML vs Wise transaction-history CSV from the file content and imports it. Use mode='prepare' (default) to preview a dry run and get a plan handle, mode='execute' to create the reviewed transactions, or mode='show_details' to page the full per-row result. If the bank account dimension is unique it is resolved automatically.",
+    "Unified bank-statement entry point. Auto-detects CAMT.053 XML vs Wise transaction-history CSV from the file content and imports it. Use mode='prepare' (default) to preview a dry run and get a plan handle, mode='execute' to create the reviewed transactions, or mode='show_details' to page the full per-row result. If the bank account dimension is unique it is resolved automatically; for a Wise CSV only when that account is identified as Wise.",
     {
       mode: z.enum(["prepare", "execute", "show_details"]).optional().describe("Workflow phase. Defaults to prepare (dry-run preview)."),
       file_ref: z.string().optional().describe("Opaque Accounting Inbox bank_input file reference. Provide exactly one of file_ref or file_path."),
@@ -463,4 +490,24 @@ export function registerProcessBankInputTool(
         : handleWise(mode, args, source, snapshot);
     },
   );
+}
+
+// The name pattern the Accounting Inbox uses to pick the Wise dimension, plus
+// Wise's own BIC prefix (TRWI…).
+const WISE_NAME = /\bwise\b/i;
+const WISE_BIC = /^TRWI/i;
+
+function wiseIdentifiedDimensionIds(bankAccounts: BankAccount[], accountDimensions: AccountDimension[]): Set<number> {
+  const titles = new Map<number, string | undefined>();
+  for (const dimension of accountDimensions) {
+    if (dimension.id !== undefined && !dimension.is_deleted) titles.set(dimension.id, dimension.title_est);
+  }
+  const ids = new Set<number>();
+  for (const account of bankAccounts) {
+    const id = account.accounts_dimensions_id;
+    if (id === undefined) continue;
+    const names = [account.account_name_est, account.account_name_eng, account.bank_name, titles.get(id)];
+    if (WISE_BIC.test(account.swift_code?.trim() ?? "") || names.some(name => name != null && WISE_NAME.test(name))) ids.add(id);
+  }
+  return ids;
 }

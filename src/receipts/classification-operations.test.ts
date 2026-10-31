@@ -450,6 +450,29 @@ describe("classification operations — P0-2 plan binding", () => {
     expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
   });
 
+  it("the stored plan exposes each group's per-transaction effects for paged approval review", async () => {
+    const { operations, ctx } = makeSaasOperations();
+    const handle = await dryRunHandle(operations, [saasGroup()]);
+    const plan = ctx.planStore.inspect(handle);
+    // One reviewable command per group, carrying the effects the dry run computed
+    // (supplier, invoice, accounts/VAT, amounts) — not just a group count.
+    expect(plan.commands).toEqual([expect.objectContaining({
+      id: "bank-classification-group-1",
+      category: "bank_classification_apply",
+      reviewProjection: expect.objectContaining({
+        category: "saas_subscriptions",
+        apply_mode: "purchase_invoice",
+        transactions: [expect.objectContaining({
+          id: 42, status: "PROJECT", amount: 25, currency: "EUR", date: "2026-03-22", clients_id: 7,
+          booking: expect.objectContaining({
+            supplier_client_id: 7, invoice_number: "AUTO-TX-42", purchase_account_id: 5230,
+            liability_account_id: 2310, gross_amount: 25,
+          }),
+        })],
+      }),
+    })]);
+  });
+
   it("execute_apply books using the REAL dry-run plan handle (happy path)", async () => {
     const { operations, api } = makeSaasOperations(SAAS_TX, { allowWrites: true });
     const handle = await dryRunHandle(operations, [saasGroup()]);
@@ -1377,7 +1400,7 @@ describe("classification operations — ledger context (F6)", () => {
     it("proposes the account and dimension with its evidence and books it after one reviewed plan", async () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
       const rows = payments();
-      const { api, operations } = ledgerOperations({
+      const { api, operations, ctx } = ledgerOperations({
         rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
       });
       api.transactions.update.mockImplementation(async (id: number, data: Record<string, unknown>) => {
@@ -1416,6 +1439,14 @@ describe("classification operations — ledger context (F6)", () => {
       ]);
       expect(api.transactions.update).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
+      // The paged plan carries the same account, dimension and client transition.
+      const reviewed = ctx.planStore.inspect(dry.value.planHandle!).commands[0]!.reviewProjection as {
+        transactions: Array<{ id: number; history_distribution?: Record<string, unknown> }>;
+      };
+      expect(reviewed.transactions.map(tx => [tx.id, tx.history_distribution])).toEqual([
+        [61, expect.objectContaining({ account_id: 1010, dimension_id: 391, amount: 19, clients_id: 77, set_clients_id: false })],
+        [62, expect.objectContaining({ account_id: 1010, dimension_id: 391, amount: 25, clients_id: 77, set_clients_id: true })],
+      ]);
 
       // Without the reviewed plan nothing is written.
       const unplanned = await operations.applyClassifications({ classificationsJson, execute: true });

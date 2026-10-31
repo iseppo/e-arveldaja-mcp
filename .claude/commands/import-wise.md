@@ -68,13 +68,13 @@ Deleting or invalidating a stored bank row needs the `standard` or `full` profil
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `import_wise_transactions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects Wise CSV vs CAMT.053 from the validated file CONTENT (not the filename) and, when a single Wise bank account matches, resolves the `accounts_dimensions_id` automatically. In this workflow "preview" means `mode: "prepare"` and "execute" means `mode: "execute"`.
+Use `process_bank_input` with `mode="prepare"` / `mode="execute"` / `mode="show_details"`. It auto-detects Wise CSV vs CAMT.053 from the validated file CONTENT (not the filename). Without one supplied, it resolves the `accounts_dimensions_id` automatically only when that bank account is itself identified as Wise (its name or bank says "Wise", or its BIC starts with TRWI); it never books a Wise CSV to another bank account on its own. In this workflow "preview" means `mode: "prepare"` and "execute" means `mode: "execute"`.
 
 ### Step 1: Preview
 
-If `accounts_dimensions_id` was not provided, let the tool resolve it: a unique Wise bank account is chosen automatically, and an ambiguous or missing match comes back as a `needs_input` question with `choices` — surface it and ask one recommendation-first confirmation, then pass the chosen `accounts_dimensions_id`.
+If the user or an earlier step supplied the Wise account's `accounts_dimensions_id`, pass it on every call. Otherwise let the tool propose one: an account identified as Wise may be resolved automatically, and anything else comes back as a `needs_input` question (with `choices` naming only Wise-identified accounts, or none when no account is identified as Wise). Surface it and ask one recommendation-first confirmation, then pass the confirmed `accounts_dimensions_id`; if no Wise bank account is configured, stop and say so rather than picking another bank. Before approval, check that the preview's bank account is the intended Wise account.
 
-Call `process_bank_input` with `mode: "prepare"`, `file_ref` or `file_path`, `accounts_dimensions_id` only when the tool asked for it, and the optional arguments below.
+Call `process_bank_input` with `mode: "prepare"`, `file_ref` or `file_path`, the supplied or confirmed `accounts_dimensions_id` when there is one, and the optional arguments below.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `import_wise_transactions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -152,7 +152,7 @@ Each re-preview repeats every decision argument given so far (`confirm_own_trans
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `process_bank_input`, and none of these is advertised: `import_wise_transactions`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-The compact preview's warning for this review carries only the reason. When it does not list the candidate journal IDs, the owner's choice needs the `standard` or `full` profile's preview.
+The compact preview's warning for this review carries only the reason. When it does not list the candidate journal IDs, page the existing plan's reviews: `get_execution_plan_page` with `{ "plan_handle": "<summary.plan_handle>", "section": "reviews", "detail": "full" }`, following every `next_cursor`, and read the candidates from `items[].review_data`. Only when that full evidence is unavailable (for example a preview that returned no `plan_handle` because it would write nothing) does the owner's choice need the `standard` or `full` profile's preview.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 Before approval or execution, review every command's effects, including bank-row creation, fees and their confirmation, inter-account distributions, invoice currency changes, and client transitions. Complete inline effects are sufficient; counts and samples alone are not. If anything is omitted or truncated, retrieve the whole plan read-only:

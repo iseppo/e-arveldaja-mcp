@@ -293,6 +293,55 @@ describe("process_bank_input — Wise journalized_transfer_ids", () => {
   });
 });
 
+describe("process_bank_input — Wise account identity (never auto-select a non-Wise bank)", () => {
+  const header = `ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency","Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency","Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,"Created by",Category,Note`;
+  const card = `CARD_TRANSACTION-1,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.00,EUR,,,"Test OÜ",12.00,EUR,"Hoster",12.00,EUR,1,,,"Test Person","Software",`;
+  const csv = `base64:csv:${Buffer.from(`${header}\n${card}\n`, "utf8").toString("base64")}`;
+
+  it("asks for the Wise dimension instead of resolving the only (LHV) bank account", async () => {
+    // The fixture default is a single "LHV põhikonto" bank account: before the
+    // fix, the unique-local-bank rung picked it for a Wise CSV.
+    const { handler, api } = setup();
+    const result = parse(await handler({ mode: "prepare", file_path: csv }));
+    expect(result).toMatchObject({ status: "needs_input", category: "bank_account_dimension_required", mutation_occurred: false });
+    expect(JSON.stringify(result)).toContain("Wise");
+    expect(result.summary).toBeUndefined();
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+
+  it("offers only the Wise-identified accounts when the auto-resolved account is not Wise", async () => {
+    // A saved/unique-count pick cannot stand for Wise; the Wise account (BIC TRWI…) is offered.
+    const { handler } = setup({
+      bankAccounts: [
+        fixtureBankAccount({ accounts_dimensions_id: 7 }),
+        fixtureBankAccount({ accounts_dimensions_id: 8, account_name_est: "Arvelduskonto", bank_name: null, swift_code: "TRWIBEB1XXX",
+          iban_code: "BE27905193250073", account_no: "BE27905193250073" }),
+      ],
+      accountDimensions: [fixtureAccountDimension({ id: 7 }), fixtureAccountDimension({ id: 8, title_est: "Arvelduskonto" })],
+    });
+    const result = parse(await handler({ mode: "prepare", file_path: csv }));
+    expect(result).toMatchObject({ status: "needs_input", category: "bank_account_dimension_required" });
+    expect(result.choices.map((choice: { id: string }) => choice.id)).toEqual(["8"]);
+  });
+
+  it("auto-resolves a sole bank account that is identified as Wise", async () => {
+    const { handler } = setup({
+      bankAccounts: [fixtureBankAccount({ accounts_dimensions_id: 7, account_name_est: "Wise EUR", iban_code: "BE27905193250073", account_no: "BE27905193250073" })],
+      accountDimensions: [fixtureAccountDimension({ id: 7, title_est: "Wise EUR" })],
+    });
+    const result = parse(await handler({ mode: "prepare", file_path: csv }));
+    expect(result.status).not.toBe("needs_input");
+    expect(result.summary.plan_handle).toEqual(expect.any(String));
+  });
+
+  it("keeps an explicitly supplied dimension even when it is not named Wise", async () => {
+    const { handler } = setup();
+    const result = parse(await handler({ mode: "prepare", file_path: csv, accounts_dimensions_id: 7 }));
+    expect(result.status).not.toBe("needs_input");
+    expect(result.summary.plan_handle).toEqual(expect.any(String));
+  });
+});
+
 describe("process_bank_input — capability-aware elicitation + persisted default", () => {
   const storePath = () => {
     const dir = mkdtempSync(join(tmpdir(), "pbi-defaults-"));

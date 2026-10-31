@@ -703,7 +703,7 @@ describe("renderInterAccountCompact", () => {
     const proposal = { counterpart_transaction_id: 70, journal_id: 900, evidence: ["sole_same_key_candidate"] };
     const match = makeInterAccount(0, {
       skippedAlreadyHandled: [
-        { transaction_id: 71, amount: 600, date: "2026-03-03", source_account: "LHV", existing_journal_id: 900, reason: "Likely mirror", mirror_proposal: proposal, next_action: { tool: "delete_transaction", args: { id: 71 }, approval_required: true } },
+        { transaction_id: 71, amount: 600, date: "2026-03-03", source_account: "LHV", existing_journal_id: 900, reason: "Likely mirror", mirror_proposal: proposal, next_action: { tool: "reconcile_bank_transactions", args: { mode: "inter_account_dry_run", delete_proposed_mirrors: true }, approval_required: false } },
         { transaction_id: 74, amount: 10, date: "2026-03-03", source_account: "LHV", existing_journal_id: 901, reason: "Already journalized" },
       ],
     });
@@ -722,7 +722,7 @@ describe("renderInterAccountCompact", () => {
         transaction_id: 80 + index, amount: 600, date: "2026-03-03", source_account: "LHV", existing_journal_id: 900 + index,
         reason: `Likely mirror ${index}`,
         mirror_proposal: { counterpart_transaction_id: 70 + index, journal_id: 900 + index, evidence: ["sole_same_key_candidate"] },
-        next_action: { tool: "delete_transaction", args: { id: 80 + index }, approval_required: true },
+        next_action: { tool: "reconcile_bank_transactions", args: { mode: "inter_account_dry_run", delete_proposed_mirrors: true }, approval_required: false },
       })),
     });
     const { summary } = renderInterAccountCompact({ mode: "DRY_RUN", match, planHandle: "PLAN-IA" });
