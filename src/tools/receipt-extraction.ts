@@ -1027,6 +1027,13 @@ function isSupplierLabel(text: string): boolean {
   return match !== null && isLabelShapedSupplierMarker(text, match);
 }
 
+// Estonian association / foundation legal forms (#5b): an apartment
+// association ("Näidise tn 1 korteriühistu") is the registered supplier, not
+// the management company in its footer. Case-sensitive, so the pronoun "sa"
+// is never the foundation abbreviation SA.
+const ESTONIAN_NONPROFIT_FORM_RE =
+  /(?<![\p{L}\d])(?:KÜ|SA|MTÜ|TÜ|[Kk]orteriühistu|[Hh]ooneühistu|[Ss]ihtasutus|[Mm]ittetulundusühing|[Tt]ulundusühistu|KORTERIÜHISTU|HOONEÜHISTU|SIHTASUTUS|MITTETULUNDUSÜHING|TULUNDUSÜHISTU)(?![\p{L}\d])/u;
+
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
     .replace(SUPPLIER_LABEL_RE, "")
@@ -1057,7 +1064,8 @@ function cleanSupplierCandidate(raw: string): string | undefined {
   if (/^(?:sularahaarve|kassaarve|kreeditarve|ettemaksuarve|arve-saateleht|saateleht|kviitung|tšekk|tsekk|dokumendi\s+(?:number|nr)|tellimuse\s+(?:number|nr))(?:\s*[:.#]?\s*[A-Z0-9/_-]*\d[A-Z0-9/_-]*)?$/iu.test(candidate)) {
     return undefined;
   }
-  if (SUPPLIER_INVALID_LINE_RE.test(candidate) && !/\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i.test(candidate)) {
+  if (SUPPLIER_INVALID_LINE_RE.test(candidate) && !/\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB)\b/i.test(candidate) &&
+    !ESTONIAN_NONPROFIT_FORM_RE.test(candidate)) {
     return undefined;
   }
   return candidate;
@@ -2996,7 +3004,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
 
   // A trailing \b never matches after "Ü" (a non-word character to the regex
   // engine), so "Näidis OÜ" at the end of a line needs a letter look-ahead.
-  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
+  const companyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])|(?<![\p{L}])(korteriühistu|hooneühistu|sihtasutus|mittetulundusühing|tulundusühistu)(?![\p{L}])/iu;
   // A2: a line bleeding over several whitespace columns ("Google    Google
   // Cloud EMEA Limited") is trimmed to the column holding the legal form the
   // pattern matched — the same entity, never a different one.
@@ -3016,6 +3024,9 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
     }
     return candidate;
   };
+  // Uppercase association/foundation abbreviations (SA, KÜ, TÜ) are matched
+  // case-sensitively, outside the case-insensitive companyPattern.
+  const isCompanyLine = (candidate: string) => companyPattern.test(candidate) || ESTONIAN_NONPROFIT_FORM_RE.test(candidate);
   const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
   const searchRows = rows.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(rows.length, 12));
   for (const row of searchRows) {
@@ -3023,7 +3034,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
     if (
       candidate &&
       candidate.length <= 80 &&
-      (companyPattern.test(candidate) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
+      (isCompanyLine(candidate) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
     ) {
       return trimToLegalFormColumn(row.raw, candidate);
     }
@@ -3031,7 +3042,7 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
 
   for (const row of rows) {
     const candidate = clean(row.line);
-    if (candidate && companyPattern.test(candidate)) {
+    if (candidate && isCompanyLine(candidate)) {
       return trimToLegalFormColumn(row.raw, candidate);
     }
   }

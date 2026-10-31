@@ -5219,3 +5219,42 @@ describe("#5 the year is never the invoice total", () => {
     expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku EUR 2026.00"].join("\n"), "big2.pdf").total_gross).toBe(2026);
   });
 });
+
+describe("#5b supplier name from the registered association, not the manager footer", () => {
+  it("an apartment association heading the invoice beats the management company in the footer", () => {
+    const text = [
+      "Tallinn, Näidise tn 1 korteriühistu                                   Arve number M000000001",
+      "Reg. kood: 80000000     KMKR: EE100000001                             Kuupäev 07.10.2026",
+      "Maksja:",
+      "Mari Maasikas",
+      "Remondifond                    m²          59.00     0.3000         17.70",
+      "Arve summa € 17,70",
+      "Haldur: Test Haldur test@example.invalid",
+      "Haldus OÜ",
+    ].join("\n");
+    expect(extractSupplierName(text, "a.pdf")).toBe("Tallinn, Näidise tn 1 korteriühistu");
+  });
+
+  it("foundations count as registered suppliers too; the pronoun 'sa' does not", () => {
+    expect(extractSupplierName(["SA Näidise Fond", "Reg. kood: 90000000", "Arve nr 1", "Kokku 10,00 €"].join("\n"), "b.pdf")).toBe("SA Näidise Fond");
+    expect(extractSupplierName(["Kas sa tead, et arve summa", "Näidis OÜ", "Kokku 10,00 €"].join("\n"), "c.pdf")).toBe("Näidis OÜ");
+  });
+
+  it("keeps a supplier AS above its own registry code", () => {
+    expect(extractSupplierName(["Näidis Teenused AS", "Reg. kood: 10000001", "Arve nr 5", "Kokku 10,00 €"].join("\n"), "d.pdf")).toBe("Näidis Teenused AS");
+  });
+
+  it("role: a buyer association and a manager footer never replace the supplier-block entity", () => {
+    const text = [
+      "Näidis Teenused OÜ",
+      "Reg. kood: 10000001",
+      "Maksja:",
+      "Näidise tn 2 korteriühistu",
+      "Reg. kood: 80000002",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+      "Haldus OÜ, Reg. kood 10000003",
+    ].join("\n");
+    expect(extractSupplierName(text, "e.pdf")).toBe("Näidis Teenused OÜ");
+  });
+});
