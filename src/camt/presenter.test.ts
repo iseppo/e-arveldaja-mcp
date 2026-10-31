@@ -4,6 +4,7 @@ import {
   camtResultRow,
   renderCamtImportCompact,
   renderCamtImportPayload,
+  renderCamtImportSlim,
   renderCamtParsePayload,
   type CamtImportRenderData,
   type CamtParsePayload,
@@ -14,6 +15,7 @@ import { mcpPayloadBytes, RESPONSE_BUDGETS } from "../response-budget.js";
 import { roundMoney } from "../money.js";
 import { camtMovementIdentity } from "./duplicate-identity.js";
 import type { CamtCreateDescriptor, CamtImportProjection, ParsedCamtEntry } from "./types.js";
+import { CAMT_HOLD_SKIP_CODES } from "./projection.js";
 
 // B2: the guided compact CAMT response must stay approximately CONSTANT in size
 // as the clean-row count grows, and always fit under the batch response budget.
@@ -323,5 +325,68 @@ describe("renderCamtImportCompact — zero-create dry run", () => {
       { date: "2026-02-04", amount: 95, duplicate_transaction_ids: [], reason: "r", review_note: "partial legacy" },
     ]) });
     expect(summary.status).toBe("needs_review");
+  });
+});
+
+describe("renderCamtImportSlim (#1 compact default on standard/full)", () => {
+  const duplicateSkip = (index: number) => ({
+    date: "2026-02-01", amount: 100 + index, bank_reference: `DUP-${index}`,
+    duplicate_transaction_ids: [5000 + index], reason: "Existing transaction matched by bank reference",
+  });
+  // One fixture per category the guided compact renderer surfaces.
+  const heldFixtures: CamtImportProjection["skipped"] = [
+    { date: "2026-02-04", amount: 95, duplicate_transaction_ids: [], reason: "r", review_note: "partial legacy" },
+    { date: "2026-02-05", amount: 11, duplicate_transaction_ids: [], journal_ids: [801], reason: "r", review_code: "camt_journal_posting_review", review_note: "journal note" },
+    { date: "2026-02-06", amount: 42, duplicate_transaction_ids: [9001], journal_ids: [9101], reason: "native", skip_code: "camt_native_import_match" },
+    ...CAMT_HOLD_SKIP_CODES.map((code, index) => ({
+      date: "2026-02-07", amount: 60 + index, duplicate_transaction_ids: [7000 + index], reason: `held ${code}`, skip_code: code, review_note: `hold note ${code}`,
+    })),
+  ];
+
+  it("is about half the full envelope for 10 creates + 46 duplicates and keeps every create row", () => {
+    const data = makeData(10);
+    const withDuplicates = { ...data, projection: { ...data.projection, skipped: Array.from({ length: 46 }, (_, i) => duplicateSkip(i)) } };
+    const full = toMcpJson(renderCamtImportPayload({ mode: "DRY_RUN", ...withDuplicates }));
+    const slim = renderCamtImportSlim({ mode: "DRY_RUN", ...withDuplicates });
+    // The 10 kept create rows alone are ~20 % of the full envelope, so the cut
+    // comes from dropping `sample` / `skipped_summary` and shrinking duplicates.
+    expect(toMcpJson(slim).length).toBeLessThan(full.length * 0.55);
+    expect(slim).not.toHaveProperty("sample");
+    expect(slim.execution.results).toHaveLength(10);
+    expect(slim.execution.duplicates.count).toBe(46);
+    expect(slim).not.toHaveProperty("skipped_summary");
+    expect(slim.execution.duplicates.rows[0]).toEqual({ i: 0, date: "2026-02-01", amount: 100, existing_transaction_ids: [5000] });
+    const references = slim.execution.duplicates.bank_references ?? "";
+    expect(references).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]{32}>>\n/);
+    const unwrapped = JSON.parse(references.split("\n").slice(1, -1).join("\n")) as Array<string | null>;
+    expect(unwrapped).toHaveLength(46);
+    expect(unwrapped[0]).toBe("DUP-0");
+    expect(slim.execution.held).toEqual([]);
+    expect(slim.detail).toBe("compact");
+    expect(slim.detail_hint).toContain("PLAN-HANDLE-XYZ");
+  });
+
+  it("keeps every held category with its code, note and ids, also in a zero-create preview", () => {
+    const data = makeData(0);
+    const slim = renderCamtImportSlim({ mode: "DRY_RUN", ...data, planHandle: undefined, projection: { ...data.projection, skipped: [duplicateSkip(0), ...heldFixtures] } });
+    expect(slim.execution.duplicates.count).toBe(1);
+    expect(slim.execution.held).toHaveLength(heldFixtures.length);
+    expect(slim.execution.held[0]).toMatchObject({ i: 1, review_note: "partial legacy" });
+    expect(slim.execution.held[1]).toMatchObject({ review_code: "camt_journal_posting_review", review_note: "journal note", journal_ids: [801] });
+    expect(slim.execution.held[2]).toMatchObject({ skip_code: "camt_native_import_match", duplicate_transaction_ids: [9001], journal_ids: [9101] });
+    for (const code of CAMT_HOLD_SKIP_CODES) {
+      expect(slim.execution.held).toEqual(expect.arrayContaining([expect.objectContaining({ skip_code: code, review_note: `hold note ${code}` })]));
+    }
+    const expectedCounts: Record<string, number> = {
+      camt_partial_legacy_import: 1, camt_journal_posting_review: 1, camt_native_import_match: 1,
+      ...Object.fromEntries(CAMT_HOLD_SKIP_CODES.map(code => [code, 1])),
+    };
+    expect(slim.summary.held_by_code).toEqual(expectedCounts);
+    // Every category the guided compact renderer warns about is a held row here.
+    const guidedCodes = new Set((renderCamtImportCompact({ mode: "DRY_RUN", data: { ...data, planHandle: undefined, projection: { ...data.projection, skipped: heldFixtures } } })
+      .summary.warnings ?? []).map(warning => warning.code));
+    // Overflow markers (`<code>_more`) are counts of the same category, not new ones.
+    for (const code of guidedCodes) expect(Object.keys(slim.summary.held_by_code)).toContain(code.replace(/_more$/, ""));
+    expect(guidedCodes.size).toBeGreaterThan(0);
   });
 });

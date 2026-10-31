@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 172820,
+    "toolsListBytes": 173344,
     "descriptionsBytes": 23982,
-    "inputSchemasBytes": 113605,
+    "inputSchemasBytes": 114129,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -5838,6 +5838,14 @@
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
             "type": "string"
           },
+          "detail": {
+            "description": "Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan.",
+            "enum": [
+              "compact",
+              "full"
+            ],
+            "type": "string"
+          },
           "execute": {
             "description": "Actually create transactions (default false = dry run)",
             "type": "boolean"
@@ -5892,6 +5900,14 @@
           "date_to": {
             "description": "Only import entries up to this date (YYYY-MM-DD)",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan.",
+            "enum": [
+              "compact",
+              "full"
+            ],
             "type": "string"
           },
           "file_path": {

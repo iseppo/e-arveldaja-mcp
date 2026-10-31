@@ -100,7 +100,7 @@ export function remapHiddenGranularTool(tool: string, args: Record<string, unkno
 // Guided profiles present ONE unified bank façade. The merged process_camt053 /
 // import_wise_transactions and their granular constituents all collapse to
 // process_bank_input (mode defaults to prepare). The execute flag and legacy
-// mode hint are dropped; file_ref/file_path/dimension/fee/date args carry over —
+// mode hint (and CAMT `detail`) are dropped; file_ref/file_path/dimension/fee/date args carry over —
 // all valid process_bank_input inputs. Standard/full are untouched.
 const BANK_FACADE_SOURCE_TOOLS = new Set([
   "process_camt053", "parse_camt053", "import_camt053", "import_wise_transactions",
@@ -110,7 +110,8 @@ export function remapGuidedBankFacade(
   args: Record<string, unknown>,
 ): { tool: string; args: Record<string, unknown> } | undefined {
   if (!BANK_FACADE_SOURCE_TOOLS.has(tool)) return undefined;
-  const { execute: _execute, mode: _mode, ...rest } = args;
+  // `detail` is CAMT presentation only; process_bank_input always renders compact.
+  const { execute: _execute, mode: _mode, detail: _detail, ...rest } = args;
   // process_bank_input has no deprecated fee_account_relation_id alias. Fold it
   // in only when it agrees; a conflicting pair stays as is, so the strict input
   // check refuses the call instead of picking one (as the Wise import would).

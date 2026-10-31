@@ -15,9 +15,10 @@ import {
   type CamtImportCompactPayload,
   type CamtImportFullPayload,
   type CamtParsePayload,
+  type CamtImportSlimPayload,
   type ImportPreflightFailurePayload,
 } from "../camt/presenter.js";
-import type { CamtPlanErrorPayload, CamtProcessedImportPayload, ProcessCamt053Payload } from "./camt-import.js";
+import type { CamtPlanErrorPayload, CamtProcessedImportPayload, CamtProcessedSlimImportPayload, ProcessCamt053Payload } from "./camt-import.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { preflightCamt053Xml } from "../camt/parser.js";
 import { buildCamtDescriptionWithMetadata } from "../camt/duplicate-identity.js";
@@ -289,10 +290,16 @@ function setupCamtTool(options: {
   // merged process_camt053 tool).
   registerCamtImportTools(server, api, options.runtimeSafetyContext ?? createTestRuntimeSafetyContext(), { enableLightyear: true, exposeGranularTools: true, exposeSetupTools: true, enableTaxTools: true, enableReferenceAdmin: true, enableAnnualReport: true, enableSales: true, enableProducts: true });
 
+  const rawHandler = getRegisteredToolHandler(server, options.toolName ?? "import_camt053");
   return {
     api,
     server,
-    handler: getRegisteredToolHandler(server, options.toolName ?? "import_camt053"),
+    // These behaviour tests read the full envelope (sample, execution.skipped):
+    // import_camt053 calls default to detail="full" unless a test sets detail
+    // (#1 made the slim envelope the default; see the "#1 compact" tests).
+    handler: (options.toolName ?? "import_camt053") === "import_camt053"
+      ? (args: Record<string, unknown>) => rawHandler({ detail: "full", ...args })
+      : rawHandler,
   };
 }
 
@@ -1094,6 +1101,7 @@ describe("camt import tool", () => {
         mode: "dry_run",
         file_path: "/tmp/camt.xml",
         accounts_dimensions_id: 7,
+        detail: "full",
       });
       const payload = parseToolPayload<ProcessCamt053Payload<CamtProcessedImportPayload>>(result.content[0]!.text);
 
@@ -1106,6 +1114,7 @@ describe("camt import tool", () => {
           file_path: "/tmp/camt.xml",
           accounts_dimensions_id: 7,
           execute: false,
+          detail: "full",
         },
         result: {
           mode: "DRY_RUN",
@@ -1255,7 +1264,7 @@ describe("camt import tool", () => {
         date_from: "2026-02-01",
         date_to: "2026-02-28",
       });
-      const payload = parseToolPayload<ProcessCamt053Payload<CamtProcessedImportPayload>>(result.content[0]!.text);
+      const payload = parseToolPayload<ProcessCamt053Payload<CamtProcessedSlimImportPayload>>(result.content[0]!.text);
 
       expect(payload).toMatchObject({
         recommended_entry_point: "process_camt053",
@@ -1271,7 +1280,7 @@ describe("camt import tool", () => {
       });
       expect(api.transactions.create).not.toHaveBeenCalled();
       expect(payload.result.mode).toBe("DRY_RUN");
-      expect(payload.result.sample[0]!.status).toBe("would_create");
+      expect(payload.result.execution.results[0]!.status).toBe("would_create");
       expect(payload.result.workflow.recommended_next_action).toMatchObject({
         kind: "approve_tool_call",
         tool: "process_camt053",
@@ -2742,6 +2751,25 @@ describe("camt import tool", () => {
     expect(vi.mocked(api.transactions.create).mock.calls.map(([body]) => (body as { amount: number }).amount)).toEqual([50, 50]);
   });
 
+  it("#1 a compact dry run approves a full-detail execute: detail is not plan input", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
+
+    const { api, handler } = setupCamtTool({ allowWrites: true });
+    const dry = parseToolPayload<CamtImportSlimPayload>((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, detail: "compact",
+    })).content[0]!.text);
+    expect(dry.detail).toBe("compact");
+    expect(dry).not.toHaveProperty("sample");
+    const payload = parseToolPayload<CamtImportFullPayload>((await handler({
+      file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, execute: true, plan_handle: dry.plan_handle, detail: "full",
+    })).content[0]!.text);
+
+    expect(payload.execution.execution_report!.status).toBe("completed");
+    expect(payload.sample).toHaveLength(2);
+    expect(api.transactions.create).toHaveBeenCalledTimes(2);
+  });
+
   it("flags only as many ref-less copies as the ledger already holds", async () => {
     mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
     mockedReadFile.mockResolvedValue(repeatedEntryXml(refLessEntry, 2));
@@ -3291,11 +3319,11 @@ describe("camt plan-bound execution", () => {
     expect(parseToolPayload<ProcessCamt053Payload<CamtPlanErrorPayload>>(missing.content[0]!.text).result.category).toBe("plan_handle_required");
     expect(api.transactions.create).not.toHaveBeenCalled();
 
-    const dry = parseToolPayload<ProcessCamt053Payload<CamtProcessedImportPayload>>((await handler({ mode: "dry_run", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
+    const dry = parseToolPayload<ProcessCamt053Payload<CamtProcessedSlimImportPayload>>((await handler({ mode: "dry_run", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 })).content[0]!.text);
     const plan_handle = dry.result.plan_handle;
     expect(plan_handle).toMatch(HANDLE_RE);
 
-    const done = parseToolPayload<ProcessCamt053Payload<CamtProcessedImportPayload>>((await handler({
+    const done = parseToolPayload<ProcessCamt053Payload<CamtProcessedSlimImportPayload>>((await handler({
       mode: "execute", file_path: "/tmp/camt.xml", accounts_dimensions_id: 7, plan_handle,
     })).content[0]!.text);
     expect(done).toMatchObject({
@@ -3311,7 +3339,7 @@ describe("camt plan-bound execution", () => {
     });
     expect(api.transactions.create).toHaveBeenCalledTimes(1);
     expect(done.result.mode).toBe("EXECUTED");
-    expect(done.result.sample[0]!.status).toBe("created");
+    expect(done.result.execution.results[0]!.status).toBe("created");
     expect(done.result.execution.execution_report!.status).toBe("completed");
   });
 

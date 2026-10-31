@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 126,
-    "toolsListBytes": 138785,
+    "toolsListBytes": 139047,
     "descriptionsBytes": 18343,
-    "inputSchemasBytes": 90123,
+    "inputSchemasBytes": 90385,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -5347,6 +5347,14 @@
           "date_to": {
             "description": "Only import entries up to this date (YYYY-MM-DD)",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "type": "string"
+          },
+          "detail": {
+            "description": "Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan.",
+            "enum": [
+              "compact",
+              "full"
+            ],
             "type": "string"
           },
           "file_path": {

@@ -20,8 +20,10 @@ import {
   issueCamtResultHandle,
   renderCamtImportCompact,
   renderCamtImportPayload,
+  renderCamtImportSlim,
   renderCamtParsePayload,
   type CamtImportFullPayload,
+  type CamtImportSlimPayload,
 } from "../camt/presenter.js";
 
 // Re-exported for the identity-only consumers that still import through this
@@ -43,9 +45,13 @@ export type CamtPlanErrorPayload = {
 /** The full import envelope as process_camt053 forwards it: its workflow names the merged entry points. */
 export type CamtProcessedImportPayload = Omit<CamtImportFullPayload, "workflow"> & { workflow: RemappedWorkflowEnvelope };
 
+/** The slim (default) import envelope as process_camt053 forwards it. */
+export type CamtProcessedSlimImportPayload = Omit<CamtImportSlimPayload, "workflow"> & { workflow: RemappedWorkflowEnvelope };
+
 /**
  * The process_camt053 envelope. R is the delegated payload for the invoked mode:
- * CamtParsePayload (parse), CamtProcessedImportPayload / CamtImportCompactPayload
+ * CamtParsePayload (parse), CamtProcessedSlimImportPayload (default) /
+ * CamtProcessedImportPayload (detail="full") / CamtImportCompactPayload (guided)
  * (dry_run / execute), CamtPlanErrorPayload or ImportPreflightFailurePayload.
  */
 export type ProcessCamt053Payload<R> = {
@@ -85,9 +91,12 @@ export function registerCamtImportTools(
   assertRuntimeSafetyContext(runtimeSafetyContext);
   const operations = createCamtOperations(api, runtimeSafetyContext);
 
-  // Guided profiles receive the token-lean compact CAMT surface; standard/full
-  // keep the PR0-pinned full envelope byte-for-byte.
+  // Guided profiles receive the token-lean compact CAMT surface. Standard/full
+  // default to the slim envelope; detail="full" keeps the previous full
+  // envelope byte-for-byte. `detail` is presentation only (not plan input).
   const useCompactCamt = (): boolean => isGuidedProfile(currentToolProfile());
+  const renderStandardImport = (detail: "compact" | "full" | undefined, input: Parameters<typeof renderCamtImportPayload>[0]) =>
+    detail === "full" ? renderCamtImportPayload(input) : renderCamtImportSlim(input);
 
   // parse_camt053 / import_camt053 are fully covered by the merged
   // process_camt053 modes (parse / dry_run / execute). They enter tools/list (a
@@ -127,8 +136,9 @@ export function registerCamtImportTools(
     date_from?: string;
     date_to?: string;
     plan_handle?: string;
+    detail?: "compact" | "full";
   }): Promise<AdapterResult> {
-    const { file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle } = args;
+    const { file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail } = args;
     if (date_from && date_to && date_from > date_to) {
       throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
     }
@@ -148,7 +158,7 @@ export function registerCamtImportTools(
         if (useCompactCamt()) {
           return { payload: renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value }), isError: false };
         }
-        return { payload: renderCamtImportPayload({ mode: "DRY_RUN", ...outcome.value }), isError: false };
+        return { payload: renderStandardImport(detail, { mode: "DRY_RUN", ...outcome.value }), isError: false };
       }
 
       const outcome = await operations.executeImport({
@@ -166,7 +176,7 @@ export function registerCamtImportTools(
           isError: false,
         };
       }
-      return { payload: renderCamtImportPayload({ mode: "EXECUTED", ...outcome.value }), isError: false };
+      return { payload: renderStandardImport(detail, { mode: "EXECUTED", ...outcome.value }), isError: false };
     } catch (error) {
       if (error instanceof CamtPreflightRejectedError) {
         return { payload: importPreflightFailurePayload(error.source, error.rejected), isError: true };
@@ -207,10 +217,11 @@ export function registerCamtImportTools(
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
+      detail: z.enum(["compact", "full"]).optional().describe("Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan."),
     },
     { ...batch, openWorldHint: true, title: "Import CAMT.053" },
-    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle }) =>
-      toToolResponse(await runImport({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle })),
+    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail }) =>
+      toToolResponse(await runImport({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail })),
   );
 
   registerTool(server,
@@ -224,9 +235,10 @@ export function registerCamtImportTools(
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
       plan_handle: z.string().optional().describe("Execution-plan handle returned by the reviewed dry run. Required for mode='execute'."),
+      detail: z.enum(["compact", "full"]).optional().describe("Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan."),
     },
     { ...batch, openWorldHint: true, title: "Process CAMT.053" },
-    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle }) => {
+    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle, detail }) => {
       const selectedMode = mode ?? "parse";
       let delegatedTool: ProcessCamt053Payload<unknown>["delegated_tool"];
       let delegatedArgs: Record<string, unknown>;
@@ -252,6 +264,7 @@ export function registerCamtImportTools(
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
           ...(selectedMode === "execute" && plan_handle !== undefined ? { plan_handle } : {}),
+          ...(detail !== undefined ? { detail } : {}),
         };
         inner = await runImport({
           ...(file_path !== undefined ? { file_path } : {}),
@@ -261,6 +274,7 @@ export function registerCamtImportTools(
           ...(date_from !== undefined ? { date_from } : {}),
           ...(date_to !== undefined ? { date_to } : {}),
           ...(selectedMode === "execute" && plan_handle !== undefined ? { plan_handle } : {}),
+          ...(detail !== undefined ? { detail } : {}),
         });
       }
 

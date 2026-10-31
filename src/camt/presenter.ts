@@ -455,6 +455,117 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): CamtImpor
   };
 }
 
+// --- SLIM presenter (standard / full default, detail="compact") ----------------
+//
+// The full envelope minus the bulk: no `sample`, and `execution.skipped` split
+// into proven duplicates (an existing transaction is this entry, nothing to
+// do) and every held row (anything that needs a look — hold codes, journal
+// reviews, native-import matches, partial-legacy notes) with its code, note and
+// ids. `detail: "full"` restores the full envelope.
+
+/**
+ * A proven-duplicate skipped row in the slim envelope; `i` indexes the plan
+ * exclusions. The amount is in the statement currency (`statement_metadata`).
+ */
+export type CamtSlimDuplicateRow = {
+  i: number;
+  date: string;
+  amount: number;
+  existing_transaction_ids: number[];
+};
+
+/** A held (not created, not a plain duplicate) row in the slim envelope. */
+export type CamtSlimSkippedRow = {
+  i: number;
+  date: string;
+  amount: number;
+  bank_reference?: string;
+  reason: string;
+  skip_code?: string;
+  review_code?: string;
+  review_note?: string;
+  duplicate_transaction_ids: number[];
+  journal_ids?: number[];
+};
+
+/** The slim (default standard/full) import_camt053 envelope, dry run and execute. */
+export type CamtImportSlimPayload = Omit<CamtImportFullPayload, "sample" | "skipped_summary" | "execution" | "summary"> & {
+  detail: "compact";
+  detail_hint: string;
+  summary: CamtImportSummary & { held_by_code: Record<string, number> };
+  execution: Omit<CamtImportFullPayload["execution"], "skipped"> & {
+    /**
+     * `bank_references` is ONE sandboxed JSON array of the rows' bank
+     * references (index-aligned with `rows`, null when absent): one wrapper
+     * instead of one per row keeps the compact view small.
+     */
+    duplicates: { count: number; rows: CamtSlimDuplicateRow[]; bank_references?: string };
+    held: CamtSlimSkippedRow[];
+  };
+};
+
+/** A skipped row that is only a proven duplicate: no hold, review or note. */
+function isProvenDuplicateRow(row: CamtSkippedRow): boolean {
+  return row.skip_code === undefined && row.review_code === undefined && row.review_note === undefined;
+}
+
+/** The held-row code a slim `held_by_code` count uses. */
+function slimHeldCode(row: CamtSkippedRow): string {
+  return row.skip_code ?? row.review_code ?? "camt_partial_legacy_import";
+}
+
+export function renderCamtImportSlim(input: CamtImportRenderInput): CamtImportSlimPayload {
+  const { sample: _sample, skipped_summary: _skippedSummary, execution, summary, ...full } = renderCamtImportPayload(input);
+  const { skipped: _skipped, ...executionRest } = execution;
+  const duplicates: CamtSlimDuplicateRow[] = [];
+  const duplicateReferences: Array<string | null> = [];
+  const held: CamtSlimSkippedRow[] = [];
+  const heldByCode: Record<string, number> = {};
+  input.projection.skipped.forEach((row, i) => {
+    if (isProvenDuplicateRow(row)) {
+      duplicates.push({
+        i, date: row.date, amount: row.amount,
+        existing_transaction_ids: row.duplicate_transaction_ids,
+      });
+      duplicateReferences.push(row.bank_reference ?? null);
+      return;
+    }
+    const bankReference = wrapUntrustedOcr(row.bank_reference);
+    const code = slimHeldCode(row);
+    heldByCode[code] = (heldByCode[code] ?? 0) + 1;
+    held.push({
+      i, date: row.date, amount: row.amount,
+      ...(bankReference !== undefined ? { bank_reference: bankReference } : {}),
+      reason: row.reason,
+      ...(row.skip_code !== undefined ? { skip_code: row.skip_code } : {}),
+      ...(row.review_code !== undefined ? { review_code: row.review_code } : {}),
+      ...(row.review_note !== undefined ? { review_note: row.review_note } : {}),
+      duplicate_transaction_ids: row.duplicate_transaction_ids,
+      ...(row.journal_ids !== undefined ? { journal_ids: row.journal_ids } : {}),
+    });
+  });
+  const pageHint = input.planHandle !== undefined
+    ? ` or page get_execution_plan_page { plan_handle: "${input.planHandle}", section: "exclusions" }`
+    : "";
+  return {
+    ...full,
+    detail: "compact",
+    detail_hint: `Compact view: sample rows are omitted and duplicates are listed briefly. Rerun with detail='full' for the full envelope${pageHint}.`,
+    summary: { ...summary, held_by_code: heldByCode },
+    execution: {
+      ...executionRest,
+      duplicates: {
+        count: duplicates.length,
+        rows: duplicates,
+        ...(duplicateReferences.some(reference => reference !== null)
+          ? { bank_references: wrapUntrustedOcr(JSON.stringify(duplicateReferences)) }
+          : {}),
+      },
+      held,
+    },
+  };
+}
+
 // --- COMPACT presenter (guided / guided-sales) -------------------------------
 //
 // Size is approximately CONSTANT regardless of row count: counts/totals are

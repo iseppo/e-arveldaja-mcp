@@ -538,6 +538,13 @@ describe("hidden-granular → merged entry-point remap", () => {
     expect(result!.args).not.toHaveProperty("execution_mode");
   });
 
+  it("#1 drops the CAMT presentation-only detail argument on the guided bank façade", () => {
+    for (const tool of ["process_camt053", "import_camt053"]) {
+      expect(remapGuidedBankFacade(tool, { mode: "dry_run", file_path: "/tmp/s.xml", accounts_dimensions_id: 7, detail: "full" }))
+        .toEqual({ tool: "process_bank_input", args: { file_path: "/tmp/s.xml", accounts_dimensions_id: 7 } });
+    }
+  });
+
   it("maps the deprecated Wise fee_account_relation_id alias onto process_bank_input's fee_account_dimensions_id", () => {
     expect(remapGuidedBankFacade("import_wise_transactions", { execute: true, file_path: "/tmp/w.csv", fee_account_relation_id: 42 }))
       .toEqual({ tool: "process_bank_input", args: { file_path: "/tmp/w.csv", fee_account_dimensions_id: 42 } });
