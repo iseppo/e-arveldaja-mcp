@@ -1410,6 +1410,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       });
 
       let confirmation: Partial<CreatePurchaseInvoiceFromPdfConfirmation> = {};
+      const readbackWarnings: string[] = [];
       if (params.require_confirm_plan === true) {
         let draft: PurchaseInvoice;
         let mismatches: string[];
@@ -1439,6 +1440,16 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
             error: "Created verified draft retained; confirmation plan unavailable. Do not recreate or confirm by ID alone." } satisfies CreatePurchaseInvoiceFromPdfFailurePayload);
         }
         result = renderExternalEntity("purchase_invoice", draft);
+      } else {
+        // The create response predates the upload, so its base_document_files_id
+        // is stale: re-read the invoice. A failed read is only a warning — the
+        // invoice and the upload both succeeded.
+        try {
+          api.purchaseInvoices.invalidateListCache();
+          result = renderExternalEntity("purchase_invoice", await api.purchaseInvoices.get(result.id));
+        } catch (error: unknown) {
+          readbackWarnings.push(`document_id_readback_unavailable: the invoice and its file were saved, but re-reading invoice ${result.id} failed (${error instanceof Error ? error.message : String(error)}); base_document_files_id below may be stale — use get_purchase_invoice.`);
+        }
       }
 
       // Advisory-by-default: the invoice was already created above (or blocked
@@ -1455,7 +1466,7 @@ export function registerCreatePurchaseInvoiceFromPdfTool(server: McpServer, api:
       const duplicateWarnings = duplicateScan.skipped_no_eur_amount
         ? [duplicateScan.scan_note ?? "Duplicate scan skipped: no EUR-equivalent gross amount available."]
         : formatDuplicatePostingWarnings(duplicateScan, duplicateCandidate, t => wrapUntrustedOcr(t) ?? "");
-      const warnings = [...duplicateWarnings, ...formatJournalReferenceWarnings(journalReferenceScan)];
+      const warnings = [...readbackWarnings, ...duplicateWarnings, ...formatJournalReferenceWarnings(journalReferenceScan)];
       const referencingJournalIds = journalReferenceScan.hits.map(hit => hit.journal_id);
 
       return {

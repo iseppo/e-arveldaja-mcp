@@ -190,6 +190,71 @@ afterEach(() => {
 });
 
 describe("pdf workflow tools", () => {
+  describe("#14 base_document_files_id readback after upload", () => {
+    const createArgs = (filePath: string) => ({
+      supplier_client_id: 7,
+      invoice_number: "PI-DOC-ID",
+      invoice_date: "2026-03-20",
+      journal_date: "2026-03-20",
+      term_days: 14,
+      items: JSON.stringify([{
+        cl_purchase_articles_id: 45,
+        custom_title: "Internet subscription",
+        purchase_accounts_id: 5230,
+        total_net_price: 100,
+        vat_rate_dropdown: "24",
+        vat_accounts_id: 1510,
+        cl_vat_articles_id: 1,
+      }]),
+      vat_price: 24,
+      gross_price: 124,
+      file_path: filePath,
+      source_sha256: sha256Hex(Buffer.from("%PDF-doc-id")),
+    });
+
+    it("returns the re-read invoice with the attached file's id", async () => {
+      const filePath = createTempInvoiceFile("invoice-doc-id.pdf", "%PDF-doc-id");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const get = vi.fn().mockImplementation(async (id: number) => id === 9001
+        ? { id: 9001, number: "PI-DOC-ID", status: "PROJECT", base_document_files_id: 123 }
+        : { id, number: "PI-1", create_date: "2026-02-15", gross_price: 124, items: [] });
+      const { handler, api } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        purchaseInvoices: {
+          get,
+          createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001, number: "PI-DOC-ID", base_document_files_id: null }),
+        },
+      });
+      const response = await handler(createArgs(filePath));
+      const payload = parseToolPayload<CreatePurchaseInvoiceFromPdfPayload>(response.content[0]!.text);
+      expect(response.isError).toBeFalsy();
+      expect(api.purchaseInvoices.uploadDocument).toHaveBeenCalledTimes(1);
+      expect(get).toHaveBeenCalledWith(9001);
+      expect(payload.result.base_document_files_id).toBe(123);
+      expect(payload.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("document_id_readback_unavailable")]));
+    });
+
+    it("keeps the create result and warns when the re-read fails", async () => {
+      const filePath = createTempInvoiceFile("invoice-doc-id.pdf", "%PDF-doc-id");
+      mockedResolveFileInput.mockResolvedValue({ path: filePath });
+      const get = vi.fn().mockImplementation(async (id: number) => {
+        if (id === 9001) throw new Error("read timeout");
+        return { id, number: "PI-1", create_date: "2026-02-15", gross_price: 124, items: [] };
+      });
+      const { handler } = setupPdfWorkflowTool("create_purchase_invoice_from_pdf", {
+        purchaseInvoices: {
+          get,
+          createAndSetTotals: vi.fn().mockResolvedValue({ id: 9001, number: "PI-DOC-ID", base_document_files_id: null }),
+        },
+      });
+      const response = await handler(createArgs(filePath));
+      const payload = parseToolPayload<CreatePurchaseInvoiceFromPdfPayload>(response.content[0]!.text);
+      expect(response.isError).toBeFalsy();
+      expect(payload.document_uploaded).toBe(true);
+      expect(payload.result.id).toBe(9001);
+      expect(payload.warnings).toEqual(expect.arrayContaining([expect.stringContaining("document_id_readback_unavailable")]));
+    });
+  });
+
   it("H05 PDF handoff preserves approved supplier totals", async () => {
     const filePath = createTempInvoiceFile("invoice-rounding.pdf", "%PDF-pdf-bytes");
     mockedResolveFileInput.mockResolvedValue({ path: filePath });
