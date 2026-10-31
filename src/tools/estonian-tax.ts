@@ -1382,7 +1382,7 @@ export function registerEstonianTaxTools(server: McpServer, api: ApiContext): vo
       expense_account_dimension_id: coerceId.optional().describe("Dimension ID of the expense account; required when that account has dimensions"),
       vat_account: z.number().optional().describe("Input VAT account (default 1510)"),
       payable_account: z.number().optional().describe("Payable to owner account (default 2110)"),
-      payable_account_dimension_id: coerceId.optional().describe("Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions — the default 2110 often has one per lender"),
+      payable_account_dimension_id: coerceId.optional().describe("Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions (e.g. a 2110 split by lender)"),
       document_number: z.string().optional().describe("Receipt/document number"),
     },
     { ...create, title: "Book Owner-Paid Expense" },

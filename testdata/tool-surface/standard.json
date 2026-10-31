@@ -2,9 +2,9 @@
   "profile": "standard",
   "measurement": {
     "toolCount": 126,
-    "toolsListBytes": 138801,
+    "toolsListBytes": 138785,
     "descriptionsBytes": 18343,
-    "inputSchemasBytes": 90139,
+    "inputSchemasBytes": 90123,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4330,7 +4330,7 @@
             "type": "number"
           },
           "payable_account_dimension_id": {
-            "description": "Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions — the default 2110 often has one per lender",
+            "description": "Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions (e.g. a 2110 split by lender)",
             "exclusiveMinimum": 0,
             "maximum": 9007199254740991,
             "type": "integer"
