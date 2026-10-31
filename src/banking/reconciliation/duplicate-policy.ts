@@ -276,6 +276,13 @@ export function computeExactMatchProjection(
   openSales: SaleInvoice[],
   openPurchases: PurchaseInvoice[],
   threshold: number,
+  /**
+   * Every purchase invoice (paid, draft and invalidated included) the document rule
+   * searches for references. A paid or draft invoice carrying the same
+   * reference must not be filtered out before the search, or an unrelated
+   * open invoice would look like the only one named. Defaults to `openPurchases`.
+   */
+  referencePurchases: readonly PurchaseInvoice[] = openPurchases,
 ): ExactMatchProjection {
   const saleIndex = buildInvoiceIndex(openSales);
   const purchaseIndex = buildInvoiceIndex(openPurchases);
@@ -294,7 +301,7 @@ export function computeExactMatchProjection(
     // Raw hits before any score or consumed-key filtering, so a filtered
     // competitor cannot manufacture uniqueness.
     const documentHits = documentRuleApplies && getInvoiceMatchEligibility(tx).allowPurchaseInvoices
-      ? documentReferenceHits(tx, openPurchases)
+      ? documentReferenceHits(tx, referencePurchases)
       : [];
     if (documentHits.length > 1) {
       skipped.push({

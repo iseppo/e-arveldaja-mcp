@@ -823,7 +823,9 @@ async function loadExactMatchProjection(
     return critical.payment_status !== "PAID" && critical.status === "CONFIRMED";
   });
 
-  const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold);
+  // The document rule searches every purchase invoice: a paid or draft
+  // invoice naming the same reference makes an open one ambiguous.
+  const projection = computeExactMatchProjection(unconfirmed, openSales, openPurchases, threshold, allPurchases);
   await enrichExactMatchProjectionWithDuplicateGuard(api, projection, input.blockOnDuplicate === true, allTx, unconfirmed);
   return { projection, threshold };
 }

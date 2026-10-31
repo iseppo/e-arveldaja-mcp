@@ -890,6 +890,46 @@ describe("executeExactConfirm document_reference_exact", () => {
     expect(report.mutation_may_have_occurred).toBe(true);
   });
 
+  // A paid or draft invoice that carries the same reference must not be
+  // filtered out before the reference search: the open one is then not the
+  // only invoice the payment names.
+  it.each([
+    ["a paid invoice of another supplier", { payment_status: "PAID", clients_id: 9900, client_name: "Other OÜ" }, "ambiguous_invoice_candidates: purchase_invoice #5570001, purchase_invoice #5577728"],
+    ["a draft invoice", { status: "PROJECT" }, "ambiguous_invoice_candidates: purchase_invoice #5570001, purchase_invoice #5577728"],
+  ])("does not confirm when %s carries the same order number", async (_label, overrides, reason) => {
+    const { api, operations, setPurchases } = setupLux();
+    setPurchases([
+      luxInvoice(5582125, "261018825312"),
+      luxInvoice(5577728, "261018825247"),
+      { ...luxInvoice(5570001, "261018825247"), ...overrides } as LuxInvoice,
+    ]);
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    if (!dry.ok) throw new Error("prepare failed");
+    expect(dry.value.projection.confirms.map(c => [c.transactionId, c.invoiceId])).toEqual([[14377017, 5582125]]);
+    expect(dry.value.projection.skipped).toEqual([{ transaction_id: 14377009, reason: expect.stringContaining(reason) }]);
+    expect(api.transactions.update).not.toHaveBeenCalled();
+  });
+
+  it("sends a payment naming only a paid invoice to review instead of another open invoice", async () => {
+    const { operations, setPurchases } = setupLux();
+    // Only the paid invoice carries the order number; the open same-amount
+    // invoice of another supplier carries none.
+    setPurchases([
+      luxInvoice(5582125, "261018825312"),
+      { ...luxInvoice(5577728, "261018825247"), payment_status: "PAID" },
+      { ...luxInvoice(5590002, "x"), notes: null, clients_id: 9900, client_name: "Other OÜ" } as unknown as LuxInvoice,
+    ]);
+    for (const minConfidence of [undefined, 50]) {
+      const dry = await operations.prepareExactConfirm({ minConfidence, blockOnDuplicate: undefined });
+      if (!dry.ok) throw new Error("prepare failed");
+      expect(dry.value.projection.confirms.map(c => c.transactionId)).not.toContain(14377009);
+      expect(dry.value.projection.skipped).toContainEqual({
+        transaction_id: 14377009,
+        reason: expect.stringContaining("document_reference_review: purchase_invoice #5577728 is named in the payment text but its payment status is PAID"),
+      });
+    }
+  });
+
   it("leaves suggestion scores unchanged", async () => {
     const { operations } = setupLux();
     const outcome = await operations.suggestMatches({ minConfidence: 30, blockOnDuplicate: undefined });

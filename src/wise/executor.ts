@@ -876,15 +876,37 @@ async function runWiseImport(
           throw new Error(drift);
         }
       };
+      // A client taken from confirmed history must still be the one that
+      // history and the live client list give, on the same fresh read as the
+      // create: a payment confirmed or a client deactivated after the execute
+      // projection stops the row before anything is written.
+      const guardHistoryClient = async (command: MainCreateCommand, freshTransactions: Transaction[]): Promise<void> => {
+        const row = rowsByIndex.get(command.row_index);
+        if (row === undefined || clientResolutions.get(row)?.match_type !== "confirmed_history") return;
+        const approved = command.create_payload.clients_id;
+        const resolved = resolveWiseCardClientFromHistory(row, freshTransactions.filter(isNonVoidTransaction), accounts_dimensions_id);
+        let live = false;
+        if (resolved !== undefined && resolved === approved) {
+          api.clients.invalidateListCache();
+          const client = (await api.clients.listAll()).find(candidate => candidate.id === resolved);
+          live = client !== undefined && client.is_deleted !== true && client.is_active !== false && !client.deactivated_date;
+        }
+        if (resolved !== approved || !live) {
+          blockedRows.add(command.row_index);
+          throw new Error(`Stale client precondition: the client from earlier payments to this merchant is no longer ${String(approved)} or is no longer active`);
+        }
+      };
       // Creates one main or fee leg, guarded in this order: fresh transactions,
-      // the identity re-check, the Wise-side (and, for a main leg, the
-      // counterpart) guard, then the create; returns the created id.
+      // the identity re-check, for a main leg the history-client re-check, the
+      // Wise-side (and, for a main leg, the counterpart) guard, then the
+      // create; returns the created id.
       const createLeg = async (command: MainCreateCommand | FeeCreateCommand, legKind: "main" | "fee"): Promise<number> => {
         clearRuntimeCaches();
         const freshTransactions = await api.transactions.listAll();
         if (transactionCommandExists(command, freshTransactions)) {
           throw new Error("Stale transaction precondition: an equivalent Wise transaction appeared before create");
         }
+        if (command.action === "main_create") await guardHistoryClient(command, freshTransactions);
         await guardWiseLeg(command, legKind, freshTransactions);
         const result = await createBankTransaction(api, command.create_payload, command.source_direction === "IN" ? "incoming" : "outgoing");
         const apiId = result.created_object_id;
