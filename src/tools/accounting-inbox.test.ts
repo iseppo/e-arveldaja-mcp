@@ -3365,6 +3365,18 @@ ${entryXml}
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });
 
+  it("owner-expense execute writes nothing when the payable account gains dimensions after prepare", async () => {
+    const { handler, api } = ownerExpenseContinuationSetup();
+    const item = ownerExpenseBookingItem();
+    const ready = parseMcpResponse((await handler({ action: "prepare_action", review_item_json: item })).content[0]!.text) as { status: string; plan_handle?: string };
+    expect(ready.status).toBe("ready_for_approval");
+    vi.mocked(api.readonly.getAccountDimensions).mockResolvedValue([{ id: 12637384, accounts_id: 2110, title_est: "Lender" }] as never);
+    const executed = await handler({ action: "execute_review_action", review_item_json: item, plan_handle: ready.plan_handle });
+    expect(executed.content[0]!.text).toContain("has dimensions");
+    expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
+    expect(vi.mocked(api.readonly.getAccountDimensions)).toHaveBeenLastCalledWith({ fresh: true });
+  });
+
   it("owner-expense prepare_action with save_as_rule keeps the read-only rule planning path", async () => {
     const { handler, runtime } = ownerExpenseContinuationSetup();
     const before = runtime.planStore.activeCount;

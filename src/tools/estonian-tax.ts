@@ -290,7 +290,9 @@ export async function computeOwnerExpenseJournalProjection(
   // An account with dimensions takes entries only on one of its dimensions:
   // never post such an account without one (live 2026-10-31: the default 2110
   // was a per-lender loan account). Refused here, before anything is written.
-  const liveDimensions = (await api.readonly.getAccountDimensions())
+  // Fresh, not the 10-minute cache: execute re-derives this projection, and a
+  // dimension added to (or removed from) an account since the preview must show.
+  const liveDimensions = (await api.readonly.getAccountDimensions({ fresh: true }))
     .filter(dimension => dimension.is_deleted !== true);
   const postingDimension = (account: number, dimensionId: number | undefined, param: string | undefined): { ok: true; id: number | null } | { ok: false; error: CallToolResult } => {
     const own = liveDimensions.filter(dimension => dimension.accounts_id === account);
@@ -484,7 +486,7 @@ export async function computeOwnerExpenseJournalProjection(
 async function findExistingOwnerExpenseJournal(
   api: ApiContext,
   p: OwnerExpenseJournalProjection,
-): Promise<number | undefined> {
+): Promise<{ kind: "same" | "conflict"; id: number } | undefined> {
   if (p.document_number === null) return undefined;
   api.journals.invalidateListCache();
   const candidates = (await api.journals.listAll()).filter(j =>
@@ -492,12 +494,23 @@ async function findExistingOwnerExpenseJournal(
     j.document_number === p.document_number &&
     j.clients_id === p.owner_client_id &&
     j.effective_date === p.journal_date);
+  const postingKey = (accountId: number, dimensionId: number | null | undefined, side: string | undefined, amount: number) =>
+    `${accountId}|${dimensionId ?? "-"}|${side ?? "?"}|${roundMoney(amount).toFixed(2)}`;
+  const approved = p.postings.map(posting => postingKey(posting.account_id, posting.dimension_id, posting.side, posting.amount)).sort();
   for (const candidate of candidates) {
-    const postings = candidate.postings?.length ? candidate.postings : (await api.journals.get(candidate.id!))?.postings ?? [];
+    const postings = (candidate.postings?.length ? candidate.postings : (await api.journals.get(candidate.id!))?.postings ?? [])
+      .filter(posting => !posting.is_deleted);
     const credited = roundMoney(postings
-      .filter(posting => !posting.is_deleted && posting.type === "C")
+      .filter(posting => posting.type === "C")
       .reduce((sum, posting) => sum + (posting.base_amount ?? posting.amount), 0));
-    if (credited === p.total) return candidate.id!;
+    if (credited !== p.total) continue;
+    // Same document, owner, date and total: it is this expense. Reuse it only
+    // when it books exactly the approved lines (accounts, dimensions, sides,
+    // amounts); otherwise it is a conflict to review, never silently reused.
+    const existing = postings.map(posting => postingKey(posting.accounts_id, posting.accounts_dimensions_id, posting.type, posting.base_amount ?? posting.amount)).sort();
+    return existing.length === approved.length && existing.every((key, index) => key === approved[index])
+      ? { kind: "same", id: candidate.id! }
+      : { kind: "conflict", id: candidate.id! };
   }
   return undefined;
 }
@@ -514,7 +527,16 @@ export async function bookOwnerExpenseFromProjection(
     type: posting.side,
     amount: posting.amount,
   }));
-  const existingId = await findExistingOwnerExpenseJournal(api, p);
+  const existing = await findExistingOwnerExpenseJournal(api, p);
+  if (existing?.kind === "conflict") {
+    return toolError({
+      error: `Owner-expense journal ${existing.id} already has this document number, owner, date and total, but books different lines (account, dimension or amount) than the approved journal. Nothing was created.`,
+      hint: `Check journal ${existing.id} with get_journal: correct or delete it if it is wrong (e.g. the debt on no dimension or on another person's dimension), then book again; or use another document_number if it is a different expense.`,
+      code: "owner_expense_journal_conflict",
+      journal_id: existing.id,
+    });
+  }
+  const existingId = existing?.id;
   const result: ApiResponse = existingId !== undefined
     ? { code: 200, messages: [`Existing owner-expense journal ${existingId} reused.`], created_object_id: existingId }
     : await api.journals.create({

@@ -2258,6 +2258,35 @@ describe("create_owner_expense_reimbursement", () => {
       expect(data.note).toContain("account 2110 dimension 12637385");
     });
 
+    it("validates against a fresh dimension list, not the cached one", async () => {
+      setupWithDimensions([]);
+      await tools.get("create_owner_expense_reimbursement")!(base);
+      expect(vi.mocked(api.readonly.getAccountDimensions)).toHaveBeenCalledWith({ fresh: true });
+    });
+
+    it("does not reuse an earlier same-document draft that books the debt on no or another dimension", async () => {
+      setupWithDimensions([]);
+      const withDoc = { ...base, document_number: "R-1" };
+      await tools.get("create_owner_expense_reimbursement")!(withDoc);
+      expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+      // 2110 gets its per-lender dimensions; the retry names the owner's one.
+      vi.mocked(api.readonly.getAccountDimensions).mockResolvedValue([LOAN_DIMENSION, OWNER_DIMENSION] as never);
+      const retry = await tools.get("create_owner_expense_reimbursement")!({ ...withDoc, payable_account_dimension_id: 12637385 });
+      expect(isError(retry)).toBe(true);
+      expect(errorText(retry)).toContain("owner_expense_journal_conflict");
+      expect(errorText(retry)).toContain("42");
+      expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+    });
+
+    it("reuses an earlier same-document draft that books exactly the approved lines", async () => {
+      setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION]);
+      const withDoc = { ...base, document_number: "R-2", payable_account_dimension_id: 12637385 };
+      await tools.get("create_owner_expense_reimbursement")!(withDoc);
+      const second = parseResult(await tools.get("create_owner_expense_reimbursement")!(withDoc));
+      expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+      expect((second.journal_entry as { booking_status?: string }).booking_status).toBe("duplicate");
+    });
+
     it("posts no dimension field for accounts without dimensions (unchanged payload)", async () => {
       setupWithDimensions([]);
       const r = await tools.get("create_owner_expense_reimbursement")!(base);

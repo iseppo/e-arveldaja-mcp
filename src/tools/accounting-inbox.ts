@@ -2542,7 +2542,7 @@ function readOwnerExpenseAnswers(reviewItem: Record<string, unknown>, followUpQu
 // name such an account without its dimension, ask for it (listing the account's
 // dimensions) instead of preparing a journal the API would refuse.
 async function missingDimensionAnswers(api: ApiContext, params: OwnerExpenseReimbursementParams): Promise<OwnerExpenseMissingAnswer[]> {
-  const dimensions = (await api.readonly.getAccountDimensions()).filter(dimension => dimension.is_deleted !== true);
+  const dimensions = (await api.readonly.getAccountDimensions({ fresh: true })).filter(dimension => dimension.is_deleted !== true);
   const missing: OwnerExpenseMissingAnswer[] = [];
   const ask = (account: number, given: number | undefined, field: string, role: string) => {
     if (given !== undefined) return;
