@@ -1339,6 +1339,18 @@ function removeExchangeRateExpressions(line: string): string {
 const EXCHANGE_RATE_LABEL_VALUE_RE =
   /(\b(?:(?:exchange|exch\.?|fx|conversion)\s+rate|vahetuskurss|valuutakurss)\b\s*[:=-]?\s*(?:[A-Z]{3}\s*\/\s*[A-Z]{3}\s*)?)\d[\d.,]*/gi;
 
+// Owner rule (#5): a bare four-digit 2000-2100 token is a year, never an
+// amount: no decimal part, not part of a date ("07.10.2026", "2026-10-07",
+// "10/2026") or a longer number, and no currency mark next to it. "2 026,00 €",
+// "2026.00" and "€ 2026" stay amounts.
+const BARE_YEAR_TOKEN_RE =
+  /(?<![\d.,/-])(?<!(?:€|\$|£|\beur)\s*)(?:20\d\d|2100)(?!\d|[.,/-]\d|\s*(?:€|\$|£|eur\b))/giu;
+
+/** Blank bare year tokens so a period header ("perioodi september 2026") yields no amount. */
+function blankBareYearTokens(line: string): string {
+  return line.replace(BARE_YEAR_TOKEN_RE, match => " ".repeat(match.length));
+}
+
 /**
  * Blank the numbers of an exchange-rate statement ("1 GBP = 1.1600 EUR",
  * "Exchange rate: 1.16") so they never become amount candidates. Span-based,
@@ -1485,6 +1497,17 @@ interface ClassifiedAmountLine {
   rowTriple?: { sum: number; parts: [number, number] };
 }
 
+// Column titles of an item table, from the NON_AMOUNT_COLUMN_HEADER_RE
+// vocabulary plus the amount-column titles that follow it ("KM %", "KMga").
+const TABLE_COLUMN_WORD_RE =
+  /(?<![\p{L}])(kirjeldus|description|kood|code|nimetus|toode|item|product|kogus|qty|quantity|ühik\p{L}*|unit|hind|price|km\s*%|kmga|summa)(?![\p{L}])/giu;
+
+/** At least three distinct column titles on one line: an item-table header row. */
+function isTableColumnHeaderLine(line: string): boolean {
+  const words = new Set([...line.matchAll(TABLE_COLUMN_WORD_RE)].map(match => match[1]!.toLowerCase().replace(/\s+/g, "")));
+  return words.size >= 3;
+}
+
 function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   const line = lines[index]!;
   // Pass the whole document as locale context so a bare "1,234" is disambiguated
@@ -1496,7 +1519,9 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   const blockedAsReference = RECEIPT_REFERENCE_LINE_RE.test(lineLower);
   const blockedAsReferenceInInspection = RECEIPT_REFERENCE_LINE_RE.test(inspectionLine);
   const hasCurrencyKeyword = RECEIPT_CURRENCY_PATTERNS.some(currency => currency.pattern.test(line));
-  const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower);
+  // A table column-header row ("… Ühik Kogus hind Kokku KM KM % KMga") names
+  // columns; its "Kokku" is a column title, not a total label (#5).
+  const hasTotalLikeLabel = RECEIPT_TOTAL_LABEL_RE.test(lineLower) && !isTableColumnHeaderLine(line);
   const hasNetLikeLabel = RECEIPT_NET_LABEL_RE.test(lineLower);
   const hasVatAmountLabel = isVatAmountLine(inspectionLine);
   const hasOwnLineVatLabel = isVatAmountLine(line);
@@ -1511,7 +1536,8 @@ function classifyLine(lines: string[], index: number): ClassifiedAmountLine {
   // number cannot become an amount candidate.
   // Exchange-rate figures are blanked the same way (F-GROSSPICKER): a rate is
   // never the gross, and on a DCC slip its currency mark made it win.
-  const amountTokens = extractAmountTokensFromLine(blankExchangeRateNumbers(line.replace(TEXTUAL_DATE_IN_LINE_RE, " ")), documentContext, {
+  // Bare year tokens are blanked the same way (#5): a year is never the gross.
+  const amountTokens = extractAmountTokensFromLine(blankBareYearTokens(blankExchangeRateNumbers(line.replace(TEXTUAL_DATE_IN_LINE_RE, " "))), documentContext, {
     includeZero: isExplicitVatTotalLine(line),
   });
   const amounts = [...new Set(amountTokens)];

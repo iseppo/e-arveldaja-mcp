@@ -5169,3 +5169,53 @@ describe("reverse-charge footnote body does not bind a footer amount below it (o
     expect(isHeld(result)).toBe(true);
   });
 });
+
+describe("#5 the year is never the invoice total", () => {
+  // Synthetic apartment-association utility invoice (fake names): section
+  // header rows carry the period year next to a "Kokku" column title.
+  const header = (section: string) => `${section} perioodi september 2026 eest        Ühik        Kogus            hind           Kokku     KM          KM %    KMga`;
+  const lines = [
+    "Tallinn, Näidise tn 1 korteriühistu                                   Arve number M000000001",
+    "Reg. kood: 80000001     KMKR: EE100000001                             Kuupäev 07.10.2026",
+    "Maksja:                                                               Maksetähtaeg 31.10.2026",
+    "Mari Maasikas",
+    "                                                 Ühiku                                        Summa",
+    header("Kommunaalmaksed"),
+    "Garaazi elekter                tk           1.00     0.9027          0.90       0.22      24%        1.12",
+    "Üldelekter                     m²          59.00     0.1427          8.42       2.02      24%       10.44",
+    header("Majandamiskulud"),
+    "Remondifond                    m²          59.00     0.3000         17.70       0.00    KM-ta       17.70",
+    "Arve koostas: Test Koostaja                                           Käibemaksuta                   € 37,32",
+    "Haldur: Test Haldur                                                   Käibemaksuga 24%              € 125,13",
+    "                                                                      Käibemaks                      € 30,02",
+    "                                                                      Arve summa                    € 192,47",
+    "Näidis Halduse AS",
+  ];
+  const item = (text: string, x: number, y: number, width: number): LayoutTextItem => ({ text, x, y, width, height: 7, pageNum: 1 });
+
+  it("text path: the period year in a column-header row is no total candidate", () => {
+    const result = extractReceiptFieldsFromText(lines.join("\n"), "utility.pdf");
+    expect(result.total_gross).toBe(192.47);
+    expect(result.total_vat).toBe(30.02);
+    expect(result.field_provenance?.some(entry => entry.value === 2026)).toBe(false);
+  });
+
+  it("layout path: the year does not disagree with the bound footer total", () => {
+    const items = [
+      item("Kommunaalmaksed perioodi september 2026 eest", 53, 186, 177), item("Kokku", 340, 186, 20), item("KMga", 520, 186, 20),
+      item("Käibemaksuta", 400, 430, 45), item("€ 37,32", 525, 430, 27),
+      item("Käibemaksuga 24%", 400, 440, 60), item("€ 125,13", 525, 440, 27),
+      item("Käibemaks", 400, 450, 35), item("€ 30,02", 525, 450, 27),
+      item("Arve summa", 400, 460, 40), item("€ 192,47", 525, 460, 27),
+    ];
+    const result = extractReceiptFieldsFromText(lines.join("\n"), "utility.pdf", { textItems: items });
+    expect(result.total_gross).toBe(192.47);
+    expect(result.total_gross_conflict).toBeUndefined();
+    expect(result.extraction_notes ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining("2026")]));
+  });
+
+  it("an amount printed with decimals or a currency mark stays a candidate", () => {
+    expect(extractReceiptFieldsFromText(["Näidis OÜ", "Teenus 2 026,00 €", "Kokku 2 026,00 €"].join("\n"), "big.pdf").total_gross).toBe(2026);
+    expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku EUR 2026.00"].join("\n"), "big2.pdf").total_gross).toBe(2026);
+  });
+});
