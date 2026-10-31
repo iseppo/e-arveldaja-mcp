@@ -3368,7 +3368,7 @@ export function draftConfirmationFields(
   }
   if (pendingIds.length > 0) {
     const one = pendingIds.length === 1;
-    parts.push(`${pendingIds.length} earlier journal entr${one ? "y" : "ies"} for rows skipped as duplicates ${one ? "is" : "are"} still unregistered draft${one ? "" : "s"} (pending_duplicate_journals). This run did not create or review ${one ? "it" : "them"}, so ${one ? "it is" : "they are"} not in the confirm list: compare each draft's date, accounts, dimensions and amounts with its statement row, and confirm only after the user approves that draft.`);
+    parts.push(`${pendingIds.length} earlier journal entr${one ? "y" : "ies"} for rows skipped as duplicates ${one ? "was" : "were"} listed as unregistered draft${one ? "" : "s"} (pending_duplicate_journals). This run did not create or review ${one ? "it" : "them"}, so ${one ? "it is" : "they are"} not in the confirm list: compare each draft's date, accounts, dimensions and amounts with its statement row, and confirm only after the user approves that draft.`);
   }
   const held = pending.filter(j => j.snapshot_mismatch !== undefined).length;
   if (held > 0) {

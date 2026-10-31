@@ -5848,7 +5848,7 @@ describe("draftConfirmationFields", () => {
     expect(fields.next_actions).toBeUndefined();
     expect(fields.pending_duplicate_journal_ids).toEqual([7, 8]);
     expect(fields.pending_duplicate_journals?.map(j => j.journal_id)).toEqual([7, 8]);
-    expect(fields.note).toContain("still unregistered drafts");
+    expect(fields.note).toContain("were listed as unregistered drafts");
   });
 
   it("confirms only the journals this run created when earlier drafts are also pending", () => {

@@ -1741,7 +1741,8 @@ export const CLASSIFICATION_REVIEW_CHUNK_SIZE = 10;
 
 /** One transaction in a classification review command: its fresh state and booking effect. */
 export interface ClassificationReviewTransaction {
-  readonly id: number;
+  /** null for a transaction without an id, which is skipped (`present: false`). */
+  readonly id: number | null;
   readonly status?: string | null;
   readonly amount?: number | null;
   readonly base_amount?: number | null;
