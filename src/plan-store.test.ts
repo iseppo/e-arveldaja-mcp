@@ -37,6 +37,20 @@ function expectCode(action: () => unknown, code: PlanStoreError["code"]): void {
 }
 
 describe("ExecutionPlanStore", () => {
+  it("boundSourcePath reads a live in-scope plan's private source binding without consuming it (#13)", () => {
+    const runtime = createTestRuntimeSafetyContext();
+    const binding = { file_ref: "r", operation: "bank_input", kind: "file", canonical_path: "/tmp/a.xml" };
+    const handle = runtime.planStore.issue("camt_import", input({ privatePayload: { fingerprint: "f", source_paths: [binding] } }));
+    expect(runtime.planStore.boundSourcePath(handle, 0)).toEqual(binding);
+    expect(runtime.planStore.boundSourcePath(handle, 1)).toBeUndefined();
+    runtime.setScope({ connectionIndex: 1 });
+    expect(runtime.planStore.boundSourcePath(handle, 0)).toBeUndefined();
+    runtime.setScope({ connectionIndex: 0 });
+    expect(runtime.planStore.consume(handle, "camt_import").privatePayload).toMatchObject({ source_paths: [binding] });
+    expect(runtime.planStore.boundSourcePath(handle, 0)).toBeUndefined();
+    expect(runtime.planStore.boundSourcePath("not-a-handle", 0)).toBeUndefined();
+  });
+
   it("consumes a cross-connection execute attempt exactly once", () => {
     const runtime = createTestRuntimeSafetyContext();
     const handle = runtime.planStore.issue("camt_import", input());

@@ -3781,3 +3781,38 @@ describe("camt import — deactivated clients are never auto-selected (#12)", ()
     expect(row.client_note).toContain("deactivated");
   });
 });
+
+describe("camt execute after the inbox file_ref expired (#13)", () => {
+  const MINUTE = 60_000;
+  async function dryRunWithRef(context: ReturnType<typeof createTestRuntimeSafetyContext>) {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const setup = setupCamtTool({ allowWrites: true, runtimeSafetyContext: context });
+    const file_ref = context.fileReferenceStore.issue({ canonicalPath: "/tmp/camt.xml", kind: "file", operation: "camt_input" });
+    context.advanceTime(5 * MINUTE);
+    const plan_handle = await issueCamtPlanHandle(setup.handler, { file_ref, accounts_dimensions_id: 7 });
+    context.advanceTime(7 * MINUTE);
+    return { ...setup, file_ref, plan_handle };
+  }
+
+  it("re-reads the reviewed path and imports", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const { api, handler, file_ref, plan_handle } = await dryRunWithRef(context);
+    const payload = parseToolPayload<CamtImportFullPayload>((await handler({
+      file_ref, accounts_dimensions_id: 7, execute: true, plan_handle,
+    })).content[0]!.text);
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.transactions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("a deleted reviewed file is plan_drift with reason file_unavailable", async () => {
+    const context = createTestRuntimeSafetyContext();
+    const { api, handler, file_ref, plan_handle } = await dryRunWithRef(context);
+    mockedResolveFileInput.mockRejectedValue(new Error("ENOENT"));
+    const result = await handler({ file_ref, accounts_dimensions_id: 7, execute: true, plan_handle });
+    const payload = parseToolPayload<CamtPlanErrorPayload>(result.content[0]!.text);
+    expect(result.isError).toBe(true);
+    expect(payload).toMatchObject({ category: "plan_drift", reason: "file_unavailable" });
+    expect(api.transactions.create).not.toHaveBeenCalled();
+  });
+});

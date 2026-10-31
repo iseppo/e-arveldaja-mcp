@@ -27,6 +27,8 @@ export interface BuildExecutionPlanInputArgs {
   readonly totals: PlanRecord;
   readonly exclusions: readonly PlanData[];
   readonly reviews: readonly PlanData[];
+  /** Extra private fields (e.g. `source_paths`), never in public/inspect views. */
+  readonly privateExtras?: PlanRecord;
 }
 
 /**
@@ -48,7 +50,7 @@ export function buildExecutionPlanInput(args: BuildExecutionPlanInputArgs): Exec
     totals: args.totals,
     exclusions: args.exclusions,
     reviews: args.reviews,
-    privatePayload: { fingerprint: args.fingerprint },
+    privatePayload: { ...args.privateExtras, fingerprint: args.fingerprint },
   };
 }
 

@@ -338,6 +338,24 @@ export class ExecutionPlanStore {
     return Object.freeze(publicPlan);
   }
 
+  /**
+   * Non-consuming read of the private `source_paths[index]` binding of a live,
+   * in-scope plan (the reviewed path of an inbox `file_ref`), for a façade that
+   * must read its source before it can route to the consuming executor.
+   * Returns undefined on any problem; the later `consume` reports it.
+   */
+  boundSourcePath(handle: string, index: number): PlanData | undefined {
+    try {
+      this.inspect(handle);
+    } catch {
+      return undefined;
+    }
+    const privatePayload = this.#active.get(handle)?.privatePayload;
+    if (typeof privatePayload !== "object" || privatePayload === null || Array.isArray(privatePayload)) return undefined;
+    const paths = (privatePayload as { readonly [key: string]: PlanData }).source_paths;
+    return Array.isArray(paths) ? paths[index] : undefined;
+  }
+
   consume(handle: string, expectedDomain: string): StoredExecutionPlan {
     this.#validateHandle(handle);
     const now = this.#readNow();

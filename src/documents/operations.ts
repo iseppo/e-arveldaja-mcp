@@ -9,6 +9,7 @@ import {
   assertFileInputSnapshotIdentity,
   captureFileInputSnapshot,
   FileInputSnapshotError,
+  planBoundFileReference,
   type FileInputSnapshot,
   type FileInputSource,
 } from "../file-input-snapshot.js";
@@ -134,7 +135,9 @@ export async function materializeSnapshot(
       sourcePath = source.file_path;
     }
   } catch {
-    sourcePath = undefined; // naming is cosmetic; the snapshot already bound the bytes
+    // Naming is cosmetic; the snapshot already bound the bytes. An expired
+    // file_ref re-read from its plan-bound path keeps that path's name.
+    sourcePath = source.file_ref !== undefined ? snapshot.canonicalPath() : undefined;
   }
   const fileName = sanitizeUploadFileName(sourcePath ?? "document", extension);
   const dir = await mkdtemp(join(tmpdir(), "e-arveldaja-document-"));
@@ -671,6 +674,7 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
           reviews: [],
           privatePayload: {
             source_sha256: material.source_sha256,
+            source_paths: [planBoundFileReference(input.source, snapshot, FILE_REFERENCE_OPERATIONS.receipt)],
             ...(orderReferenceNote !== undefined ? { order_reference_note: orderReferenceNote } : {}),
             ...(supplierIdentifierAcknowledged ? { supplier_identifier_acknowledged: { ...supplierIdentifierAcknowledged } } : {}),
           },

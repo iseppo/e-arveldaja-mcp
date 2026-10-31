@@ -50,6 +50,8 @@ export interface OperationFailure {
   readonly mutationMayHaveOccurred?: boolean;
   readonly mutatedObjects?: readonly MutatedObject[];
   readonly recovery?: OperationRecoveryContext;
+  /** Why an execute-time source re-read failed (`plan_drift` only). */
+  readonly reason?: string;
 }
 
 export type OperationOutcome<T> =
@@ -65,6 +67,7 @@ export function failureResponsePayload(error: OperationFailure): Record<string, 
   return {
     error: error.message,
     category: error.code,
+    ...(error.reason !== undefined ? { reason: error.reason } : {}),
     retry: error.retry,
     mutation_occurred: error.mutationOccurred === true ? true : error.mutationMayHaveOccurred === true ? null : false,
     ...(error.mutationMayHaveOccurred === true ? { mutation_may_have_occurred: true } : {}),
@@ -94,7 +97,7 @@ export function plainFailureOutcome<T>(
   code: string,
   message: string,
   retry: "never" | "safe" | "unknown" = "never",
-  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext; reason?: string }>,
 ): OperationOutcome<T> {
   return {
     ok: false,
@@ -106,6 +109,7 @@ export function plainFailureOutcome<T>(
       ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
       ...(mutation?.recovery ? { recovery: mutation.recovery } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
+      ...(mutation?.reason !== undefined ? { reason: mutation.reason } : {}),
     },
     blockers: [],
   };
@@ -124,7 +128,7 @@ export function failureOutcome<T = never>(
   message: string,
   retry: "never" | "safe" | "unknown",
   blockers: readonly CompactReviewItem[] = [],
-  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext }>,
+  mutation?: Readonly<{ mutationOccurred?: boolean; mutationMayHaveOccurred?: boolean; mutatedObjects?: readonly MutatedObject[]; recovery?: OperationRecoveryContext; reason?: string }>,
 ): OperationOutcome<T> {
   return cloneAndFreezePlanData({
     ok: false,
@@ -136,6 +140,7 @@ export function failureOutcome<T = never>(
       ...(mutation?.mutationMayHaveOccurred ? { mutationMayHaveOccurred: true } : {}),
       ...(mutation?.recovery ? { recovery: mutation.recovery } : {}),
       ...(mutation?.mutatedObjects !== undefined ? { mutatedObjects: mutation.mutatedObjects } : {}),
+      ...(mutation?.reason !== undefined ? { reason: mutation.reason } : {}),
     },
     blockers,
   } as unknown as PlanData) as unknown as OperationOutcome<T>;

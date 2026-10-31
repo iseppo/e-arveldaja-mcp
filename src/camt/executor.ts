@@ -15,7 +15,17 @@ import { canonicalRefNumber } from "../ref-number.js";
 import { checkStatementClosingBalance } from "../statement-balance-check.js";
 import { appendStatementBalance, getStatementBalanceIdentityWarning, readStatementBalances } from "../statement-balance-store.js";
 import { PlanStoreError, type PlanData, type PlanRecord } from "../plan-store.js";
-import { assertFileInputSnapshotIdentity, captureFileInputSnapshot, FileInputSnapshotError, type FileInputSnapshot, type FileInputSource } from "../file-input-snapshot.js";
+import {
+  assertFileInputSnapshotIdentity,
+  capturePlanBoundFileInputSnapshot,
+  describeSourceReReadFailure,
+  FileInputSnapshotError,
+  planBoundFileReference,
+  storedSourceBindings,
+  type FileInputSnapshot,
+  type FileInputSource,
+  type SourceReReadFailureReason,
+} from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { type ApiContext } from "../tools/crud-tools.js";
 import { type RuntimeSafetyContext } from "../runtime-safety-context.js";
@@ -87,13 +97,14 @@ export async function loadCamt053SnapshotAndPreflight(
   source: FileInputSource,
   runtimeSafetyContext: RuntimeSafetyContext,
   preloadedSnapshot?: FileInputSnapshot,
+  planBinding?: unknown,
 ): Promise<{ snapshot: FileInputSnapshot; preflight: CamtPreflightResult }> {
   // ADDITIVE snapshot threading (bank façade): when the caller has already
   // captured the immutable bytes ONCE (under the unified bank_input operation),
   // it hands the frozen snapshot in by identity so this op does NOT read the
   // path a second time. The granular process_camt053 path passes no snapshot and
   // captures internally under camt_input exactly as before — byte-identical.
-  const snapshot = preloadedSnapshot ?? await captureFileInputSnapshot(source, {
+  const snapshot = preloadedSnapshot ?? await capturePlanBoundFileInputSnapshot(source, planBinding, {
     runtimeSafetyContext,
     operation: FILE_REFERENCE_OPERATIONS.camt,
     allowedExtensions: [".xml"],
@@ -437,12 +448,15 @@ export function issueCamtPlan(
   snapshot: FileInputSnapshot,
   projection: CamtImportProjection,
   normalizedArgs: PlanRecord,
+  source?: FileInputSource,
+  sourceOperation: string = FILE_REFERENCE_OPERATIONS.camt,
 ): string {
   const possibleDuplicateCount = projection.descriptors.filter(d => d.possibleDuplicateMatches.length > 0).length;
   const planInput = buildCamtExecutionPlanInput({
     normalizedArgs,
     sourceIdentity: stripUndefinedDeep({ ...snapshot.identity }) as PlanRecord,
     statementIban: projection.statementMetadata.iban,
+    sourcePaths: [source !== undefined ? planBoundFileReference(source, snapshot, sourceOperation) : null],
     reviewCommands: camtReviewCommands(projection),
     fingerprint: camtPlanFingerprint(projection, normalizedArgs),
     counts: {
@@ -604,7 +618,7 @@ export interface CamtExecuteInput {
 
 type CamtExecuteResult =
   | { readonly ok: true; readonly execution: CamtImportExecution }
-  | { readonly ok: false; readonly code: string; readonly message: string };
+  | { readonly ok: false; readonly code: string; readonly message: string; readonly reason?: SourceReReadFailureReason };
 
 /**
  * EXECUTE: consume the reviewed plan ONCE, re-read the source immutably, and
@@ -653,10 +667,13 @@ export async function executeCamtImport(
   let snapshot: FileInputSnapshot;
   let preflight: CamtPreflightResult;
   try {
-    ({ snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, runtimeSafetyContext, preloadedSnapshot));
+    ({ snapshot, preflight } = await loadCamt053SnapshotAndPreflight(
+      source, runtimeSafetyContext, preloadedSnapshot, storedSourceBindings(storedPlan.privatePayload)[0],
+    ));
   } catch (error) {
     if (error instanceof FileInputSnapshotError) {
-      return { ok: false, code: "plan_drift", message: "The CAMT source could not be re-read to match the reviewed plan." };
+      const { reason, message } = describeSourceReReadFailure(error.code);
+      return { ok: false, code: "plan_drift", reason, message: `The CAMT source could not be re-read to match the reviewed plan: ${message}.` };
     }
     throw error;
   }
@@ -673,6 +690,7 @@ export async function executeCamtImport(
     return {
       ok: false,
       code: "plan_drift",
+      reason: describeSourceReReadFailure(error.code).reason,
       message: error.code === "file_input_changed"
         ? "The CAMT source file (bytes or location) changed since the plan was reviewed."
         : "The reviewed CAMT plan's source identity is invalid.",

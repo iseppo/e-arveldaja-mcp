@@ -7,7 +7,8 @@ import { toMcpJson, wrapUntrustedOcr } from "../mcp-json.js";
 import { type ApiContext, coerceId, jsonObjectArrayInput } from "../tools/crud-tools.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
-  captureFileInputSnapshot,
+  capturePlanBoundFileInputSnapshot,
+  describeSourceReReadFailure,
   FileInputSnapshotError,
   fileInputSnapshotRetry,
   type FileInputSnapshot,
@@ -554,7 +555,12 @@ export function registerProcessAccountingDocumentTool(
       // op-mismatch guard fires and this rejects without any second read.
       let snapshot: FileInputSnapshot;
       try {
-        snapshot = await captureFileInputSnapshot(source, {
+        // On create, an expired inbox file_ref may re-read the path the
+        // reviewed plan bound (the create then checks the plan identity).
+        const binding = mode === "create" && args.plan_handle !== undefined
+          ? runtimeSafetyContext.planStore.boundSourcePath(args.plan_handle, 0)
+          : undefined;
+        snapshot = await capturePlanBoundFileInputSnapshot(source, binding, {
           runtimeSafetyContext,
           operation: FILE_REFERENCE_OPERATIONS.receipt,
           allowedExtensions: INVOICE_DOCUMENT_EXTENSIONS,
@@ -562,7 +568,13 @@ export function registerProcessAccountingDocumentTool(
         });
       } catch (error) {
         if (error instanceof FileInputSnapshotError) {
-          return textResult({ error: error.message, category: error.code, retry: fileInputSnapshotRetry(error.code), mutation_occurred: false }, true);
+          return textResult({
+            error: error.message,
+            category: error.code,
+            ...(mode === "create" ? { reason: describeSourceReReadFailure(error.code).reason } : {}),
+            retry: fileInputSnapshotRetry(error.code),
+            mutation_occurred: false,
+          }, true);
         }
         throw error;
       }

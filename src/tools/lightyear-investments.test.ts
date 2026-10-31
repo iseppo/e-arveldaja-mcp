@@ -5998,3 +5998,97 @@ describe("Lightyear statement day validation", () => {
     expect(statementDay("29/02/0050 10:00:00")).toBeNull();
   });
 });
+
+describe("Lightyear execute after the inbox file_ref expired (#13)", () => {
+  type ExecutePayload = { mode?: string; new_entries?: number; created?: number; category?: string; reason?: string; error?: string };
+  const MINUTE = 60_000;
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
+  });
+  const issueRef = (context: ReturnType<typeof createTestRuntimeSafetyContext>) => context.fileReferenceStore.issue({
+    canonicalPath: "/tmp/lightyear.csv", kind: "file", operation: "lightyear_statement_input",
+  });
+  const distArgs = { broker_account: 1120, income_account: 8320 };
+
+  async function dryRunDistributions(context: ReturnType<typeof createTestRuntimeSafetyContext>, api: ReturnType<typeof planApi>) {
+    const handler = registerBookingHandler(context, api, "book_lightyear_distributions");
+    const file_ref = issueRef(context);
+    context.advanceTime(5 * MINUTE);
+    const dry = parseToolPayload<{ plan_handle: string }>((await handler({ file_ref, ...distArgs, dry_run: true })).content[0]!.text);
+    context.advanceTime(7 * MINUTE);
+    return { handler, file_ref, plan_handle: dry.plan_handle };
+  }
+
+  it("distributions execute re-reads the reviewed path when the ref expired", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const { handler, file_ref, plan_handle } = await dryRunDistributions(context, api);
+    const result = await handler({ file_ref, ...distArgs, dry_run: false, plan_handle });
+    const payload = parseToolPayload<ExecutePayload>(result.content[0]!.text);
+    expect(result.isError).toBeFalsy();
+    expect(payload.mode).toBe("EXECUTED");
+    expect(api.journals.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("still succeeds after another issue() purged the expired ref", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const { handler, file_ref, plan_handle } = await dryRunDistributions(context, api);
+    context.fileReferenceStore.issue({ canonicalPath: "/tmp/other.xml", kind: "file", operation: "camt_input" });
+    const result = await handler({ file_ref, ...distArgs, dry_run: false, plan_handle });
+    expect(parseToolPayload<ExecutePayload>(result.content[0]!.text).mode).toBe("EXECUTED");
+  });
+
+  it("changed bytes at the reviewed path are plan_drift with reason file_changed", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const { handler, file_ref, plan_handle } = await dryRunDistributions(context, api);
+    mockedReadFile.mockResolvedValue(`${PLAN_DIV_CSV()}\n`);
+    const result = await handler({ file_ref, ...distArgs, dry_run: false, plan_handle });
+    const payload = parseToolPayload<ExecutePayload>(result.content[0]!.text);
+    expect(result.isError).toBe(true);
+    expect(payload).toMatchObject({ category: "plan_drift", reason: "file_changed" });
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("a different ref string never falls back to the reviewed path", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const { handler, plan_handle } = await dryRunDistributions(context, api);
+    const result = await handler({ file_ref: "B".repeat(43), ...distArgs, dry_run: false, plan_handle });
+    const payload = parseToolPayload<ExecutePayload>(result.content[0]!.text);
+    expect(result.isError).toBe(true);
+    expect(payload).toMatchObject({ category: "plan_drift", reason: "file_ref_expired" });
+    expect(api.journals.create).not.toHaveBeenCalled();
+  });
+
+  it("a ref issued for another operation is plan_drift with reason file_ref_mismatch", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_DIV_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const { handler, plan_handle } = await dryRunDistributions(context, api);
+    const otherRef = context.fileReferenceStore.issue({ canonicalPath: "/tmp/lightyear.csv", kind: "file", operation: "camt_input" });
+    const result = await handler({ file_ref: otherRef, ...distArgs, dry_run: false, plan_handle });
+    expect(parseToolPayload<ExecutePayload>(result.content[0]!.text)).toMatchObject({ category: "plan_drift", reason: "file_ref_mismatch" });
+  });
+
+  it("trades execute re-reads the reviewed path when the ref expired", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const context = createTestRuntimeSafetyContext();
+    const api = planApi();
+    const handler = registerBookingHandler(context, api, "book_lightyear_trades");
+    const file_ref = issueRef(context);
+    const args = { file_ref, investment_account: 1550, broker_account: 1120 };
+    context.advanceTime(5 * MINUTE);
+    const plan_handle = await issueTradesHandle(handler, args);
+    context.advanceTime(7 * MINUTE);
+    const result = await handler({ ...args, dry_run: false, plan_handle });
+    const payload = parseToolPayload<ExecutePayload>(result.content[0]!.text);
+    expect(result.isError).toBeFalsy();
+    expect(payload).toMatchObject({ mode: "EXECUTED", created: 1 });
+  });
+});

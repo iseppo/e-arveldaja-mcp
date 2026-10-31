@@ -53,6 +53,8 @@ export interface BuildCamtExecutionPlanInputArgs
   extends Omit<BuildExecutionPlanInputArgs, "sourceIdentities" | "liveSnapshot"> {
   readonly sourceIdentity: PlanRecord;
   readonly statementIban: string;
+  /** Private `source_paths` (file_ref bindings), see `planBoundFileReference`. */
+  readonly sourcePaths?: readonly PlanData[];
 }
 
 /**
@@ -65,6 +67,7 @@ export function buildCamtExecutionPlanInput(args: BuildCamtExecutionPlanInputArg
     normalizedArgs: args.normalizedArgs,
     sourceIdentities: [args.sourceIdentity],
     liveSnapshot: { statement_iban: args.statementIban },
+    ...(args.sourcePaths !== undefined ? { privateExtras: { source_paths: args.sourcePaths } } : {}),
     reviewCommands: args.reviewCommands,
     fingerprint: args.fingerprint,
     counts: args.counts,

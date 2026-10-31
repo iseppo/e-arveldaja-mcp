@@ -42,6 +42,9 @@ export interface CamtImportInput {
    * the op does not read the source a second time. Absent for the granular
    * process_camt053 path, which captures internally under camt_input. */
   readonly snapshot?: FileInputSnapshot;
+  /** The file-reference operation `snapshot` was captured under (default camt_input);
+   * bound with the reviewed path so an expired `file_ref` can be re-read at execute. */
+  readonly sourceOperation?: string;
   /** false = preview only: no consume-once plan handle is minted. For callers
    * that discard the handle (the accounting inbox dry run), so a preview never
    * takes a plan-store slot. Default true. */
@@ -115,7 +118,7 @@ class CamtOperationsImpl implements CamtOperations {
     // A dry run with nothing to create has nothing to approve: no plan (as Wise).
     const planHandle = input.mintPlanHandles === false || projection.descriptors.length === 0
       ? undefined
-      : issueCamtPlan(this.runtimeSafetyContext, snapshot, projection, normalizedArgs);
+      : issueCamtPlan(this.runtimeSafetyContext, snapshot, projection, normalizedArgs, source, input.sourceOperation);
     const results = projection.descriptors.map(descriptor => camtResultRow(descriptor, "would_create"));
     const possibleDuplicates = projection.descriptors
       .filter(descriptor => descriptor.possibleDuplicateMatches.length > 0)
@@ -157,7 +160,8 @@ class CamtOperationsImpl implements CamtOperations {
       ? ok(result.execution)
       // A failed company identity lookup refuses before any mutation and keeps
       // the reviewed plan, so the same call is safe to retry.
-      : fail(result.code, result.message, result.code === "company_identity_unavailable" ? "safe" : "never");
+      : fail(result.code, result.message, result.code === "company_identity_unavailable" ? "safe" : "never",
+        result.reason !== undefined ? { reason: result.reason } : undefined);
   }
 }
 

@@ -14,6 +14,9 @@ import {
   assertFileInputSnapshotIdentity,
   assertMatchingFileInputSnapshot,
   captureFileInputSnapshot,
+  capturePlanBoundFileInputSnapshot,
+  describeSourceReReadFailure,
+  planBoundFileReference,
   type CaptureFileInputOptions,
   fileInputSnapshotRetry,
 } from "./file-input-snapshot.js";
@@ -323,7 +326,7 @@ describe("captureFileInputSnapshot", () => {
       [{ file_ref: fileRef }, { ...csvOptions(context), operation: FILE_REFERENCE_OPERATIONS.camt }, "file_input_reference_mismatch"],
       [{ file_ref: wrongKind }, csvOptions(context), "file_input_reference_mismatch"],
       [{ file_ref: sameOperationDirectory }, csvOptions(context), "file_input_reference_mismatch"],
-      [{ file_ref: "forged-hostile-ref" }, csvOptions(context), "file_input_reference_expired"],
+      [{ file_ref: "forged-hostile-ref" }, csvOptions(context), "file_input_reference_invalid"],
     ] as const) {
       const error = await rejection(source, options);
       expect(error).toBeInstanceOf(FileInputSnapshotError);
@@ -336,7 +339,7 @@ describe("captureFileInputSnapshot", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  it("maps a ref from another runtime scope to file_input_reference_expired before reading", async () => {
+  it("maps a ref from another runtime scope to file_input_reference_scope_mismatch before reading", async () => {
     const context = runtime();
     const read = vi.fn(async () => Buffer.from("secret"));
     const fileRef = context.fileReferenceStore.issue({
@@ -346,8 +349,84 @@ describe("captureFileInputSnapshot", () => {
     });
     context.setScope({ profile: "guided" });
     await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context), { readFile: read }))
-      .rejects.toMatchObject({ code: "file_input_reference_expired" });
+      .rejects.toMatchObject({ code: "file_input_reference_scope_mismatch" });
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("capturePlanBoundFileInputSnapshot (#13)", () => {
+  async function reviewedFile(contents = "a,b\n"): Promise<string> {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "file-plan-bound-")));
+    roots.push(root);
+    const path = join(root, "statement.csv");
+    await writeFile(path, contents);
+    return path;
+  }
+
+  async function dryRun(context: ReturnType<typeof runtime>, path: string) {
+    const fileRef = context.fileReferenceStore.issue({ canonicalPath: path, kind: "file", operation: FILE_REFERENCE_OPERATIONS.wise });
+    const snapshot = await captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context));
+    const binding = planBoundFileReference({ file_ref: fileRef }, snapshot, FILE_REFERENCE_OPERATIONS.wise);
+    return { fileRef, snapshot, binding };
+  }
+
+  it("re-reads the reviewed path when the bound ref expired", async () => {
+    const context = runtime();
+    const path = await reviewedFile();
+    const { fileRef, snapshot, binding } = await dryRun(context, path);
+    expect(binding).toEqual({ file_ref: fileRef, operation: FILE_REFERENCE_OPERATIONS.wise, kind: "file", canonical_path: path });
+    context.advanceTime(700_000);
+    const reread = await capturePlanBoundFileInputSnapshot({ file_ref: fileRef }, binding, csvOptions(context));
+    expect(assertFileInputSnapshotIdentity(reread, snapshot.identity, csvOptions(context)).identity).toEqual(snapshot.identity);
+  });
+
+  it("re-reads the reviewed path after another issue() purged the expired ref", async () => {
+    const context = runtime();
+    const path = await reviewedFile();
+    const { fileRef, snapshot, binding } = await dryRun(context, path);
+    context.advanceTime(700_000);
+    context.fileReferenceStore.issue({ canonicalPath: "/tmp/other.csv", kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt });
+    await expect(captureFileInputSnapshot({ file_ref: fileRef }, csvOptions(context)))
+      .rejects.toMatchObject({ code: "file_input_reference_invalid" });
+    const reread = await capturePlanBoundFileInputSnapshot({ file_ref: fileRef }, binding, csvOptions(context));
+    expect(reread.identity).toEqual(snapshot.identity);
+  });
+
+  it("never falls back for a different ref, another operation or a scope change", async () => {
+    const context = runtime();
+    const path = await reviewedFile();
+    const { fileRef, binding } = await dryRun(context, path);
+    context.advanceTime(700_000);
+    await expect(capturePlanBoundFileInputSnapshot({ file_ref: "A".repeat(43) }, binding, csvOptions(context)))
+      .rejects.toBeInstanceOf(FileInputSnapshotError);
+    await expect(capturePlanBoundFileInputSnapshot({ file_ref: fileRef }, binding, { ...csvOptions(context), operation: FILE_REFERENCE_OPERATIONS.camt }))
+      .rejects.toBeInstanceOf(FileInputSnapshotError);
+    const scoped = runtime();
+    const live = await dryRun(scoped, path);
+    scoped.setScope({ profile: "guided" });
+    await expect(capturePlanBoundFileInputSnapshot({ file_ref: live.fileRef }, live.binding, csvOptions(scoped)))
+      .rejects.toMatchObject({ code: "file_input_reference_scope_mismatch" });
+  });
+
+  it("changed bytes at the bound path fail the identity check", async () => {
+    const context = runtime();
+    const path = await reviewedFile();
+    const { fileRef, snapshot, binding } = await dryRun(context, path);
+    context.advanceTime(700_000);
+    await writeFile(path, "a,b,c\n");
+    const reread = await capturePlanBoundFileInputSnapshot({ file_ref: fileRef }, binding, csvOptions(context));
+    expect(() => assertFileInputSnapshotIdentity(reread, snapshot.identity, csvOptions(context)))
+      .toThrowError(new FileInputSnapshotError("file_input_changed"));
+    expect(describeSourceReReadFailure("file_input_changed").reason).toBe("file_changed");
+  });
+
+  it("maps every re-read failure code to a reason", () => {
+    expect(describeSourceReReadFailure("file_input_reference_expired").reason).toBe("file_ref_expired");
+    expect(describeSourceReReadFailure("file_input_reference_invalid").reason).toBe("file_ref_expired");
+    expect(describeSourceReReadFailure("file_input_reference_scope_mismatch").reason).toBe("file_ref_scope_changed");
+    expect(describeSourceReReadFailure("file_input_reference_mismatch").reason).toBe("file_ref_mismatch");
+    expect(describeSourceReReadFailure("file_input_unavailable").reason).toBe("file_unavailable");
+    expect(describeSourceReReadFailure("file_input_source_invalid").reason).toBe("source_invalid");
   });
 });
 

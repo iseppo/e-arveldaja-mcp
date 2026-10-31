@@ -76,7 +76,8 @@ import { canonicalPlanJson, stripUndefinedDeep } from "../tools/camt-plan.js";
 import { isAmbiguousPostCreateFailure } from "../tools/receipt-inbox.js";
 import { InvoiceCreationError } from "../api/purchase-invoices.api.js";
 import { uploadSourceDocumentOrInvalidate } from "../tools/pdf-workflow.js";
-import { assertFileInputSnapshotIdentity, FileInputSnapshotError } from "../file-input-snapshot.js";
+import { assertFileInputSnapshotIdentity, FileInputSnapshotError, planBoundFileReference } from "../file-input-snapshot.js";
+import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { todayInTallinn } from "../local-date.js";
 import { parseStrictDate } from "../strict-date.js";
 import type { Account, Client, CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem } from "../types/api.js";
@@ -1244,7 +1245,10 @@ class ReadingDocumentOperations {
         totals: values.gross !== null ? { gross_price: values.gross } : {},
         exclusions: [],
         reviews: [],
-        privatePayload: { source_sha256: packet.source_sha256 },
+        privatePayload: {
+          source_sha256: packet.source_sha256,
+          source_paths: [planBoundFileReference(input.source, snapshot, FILE_REFERENCE_OPERATIONS.receipt)],
+        },
       });
       this.handles.add(planHandle);
       return ok({ ...result, status: "ready", card, planHandle, ...(bookingBasis ? { bookingBasis } : {}) });

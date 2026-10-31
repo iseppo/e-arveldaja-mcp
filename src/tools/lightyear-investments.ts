@@ -7,7 +7,11 @@ import type { ApiContext } from "./crud-tools.js";
 import {
   assertFileInputSnapshotIdentity,
   captureFileInputSnapshot,
+  capturePlanBoundFileInputSnapshot,
+  describeSourceReReadFailure,
   FileInputSnapshotError,
+  planBoundFileReference,
+  storedSourceBindings,
   type FileInputSnapshot,
   type FileInputSource,
 } from "../file-input-snapshot.js";
@@ -2475,17 +2479,26 @@ function matchSellsToCapitalGains(
 // MCP output on every render while the values used for matching, dedup, audit,
 // and the API stay clean.
 
+/** Reads a Lightyear CSV source. At execute, `binding` (the consumed plan's
+ * `source_paths[i]`) lets an expired inbox `file_ref` re-read the reviewed path. */
 async function readCsvSnapshot(
   source: FileInputSource,
   operation: string,
   runtimeSafetyContext: RuntimeSafetyContext,
+  binding?: unknown,
 ): Promise<FileInputSnapshot> {
-  return captureFileInputSnapshot(source, {
+  return capturePlanBoundFileInputSnapshot(source, binding, {
     runtimeSafetyContext,
     operation,
     allowedExtensions: [".csv"],
     maxSize: MAX_CSV_SIZE,
   });
+}
+
+/** plan_drift for an execute-time source re-read failure, naming the reason. */
+function sourceReReadDrift(error: FileInputSnapshotError, label: string) {
+  const { reason, message } = describeSourceReReadFailure(error.code);
+  return toolError({ error: `${label} could not be re-read to match the plan: ${message}.`, category: "plan_drift", reason, retry: "never", mutation_occurred: false });
 }
 
 interface LyPosting {
@@ -2546,9 +2559,15 @@ function lightyearSourceDrift(snapshot: FileInputSnapshot, storedIdentity: unkno
     return undefined;
   } catch (error) {
     if (!(error instanceof FileInputSnapshotError)) throw error;
-    return planErrorResult("plan_drift", error.code === "file_input_changed"
-      ? `${label} file (bytes or location) changed since the plan was reviewed.`
-      : `${label} identity stored in the reviewed plan is invalid.`);
+    return toolError({
+      error: error.code === "file_input_changed"
+        ? `${label} file (bytes or location) changed since the plan was reviewed.`
+        : `${label} identity stored in the reviewed plan is invalid.`,
+      category: "plan_drift",
+      reason: describeSourceReReadFailure(error.code).reason,
+      retry: "never",
+      mutation_occurred: false,
+    });
   }
 }
 
@@ -3889,12 +3908,14 @@ export function registerLightyearTools(
         });
       }
 
-      const buildTradesProjection = async (): Promise<{
+      const buildTradesProjection = async (bindings: readonly unknown[] = []): Promise<{
         projection: TradesProjection;
         sourceIdentities: PlanRecord[];
         sourceSnapshots: FileInputSnapshot[];
+        sourcePaths: PlanData[];
       }> => {
-        const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
+        const statementSnapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, bindings[0]);
+        const sourcePaths: PlanData[] = [planBoundFileReference(statementSource, statementSnapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)];
         const rows = parseAccountStatement(statementSnapshot.text());
         const extraction = extractTrades(rows);
         const trades = extraction.trades.filter(t => !skipSet.has(t.ticker));
@@ -3902,7 +3923,8 @@ export function registerLightyearTools(
         let gainsMap = new Map<string, CapitalGainsRow>();
         const sourceSnapshots: FileInputSnapshot[] = [statementSnapshot];
         if (gainsSource) {
-          const gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext);
+          const gainsSnapshot = await readCsvSnapshot(gainsSource, FILE_REFERENCE_OPERATIONS.lightyearGains, runtimeSafetyContext, bindings[1]);
+          sourcePaths.push(planBoundFileReference(gainsSource, gainsSnapshot, FILE_REFERENCE_OPERATIONS.lightyearGains));
           const gainsRows = parseCapitalGains(gainsSnapshot.text());
           const sells = trades.filter(t => t.type === "Sell");
           gainsMap = matchSellsToCapitalGains(sells, gainsRows, gainsWarnings);
@@ -3925,11 +3947,11 @@ export function registerLightyearTools(
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
           gainAccount, lossAccount, feeAccount,
         });
-        return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots };
+        return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths };
       };
 
       if (isDryRun) {
-        const { projection, sourceIdentities } = await buildTradesProjection();
+        const { projection, sourceIdentities, sourcePaths } = await buildTradesProjection();
         const postingErrors = await validateProjectedPostings(api, accounts, projection.commands);
         if (postingErrors.length > 0) return toolError({ error: "Account validation failed", details: postingErrors });
         const planHandleIssued = runtimeSafetyContext.planStore.issue(
@@ -3937,6 +3959,7 @@ export function registerLightyearTools(
           buildLightyearExecutionPlanInput({
             normalizedArgs,
             sourceIdentities,
+            privateExtras: { source_paths: sourcePaths },
             liveSnapshot: { accounts: projection.accounts },
             reviewCommands: tradesReviewCommands(projection),
             fingerprint: tradesFingerprint(projection, normalizedArgs),
@@ -3978,11 +4001,9 @@ export function registerLightyearTools(
       let projection: TradesProjection;
       let sourceSnapshots: FileInputSnapshot[];
       try {
-        ({ projection, sourceSnapshots } = await buildTradesProjection());
+        ({ projection, sourceSnapshots } = await buildTradesProjection(storedSourceBindings(storedPlan.privatePayload)));
       } catch (error) {
-        if (error instanceof FileInputSnapshotError) {
-          return planErrorResult("plan_drift", "A reviewed Lightyear source could not be re-read to match the plan.");
-        }
+        if (error instanceof FileInputSnapshotError) return sourceReReadDrift(error, "A reviewed Lightyear source");
         throw error;
       }
 
@@ -4056,12 +4077,12 @@ export function registerLightyearTools(
 
       // Load the statement once per run to derive the deterministic distribution
       // set and its source identity; execute re-reads and re-validates it.
-      const readDistributions = async (): Promise<{
+      const readDistributions = async (binding?: unknown): Promise<{
         snapshot: FileInputSnapshot;
         distributions: LightyearDistribution[];
         warnings: string[];
       }> => {
-        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext);
+        const snapshot = await readCsvSnapshot(statementSource, FILE_REFERENCE_OPERATIONS.lightyearStatement, runtimeSafetyContext, binding);
         const rows = parseAccountStatement(snapshot.text());
         const extraction = extractDistributions(rows, collectTradeReservedConversionRefs(rows));
         return { snapshot, distributions: extraction.distributions, warnings: extraction.warnings };
@@ -4171,6 +4192,7 @@ export function registerLightyearTools(
           buildLightyearExecutionPlanInput({
             normalizedArgs,
             sourceIdentities: [sourceIdentityRecord(snapshot)],
+            privateExtras: { source_paths: [planBoundFileReference(statementSource, snapshot, FILE_REFERENCE_OPERATIONS.lightyearStatement)] },
             liveSnapshot: { income_account, interest_account, fund_distribution_account, reward_account, ...(tax_account !== undefined ? { tax_account } : {}) },
             reviewCommands: distributionsReviewCommands(projection),
             fingerprint: distributionsFingerprint(projection, normalizedArgs),
@@ -4226,11 +4248,9 @@ export function registerLightyearTools(
       let distributions: LightyearDistribution[];
       let warnings: string[];
       try {
-        ({ snapshot, distributions, warnings } = await readDistributions());
+        ({ snapshot, distributions, warnings } = await readDistributions(storedSourceBindings(storedPlan.privatePayload)[0]));
       } catch (error) {
-        if (error instanceof FileInputSnapshotError) {
-          return planErrorResult("plan_drift", "The reviewed Lightyear statement could not be re-read to match the plan.");
-        }
+        if (error instanceof FileInputSnapshotError) return sourceReReadDrift(error, "The reviewed Lightyear statement");
         throw error;
       }
       const drift = lightyearSourceDrift(snapshot, storedPlan.sourceIdentities[0], "The Lightyear statement");

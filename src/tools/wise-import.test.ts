@@ -567,6 +567,40 @@ describe("wise import tool", () => {
     })]);
   });
 
+  it("#13 execute after the inbox file_ref expired re-reads the reviewed path", async () => {
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "CARD_TRANSACTION-1301", date: "2026-01-11", sourceAmount: "30", targetName: "Other Ltd" }),
+    ]));
+    const context = createTestRuntimeSafetyContext();
+    const setup = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+    const file_ref = context.fileReferenceStore.issue({ canonicalPath: "/tmp/wise.csv", kind: "file", operation: "wise_input" });
+    const args = { file_ref, accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+    context.advanceTime(5 * 60_000);
+    const dry = parseWiseResponse(await setup.rawHandler({ ...args, execute: false }));
+    context.advanceTime(7 * 60_000);
+    const executed = await setup.rawHandler({
+      ...args, execute: true, approved_command_digest: dry.approved_command_digest, plan_handle: dry.plan_handle,
+    });
+    expect(executed.isError).toBeFalsy();
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+
+    // Bytes changed at the reviewed path: plan_drift with reason file_changed.
+    const changedSetup = setupWiseTool([], undefined, { runtimeSafetyContext: context });
+    const changedRef = context.fileReferenceStore.issue({ canonicalPath: "/tmp/wise.csv", kind: "file", operation: "wise_input" });
+    const changedArgs = { ...args, file_ref: changedRef };
+    context.advanceTime(5 * 60_000);
+    const reviewed = parseWiseResponse(await changedSetup.rawHandler({ ...changedArgs, execute: false }));
+    context.advanceTime(7 * 60_000);
+    mockedReadFile.mockResolvedValue(buildCsvRows([
+      buildM04Values({ id: "CARD_TRANSACTION-1302", date: "2026-01-11", sourceAmount: "31", targetName: "Other Ltd" }),
+    ]));
+    const drifted = parseWiseResponse<WiseFailurePayload>(await changedSetup.rawHandler({
+      ...changedArgs, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(drifted).toMatchObject({ category: "plan_drift", reason: "file_changed" });
+    expect(changedSetup.api.transactions.create).not.toHaveBeenCalled();
+  });
+
   it("the only untagged CONFIRMED lookalike whose registration journal proves the movement is not duplicated (wise_untagged_ledger_unique)", async () => {
     mockedReadFile.mockResolvedValue(buildCsvRows([
       buildM04Values({ id: "CARD_TRANSACTION-4401", date: "2026-01-10", sourceAmount: "12.5", targetName: "Acme Ltd" }),

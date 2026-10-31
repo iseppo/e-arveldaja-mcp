@@ -23,7 +23,9 @@ export type FileInputSnapshotErrorCode =
   | "file_input_source_invalid"
   | "file_input_unavailable"
   | "file_input_reference_mismatch"
-  | "file_input_reference_expired";
+  | "file_input_reference_expired"
+  | "file_input_reference_invalid"
+  | "file_input_reference_scope_mismatch";
 
 const SAFE_MESSAGES: Readonly<Record<FileInputSnapshotErrorCode, string>> = Object.freeze({
   file_input_changed: "The file input no longer matches the reviewed source bytes.",
@@ -31,7 +33,9 @@ const SAFE_MESSAGES: Readonly<Record<FileInputSnapshotErrorCode, string>> = Obje
   file_input_source_invalid: "Provide exactly one direct file path/input or opaque file reference.",
   file_input_unavailable: "The file input could not be safely resolved and read.",
   file_input_reference_mismatch: "The file reference was issued for a different tool or input kind. Use the file_ref from the accounting_inbox recommended step for this tool (guided: process_bank_input), or pass file_path.",
-  file_input_reference_expired: "The file reference is unknown or expired, or the runtime scope changed. Re-run accounting_inbox for a fresh reference, or pass file_path.",
+  file_input_reference_expired: "The file reference has expired. Re-run accounting_inbox for a fresh reference, or pass file_path.",
+  file_input_reference_invalid: "The file reference is unknown or expired. Re-run accounting_inbox for a fresh reference, or pass file_path.",
+  file_input_reference_scope_mismatch: "The file reference was issued for another connection or runtime scope. Re-run accounting_inbox for a fresh reference, or pass file_path.",
 });
 
 /** A file-reference store rejection, mapped before anything is read. Refs are
@@ -44,9 +48,11 @@ function fileReferenceErrorCode(error: unknown): FileInputSnapshotErrorCode {
     case "file_reference_kind_mismatch":
       return "file_input_reference_mismatch";
     case "file_reference_invalid":
+      return "file_input_reference_invalid";
     case "file_reference_expired":
-    case "file_reference_scope_mismatch":
       return "file_input_reference_expired";
+    case "file_reference_scope_mismatch":
+      return "file_input_reference_scope_mismatch";
     default:
       return "file_input_unavailable";
   }
@@ -102,11 +108,19 @@ export interface CaptureFileInputOptions {
 export class FileInputSnapshot {
   readonly identity: FileInputIdentity;
   readonly #content: Buffer;
+  readonly #canonicalPath: string | undefined;
 
-  constructor(identity: FileInputIdentity, content: Uint8Array) {
+  constructor(identity: FileInputIdentity, content: Uint8Array, canonicalPath?: string) {
     this.identity = Object.freeze({ ...identity });
     this.#content = Buffer.from(content);
+    this.#canonicalPath = canonicalPath;
     Object.freeze(this);
+  }
+
+  /** The resolved local path that was read (undefined for inline input). Kept
+   * private to the process: plans store it only in `privatePayload`. */
+  canonicalPath(): string | undefined {
+    return this.#canonicalPath;
   }
 
   bytes(): Buffer {
@@ -220,7 +234,7 @@ export async function captureFileInputSnapshot(
     digest_sha256: digest(immutable),
     size_bytes: immutable.byteLength,
     extension,
-  }, immutable);
+  }, immutable, inline ? undefined : resolved.path);
 }
 
 function identitiesMatch(actual: FileInputIdentity, expected: FileInputIdentity): boolean {
@@ -302,4 +316,109 @@ export async function assertMatchingFileInputSnapshot(
   const validatedIdentity = validatedExpectedIdentity(expectedIdentity, options);
   const snapshot = await captureFileInputSnapshot(source, options, dependencies);
   return assertFileInputSnapshotIdentity(snapshot, validatedIdentity, options);
+}
+
+/** Why an execute-time source re-read failed, for a `plan_drift` answer. */
+export type SourceReReadFailureReason =
+  | "file_ref_expired"
+  | "file_ref_scope_changed"
+  | "file_ref_mismatch"
+  | "file_unavailable"
+  | "file_changed"
+  | "source_invalid";
+
+const RE_READ_FAILURE_MESSAGES: Readonly<Record<SourceReReadFailureReason, string>> = Object.freeze({
+  file_ref_expired: "the file reference has expired and the reviewed file could not be re-read in its place; re-run the dry run with a fresh file_ref or with file_path",
+  file_ref_scope_changed: "the file reference belongs to another connection or runtime scope; re-run the dry run in this scope",
+  file_ref_mismatch: "the file reference was issued for another tool or input kind, or differs from the one the plan reviewed",
+  file_unavailable: "the reviewed file could not be read (moved, deleted or unreadable)",
+  file_changed: "the reviewed file's bytes or location changed since the dry run",
+  source_invalid: "the source arguments are invalid (pass exactly one of file_path / file_ref)",
+});
+
+/** One mapping from a re-read failure to the `plan_drift` reason and message,
+ * shared by every execute path. */
+export function describeSourceReReadFailure(code: FileInputSnapshotErrorCode): {
+  reason: SourceReReadFailureReason;
+  message: string;
+} {
+  const reason: SourceReReadFailureReason =
+    code === "file_input_reference_expired" || code === "file_input_reference_invalid" ? "file_ref_expired" :
+    code === "file_input_reference_scope_mismatch" ? "file_ref_scope_changed" :
+    code === "file_input_reference_mismatch" ? "file_ref_mismatch" :
+    code === "file_input_unavailable" ? "file_unavailable" :
+    code === "file_input_changed" ? "file_changed" :
+    "source_invalid";
+  return { reason, message: RE_READ_FAILURE_MESSAGES[reason] };
+}
+
+/** The private plan binding of a `file_ref` source: the ref string, its
+ * operation and the canonical path the dry run read. */
+export interface PlanBoundFileReference {
+  readonly file_ref: string;
+  readonly operation: string;
+  readonly kind: "file";
+  readonly canonical_path: string;
+}
+
+/** The binding a dry run stores in `privatePayload.source_paths[i]`; null for
+ * a direct `file_path` source (nothing to fall back to). */
+export function planBoundFileReference(
+  source: FileInputSource,
+  snapshot: FileInputSnapshot,
+  operation: string,
+): { readonly [key: string]: string } | null {
+  const canonicalPath = snapshot.canonicalPath();
+  if (typeof source.file_ref !== "string" || canonicalPath === undefined) return null;
+  return { file_ref: source.file_ref, operation, kind: "file", canonical_path: canonicalPath };
+}
+
+/** `privatePayload.source_paths` of a stored plan, if present. */
+export function storedSourceBindings(privatePayload: unknown): readonly unknown[] {
+  if (typeof privatePayload !== "object" || privatePayload === null || Array.isArray(privatePayload)) return [];
+  const bindings = (privatePayload as { readonly source_paths?: unknown }).source_paths;
+  return Array.isArray(bindings) ? bindings : [];
+}
+
+function validBinding(candidate: unknown): PlanBoundFileReference | undefined {
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return undefined;
+  const record = candidate as Record<string, unknown>;
+  return typeof record.file_ref === "string" && typeof record.operation === "string" && record.kind === "file" &&
+    typeof record.canonical_path === "string" && isAbsolute(record.canonical_path)
+    ? record as unknown as PlanBoundFileReference
+    : undefined;
+}
+
+/**
+ * Execute-time re-read of a source the consumed plan reviewed. Resolves the
+ * `file_ref` as usual; only when that ref is byte-equal to the one the plan
+ * bound, for the same operation, and the store says it expired (or no longer
+ * knows it — an expired ref is purged by the next issue), the reviewed
+ * canonical path is read instead. A different ref, a scope / operation / kind
+ * mismatch never falls back. The caller still checks the plan's identity
+ * (locator, digest, size, extension), which proves it is the reviewed file.
+ */
+export async function capturePlanBoundFileInputSnapshot(
+  source: FileInputSource,
+  binding: unknown,
+  options: CaptureFileInputOptions,
+  dependencies: FileInputSnapshotDependencies = {},
+): Promise<FileInputSnapshot> {
+  try {
+    return await captureFileInputSnapshot(source, options, dependencies);
+  } catch (error) {
+    const bound = validBinding(binding);
+    if (
+      error instanceof FileInputSnapshotError &&
+      (error.code === "file_input_reference_expired" || error.code === "file_input_reference_invalid") &&
+      bound !== undefined &&
+      Object.prototype.hasOwnProperty.call(source, "file_ref") &&
+      !Object.prototype.hasOwnProperty.call(source, "file_path") &&
+      source.file_ref === bound.file_ref &&
+      bound.operation === options.operation
+    ) {
+      return captureFileInputSnapshot({ file_path: bound.canonical_path }, options, dependencies);
+    }
+    throw error;
+  }
 }

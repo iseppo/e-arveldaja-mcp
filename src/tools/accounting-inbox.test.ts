@@ -151,7 +151,7 @@ it("routes a hostile Inbox filename through a clean opaque file_ref", async () =
   await expect(getRegisteredToolHandler(server, "process_camt053")({
     mode: "parse",
     file_ref: step.suggested_args.file_ref,
-  })).rejects.toThrow("unknown or expired");
+  })).rejects.toThrow("has expired");
 });
 
 it("round-trips same-context Inbox Wise and receipt refs and rejects receipt wrong-kind refs", async () => {

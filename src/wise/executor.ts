@@ -4,8 +4,12 @@ import type { ApiContext } from "../tools/crud/shared.js";
 import type { RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
   assertFileInputSnapshotIdentity,
-  captureFileInputSnapshot,
+  capturePlanBoundFileInputSnapshot,
+  describeSourceReReadFailure,
   FileInputSnapshotError,
+  planBoundFileReference,
+  storedSourceBindings,
+  type SourceReReadFailureReason,
   type FileInputSource,
   type FileInputSnapshot,
 } from "../file-input-snapshot.js";
@@ -124,7 +128,7 @@ export type WiseFailure =
   | { kind: "plan_store_error"; code: string; message: string }
   | { kind: "plan_handle_required" }
   | { kind: "digest_mismatch" }
-  | { kind: "plan_drift"; detail: string }
+  | { kind: "plan_drift"; detail: string; reason?: SourceReReadFailureReason }
   | { kind: "ownership_reapproval_required" }
   | { kind: "wise_client_not_found" }
   | { kind: "wise_dimension_not_bank_account" };
@@ -192,6 +196,8 @@ export interface WiseRunInput {
    * not read the source a second time. Absent for the granular
    * import_wise_transactions path, which captures internally under wise_input. */
   readonly snapshot?: FileInputSnapshot;
+  /** The file-reference operation `snapshot` was captured under (default wise_input). */
+  readonly sourceOperation?: string;
 }
 
 export interface WisePrepareRunInput extends WiseRunInput {
@@ -241,10 +247,10 @@ async function runWiseImport(
     // bytes when present so a bank_input file_ref is never re-resolved under
     // wise_input and the source is read only once. The granular path passes no
     // snapshot and captures internally under wise_input — byte-identical.
-    inputSnapshot = input.snapshot ?? await captureFileInputSnapshot({
+    inputSnapshot = input.snapshot ?? await capturePlanBoundFileInputSnapshot({
       ...(source.file_path !== undefined ? { file_path: source.file_path } : {}),
       ...(source.file_ref !== undefined ? { file_ref: source.file_ref } : {}),
-    }, {
+    }, storedSourceBindings(storedWisePlan?.privatePayload)[0], {
       runtimeSafetyContext,
       operation: FILE_REFERENCE_OPERATIONS.wise,
       allowedExtensions: [".csv"],
@@ -254,7 +260,8 @@ async function runWiseImport(
     // On execute the handle is already burned; a source that cannot be
     // re-read to match the reviewed plan is drift, not a fresh failure.
     if (executeRequested && error instanceof FileInputSnapshotError) {
-      return { ok: false, failure: { kind: "plan_drift", detail: "the Wise source could not be re-read to match the reviewed plan" } };
+      const { reason, message } = describeSourceReReadFailure(error.code);
+      return { ok: false, failure: { kind: "plan_drift", reason, detail: `the Wise source could not be re-read to match the reviewed plan: ${message}` } };
     }
     throw error;
   }
@@ -714,6 +721,7 @@ async function runWiseImport(
         approved_transfer_ids: [...approvedTransferIds],
         unverified_ownership_ids: [...unverifiedOwnershipIds],
         normalized_args: canonicalPlanJson(canonicalPlanningArgs),
+        source_paths: [planBoundFileReference(source, inputSnapshot, input.sourceOperation ?? FILE_REFERENCE_OPERATIONS.wise)],
       },
     };
     planHandle = runtimeSafetyContext.planStore.issue(WISE_PLAN_DOMAIN, planInput);
@@ -741,6 +749,7 @@ async function runWiseImport(
         ok: false,
         failure: {
           kind: "plan_drift",
+          reason: describeSourceReReadFailure(error.code).reason,
           detail: error.code === "file_input_changed"
             ? "the Wise source file (bytes or location) changed since the plan was reviewed"
             : "the reviewed Wise plan's source identity is invalid",

@@ -35,6 +35,8 @@ export type CamtPlanErrorPayload = {
   error: string;
   category: string;
   retry?: OperationFailure["retry"];
+  /** plan_drift from a source re-read: why (`describeSourceReReadFailure`). */
+  reason?: string;
   mutation_occurred: false;
 };
 
@@ -63,11 +65,12 @@ interface AdapterResult {
 // "safe"/"unknown" for an upstream one), so dropping it here discarded a real
 // per-site signal and left every CAMT failure looking equally unretryable.
 function planErrorPayload(
-  error: { code: string; message: string; retry?: OperationFailure["retry"] },
+  error: { code: string; message: string; retry?: OperationFailure["retry"]; reason?: string },
 ): CamtPlanErrorPayload {
   return {
     error: error.message,
     category: error.code,
+    ...(error.reason !== undefined ? { reason: error.reason } : {}),
     ...(error.retry !== undefined ? { retry: error.retry } : {}),
     mutation_occurred: false,
   };

@@ -33,6 +33,11 @@ describe("buildExecutionPlanInput", () => {
     expect(input.privatePayload).toEqual({ fingerprint: "fp" });
   });
 
+  it("merges optional private extras next to the fingerprint (#13)", () => {
+    const input = buildExecutionPlanInput({ ...ARGS, privateExtras: { source_paths: [null], fingerprint: "spoof" } });
+    expect(input.privatePayload).toEqual({ source_paths: [null], fingerprint: "fp" });
+  });
+
   it("is what the reconciliation and Lightyear plan modules build", () => {
     expect(buildReconciliationExecutionPlanInput).toBe(buildExecutionPlanInput);
     expect(buildLightyearExecutionPlanInput).toBe(buildExecutionPlanInput);

@@ -50,6 +50,8 @@ export type WiseFailurePayload = {
   error: string;
   category?: string;
   code?: string;
+  /** plan_drift from a source re-read: why (`describeSourceReReadFailure`). */
+  reason?: string;
   retry: "never";
   mutation_occurred: false;
   known_object_ids?: number[];
@@ -249,11 +251,12 @@ function planStoreErrorResult(error: Pick<PlanStoreError, "code" | "message">) {
 
 /** Any source/argument/live/command drift between the reviewed plan and the
  * re-derived plan stops execution with zero mutations. */
-function planDriftResult(detail: string) {
+function planDriftResult(detail: string, reason?: string) {
   return toolError({
     error: `The reviewed Wise plan no longer matches the re-read source and current ledger: ${detail}`,
     category: "plan_drift",
     code: "plan_drift",
+    ...(reason !== undefined ? { reason } : {}),
     retry: "never",
     mutation_occurred: false,
     known_object_ids: [],
@@ -293,7 +296,7 @@ export function renderWiseFailure(failure: WiseFailure) {
   switch (failure.kind) {
     case "preflight": return wisePreflightFailure(failure.rejected);
     case "plan_store_error": return planStoreErrorResult({ code: failure.code, message: failure.message } as Pick<PlanStoreError, "code" | "message">);
-    case "plan_drift": return planDriftResult(failure.detail);
+    case "plan_drift": return planDriftResult(failure.detail, failure.reason);
     default: return toolError(SIMPLE_WISE_FAILURES[failure.kind]);
   }
 }
