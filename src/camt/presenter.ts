@@ -248,6 +248,9 @@ export function camtResultRow(
     ref_number: canonicalRefNumber(descriptor.entry.reference_number).value,
     clients_id: descriptor.clientResolution.clients_id,
     client_match: descriptor.clientResolution.match_type,
+    ...(descriptor.clientResolution.match_type === "deactivated_only"
+      ? { client_note: "Only a deactivated client matches this counterparty; no client was set. Reactivate it or choose another client." }
+      : {}),
     ...(apiId !== undefined ? { api_id: apiId } : {}),
     ...(descriptor.entry.review_note !== undefined ? { review_note: descriptor.entry.review_note } : {}),
     ...(descriptor.storedDescription !== descriptor.entry.description

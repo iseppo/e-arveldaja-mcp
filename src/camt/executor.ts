@@ -7,6 +7,7 @@ import { BookingGuard, companyLedgerLockScope } from "../booking-guard.js";
 import { logAudit } from "../audit-log.js";
 import { reportProgress } from "../progress.js";
 import { normalizeCompanyName } from "../company-name.js";
+import { isLiveClient } from "../api/clients.api.js";
 import { isNonVoidTransaction } from "../transaction-status.js";
 import { createBankTransaction } from "../bank-transaction-create.js";
 import { decodeApiResponseCritical } from "../api/critical-codecs.js";
@@ -252,23 +253,29 @@ async function resolveClientForEntry(
     if (cached) return cached;
 
     const match = await api.clients.findByCode(entry.counterparty_reg_code);
-    const resolution: ClientResolution = match?.id
+    // A deactivated client is never attached automatically; the name tier
+    // below may still find a live one, else the row reports deactivated_only.
+    const resolution: ClientResolution = match?.id && isLiveClient(match)
       ? {
           clients_id: match.id,
           match_type: "reg_code",
           matched_client_name: match.name,
         }
-      : {};
+      : match?.id ? { match_type: "deactivated_only" } : {};
 
     cache.byCode.set(entry.counterparty_reg_code, resolution);
     if (resolution.clients_id) return resolution;
   }
+  const deactivatedCodeHit = entry.counterparty_reg_code
+    ? cache.byCode.get(entry.counterparty_reg_code)?.match_type === "deactivated_only"
+    : false;
+  const unresolved = (): ClientResolution => deactivatedCodeHit ? { match_type: "deactivated_only" } : {};
 
   const cacheKey = entry.counterparty_name?.trim().replace(/\s+/g, " ").toLowerCase();
-  if (!cacheKey) return {};
+  if (!cacheKey) return unresolved();
 
   const normalizedName = normalizeCompanyName(entry.counterparty_name);
-  if (!normalizedName) return {};
+  if (!normalizedName) return unresolved();
 
   // The registry code is part of the key: the same name with a different
   // statement code can resolve differently (code-conflict rejection below).
@@ -277,7 +284,15 @@ async function resolveClientForEntry(
   if (cached) return cached;
 
   const matches = await api.clients.findByName(entry.counterparty_name!);
-  const { selected, match_type: matchType } = selectClientByName(normalizedName, matches, entry.counterparty_reg_code);
+  const { selected, match_type: matchType } = selectClientByName(
+    normalizedName,
+    matches.filter(isLiveClient),
+    entry.counterparty_reg_code,
+  );
+  const deactivatedOnly = !selected?.id && (
+    deactivatedCodeHit ||
+    selectClientByName(normalizedName, matches.filter(client => !isLiveClient(client)), entry.counterparty_reg_code).selected !== undefined
+  );
 
   const resolution: ClientResolution = selected?.id
     ? {
@@ -285,7 +300,7 @@ async function resolveClientForEntry(
         match_type: matchType,
         matched_client_name: selected.name,
       }
-    : {};
+    : deactivatedOnly ? { match_type: "deactivated_only" } : {};
 
   cache.byName.set(nameCacheKey, resolution);
   return resolution;

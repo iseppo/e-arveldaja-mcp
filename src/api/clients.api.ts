@@ -2,6 +2,14 @@ import type { HttpClient } from "../http-client.js";
 import type { Client, ApiResponse } from "../types/api.js";
 import { BaseResource } from "./base-resource.js";
 
+/**
+ * A client that automatic matching may pick: not deleted, not deactivated.
+ * CRUD lookups (`findByName` / `findByCode`) still return deactivated clients.
+ */
+export function isLiveClient(client: Pick<Client, "is_deleted" | "is_active" | "deactivated_date">): boolean {
+  return !client.is_deleted && client.is_active !== false && !client.deactivated_date;
+}
+
 export class ClientsApi extends BaseResource<Client> {
   constructor(client: HttpClient) {
     super(client, "/clients");

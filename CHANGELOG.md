@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deactivated customers and suppliers are never picked automatically any more.** Before, a deactivated client with a matching name or registry code could be chosen by a bank import or receipt booking. Details: automatic client matching in CAMT import, supplier resolution (receipt batch, PDF and document booking), Wise import and the inter-account own-company lookup uses only live clients (`isLiveClient`: not deleted, `is_active` not false, no `deactivated_date`; clients without those fields count as live). When only a deactivated client matches, CAMT leaves `clients_id` unset with `client_match: "deactivated_only"` and a `client_note`; supplier resolution returns `requires_manual_review` with `code: "supplier_client_deactivated"` (receipt batch → `needs_review`) and never creates a new supplier in its place. CRUD lookups (`search_client` / `find_client_by_code`, record search) still show deactivated clients.
+
 ## [0.38.0] - 2026-10-31
 
 ### Fixed

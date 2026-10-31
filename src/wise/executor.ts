@@ -30,6 +30,7 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { buildBankDimensionCandidates } from "../resolution/bank-account-resolution.js";
 import { buildBankAccountLookups } from "../tools/inter-account-utils.js";
 import { selectClientByName } from "../camt/executor.js";
+import { isLiveClient } from "../api/clients.api.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { resolveWiseRowCounterparts, wiseCounterpartHoldReview } from "./counterpart.js";
 import {
@@ -488,7 +489,7 @@ async function runWiseImport(
   );
   let ownCompanyClientMatches: Awaited<ReturnType<typeof api.clients.findByName>> = [];
   if (approvedTransferDecisions.length > 0 && invoiceInfoSnapshot?.invoice_company_name) {
-    ownCompanyClientMatches = await api.clients.findByName(invoiceInfoSnapshot.invoice_company_name);
+    ownCompanyClientMatches = (await api.clients.findByName(invoiceInfoSnapshot.invoice_company_name)).filter(isLiveClient);
   }
   const ownCompanyClientId = resolveOwnCompanyClientId(
     invoiceInfoSnapshot?.invoice_company_name ?? undefined,
@@ -522,7 +523,7 @@ async function runWiseImport(
       // Exact normalized name only (owner decision): CAMT's single substring
       // match is not taken here, since a Wise row has no registry code to
       // veto a similar but different client ("Seppo" vs "Indrek Seppo").
-      const { selected, match_type, exact_match_count } = selectClientByName(normalizedName, await api.clients.findByName(name));
+      const { selected, match_type, exact_match_count } = selectClientByName(normalizedName, (await api.clients.findByName(name)).filter(isLiveClient));
       resolution = selected?.id !== undefined && match_type === "exact_name"
         ? { clients_id: selected.id, match_type, matched_client_name: selected.name }
         : exact_match_count > 1 ? { ambiguous: true } : {};
@@ -550,7 +551,7 @@ async function runWiseImport(
     const currentClients = await api.clients.listAll();
     for (const [row, clientsId] of historyCandidates) {
       const client = currentClients.find(candidate => candidate.id === clientsId);
-      const live = client !== undefined && client.is_deleted !== true && client.is_active !== false && !client.deactivated_date;
+      const live = client !== undefined && isLiveClient(client);
       clientResolutions.set(row, live ? { clients_id: clientsId, match_type: "confirmed_history", matched_client_name: client.name } : {});
     }
   }
@@ -889,7 +890,7 @@ async function runWiseImport(
         if (resolved !== undefined && resolved === approved) {
           api.clients.invalidateListCache();
           const client = (await api.clients.listAll()).find(candidate => candidate.id === resolved);
-          live = client !== undefined && client.is_deleted !== true && client.is_active !== false && !client.deactivated_date;
+          live = client !== undefined && isLiveClient(client);
         }
         if (resolved !== approved || !live) {
           blockedRows.add(command.row_index);

@@ -1,4 +1,5 @@
 import type { ApiContext } from "../../tools/crud/shared.js";
+import { isLiveClient } from "../../api/clients.api.js";
 import { snapshotBankTransaction, compareBankTransactionMaterial, changedLinkedInvoiceFields, TransactionMaterialDriftError } from "../transaction-material-snapshot.js";
 import { findRegistrationJournal } from "../receipt-ledger-check.js";
 import { confirmedDistributionEvidence } from "./confirmed-transfer-proof.js";
@@ -994,7 +995,7 @@ export async function runInterAccountMatching(
     if (companyClientsIdResolved) return resolvedCompanyClientsId;
     companyClientsIdResolved = true;
     if (companyName) {
-      const clients = await api.clients.findByName(invoiceInfo.invoice_company_name ?? "");
+      const clients = (await api.clients.findByName(invoiceInfo.invoice_company_name ?? "")).filter(isLiveClient);
       const exact = clients.find(c => normalizeCompanyName(c.name) === companyName);
       resolvedCompanyClientsId = exact?.id ?? null;
     }

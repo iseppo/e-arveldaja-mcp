@@ -482,7 +482,11 @@ async function processSingleReceipt(
     }
     if (!supplierResolution.client && !supplierResolution.preview_client) {
       const fallback = summarize();
-      notes.push("Supplier could not be resolved or prepared for creation.");
+      notes.push(
+        supplierResolution.code === "supplier_client_deactivated" && supplierResolution.reason
+          ? supplierResolution.reason
+          : "Supplier could not be resolved or prepared for creation.",
+      );
       maybeAddLlmFallbackNote(notes, fallback);
       return buildNeedsReviewResult(file, classification, extracted, fallback, notes, {
         supplier_resolution: supplierResolution,

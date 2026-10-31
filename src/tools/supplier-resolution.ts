@@ -64,7 +64,7 @@ export interface SupplierResolution {
    * operator attestation for a foreign registration. When present the caller
    * must create NEITHER the supplier NOR the invoice.
    */
-  code?: "legal_entity_identity_required" | "supplier_name_unverified";
+  code?: "legal_entity_identity_required" | "supplier_name_unverified" | "supplier_client_deactivated";
   /**
    * Set with supplier_name_unverified: what this call's registry lookup returned
    * (never the name, which may be the text-derived fallback).
@@ -205,6 +205,9 @@ export async function resolveSupplierInternal(
   }
   if (matchOutcome.kind === "ambiguous") {
     return { found: false, created: false, requires_manual_review: true, reason: matchOutcome.reason };
+  }
+  if (matchOutcome.kind === "review") {
+    return { found: false, created: false, requires_manual_review: true, code: matchOutcome.code, reason: matchOutcome.reason };
   }
   if (matchOutcome.kind === "conflict") {
     return {

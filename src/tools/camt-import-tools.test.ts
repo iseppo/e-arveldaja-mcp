@@ -3746,3 +3746,38 @@ describe("camt import — journals that already book the movement (F1)", () => {
     expect(api.transactions.create).not.toHaveBeenCalled();
   });
 });
+
+describe("camt import — deactivated clients are never auto-selected (#12)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("chooses the live client over a deactivated exact-name twin", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { handler } = setupCamtTool({
+      findByNameResult: [
+        { id: 90, name: "Vendor OÜ", is_active: false, deactivated_date: "2026-01-01" },
+        // Live API shape: no is_active / deactivated_date fields at all.
+        { id: 91, name: "Vendor OÜ Tallinn" },
+      ],
+    });
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseToolPayload<CamtImportFullPayload>(result.content[0]!.text);
+    expect(payload.sample[0]).toMatchObject({ clients_id: 91, client_match: "single_name_match" });
+  });
+
+  it("leaves the client unset with deactivated_only when only a deactivated client matches", async () => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/camt.xml" });
+    mockedReadFile.mockResolvedValue(singleEntryXml);
+    const { handler } = setupCamtTool({
+      findByNameResult: [{ id: 90, name: "Vendor OÜ", is_active: false }],
+    });
+    const result = await handler({ file_path: "/tmp/camt.xml", accounts_dimensions_id: 7 });
+    const payload = parseToolPayload<CamtImportFullPayload>(result.content[0]!.text);
+    const row = payload.sample[0]!;
+    expect(row.client_match).toBe("deactivated_only");
+    expect(row.clients_id).toBeUndefined();
+    expect(row.client_note).toContain("deactivated");
+  });
+});

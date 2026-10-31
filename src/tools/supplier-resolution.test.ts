@@ -941,3 +941,22 @@ describe("resolveSupplierInternal — P2 E1 supplier-name proof at the client-cr
     expect(create).not.toHaveBeenCalled();
   });
 });
+
+describe("resolveSupplierInternal — deactivated supplier (#12)", () => {
+  it("a registry code matching only a deactivated client needs review and previews no new supplier", async () => {
+    const result = await resolveSupplierInternal(
+      stubApi,
+      [makeClient({ id: 700, name: "Vana Tarnija OÜ", code: "16800007", is_active: false })],
+      { supplier_reg_code: "16800007", supplier_name: "Vana Tarnija OÜ" },
+      true,
+    );
+    expect(result).toMatchObject({
+      found: false,
+      created: false,
+      requires_manual_review: true,
+      code: "supplier_client_deactivated",
+    });
+    expect(result.client).toBeUndefined();
+    expect(result.preview_client).toBeUndefined();
+  });
+});

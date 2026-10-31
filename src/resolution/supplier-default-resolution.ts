@@ -17,6 +17,7 @@
  */
 import { closest, distance } from "fastest-levenshtein";
 import type { Client } from "../types/api.js";
+import { isLiveClient } from "../api/clients.api.js";
 import { normalizeCompanyName, sameCompanyIdentity, stripSocialHandles } from "../company-name.js";
 import { normalizeVatValue } from "../document-identifiers.js";
 import { desandboxText } from "../external-text-renderer.js";
@@ -44,6 +45,8 @@ export type SupplierMatchOutcome =
   | { kind: "conflict"; reason: string }
   /** More than one active client ties on the supplier name — never pick one. */
   | { kind: "ambiguous"; reason: string }
+  /** Only a deactivated client matches — never selected, never replaced by an auto-created one. */
+  | { kind: "review"; code: "supplier_client_deactivated"; reason: string; client: Client }
   | {
       kind: "no_match";
       selfMatchBlocked: boolean;
@@ -103,6 +106,13 @@ export function matchSupplier(
     return undefined;
   };
 
+  const deactivatedReview = (client: Client, by: string): SupplierMatchOutcome => ({
+    kind: "review",
+    code: "supplier_client_deactivated",
+    reason: `The supplier's ${by} matches only a deactivated client (id ${String(client.id)}) — reactivate it or resolve the supplier manually; no new supplier is created in its place.`,
+    client,
+  });
+
   const noMatch = (): SupplierMatchOutcome => ({
     kind: "no_match",
     selfMatchBlocked,
@@ -116,7 +126,10 @@ export function matchSupplier(
       selfMatchBlocked = true;
     } else {
       const regCode = fields.supplier_reg_code.trim();
-      const byCode = clients.find(client => client.code?.trim() === regCode && !client.is_deleted);
+      const codeMatches = clients.filter(client => client.code?.trim() === regCode && !client.is_deleted);
+      const byCode = codeMatches.find(isLiveClient);
+      const deactivatedByCode = byCode ? undefined : codeMatches.find(client => !isSelfClient(client));
+      if (deactivatedByCode) return deactivatedReview(deactivatedByCode, "registry code");
       if (byCode) {
         if (isSelfClient(byCode)) {
           selfMatchBlocked = true;
@@ -132,10 +145,13 @@ export function matchSupplier(
     if (normalizedVat && ownVat && normalizedVat === ownVat) {
       selfMatchBlocked = true;
     } else if (normalizedVat) {
-      const byVat = clients.find(client =>
+      const vatMatches = clients.filter(client =>
         !client.is_deleted &&
         normalizeVatValue(client.invoice_vat_no) === normalizedVat,
       );
+      const byVat = vatMatches.find(isLiveClient);
+      const deactivatedByVat = byVat ? undefined : vatMatches.find(client => !isSelfClient(client));
+      if (deactivatedByVat) return deactivatedReview(deactivatedByVat, "VAT number");
       if (byVat) {
         if (isSelfClient(byVat)) {
           selfMatchBlocked = true;
@@ -147,7 +163,7 @@ export function matchSupplier(
   }
 
   if (fields.supplier_name) {
-    const activeClients = clients.filter(client => !client.is_deleted && !isSelfClient(client));
+    const activeClients = clients.filter(client => isLiveClient(client) && !isSelfClient(client));
 
     // A social handle printed next to the name ("Anthropic, PBC @anthropic")
     // is not part of it, in every name tier below (a handle-only name is
@@ -228,6 +244,16 @@ export function matchSupplier(
         return { kind: "matched", match_type: "name_fuzzy", client: matchedClient };
       }
     }
+
+    // No live client by name: a deactivated client of the same legal person
+    // or normalized name blocks the auto-create that would duplicate it.
+    const deactivatedByName = clients.find(client =>
+      !client.is_deleted && !isLiveClient(client) && !isSelfClient(client) && (
+        sameCompanyIdentity(supplierName, client.name) ||
+        (normalizedSupplierName !== "" && normalizedSupplierName !== undefined &&
+          normalizeCompanyName(client.name) === normalizedSupplierName)
+      ));
+    if (deactivatedByName) return deactivatedReview(deactivatedByName, "name");
   }
 
   return noMatch();
@@ -254,7 +280,7 @@ export function resolveSupplierDefault(
       [{ tag: outcome.match_type, note: `Matched supplier by ${outcome.match_type}.` }],
     );
   }
-  if (outcome.kind === "conflict" || outcome.kind === "ambiguous") {
+  if (outcome.kind === "conflict" || outcome.kind === "ambiguous" || outcome.kind === "review") {
     return ambiguous([], outcome.reason);
   }
   if (outcome.selfMatchBlocked) {

@@ -259,3 +259,47 @@ describe("matchSupplier — strict legal-identity tier (WP5 A5)", () => {
     expect(outcome.kind).toBe("conflict");
   });
 });
+
+describe("matchSupplier — deactivated clients (#12)", () => {
+  it("a registry code that matches only a deactivated client is review, never a match or an auto-create", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 500, name: "Old Supplier OÜ", code: "16800001", is_active: false })],
+      { supplier_reg_code: "16800001", supplier_name: "Old Supplier OÜ" },
+    );
+    expect(outcome.kind).toBe("review");
+    if (outcome.kind === "review") {
+      expect(outcome.code).toBe("supplier_client_deactivated");
+      expect(outcome.client.id).toBe(500);
+    }
+  });
+
+  it("a live client with the same registry code wins over its deactivated twin", () => {
+    const outcome = matchSupplier(
+      [
+        makeClient({ id: 500, name: "Old Supplier OÜ", code: "16800001", deactivated_date: "2026-01-01" }),
+        makeClient({ id: 501, name: "Old Supplier OÜ", code: "16800001" }),
+      ],
+      { supplier_reg_code: "16800001" },
+    );
+    expect(outcome).toMatchObject({ kind: "matched", match_type: "registry_code", client: { id: 501 } });
+  });
+
+  it("a name that matches only a deactivated client is review", () => {
+    const outcome = matchSupplier(
+      [makeClient({ id: 502, name: "Näidis Teenus OÜ", is_active: false })],
+      { supplier_name: "Näidis Teenus OÜ" },
+    );
+    expect(outcome).toMatchObject({ kind: "review", code: "supplier_client_deactivated" });
+    expect(resolveSupplierDefault(
+      [makeClient({ id: 502, name: "Näidis Teenus OÜ", is_active: false })],
+      { supplier_name: "Näidis Teenus OÜ" },
+    ).status).toBe("ambiguous");
+  });
+
+  it("the live API shape without is_active / deactivated_date is a live client", () => {
+    const client = makeClient({ id: 503, name: "Live Shape OÜ", code: "16800003" });
+    delete client.is_active;
+    delete client.deactivated_date;
+    expect(matchSupplier([client], { supplier_reg_code: "16800003" })).toMatchObject({ kind: "matched", client: { id: 503 } });
+  });
+});

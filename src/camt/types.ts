@@ -139,7 +139,8 @@ export interface CamtPossibleDuplicateMatch {
 
 export interface ClientResolution {
   clients_id?: number;
-  match_type?: "reg_code" | "exact_name" | "single_name_match";
+  /** `deactivated_only`: only a deactivated client matches; `clients_id` stays unset. */
+  match_type?: "reg_code" | "exact_name" | "single_name_match" | "deactivated_only";
   matched_client_name?: string;
 }
 
