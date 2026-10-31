@@ -35,6 +35,7 @@ import {
   wiseRowAmounts,
   wiseRowDate,
   withWiseSourceDirection,
+  WISE_BANK_ACCOUNT_NAME_MAX_LENGTH,
 } from "./preflight.js";
 import {
   WISE_COMMAND_VERSION,
@@ -394,9 +395,6 @@ export interface WiseHoldCheckRow {
   readonly legs: { readonly main?: WiseHoldCheckLeg; readonly fee?: WiseHoldCheckLeg };
   readonly acknowledged_ids?: number[];
 }
-
-// Transactions.bank_account_name maxLength in the e-arveldaja API.
-const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
 
 // Inter-account route for Wise review rows: merged tool (registered on every
 // profile) first, granular tool as the standard/full alternative.

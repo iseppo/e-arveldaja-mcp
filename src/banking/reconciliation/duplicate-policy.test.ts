@@ -135,7 +135,11 @@ describe("computeExactMatchProjection third-party-payer partition", () => {
 
     expect(projection.confirms).toEqual([]);
     expect(projection.thirdPartyPayerReviews).toEqual([]);
-    expect(projection.skipped).toEqual([]);
+    // Reported for review instead of silently dropped.
+    expect(projection.skipped).toEqual([{
+      transaction_id: 1210,
+      reason: "ambiguous_invoice_candidates: sale_invoice #501, sale_invoice #502 match this payment; review the references before confirming.",
+    }]);
   });
 });
 
@@ -626,5 +630,242 @@ describe("computeExactMatchProjection explains an unverifiable CAMT marker", () 
   it("keeps the plain direction_unproven reason for an unsigned row", () => {
     const projection = computeExactMatchProjection([row({ bank_account_name: "Vendor Logistics" })], [liveSale()], NO_PURCHASES, DEFAULT);
     expect(projection.skipped[0]!.reason).toMatch(/^direction_unproven: sale_invoice #501/);
+  });
+});
+
+describe("computeExactMatchProjection document_reference_exact rule (Lux, live-shaped)", () => {
+  // Live shape (2026-10): two EUR 25.20 Lux Express card payments, each naming
+  // its order number; each purchase invoice carries that number on a canonical
+  // notes line. No structured payment reference, no transaction client.
+  // exact_amount (40) + client_name_partial (10) = 50 for BOTH invoices on
+  // BOTH rows, so the score alone can neither admit (90) nor choose (50).
+  const LUX_CLIENT = 4100;
+  const luxTx = (id: number, text: string, overrides: Partial<Transaction> = {}, direction: "CRDT" | "DBIT" = "DBIT") =>
+    withSignedCamtMarker(tx({
+      id, type: "C", amount: 25.2, base_amount: 25.2, ref_number: undefined, clients_id: undefined,
+      bank_account_name: "Lux Express", date: "2026-10-18", description: text, ...overrides,
+    } as Partial<Transaction>), direction);
+  const luxInvoice = (id: number, orderNumber: string, overrides: Partial<PurchaseInvoice> = {}) => ({
+    id, number: `PI-${id % 100}`, clients_id: LUX_CLIENT, client_name: "Lux Express", cl_currencies_id: "EUR",
+    gross_price: 25.2, base_gross_price: 25.2, bank_ref_number: null, payment_status: "", status: "CONFIRMED",
+    notes: `Bussipilet Tallinn-Tartu\nOstukorvi/tellimuse nr: ${orderNumber}`, ...overrides,
+  }) as unknown as PurchaseInvoice;
+  const firstTx = (overrides: Partial<Transaction> = {}, direction: "CRDT" | "DBIT" = "DBIT") =>
+    luxTx(14377009, "Lux Express 261018825247", overrides, direction);
+  const secondTx = () => luxTx(14377017, "Lux Express 261018825312");
+  const invoiceA = (overrides: Partial<PurchaseInvoice> = {}) => luxInvoice(5577728, "261018825247", overrides);
+  const invoiceB = (overrides: Partial<PurchaseInvoice> = {}) => luxInvoice(5582125, "261018825312", overrides);
+  const confirmRows = (projection: ReturnType<typeof computeExactMatchProjection>) =>
+    projection.confirms.map(c => [c.transactionId, c.invoiceId, c.amount, c.direction, c.confidence, c.autoConfirmRule]);
+
+  it.each([[50], [EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE]])("maps each payment to the invoice its order number names at threshold %i", (threshold) => {
+    const projection = computeExactMatchProjection([firstTx(), secondTx()], [], [invoiceB(), invoiceA()], threshold);
+    expect(confirmRows(projection)).toEqual([
+      [14377009, 5577728, 25.2, "C", 50, "document_reference_exact"],
+      [14377017, 5582125, 25.2, "C", 50, "document_reference_exact"],
+    ]);
+    expect(projection.confirms.map(c => [c.matchedDocumentReference, c.clientResolution, c.invoiceClientsId])).toEqual([
+      ["261018825247", "set_missing", LUX_CLIENT],
+      ["261018825312", "set_missing", LUX_CLIENT],
+    ]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it("keeps the numeric score: 40 without a payer name, 55 with the invoice's own client", () => {
+    const nameless = computeExactMatchProjection([firstTx({ bank_account_name: undefined } as Partial<Transaction>)], [], [invoiceA()], 90);
+    expect(confirmRows(nameless)).toEqual([[14377009, 5577728, 25.2, "C", 40, "document_reference_exact"]]);
+    const sameClient = computeExactMatchProjection([firstTx({ clients_id: LUX_CLIENT })], [], [invoiceA()], 90);
+    expect(confirmRows(sameClient)).toEqual([[14377009, 5577728, 25.2, "C", 55, "document_reference_exact"]]);
+  });
+
+  it("reports two same-amount candidates without document evidence instead of dropping them silently", () => {
+    const projection = computeExactMatchProjection([luxTx(14377009, "Lux Express pilet")], [], [invoiceB(), invoiceA()], 50);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 14377009,
+      reason: "ambiguous_invoice_candidates: purchase_invoice #5577728, purchase_invoice #5582125 match this payment; review the references before confirming.",
+    }]);
+  });
+
+  it("reports two document hits as ambiguous even when one would be filtered by its status", () => {
+    const both = luxTx(14377009, "Lux Express 261018825247 261018825312");
+    const projection = computeExactMatchProjection([both], [], [invoiceA(), invoiceB({ payment_status: "PARTIALLY_PAID" })], 90);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 14377009,
+      reason: "ambiguous_invoice_candidates: purchase_invoice #5577728, purchase_invoice #5582125 match this payment; review the references before confirming.",
+    }]);
+  });
+
+  it("never redirects a second payment of the same order to another same-amount invoice", () => {
+    const again = luxTx(14377018, "Lux Express 261018825247", { date: "2026-10-19" } as Partial<Transaction>);
+    const projection = computeExactMatchProjection([firstTx(), again], [], [invoiceA(), invoiceB()], 50);
+    expect(confirmRows(projection)).toEqual([[14377009, 5577728, 25.2, "C", 50, "document_reference_exact"]]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 14377018,
+      reason: "document_reference_review: purchase_invoice #5577728 is named in the payment text but it is already matched to another payment in this plan; no other invoice is matched in its place. Review it before confirming.",
+    }]);
+  });
+
+  it.each([
+    ["partially paid", { payment_status: "PARTIALLY_PAID" }, "its payment status is PARTIALLY_PAID"],
+    ["paid", { payment_status: "PAID" }, "its payment status is PAID"],
+    ["malformed status", { payment_status: "SOMETHING_NEW" }, "its payment status is SOMETHING_NEW"],
+    ["draft", { status: "PROJECT" }, "the invoice is not confirmed"],
+    ["amount mismatch", { gross_price: 30, base_gross_price: 30 }, "the payment amount is not the invoice total to the cent"],
+    ["one cent off", { gross_price: 25.21, base_gross_price: 25.21 }, "the payment amount is not the invoice total to the cent"],
+    ["foreign currency", { cl_currencies_id: "USD", base_gross_price: 21, currency_rate: 1.2 }, "the payment and the invoice are not both explicitly EUR"],
+    ["missing currency", { cl_currencies_id: undefined }, "the payment and the invoice are not both explicitly EUR"],
+  ])("withholds the row when the referenced invoice is %s, with an eligible same-amount invoice beside it", (_label, overrides, why) => {
+    const projection = computeExactMatchProjection([firstTx()], [], [invoiceA(overrides as Partial<PurchaseInvoice>), invoiceB()], 50);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.thirdPartyPayerReviews).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 14377009,
+      reason: `document_reference_review: purchase_invoice #5577728 is named in the payment text but ${why}; no other invoice is matched in its place. Review it before confirming.`,
+    }]);
+  });
+
+  it("withholds a row with a differing base amount or no explicit currency", () => {
+    for (const row of [{ ...firstTx(), base_amount: 24.9 }, { ...firstTx(), cl_currencies_id: undefined } as unknown as Transaction]) {
+      const projection = computeExactMatchProjection([row], [], [invoiceA(), invoiceB()], 50);
+      expect(projection.confirms).toEqual([]);
+      expect(projection.skipped).toEqual([{ transaction_id: 14377009, reason: expect.stringMatching(/^document_reference_review: purchase_invoice #5577728 /) }]);
+    }
+  });
+
+  it("does not admit an unsigned, Wise-marked or tampered row", () => {
+    const unsigned = { ...firstTx(), description: "Lux Express 261018825247" } as Transaction;
+    const wise = { ...firstTx(), description: "WISE:CARD_TRANSACTION-9 Lux Express 261018825247 [source_direction=OUT]" } as Transaction;
+    const tampered = { ...firstTx(), description: firstTx().description!.replace("Lux Express", "Lux Exprest") } as Transaction;
+    expect(isTrustedCamtDescriptionMetadata(tampered)).toBe(false);
+    for (const row of [unsigned, wise, tampered]) {
+      expect(computeExactMatchProjection([row], [], [invoiceA()], 90).confirms).toEqual([]);
+      const beside = computeExactMatchProjection([row], [], [invoiceA(), invoiceB()], 50);
+      expect(beside.confirms).toEqual([]);
+      expect(beside.skipped).toEqual([{
+        transaction_id: 14377009,
+        reason: "document_reference_review: purchase_invoice #5577728 is named in the payment text but the payment has no checksum-verified outgoing CAMT direction; no other invoice is matched in its place. Review it before confirming.",
+      }]);
+    }
+  });
+
+  it("does not match a reference carried only in the CAMT marker (br=), and assigns no client", () => {
+    const row = withSignedCamtMarker(tx({
+      id: 14377009, type: "C", amount: 25.2, base_amount: 25.2, ref_number: undefined, clients_id: undefined,
+      bank_account_name: "Lux Express", date: "2026-10-18", description: "subscription",
+    } as Partial<Transaction>), "DBIT", "261018825247");
+    expect(row.description).toContain("br=261018825247");
+    const invoice = invoiceA({ number: "261018825247", notes: null } as Partial<PurchaseInvoice>);
+    const projection = computeExactMatchProjection([row], [], [invoice], 90);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it("does not match a reference carried only in the CAMT marker (instr=)", () => {
+    const base = {
+      id: 14377009, status: "PROJECT", is_deleted: false, type: "C", amount: 25.2, base_amount: 25.2,
+      clients_id: undefined, bank_account_name: "Lux Express", date: "2026-10-18", accounts_dimensions_id: 9,
+      cl_currencies_id: "EUR",
+    } as unknown as Transaction;
+    const description = buildCamtDescriptionWithMetadata("subscription", {
+      date: "2026-10-18", amount: 25.2, currency: "EUR", direction: "DBIT", counterparty_name: "Lux Express",
+      bank_reference: "BR-14377009", instruction_id: "4812345", description: "subscription",
+    });
+    const row = { ...base, description } as Transaction;
+    expect(description).toContain("instr=4812345");
+    expect(isTrustedCamtDescriptionMetadata(row)).toBe(true);
+    const projection = computeExactMatchProjection([row], [], [invoiceA({ number: "4812345", notes: null } as Partial<PurchaseInvoice>)], 90);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([]);
+  });
+
+  it("matches an invoice number in the visible payment text", () => {
+    const row = luxTx(14377009, "Arve 261018825247");
+    const projection = computeExactMatchProjection([row], [], [invoiceA({ number: "261018825247", notes: null } as Partial<PurchaseInvoice>)], 90);
+    expect(confirmRows(projection)).toEqual([[14377009, 5577728, 25.2, "C", 50, "document_reference_exact"]]);
+  });
+
+  it.each([
+    ["a longer token containing the reference", "Lux Express 2610188252470", undefined],
+    ["a noncanonical notes line", "Lux Express 261018825247", "Tellimus 261018825247"],
+  ])("does not match %s", (_label, text, notes) => {
+    const invoice = notes === undefined ? invoiceA() : invoiceA({ notes } as Partial<PurchaseInvoice>);
+    expect(computeExactMatchProjection([luxTx(14377009, text)], [], [invoice], 90).confirms).toEqual([]);
+  });
+
+  it("reports a structured payment reference naming a different invoice as ambiguous", () => {
+    const row = firstTx({ ref_number: "RF-B" } as Partial<Transaction>);
+    const projection = computeExactMatchProjection([row], [], [invoiceA(), invoiceB({ bank_ref_number: "RF-B" } as Partial<PurchaseInvoice>)], 90);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{
+      transaction_id: 14377009,
+      reason: "ambiguous_invoice_candidates: purchase_invoice #5577728, purchase_invoice #5582125 match this payment; review the references before confirming.",
+    }]);
+  });
+
+  it("lets min_confidence above 90 opt out of both admission and the veto", () => {
+    expect(computeExactMatchProjection([firstTx()], [], [invoiceA()], 91).confirms).toEqual([]);
+    // Above 90 the referenced, partially paid A no longer withholds the row:
+    // B qualifies on its own score (amount 40 + client 15 + ref 40 = 95).
+    const row = firstTx({ clients_id: LUX_CLIENT, ref_number: "RF-B" } as Partial<Transaction>);
+    const projection = computeExactMatchProjection(
+      [row], [], [invoiceA({ payment_status: "PARTIALLY_PAID" }), invoiceB({ bank_ref_number: "RF-B" } as Partial<PurchaseInvoice>)], 95,
+    );
+    expect(confirmRows(projection)).toEqual([[14377009, 5582125, 25.2, "C", 95, undefined]]);
+  });
+
+  it("leaves an incoming payment's sale-invoice match untouched by a purchase reference in its text", () => {
+    const incoming = firstTx({ ref_number: "REF-1488", clients_id: INVOICE_CLIENT } as Partial<Transaction>, "CRDT");
+    const saleInvoice = sale({ gross_price: 25.2, base_gross_price: 25.2, payment_status: "" } as Partial<SaleInvoice>);
+    const projection = computeExactMatchProjection([incoming], [saleInvoice], [invoiceA({ payment_status: "PARTIALLY_PAID" })], 90);
+    expect(projection.confirms.map(c => [c.transactionId, c.invoiceType, c.invoiceId, c.confidence, c.autoConfirmRule])).toEqual([
+      [14377009, "sale_invoice", 501, 95, undefined],
+    ]);
+  });
+
+  it("routes a differing payer or a missing invoice client to review, never reassigning", () => {
+    const payer = computeExactMatchProjection([firstTx({ clients_id: PAYER })], [], [invoiceA()], 90);
+    expect(payer.confirms).toEqual([]);
+    expect(payer.thirdPartyPayerReviews.map(r => [r.transaction_id, r.invoice_id, r.reason])).toEqual([[14377009, 5577728, "third_party_payer"]]);
+    const noClient = computeExactMatchProjection([firstTx()], [], [invoiceA({ clients_id: undefined } as Partial<PurchaseInvoice>)], 90);
+    expect(noClient.confirms).toEqual([]);
+    expect(noClient.thirdPartyPayerReviews.map(r => [r.transaction_id, r.invoice_id, r.reason])).toEqual([[14377009, 5577728, "invoice_client_missing"]]);
+  });
+
+  it("binds the matched reference into the plan fingerprint", () => {
+    const projection = computeExactMatchProjection([firstTx()], [], [invoiceA()], 90);
+    const withoutReference = {
+      ...projection,
+      confirms: projection.confirms.map(c => ({ ...c, matchedDocumentReference: undefined })),
+    };
+    expect(exactMatchFingerprint(projection, 90)).toContain('"matched_document_reference":"261018825247"');
+    expect(exactMatchFingerprint(withoutReference, 90)).not.toEqual(exactMatchFingerprint(projection, 90));
+  });
+});
+
+describe("computeExactMatchProjection Wise card with a client resolved from history", () => {
+  // EUR 90 Anthropic card row as the Wise import now creates it: client
+  // 2010417 from earlier confirmed card payments, unsigned Wise OUT marker.
+  const wiseCard = (overrides: Partial<Transaction> = {}) => tx({
+    id: 14400001, type: "C", amount: 90, base_amount: 90, ref_number: undefined, clients_id: 2010417,
+    bank_account_name: "Anthropic Claude Subscription", date: "2026-09-17",
+    description: "WISE:CARD_TRANSACTION-3001 Anthropic Claude Subscription [source_direction=OUT]", ...overrides,
+  } as Partial<Transaction>);
+  const anthropicInvoice = {
+    id: 5600001, number: "INV-ANT-9", clients_id: 2010417, client_name: "Anthropic", cl_currencies_id: "EUR",
+    gross_price: 90, base_gross_price: 90, bank_ref_number: null, payment_status: "", status: "CONFIRMED",
+  } as unknown as PurchaseInvoice;
+
+  it("confirms at threshold 50 with confidence 55 (amount 40 + client 15) and not at 90", () => {
+    const at50 = computeExactMatchProjection([wiseCard()], [], [anthropicInvoice], 50);
+    expect(at50.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence, c.autoConfirmRule])).toEqual([[14400001, 5600001, 55, undefined]]);
+    expect(computeExactMatchProjection([wiseCard()], [], [anthropicInvoice], 90).confirms).toEqual([]);
+  });
+
+  it("keeps the direction refusal at threshold 50 without the client", () => {
+    const projection = computeExactMatchProjection([wiseCard({ clients_id: undefined })], [], [anthropicInvoice], 50);
+    expect(projection.confirms).toEqual([]);
+    expect(projection.skipped).toEqual([{ transaction_id: 14400001, reason: expect.stringMatching(/^direction_unproven: purchase_invoice #5600001/) }]);
   });
 });

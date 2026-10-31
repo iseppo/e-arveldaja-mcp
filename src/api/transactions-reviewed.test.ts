@@ -48,7 +48,7 @@ it("reviewed confirm preserves nominal/base FX and the exact approved reassignme
   expect(f.http.patch.mock.calls[0][1]).toEqual({ clients_id: 42 });
 });
 
-it.each([{ clients_id: 99 }, { bank_ref_number: "OTHER" }, { gross_price: 999 }])("refuses awaited invoice material drift before any write: %j", patch => {
+it.each([{ clients_id: 99 }, { bank_ref_number: "OTHER" }, { gross_price: 999 }, { notes: "Ostukorvi/tellimuse nr: 261018825247" }])("refuses awaited invoice material drift before any write: %j", patch => {
   const f = fixture();
   f.afterInvoiceRead.mockImplementation(() => f.changeInvoice(patch));
   return expect(f.run()).rejects.toMatchObject({ category: "transaction_material_drift", invoice_key: "purchase_invoices:51",

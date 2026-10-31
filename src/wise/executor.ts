@@ -44,6 +44,7 @@ import {
   normalizeWiseDirection,
   preflightWiseCsv,
   resolveOwnCompanyClientId,
+  resolveWiseCardClientFromHistory,
   resolveWiseFeeAccountDimensionId,
   sourceDirectionForWiseDirection,
   uniqueActivePostingDimensions,
@@ -500,6 +501,7 @@ async function runWiseImport(
   // resolved id joins the create payload and so binds the digest.
   const clientResolutions = new Map<WiseRow, WiseClientResolution>();
   const clientResolutionsByName = new Map<string, WiseClientResolution>();
+  const historyCandidates = new Map<WiseRow, number>();
   for (const row of eligible) {
     if (!wiseRowNeedsClientResolution(transferDecisions.get(row))) continue;
     // Only the counterparty endpoint names the client: the recipient of an
@@ -526,7 +528,31 @@ async function runWiseImport(
         : exact_match_count > 1 ? { ambiguous: true } : {};
       clientResolutionsByName.set(cacheKey, resolution);
     }
+    // No exact-name client (and no exact-name ambiguity): an outgoing card row
+    // may take the client its earlier confirmed payments to the merchant
+    // consistently carry. Per row, never cached by name: it depends on the
+    // row's date.
+    if (resolution.clients_id === undefined && resolution.ambiguous !== true) {
+      const historyClientsId = resolveWiseCardClientFromHistory(row, existingTx, accounts_dimensions_id);
+      if (historyClientsId !== undefined) {
+        historyCandidates.set(row, historyClientsId);
+        continue;
+      }
+    }
     clientResolutions.set(row, resolution);
+  }
+  // The historical client must still be live: read the clients fresh (preview
+  // and execute alike) and leave a missing, deleted or deactivated one unset.
+  // The resulting clients_id joins the create payload and so the digest: a
+  // client deactivated after review drops it at execute, which is plan drift.
+  if (historyCandidates.size > 0) {
+    api.clients.invalidateListCache();
+    const currentClients = await api.clients.listAll();
+    for (const [row, clientsId] of historyCandidates) {
+      const client = currentClients.find(candidate => candidate.id === clientsId);
+      const live = client !== undefined && client.is_deleted !== true && client.is_active !== false && !client.deactivated_date;
+      clientResolutions.set(row, live ? { clients_id: clientsId, match_type: "confirmed_history", matched_client_name: client.name } : {});
+    }
   }
 
   const paymentRows = eligible.filter(r => sourceDirectionForWiseDirection(r.direction) === "OUT" && bookedAmountForWiseRow(r) > 0);

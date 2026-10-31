@@ -49,9 +49,10 @@ export function exactMatchFingerprint(projection: ExactMatchProjection, threshol
         amount: descriptor.amount,
         currency: descriptor.currency,
         expected_clients_id: descriptor.clientsId,
-        // A row admitted by the ref-number rule instead of its score is a
+        // A row admitted by a guarded rule instead of its score is a
         // different approval: a switch either way is plan drift.
         ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
+        ...(descriptor.matchedDocumentReference !== undefined ? { matched_document_reference: descriptor.matchedDocumentReference } : {}),
         // A cross-mechanism duplicate suspect that appears (or vanishes) after
         // review changes what the operator approved: plan drift.
         ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0

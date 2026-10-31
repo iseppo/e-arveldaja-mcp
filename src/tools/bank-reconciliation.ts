@@ -172,10 +172,10 @@ export function registerBankReconciliationTools(
   );
 
   registerReconTool("auto_confirm_exact_matches",
-    "Batch-confirm bank transactions with a single high-confidence match (>=90, or ref_number_exact: exact EUR amount + the reference of exactly one open unpaid invoice + a signed direction matching the invoice kind). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
+    "Batch-confirm bank transactions with a single high-confidence match (>=90, or ref_number_exact: exact EUR amount + the reference of exactly one open unpaid invoice + a signed direction matching the invoice kind, or document_reference_exact: exact EUR amount + a verified outgoing CAMT direction + payment text naming exactly one open unpaid purchase invoice by its number or order number). DRY RUN by default — the dry run returns a plan_handle enumerating the reviewed confirms; execute=true REQUIRES that handle and confirms exactly the reviewed set.",
     {
       execute: z.boolean().optional().describe("Actually confirm transactions (default false = dry run)"),
-      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90; above 90 also disables ref_number_exact)"),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence (default 90; above 90 also disables ref_number_exact and document_reference_exact)"),
       block_on_duplicate: z.boolean().optional().describe(
         "Refuse (partition out of the confirm set) any exact match whose cash movement appears already booked by another journal (an available cross-mechanism duplicate scan finds a suspect). Default false = advisory only."
       ),
@@ -244,12 +244,12 @@ export function registerBankReconciliationTools(
   );
 
   registerTool(server, "reconcile_bank_transactions",
-    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches (confidence >= 90, or the ref_number_exact rule: the reference of exactly one open unpaid EUR invoice + the exact EUR amount + a proven direction matching the invoice kind; such rows keep their lower confidence and carry auto_confirm_rule), mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
+    "Merged bank reconciliation entry point. Use mode='suggest' for invoice-match suggestions, mode='dry_run_auto_confirm' or mode='execute_auto_confirm' for exact invoice matches (confidence >= 90, or the ref_number_exact rule: the reference of exactly one open unpaid EUR invoice + the exact EUR amount + a proven direction matching the invoice kind, or the document_reference_exact rule: payment text naming exactly one open unpaid EUR purchase invoice by its number or order number + the exact amount + a verified outgoing CAMT direction; such rows keep their lower confidence and carry auto_confirm_rule), mode='inter_account_dry_run' for own-account transfer detection, and mode='execute_inter_account' (REQUIRES the plan_handle from the dry run) to reconcile the reviewed inter-account transfers.",
     {
       mode: z.enum(["suggest", "dry_run_auto_confirm", "execute_auto_confirm", "inter_account_dry_run", "execute_inter_account"])
         .optional()
         .describe("Workflow phase to run. Defaults to suggest."),
-      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes (auto-confirm default 90). Above 90 also disables the ref_number_exact rule."),
+      min_confidence: z.number().min(0).max(100).optional().describe("Minimum confidence threshold for invoice matching modes (auto-confirm default 90). Above 90 also disables ref_number_exact and document_reference_exact."),
       max_date_gap: z.number().int().min(0).max(MAX_INTER_ACCOUNT_DATE_GAP_DAYS).optional()
         .describe(`Maximum days between inter-account transfer legs (default 1, max ${MAX_INTER_ACCOUNT_DATE_GAP_DAYS}).`),
       target_accounts_dimensions_id: z.number().optional().describe(

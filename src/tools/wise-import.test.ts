@@ -256,6 +256,7 @@ function setupWiseTool(
   const purchaseInvoiceUpdate = options.purchaseInvoiceUpdate ?? vi.fn().mockResolvedValue({});
   const api = {
     clients: {
+      invalidateListCache: vi.fn(),
       listAll: vi.fn().mockResolvedValue(options.clients ?? [{ id: 77, name: "Wise" }]),
       // findByNameResult answers the own-company lookup (invoice_company_name);
       // any other name gets the real substring filter over `clients`.
@@ -8709,5 +8710,115 @@ describe("wise ordinary-payment client comes only from the counterparty endpoint
     const { previewPayload, created } = await run(values, [{ id: 55, name: OWN }, { id: 77, name: "Vendor OÜ" }]);
     expect(previewPayload.clients_id).toBe(77);
     expect(created.clients_id).toBe(77);
+  });
+});
+
+describe("wise card client from confirmed history (live Anthropic shape, 2026-10)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/wise.csv" });
+    mockedReadFile.mockReset();
+    mockedLogAudit.mockClear();
+    mockedClearRuntimeCaches.mockClear();
+    mockedReportProgress.mockClear();
+  });
+
+  const OWN = "Seppo AI OÜ";
+  const MERCHANT = "Anthropic Claude Subscription";
+  const ANTHROPIC = 2010417;
+  const args = { file_path: "/tmp/wise.csv", accounts_dimensions_id: 5, fee_account_dimensions_id: 9 };
+  const card = (id: string, date: string) => buildM04Values({ id, date, sourceName: OWN, targetName: MERCHANT, sourceAmount: "90" });
+  const earlier = (id: number, date: string, clientsId: number | null = ANTHROPIC) => ({
+    id, status: "CONFIRMED", is_deleted: false, type: "C", amount: 90, cl_currencies_id: "EUR", date,
+    accounts_dimensions_id: 5, clients_id: clientsId, bank_account_name: MERCHANT,
+    description: `WISE:CARD_TRANSACTION-${id} ${MERCHANT} [source_direction=OUT]`,
+  });
+  const history = [earlier(13787867, "2026-06-17"), earlier(13895154, "2026-07-17"), earlier(14044556, "2026-08-17")];
+  const liveClients = [{ id: 77, name: "Wise" }, { id: ANTHROPIC, name: "Anthropic, PBC" }];
+
+  function setupCard(rows: string[][], existing: unknown[], clients: unknown[] = liveClients) {
+    mockedReadFile.mockResolvedValue(buildCsvRows(rows));
+    return setupWiseTool(existing, undefined, { invoiceInfo: { invoice_company_name: OWN }, clients });
+  }
+  const mainCreate = (payload: WiseImportFullPayload, wiseId: string) =>
+    payload.execution.commands.find(command => command.action === "main_create" && command.wise_id === wiseId)?.create_payload as Record<string, unknown> | undefined;
+
+  it("assigns the client the earlier card payments to the merchant carry, with confirmed_history provenance", async () => {
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history);
+    const { dry, executed } = await runApprovedWiseImport(setup, args);
+    expect(mainCreate(dry, "CARD_TRANSACTION-3001")).toMatchObject({ amount: 90, type: "C", clients_id: 2010417 });
+    expect(dry.results.find(row => row.wise_id === "CARD_TRANSACTION-3001")).toMatchObject({
+      clients_id: 2010417, client_match: "confirmed_history", matched_client_name: expect.stringMatching(wrapped("Anthropic, PBC")),
+    });
+    expect(setup.api.transactions.create).toHaveBeenCalledTimes(1);
+    expect(setup.api.transactions.create.mock.calls[0]![0]).toMatchObject({ amount: 90, type: "C", clients_id: 2010417 });
+    expect(executed.execution.errors).toEqual([]);
+  });
+
+  it.each([
+    ["deactivated", { id: ANTHROPIC, name: "Anthropic, PBC", is_active: false, deactivated_date: "2026-09-01" }],
+    ["deleted", { id: ANTHROPIC, name: "Anthropic, PBC", is_deleted: true }],
+  ])("assigns nothing when the historical client is now %s", async (_label, client) => {
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history, [{ id: 77, name: "Wise" }, client]);
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(mainCreate(dry, "CARD_TRANSACTION-3001")).not.toHaveProperty("clients_id");
+    expect(dry.results.find(row => row.wise_id === "CARD_TRANSACTION-3001")).not.toHaveProperty("client_match");
+  });
+
+  it("assigns nothing when the historical client no longer exists", async () => {
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history, [{ id: 77, name: "Wise" }]);
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(mainCreate(dry, "CARD_TRANSACTION-3001")).not.toHaveProperty("clients_id");
+  });
+
+  it.each([
+    ["the historical client is deactivated", (setup: ReturnType<typeof setupWiseTool>) => {
+      setup.api.clients.listAll.mockResolvedValue([{ id: 77, name: "Wise" }, { id: ANTHROPIC, name: "Anthropic, PBC", is_active: false }]);
+    }],
+    ["the history changes client", (setup: ReturnType<typeof setupWiseTool>) => {
+      setup.api.transactions.listAll.mockResolvedValue([...history, earlier(14044560, "2026-08-20", 2010999)]);
+    }],
+  ])("rejects the reviewed approval before any write when %s between preview and execute", async (_label, change) => {
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history);
+    const reviewed = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(mainCreate(reviewed, "CARD_TRANSACTION-3001")).toMatchObject({ clients_id: 2010417 });
+    change(setup);
+    clearWiseCallHistory(setup.api);
+    const result = await setup.rawHandler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    });
+    expect(result.isError).toBe(true);
+    expect(parseWiseResponse<WiseFailurePayload>(result)).toEqual(expect.objectContaining({ code: "plan_drift", mutation_occurred: false }));
+    expectNoWiseMutations(setup.api);
+  });
+
+  it("keeps an exact-name client and an exact-name ambiguity authoritative over history", async () => {
+    const exact = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history, [...liveClients, { id: 555, name: MERCHANT }]);
+    const exactDry = parseWiseResponse(await exact.handler({ ...args, execute: false }));
+    expect(exactDry.results.find(row => row.wise_id === "CARD_TRANSACTION-3001")).toMatchObject({ clients_id: 555, client_match: "exact_name" });
+
+    const ambiguous = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history,
+      [...liveClients, { id: 555, name: MERCHANT }, { id: 556, name: MERCHANT }]);
+    const ambiguousDry = parseWiseResponse(await ambiguous.handler({ ...args, execute: false }));
+    const row = ambiguousDry.results.find(result => result.wise_id === "CARD_TRANSACTION-3001");
+    expect(row).toMatchObject({ client_ambiguous: true });
+    expect(row).not.toHaveProperty("clients_id");
+  });
+
+  it("resolves per row by date: a payment before the first history gets no client", async () => {
+    const setup = setupCard([card("CARD_TRANSACTION-3000", "2026-06-10"), card("CARD_TRANSACTION-3001", "2026-06-20")], history);
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(mainCreate(dry, "CARD_TRANSACTION-3000")).not.toHaveProperty("clients_id");
+    expect(mainCreate(dry, "CARD_TRANSACTION-3001")).toMatchObject({ clients_id: 2010417 });
+  });
+
+  it("leaves an already-imported null-client card row alone", async () => {
+    const stored = { ...earlier(14377036, "2026-09-17", null), description: `WISE:CARD_TRANSACTION-3001 ${MERCHANT} [source_direction=OUT]` };
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], [...history, stored]);
+    const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    expect(dry.execution.commands).toEqual([]);
+    expect(dry.skipped_details?.map(group => [group.reason, group.sample_ids])).toEqual([
+      [expect.stringMatching(wrapped("Already imported (Wise ID match)")), ["CARD_TRANSACTION-3001"]],
+    ]);
+    expectNoWiseMutations(setup.api);
   });
 });

@@ -1,4 +1,4 @@
-import type { AccountDimension, BankAccount } from "../types/api.js";
+import type { AccountDimension, BankAccount, Transaction } from "../types/api.js";
 import { parseCSV } from "../csv.js";
 import { normalizeCompanyName, sameCompanyIdentity } from "../company-name.js";
 import { roundMoney } from "../money.js";
@@ -6,6 +6,7 @@ import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { DEFAULT_OTHER_FINANCIAL_EXPENSE_ACCOUNT } from "../accounting-defaults.js";
 import { assertRealDate, capture, reject } from "../camt/preflight.js";
 import { isStrictDate } from "../strict-date.js";
+import { bankTransactionDirection } from "../bank-transaction-direction.js";
 import type {
   ImportRejectedField,
   ValidatedWiseFields,
@@ -674,6 +675,53 @@ export function isJarTransfer(row: WiseRow): boolean {
   if (src && tgt && src === tgt && row.sourceCurrency === row.targetCurrency && row.sourceFeeAmount === 0) return true;
 
   return false;
+}
+
+// Transactions.bank_account_name maxLength in the e-arveldaja API.
+export const WISE_BANK_ACCOUNT_NAME_MAX_LENGTH = 100;
+
+/**
+ * The client consistently recorded on earlier card payments to this row's
+ * merchant, or `undefined`. A fallback for an outgoing card row whose exact
+ * client-name lookup found nothing: Wise card rows store the merchant in
+ * `bank_account_name` ("Anthropic Claude Subscription"), which rarely equals
+ * a client's registered name.
+ *
+ * Only confirmed, non-deleted earlier main card rows (never fee or transfer
+ * rows) on the same Wise dimension with a proven outgoing marker count, and
+ * only when their complete normalised merchant equals this row's. Every such
+ * row must carry the same valid client; a missing or different client vetoes
+ * the result. A name at the storage cap may have been cut, so it never
+ * matches. The caller still checks that the client is live.
+ */
+export function resolveWiseCardClientFromHistory(
+  row: WiseRow,
+  existingTx: readonly Transaction[],
+  accountsDimensionsId: number,
+): number | undefined {
+  const merchant = normalizeCompanyName(row.targetName);
+  if (
+    !row.id.startsWith("CARD_TRANSACTION-") ||
+    sourceDirectionForWiseDirection(row.direction) !== "OUT" ||
+    !merchant ||
+    row.targetName.length >= WISE_BANK_ACCOUNT_NAME_MAX_LENGTH
+  ) return undefined;
+  const date = wiseRowDate(row);
+  const matching = existingTx.filter(tx =>
+    tx.status === "CONFIRMED" &&
+    tx.is_deleted !== true &&
+    tx.accounts_dimensions_id === accountsDimensionsId &&
+    typeof tx.date === "string" && isStrictDate(tx.date) && tx.date < date &&
+    /^WISE:CARD_TRANSACTION-/.test(tx.description ?? "") &&
+    bankTransactionDirection(tx) === "outgoing" &&
+    normalizeCompanyName(tx.bank_account_name) === merchant);
+  const clients = new Set(matching.map(tx => tx.clients_id));
+  const [clientsId] = clients;
+  if (
+    clients.size !== 1 || !isPositiveSafeInteger(clientsId) ||
+    matching.some(tx => (tx.bank_account_name ?? "").length >= WISE_BANK_ACCOUNT_NAME_MAX_LENGTH)
+  ) return undefined;
+  return clientsId;
 }
 
 export function stripWisePrefix(description?: string | null): string {

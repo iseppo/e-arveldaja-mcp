@@ -1,6 +1,7 @@
 import type { PurchaseInvoice, SaleInvoice, Transaction } from "../types/api.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata } from "../camt/duplicate-identity.js";
+import { orderReferencesFromNotes } from "../order-reference-note.js";
 
 export type InvoiceTable = "sale_invoices" | "purchase_invoices";
 export interface MaterialInvalid { readonly field: string; readonly reason: string; readonly value_repr: string }
@@ -48,7 +49,12 @@ export interface LinkedInvoiceMaterialSnapshot {
   readonly ledger_accounts_id: number | null; readonly ledger_accounts_dimensions_id: number | null;
   readonly sale_invoice_type: string | null; readonly credit_sale_invoices_id: number | null;
   readonly credit_invoice_payment_type: string | null; readonly payment_type: string | null;
-  readonly paid_in_cash: boolean | null; readonly invalid: readonly MaterialInvalid[];
+  readonly paid_in_cash: boolean | null;
+  /** Purchases: the sorted distinct canonical order / cart references in the
+   * notes (`[]` when none), which the document-reference confirm rule relies
+   * on. Sales: null. Always present, so an added reference is a change. */
+  readonly order_references: readonly string[] | null;
+  readonly invalid: readonly MaterialInvalid[];
 }
 export type ExpectedLinkedInvoices = Readonly<Partial<Record<`${InvoiceTable}:${number}`, LinkedInvoiceMaterialSnapshot>>>;
 export interface BankMaterialTransitions {
@@ -179,7 +185,9 @@ export function snapshotLinkedInvoice(table: InvoiceTable, invoice: SaleInvoice 
     ledger_accounts_dimensions_id: n.number(row[sale ? "receivable_accounts_dimensions_id" : "liability_accounts_dimensions_id"], "ledger_accounts_dimensions_id", true),
     sale_invoice_type: n.text(sale ? row.sale_invoice_type : null, "sale_invoice_type"), credit_sale_invoices_id: n.number(sale ? row.credit_sale_invoices_id : null, "credit_sale_invoices_id", true),
     credit_invoice_payment_type: n.text(sale ? row.credit_invoice_payment_type : null, "credit_invoice_payment_type"), payment_type: n.text(sale ? null : row.payment_type, "payment_type"),
-    paid_in_cash: n.boolean(invoice.paid_in_cash, "paid_in_cash"), invalid,
+    paid_in_cash: n.boolean(invoice.paid_in_cash, "paid_in_cash"),
+    order_references: sale ? null : [...new Set(orderReferencesFromNotes(n.text(row.notes, "notes")))].sort(),
+    invalid,
   };
 }
 

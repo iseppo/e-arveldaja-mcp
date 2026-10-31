@@ -198,6 +198,16 @@ describe("reconcile_transactions", () => {
     expect(merged).toContain("inter_account_dry_run");
   });
 
+  it("documents both guarded confirm rules and the above-90 opt-out", () => {
+    for (const toolName of ["auto_confirm_exact_matches", "reconcile_bank_transactions"]) {
+      const text = toolMetadataText(getReconciliationToolOptions(toolName));
+      expect(text).toContain("ref_number_exact");
+      expect(text).toContain("document_reference_exact");
+      expect(text).toContain("purchase invoice");
+      expect(text).toMatch(/above 90 also disables ref_number_exact and document_reference_exact/i);
+    }
+  });
+
   describe("reconcile_bank_transactions wrapper", () => {
     it("runs invoice-match suggestions through the merged entry point", async () => {
       const handler = setupReconciliationTool({
@@ -4177,6 +4187,51 @@ describe("exact-match confirm duplicate-posting guard", () => {
       (await handler({ execute: true, min_confidence: 50, block_on_duplicate: true, plan_handle: dry.plan_handle })).content[0]!.text,
     );
     expect(executed.mode).toBe("EXECUTED");
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("blocks a document_reference_exact row with block_on_duplicate=true like any other confirm", async () => {
+    // EUR 100 outgoing card payment naming the order number of the one open
+    // purchase invoice: exact_amount 40 + client_name_partial 10 = 50 < 90.
+    const docTx = camtSigned({
+      id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 100, date: "2026-03-20",
+      accounts_dimensions_id: BANK_DIMENSION_ID, cl_currencies_id: "EUR", clients_id: null, bank_account_name: "Lux Express",
+      description: "Lux Express 261018825247\n[e-arveldaja-mcp:camt dir=DBIT]",
+    });
+    const docInvoice = {
+      id: 10, status: "CONFIRMED", payment_status: "", number: "PI-10", clients_id: 20, client_name: "Lux Express",
+      gross_price: 100, notes: "Ostukorvi/tellimuse nr: 261018825247",
+    };
+    const outgoingDuplicate = {
+      ...duplicateJournal,
+      postings: [
+        { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C", amount: 100, is_deleted: false },
+        { accounts_id: 5120, accounts_dimensions_id: null, type: "D", amount: 100, is_deleted: false },
+      ],
+    };
+    const api = createAutoConfirmApi({ transactions: [docTx], purchases: [docInvoice] });
+    api.readonly.getBankAccounts = vi.fn().mockResolvedValue([{ id: 1, accounts_dimensions_id: BANK_DIMENSION_ID }]);
+    api.readonly.getAccountDimensions = vi.fn().mockResolvedValue([
+      { id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, is_deleted: false, title_est: "LHV" },
+    ]);
+    api.journals.listAllWithPostings = vi.fn().mockResolvedValue([outgoingDuplicate]);
+    const { handler } = setupAutoConfirmTool({ api });
+
+    const advisory = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: false })).content[0]!.text);
+    const row = advisory.results[0]!;
+    if (row.status !== "would_confirm") throw new Error("expected a would_confirm row");
+    expect(row.match).toEqual(expect.objectContaining({ id: 10, confidence: 50, auto_confirm_rule: "document_reference_exact" }));
+    expect(row.possible_duplicate_postings).toEqual([expect.objectContaining({ journal_id: DUP_JOURNAL_ID })]);
+
+    const dry = parseToolPayload<ReconExactMatchPayload>((await handler({ execute: false, block_on_duplicate: true })).content[0]!.text);
+    const blockedRow = dry.results.find(r => r.transaction_id === 1)!;
+    if (blockedRow.status !== "blocked_duplicate_suspect") throw new Error("expected a blocked_duplicate_suspect row");
+    expect(blockedRow.conflicting_journal_ids).toEqual([DUP_JOURNAL_ID]);
+    const executed = parseToolPayload<ReconExactMatchPayload>(
+      (await handler({ execute: true, block_on_duplicate: true, plan_handle: dry.plan_handle })).content[0]!.text,
+    );
+    expect(executed.mode).toBe("EXECUTED");
+    expect(api.transactions.update).not.toHaveBeenCalled();
     expect(api.transactions.confirm).not.toHaveBeenCalled();
   });
 

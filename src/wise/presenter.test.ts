@@ -158,6 +158,25 @@ describe("renderWiseImportCompact", () => {
   });
 });
 
+describe("renderWiseImportCompact — client from confirmed history", () => {
+  it("names each history-assigned client with its provenance, capped at 3 with the plan-page hint; exact-name clients stay quiet", () => {
+    const data = makeData(6);
+    data.created = data.created.map((entry, index) => index < 4
+      ? { ...entry, clients_id: 2010417, client_match: "confirmed_history" as const, matched_client_name: "Anthropic, PBC" }
+      : index === 4 ? { ...entry, clients_id: 555, client_match: "exact_name" as const, matched_client_name: "Vendor 4 OÜ" } : entry);
+    const { summary } = renderWiseImportCompact({ data });
+    const history = summary.warnings?.filter(w => w.code === "wise_client_from_history") ?? [];
+    expect(history.map(w => [w.item_id, w.message])).toEqual([0, 1, 2].map(index => [`WISE-${index}`,
+      "Client 2010417 is set from earlier confirmed card payments to this merchant (client_match: confirmed_history), "
+      + "not from an exact name match. Check it is the right supplier before approving."]));
+    expect(summary.warnings?.find(w => w.code === "wise_client_from_history_more")?.message).toBe(
+      "1 more wise_client_from_history item(s) not shown; page them with get_execution_plan_page "
+      + "{ plan_handle: \"PLAN-HANDLE-XYZ\", section: \"commands\", detail: \"full\" } (create_payload.clients_id).",
+    );
+    expect(summary.warnings?.some(w => w.item_id === "WISE-4")).toBe(false);
+  });
+});
+
 describe("renderWiseImportCompact — automatic matches", () => {
   it("itemises each automatic match with the stored row / journal and an undo hint, never as a plain duplicate", () => {
     const data = makeData(1);
