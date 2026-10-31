@@ -1068,6 +1068,19 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             });
             continue;
           }
+          if (loopOptions.approved !== undefined && approved?.status !== "dry_run_preview") {
+            // Execute writes only rows the reviewed plan approved as a create
+            // command. Every other reviewed decision (needs_review, a skip, a
+            // failure) stands, even if its cause (e.g. an unavailable scan)
+            // has cleared by now; the next dry run re-decides it.
+            results.push(approved ?? {
+              file: fileSnapshot.file,
+              classification: "unclassifiable",
+              status: "needs_review",
+              notes: ["Not in the reviewed projection; nothing was created. Re-run the dry run."],
+            });
+            continue;
+          }
           results.push(withAlreadyBookedCandidates(context, await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,

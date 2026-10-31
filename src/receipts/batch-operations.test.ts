@@ -1977,8 +1977,29 @@ describe("receipt batch — journal already references the invoice number (Messe
     const result = outcome.value.results[0]!;
     expect(result.status).toBe("needs_review");
     expect(result.journal_reference_scan_unavailable).toBe(true);
-    // Execute: the projection and the pre-create scan each read twice.
-    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(6);
+    // Execute: the projection reads twice; a row it holds is not reprocessed (no pre-create scan).
+    expect(journalsOf(api).listAll).toHaveBeenCalledTimes(4);
+    expectZeroWrites(spies);
+  });
+
+  it.each(["create", "create_and_confirm"] as const)("a row held in review stays held when the scan recovers at the mutation pass (%s)", async (mode) => {
+    const { api, spies } = makeApi();
+    // Dry run (2 reads) and the execute projection (2 reads) fail; the mutation pass would read cleanly.
+    let reads = 0;
+    journalsOf(api).listAll = vi.fn(async () => {
+      reads += 1;
+      if (reads <= 4) throw new Error("page cap reached");
+      return [];
+    });
+    const ops = makeOperations(api);
+    const { manifest, planHandles } = await dryRunPlan(ops);
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: mode, dryRun: false, approvedManifest: manifest, planHandle: planHandles[mode],
+    });
+    if (!outcome.ok) throw new Error(`runBatch failed: ${outcome.error.code}`);
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.created_invoice).toBeUndefined();
     expectZeroWrites(spies);
   });
 
