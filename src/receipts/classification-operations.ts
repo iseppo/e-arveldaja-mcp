@@ -1712,14 +1712,17 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             group => typeof group === "object" && group !== null && !Array.isArray(group) && (group as Record<string, PlanData>).bookable === true,
           ).length ?? 0,
         },
-        // One reviewable command per group, carrying the effects the fresh
-        // fingerprint computed, so get_execution_plan_page shows what approval
-        // covers. Review-only data: execute still re-derives and compares.
-        commands: groups.map((group, index) => ({
-          id: `bank-classification-group-${index + 1}`,
-          category: "bank_classification_apply",
-          reviewProjection: classificationGroupReview(group, (fingerprint.groups as PlanData[])[index], ledgerCheck, historyCheck),
-        })),
+        // Reviewable commands per group, each carrying at most
+        // CLASSIFICATION_REVIEW_CHUNK_SIZE transactions' effects from the fresh
+        // fingerprint, so get_execution_plan_page can page what approval covers
+        // (one command fits one sandboxed review string). Review-only data:
+        // execute still re-derives and compares the whole fingerprint.
+        commands: groups.flatMap((group, index) =>
+          classificationGroupReview(group, index + 1, (fingerprint.groups as PlanData[])[index], ledgerCheck, historyCheck).map(projection => ({
+            id: `bank-classification-group-${projection.group}-part-${projection.part}`,
+            category: "bank_classification_apply",
+            reviewProjection: projection as unknown as PlanData,
+          }))),
         counts: { groups: groups.length },
         totals: {},
         exclusions: [],
@@ -1733,34 +1736,85 @@ class ClassificationOperationsImpl implements ClassificationOperations {
   }
 }
 
-/** Public review projection of one apply group: each transaction's fresh state
- * and its booking effect (purchase invoice or history distribution, including a
- * client set first), without the material snapshot the fingerprint binds. */
+/** Transactions per public review command: one command stays well under the 20,000-character review string. */
+export const CLASSIFICATION_REVIEW_CHUNK_SIZE = 10;
+
+/** One transaction in a classification review command: its fresh state and booking effect. */
+export interface ClassificationReviewTransaction {
+  readonly id: number;
+  readonly status?: string | null;
+  readonly amount?: number | null;
+  readonly base_amount?: number | null;
+  readonly currency?: string;
+  readonly currency_rate?: number | null;
+  readonly date?: string | null;
+  readonly accounts_dimensions_id?: number | null;
+  readonly clients_id?: number | null;
+  /** Purchase-invoice effect (supplier, invoice number, accounts/VAT, amounts); null when nothing is booked. */
+  readonly booking?: PlanData;
+  /** History-distribution effect (account, dimension, amount, client and whether it is set first). */
+  readonly history_distribution?: PlanData;
+  readonly ledger_check?: string;
+  readonly [key: string]: PlanData | undefined;
+}
+
+/**
+ * The public review projection of one `bank_classification_apply` command
+ * (`bank-classification-group-{group}-part-{part}`): the group's header and up
+ * to CLASSIFICATION_REVIEW_CHUNK_SIZE of its transactions, in order.
+ */
+export interface ClassificationGroupReviewProjection {
+  /** 1-based group number. */
+  readonly group: number;
+  /** 1-based part of the group; `parts` parts together list all `group_transactions` transactions. */
+  readonly part: number;
+  readonly parts: number;
+  readonly group_transactions: number;
+  readonly category: string;
+  readonly apply_mode: string;
+  readonly counterparty: string;
+  readonly bookable: PlanData;
+  readonly ledger_check?: "unavailable";
+  readonly history_distributions?: "unavailable";
+  readonly transactions: readonly ClassificationReviewTransaction[];
+}
+
+/** Public review projection of one apply group, in bounded parts: each
+ * transaction's fresh state and its booking effect (purchase invoice or history
+ * distribution, including a client set first), without the material snapshot
+ * the fingerprint binds. */
 function classificationGroupReview(
   group: ClassifiedTransactionGroupResult,
+  groupNumber: number,
   fingerprintGroup: PlanData | undefined,
   ledgerCheck: Record<string, string> | "unavailable" | null,
   historyCheck: Record<string, PlanData> | "unavailable" | null,
-): PlanData {
+): ClassificationGroupReviewProjection[] {
   const fp = (fingerprintGroup ?? {}) as Record<string, PlanData>;
-  const transactions = Array.isArray(fp.transactions) ? fp.transactions as PlanData[] : [];
-  return stripUndefinedDeep({
+  const fingerprintTransactions = Array.isArray(fp.transactions) ? fp.transactions as PlanData[] : [];
+  const transactions = fingerprintTransactions.map(entry => {
+    const { material: _material, ...state } = entry as Record<string, PlanData>;
+    const key = String(state.id);
+    return stripUndefinedDeep({
+      ...state,
+      ...(ledgerCheck !== null && ledgerCheck !== "unavailable" && ledgerCheck[key] !== undefined ? { ledger_check: ledgerCheck[key] } : {}),
+      ...(historyCheck !== null && historyCheck !== "unavailable" && key in historyCheck ? { history_distribution: historyCheck[key] ?? null } : {}),
+    }) as unknown as ClassificationReviewTransaction;
+  });
+  const parts = Math.max(1, Math.ceil(transactions.length / CLASSIFICATION_REVIEW_CHUNK_SIZE));
+  return Array.from({ length: parts }, (_, index) => ({
+    group: groupNumber,
+    part: index + 1,
+    parts,
+    group_transactions: transactions.length,
     category: group.category,
     apply_mode: group.apply_mode,
     counterparty: group.display_counterparty,
     bookable: fp.bookable ?? null,
-    ...(ledgerCheck === "unavailable" ? { ledger_check: "unavailable" } : {}),
-    ...(historyCheck === "unavailable" && group.apply_mode === "account_distribution" ? { history_distributions: "unavailable" } : {}),
-    transactions: transactions.map(entry => {
-      const { material: _material, ...state } = entry as Record<string, PlanData>;
-      const key = String(state.id);
-      return {
-        ...state,
-        ...(ledgerCheck !== null && ledgerCheck !== "unavailable" && ledgerCheck[key] !== undefined ? { ledger_check: ledgerCheck[key] } : {}),
-        ...(historyCheck !== null && historyCheck !== "unavailable" && key in historyCheck ? { history_distribution: historyCheck[key] ?? null } : {}),
-      };
-    }),
-  }) as PlanData;
+    ...(ledgerCheck === "unavailable" ? { ledger_check: "unavailable" as const } : {}),
+    ...(historyCheck === "unavailable" && group.apply_mode === "account_distribution" ? { history_distributions: "unavailable" as const } : {}),
+    transactions: transactions.slice(index * CLASSIFICATION_REVIEW_CHUNK_SIZE, (index + 1) * CLASSIFICATION_REVIEW_CHUNK_SIZE),
+  }));
 }
 
 export function createClassificationOperations(

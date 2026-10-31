@@ -955,6 +955,8 @@ describe("registerPrompts", () => {
     expect(text).toContain("- the invoice-level payable account `liability_accounts_id` of the same past invoice");
     expect(text).toContain("- The payable account (`liability_accounts_id`)");
     expect(text).toContain("- `liability_accounts_id`: the approved payable account");
+    // The reading-enabled guided route shows the payable account and makes a departure an explicit choice.
+    expect(text).toContain("when `payable_account.departs_from_history` is true, name the history account and get the user's explicit choice before approval");
     // Failed-upload cleanup is reported as attempted, not guaranteed.
     expect(text).not.toContain("the draft invoice is invalidated.");
     expect(text).toContain("attempts to invalidate the draft invoice");
@@ -1293,6 +1295,8 @@ describe("registerPrompts", () => {
     // Earlier duplicate drafts are reviewed separately, never folded into the confirm call.
     expect(text).toContain("pending_duplicate_journals");
     expect(text).toContain("never add them to the confirm call on your own");
+    expect(text).toContain("an entry with `snapshot_mismatch`");
+    expect(text).toContain("never ask approval for it as a matching draft");
     // Confirmation runs the server's <=500-id batches and inspects each result.
     expect(text).toContain("run every approved `next_actions` batch as given");
     expect(text).not.toContain("call `batch_confirm_journals` with exactly those ids");

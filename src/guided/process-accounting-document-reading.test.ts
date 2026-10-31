@@ -382,6 +382,17 @@ describe("process_accounting_document reading modes: untrusted text", () => {
     expect(body.booking_review.items[0].custom_title).toMatch(/^<<UNTRUSTED_OCR_START:/);
   });
 
+  it("verify shows the payable account next to the history's, and a departure in it", async () => {
+    const { handler } = setupReading(true);
+    const file = writePdf("%PDF payable departure");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const body = parse(await handler({ mode: "verify", file_path: file.path, document_reading: reading, proof, liability_accounts_id: 2350 }));
+    expect(body.status).toBe("ready");
+    expect(body.booking_review.liability_accounts_id).toBe(2350);
+    expect(body.payable_account).toEqual({ liability_accounts_id: 2350, history_liability_accounts_id: 2310, departs_from_history: true });
+    expect(body.next_step).toContain("departs_from_history");
+  });
+
   it("without supplier history, booking_items_required's next step asks for explicit items and does not point at dimension notes", async () => {
     const { handler } = setupReading(true, { withHistory: false });
     const file = writePdf("%PDF no history");

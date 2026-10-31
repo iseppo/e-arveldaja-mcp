@@ -2033,7 +2033,17 @@ export interface LightyearPendingDuplicateJournal {
   }> | null;
   /** Postings could not be loaded (detail budget or read failure); read the journal with get_journal. */
   postings_unavailable?: true;
+  /**
+   * The journal's current detail no longer matches the list entry that made it
+   * a pending draft for `reference` (it was registered, deleted, or its
+   * document number no longer claims the reference). The entry shows the
+   * current detail and `postings: null`; it is held — never offered for
+   * approval as a matching draft.
+   */
+  snapshot_mismatch?: LightyearPendingDuplicateMismatch;
 }
+
+export type LightyearPendingDuplicateMismatch = "registered_since_listing" | "deleted_since_listing" | "reference_changed";
 
 /**
  * Earlier unregistered drafts for the skipped duplicate refs, with their
@@ -2057,7 +2067,13 @@ export async function loadPendingDuplicateJournals(
   let budget = PENDING_DUPLICATE_DETAIL_LIMIT;
   const out: LightyearPendingDuplicateJournal[] = [];
   for (const { reference, journal } of matches) {
+    // Every field of an entry comes from ONE snapshot: the list entry when it
+    // already carries postings, otherwise the journal's current detail. A
+    // detail that no longer is an unregistered draft claiming `reference` is
+    // held rather than shown with the list entry's identity.
+    let snapshot: Journal = journal;
     let detailed: Journal | undefined = journal.postings && journal.postings.length > 0 ? journal : undefined;
+    let mismatch: LightyearPendingDuplicateMismatch | undefined;
     if (detailed === undefined && budget > 0) {
       budget--;
       try {
@@ -2065,8 +2081,14 @@ export async function loadPendingDuplicateJournals(
       } catch {
         detailed = undefined;
       }
+      if (detailed !== undefined) {
+        snapshot = detailed;
+        if (detailed.is_deleted) mismatch = "deleted_since_listing";
+        else if (detailed.registered) mismatch = "registered_since_listing";
+        else if (!matchJournalsByRef([detailed], lookups).some(m => m.reference === reference)) mismatch = "reference_changed";
+      }
     }
-    const postings = detailed?.postings?.filter(p => !p.is_deleted).map(p => ({
+    const postings = mismatch !== undefined ? undefined : detailed?.postings?.filter(p => !p.is_deleted).map(p => ({
       accounts_id: p.accounts_id,
       accounts_dimensions_id: p.accounts_dimensions_id ?? null,
       type: p.type ?? null,
@@ -2078,11 +2100,13 @@ export async function loadPendingDuplicateJournals(
     out.push({
       journal_id: journal.id as number,
       reference: wrapUntrustedOcr(reference) ?? reference,
-      effective_date: journal.effective_date,
-      document_number: journal.document_number ? wrapUntrustedOcr(String(journal.document_number)) ?? null : null,
-      title: journal.title ? wrapUntrustedOcr(journal.title) ?? null : null,
+      effective_date: snapshot.effective_date,
+      document_number: snapshot.document_number ? wrapUntrustedOcr(String(snapshot.document_number)) ?? null : null,
+      title: snapshot.title ? wrapUntrustedOcr(snapshot.title) ?? null : null,
       postings: hasPostings ? postings : null,
-      ...(hasPostings ? {} : { postings_unavailable: true as const }),
+      ...(mismatch !== undefined
+        ? { snapshot_mismatch: mismatch }
+        : hasPostings ? {} : { postings_unavailable: true as const }),
     });
   }
   return out;
@@ -3345,6 +3369,10 @@ export function draftConfirmationFields(
   if (pendingIds.length > 0) {
     const one = pendingIds.length === 1;
     parts.push(`${pendingIds.length} earlier journal entr${one ? "y" : "ies"} for rows skipped as duplicates ${one ? "is" : "are"} still unregistered draft${one ? "" : "s"} (pending_duplicate_journals). This run did not create or review ${one ? "it" : "them"}, so ${one ? "it is" : "they are"} not in the confirm list: compare each draft's date, accounts, dimensions and amounts with its statement row, and confirm only after the user approves that draft.`);
+  }
+  const held = pending.filter(j => j.snapshot_mismatch !== undefined).length;
+  if (held > 0) {
+    parts.push(`${held} of them changed after the journal list was read (snapshot_mismatch: registered, deleted, or no longer claiming the statement reference) and ${held === 1 ? "is" : "are"} held: do not ask approval for ${held === 1 ? "it" : "them"} as a matching draft — re-run the import after checking ${held === 1 ? "it" : "them"} with get_journal.`);
   }
   // batch_confirm_journals takes at most 500 ids per call.
   const batches: number[][] = [];

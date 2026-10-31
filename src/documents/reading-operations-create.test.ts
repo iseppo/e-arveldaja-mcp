@@ -8,7 +8,7 @@ import { parseDocument } from "../document-parser.js";
 import { logAudit } from "../audit-log.js";
 import { createTestRuntimeSafetyContext } from "../__fixtures__/runtime-safety.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
-import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, historyTitleNotPrinted, itemTitleHasDate, READING_CONFIRM_DOMAIN, titleWordsMatch } from "./reading-operations.js";
+import { bookingDrift, createReadingDocumentOperations, deferredBookingDrift, draftReadbackMismatches, historyTitleNotPrinted, itemTitleHasDate, READING_CONFIRM_DOMAIN, READING_PLAN_DOMAIN, titleWordsMatch } from "./reading-operations.js";
 import { WRONG_COMPANY_SIGNALS } from "./operations.js";
 import type { BlankLeaderProof, LostValueSeam } from "./lost-value-ocr.js";
 import { fakeSeam, LOST_DOTS, lostValueLines, lostValueParse, ocrRow, PLAIN_PDF, type LostRow } from "../__fixtures__/document-reading/lost-value.js";
@@ -101,6 +101,32 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
 describe("reading create", () => {
+  it("books the history invoice's payable account (2350), not the default 2310, through verify and create", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, liability_accounts_id: 2350 };
+    const file = writePdf("%PDF payable 2350");
+    const verify = await verified(w, file);
+    expect(verify.status).toBe("ready");
+    expect(verify.booking).toMatchObject({ liability_accounts_id: 2350 });
+    expect(verify.payableAccount).toEqual({ liability_accounts_id: 2350, history_liability_accounts_id: 2350, departs_from_history: false });
+    const command = w.runtime.planStore.inspect(verify.planHandle!, READING_PLAN_DOMAIN).commands[0]!;
+    expect(command.reviewProjection).toMatchObject({ liability_accounts_id: 2350, payable_account: { liability_accounts_id: 2350 } });
+    const outcome = await create(w, file, verify.planHandle!);
+    if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
+    expect(w.createAndSetTotals.mock.calls[0]![0]).toMatchObject({ liability_accounts_id: 2350 });
+  });
+
+  it("an explicit payable account other than the history's is shown as a departure from history", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, liability_accounts_id: 2350 };
+    const file = writePdf("%PDF payable override");
+    const { reading, proof } = readingFor(packetFor(file.sha256));
+    const outcome = await w.ops.verify({ source: { file_path: file.path }, reading, proof, booking: { liabilityAccountsId: 2310 } });
+    if (!outcome.ok) throw new Error(outcome.error.message);
+    expect(outcome.value.booking).toMatchObject({ liability_accounts_id: 2310 });
+    expect(outcome.value.payableAccount).toEqual({ liability_accounts_id: 2310, history_liability_accounts_id: 2350, departs_from_history: true });
+  });
+
   it("a clean reading creates one draft, uploads the document, audits the reading path and binds a confirm handle", async () => {
     const w = world();
     const file = writePdf("%PDF clean A-17");
@@ -462,6 +488,14 @@ describe("Step 0: a date lost under a leader is typed and re-checked at create (
     const outcome = await create(w, file, verify.planHandle!, typed("2026-03-15"));
     if (!outcome.ok || outcome.value.status !== "created") throw new Error(JSON.stringify(outcome));
     expect(outcome.value.bookingComputedAtCreate).toMatchObject({ invoice_date: "2026-03-15", gross_price: 124, vat_price: 24 });
+  });
+
+  it("the history invoice's payable account is carried into the lost-date basis", async () => {
+    const w = world();
+    w.details[HISTORY_INVOICE.id] = { ...HISTORY_DETAIL, liability_accounts_id: 2350 };
+    const { verify } = await lostVerified(w, "lost date payable 2350");
+    expect(verify.bookingBasis).toMatchObject({ liability_accounts_id: 2350 });
+    expect(verify.payableAccount).toEqual({ liability_accounts_id: 2350, history_liability_accounts_id: 2350, departs_from_history: false });
   });
 
   it("a template's VAT account, VAT article and reverse-charge id are shown in the basis", async () => {

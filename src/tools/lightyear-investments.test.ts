@@ -16,6 +16,7 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
 import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { Journal } from "../types/api.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance, LEGACY_DISTRIBUTION_FETCH_BUDGET } = lightyearInvestments;
 
@@ -3086,6 +3087,38 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(payload.note).toContain("not in the confirm list");
   });
 
+  it.each([
+    ["book_lightyear_distributions", ["01/03/2026", "OR-1", "", "", "Dividend", "0", "EUR", "0", "9", "0", "0", "9", "0"]],
+    ["book_lightyear_trades", ["01/03/2026 11:51:35", "OR-1", "VUAA", "IE00BK5BQT80", "Buy", "1.000000000", "EUR", "9.000000000", "9.00", "", "0.00", "9.00", ""]],
+  ] as const)("holds an earlier draft whose current detail no longer claims the statement reference (%s)", async (tool, row) => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([[...row]]));
+    // The list says draft 41 is LY:OR-1 on March 1; its current detail is
+    // LY:OTHER on April 1 with matching postings. The review must not show the
+    // list's identity next to the detail's postings as a matching draft.
+    const run = setupLightyearTool(tool, {
+      journals: [{ id: 41, document_number: "LY:OR-1", effective_date: "2026-03-01", title: "list title", is_deleted: false, registered: false }],
+    });
+    run.api.journals.get = vi.fn(async () => ({
+      id: 41, document_number: "LY:OTHER", effective_date: "2026-04-01", title: "detail title", is_deleted: false, registered: false,
+      postings: [
+        { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount: 9 },
+        { accounts_id: 8320, accounts_dimensions_id: null, type: "C", amount: 9 },
+      ],
+    }));
+    const args = tool === "book_lightyear_trades"
+      ? { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, skip_tickers: "none", dry_run: false }
+      : { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false };
+    const payload = parseToolPayload<lightyearInvestments.LightyearDraftConfirmationFields>((await run.handler(args)).content[0]!.text);
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+    expect(payload.next_actions).toBeUndefined();
+    expect(payload.pending_duplicate_journals).toHaveLength(1);
+    const draft = payload.pending_duplicate_journals![0]!;
+    expect(draft).toMatchObject({ journal_id: 41, effective_date: "2026-04-01", postings: null, snapshot_mismatch: "reference_changed" });
+    expect(draft.document_number).toContain("LY:OTHER");
+    expect(draft.title).toContain("detail title");
+    expect(payload.note).toContain("snapshot_mismatch");
+  });
+
   it("bounds legacy-check detail fetches and reviews rows it could not check", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["01/03/2026", "IN-BUDGET", "", "", "Interest", "0", "EUR", "0", "5", "0", "0", "5", "0"],
@@ -5846,7 +5879,7 @@ describe("loadPendingDuplicateJournals", () => {
       { ...base, id: 5, document_number: "LY:OR-5", effective_date: "2026-01-05", registered: false, is_deleted: true },
     ] as any;
     const get = vi.fn(async (id: number) => ({
-      id, effective_date: "2026-01-02", postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }],
+      ...journals.find((j: { id: number }) => j.id === id), postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }],
     }));
     const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
     const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [
@@ -5864,6 +5897,31 @@ describe("loadPendingDuplicateJournals", () => {
     ]);
   });
 
+  it.each([
+    [{ registered: true }, "registered_since_listing"],
+    [{ is_deleted: true }, "deleted_since_listing"],
+    [{ document_number: "LY:OR-9" }, "reference_changed"],
+    [{ document_number: "OR-1", effective_date: "2026-01-03" }, "reference_changed"],
+  ] as const)("holds a draft whose detail differs from the list entry (%o)", async (change, code) => {
+    const journals: Journal[] = [{ id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", registered: false, is_deleted: false, postings: [] }];
+    const get = vi.fn(async () => ({ ...journals[0], ...change, postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }] }));
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [{ reference: "OR-1", date: "2026-01-02" }]);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ journal_id: 1, postings: null, snapshot_mismatch: code });
+    expect(pending[0]!.postings_unavailable).toBeUndefined();
+  });
+
+  it("takes date, document number and title from the same detail snapshot as the postings", async () => {
+    const journals: Journal[] = [{ id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", title: "old", registered: false, is_deleted: false, postings: [] }];
+    const get = vi.fn(async () => ({ ...journals[0], effective_date: "2026-01-05", title: "new", postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }] }));
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [{ reference: "OR-1", date: "2026-01-02" }]);
+    expect(pending[0]).toMatchObject({ effective_date: "2026-01-05" });
+    expect(pending[0]!.title).toContain("new");
+    expect(pending[0]!.snapshot_mismatch).toBeUndefined();
+  });
+
   it("marks postings unavailable when the detail read fails or the budget is spent", async () => {
     const count = lightyearInvestments.PENDING_DUPLICATE_DETAIL_LIMIT + 1;
     const journals = Array.from({ length: count }, (_, i) => ({
@@ -5871,7 +5929,7 @@ describe("loadPendingDuplicateJournals", () => {
     }));
     const get = vi.fn(async (id: number) => {
       if (id === 1) throw new Error("boom");
-      return { id, effective_date: "2026-01-02", postings: [{ accounts_id: 1120, type: "D" as const, amount: 1 }] };
+      return { ...journals[id - 1]!, postings: [{ accounts_id: 1120, type: "D" as const, amount: 1 }] };
     });
     const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
     const pending = await lightyearInvestments.loadPendingDuplicateJournals(
