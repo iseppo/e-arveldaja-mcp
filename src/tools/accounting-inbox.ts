@@ -31,7 +31,7 @@ import {
 } from "./estonian-tax.js";
 import { canonicalPlanJson, stripUndefinedDeep } from "./camt-plan.js";
 import type { ExecutionPlanInput, PlanRecord } from "../plan-store.js";
-import { camtDuplicateStructuredCorroborators, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
+import { camtDuplicateStructuredCorroborators, camtMovementIdentity, storedBankReferenceLookupKey } from "../camt/duplicate-identity.js";
 import { createAccountingOperations } from "../accounting-operations.js";
 import { ownerExpenseQuestionEffect, type ReviewGuidance } from "../estonian-accounting-guidance.js";
 import {
@@ -49,7 +49,7 @@ import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-
 import { CAMT_MAX_FILE_SIZE, normalizeAccountIdentity } from "../camt/executor.js";
 import { camtDateDay, countCamtStatements, preflightCamt053Xml } from "../camt/parser.js";
 import { groupCamtStatementFiles, type CamtStatementFingerprint } from "../camt/statement-duplicates.js";
-import { groupByDigest, type DigestedFile } from "../file-digest-groups.js";
+import { findSupersededFiles, groupByDigest, type DigestedFile } from "../file-digest-groups.js";
 import {
   buildBankDimensionCandidates,
   normalizeIban,
@@ -112,10 +112,15 @@ interface InboxFileCandidate {
    * statement period/account could not be analyzed), "not_analyzed". */
   analysis?: "analyzed" | "hash_only" | "not_analyzed" | "not_a_statement";
   sha256?: string;
-  /** CAMT only: a byte-identical copy of camt_files[duplicate_of]; no steps. */
-  coverage?: "duplicate";
+  /** CAMT only: a byte-identical copy of camt_files[duplicate_of], or a statement
+   * whose every movement is in camt_files[superseded_by] (same account, period
+   * inside it); no steps either way. */
+  coverage?: "duplicate" | "superseded";
   duplicate_of?: number;
   stands_in_for?: number[];
+  superseded_by?: number;
+  /** Set on a kept statement: the indices of the statements it supersedes. */
+  covers?: number[];
   statement?: { from: string; to: string; currency: string };
   overlaps_with?: Array<{ index: number; from: string; to: string }>;
 }
@@ -124,6 +129,8 @@ interface CamtOverlapSummary {
   analyzed: number;
   duplicate_count: number;
   overlap_pair_count: number;
+  /** Present when > 0: statements fully contained in another one (no steps). */
+  superseded_count?: number;
   budget_exceeded?: true;
 }
 
@@ -395,6 +402,8 @@ export async function analyzeInboxCamtFiles(
     fingerprint: CamtStatementFingerprint;
     statement?: { from: string; to: string; currency: string };
     notAStatement?: boolean;
+    /** Movement identities of an analyzed statement (multiset). */
+    identities?: string[];
   }>();
   let bytesRead = 0;
   let budgetExceeded = camtFiles.length > budget.maxFiles;
@@ -424,6 +433,7 @@ export async function analyzeInboxCamtFiles(
     let accountKey: string | undefined;
     let period: { from: string; to: string } | undefined;
     let statement: { from: string; to: string; currency: string } | undefined;
+    let identities: string[] | undefined;
     let notAStatement = false;
     try {
       const preflight = preflightCamt053Xml(snapshot.text());
@@ -438,6 +448,7 @@ export async function analyzeInboxCamtFiles(
           accountKey = `${identity}:${currency}`;
           period = { from, to };
           statement = { from, to, currency };
+          identities = entries.map(camtMovementIdentity);
         }
       }
     } catch {
@@ -457,6 +468,7 @@ export async function analyzeInboxCamtFiles(
       },
       ...(statement !== undefined ? { statement } : {}),
       ...(notAStatement ? { notAStatement } : {}),
+      ...(identities !== undefined ? { identities } : {}),
     });
   }
 
@@ -469,6 +481,20 @@ export async function analyzeInboxCamtFiles(
   }
 
   const grouped = new Map(groupCamtStatementFiles([...analyzed.values()].map(entry => entry.fingerprint)).map(info => [info.index, info]));
+  // A statement whose every movement is in another kept statement of the same
+  // account and a containing period is superseded by it (byte copies excluded).
+  const superseded = findSupersededFiles([...analyzed.values()].flatMap(entry => {
+    const { fingerprint } = entry;
+    if (grouped.get(fingerprint.index)!.duplicate_of !== undefined) return [];
+    if (entry.identities === undefined || fingerprint.accountKey === undefined || fingerprint.period === undefined) return [];
+    return [{ ...fingerprint, scopeKey: fingerprint.accountKey, identities: entry.identities }];
+  }));
+  const covers = new Map<number, number[]>();
+  for (const [index, cover] of [...superseded.entries()].sort(([left], [right]) => left - right)) {
+    const list = covers.get(cover);
+    if (list) list.push(index);
+    else covers.set(cover, [index]);
+  }
   const bindings = new Map<string, string>();
   let overlapPairs = 0;
   const files = camtFiles.map((file, index): InboxFileCandidate => {
@@ -477,7 +503,10 @@ export async function analyzeInboxCamtFiles(
     const sha256 = entry.fingerprint.digest;
     const info = grouped.get(index)!;
     const statement = entry.statement;
-    if (info.stands_in_for !== undefined) bindings.set(file.path, sha256);
+    const supersededBy = superseded.get(index);
+    const covered = covers.get(index);
+    // A changed or removed kept file re-opens its copies and the statements it supersedes.
+    if (info.stands_in_for !== undefined || covered !== undefined) bindings.set(file.path, sha256);
     // Each overlapping pair is listed on both files: count it on the first.
     overlapPairs += info.overlaps_with?.filter(other => other.index > index).length ?? 0;
     return {
@@ -485,7 +514,9 @@ export async function analyzeInboxCamtFiles(
       analysis: statement !== undefined ? "analyzed" : entry.notAStatement ? "not_a_statement" : "hash_only",
       sha256,
       ...(info.duplicate_of !== undefined ? { coverage: "duplicate" as const, duplicate_of: info.duplicate_of } : {}),
+      ...(supersededBy !== undefined ? { coverage: "superseded" as const, superseded_by: supersededBy } : {}),
       ...(info.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
+      ...(covered !== undefined ? { covers: covered } : {}),
       ...(statement !== undefined && info.duplicate_of === undefined ? { statement } : {}),
       ...(info.overlaps_with !== undefined ? { overlaps_with: info.overlaps_with } : {}),
     };
@@ -496,6 +527,7 @@ export async function analyzeInboxCamtFiles(
       analyzed: analyzed.size,
       duplicate_count: files.filter(file => file.duplicate_of !== undefined).length,
       overlap_pair_count: overlapPairs,
+      ...(superseded.size > 0 ? { superseded_count: superseded.size } : {}),
     },
     bindings,
   };
@@ -542,6 +574,10 @@ interface LightyearFileCandidate {
   duplicate_of?: number;
   /** Set on a kept file: the lightyear_files indices of its byte-identical copies. */
   stands_in_for?: number[];
+  /** Account statement whose every row is in lightyear_files[superseded_by]. */
+  superseded_by?: number;
+  /** Set on a kept account statement: the indices of the statements it supersedes. */
+  covers?: number[];
 }
 
 /** A detected Lightyear export as accounting_inbox reports it under detected_inputs.lightyear_files. */
@@ -549,11 +585,13 @@ export type InboxLightyearFilePayload = {
   kind: LightyearFileCandidate["kind"];
   display_path: string;
   display_name: string;
-  /** Absent on a copy (`coverage: "duplicate"`) and when the Lightyear tools are not visible. */
+  /** Absent on a copy (`coverage: "duplicate"`), on a superseded statement and when the Lightyear tools are not visible. */
   file_ref?: string;
-  coverage?: "duplicate";
+  coverage?: "duplicate" | "superseded";
   duplicate_of?: number;
   stands_in_for?: number[];
+  superseded_by?: number;
+  covers?: number[];
   modified_at: string;
   size_bytes: number;
 };
@@ -570,6 +608,8 @@ async function analyzeInboxLightyearFiles(
   const budget = LIGHTYEAR_ANALYSIS_BUDGET;
   if (lightyearFiles.length > budget.maxFiles) return { files: lightyearFiles, budgetExceeded: true };
   const digested: DigestedFile[] = [];
+  // Account-statement rows as canonical JSON of the statement columns (a multiset).
+  const rowIdentities = new Map<number, string[]>();
   let bytesRead = 0;
   for (const [index, file] of lightyearFiles.entries()) {
     if (bytesRead + file.size_bytes > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
@@ -590,15 +630,31 @@ async function analyzeInboxLightyearFiles(
     if (bytesRead > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
     // Copies are only ever of the same kind.
     digested.push({ index, path: file.path, modifiedAt: file.modified_at, digest: `${file.kind}:${snapshot.identity.digest_sha256}` });
+    if (file.kind === "account_statement") {
+      const rows = parseCSV(snapshot.text().replace(/^\uFEFF/, "")).slice(1)
+        .map(row => row.slice(0, EXPECTED_STATEMENT_HEADERS.length).map(cell => cell.trim()))
+        .filter(row => row.some(cell => cell !== ""));
+      rowIdentities.set(index, rows.map(row => JSON.stringify(row)));
+    }
   }
   const grouped = new Map(groupByDigest(digested).map(info => [info.index, info]));
+  // An account statement whose every row is in another kept statement is
+  // superseded by it (no account id is read from file names; byte copies excluded).
+  const superseded = findSupersededFiles(digested.flatMap(file => {
+    const identities = rowIdentities.get(file.index);
+    if (identities === undefined || grouped.get(file.index)?.duplicate_of !== undefined) return [];
+    return [{ ...file, scopeKey: "account_statement", identities }];
+  }));
   return {
     files: lightyearFiles.map((file, index) => {
       const info = grouped.get(index);
+      const covered = [...superseded.entries()].filter(([, cover]) => cover === index).map(([covered]) => covered).sort((left, right) => left - right);
       return {
         ...file,
         ...(info?.duplicate_of !== undefined ? { duplicate_of: info.duplicate_of } : {}),
         ...(info?.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
+        ...(superseded.has(index) ? { superseded_by: superseded.get(index)! } : {}),
+        ...(covered.length > 0 ? { covers: covered } : {}),
       };
     }),
     budgetExceeded: false,
@@ -646,8 +702,8 @@ function publicLightyearFile(
     kind: file.kind,
     display_path: sandboxExternalText(file.path),
     display_name: sandboxExternalText(file.name),
-    // A byte-identical copy gets no file_ref: the kept file stands in for it.
-    ...(toolsVisible && file.duplicate_of === undefined
+    // A byte-identical copy or a superseded statement gets no file_ref: the kept file stands in for it.
+    ...(toolsVisible && file.duplicate_of === undefined && file.superseded_by === undefined
       ? {
           file_ref: runtimeSafetyContext.fileReferenceStore.issue({
             canonicalPath: file.path,
@@ -659,7 +715,9 @@ function publicLightyearFile(
         }
       : {}),
     ...(file.duplicate_of !== undefined ? { coverage: "duplicate" as const, duplicate_of: file.duplicate_of } : {}),
+    ...(file.superseded_by !== undefined ? { coverage: "superseded" as const, superseded_by: file.superseded_by } : {}),
     ...(file.stands_in_for !== undefined ? { stands_in_for: file.stands_in_for } : {}),
+    ...(file.covers !== undefined ? { covers: file.covers } : {}),
     modified_at: file.modified_at,
     size_bytes: file.size_bytes,
   };
@@ -825,11 +883,15 @@ export function buildRecommendedSteps(params: {
   // A byte-identical copy of another detected statement gets no steps (never a
   // recommended:false step, which the dry-run autopilot would treat as a
   // skipped prerequisite and defer classification on).
-  const steppedCamtFiles = camtFiles.filter(file => file.duplicate_of === undefined && file.analysis !== "not_a_statement");
+  // The same holds for a statement superseded by a larger one.
+  const steppedCamtFiles = camtFiles.filter(file =>
+    file.duplicate_of === undefined && file.superseded_by === undefined && file.analysis !== "not_a_statement");
   for (const file of steppedCamtFiles) {
-    const standInNote = file.stands_in_for !== undefined
+    const standInNote = (file.stands_in_for !== undefined
       ? ` This file stands in for byte-identical file(s) at camt_files index ${file.stands_in_for.join(", ")}; if it was changed or removed, re-run accounting_inbox so the duplicates are reconsidered.`
-      : "";
+      : "") + (file.covers !== undefined
+      ? ` This statement contains every movement of the statement(s) at camt_files index ${file.covers.join(", ")}, which are left out; if it was changed or removed, re-run accounting_inbox so they are reconsidered.`
+      : "");
     steps.push({
       step: stepNumber++,
       tool: "parse_camt053",
@@ -996,8 +1058,10 @@ function lightyearSummarySentence(files: LightyearFileCandidate[], toolsVisible:
   const statements = files.filter(file => file.kind === "account_statement").length;
   const gains = files.length - statements;
   const copies = files.filter(file => file.duplicate_of !== undefined).length;
+  const superseded = files.filter(file => file.superseded_by !== undefined).length;
   const found = `Found ${files.length} Lightyear export(s) (${statements} account statement(s), ${gains} capital-gains file(s))` +
-    (copies > 0 ? `, of which ${copies} identical cop${copies === 1 ? "y" : "ies"} of another export (use the kept file only)` : "");
+    (copies > 0 ? `, of which ${copies} identical cop${copies === 1 ? "y" : "ies"} of another export (use the kept file only)` : "") +
+    (superseded > 0 ? `${copies > 0 ? " and" : ", of which"} ${superseded} account statement(s) whose every row is in a larger statement (coverage=superseded; use the larger one)` : "");
   return toolsVisible
     ? `${found}; book them with the lightyear-booking workflow (parse_lightyear_statement, then book_lightyear_trades / book_lightyear_distributions dry run). Overlapping statement periods are de-duplicated by the LY: reference.`
     : `${found}. Lightyear tools are not enabled in this profile (EARVELDAJA_DISABLE_LIGHTYEAR or a guided profile).`;
@@ -1027,6 +1091,10 @@ function buildUserSummary(params: {
   );
   if (params.camtDuplicateCount > 0) {
     parts.push(`${params.camtDuplicateCount} CAMT file(s) are byte-identical copies of another and are left out of the steps.`);
+  }
+  const supersededCount = params.camtFiles.filter(file => file.superseded_by !== undefined).length;
+  if (supersededCount > 0) {
+    parts.push(`${supersededCount} CAMT statement(s) are fully contained in a larger statement of the same account and are left out of the steps.`);
   }
   const notAStatementCount = params.camtFiles.filter(file => file.analysis === "not_a_statement").length;
   if (notAStatementCount > 0) {
@@ -1197,8 +1265,10 @@ function publicInboxFile(
     // CAMT analysis: indices, enums, a hex digest, validated dates and currency only.
     ...(file.analysis !== undefined ? { analysis: file.analysis } : {}),
     ...(file.sha256 !== undefined ? { sha256: file.sha256 } : {}),
-    ...(file.coverage !== undefined ? { coverage: file.coverage, duplicate_of: file.duplicate_of } : {}),
+    ...(file.coverage === "duplicate" ? { coverage: file.coverage, duplicate_of: file.duplicate_of } : {}),
+    ...(file.coverage === "superseded" ? { coverage: file.coverage, superseded_by: file.superseded_by } : {}),
     ...(file.stands_in_for !== undefined ? { stands_in_for: file.stands_in_for } : {}),
+    ...(file.covers !== undefined ? { covers: file.covers } : {}),
     ...(file.statement !== undefined ? { statement: file.statement } : {}),
     ...(file.overlaps_with !== undefined ? { overlaps_with: file.overlaps_with } : {}),
   };
@@ -1495,6 +1565,9 @@ function buildPreparedInboxPayload(
       "Summarize work as: done automatically, needs one decision, and needs accountant review.",
       ...(prepared.camtOverlap.duplicate_count > 0 || prepared.camtOverlap.overlap_pair_count > 0
         ? ["CAMT files marked coverage=duplicate are byte-identical copies of the camt_files entry named by duplicate_of; they are listed for transparency only. Importing one is harmless but unnecessary, and the user may still import one explicitly. Statements listed in overlaps_with are both kept: rows in the overlap are deduplicated on import, and reference-less rows there may surface as possible-duplicate review."]
+        : []),
+      ...((prepared.camtOverlap.superseded_count ?? 0) > 0
+        ? ["CAMT files marked coverage=superseded contain only movements that are also in the camt_files entry named by superseded_by (same account, period inside it); importing that statement covers them, so they get no steps. A statement with even one movement of its own is never superseded."]
         : []),
       ...(prepared.liveApiDefaultsAvailable
         ? []

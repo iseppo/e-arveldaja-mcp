@@ -4289,6 +4289,96 @@ describe("accounting_inbox CAMT duplicates and overlaps", () => {
     }
   });
 
+  describe("#2 statements fully covered by a larger one", () => {
+    type CamtFilePayload = { display_name: string; coverage?: string; superseded_by?: number; covers?: number[]; duplicate_of?: number; overlaps_with?: Array<{ index: number }> };
+    type StepPayload = { tool: string; suggested_args: { file_ref: string }; reason: string };
+    const row = (date: string, amount: string, reference?: string) => ({ date, amount, ...(reference ? { reference } : {}) });
+    const rowsA = [row("2026-09-02", "10.00", "R1"), row("2026-09-20", "50.00", "R2"), row("2026-09-20", "50.00", "R2"), row("2026-10-20", "7.00", "R3")];
+    const statementA = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-10-31" }, entries: rowsA });
+    // B: Sep 1–Oct 2, rows ⊆ A.
+    const statementB = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-10-02" }, entries: rowsA.slice(0, 3) });
+    // D: Sep 1–Oct 12 with a row A does not have (e.g. a filtered export of another day).
+    const statementD = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-10-12" }, entries: [rowsA[0]!, row("2026-10-05", "3.00", "R9")] });
+
+    it("supersedes B by A, keeps D (overlap info only), and gives B no steps", async () => {
+      const workspace = await workspaceWith([
+        { name: "a.xml", xml: statementA, mtime: OLDER },
+        { name: "b.xml", xml: statementB, mtime: NEWER },
+        { name: "d.xml", xml: statementD, mtime: NEWER },
+      ]);
+      const { context, scan } = setup();
+      const payload = await scan(workspace);
+      const files = payload.detected_inputs.camt_files as CamtFilePayload[];
+      const indexOf = (name: string) => files.findIndex(file => desandboxText(file.display_name) === name);
+      const [a, b, d] = [indexOf("a.xml"), indexOf("b.xml"), indexOf("d.xml")];
+      expect(files[b]).toMatchObject({ coverage: "superseded", superseded_by: a, statement: { from: "2026-09-01", to: "2026-10-02" } });
+      expect(files[b].duplicate_of).toBeUndefined();
+      expect(files[a]).toMatchObject({ covers: [b] });
+      expect(files[a].coverage).toBeUndefined();
+      expect(files[d].coverage).toBeUndefined();
+      expect(files[d]!.overlaps_with!.map(other => other.index).sort()).toEqual([a, b].sort());
+      expect(payload.camt_overlap).toMatchObject({ analyzed: 3, duplicate_count: 0, superseded_count: 1 });
+      expect(payload.user_summary).toContain("1 CAMT statement(s) are fully contained in a larger statement");
+      expect(payload.assistant_guidance.join("\n")).toContain("coverage=superseded");
+      const refs = camtStepRefs(payload);
+      expect(refs).toHaveLength(4);
+      const steppedPaths = new Set(refs.map((ref: string) => resolvedPath(context, ref)));
+      expect(steppedPaths).toEqual(new Set([join(workspace, "a.xml"), join(workspace, "d.xml")]));
+      // The covering statement's step refs are bound to its bytes; D stays unbound.
+      const sha = (xml: string) => createHash("sha256").update(xml).digest("hex");
+      for (const ref of refs) {
+        const bound = context.fileReferenceStore.resolveBound(ref, { kind: "file", operation: FILE_REFERENCE_OPERATIONS.camt });
+        expect(bound.expectedSha256).toBe(bound.canonicalPath === join(workspace, "a.xml") ? sha(statementA) : undefined);
+      }
+      const importA = (payload.recommended_steps as StepPayload[]).find(step => step.tool === "import_camt053" &&
+        resolvedPath(context, step.suggested_args.file_ref) === join(workspace, "a.xml"));
+      expect(desandboxText(importA!.reason)).toContain(`contains every movement of the statement(s) at camt_files index ${b}`);
+    });
+
+    it("counts a repeated same-amount row: one fewer occurrence in the larger file keeps the smaller one", async () => {
+      const smaller = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-09-30" }, entries: [rowsA[1]!, rowsA[2]!, rowsA[1]!] });
+      const workspace = await workspaceWith([
+        { name: "a.xml", xml: statementA, mtime: OLDER },
+        { name: "small.xml", xml: smaller, mtime: NEWER },
+      ]);
+      const payload = await setup().scan(workspace);
+      expect((payload.detected_inputs.camt_files as CamtFilePayload[]).some(file => file.coverage !== undefined)).toBe(false);
+      expect(payload.camt_overlap).not.toHaveProperty("superseded_count");
+    });
+
+    it("never supersedes on period containment alone (a statement without movements is kept)", async () => {
+      const empty = fixtureCamtStatementXml({ period: { from: "2026-09-01", to: "2026-09-30" } });
+      const workspace = await workspaceWith([
+        { name: "a.xml", xml: statementA, mtime: OLDER },
+        { name: "empty.xml", xml: empty, mtime: NEWER },
+      ]);
+      const payload = await setup().scan(workspace);
+      expect((payload.detected_inputs.camt_files as CamtFilePayload[]).some(file => file.coverage !== undefined)).toBe(false);
+    });
+
+    it("an equal-content pair (other bytes, same period and movements) keeps exactly one, whatever the input order", async () => {
+      const copyWithOtherHeader = statementA.replace("<BkToCstmrStmt>", "<BkToCstmrStmt><!-- MsgId OTHER-EXPORT -->");
+      const workspace = await workspaceWith([
+        { name: "a.xml", xml: statementA, mtime: OLDER },
+        { name: "a-export.xml", xml: copyWithOtherHeader, mtime: OLDER },
+      ]);
+      const context = createTestRuntimeSafetyContext();
+      const candidates = ["a.xml", "a-export.xml"].map(name => ({
+        path: join(workspace, name), name, modified_at: OLDER.toISOString(), size_bytes: 10,
+      }));
+      const outcome = async (list: typeof candidates) => {
+        const analysis = await analyzeInboxCamtFiles(list, context);
+        return Object.fromEntries(analysis.files.map(file => [file.name, file.superseded_by === undefined ? "kept" : `superseded_by:${list[file.superseded_by]!.name}`]));
+      };
+      const forward = await outcome(candidates);
+      const reversed = await outcome([...candidates].reverse());
+      expect(Object.values(forward).filter(value => value === "kept")).toHaveLength(1);
+      expect(reversed).toEqual(forward);
+      // Lowest path wins the tie: "a-export.xml" < "a.xml".
+      expect(forward).toEqual({ "a-export.xml": "kept", "a.xml": "superseded_by:a-export.xml" });
+    });
+  });
+
   it("an invalid statement account identity leaves overlap unanalyzed (hash only)", async () => {
     const workspace = await workspaceWith([
       { name: "statement-a.xml", xml: fixtureCamtStatementXml({ iban: "EE63-7700-7710-1121-2909", period: { from: "2026-09-01", to: "2026-09-30" } }), mtime: NEWER },
@@ -4837,6 +4927,40 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     expect(new Set(files.filter(file => file.file_ref !== undefined).map(file => file.kind))).toEqual(new Set(["account_statement", "capital_gains"]));
     expect(prepared.user_summary).toContain("of which 2 identical copies of another export");
     expect(prepared).not.toHaveProperty("lightyear_analysis");
+  });
+
+  it("#2 an account statement whose every row is in a larger one is superseded (no file_ref); equal rows keep one", async () => {
+    const workspace = await lightyearWorkspace();
+    const secondRow = "15/09/2026 10:00:00,OR-FIXTURE2,FIXT,IE0000000001,Sell,1,EUR,11.00,11.00,,0.00,11.00,\n";
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-FULL.csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
+    // Same rows, other bytes (every cell quoted): content-equal to the 1-row statement.
+    const quoted = LIGHTYEAR_STATEMENT_CSV.trim().split("\n").map(line => line.split(",").map(cell => `"${cell}"`).join(",")).join("\n");
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-QUOTED.csv"), `${quoted}\n`);
+    const { prepared } = await scan(workspace);
+    const files = prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[];
+    const byName = new Map(files.map((file, index) => [desandboxText(file.display_name), { file, index }]));
+    const full = byName.get("AccountStatement-LY-FIXTURE-FULL.csv")!;
+    for (const name of ["AccountStatement-LY-FIXTURE.csv", "AccountStatement-LY-FIXTURE-QUOTED.csv"]) {
+      const covered = byName.get(name)!;
+      expect(covered.file).toMatchObject({ coverage: "superseded", superseded_by: full.index });
+      expect(covered.file.file_ref).toBeUndefined();
+    }
+    expect(full.file.covers).toEqual([byName.get("AccountStatement-LY-FIXTURE.csv")!.index, byName.get("AccountStatement-LY-FIXTURE-QUOTED.csv")!.index].sort((left, right) => left - right));
+    expect(typeof full.file.file_ref).toBe("string");
+    // Capital-gains files are byte-deduplicated only.
+    expect(byName.get("LightyearCapitalGainsStatement-LY-FIXTURE.csv")!.file.coverage).toBeUndefined();
+    expect(prepared.user_summary).toContain("2 account statement(s) whose every row is in a larger statement");
+  });
+
+  it("#2 two content-equal Lightyear statements without a larger one keep exactly one", async () => {
+    const workspace = await lightyearWorkspace();
+    const quoted = LIGHTYEAR_STATEMENT_CSV.trim().split("\n").map(line => line.split(",").map(cell => `"${cell}"`).join(",")).join("\n");
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE-QUOTED.csv"), `${quoted}\n`);
+    const { prepared } = await scan(workspace);
+    const statements = (prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[]).filter(file => file.kind === "account_statement");
+    expect(statements).toHaveLength(2);
+    expect(statements.filter(file => file.coverage === "superseded")).toHaveLength(1);
+    expect(statements.filter(file => typeof file.file_ref === "string")).toHaveLength(1);
   });
 
   it("does not change the steps of an existing CAMT/Wise workspace", async () => {
