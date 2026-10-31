@@ -63,6 +63,46 @@ function clientConflictError(conflicts: { duplicates: Client[]; selfMatch: boole
 
 const CLIENT_IDENTITY_FIELDS = ["code", "invoice_vat_no", "cl_code_country", "is_physical_entity", "is_juridical_entity"] as const;
 
+
+/** One sent top-level field whose read-back value differs (#17). */
+export type ClientIgnoredField = { field: string; sent: unknown; read_back: unknown };
+
+/** The update_client success payload. */
+export type UpdateClientPayload = {
+  ok: true;
+  action: "updated" | "updated_with_ignored_fields";
+  entity: "client";
+  id: number;
+  message: string;
+  warnings?: string[];
+  /** Sent fields the client read back without (action "updated_with_ignored_fields"). */
+  ignored_fields?: ClientIgnoredField[];
+  /** The read-back after the update failed, so nothing was compared. */
+  readback_unavailable?: true;
+  raw: unknown;
+};
+
+/**
+ * Sent top-level scalar fields whose read-back differs: strings compared
+ * trimmed, numbers and booleans strictly, null equal to an absent value.
+ * Nested objects and arrays are not compared.
+ */
+function clientUpdateIgnoredFields(sent: Record<string, unknown>, readback: Client): ClientIgnoredField[] {
+  const stored = readback as unknown as Record<string, unknown>;
+  const ignored: ClientIgnoredField[] = [];
+  for (const [field, value] of Object.entries(sent)) {
+    if (value !== null && typeof value === "object") continue;
+    const readValue = stored[field];
+    const same = typeof value === "string" && typeof readValue === "string"
+      ? value.trim() === readValue.trim()
+      : value === null
+        ? readValue === null || readValue === undefined
+        : value === readValue;
+    if (!same) ignored.push({ field, sent: value, read_back: readValue ?? null });
+  }
+  return ignored;
+}
+
 export function registerClientTools(server: McpServer, api: ApiContext): void {
   // =====================
   // CLIENTS
@@ -157,7 +197,7 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
     });
   });
 
-  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client.", {
+  registerTool(server, "update_client", "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client. The client is read back afterwards: sent fields it does not store are listed in ignored_fields (action updated_with_ignored_fields).", {
     id: coerceId.describe("Client ID"),
     data: jsonObjectInput.describe("Object with fields to update."),
     foreign_identity_attested: z.boolean().optional().describe("Operator attestation for a FOREIGN legal entity's identity, required when changing its identity fields (see create_client)."),
@@ -204,16 +244,38 @@ export function registerClientTools(server: McpServer, api: ApiContext): void {
       }
     }
     const result = await api.clients.update(id, parsed);
+    // #17: the API accepts some fields without storing them (live: the
+    // related-party flag read back unchanged). Read the client back and name
+    // every sent top-level value that did not stick.
+    let readback: Client | undefined;
+    try {
+      readback = await api.clients.get(id);
+    } catch {
+      readback = undefined;
+    }
+    const ignoredFields = readback ? clientUpdateIgnoredFields(parsed, readback) : [];
     logAudit({
       tool: "update_client", action: "UPDATED", entity_type: "client", entity_id: id,
       summary: `Updated client ${id}`,
-      details: { fields_changed: Object.keys(parsed) },
+      details: { fields_changed: Object.keys(parsed), ...(ignoredFields.length > 0 ? { ignored_fields: ignoredFields } : {}) },
     });
+    if (ignoredFields.length > 0) {
+      return toolResponse({
+        action: "updated_with_ignored_fields",
+        entity: "client",
+        id,
+        message: `Updated client ${id}, but e-arveldaja did not store ${ignoredFields.map(entry => entry.field).join(", ")}.`,
+        warnings: [`The API accepted the update but the client reads back with a different value for: ${ignoredFields.map(entry => entry.field).join(", ")}. Those fields were not saved; change them in the e-arveldaja UI.`],
+        extra: { ignored_fields: ignoredFields },
+        raw: result,
+      });
+    }
     return toolResponse({
       action: "updated",
       entity: "client",
       id,
       message: `Updated client ${id}.`,
+      ...(readback === undefined ? { extra: { readback_unavailable: true } } : {}),
       raw: result,
     });
   });

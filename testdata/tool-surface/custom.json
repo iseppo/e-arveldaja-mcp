@@ -2,8 +2,8 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 93106,
-    "descriptionsBytes": 12127,
+    "toolsListBytes": 93239,
+    "descriptionsBytes": 12260,
     "inputSchemasBytes": 60585,
     "largestTool": {
       "name": "import_wise_transactions",
@@ -406,7 +406,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client.",
+      "description": "Update client fields. Server-managed activation fields are rejected; use deactivate/reactivate tools. Identity changes (code, VAT, country, person type) pass the same identity and duplicate checks as create_client. The client is read back afterwards: sent fields it does not store are listed in ignored_fields (action updated_with_ignored_fields).",
       "execution": {
         "taskSupport": "forbidden"
       },

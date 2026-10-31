@@ -16,6 +16,8 @@ import {
   validateUpdateFields,
 } from "./crud-tools.js";
 import { registerPurchaseInvoiceTools } from "./crud/purchase-invoices.js";
+import type { UpdateClientPayload } from "./crud/clients.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { isoDateString } from "./crud/shared.js";
 import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX } from "../mcp-json.js";
 import { logAudit } from "../audit-log.js";
@@ -1560,6 +1562,48 @@ describe("update_* allowlists", () => {
     expect(api.clients.update).not.toHaveBeenCalled();
     const body = parseMcpResponse(result.content[0]!.text) as { error: string; details: string[] };
     expect(body.details[0]).toMatch(/at least one field/);
+  });
+
+  it("#17 update_client names a sent field the client reads back without", async () => {
+    const { handler } = getCrudToolHarness("update_client", {
+      clients: {
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+        get: vi.fn().mockResolvedValue({ id: 7, name: "Näidis OÜ ", email: "new@example.com", is_related_party: false, related_party: null }),
+      },
+    });
+    const result = await handler({ id: 7, data: { name: "Näidis OÜ", email: "new@example.com", is_related_party: true } }) as { content: Array<{ text: string }> };
+    const payload = parseToolPayload<UpdateClientPayload>(result.content[0]!.text);
+    expect(payload.action).toBe("updated_with_ignored_fields");
+    expect(payload.ignored_fields).toEqual([{ field: "is_related_party", sent: true, read_back: false }]);
+    expect(payload.warnings?.[0]).toContain("is_related_party");
+    expect(vi.mocked(logAudit)).toHaveBeenCalledWith(expect.objectContaining({
+      details: expect.objectContaining({ ignored_fields: [{ field: "is_related_party", sent: true, read_back: false }] }),
+    }));
+  });
+
+  it("#17 update_client keeps its response when every sent field reads back", async () => {
+    const { handler } = getCrudToolHarness("update_client", {
+      clients: {
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+        get: vi.fn().mockResolvedValue({ id: 7, email: "new@example.com", related_party: null }),
+      },
+    });
+    const result = await handler({ id: 7, data: { email: " new@example.com", related_party: null } }) as { content: Array<{ text: string }> };
+    const payload = parseToolPayload<UpdateClientPayload>(result.content[0]!.text);
+    expect(payload).toEqual({ ok: true, action: "updated", entity: "client", id: 7, message: "Updated client 7.", raw: { code: 1, messages: ["ok"] } });
+  });
+
+  it("#17 update_client reports a failed readback without failing the update", async () => {
+    const { handler } = getCrudToolHarness("update_client", {
+      clients: {
+        update: vi.fn().mockResolvedValue({ code: 1, messages: ["ok"] }),
+        get: vi.fn().mockRejectedValue(new Error("network")),
+      },
+    });
+    const result = await handler({ id: 7, data: { email: "new@example.com" } }) as { content: Array<{ text: string }> };
+    const payload = parseToolPayload<UpdateClientPayload>(result.content[0]!.text);
+    expect(payload).toMatchObject({ ok: true, action: "updated", readback_unavailable: true });
+    expect(payload.ignored_fields).toBeUndefined();
   });
 
   it("update_client passes through an allowed field", async () => {
@@ -3959,7 +4003,9 @@ describe("M5 create_client / update_client identity guards", () => {
       clients: { get: vi.fn(), update: vi.fn().mockResolvedValue({}) },
     });
     await handler({ id: 7, data: { email: "a@b.ee" } });
-    expect(api.clients.get).not.toHaveBeenCalled();
+    // No identity pre-read: the only read is the #17 readback after the update.
+    expect(api.clients.get).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.clients.update).mock.invocationCallOrder[0]!).toBeLessThan(vi.mocked(api.clients.get).mock.invocationCallOrder[0]!);
     expect(api.clients.update).toHaveBeenCalledWith(7, { email: "a@b.ee" });
   });
 });
