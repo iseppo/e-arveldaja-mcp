@@ -1,4 +1,5 @@
 import { canonicalRefNumber } from "../ref-number.js";
+import { normalizeIban } from "../resolution/bank-account-resolution.js";
 import { summarizeEntries } from "./parser.js";
 import {
   buildBatchDuplicateKey,
@@ -36,7 +37,9 @@ import {
 import type {
   CamtCreateDescriptor,
   CamtImportProjection,
+  CamtInterAccountTransferTag,
   CamtParseResult,
+  CamtSkipInterAccountLegs,
   CamtSkippedRow,
   ClientResolution,
   ClientResolutionCache,
@@ -155,6 +158,21 @@ interface CamtProjectionInput {
   readonly reportProgress: (index: number, total: number) => Promise<void>;
   /** This connection's stored journal-review acknowledgements (#10b), read by the operation layer. */
   readonly reviewAcknowledgements?: readonly CamtReviewAcknowledgementRecord[];
+  /** #11: leave out own-account transfer legs of this direction (default "none"). */
+  readonly skipInterAccountLegs?: CamtSkipInterAccountLegs;
+}
+
+export const CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT = "inter_account_other_side_kept";
+
+/** The one other own bank dimension the counterparty IBAN belongs to, if exactly one. */
+function interAccountTransferTag(
+  entry: ParsedCamtEntry,
+  ownIbanToDimension: ReadonlyMap<string, ReadonlySet<number>>,
+  dimensionId: number,
+): CamtInterAccountTransferTag | undefined {
+  const iban = normalizeIban(entry.counterparty_iban);
+  const others = [...(iban ? ownIbanToDimension.get(iban) ?? [] : [])].filter(dimension => dimension !== dimensionId);
+  return others.length === 1 ? { counterparty_dimension_id: others[0]! } : undefined;
 }
 
 /**
@@ -378,6 +396,23 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       continue;
     }
 
+    // #11: the other account's statement books this own transfer; leave this leg out.
+    const interAccountTransfer = interAccountTransferTag(entry, journalCoverage.ownIbanToDimension, accountsDimensionsId);
+    const skipLegs = input.skipInterAccountLegs ?? "none";
+    if (interAccountTransfer && skipLegs !== "none" && (entry.direction === "DBIT") === (skipLegs === "outgoing")) {
+      skipped.push({
+        date: entry.date,
+        amount: entry.amount,
+        bank_reference: entry.bank_reference,
+        duplicate_transaction_ids: [],
+        reason: `Own-account transfer ${entry.direction === "DBIT" ? "out to" : "in from"} bank dimension ${interAccountTransfer.counterparty_dimension_id} left out: ` +
+          "the other account's statement books it (skip_inter_account_legs). Import that statement too, or the transfer stays unbooked.",
+        skip_code: CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT,
+        inter_account_transfer: interAccountTransfer,
+      });
+      continue;
+    }
+
     const rendering = renderCamtDescriptionDetailed(entry.description, entry, {
       omitCounterpartyIban: isCamtIbanOmissionEligible(ibanOmissionEvidence, entry.counterparty_iban),
     });
@@ -423,6 +458,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       entry, payload, storedDescription, clientResolution, possibleDuplicateMatches, batchDuplicateKey,
       ...(rendering.truncated ? { description_truncated: rendering.truncated } : {}),
       ...(rendering.ibanOmitted ? { counterparty_iban_omitted: true as const } : {}),
+      ...(interAccountTransfer ? { inter_account_transfer: interAccountTransfer } : {}),
     });
     seenBatchDuplicateKeys.add(batchDuplicateKey);
   }

@@ -212,11 +212,14 @@ export function registerBankReconciliationTools(
       delete_proposed_mirrors: z.boolean().optional().describe(
         "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute."
       ),
+      keep_side: z.enum(["outgoing", "incoming"]).optional().describe(
+        "Inter-account only: which leg of a matched transfer pair is confirmed (the other is deleted). Default outgoing. incoming requires a checksum-verified incoming CAMT marker on that leg, else the pair goes to ambiguous_pairs (direction_unresolved). Resend the same value at execute."
+      ),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
     },
     { ...batch, title: "Reconcile Inter-Account Transfers" },
-    async ({ execute, max_date_gap, target_accounts_dimensions_id, delete_proposed_mirrors, plan_handle }) => {
-      const input = { maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors };
+    async ({ execute, max_date_gap, target_accounts_dimensions_id, delete_proposed_mirrors, keep_side, plan_handle }) => {
+      const input = { maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side };
       const compact = useCompactRecon();
       const connectionName = activeConnectionName();
       try {
@@ -224,7 +227,7 @@ export function registerBankReconciliationTools(
           const outcome = await operations.prepareInterAccount(input);
           if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
           return compact
-            ? compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors }))
+            ? compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side }))
             : response(buildInterAccountPayload({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle }));
         }
         const outcome = await operations.executeInterAccount({ ...input, planHandle: plan_handle });
@@ -258,6 +261,9 @@ export function registerBankReconciliationTools(
       delete_proposed_mirrors: z.boolean().optional().describe(
         "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute."
       ),
+      keep_side: z.enum(["outgoing", "incoming"]).optional().describe(
+        "Inter-account only: which leg of a matched transfer pair is confirmed (the other is deleted). Default outgoing. incoming requires a checksum-verified incoming CAMT marker on that leg, else the pair goes to ambiguous_pairs (direction_unresolved). Resend the same value at execute."
+      ),
       block_on_duplicate: z.boolean().optional().describe(
         "For the invoice-matching modes (suggest / dry_run_auto_confirm / execute_auto_confirm): refuse (or, in suggest, flag) an exact match whose cash movement appears already booked by another journal. Default false = advisory only."
       ),
@@ -266,7 +272,7 @@ export function registerBankReconciliationTools(
       ),
     },
     { ...batch, title: "Reconcile Bank Transactions" },
-    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id, delete_proposed_mirrors, block_on_duplicate, plan_handle }) => {
+    async ({ mode, min_confidence, max_date_gap, target_accounts_dimensions_id, delete_proposed_mirrors, keep_side, block_on_duplicate, plan_handle }) => {
       const selectedMode = mode ?? "suggest";
 
       // Guided surface: emit the token-lean compact operation summary and return
@@ -292,12 +298,12 @@ export function registerBankReconciliationTools(
               return compactResponse(renderExactMatchCompact({ mode: "EXECUTED", projection: outcome.value.projection, executionReport: outcome.value.executionReport, ledgerChecks: outcome.value.ledgerChecks, operationHandle, connectionName, blockOnDuplicate: block_on_duplicate }));
             }
             case "inter_account_dry_run": {
-              const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors });
+              const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side });
               if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
-              return compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors }));
+              return compactResponse(renderInterAccountCompact({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle, connectionName, maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side }));
             }
             case "execute_inter_account": {
-              const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, planHandle: plan_handle });
+              const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side, planHandle: plan_handle });
               if (!outcome.ok) return reconPlanError(outcome.error.code, outcome.error.message);
               const operationHandle = issueReconResultHandle(
                 buildReconInterAccountResultDetailItems(outcome.value.match),
@@ -353,6 +359,7 @@ export function registerBankReconciliationTools(
             ...(max_date_gap !== undefined ? { max_date_gap } : {}),
             ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
             ...(delete_proposed_mirrors !== undefined ? { delete_proposed_mirrors } : {}),
+            ...(keep_side !== undefined ? { keep_side } : {}),
           };
           break;
         case "execute_inter_account":
@@ -362,6 +369,7 @@ export function registerBankReconciliationTools(
             ...(max_date_gap !== undefined ? { max_date_gap } : {}),
             ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
             ...(delete_proposed_mirrors !== undefined ? { delete_proposed_mirrors } : {}),
+            ...(keep_side !== undefined ? { keep_side } : {}),
             ...(plan_handle !== undefined ? { plan_handle } : {}),
           };
           break;
@@ -390,14 +398,14 @@ export function registerBankReconciliationTools(
             break;
           }
           case "execute_inter_account": {
-            const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, planHandle: plan_handle });
+            const outcome = await operations.executeInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side, planHandle: plan_handle });
             result = outcome.ok
               ? buildInterAccountPayload({ mode: "EXECUTED", match: outcome.value.match, executionReport: outcome.value.executionReport })
               : reconPlanErrorPayload(outcome.error.code, outcome.error.message);
             break;
           }
           default: {
-            const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors });
+            const outcome = await operations.prepareInterAccount({ maxDateGap: max_date_gap, targetAccountsDimensionsId: target_accounts_dimensions_id, deleteProposedMirrors: delete_proposed_mirrors, keepSide: keep_side });
             result = outcome.ok
               ? buildInterAccountPayload({ mode: "DRY_RUN", match: outcome.value.match, planHandle: outcome.value.planHandle })
               : reconPlanErrorPayload(outcome.error.code, outcome.error.message);

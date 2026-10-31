@@ -105,6 +105,8 @@ export type CamtImportSummary = {
   journal_review_count: number;
   /** Rows quieted by an earlier acknowledgement (#10b); present when above 0. */
   acknowledged_review_count?: number;
+  /** Rows whose counterparty is another own bank account (#11), created or left out; present when above 0. */
+  inter_account_transfer_count?: number;
   description_truncated_count: number;
   counterparty_iban_omitted_count: number;
 };
@@ -191,6 +193,12 @@ export type CamtParsePayload = Omit<CamtParseResult, "entries"> & { entries: Cam
 const MAX_EXPOSED_ISSUES = 100;
 const MAX_EXPOSED_VALUE_CHARS = 256;
 
+/** Rows whose counterparty is another own bank account (#11): to create, or left out. */
+export function interAccountTransferCount(projection: CamtImportProjection): number {
+  return projection.descriptors.filter(descriptor => descriptor.inter_account_transfer !== undefined).length +
+    projection.skipped.filter(row => row.inter_account_transfer !== undefined).length;
+}
+
 /** Journal reviews quieted by an earlier acknowledgement (#10b). */
 export function acknowledgedReviewCount(projection: CamtImportProjection): number {
   return projection.skipped.filter(row => row.acknowledged_review !== undefined).length;
@@ -268,6 +276,7 @@ export function camtResultRow(
       : {}),
     ...(descriptor.description_truncated ? { description_truncated: descriptor.description_truncated } : {}),
     ...(descriptor.counterparty_iban_omitted ? { counterparty_iban_omitted: true as const } : {}),
+    ...(descriptor.inter_account_transfer ? { inter_account_transfer: descriptor.inter_account_transfer } : {}),
   };
 }
 
@@ -322,6 +331,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): CamtImpor
     // Skipped rows an existing journal may already book; they stay unimported.
     journal_review_count: projection.skipped.filter(isCamtJournalReviewRow).length,
     ...(acknowledgedReviewCount(projection) > 0 ? { acknowledged_review_count: acknowledgedReviewCount(projection) } : {}),
+    ...(interAccountTransferCount(projection) > 0 ? { inter_account_transfer_count: interAccountTransferCount(projection) } : {}),
     // Rows whose stored text is shorter than the statement text, and rows
     // whose marker left the (proven external) counterparty IBAN out.
     description_truncated_count: input.results.filter(row => row.description_truncated !== undefined).length,
@@ -499,6 +509,7 @@ export type CamtSlimSkippedRow = {
   duplicate_transaction_ids: number[];
   journal_ids?: number[];
   acknowledged_review?: { review_code: string; journal_ids: number[] };
+  inter_account_transfer?: { counterparty_dimension_id: number };
 };
 
 /** The slim (default standard/full) import_camt053 envelope, dry run and execute. */
@@ -556,6 +567,7 @@ export function renderCamtImportSlim(input: CamtImportRenderInput): CamtImportSl
       duplicate_transaction_ids: row.duplicate_transaction_ids,
       ...(row.journal_ids !== undefined ? { journal_ids: row.journal_ids } : {}),
       ...(row.acknowledged_review !== undefined ? { acknowledged_review: row.acknowledged_review } : {}),
+      ...(row.inter_account_transfer !== undefined ? { inter_account_transfer: row.inter_account_transfer } : {}),
     });
   });
   const pageHint = input.planHandle !== undefined
@@ -669,6 +681,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): CamtImportComp
     held_for_review: heldRows.length,
     errors: data.errorCount,
     ...(acknowledgedReviewCount(data.projection) > 0 ? { acknowledged_reviews: acknowledgedReviewCount(data.projection) } : {}),
+    ...(interAccountTransferCount(data.projection) > 0 ? { inter_account_transfers: interAccountTransferCount(data.projection) } : {}),
   };
   const totals = {
     credit_total: data.projection.parsed.summary.credit_total,

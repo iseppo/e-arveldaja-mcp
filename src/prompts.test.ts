@@ -1271,8 +1271,8 @@ describe("registerPrompts", () => {
 
   // The reviewed mirror-deletion choice is part of the execute arguments: an
   // execute without it drifts, and one that drops it would delete nothing.
-  const INTER_ACCOUNT_SAME_ARGUMENTS = "Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` as the dry run, or the plan is refused with `plan_drift`.";
-  const GUIDED_INTER_ACCOUNT_NEXT_ACTION = '`summary.next_action` is the ready-to-send execute call (`mode: "execute_inter_account"` with the `plan_handle` and the dry run\'s `max_date_gap` / `target_accounts_dimensions_id` / `delete_proposed_mirrors`); send its `args` unchanged, only after approval.';
+  const INTER_ACCOUNT_SAME_ARGUMENTS = "Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` / `keep_side` as the dry run, or the plan is refused with `plan_drift`.";
+  const GUIDED_INTER_ACCOUNT_NEXT_ACTION = '`summary.next_action` is the ready-to-send execute call (`mode: "execute_inter_account"` with the `plan_handle` and the dry run\'s `max_date_gap` / `target_accounts_dimensions_id` / `delete_proposed_mirrors` / `keep_side`); send its `args` unchanged, only after approval.';
 
   it.each(["standard", "guided"] as const)("tells the %s profile to resend delete_proposed_mirrors with the inter-account execute", async profile => {
     const text = await getPromptText(setupPromptServer({ toolProfile: profile }), "reconcile-bank", { mode: "auto" });

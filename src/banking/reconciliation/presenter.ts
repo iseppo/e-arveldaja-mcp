@@ -985,6 +985,7 @@ export interface InterAccountCompactInput {
   readonly maxDateGap?: number;
   readonly targetAccountsDimensionsId?: number;
   readonly deleteProposedMirrors?: boolean;
+  readonly keepSide?: "outgoing" | "incoming";
 }
 
 /** Scalar-only per-transfer details for the operation-result store. */
@@ -1184,6 +1185,7 @@ export function renderInterAccountCompact(input: InterAccountCompactInput): Reco
                   plan_handle: input.planHandle,
                   ...matchingArgs,
                   ...(input.deleteProposedMirrors === true ? { delete_proposed_mirrors: true } : {}),
+                  ...(input.keepSide !== undefined ? { keep_side: input.keepSide } : {}),
                 },
                 approval_required: true,
               },

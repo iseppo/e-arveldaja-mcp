@@ -132,6 +132,29 @@ describe("process_bank_input", () => {
     expect(api.transactions.create).toHaveBeenCalled();
   });
 
+  it("skip_inter_account_legs reaches the CAMT import and is bound into the plan (#11)", async () => {
+    const { handler } = setup();
+    const source = inlineXml(fixtureCamtXml());
+    const dry = parse(await handler({ mode: "prepare", file_path: source, skip_inter_account_legs: "outgoing" }));
+    expect(dry.summary.status).toBe("ready_for_approval");
+    // Executing without the reviewed argument is refused: it is part of the plan.
+    const drifted = await handler({ mode: "execute", file_path: source, plan_handle: dry.summary.plan_handle });
+    expect(drifted.content[0]!.text).toContain("plan_drift");
+    const again = parse(await handler({ mode: "prepare", file_path: source, skip_inter_account_legs: "outgoing" }));
+    const executed = parse(await handler({ mode: "execute", file_path: source, plan_handle: again.summary.plan_handle, skip_inter_account_legs: "outgoing" }));
+    expect(executed.summary.status).toMatch(/completed|partial/);
+  });
+
+  it("skip_inter_account_legs is refused for a Wise CSV (#11)", async () => {
+    const { handler } = setup();
+    const header = `ID,Status,Direction,"Created on","Finished on","Source fee amount","Source fee currency","Target fee amount","Target fee currency","Source name","Source amount (after fees)","Source currency","Target name","Target amount (after fees)","Target currency","Exchange rate",Reference,Batch,"Created by",Category,Note`;
+    const card = `CARD_TRANSACTION-1,COMPLETED,OUT,"2026-07-05 10:00:00","2026-07-05 10:00:01",0.00,EUR,,,"Test OÜ",12.00,EUR,"Hoster",12.00,EUR,1,,,"Test Person","Software",`;
+    const csv = `base64:csv:${Buffer.from(`${header}\n${card}\n`, "utf8").toString("base64")}`;
+    const result = await handler({ mode: "prepare", file_path: csv, accounts_dimensions_id: 7, skip_inter_account_legs: "outgoing" });
+    expect(result.isError).toBe(true);
+    expect(parse(result).category).toBe("invalid_argument_for_input");
+  });
+
   it("executes a file_ref-prepared plan via file_path of the SAME file, but refuses an identical copy elsewhere", async () => {
     const dirA = await realpath(await mkdtemp(join(tmpdir(), "bank-facade-a-")));
     facadeTempDirs.push(dirA);

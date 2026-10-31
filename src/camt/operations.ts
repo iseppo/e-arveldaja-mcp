@@ -6,6 +6,7 @@ import {
   assertStatementAccountMatchesDimension,
   buildImportProjection,
   camtNormalizedArgs,
+  interAccountSkipNote,
   CamtJournalSnapshotError,
   CamtPreflightRejectedError,
   ensureAccountDimensionExists,
@@ -20,7 +21,7 @@ import {
   type CamtImportExecution,
   type CamtImportPreview,
 } from "./presenter.js";
-import type { CamtParseResult } from "./types.js";
+import type { CamtParseResult, CamtSkipInterAccountLegs } from "./types.js";
 
 // Typed CAMT operations. The interface references NO MCP types — inputs and
 // results are plain typed data. Domain failures that need a special MCP
@@ -37,6 +38,8 @@ export interface CamtImportInput {
   readonly accountsDimensionsId: number;
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
+  /** #11: leave out own-account transfer legs of this direction (default "none"); bound into the plan. */
+  readonly skipInterAccountLegs?: CamtSkipInterAccountLegs;
   /** ADDITIVE (bank façade): an immutable snapshot captured ONCE upstream under
    * the unified bank_input operation. When present it is threaded by identity so
    * the op does not read the source a second time. Absent for the granular
@@ -77,6 +80,7 @@ class CamtOperationsImpl implements CamtOperations {
 
   async prepareImport(input: CamtImportInput): Promise<OperationOutcome<CamtImportPreview>> {
     const { source, accountsDimensionsId, dateFrom, dateTo } = input;
+    const skipInterAccountLegs = input.skipInterAccountLegs ?? "none";
     // DRY RUN: preflight, preserve the existing stop gates, project the import,
     // and issue an immutable execution plan the operator reviews.
     const { snapshot, preflight } = await loadCamt053SnapshotAndPreflight(source, this.runtimeSafetyContext, input.snapshot);
@@ -88,7 +92,7 @@ class CamtOperationsImpl implements CamtOperations {
 
     let projection;
     try {
-      projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo);
+      projection = await buildImportProjection(this.api, loaded, accountsDimensionsId, dateFrom, dateTo, false, skipInterAccountLegs);
     } catch (error) {
       if (!(error instanceof CamtJournalSnapshotError)) throw error;
       return fail(error.code, error.message, error.code === "journal_snapshot_unavailable" ? "safe" : "never");
@@ -103,7 +107,7 @@ class CamtOperationsImpl implements CamtOperations {
         .filter(descriptor => descriptor.entry.date <= balanceDate)
         .reduce((sum, descriptor) =>
           sum + (descriptor.entry.direction === "CRDT" ? descriptor.entry.amount : -descriptor.entry.amount), 0);
-    const statementBalanceCheck = closingBalance
+    const balanceCheck = closingBalance
       ? await runStatementBalanceCheck(
           this.api,
           closingBalance,
@@ -114,7 +118,9 @@ class CamtOperationsImpl implements CamtOperations {
           pendingImportAmount,
         )
       : undefined;
-    const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);
+    const skipNote = interAccountSkipNote(projection);
+    const statementBalanceCheck = balanceCheck && skipNote ? { ...balanceCheck, notes: [...balanceCheck.notes, skipNote] } : balanceCheck;
+    const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo, skipInterAccountLegs);
     // A dry run with nothing to create has nothing to approve: no plan (as Wise).
     const planHandle = input.mintPlanHandles === false || projection.descriptors.length === 0
       ? undefined
@@ -131,6 +137,7 @@ class CamtOperationsImpl implements CamtOperations {
       accounts_dimensions_id: accountsDimensionsId,
       ...(dateFrom ? { date_from: dateFrom } : {}),
       ...(dateTo ? { date_to: dateTo } : {}),
+      ...(skipInterAccountLegs !== "none" ? { skip_inter_account_legs: skipInterAccountLegs } : {}),
       execute: false,
       ...(planHandle !== undefined ? { plan_handle: planHandle } : {}),
     };
@@ -154,6 +161,7 @@ class CamtOperationsImpl implements CamtOperations {
       dateFrom: input.dateFrom,
       dateTo: input.dateTo,
       planHandle: input.planHandle,
+      ...(input.skipInterAccountLegs !== undefined ? { skipInterAccountLegs: input.skipInterAccountLegs } : {}),
       ...(input.snapshot !== undefined ? { snapshot: input.snapshot } : {}),
     });
     return result.ok

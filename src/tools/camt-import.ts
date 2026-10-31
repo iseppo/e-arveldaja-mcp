@@ -14,6 +14,7 @@ import { readOnly, batch } from "../annotations.js";
 import { remapHiddenGranularWorkflowResult, type RemappedWorkflowEnvelope } from "../workflow-response.js";
 import { createCamtOperations } from "../camt/operations.js";
 import { CamtPreflightRejectedError } from "../camt/executor.js";
+import type { CamtSkipInterAccountLegs } from "../camt/types.js";
 import { currentToolProfile, isGuidedProfile } from "../tool-profile.js";
 import {
   importPreflightFailurePayload,
@@ -137,8 +138,10 @@ export function registerCamtImportTools(
     date_to?: string;
     plan_handle?: string;
     detail?: "compact" | "full";
+    skip_inter_account_legs?: CamtSkipInterAccountLegs;
   }): Promise<AdapterResult> {
-    const { file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail } = args;
+    const { file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail, skip_inter_account_legs } = args;
+    const skipLegs = skip_inter_account_legs !== undefined ? { skipInterAccountLegs: skip_inter_account_legs } : {};
     if (date_from && date_to && date_from > date_to) {
       throw new Error(`date_from ${date_from} must be on or before date_to ${date_to}`);
     }
@@ -153,6 +156,7 @@ export function registerCamtImportTools(
           accountsDimensionsId: accounts_dimensions_id,
           dateFrom: date_from,
           dateTo: date_to,
+          ...skipLegs,
         });
         if (!outcome.ok) return { payload: planErrorPayload(outcome.error), isError: true };
         if (useCompactCamt()) {
@@ -167,6 +171,7 @@ export function registerCamtImportTools(
         dateFrom: date_from,
         dateTo: date_to,
         planHandle: plan_handle,
+        ...skipLegs,
       });
       if (!outcome.ok) return { payload: planErrorPayload(outcome.error), isError: true };
       if (useCompactCamt()) {
@@ -217,11 +222,12 @@ export function registerCamtImportTools(
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
       plan_handle: z.string().optional().describe("Execution-plan handle from the reviewed dry run. Required for execute=true."),
+      skip_inter_account_legs: z.enum(["none", "outgoing", "incoming"]).optional().describe("Own-account transfers (counterparty IBAN = another own bank account): leave out this side's outgoing or incoming legs because the other account's statement books them. Default none. Bound into the plan."),
       detail: z.enum(["compact", "full"]).optional().describe("Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan."),
     },
     { ...batch, openWorldHint: true, title: "Import CAMT.053" },
-    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail }) =>
-      toToolResponse(await runImport({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail })),
+    async ({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail, skip_inter_account_legs }) =>
+      toToolResponse(await runImport({ file_path, file_ref, accounts_dimensions_id, execute, date_from, date_to, plan_handle, detail, skip_inter_account_legs })),
   );
 
   registerTool(server,
@@ -235,10 +241,11 @@ export function registerCamtImportTools(
       date_from: isoDateString("Only import entries from this date (YYYY-MM-DD)").optional(),
       date_to: isoDateString("Only import entries up to this date (YYYY-MM-DD)").optional(),
       plan_handle: z.string().optional().describe("Execution-plan handle returned by the reviewed dry run. Required for mode='execute'."),
+      skip_inter_account_legs: z.enum(["none", "outgoing", "incoming"]).optional().describe("Own-account transfers (counterparty IBAN = another own bank account): leave out this side's outgoing or incoming legs because the other account's statement books them. Default none. Bound into the plan."),
       detail: z.enum(["compact", "full"]).optional().describe("Output detail on standard/full. Default compact: no sample rows, duplicates listed briefly, every held row kept. full = the complete envelope. Presentation only; not part of the reviewed plan."),
     },
     { ...batch, openWorldHint: true, title: "Process CAMT.053" },
-    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle, detail }) => {
+    async ({ mode, file_path, file_ref, accounts_dimensions_id, date_from, date_to, plan_handle, detail, skip_inter_account_legs }) => {
       const selectedMode = mode ?? "parse";
       let delegatedTool: ProcessCamt053Payload<unknown>["delegated_tool"];
       let delegatedArgs: Record<string, unknown>;
@@ -265,6 +272,7 @@ export function registerCamtImportTools(
           ...(date_to !== undefined ? { date_to } : {}),
           ...(selectedMode === "execute" && plan_handle !== undefined ? { plan_handle } : {}),
           ...(detail !== undefined ? { detail } : {}),
+          ...(skip_inter_account_legs !== undefined ? { skip_inter_account_legs } : {}),
         };
         inner = await runImport({
           ...(file_path !== undefined ? { file_path } : {}),
@@ -275,6 +283,7 @@ export function registerCamtImportTools(
           ...(date_to !== undefined ? { date_to } : {}),
           ...(selectedMode === "execute" && plan_handle !== undefined ? { plan_handle } : {}),
           ...(detail !== undefined ? { detail } : {}),
+          ...(skip_inter_account_legs !== undefined ? { skip_inter_account_legs } : {}),
         });
       }
 

@@ -243,7 +243,7 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 
 For transfers between your own bank accounts (counterparty matches company name or IBAN matches another own account), use the merged inter-account modes — never confirm both legs of a transfer by hand.
 
-Call `reconcile_bank_transactions` with `mode: "inter_account_dry_run"` (add `target_accounts_dimensions_id` when there are 3+ bank accounts and the IBAN is missing).
+Call `reconcile_bank_transactions` with `mode: "inter_account_dry_run"` (add `target_accounts_dimensions_id` when there are 3+ bank accounts and the IBAN is missing). By default a matched pair keeps the outgoing leg; when the owner prefers the incoming account's row (for example its statement carries the better description), add `keep_side: "incoming"`.
 
 The dry run returns a `plan_handle` (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `confirm_transaction`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
@@ -263,6 +263,7 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 - `already_handled`: a journal already books the transfer. Rows WITHOUT `mirror_proposal` are only listed for the owner: they are not proven mirrors, so never offer to delete them. Propose deleting a row only when it carries `mirror_proposal` (it is then the sole candidate): show its `evidence`, `journal_id` and `counterpart_transaction_id`. Never delete a mirror with a direct `delete_transaction`. To delete, follow the row's `next_action`: re-run the dry run with `delete_proposed_mirrors: true` (same `max_date_gap` / `target_accounts_dimensions_id`), which re-proves each mirror; review the exact rows that plan now deletes (their `already_handled` reason says the plan carries the deletion), and execute that plan with the same arguments only after the owner explicitly approves those deletions
 - `one_sided`: would confirm against the other bank account
 - `pairs`: would confirm the outgoing side and delete the duplicate incoming `PROJECT` (draft/unconfirmed) row (`incoming_action: "would_delete_duplicate"`)
+- `pairs` with `kept_side: "incoming"` (dry run with `keep_side: "incoming"`): would confirm the incoming side and delete the outgoing `PROJECT` row (`outgoing_action`); a pair whose incoming direction is not proven by a verified CAMT marker is not swapped and is listed as `direction_unresolved`
 - `result.execution.errors`: any confirmation failures or other blocking issues
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
@@ -270,7 +271,7 @@ Capability condition for `guided`: inspect the connected MCP server's advertised
 
 - `summary.counts` gives the pairs, one-sided confirms, already-handled rows (`duplicates`), proposed mirror deletions (`proposed_mirrors`), and transfers needing review; `summary.samples`, `summary.warnings`, and `summary.blockers` carry the detail. Warnings show at most 3 rows per category; when a category has more, a `<category>_more` warning reports how many are not shown, and when the response size limit trims further a `warnings_truncated` warning counts the dropped rows per code: tell the owner those counts and never present the shown rows as the complete list.
 - Already-handled rows are only listed. A `mirror_proposal` warning names a row that is the sole proven mirror of a journal-booked transfer; to delete them, re-run the dry run with `delete_proposed_mirrors: true` (the summary's `next_action` says so when the plan is otherwise empty), review `proposed_mirror_deletes`, and execute with the same argument only after the owner's explicit approval; execute deletes only rows still matching the reviewed row and journal. Never offer to delete an already-handled row that has no mirror proposal.
-- `summary.next_action` is the ready-to-send execute call (`mode: "execute_inter_account"` with the `plan_handle` and the dry run's `max_date_gap` / `target_accounts_dimensions_id` / `delete_proposed_mirrors`); send its `args` unchanged, only after approval.
+- `summary.next_action` is the ready-to-send execute call (`mode: "execute_inter_account"` with the `plan_handle` and the dry run's `max_date_gap` / `target_accounts_dimensions_id` / `delete_proposed_mirrors` / `keep_side`); send its `args` unchanged, only after approval.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 - Ambiguous transfers (including `direction_unresolved`) are never auto-confirmed — present them for a decision.
 - Transfers needing review (<!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
@@ -299,7 +300,7 @@ Capability condition for `standard`: inspect the connected MCP server's advertis
 Without a code
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->: a same-key journal or several possible target accounts; follow the row's `reason`.
 
-Ask for approval. If the user does not explicitly approve, stop — the plan handle is not approval. If approved, call `reconcile_bank_transactions` with `mode: "execute_inter_account"` and `plan_handle` set to the handle from the reviewed dry run (required; consumed once). Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` as the dry run, or the plan is refused with `plan_drift`.
+Ask for approval. If the user does not explicitly approve, stop — the plan handle is not approval. If approved, call `reconcile_bank_transactions` with `mode: "execute_inter_account"` and `plan_handle` set to the handle from the reviewed dry run (required; consumed once). Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` / `keep_side` as the dry run, or the plan is refused with `plan_drift`.
 - After execute, inspect the execution report (`status`, `command_partitions`, `stop_reason`) — on a partial execution do not retry automatically, re-run the dry run.
 - In `pairs`, `incoming_action: "deleted"` is normal; `incoming_action: "orphan"` means the duplicate incoming row could not be deleted and needs explicit follow-up.
 

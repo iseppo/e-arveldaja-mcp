@@ -75,7 +75,7 @@ export const EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE = 90;
  * `[source_direction=…]` marker carries no checksum at all, so it never counts
  * as proven here.
  */
-function verifiedCamtDirection(tx: Transaction): "incoming" | "outgoing" | undefined {
+export function verifiedCamtDirection(tx: Transaction): "incoming" | "outgoing" | undefined {
   const metadata = extractCamtDescriptionMetadata(tx.description);
   if (metadata.source_direction === undefined || !isTrustedCamtDescriptionMetadata(tx, metadata)) return undefined;
   const direction = metadata.source_direction === "CRDT" ? "incoming" : "outgoing";

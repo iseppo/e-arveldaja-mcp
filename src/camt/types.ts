@@ -172,6 +172,15 @@ export interface CamtCreateDescriptor {
   description_truncated?: { stored_length: number; full_length: number };
   /** The marker carries `x=i` instead of the counterparty IBAN (proven external). */
   counterparty_iban_omitted?: true;
+  /** The counterparty IBAN is the company's own account on exactly one other bank dimension (#11). */
+  inter_account_transfer?: CamtInterAccountTransferTag;
+}
+
+/** #11: which side of an own-account transfer this import books. */
+export type CamtSkipInterAccountLegs = "none" | "outgoing" | "incoming";
+
+export interface CamtInterAccountTransferTag {
+  counterparty_dimension_id: number;
 }
 
 export interface CamtSkippedRow {
@@ -199,6 +208,8 @@ export interface CamtSkippedRow {
   /** A journal review the owner acknowledged earlier (skip_code
    * `camt_review_acknowledged`, no review_code). */
   acknowledged_review?: { review_code: string; journal_ids: number[] };
+  /** A left-out own-account transfer leg (skip_code `inter_account_other_side_kept`). */
+  inter_account_transfer?: CamtInterAccountTransferTag;
 }
 
 export interface CamtImportProjection {

@@ -57,7 +57,7 @@ import {
   type CamtJournalSnapshot,
 } from "./journal-coverage.js";
 import { preflightCamt053Xml } from "./parser.js";
-import { computeCamtImportProjection } from "./projection.js";
+import { CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT, computeCamtImportProjection } from "./projection.js";
 import {
   camtPossibleDuplicateRow,
   camtResultRow,
@@ -69,6 +69,7 @@ import type {
   CamtImportProjection,
   CamtParseResult,
   CamtPreflightResult,
+  CamtSkipInterAccountLegs,
   ClientResolution,
   ClientResolutionCache,
   Client,
@@ -373,6 +374,7 @@ export async function buildImportProjection(
   dateFrom: string | undefined,
   dateTo: string | undefined,
   freshBankAccounts = false,
+  skipInterAccountLegs: CamtSkipInterAccountLegs = "none",
 ): Promise<CamtImportProjection> {
   const ledgerTransactions = (await api.transactions.listAll()).filter(isNonVoidTransaction);
   const journalCoverage = await loadCamtJournalSnapshot(api, accountsDimensionsId, freshBankAccounts);
@@ -386,6 +388,7 @@ export async function buildImportProjection(
     resolveClient: (entry, cache) => resolveClientForEntry(api, entry, cache),
     reportProgress: (index, total) => reportProgress(index, total),
     reviewAcknowledgements: readCamtReviewAcknowledgements(),
+    skipInterAccountLegs,
   });
 }
 
@@ -395,12 +398,29 @@ export function camtNormalizedArgs(
   accountsDimensionsId: number,
   dateFrom: string | undefined,
   dateTo: string | undefined,
+  skipInterAccountLegs: CamtSkipInterAccountLegs = "none",
 ): PlanRecord {
   return stripUndefinedDeep({
     accounts_dimensions_id: accountsDimensionsId,
     date_from: dateFrom,
     date_to: dateTo,
+    // Bound only when set, so a default plan's arguments are unchanged.
+    skip_inter_account_legs: skipInterAccountLegs === "none" ? undefined : skipInterAccountLegs,
   }) as PlanRecord;
+}
+
+/** #11: the advisory closing-balance note for own-transfer legs this import leaves out. */
+export function interAccountSkipNote(projection: CamtImportProjection): string | undefined {
+  const legs = projection.skipped.filter(row => row.skip_code === CAMT_INTER_ACCOUNT_OTHER_SIDE_KEPT);
+  if (legs.length === 0) return undefined;
+  const total = Math.round(legs.reduce((sum, row) => sum + row.amount, 0) * 100) / 100;
+  return `${legs.length} own-account transfer leg(s) totalling ${total.toFixed(2)} EUR were left out (skip_inter_account_legs), ` +
+    "so this account's balance stays off by that amount until the other account's statement is imported and its legs are reconciled.";
+}
+
+function withInterAccountSkipNote<T extends { notes: string[] }>(check: T | undefined, projection: CamtImportProjection): T | undefined {
+  const note = interAccountSkipNote(projection);
+  return check && note ? { ...check, notes: [...check.notes, note] } : check;
 }
 
 export function camtPlanFingerprint(projection: CamtImportProjection, normalizedArgs: PlanRecord): string {
@@ -613,6 +633,7 @@ export interface CamtExecuteInput {
   readonly dateFrom: string | undefined;
   readonly dateTo: string | undefined;
   readonly planHandle: string | undefined;
+  readonly skipInterAccountLegs?: CamtSkipInterAccountLegs;
   /** ADDITIVE: pre-captured immutable snapshot (bank façade). When present the
    * execute path uses it as its single immutable re-read instead of capturing
    * under camt_input, so a bank_input file_ref never re-resolves. */
@@ -637,7 +658,8 @@ export async function executeCamtImport(
 ): Promise<CamtExecuteResult> {
   const { source, accountsDimensionsId, dateFrom, dateTo, planHandle } = input;
   const preloadedSnapshot = input.snapshot;
-  const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo);
+  const skipInterAccountLegs = input.skipInterAccountLegs ?? "none";
+  const normalizedArgs = camtNormalizedArgs(accountsDimensionsId, dateFrom, dateTo, skipInterAccountLegs);
 
   // A plan handle is NOT human approval; the stop gates below stay in force.
   if (typeof planHandle !== "string" || planHandle.length === 0) {
@@ -710,7 +732,7 @@ export async function executeCamtImport(
   try {
     // Uncached bank accounts: a changed `x=i` decision changes a stored
     // description, which the fingerprint compare below reports as plan_drift.
-    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo, true);
+    projection = await buildImportProjection(api, loaded, accountsDimensionsId, dateFrom, dateTo, true, skipInterAccountLegs);
   } catch (error) {
     if (error instanceof CamtJournalSnapshotError) return { ok: false, code: error.code, message: error.message };
     throw error;
@@ -865,7 +887,7 @@ export async function executeCamtImport(
 
   // Run after the mutations so the freshly-imported (still PROJECT) rows are
   // reflected in the expected balance, and persist the closing balance.
-  const statementBalanceCheck = loaded.statement_metadata.closing_balance
+  const statementBalanceCheck = withInterAccountSkipNote(loaded.statement_metadata.closing_balance
     ? await runStatementBalanceCheck(
         api,
         loaded.statement_metadata.closing_balance,
@@ -874,7 +896,7 @@ export async function executeCamtImport(
         true,   // execute: persist the closing-balance record
         true,   // execute: rows are booked, so the tolerance warning is real
       )
-    : undefined;
+    : undefined, projection);
 
   return {
     ok: true,

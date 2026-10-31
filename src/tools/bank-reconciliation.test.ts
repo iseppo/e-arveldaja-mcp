@@ -1329,6 +1329,51 @@ describe("bank_reconciliation plan binding", () => {
     expect(api.transactions.confirm).toHaveBeenCalledTimes(2);
   });
 
+  describe("keep_side (#11)", () => {
+    const pair = (incomingDescription: string) => [
+      { id: 40, status: "PROJECT", is_deleted: false, type: "C", amount: 500, date: "2026-03-20", accounts_dimensions_id: 100, bank_account_no: "EE222", clients_id: 99 },
+      incomingDescription.includes("e-arveldaja-mcp:camt")
+        ? camtSigned({ id: 41, status: "PROJECT", is_deleted: false, type: "D", description: incomingDescription, amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 99 })
+        : { id: 41, status: "PROJECT", is_deleted: false, type: "D", description: incomingDescription, amount: 500, date: "2026-03-20", accounts_dimensions_id: 200, bank_account_no: "EE111", clients_id: 99 },
+    ];
+
+    it("keep_side incoming confirms the incoming leg against the sending account and deletes the outgoing one", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: pair("[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]"), bankAccounts: iaBankAccounts });
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false, keep_side: "incoming" })).content[0]!.text);
+      expect(dry.pairs[0]).toMatchObject({ outgoing_transaction_id: 40, incoming_transaction_id: 41, kept_side: "incoming", incoming_action: "would_confirm", outgoing_action: "would_delete_duplicate" });
+      // keep_side is bound into the plan: executing without it is plan_drift.
+      const drift = parseToolPayload<ReconPlanErrorPayload>((await handler({ execute: true, plan_handle: dry.plan_handle })).content[0]!.text);
+      expect(drift.category).toBe("plan_drift");
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+      const done = parseToolPayload<ReconInterAccountPayload>((await executeInterAccount(handler, { keep_side: "incoming" })).content[0]!.text);
+      expect(done.execution.execution_report!.status).toBe("completed");
+      expect(api.transactions.confirm).toHaveBeenCalledTimes(1);
+      expect(api.transactions.confirm).toHaveBeenCalledWith(41, [
+        { related_table: "accounts", related_id: 1020, related_sub_id: 100, amount: 500 },
+      ], expect.objectContaining({ autoFixClientsId: false }));
+      expect(api.transactions.delete).toHaveBeenCalledTimes(1);
+      expect(api.transactions.delete).toHaveBeenCalledWith(40);
+      expect(done.pairs[0]).toMatchObject({ status: "confirmed", incoming_action: "confirmed", outgoing_action: "deleted" });
+    });
+
+    it("keep_side incoming with an incoming leg whose direction no CAMT checksum proves → ambiguous direction_unresolved, nothing confirmed", async () => {
+      // A Wise [source_direction=IN] marker carries no checksum.
+      const { handler, api } = setupInterAccountTool({ transactions: pair("WISE:T41 Transfer in [source_direction=IN]"), bankAccounts: iaBankAccounts });
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ execute: false, keep_side: "incoming" })).content[0]!.text);
+      expect(dry.matched_pairs).toBe(0);
+      expect(dry.ambiguous_pairs.map(row => row.code)).toContain("direction_unresolved");
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("default keep_side (outgoing) is unchanged: confirms the outgoing leg, deletes the incoming one", async () => {
+      const { handler, api } = setupInterAccountTool({ transactions: pair("[e-arveldaja-mcp:camt dir=CRDT sig=abc123abc123abcd]"), bankAccounts: iaBankAccounts });
+      await executeInterAccount(handler);
+      expect(api.transactions.confirm).toHaveBeenCalledWith(40, expect.any(Array), expect.any(Object));
+      expect(api.transactions.delete).toHaveBeenCalledWith(41);
+    });
+  });
+
   it("inter-account: execute requires the handle and books the company-client fix as its own command", async () => {
     const { handler, api } = setupInterAccountTool({
       transactions: [

@@ -78,7 +78,7 @@ import {
   type OneSidedInference,
   type TransferResolution,
 } from "./inter-account-matcher.js";
-import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE } from "./duplicate-policy.js";
+import { computeExactMatchProjection, EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE, verifiedCamtDirection } from "./duplicate-policy.js";
 import {
   checkReceiptLedger,
   invoiceLinksFromTransaction,
@@ -939,12 +939,14 @@ export async function runInterAccountMatching(
   const consumedTxIds = new Set<number>();
   const blockedOneSidedTxIds = new Set<number>();
   const deleteProposedMirrors = input.deleteProposedMirrors === true;
+  const keepIncoming = input.keepSide === "incoming";
   const mirrorDeleteActions: InterAccountMirrorDeleteAction[] = [];
 
   function finish(companyClientsId: number | null): InterAccountMatchResult {
     const planCommandProjections = buildInterAccountPlanCommandProjections(confirmActions, companyClientsId, mirrorDeleteActions);
     const normalizedArgs = stripUndefinedDeep({ max_date_gap: maxGap, target_accounts_dimensions_id,
-      ...(deleteProposedMirrors ? { delete_proposed_mirrors: true } : {}) }) as PlanRecord;
+      ...(deleteProposedMirrors ? { delete_proposed_mirrors: true } : {}),
+      ...(keepIncoming ? { keep_side: "incoming" } : {}) }) as PlanRecord;
     const fingerprint = interAccountFingerprint({ normalizedArgs, planCommandProjections, skippedAlreadyHandled,
       ambiguousPairs, ambiguousRefless, crossCurrencyPairs });
     const companyLegalName = (invoiceInfo.invoice_company_name ?? "").trim();
@@ -1246,6 +1248,57 @@ export async function runInterAccountMatching(
       continue;
     }
 
+    // #11 keep_side "incoming": confirm the incoming leg against the sending
+    // account and delete the outgoing one — only when the incoming leg's CAMT
+    // marker proves it is money in (checksum-verified CRDT); else review.
+    if (keepIncoming && verifiedCamtDirection(txIn) !== "incoming") {
+      consumedTxIds.delete(txOut.id);
+      consumedTxIds.delete(txIn.id!);
+      ambiguousPairs.push({
+        outgoing_transaction_id: txOut.id,
+        amount: txOut.amount,
+        date_out: txOut.date,
+        from_dimension_id: txOut.accounts_dimensions_id,
+        candidate_incoming_transaction_ids: [txIn.id!],
+        candidate_incoming_dimension_ids: [txIn.accounts_dimensions_id],
+        confidence: bestCandidate.confidence,
+        code: "direction_unresolved",
+        reason: `keep_side "incoming" needs a checksum-verified incoming CAMT marker on transaction ${txIn.id}; without it the incoming leg cannot be confirmed safely. Re-run with keep_side "outgoing" or confirm the pair inline.`,
+      });
+      blockedOneSidedTxIds.add(txOut.id);
+      blockedOneSidedTxIds.add(txIn.id!);
+      continue;
+    }
+    if (keepIncoming) {
+      matchedPairs.push({
+        outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
+        amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
+        from_account: fromTitle, to_account: toTitle,
+        from_dimension_id: txOut.accounts_dimensions_id, to_dimension_id: txIn.accounts_dimensions_id,
+        description_out: txOut.description ?? undefined, description_in: txIn.description ?? undefined,
+        confidence: bestCandidate.confidence, match_reasons: bestCandidate.reasons,
+        status: "would_confirm", incoming_action: "would_confirm", outgoing_action: "would_delete_duplicate", kept_side: "incoming",
+      });
+      confirmActions.push({
+        confirmedTxId: txIn.id!,
+        confirmedClientsId: txIn.clients_id ?? null,
+        confirmedNominalAmount: txIn.amount,
+        confirmedCurrency: transactionCurrency(txIn),
+        targetDimensionId: txOut.accounts_dimensions_id,
+        distributionAmount: bestCandidate.comparableAmount,
+        deleteTxId: txOut.id,
+        auditSummary: `Confirmed inter-account incoming ${bestCandidate.comparableAmount} EUR (${fromTitle} -> ${toTitle})`,
+        auditDetails: { amount: txIn.amount, date: txIn.date, paired_outgoing_id: txOut.id, kept_side: "incoming" },
+        deleteAuditSummary: `Deleted duplicate outgoing row ${txOut.id} after confirming incoming ${txIn.id} (${fromTitle} -> ${toTitle})`,
+        deleteAuditDetails: { amount: txOut.amount, date: txOut.date, paired_incoming_id: txIn.id },
+      });
+      recordInterAccountJournal(
+        txOut.accounts_dimensions_id, txIn.accounts_dimensions_id, comparableTransactionAmount(txOut), txOut.date,
+        undefined, transferReferenceOf(txOut, guard.journals),
+      );
+      if (txIn.clients_id == null) await resolveCompanyClientsId();
+      continue;
+    }
     matchedPairs.push({
       outgoing_transaction_id: txOut.id, incoming_transaction_id: txIn.id!,
       amount: txOut.amount, date_out: txOut.date, date_in: txIn.date,
@@ -1805,7 +1858,7 @@ export async function runInterAccountMatching(
     action.sourceMaterial = snapshotBankTransaction(source);
     if (mirror) action.mirrorMaterial = snapshotBankTransaction(mirror);
     action.mappingMaterial = transferMappingMaterial(bankAccounts, accountDimensions);
-    const pair = matchedPairs.find(row => row.outgoing_transaction_id === action.confirmedTxId);
+    const pair = matchedPairs.find(row => (row.kept_side === "incoming" ? row.incoming_transaction_id : row.outgoing_transaction_id) === action.confirmedTxId);
     const single = matchedOneSided.find(row => row.transaction_id === action.confirmedTxId);
     const reasons = pair?.match_reasons ?? single?.match_reasons ?? [];
     action.pairEvidence = {kind: pair ? reasons.some(reason => reason.startsWith("same_type_")) ? "same_type" : "reciprocal" : "one_sided",
@@ -2129,12 +2182,25 @@ export async function executeInterAccount(
     if (completedIds.has(reconDeleteProposedMirrorCommandId(row.transaction_id))) row.mirror_deleted = true;
   }
   for (const pair of match.matchedPairs) {
-    const action=match.confirmActions.find(action=>action.confirmedTxId===pair.outgoing_transaction_id);
+    // keep_side "incoming" (#11) confirms the incoming leg and deletes the outgoing one.
+    const keptIncoming = pair.kept_side === "incoming";
+    const confirmedId = keptIncoming ? pair.incoming_transaction_id : pair.outgoing_transaction_id;
+    const deletedId = keptIncoming ? pair.outgoing_transaction_id : pair.incoming_transaction_id;
+    const action=match.confirmActions.find(action=>action.confirmedTxId===confirmedId);
     if(action?.registrationJournalId!=null)pair.registration_journal_id=action.registrationJournalId;
     if(action?.linkageEvidence)pair.linkage_evidence=action.linkageEvidence;
-    const confirmed = completedIds.has(reconTransferConfirmCommandId(pair.outgoing_transaction_id));
-    const deleted = completedIds.has(reconDeleteDuplicateCommandId(pair.incoming_transaction_id));
+    const confirmed = completedIds.has(reconTransferConfirmCommandId(confirmedId));
+    const deleted = completedIds.has(reconDeleteDuplicateCommandId(deletedId));
     pair.status = confirmed ? "confirmed" : "not_confirmed";
+    if (keptIncoming) {
+      pair.incoming_action = confirmed ? "confirmed" : "not_confirmed";
+      pair.outgoing_action = deleted ? "deleted" : confirmed ? "orphan" : "would_delete_duplicate";
+      if (confirmed && !deleted) {
+        pair.incoming_note = `Transaction ${confirmedId} was confirmed; row ${deletedId} was retained. Re-read both transactions and the registration journal for manual review before any correction. See execution_report for the stop reason.`;
+        match.errors.push({ transaction_ids: [pair.outgoing_transaction_id, pair.incoming_transaction_id], ...(action?.registrationJournalId!=null?{journal_id:action.registrationJournalId}:{}), reason: pair.incoming_note });
+      }
+      continue;
+    }
     if (deleted) {
       pair.incoming_action = "deleted";
     } else if (confirmed) {

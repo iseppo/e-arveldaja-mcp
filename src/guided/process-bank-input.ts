@@ -332,6 +332,7 @@ export function registerProcessBankInputTool(
     counterpart_overrides?: Array<{ wise_id: string; dimension_id: number }>;
     approved_command_digest?: string;
     skip_jar_transfers?: boolean;
+    skip_inter_account_legs?: "none" | "outgoing" | "incoming";
     operation_handle?: string;
     cursor?: string;
     page_size?: number;
@@ -348,12 +349,14 @@ export function registerProcessBankInputTool(
         const outcome = await camtOperations.prepareImport({
           source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, snapshot,
           sourceOperation: FILE_REFERENCE_OPERATIONS.bank,
+          ...(args.skip_inter_account_legs !== undefined ? { skipInterAccountLegs: args.skip_inter_account_legs } : {}),
         });
         if (!outcome.ok) return emit(failureResponsePayload(outcome.error), true);
         return emit(renderCamtImportCompact({ mode: "DRY_RUN", data: outcome.value }));
       }
       const outcome = await camtOperations.executeImport({
         source, accountsDimensionsId, dateFrom: args.date_from, dateTo: args.date_to, planHandle: args.plan_handle, snapshot,
+        ...(args.skip_inter_account_legs !== undefined ? { skipInterAccountLegs: args.skip_inter_account_legs } : {}),
       });
       if (!outcome.ok) return emit(failureResponsePayload(outcome.error), true);
       const operationHandle = issueCamtResultHandle(runtimeSafetyContext.operationResultStore, outcome.value, args.plan_handle);
@@ -431,6 +434,7 @@ export function registerProcessBankInputTool(
       counterpart_overrides: z.array(z.object({ wise_id: z.string().min(1), dimension_id: coerceId })).optional().describe("Wise only, owner-confirmed only: { wise_id, dimension_id } picking the own bank account of a transfer whose evidence points to several; must be one of the evidenced accounts."),
       approved_command_digest: z.string().regex(SHA256_HEX).optional().describe("Wise only: exact lowercase SHA-256 command digest from the reviewed dry run. Required for Wise mode='execute'."),
       skip_jar_transfers: z.boolean().optional().describe("Wise only: skip Jar (savings pot) transfers (default true)."),
+      skip_inter_account_legs: z.enum(["none", "outgoing", "incoming"]).optional().describe("CAMT only: leave out own-account transfer legs of this direction (counterparty IBAN = another own bank account) because the other account's statement books them. Default none; bound into the plan."),
       operation_handle: z.string().regex(HANDLE_PATTERN).optional().describe("mode='show_details' only: operation-result handle from a prior execute."),
       cursor: z.string().max(128).optional().describe("mode='show_details' only: opaque cursor returned by the preceding page."),
       page_size: z.number().int().min(1).max(50).optional().describe("mode='show_details' only: maximum items to return (default 20, max 50)."),
@@ -499,6 +503,14 @@ export function registerProcessBankInputTool(
         }, true);
       }
 
+      if (detected.format === "wise" && args.skip_inter_account_legs !== undefined) {
+        return textResult({
+          error: "skip_inter_account_legs applies to CAMT.053 statements only; this file is a Wise CSV.",
+          category: "invalid_argument_for_input",
+          retry: "never",
+          mutation_occurred: false,
+        }, true);
+      }
       return detected.format === "camt"
         ? handleCamt(mode, args, source, snapshot, detected.preflight.value.statement_metadata.iban, detected.preflight.value.statement_metadata.currency)
         : handleWise(mode, args, source, snapshot);

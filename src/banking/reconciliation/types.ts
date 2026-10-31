@@ -226,8 +226,13 @@ export interface PairResult {
   confidence: number;
   match_reasons: string[];
   status: string;
-  incoming_action?: "deleted" | "orphan" | "would_delete_duplicate";
+  /** The deleted (or to-be-deleted) leg's action; with `kept_side: "incoming"` the incoming leg is confirmed instead. */
+  incoming_action?: "deleted" | "orphan" | "would_delete_duplicate" | "would_confirm" | "confirmed" | "not_confirmed";
   incoming_note?: string;
+  /** Present with `kept_side: "incoming"` (#11): what happens to the outgoing leg. */
+  outgoing_action?: "deleted" | "orphan" | "would_delete_duplicate";
+  /** Present when keep_side "incoming" chose the incoming leg to confirm. */
+  kept_side?: "incoming";
 }
 
 export interface AmbiguousPairResult {
@@ -406,6 +411,10 @@ export interface InterAccountInput {
   /** Opt-in: bind each proposed mirror deletion into the plan as a command.
    * Part of the plan's normalized args, so execute must resend it. */
   readonly deleteProposedMirrors?: boolean;
+  /** #11: which leg of a matched pair is confirmed (default "outgoing"; the other
+   * leg is deleted). "incoming" needs a checksum-verified CRDT marker on the
+   * incoming leg. Part of the plan's normalized args when "incoming". */
+  readonly keepSide?: "outgoing" | "incoming";
   /** false = preview only: no consume-once plan handle is minted (accounting
    * inbox dry run, which discards it). Default true. */
   readonly mintPlanHandles?: boolean;

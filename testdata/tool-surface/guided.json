@@ -2,9 +2,9 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 34816,
+    "toolsListBytes": 35468,
     "descriptionsBytes": 4971,
-    "inputSchemasBytes": 25213,
+    "inputSchemasBytes": 25865,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5425
@@ -182,6 +182,14 @@
           "delete_proposed_mirrors": {
             "description": "Inter-account only, opt-in: bind each proposed mirror deletion (a PROJECT row already journalized from the other account side) into the dry-run plan; execute deletes only rows still matching the reviewed identity. Resend the same value at execute.",
             "type": "boolean"
+          },
+          "keep_side": {
+            "description": "Inter-account only: which leg of a matched transfer pair is confirmed (the other is deleted). Default outgoing. incoming requires a checksum-verified incoming CAMT marker on that leg, else the pair goes to ambiguous_pairs (direction_unresolved). Resend the same value at execute.",
+            "enum": [
+              "outgoing",
+              "incoming"
+            ],
+            "type": "string"
           },
           "max_date_gap": {
             "description": "Maximum days between inter-account transfer legs (default 1, max 31).",
@@ -590,6 +598,15 @@
           },
           "plan_handle": {
             "description": "Execution-plan handle from the reviewed dry run. Required for mode='execute'.",
+            "type": "string"
+          },
+          "skip_inter_account_legs": {
+            "description": "CAMT only: leave out own-account transfer legs of this direction (counterparty IBAN = another own bank account) because the other account's statement books them. Default none; bound into the plan.",
+            "enum": [
+              "none",
+              "outgoing",
+              "incoming"
+            ],
             "type": "string"
           },
           "skip_jar_transfers": {
