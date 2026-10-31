@@ -901,9 +901,17 @@ function parseCapitalGains(csv: string): CapitalGainsRow[] {
  * Pairs Buy/Sell orders with their FX Conversion entries (for USD trades).
  * Consumed conversions are tracked to prevent double-matching.
  */
+/** A trade-extraction FX warning, kept with its row so callers can drop the
+ * ones that no longer matter (already booked, skipped ticker). */
+interface TradeExtractionWarning {
+  reference: string;
+  ticker: string;
+  text: string;
+}
+
 interface TradeExtractionResult {
   trades: InvestmentTrade[];
-  warnings: string[];
+  warnings: TradeExtractionWarning[];
   consumedConversionRefs: Set<string>;
 }
 
@@ -1015,7 +1023,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
 
   // Track consumed conversion references to prevent reuse
   const consumedConversions = new Set<string>();
-  const fxWarnings: string[] = [];
+  const fxWarnings: TradeExtractionWarning[] = [];
 
   const trades: InvestmentTrade[] = [];
 
@@ -1048,7 +1056,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     const tradeAmountFailure = validateTradeAmounts(row);
     if (tradeAmountFailure) {
       trade.fx_review_reason = tradeAmountFailure;
-      fxWarnings.push(fxReviewWarning(trade.reference, tradeAmountFailure));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, tradeAmountFailure) });
       trades.push(trade);
       continue;
     }
@@ -1076,7 +1084,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     if (shortlisted.length !== 1) {
       const reason = fxReason("invalid_conversion_pair");
       trade.fx_review_reason = reason;
-      fxWarnings.push(fxReviewWarning(trade.reference, reason));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason) });
       trades.push(trade);
       continue;
     }
@@ -1087,7 +1095,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     if (candidate.rows.length !== 2 || eurRows.length !== 1 || foreignRows.length !== 1) {
       const reason = fxReason("invalid_conversion_pair");
       trade.fx_review_reason = reason;
-      fxWarnings.push(fxReviewWarning(trade.reference, reason, candidate.ref));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason, candidate.ref) });
       trades.push(trade);
       continue;
     }
@@ -1097,7 +1105,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     const conversionFailure = validateConversionAmounts(eurConv, foreignConv);
     if (conversionFailure) {
       trade.fx_review_reason = conversionFailure;
-      fxWarnings.push(fxReviewWarning(trade.reference, conversionFailure, candidate.ref));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, conversionFailure, candidate.ref) });
       trades.push(trade);
       continue;
     }
@@ -1109,7 +1117,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     );
     if (!resolution.ok) {
       trade.fx_review_reason = resolution.reason;
-      fxWarnings.push(fxReviewWarning(trade.reference, resolution.reason, candidate.ref));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, resolution.reason, candidate.ref) });
       trades.push(trade);
       continue;
     }
@@ -1118,7 +1126,7 @@ function extractTrades(rows: AccountStatementRow[]): TradeExtractionResult {
     if (convertedFxFee === null) {
       const reason = fxReason("conversion_fee_conflict");
       trade.fx_review_reason = reason;
-      fxWarnings.push(fxReviewWarning(trade.reference, reason, candidate.ref));
+      fxWarnings.push({ reference: trade.reference, ticker: trade.ticker, text: fxReviewWarning(trade.reference, reason, candidate.ref) });
       trades.push(trade);
       continue;
     }
@@ -2723,6 +2731,8 @@ interface TradesProjection {
   accounts: { investment: number; broker: number; gain: number; loss: number; fee: number };
   totalTrades: number;
   newEntries: number;
+  /** FX warnings dropped because the row is already booked or its ticker skipped. */
+  suppressedWarnings?: LightyearSuppressedWarnings;
 }
 
 interface TradesProjectionParams {
@@ -3421,7 +3431,31 @@ interface TradesRenderInput {
   pendingDuplicates?: LightyearPendingDuplicateJournal[];
 }
 
-function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> {
+export interface LightyearSuppressedWarnings {
+  already_booked: number;
+  skipped_ticker: number;
+}
+
+/** The book_lightyear_trades payload (dry run and execute). */
+export type LightyearTradesPayload = Partial<LightyearDraftConfirmationFields> & {
+  mode: "DRY_RUN" | "EXECUTED";
+  total_trades: number;
+  new_entries: number;
+  created: number;
+  skipped: number;
+  duplicates_skipped: number;
+  duplicate_refs: Array<{ reference: string | undefined; ticker: string; date: string }>;
+  results: Array<Record<string, unknown>>;
+  accounts: { investment: number; broker: number; gain: number; loss: number; fee: number };
+  warnings?: string[];
+  /** Counts of FX warnings left out: rows already booked, or tickers skipped. Only when > 0. */
+  suppressed_warnings?: LightyearSuppressedWarnings;
+  plan_handle?: string;
+  execution_report?: PlanExecutionReport;
+  note?: string;
+};
+
+function renderTradesPayload(input: TradesRenderInput): LightyearTradesPayload {
   const { projection, mode } = input;
   const dryRun = mode === "DRY_RUN";
   let commandIndex = 0;
@@ -3461,6 +3495,10 @@ function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> 
       fee: projection.accounts.fee,
     },
     ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
+    ...(projection.suppressedWarnings !== undefined &&
+      projection.suppressedWarnings.already_booked + projection.suppressedWarnings.skipped_ticker > 0
+      ? { suppressed_warnings: projection.suppressedWarnings }
+      : {}),
     ...(input.planHandle !== undefined ? { plan_handle: input.planHandle } : {}),
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     ...(dryRun
@@ -3559,10 +3597,9 @@ export function registerLightyearTools(
         });
       }
       const tradeReservedConversionRefs = collectTradeReservedConversionRefs(rows);
-      const {
-        trades,
-        warnings: fxWarnings,
-      } = extractTrades(rows);
+      const extractedTrades = extractTrades(rows);
+      const trades = extractedTrades.trades;
+      const fxWarnings = extractedTrades.warnings.map(warning => warning.text);
       const distributionExtraction = extractDistributions(rows, tradeReservedConversionRefs);
       const distributions = distributionExtraction.distributions;
       const bookableTrades = trades.filter(t => !t.cash_equivalent);
@@ -3936,17 +3973,26 @@ export function registerLightyearTools(
         const ownRefCandidates = findOwnRefDateMismatches(
           indexJournalsByDay(guard.journals), trades, t => t.reference, t => !existingRefs.has(t.reference), existing.journalIds,
         );
+        // FX warnings matter only for rows this run can still book: drop the
+        // ones for skipped tickers and already-booked references, and count them.
+        const suppressedWarnings = { already_booked: 0, skipped_ticker: 0 };
+        const relevantFxWarnings = extraction.warnings.filter(warning => {
+          if (skipSet.has(warning.ticker)) { suppressedWarnings.skipped_ticker += 1; return false; }
+          if (existingRefs.has(warning.reference)) { suppressedWarnings.already_booked += 1; return false; }
+          return true;
+        });
         const projection = computeTradesProjection({
           trades, gainsMap, existingRefs, ownRefCandidates,
           // FIFO matching runs over every sell (disambiguation needs them all),
           // but its warnings are only actionable for sells not yet booked.
-          seedWarnings: [...extraction.warnings, ...gainsWarnings.filter(warning => {
+          seedWarnings: [...relevantFxWarnings.map(warning => warning.text), ...gainsWarnings.filter(warning => {
             return !trades.some(t => t.type === "Sell" && existingRefs.has(t.reference) && warning.includes(`for sell ${t.reference} (`));
           })],
           hasCapitalGainsFile: hasGainsFile,
           investment_account, investment_dimension_id, broker_account, broker_dimension_id,
           gainAccount, lossAccount, feeAccount,
         });
+        projection.suppressedWarnings = suppressedWarnings;
         return { projection, sourceIdentities: sourceSnapshots.map(sourceIdentityRecord), sourceSnapshots, sourcePaths };
       };
 
@@ -4318,7 +4364,7 @@ export function registerLightyearTools(
       const rows = parseAccountStatement(csv);
       const { trades, warnings: fxWarnings } = extractTrades(rows);
 
-      const portfolioWarnings: string[] = [...fxWarnings];
+      const portfolioWarnings: string[] = fxWarnings.map(warning => warning.text);
 
       const skippedTrades: InvestmentTrade[] = [];
       const reviewedTrades: Array<{ trade: InvestmentTrade; reason: FxReviewReason; ordinal: number }> = [];

@@ -6092,3 +6092,42 @@ describe("Lightyear execute after the inbox file_ref expired (#13)", () => {
     expect(payload).toMatchObject({ mode: "EXECUTED", created: 1 });
   });
 });
+
+describe("Lightyear trade warnings for rows that still matter (#7)", () => {
+  beforeEach(() => {
+    mockedResolveFileInput.mockResolvedValue({ path: "/tmp/lightyear.csv" });
+  });
+
+  it("drops FX warnings for already-booked references and skipped tickers and counts them", async () => {
+    const usdSell = (ref: string, ticker: string): string[] =>
+      ["10/09/2026 14:00:00", ref, ticker, "US0378331005", "Sell", "1.000000000", "USD", "100.000000000", "100.00", "", "0.00", "100.00", ""];
+    mockedReadFile.mockResolvedValue(buildStatementCsv([
+      usdSell("OR-FX-BOOKED-1", "AAPL"),
+      usdSell("OR-FX-BOOKED-2", "MSFT"),
+      usdSell("OR-FX-NEW", "NVDA"),
+      usdSell("OR-FX-FUND", "ICSUSSDP"),
+    ]));
+    const { handler } = setupLightyearTool("book_lightyear_trades", {
+      journals: [
+        { id: 1, is_deleted: false, document_number: "LY:OR-FX-BOOKED-1", effective_date: "2026-09-10" },
+        { id: 2, is_deleted: false, document_number: "LY:OR-FX-BOOKED-2", effective_date: "2026-09-10" },
+      ],
+    });
+    const payload = parseToolPayload<lightyearInvestments.LightyearTradesPayload>((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120,
+    })).content[0]!.text);
+    const fxWarnings = (payload.warnings ?? []).filter(warning => warning.includes("invalid_conversion_pair"));
+    expect(fxWarnings).toHaveLength(1);
+    expect(fxWarnings[0]).toContain("OR-FX-NEW");
+    expect(payload.suppressed_warnings).toEqual({ already_booked: 2, skipped_ticker: 1 });
+  });
+
+  it("omits suppressed_warnings when nothing was dropped", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const { handler } = setupLightyearTool("book_lightyear_trades");
+    const payload = parseToolPayload<lightyearInvestments.LightyearTradesPayload>((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120,
+    })).content[0]!.text);
+    expect(payload).not.toHaveProperty("suppressed_warnings");
+  });
+});
