@@ -532,8 +532,8 @@ export async function bookOwnerExpenseFromProjection(
         note: existingId !== undefined
           ? `An owner-expense journal ${existingId} with the same document number, owner, date and total already exists — no new journal was created.`
           : p.vat_registered
-          ? `Expense booked. Owner debt increased by ${p.total} EUR on account ${p.payable_account}.`
-          : `Expense booked. Company is not VAT-registered, so the full gross amount was debited to expense account ${p.expense_account}. Owner debt increased by ${p.total} EUR on account ${p.payable_account}.`,
+          ? `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Once confirmed, owner debt increases by ${p.total} EUR on account ${p.payable_account}.`
+          : `Draft journal ${String(result.created_object_id)} created, not yet confirmed: it reaches the ledger and reports only after confirm_journal. Company is not VAT-registered, so the full gross amount is debited to expense account ${p.expense_account}. Once confirmed, owner debt increases by ${p.total} EUR on account ${p.payable_account}.`,
         ...(suggestions.length > 0 ? { suggestions } : {}),
       }),
     }],
