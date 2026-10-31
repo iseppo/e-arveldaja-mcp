@@ -281,7 +281,7 @@ describe("resolveReviewItemPlan unknown review type (M14)", () => {
     const result = resolveReviewItemPlan({ id: "review:7", review_type: "mystery" } as any);
     expect(result).toMatchObject({
       status: "unsupported_review_type",
-      supported_review_types: ["receipt_review", "classification_group", "camt_possible_duplicate"],
+      supported_review_types: ["receipt_review", "classification_group", "camt_possible_duplicate", "camt_journal_review"],
     });
     expect(result.unresolved_questions).not.toHaveLength(0);
     expect(result.unresolved_questions[0]).toMatch(/supported type/i);
@@ -299,6 +299,7 @@ describe("resolveReviewItemPlan unknown review type (M14)", () => {
       "receipt_review",
       "classification_group",
       "camt_possible_duplicate",
+      "camt_journal_review",
     ]);
     expect(payload.unresolved_questions.length).toBeGreaterThan(0);
   });

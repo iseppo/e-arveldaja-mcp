@@ -35,6 +35,14 @@ Treat the tool response as the source of truth:
 - if the action is `cleanup_camt_possible_duplicate`, explain briefly that it fills missing CAMT metadata onto the kept older transaction before deleting the duplicate PROJECT row
 - if the action is `save_auto_booking_rule`, explain briefly that it saves the rule into the company's configured accounting-knowledge store (an Open Knowledge Format bundle by default, or the legacy `accounting-rules.md` single file when that mode is configured)
 
+### CAMT journal reviews the owner has checked
+
+A `camt_journal_review` item (`review_type: "camt_journal_review"`, or a CAMT `needs_review` item with `code: "camt_journal_review"`) that carries `item.acknowledgement` can be acknowledged when the owner confirms the named journal books that statement row. Nothing is booked or changed in e-arveldaja; the check is recorded so later imports of the same statement do not raise the row again.
+
+1. Only after the owner confirms the journal books the row, call `action: "prepare_action"` with the item as returned. Refusals keep the review: `camt_ack_nonunique_movement` (the statement holds an identical second movement), `camt_ack_multiple_candidates` (more than one journal may book it — a possible double booking), `camt_ack_journal_already_claimed` (the journal is bound to another row), `camt_ack_journal_mismatch` (the journal does not move exactly this amount in this direction on the bank account), `camt_ack_code_not_acknowledgeable` (a wrong booking that needs a correction). Tell the owner the reason; never retry around it.
+2. With `status="ready_for_approval"`, show `proposed_action.acknowledgement` (date, amount, direction, journal) and ask for explicit approval.
+3. After approval, call `action: "execute_review_action"` with the same `review_item_json` and the returned `plan_handle`. `status: "acknowledged"` means it is recorded; a `plan_drift` or refusal means the journal changed: re-run the statement preview.
+
 ### Owner-paid expense receipts
 
 A `receipt_review` item classified `owner_paid_expense_reimbursement` is booked by the server as one owner-payable DRAFT journal; registration is a separate step. It needs these answers under `review_item_json.item.owner_expense`:

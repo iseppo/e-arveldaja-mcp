@@ -184,6 +184,42 @@ describe("runAccountingInboxDryRunPipeline", () => {
     expect(envelope.available_actions.map(action => [action.kind, action.tool])).toEqual([["review_item", undefined], ["review_item", undefined]]);
   });
 
+  it("an acknowledgeable CAMT journal review carries a camt_journal_review resolver_input (#10b)", async () => {
+    const acknowledgement = {
+      accounts_dimensions_id: 101, movement_identity: "a".repeat(64), review_code: "camt_journal_posting_review",
+      journal_ids: [28424939], date: "2026-06-20", amount: 12.83, direction: "DBIT",
+    };
+    const prepareCamtImport = vi.fn().mockResolvedValue(ok({
+      projection: { skipped: [
+        { date: "2026-06-20", amount: 12.83, bank_reference: "PILET-1", duplicate_transaction_ids: [], reason: "review", journal_ids: [28424939],
+          review_code: "camt_journal_posting_review", review_note: "note", acknowledgement },
+        { date: "2026-06-21", amount: 5, bank_reference: "PILET-2", duplicate_transaction_ids: [], reason: "review", journal_ids: [1, 2],
+          review_code: "camt_journal_posting_review", review_note: "note",
+          acknowledgement: { ...acknowledgement, journal_ids: [1, 2], refused: "camt_ack_multiple_candidates" } },
+      ] },
+      createdCount: 0, errorCount: 0, possibleDuplicates: [],
+    }));
+    const result = await runAccountingInboxDryRunPipeline({
+      prepared: preparedInbox({
+        steps: [{
+          step: 1, tool: "import_camt053", purpose: "Import CAMT", recommended: true,
+          suggested_args: { file_path: "/tmp/accounting-inbox/statement.xml", accounts_dimensions_id: 101, execute: false },
+          missing_inputs: [], reason: "CAMT found",
+        }],
+      }),
+      operations: mockOperations({ prepareCamtImport }),
+    });
+    const [acknowledgeable, refused] = result.needs_accountant_review;
+    expect(acknowledgeable!.resolver_input).toEqual({
+      review_type: "camt_journal_review", source_tool: "import_camt053", id: acknowledgeable!.id,
+      item: { code: "camt_journal_review", review_code: "camt_journal_posting_review", date: "2026-06-20", amount: 12.83, journal_ids: [28424939], acknowledgement },
+    });
+    expect(acknowledgeable!.recommendation).toContain("action='prepare_action'");
+    expect(refused!.recommendation).not.toContain("prepare_action");
+    const envelope = buildWorkflowEnvelope({ summary: "Inbox.", needs_review: [acknowledgeable!] });
+    expect(envelope.available_actions[0]).toMatchObject({ tool: "continue_accounting_workflow", args: { action: "resolve_review" } });
+  });
+
   it("carries the CAMT journal-review count into the step preview the approval summary reads", async () => {
     const prepareCamtImport = vi.fn().mockResolvedValue(ok({
       projection: { skipped: [

@@ -184,6 +184,13 @@ function bankNetCents(journal: Journal, context: CamtJournalCoverageContext): nu
   return net;
 }
 
+/** The registered journal moves exactly the entry's signed EUR cents on the bank account + dimension. */
+export function journalBooksEntryExactly(journalId: number, entry: ParsedCamtEntry, context: CamtJournalCoverageContext): boolean {
+  const journal = context.journalsById.get(journalId);
+  if (!journal || journal.registered !== true || (entry.currency || "EUR") !== "EUR") return false;
+  return bankNetCents(journal, context) === (entry.direction === "CRDT" ? 1 : -1) * cents(entry.amount);
+}
+
 /** A same-dimension transaction journal whose source transaction carries another bank reference. */
 function contradictsSourceTransaction(journal: Journal, entryKey: string | undefined, context: CamtJournalCoverageContext): boolean {
   if (!entryKey || journal.operation_type !== "TRANSACTION" || journal.operations_id == null) return false;

@@ -485,6 +485,12 @@ legitimate identical payments are possible).
   file `already_attached` only after a fresh read of the invoice and a SHA-256
   of its current `document_user` bytes (≤ 20 downloads per run, incl. a dry-run
   backfill for invoices named by the receipt's number).
+- **CAMT review acknowledgements**: an owner-approved "journal N books this
+  statement row" check (`continue_accounting_workflow` prepare/execute on a
+  `camt_journal_review` item) is stored in `camt-review-acknowledgements.json`
+  (same store factory; off in single-file mode). The CAMT projection applies one
+  only when its full key matches, the movement is unique in the statement and
+  the one journal still moves exactly the row's amount; never a booking.
 
 ## Architecture
 

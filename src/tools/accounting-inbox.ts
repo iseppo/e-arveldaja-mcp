@@ -43,6 +43,11 @@ import {
 import { projectWorkflowResponse, remapHiddenGranularTool, remapHiddenGranularWorkflowEnvelope, workflowFromAccountingInboxPayload, type WorkflowEnvelope } from "../workflow-response.js";
 import { createPublicWorkflowStateDetail, WorkflowStateStoreError, type PublicWorkflowStateDetail } from "../workflow-state-store.js";
 import { runAccountingInboxDryRunPipeline } from "./accounting-inbox-autopilot-service.js";
+import {
+  buildCamtReviewAcknowledgementExecuteResponse,
+  buildCamtReviewAcknowledgementPrepareResponse,
+  isCamtJournalReviewItem,
+} from "./camt-review-acknowledgement-action.js";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-snapshot.js";
@@ -78,6 +83,7 @@ const SUPPORTED_REVIEW_TYPES = [
   "receipt_review",
   "classification_group",
   "camt_possible_duplicate",
+  "camt_journal_review",
 ] as const;
 
 const RECEIPT_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png"]);
@@ -199,7 +205,7 @@ interface PreparedInboxData {
 }
 
 interface ReviewResolutionResult {
-  review_type: "receipt_review" | "classification_group" | "camt_possible_duplicate" | "unknown";
+  review_type: "receipt_review" | "classification_group" | "camt_possible_duplicate" | "camt_journal_review" | "unknown";
   status: "ready_for_action" | "needs_answers" | "unsupported_review_type";
   recommendation: string;
   compliance_basis: string[];
@@ -1939,6 +1945,18 @@ export function resolveReviewItemPlan(
     };
   }
 
+  if (reviewType === "camt_journal_review" && item) {
+    return {
+      review_type: "camt_journal_review",
+      status: "ready_for_action",
+      recommendation: "Compare the named journal with the statement row (date, amount, direction, counterparty). If it books this row, nothing has to be created; if the movement is not booked yet, create the transaction manually.",
+      compliance_basis: [],
+      unresolved_questions: [],
+      suggested_tools: ["continue_accounting_workflow"],
+      next_step_summary: "Only if the owner confirms the journal books this row: call continue_accounting_workflow action='prepare_action' with this review item, then, after approval, action='execute_review_action' with the returned plan_handle. That records the check so later statement imports do not raise the row again; nothing is booked.",
+    };
+  }
+
   if (reviewType === "camt_possible_duplicate" && item) {
     const guidance = reviewGuidanceFromRecord(item);
     const newTransactionId = numberAt(item, "new_transaction_api_id");
@@ -2770,8 +2788,8 @@ function ownerExpenseNotServerExecutableResponse(): CallToolResult {
       type: "text",
       text: toMcpJson({
         status: "not_server_executable",
-        error: "This review item's action is not server-executable via continue_accounting_workflow. Only owner-paid expense reimbursements can be booked through action='execute_review_action'; prepare and approve every other action with its own visible tool.",
-        supported_server_executable_actions: ["owner_expense_reimbursement"],
+        error: "This review item's action is not server-executable via continue_accounting_workflow. Only owner-paid expense reimbursements and CAMT journal-review acknowledgements run through action='execute_review_action'; prepare and approve every other action with its own visible tool.",
+        supported_server_executable_actions: ["owner_expense_reimbursement", "acknowledge_camt_journal_review"],
       }),
     }],
   };
@@ -3085,9 +3103,9 @@ export function registerAccountingInboxTools(
     "continue_accounting_workflow",
     "Continue an accounting workflow response, resolve a review item, or prepare an approval action.",
     {
-      action: z.enum(["next", "resolve_review", "prepare_action", "execute_review_action"]).optional().describe("next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle."),
+      action: z.enum(["next", "resolve_review", "prepare_action", "execute_review_action"]).optional().describe("next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation or records a prepared CAMT journal-review acknowledgement with plan_handle."),
       workflow_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("Opaque server-issued workflow handle from a compact workflow_action_v2 response. Carries inert prior workflow state; never approval or mutation authority."),
-      plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation. Drift-bound to the reviewed booking params; not itself approval."),
+      plan_handle: z.string().regex(/^[A-Za-z0-9_-]{43}$/).optional().describe("For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation or CAMT journal-review acknowledgement. Drift-bound to the reviewed booking params; not itself approval."),
       item_id: z.string().max(128).optional().describe("Stable id of a workflow item (from a workflow_action_v2 blocker or page item); action='next' returns the item after it."),
       workflow_state_json: jsonObjectInput.optional().describe("Previous v1 workflow response; required for action='next' without workflow_handle."),
       review_item_json: jsonObjectInput.optional().describe("Review item object for action='resolve_review' or action='prepare_action'."),
@@ -3106,6 +3124,9 @@ export function registerAccountingInboxTools(
 
       if (action === "execute_review_action") {
         const reviewItem = parseRequiredJsonObject(review_item_json, "review_item_json");
+        if (isCamtJournalReviewItem(reviewItem)) {
+          return buildCamtReviewAcknowledgementExecuteResponse(reviewItem, plan_handle, api, runtimeSafetyContext);
+        }
         return buildOwnerExpenseExecuteResponse(reviewItem, plan_handle, api, runtimeSafetyContext);
       }
 
@@ -3117,6 +3138,10 @@ export function registerAccountingInboxTools(
         // save and every other review type keep the read-only planning below.
         if (isOwnerExpenseReviewItem(reviewItem) && !save_as_rule) {
           return buildOwnerExpenseContinuationPrepareResponse(reviewItem, api, runtimeSafetyContext);
+        }
+        // A CAMT journal review the owner checked (#10b): plan an acknowledgement.
+        if (isCamtJournalReviewItem(reviewItem) && !save_as_rule) {
+          return buildCamtReviewAcknowledgementPrepareResponse(reviewItem, api, runtimeSafetyContext);
         }
         const ruleOverride = rule_override_json
           ? parseJsonObject(rule_override_json, "rule_override_json")

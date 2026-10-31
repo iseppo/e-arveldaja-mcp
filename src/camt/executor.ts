@@ -28,6 +28,7 @@ import {
 } from "../file-input-snapshot.js";
 import { FILE_REFERENCE_OPERATIONS } from "../file-reference-store.js";
 import { type ApiContext } from "../tools/crud-tools.js";
+import { readCamtReviewAcknowledgements } from "./review-acknowledgement-store.js";
 import { type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import {
   buildCamtExecutionPlanInput,
@@ -384,6 +385,7 @@ export async function buildImportProjection(
     journalCoverage,
     resolveClient: (entry, cache) => resolveClientForEntry(api, entry, cache),
     reportProgress: (index, total) => reportProgress(index, total),
+    reviewAcknowledgements: readCamtReviewAcknowledgements(),
   });
 }
 
@@ -418,6 +420,7 @@ export function camtPlanFingerprint(projection: CamtImportProjection, normalized
       journal_ids: row.journal_ids,
       review_code: row.review_code,
       skip_code: row.skip_code,
+      acknowledged_review: row.acknowledged_review,
     })),
     possible_duplicates: projection.descriptors.map((descriptor, index) => ({
       id: camtPlanCommandId(index),

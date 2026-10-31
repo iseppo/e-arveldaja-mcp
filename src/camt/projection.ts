@@ -21,9 +21,18 @@ import {
   checkCamtDuplicateRegistration,
   classifyCamtJournalCoverage,
   findCamtNativeImportMatch,
+  journalBooksEntryExactly,
   type CamtJournalCoverage,
   type CamtJournalSnapshot,
 } from "./journal-coverage.js";
+import {
+  CAMT_REVIEW_ACKNOWLEDGED,
+  camtReviewAcknowledgementKey,
+  findClaimingAcknowledgement,
+  isAcknowledgeableCamtReviewCode,
+  type CamtAckRefusalCode,
+  type CamtReviewAcknowledgementRecord,
+} from "./review-acknowledgement.js";
 import type {
   CamtCreateDescriptor,
   CamtImportProjection,
@@ -144,6 +153,67 @@ interface CamtProjectionInput {
   readonly resolveClient: (entry: ParsedCamtEntry, cache: ClientResolutionCache) => Promise<ClientResolution>;
   /** Injected progress reporter; the transport lives in the operation layer. */
   readonly reportProgress: (index: number, total: number) => Promise<void>;
+  /** This connection's stored journal-review acknowledgements (#10b), read by the operation layer. */
+  readonly reviewAcknowledgements?: readonly CamtReviewAcknowledgementRecord[];
+}
+
+/**
+ * #10(b): give each acknowledgeable journal review its acknowledgement
+ * candidate, and quiet the ones whose full key a stored acknowledgement
+ * matches. A movement must occur once in the statement, the review must name
+ * exactly one journal that moves exactly the row's signed EUR cents, and no
+ * other row (or another movement's acknowledgement) may name that journal;
+ * otherwise the candidate is refused and any stored acknowledgement ignored.
+ */
+function applyReviewAcknowledgements(
+  skipped: CamtSkippedRow[],
+  pending: ReadonlyMap<CamtSkippedRow, { entry: ParsedCamtEntry; booksExactly: boolean }>,
+  entries: readonly ParsedCamtEntry[],
+  accountsDimensionsId: number,
+  records: readonly CamtReviewAcknowledgementRecord[],
+): void {
+  const occurrences = new Map<string, number>();
+  for (const entry of entries) {
+    const identity = camtMovementIdentity(entry);
+    occurrences.set(identity, (occurrences.get(identity) ?? 0) + 1);
+  }
+  const journalRows = new Map<number, number>();
+  for (const row of skipped) {
+    for (const id of new Set(row.journal_ids ?? [])) journalRows.set(id, (journalRows.get(id) ?? 0) + 1);
+  }
+  const stored = new Set(records.map(camtReviewAcknowledgementKey));
+  skipped.forEach((row, index) => {
+    const source = pending.get(row);
+    if (!source || !isAcknowledgeableCamtReviewCode(row.review_code) || row.movement_identity === undefined) return;
+    const journalIds = [...row.journal_ids ?? []].sort((left, right) => left - right);
+    const key = { accounts_dimensions_id: accountsDimensionsId, movement_identity: row.movement_identity, review_code: row.review_code, journal_ids: journalIds };
+    let refused: CamtAckRefusalCode | undefined;
+    if (journalIds.length !== 1) refused = "camt_ack_multiple_candidates";
+    else if (occurrences.get(row.movement_identity) !== 1) refused = "camt_ack_nonunique_movement";
+    else if (!source.booksExactly) refused = "camt_ack_journal_mismatch";
+    else if ((journalRows.get(journalIds[0]!) ?? 0) > 1 || findClaimingAcknowledgement(records, key)) refused = "camt_ack_journal_already_claimed";
+    if (refused === undefined && stored.has(camtReviewAcknowledgementKey(key))) {
+      skipped[index] = {
+        date: row.date,
+        amount: row.amount,
+        bank_reference: row.bank_reference,
+        duplicate_transaction_ids: [],
+        journal_ids: journalIds,
+        reason: `Checked earlier: journal ${journalIds[0]} books this movement (acknowledged ${row.review_code})`,
+        skip_code: CAMT_REVIEW_ACKNOWLEDGED,
+        movement_identity: row.movement_identity,
+        acknowledged_review: { review_code: row.review_code, journal_ids: journalIds },
+      };
+      return;
+    }
+    row.acknowledgement = {
+      ...key,
+      date: source.entry.date,
+      amount: source.entry.amount,
+      direction: source.entry.direction,
+      ...(refused !== undefined ? { refused } : {}),
+    };
+  });
 }
 
 export async function computeCamtImportProjection(input: CamtProjectionInput): Promise<CamtImportProjection> {
@@ -175,6 +245,7 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
   const ibanOmissionEvidence = camtIbanOmissionEvidence(input.journalCoverage.bankAccounts, parsed.statement_metadata.iban);
   const descriptors: CamtCreateDescriptor[] = [];
   const skipped: CamtSkippedRow[] = [];
+  const acknowledgeable = new Map<CamtSkippedRow, { entry: ParsedCamtEntry; booksExactly: boolean }>();
 
   for (let index = 0; index < filteredEntries.length; index++) {
     const entry = filteredEntries[index]!;
@@ -296,7 +367,14 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
       continue;
     }
     if (coverage.kind !== "none") {
-      skipped.push(journalCoverageSkip(entry, coverage));
+      const row = journalCoverageSkip(entry, coverage);
+      if (coverage.kind === "review" && isAcknowledgeableCamtReviewCode(coverage.code)) {
+        acknowledgeable.set(row, {
+          entry,
+          booksExactly: coverage.journal_ids.length === 1 && journalBooksEntryExactly(coverage.journal_ids[0]!, entry, journalCoverage),
+        });
+      }
+      skipped.push(row);
       continue;
     }
 
@@ -348,6 +426,8 @@ export async function computeCamtImportProjection(input: CamtProjectionInput): P
     });
     seenBatchDuplicateKeys.add(batchDuplicateKey);
   }
+
+  applyReviewAcknowledgements(skipped, acknowledgeable, parsed.entries, accountsDimensionsId, input.reviewAcknowledgements ?? []);
 
   return {
     parsed,

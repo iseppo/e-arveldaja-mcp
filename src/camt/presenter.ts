@@ -18,6 +18,7 @@ import {
   determinePossibleDuplicateAction,
 } from "./duplicate-identity.js";
 import type { StatementBalanceCheck } from "../statement-balance-check.js";
+import type { CamtReviewAcknowledgementCandidate } from "./review-acknowledgement.js";
 import type {
   CamtCreateDescriptor,
   CamtImportProjection,
@@ -87,6 +88,8 @@ export type CamtJournalReviewItem = {
   bank_reference?: string;
   journal_ids: number[];
   review_note?: string;
+  /** Acknowledgeable review (#10b): pass this item to continue_accounting_workflow prepare_action. */
+  acknowledgement?: CamtReviewAcknowledgementCandidate;
 };
 
 export type CamtImportReviewItem = CamtPossibleDuplicatePayload | CamtJournalReviewItem;
@@ -100,6 +103,8 @@ export type CamtImportSummary = {
   error_count: number;
   possible_duplicate_count: number;
   journal_review_count: number;
+  /** Rows quieted by an earlier acknowledgement (#10b); present when above 0. */
+  acknowledged_review_count?: number;
   description_truncated_count: number;
   counterparty_iban_omitted_count: number;
 };
@@ -185,6 +190,11 @@ export type CamtParsePayload = Omit<CamtParseResult, "entries"> & { entries: Cam
 
 const MAX_EXPOSED_ISSUES = 100;
 const MAX_EXPOSED_VALUE_CHARS = 256;
+
+/** Journal reviews quieted by an earlier acknowledgement (#10b). */
+export function acknowledgedReviewCount(projection: CamtImportProjection): number {
+  return projection.skipped.filter(row => row.acknowledged_review !== undefined).length;
+}
 
 export function journalReviewClause(count: number): string {
   return count > 0 ? ` (${count} of them left unimported for existing-journal review)` : "";
@@ -311,6 +321,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): CamtImpor
     possible_duplicate_count: input.possibleDuplicates.length,
     // Skipped rows an existing journal may already book; they stay unimported.
     journal_review_count: projection.skipped.filter(isCamtJournalReviewRow).length,
+    ...(acknowledgedReviewCount(projection) > 0 ? { acknowledged_review_count: acknowledgedReviewCount(projection) } : {}),
     // Rows whose stored text is shorter than the statement text, and rows
     // whose marker left the (proven external) counterparty IBAN out.
     description_truncated_count: input.results.filter(row => row.description_truncated !== undefined).length,
@@ -383,6 +394,7 @@ export function renderCamtImportPayload(input: CamtImportRenderInput): CamtImpor
       bank_reference: wrapUntrustedOcr(row.bank_reference),
       journal_ids: row.journal_ids ?? [],
       review_note: row.review_note,
+      ...(row.acknowledgement !== undefined ? { acknowledgement: row.acknowledgement } : {}),
     }));
   const needsReview = [...sanitizedPossibleDuplicates, ...journalReviews];
 
@@ -486,6 +498,7 @@ export type CamtSlimSkippedRow = {
   review_note?: string;
   duplicate_transaction_ids: number[];
   journal_ids?: number[];
+  acknowledged_review?: { review_code: string; journal_ids: number[] };
 };
 
 /** The slim (default standard/full) import_camt053 envelope, dry run and execute. */
@@ -542,6 +555,7 @@ export function renderCamtImportSlim(input: CamtImportRenderInput): CamtImportSl
       ...(row.review_note !== undefined ? { review_note: row.review_note } : {}),
       duplicate_transaction_ids: row.duplicate_transaction_ids,
       ...(row.journal_ids !== undefined ? { journal_ids: row.journal_ids } : {}),
+      ...(row.acknowledged_review !== undefined ? { acknowledged_review: row.acknowledged_review } : {}),
     });
   });
   const pageHint = input.planHandle !== undefined
@@ -654,6 +668,7 @@ export function renderCamtImportCompact(input: CamtCompactInput): CamtImportComp
     auto_matched: nativeMatches.length,
     held_for_review: heldRows.length,
     errors: data.errorCount,
+    ...(acknowledgedReviewCount(data.projection) > 0 ? { acknowledged_reviews: acknowledgedReviewCount(data.projection) } : {}),
   };
   const totals = {
     credit_total: data.projection.parsed.summary.credit_total,

@@ -2,9 +2,9 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 34719,
+    "toolsListBytes": 34816,
     "descriptionsBytes": 4971,
-    "inputSchemasBytes": 25116,
+    "inputSchemasBytes": 25213,
     "largestTool": {
       "name": "process_accounting_document",
       "bytes": 5425
@@ -1002,7 +1002,7 @@
         "additionalProperties": false,
         "properties": {
           "action": {
-            "description": "next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation with plan_handle.",
+            "description": "next reads workflow_handle (+ item_id) or workflow_state_json; resolve_review/prepare_action read review_item_json; execute_review_action books a prepared owner-expense continuation or records a prepared CAMT journal-review acknowledgement with plan_handle.",
             "enum": [
               "next",
               "resolve_review",
@@ -1017,7 +1017,7 @@
             "type": "string"
           },
           "plan_handle": {
-            "description": "For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation. Drift-bound to the reviewed booking params; not itself approval.",
+            "description": "For action='execute_review_action': the consume-once plan handle minted by action='prepare_action' for a server-executed owner-expense continuation or CAMT journal-review acknowledgement. Drift-bound to the reviewed booking params; not itself approval.",
             "pattern": "^[A-Za-z0-9_-]{43}$",
             "type": "string"
           },

@@ -521,16 +521,19 @@ function summarizeAutopilotToolResult(
             journal_ids: row.journal_ids,
             transaction_ids: row.duplicate_transaction_ids,
           });
-          // A direct action, not a continuation: no resolver handles these rows,
-          // so there is no resolver_input; the id still makes the item resumable.
+          // A direct action, not a continuation, except an acknowledgeable
+          // journal review (#10b): its resolver_input lets prepare_action record
+          // that the named journal books the row. The id makes the item resumable.
+          const id = stableReviewId(tool, {
+            category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
+            date: row.date,
+            amount: row.amount,
+            bank_reference: row.bank_reference,
+            existing_transactions: (row.journal_ids ?? []).map(id => ({ id })),
+          });
+          const acknowledgeable = row.acknowledgement !== undefined && row.acknowledgement.refused === undefined;
           return {
-            id: stableReviewId(tool, {
-              category: journalReview ? "camt_journal_review" : "camt_partial_legacy",
-              date: row.date,
-              amount: row.amount,
-              bank_reference: row.bank_reference,
-              existing_transactions: (row.journal_ids ?? []).map(id => ({ id })),
-            }),
+            id,
             ...toAutopilotFollowUp(
               tool,
               `CAMT row ${row.date} ${row.amount} was not created: ${!journalReview
@@ -538,10 +541,24 @@ function summarizeAutopilotToolResult(
                 : row.review_code === "camt_duplicate_journal_conflict" || row.review_code === "camt_journal_direction_conflict"
                   ? `an existing confirmed transaction is booked wrongly (wrong direction or amount) and needs correction (${row.review_code})`
                   : `an existing journal may already book it (${row.review_code})`}.`,
-              { recommendation: row.review_note ?? row.reason },
+              {
+                recommendation: `${row.review_note ?? row.reason}${acknowledgeable
+                  ? ` If the owner confirms journal ${row.acknowledgement!.journal_ids[0]} books this row, call continue_accounting_workflow action='prepare_action' with this item's resolver_input so later imports do not raise it again.`
+                  : ""}`,
+              },
               undefined,
               mergeKey,
             ),
+            ...(row.acknowledgement !== undefined
+              ? {
+                  resolver_input: {
+                    review_type: "camt_journal_review",
+                    source_tool: tool,
+                    item: { code: "camt_journal_review", review_code: row.review_code, date: row.date, amount: row.amount, journal_ids: row.journal_ids ?? [], acknowledgement: row.acknowledgement },
+                    id,
+                  },
+                }
+              : {}),
           };
         })],
       };

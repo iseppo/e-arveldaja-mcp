@@ -1,3 +1,4 @@
+import type { CamtReviewAcknowledgementCandidate } from "./review-acknowledgement.js";
 import type { Client, Transaction } from "../types/api.js";
 import type { CreateBankTransactionRequest } from "../types/mutations.js";
 import type { StatementBalanceCheck } from "../statement-balance-check.js";
@@ -192,6 +193,12 @@ export interface CamtSkippedRow {
   /** Review rows only: opaque sha256 leg identity (camtMovementIdentity), so
    * the same leg raised from overlapping statements can be recognised. */
   movement_identity?: string;
+  /** An acknowledgeable journal review (#10b): what `prepare_action` records;
+   * `refused` says why it cannot be acknowledged as it stands. */
+  acknowledgement?: CamtReviewAcknowledgementCandidate;
+  /** A journal review the owner acknowledged earlier (skip_code
+   * `camt_review_acknowledged`, no review_code). */
+  acknowledged_review?: { review_code: string; journal_ids: number[] };
 }
 
 export interface CamtImportProjection {

@@ -36,6 +36,10 @@ For owner-paid expense receipts:
 - Likely restricted categories (representation, passenger-car, etc.): need confirmation, unless a saved company booking rule already defines the policy.
 - To book it, continue with `action: "prepare_action"` (see the `prepare-accounting-review-action` workflow, "Owner-paid expense receipts"): the answers go into `review_item_json.item.owner_expense`, and the prepared journal is booked with `action: "execute_review_action"`.
 
+For CAMT journal reviews (`review_type: "camt_journal_review"`):
+- Compare the named journal with the statement row. If it books the row and the owner confirms, continue with `action: "prepare_action"` (see the `prepare-accounting-review-action` workflow, "CAMT journal reviews the owner has checked"), so later imports do not raise it again; nothing is booked.
+- If the movement is not booked yet, create the transaction manually after approval.
+
 ### Step 3: Keep the interaction minimal
 
 - if `unresolved_questions` is empty, do not invent extra questions
