@@ -184,9 +184,11 @@ export const SUGGEST_DEFAULT_MIN_CONFIDENCE = 50;
  * order / cart reference the bank description carries as a whole token.
  * exact_amount (40) + 30 = 70 outranks every amount/name-only candidate
  * (max 40 + 15 = 55). The cap 85 keeps it strictly below the 90 auto-confirm
- * threshold (owner decision: a document reference alone never auto-confirms)
- * and equals the Tier A cap. The exact-confirm path scores with matchScore
- * alone, so ref_number_exact and >= 90 admission are untouched.
+ * threshold and equals the Tier A cap: this score only ranks suggestions and
+ * never confers confirmation authority. The exact-confirm path scores with
+ * matchScore alone; a document reference reaches its reviewed plan only
+ * through the separately guarded document_reference_exact rule
+ * (duplicate-policy), never through this bonus.
  */
 const DOCUMENT_REFERENCE_POINTS = 30;
 const DOCUMENT_REFERENCE_CONFIDENCE_CAP = 85;

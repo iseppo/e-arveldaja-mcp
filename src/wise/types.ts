@@ -145,10 +145,12 @@ export interface WiseTransferTreatedAsPayment {
   basis: WiseExternalPaymentBasis;
 }
 
-/** A row's counterparty-name client lookup (the CAMT rule, selectClientByName). */
+/** A row's counterparty-name client lookup (the CAMT rule, selectClientByName),
+ * or for an outgoing card row without one, the client its earlier confirmed
+ * payments to the same merchant consistently carry (resolveWiseCardClientFromHistory). */
 export interface WiseClientResolution {
   clients_id?: number;
-  match_type?: "exact_name";
+  match_type?: "exact_name" | "confirmed_history";
   matched_client_name?: string;
   /** Several clients have exactly this normalized name: clients_id stays null. */
   ambiguous?: true;
@@ -297,8 +299,8 @@ export interface WiseCreatedEntry {
   booked_currency?: string;
   /** The client set on the created row (create_payload.clients_id). */
   clients_id?: number;
-  /** Dry run: how clients_id was found from the counterparty name. */
-  client_match?: "exact_name";
+  /** Dry run: how clients_id was found (counterparty name, or earlier confirmed card payments to the merchant). */
+  client_match?: "exact_name" | "confirmed_history";
   matched_client_name?: string;
   /** Several clients have exactly the counterparty name: the row is created without
    * a client and needs one before it can be confirmed. */

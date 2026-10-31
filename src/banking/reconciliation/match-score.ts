@@ -23,9 +23,11 @@ export interface MatchCandidate {
   ref_number?: string | null;
   confidence: number;
   match_reasons: string[];
-  /** Set when the candidate is admitted to the exact-confirm set by the
-   * ref-number + exact-amount rule rather than by its score. */
-  auto_confirm_rule?: "ref_number_exact";
+  /** Set when the candidate is admitted to (or chosen within) the
+   * exact-confirm set by a guarded rule rather than by its score alone. */
+  auto_confirm_rule?: "ref_number_exact" | "document_reference_exact";
+  /** document_reference_exact: the invoice or order number the payment text names. */
+  matched_document_reference?: string;
 }
 
 export function buildSuggestedDistribution(

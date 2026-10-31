@@ -1003,6 +1003,9 @@ describe("registerPrompts", () => {
     expect(text).toContain("confidence >= 90, or a row flagged `auto_confirm_rule: \"ref_number_exact\"`");
     expect(text).toContain("Never confirm any other 80-89 match without asking");
     expect(text).toContain("re-run the dry run with `min_confidence` above 90");
+    // A document reference confirms only through the guarded Auto-mode rule; the suggestion score never does.
+    expect(text).toContain("`auto_confirm_rule: \"document_reference_exact\"`");
+    expect(text).toContain("That suggestion score only ranks; it never confirms anything.");
     // already_handled rows without a mirror proposal are never offered for deletion.
     expect(text).toContain("Rows WITHOUT `mirror_proposal` are only listed for the owner");
     expect(text).not.toContain("safe to delete");

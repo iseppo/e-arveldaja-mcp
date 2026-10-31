@@ -784,6 +784,16 @@ export function renderWiseImportCompact(input: WiseCompactInput): WiseImportComp
     code: "wise_transfer_treated_as_payment",
     message: `Imported as an ordinary unconfirmed payment, not an own transfer (${entry.basis === "owner" ? "not_own_transfer_ids" : "the other party is not an own account"}). If it is an own transfer after all, re-run the preview with this ID in confirm_own_transfer_ids.`,
   })), "they are plain unconfirmed rows in the plan; re-run the preview with a narrower date_from/date_to to list them."));
+  // A client taken from earlier card payments (not an exact name match) is
+  // named with its provenance so the owner checks it before approving.
+  warnings.push(...cappedWarnings("wise_client_from_history", data.created.filter(entry => entry.client_match === "confirmed_history").map(entry => ({
+    item_id: entry.wise_id,
+    code: "wise_client_from_history",
+    message: `Client ${entry.clients_id} is set from earlier confirmed card payments to this merchant (client_match: confirmed_history), `
+      + "not from an exact name match. Check it is the right supplier before approving.",
+  })), dryRun && data.planHandle !== undefined
+    ? `page them with get_execution_plan_page { plan_handle: "${data.planHandle}", section: "commands", detail: "full" } (create_payload.clients_id).`
+    : "re-run the preview and page its plan commands with get_execution_plan_page."));
   warnings.push(...cappedWarnings("wise_client_ambiguous", data.created.filter(entry => entry.client_ambiguous === true).map(entry => ({
     item_id: entry.wise_id,
     code: "wise_client_ambiguous",

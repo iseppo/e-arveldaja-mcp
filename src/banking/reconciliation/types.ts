@@ -74,8 +74,11 @@ export interface ExactConfirmDescriptor {
   invoiceClientsId: number | null;
   confidence: number;
   /** Set when the match was admitted by the ref-number + exact-amount rule
-   * (see duplicate-policy isRefNumberExactMatch), not by its score. */
-  autoConfirmRule?: "ref_number_exact";
+   * (see duplicate-policy isRefNumberExactMatch) or chosen by the
+   * document-reference rule (documentReferenceRuleGap), not by its score. */
+  autoConfirmRule?: "ref_number_exact" | "document_reference_exact";
+  /** document_reference_exact: the invoice or order number the payment text names. */
+  matchedDocumentReference?: string;
   /** How the confirm reconciles the transaction's client with the invoice's.
    * "set_missing": the transaction carries no client, so the invoice's is
    * copied onto it before registering. "unchanged": it already carries the

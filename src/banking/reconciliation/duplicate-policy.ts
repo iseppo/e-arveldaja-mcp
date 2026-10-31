@@ -14,6 +14,7 @@ import {
 import { transactionCurrency } from "./amount-resolution.js";
 import { normalizeCompanyName } from "../../company-name.js";
 import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
+import { documentReferenceOnTransaction } from "./document-reference.js";
 import type {
   ExactConfirmClientResolution,
   ExactConfirmDescriptor,
@@ -172,6 +173,52 @@ function isRefNumberExactMatch(
   return true;
 }
 
+/**
+ * The document-reference rule (`document_reference_exact`): a payment whose
+ * visible text names exactly one open purchase invoice by a strong document
+ * reference (its number, or a canonical order / cart number line in its notes)
+ * selects that invoice, and is admitted at thresholds up to the default even
+ * though its score stays lower (Lux live 2026-10: exact_amount 40 + name 10 =
+ * 50, two same-amount invoices). Only the visible text is searched: the CAMT
+ * marker's technical fields (`br=`, `instr=`) are not payment text.
+ *
+ * Within the rule's scope a referenced invoice is terminal: when it is not
+ * eligible, or another invoice competes, the row goes to review and is never
+ * matched to a different invoice. The rule supplies selection authority only;
+ * the confidence stays the score, and the payer, currency, direction,
+ * duplicate and consumed-invoice gates still apply.
+ */
+function documentReferenceHits(
+  tx: Transaction,
+  openPurchases: readonly PurchaseInvoice[],
+): Array<{ inv: PurchaseInvoice; matchedReference: string }> {
+  return openPurchases
+    .map(inv => ({ inv, matchedReference: documentReferenceOnTransaction(tx.description, inv) }))
+    .filter((hit): hit is { inv: PurchaseInvoice; matchedReference: string } => hit.matchedReference !== undefined)
+    .sort((a, b) => a.inv.id! - b.inv.id!);
+}
+
+/** Why the referenced invoice cannot be confirmed by the document rule, or `undefined` when it can. */
+function documentReferenceRuleGap(tx: Transaction, inv: PurchaseInvoice, consumedInvoiceKeys: ReadonlySet<string>): string | undefined {
+  if (consumedInvoiceKeys.has(`purchase:${inv.id!}`)) return "it is already matched to another payment in this plan";
+  if (inv.status !== "CONFIRMED") return "the invoice is not confirmed";
+  if (!isUnpaidPaymentStatus(inv.payment_status)) return `its payment status is ${String(inv.payment_status)}`;
+  if (explicitCurrency(tx.cl_currencies_id) !== "EUR" || explicitCurrency(inv.cl_currencies_id) !== "EUR") {
+    return "the payment and the invoice are not both explicitly EUR";
+  }
+  if (tx.base_amount != null && !sameAmountToTheCent(tx.base_amount, tx.amount)) return "the payment carries a differing base amount";
+  if (!sameAmountToTheCent(tx.amount, inv.gross_price ?? Number.NaN)) return "the payment amount is not the invoice total to the cent";
+  if (!hasProvenDirectionFor(tx, "purchase_invoice")) return "the payment has no checksum-verified outgoing CAMT direction";
+  return undefined;
+}
+
+function ambiguousInvoiceCandidatesReason(candidates: ReadonlyArray<{ type: MatchCandidate["type"]; id: number }>): string {
+  const named = [...new Map(candidates.map(c => [`${c.type} #${c.id}`, c])).values()]
+    .sort((a, b) => a.type.localeCompare(b.type) || a.id - b.id)
+    .map(c => `${c.type} #${c.id}`);
+  return `ambiguous_invoice_candidates: ${named.join(", ")} match this payment; review the references before confirming.`;
+}
+
 export function collectExactMatchCandidates(
   tx: Transaction,
   saleIndex: InvoiceIndex<SaleInvoice>,
@@ -239,9 +286,25 @@ export function computeExactMatchProjection(
   const salesById = new Map(openSales.map(inv => [inv.id, inv]));
   const purchasesById = new Map(openPurchases.map(inv => [inv.id, inv]));
 
+  // An explicit min_confidence above the default opts out of the document rule
+  // (admission and veto alike), as it does of the ref-number rule.
+  const documentRuleApplies = threshold <= EXACT_CONFIRM_DEFAULT_MIN_CONFIDENCE;
+
   for (const tx of unconfirmed) {
+    // Raw hits before any score or consumed-key filtering, so a filtered
+    // competitor cannot manufacture uniqueness.
+    const documentHits = documentRuleApplies && getInvoiceMatchEligibility(tx).allowPurchaseInvoices
+      ? documentReferenceHits(tx, openPurchases)
+      : [];
+    if (documentHits.length > 1) {
+      skipped.push({
+        transaction_id: tx.id,
+        reason: ambiguousInvoiceCandidatesReason(documentHits.map(hit => ({ type: "purchase_invoice" as const, id: hit.inv.id! }))),
+      });
+      continue;
+    }
     const unverifiedMarkerMatches: string[] = [];
-    const candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys, unverifiedMarkerMatches);
+    let candidates = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, consumedInvoiceKeys, unverifiedMarkerMatches);
     if (candidates.length === 0 && unverifiedMarkerMatches.length > 0) {
       skipped.push({
         transaction_id: tx.id,
@@ -254,6 +317,55 @@ export function computeExactMatchProjection(
         transaction_id: tx.id,
         reason: `ambiguous_foreign_invoice_base: ${candidates.map(c => `${c.type} #${c.id}`).join(", ")} compete on a foreign-currency invoice base amount; match manually.`,
       });
+      continue;
+    }
+    const documentHit = documentHits[0];
+    if (documentHit !== undefined) {
+      const { inv, matchedReference } = documentHit;
+      // A structured payment reference naming another invoice contradicts the text.
+      const refTargets = tx.ref_number
+        ? [
+            ...(saleIndex.byRef.get(tx.ref_number) ?? []).map(other => ({ type: "sale_invoice" as const, id: other.id! })),
+            ...(purchaseIndex.byRef.get(tx.ref_number) ?? []).map(other => ({ type: "purchase_invoice" as const, id: other.id! })),
+          ]
+        : [];
+      if (refTargets.some(target => target.type !== "purchase_invoice" || target.id !== inv.id)) {
+        skipped.push({
+          transaction_id: tx.id,
+          reason: ambiguousInvoiceCandidatesReason([{ type: "purchase_invoice", id: inv.id! }, ...refTargets]),
+        });
+        continue;
+      }
+      const scored = candidates.find(c => c.type === "purchase_invoice" && c.id === inv.id);
+      const gap = documentReferenceRuleGap(tx, inv, consumedInvoiceKeys);
+      if (gap === undefined) {
+        // Needed for admission (below the threshold) or to choose among
+        // contenders (counted before consumed-key filtering, so the outcome
+        // does not depend on row order); a sole score-qualified match stays.
+        const contenders = collectExactMatchCandidates(tx, saleIndex, purchaseIndex, threshold, new Set());
+        if (scored === undefined || contenders.length > 1) {
+          const { confidence, reasons } = matchScore(tx, inv, tx.amount);
+          candidates = [{
+            type: "purchase_invoice", id: inv.id!, number: inv.number ?? "",
+            client_name: inv.client_name ?? "", clients_id: inv.clients_id,
+            gross_price: inv.gross_price ?? 0, payment_status: inv.payment_status ?? "NOT_PAID",
+            partially_paid_warning: false, confidence, match_reasons: reasons,
+            auto_confirm_rule: "document_reference_exact", matched_document_reference: matchedReference,
+          }];
+        }
+      } else if (scored === undefined || candidates.length > 1) {
+        // The named invoice cannot be confirmed here: never redirect the row
+        // to another invoice. (A sole score-qualified match of the named
+        // invoice continues through the usual gates below.)
+        skipped.push({
+          transaction_id: tx.id,
+          reason: `document_reference_review: purchase_invoice #${inv.id} is named in the payment text but ${gap}; no other invoice is matched in its place. Review it before confirming.`,
+        });
+        continue;
+      }
+    }
+    if (candidates.length > 1) {
+      skipped.push({ transaction_id: tx.id, reason: ambiguousInvoiceCandidatesReason(candidates) });
       continue;
     }
     if (candidates.length !== 1) continue;
@@ -345,6 +457,7 @@ export function computeExactMatchProjection(
       invoiceClientsId,
       confidence: match.confidence,
       ...(match.auto_confirm_rule !== undefined ? { autoConfirmRule: match.auto_confirm_rule } : {}),
+      ...(match.matched_document_reference !== undefined ? { matchedDocumentReference: match.matched_document_reference } : {}),
       clientResolution,
       needsClientUpdate: clientResolution === "set_missing",
       accountsDimensionsId: tx.accounts_dimensions_id,

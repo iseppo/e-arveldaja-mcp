@@ -81,7 +81,9 @@ export type ReconExactMatchConfirmRow = {
     id: number;
     number: string;
     confidence: number;
-    auto_confirm_rule?: "ref_number_exact";
+    auto_confirm_rule?: "ref_number_exact" | "document_reference_exact";
+    /** document_reference_exact: the invoice or order number the payment text names (sandbox-wrapped). */
+    matched_document_reference?: string;
   };
   status: "would_confirm" | "confirmed" | "not_confirmed";
   possible_duplicate_postings?: RenderedDuplicatePostingSuspect[];
@@ -256,6 +258,7 @@ export function exactMatchReviewCommands(projection: ExactMatchProjection): Reco
         bank_ref_number: descriptor.transactionMaterial?.bank_ref_number,
         confidence: descriptor.confidence,
         ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
+        ...(descriptor.matchedDocumentReference !== undefined ? { matched_document_reference: wrapUntrustedOcr(descriptor.matchedDocumentReference) } : {}),
         ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
           ? { possible_duplicate_postings: renderDuplicatePostingSuspects(descriptor.possibleDuplicatePostings) }
           : {}),
@@ -304,8 +307,10 @@ function wrapSuggestMatch(match: SuggestMatchRow): ReconSuggestMatch {
 
 const DOCUMENT_REFERENCE_NOTE =
   "These purchase invoices match a transaction's exact amount and a document reference (invoice number or order / cart number) "
-  + "in its description, but another invoice ranked higher for that transaction. They are not auto-confirmed: check each one and "
-  + "confirm the transaction against that invoice only when it is that invoice's payment.";
+  + "in its description, but another invoice ranked higher for that transaction. Suggestion scores only rank candidates and never "
+  + "confirm a payment; the auto-confirm dry run admits a document reference only through its guarded document_reference_exact rule "
+  + "(exactly one named invoice, no competing evidence), so these rows stay out of it too. Check each one and confirm the transaction "
+  + "against that invoice only when it is that invoice's payment.";
 
 // Wrap every untrusted free-text field on a RAW document-reference row.
 function wrapDocumentReferenceCandidate(row: DocumentReferenceCandidateRow): DocumentReferenceCandidateRow {
@@ -369,7 +374,11 @@ export function renderExactMatchPayload(input: {
       transaction_id: descriptor.transactionId,
       amount: descriptor.amount,
       date: descriptor.date,
-      match: { type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence, ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}) },
+      match: {
+        type: descriptor.invoiceType, id: descriptor.invoiceId, number: wrapUntrustedOcr(descriptor.invoiceNumber) ?? "", confidence: descriptor.confidence,
+        ...(descriptor.autoConfirmRule !== undefined ? { auto_confirm_rule: descriptor.autoConfirmRule } : {}),
+        ...(descriptor.matchedDocumentReference !== undefined ? { matched_document_reference: wrapUntrustedOcr(descriptor.matchedDocumentReference) ?? "" } : {}),
+      },
       status: dryRun ? "would_confirm" : confirmed ? "confirmed" : "not_confirmed",
       ...(descriptor.possibleDuplicatePostings && descriptor.possibleDuplicatePostings.length > 0
         ? { possible_duplicate_postings: renderDuplicatePostingSuspects(descriptor.possibleDuplicatePostings) }
@@ -607,7 +616,8 @@ export function renderSuggestCompact(
     item_id: String(row.transaction_id ?? ""),
     code: "document_reference_candidate",
     message: `Transaction ${row.transaction_id ?? "?"} (${row.amount}) carries the exact amount and a document reference of purchase invoice #${row.invoice.id}, `
-      + "but another invoice ranked higher for it; it is not auto-confirmed. Check it before confirming the payment against that invoice.",
+      + "but another invoice ranked higher for it; suggestion scores only rank candidates, and with this competing evidence the "
+      + "guarded document_reference_exact confirm rule does not take it either. Check it before confirming the payment against that invoice.",
   })), "each needs the same check before confirming."));
 
   // Suggest is read-only (no execution) — it never produces execution blockers.
@@ -751,14 +761,22 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): ReconCom
   // 90) and rows skipped for an unproven direction are counted and itemised,
   // so the approval names them.
   const refRuleConfirms = projection.confirms.filter(descriptor => descriptor.autoConfirmRule === "ref_number_exact");
+  const documentRuleConfirms = projection.confirms.filter(descriptor => descriptor.autoConfirmRule === "document_reference_exact");
   const directionUnproven = projection.skipped.filter(row => row.reason.startsWith("direction_unproven:"));
+  // Rows withheld because several invoices, or one ineligible named invoice,
+  // compete for the payment: itemised so the operator reviews them inline.
+  const ambiguousCandidates = projection.skipped.filter(row => row.reason.startsWith("ambiguous_invoice_candidates:"));
+  const documentReviews = projection.skipped.filter(row => row.reason.startsWith("document_reference_review:"));
 
   const counts = {
     total_unconfirmed: projection.totalUnconfirmed,
     [dryRun ? "would_confirm" : "confirmed"]: confirmedCount,
     ref_number_exact: refRuleConfirms.length,
+    document_reference_exact: documentRuleConfirms.length,
     skipped: projection.skipped.length,
     direction_unproven: directionUnproven.length,
+    ambiguous_invoice_candidates: ambiguousCandidates.length,
+    document_reference_review: documentReviews.length,
     third_party_payer_reviews: projection.thirdPartyPayerReviews.length,
     blocked_duplicates: projection.blockedDuplicateSuspects.length,
     duplicates: duplicateCount,
@@ -781,11 +799,24 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): ReconCom
       + `by the ref_number_exact rule (confidence ${descriptor.confidence}, below 90): the reference of exactly one open unpaid EUR invoice, the exact EUR amount `
       + "and a direction matching the invoice kind. To leave these rows out, re-run the dry run with min_confidence above 90.",
   })), moreHint));
-  warnings.push(...cappedWarnings("direction_unproven", directionUnproven.map(row => ({
-    ...(row.transaction_id !== undefined ? { item_id: String(row.transaction_id) } : {}),
-    code: "direction_unproven",
-    message: row.reason,
+  warnings.push(...cappedWarnings("document_reference_exact", documentRuleConfirms.map(descriptor => ({
+    item_id: String(descriptor.transactionId),
+    code: "document_reference_exact",
+    message: `Transaction ${descriptor.transactionId} is in the ${dryRun ? "proposed" : "executed"} confirm set against ${descriptor.invoiceType} #${descriptor.invoiceId} `
+      + `by the document_reference_exact rule (confidence ${descriptor.confidence}): its payment text names this one open unpaid EUR purchase invoice, `
+      + "the amount is exact and the outgoing direction is checksum-verified. To leave these rows out, re-run the dry run with min_confidence above 90.",
   })), moreHint));
+  for (const [code, rows] of [
+    ["direction_unproven", directionUnproven],
+    ["ambiguous_invoice_candidates", ambiguousCandidates],
+    ["document_reference_review", documentReviews],
+  ] as const) {
+    warnings.push(...cappedWarnings(code, rows.map(row => ({
+      ...(row.transaction_id !== undefined ? { item_id: String(row.transaction_id) } : {}),
+      code,
+      message: row.reason,
+    })), moreHint));
+  }
   // Blocked suspects are in neither plan section (removed from the confirms,
   // not plan exclusions): only the full dry-run output lists every one.
   const blockedHint = "they are not in the plan; the standard or full profile (EARVELDAJA_PROFILE) lists every one as a "
@@ -926,7 +957,10 @@ export function renderExactMatchCompact(input: ExactMatchCompactInput): ReconCom
     measureEnvelope: "summary",
     warningHints: {
       ref_number_exact: moreHint,
+      document_reference_exact: moreHint,
       direction_unproven: moreHint,
+      ambiguous_invoice_candidates: moreHint,
+      document_reference_review: moreHint,
       possible_duplicate: duplicateHint,
       blocked_duplicate_suspect: blockedHint,
       ...Object.fromEntries(projection.thirdPartyPayerReviews.map(review => [review.reason, thirdPartyPayerHint])),

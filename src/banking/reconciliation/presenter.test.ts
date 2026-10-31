@@ -472,6 +472,51 @@ describe("renderExactMatchCompact", () => {
   });
 });
 
+describe("renderExactMatchCompact document_reference_exact and ambiguous_invoice_candidates", () => {
+  const ambiguous = (id: number) => ({
+    transaction_id: id,
+    reason: `ambiguous_invoice_candidates: purchase_invoice #5577728, purchase_invoice #5582125 match this payment; review the references before confirming.`,
+  });
+  const projection = makeExactProjection(5, {
+    confirms: Array.from({ length: 5 }, (_, index) => confirmDescriptor(index, index < 4
+      ? { confidence: 50, autoConfirmRule: "document_reference_exact", matchedDocumentReference: `26101882524${index}` }
+      : {})),
+    skipped: [ambiguous(81), ambiguous(82), ambiguous(83), ambiguous(84)],
+  });
+
+  it("counts and itemises both, capped at 3 with an N-more count and the paging hint", () => {
+    const { summary } = renderExactMatchCompact({ mode: "DRY_RUN", projection, planHandle: "PLAN-D" });
+    expect(summary.counts).toMatchObject({ would_confirm: 5, document_reference_exact: 4, ambiguous_invoice_candidates: 4, skipped: 4 });
+    const ruleWarnings = summary.warnings?.filter(w => w.code === "document_reference_exact") ?? [];
+    expect(ruleWarnings.map(w => w.item_id)).toEqual(["0", "1", "2"]);
+    expect(ruleWarnings[0]!.message).toBe(
+      "Transaction 0 is in the proposed confirm set against purchase_invoice #900 by the document_reference_exact rule "
+      + "(confidence 50): its payment text names this one open unpaid EUR purchase invoice, the amount is exact and the "
+      + "outgoing direction is checksum-verified. To leave these rows out, re-run the dry run with min_confidence above 90.",
+    );
+    expect(summary.warnings?.find(w => w.code === "document_reference_exact_more")?.message)
+      .toMatch(/^1 more document_reference_exact item\(s\) not shown; page them with get_execution_plan_page \{ plan_handle: "PLAN-D", section: "commands" or "exclusions"/);
+    const ambiguityWarnings = summary.warnings?.filter(w => w.code === "ambiguous_invoice_candidates") ?? [];
+    expect(ambiguityWarnings.map(w => [w.item_id, w.message])).toEqual([
+      ["81", ambiguous(81).reason], ["82", ambiguous(82).reason], ["83", ambiguous(83).reason],
+    ]);
+    expect(summary.warnings?.find(w => w.code === "ambiguous_invoice_candidates_more")?.message)
+      .toMatch(/^1 more ambiguous_invoice_candidates item\(s\) not shown; page them with get_execution_plan_page \{ plan_handle: "PLAN-D"/);
+    expect(summary.samples?.[0]).toMatchObject({ match: { id: 900, confidence: 50, auto_confirm_rule: "document_reference_exact" } });
+  });
+
+  it("renders the rule and the wrapped matched reference in full results and plan errors", () => {
+    const payload = renderExactMatchPayload({ mode: "DRY_RUN", projection, planHandle: "PLAN-D" });
+    const row = payload.results[0]!;
+    if (row.status !== "would_confirm") throw new Error("expected a would_confirm row");
+    expect(row.match.auto_confirm_rule).toBe("document_reference_exact");
+    expect(row.match.confidence).toBe(50);
+    expect(String(row.match.matched_document_reference)).toMatch(OCR);
+    expect(String(row.match.matched_document_reference)).toContain("261018825240");
+    expect(payload.errors.map(e => e.transaction_id)).toEqual([81, 82, 83, 84]);
+  });
+});
+
 describe("renderExactMatchPayload", () => {
   it("renders third-party-payer reviews with a wrapped invoice number and counts them in the summary", () => {
     const projection = makeExactProjection(0, { thirdPartyPayerReviews: [thirdPartyReview] });
@@ -722,7 +767,9 @@ describe("document_reference_candidates rendering (okt 2026 finding 5)", () => {
     expect(row.invoice.client_name).toMatch(OCR);
     expect(row.matched_reference).toMatch(OCR);
     expect(row.invoice.id).toBe(701);
-    expect(payload.document_reference_note).toContain("not auto-confirmed");
+    // Suggestion ranking is not confirmation authority; only the guarded rule is.
+    expect(payload.document_reference_note).toContain("Suggestion scores only rank candidates");
+    expect(payload.document_reference_note).toContain("document_reference_exact");
     expect(payload.matches).toHaveLength(1);
   });
 
@@ -738,5 +785,7 @@ describe("document_reference_candidates rendering (okt 2026 finding 5)", () => {
     expect(warning?.item_id).toBe("7");
     expect(warning?.message).toContain("purchase invoice #701");
     expect(warning?.message).not.toContain("990011223344");
+    expect(warning?.message).toContain("suggestion scores only rank candidates");
+    expect(warning?.message).toContain("document_reference_exact");
   });
 });

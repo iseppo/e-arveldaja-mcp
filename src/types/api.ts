@@ -54,6 +54,8 @@ export interface Client {
   bank_ref_number_sales?: string | null;
   bank_ref_number_purchases?: string | null;
   bank_account_custom_name?: string | null;
+  is_active?: boolean;
+  deactivated_date?: string | null;
   is_deleted?: boolean;
   is_associate_company?: boolean;
   is_parent_company_group?: boolean;

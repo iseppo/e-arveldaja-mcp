@@ -5,6 +5,7 @@ import type { ReconCompactPayload, ReconSuggestPayload } from "./presenter.js";
 import type { ReconcileBankTransactionsPayload } from "../../tools/bank-reconciliation.js";
 import { runWithToolProfile } from "../../tool-profile.js";
 import { createTestRuntimeSafetyContext } from "../../__fixtures__/runtime-safety.js";
+import { withSignedCamtMarker } from "../../__fixtures__/camt-marker.js";
 
 vi.mock("../../progress.js", () => ({ reportProgress: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../../audit-log.js", () => ({ logAudit: vi.fn() }));
@@ -164,6 +165,55 @@ describe("reconciliation compact profile routing", () => {
       expect(codes).toContain("blocked_duplicate_suspect");
       expect((exec.summary.warnings ?? []).some(w => w.code === "possible_duplicate" && w.message.startsWith("POSSIBLE duplicate"))).toBe(false);
       expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+  });
+
+  it("guided dry run → next_action → execute confirms a document_reference_exact row at the default threshold", async () => {
+    const { handler, api } = setup();
+    // Outgoing EUR 25.20 card payment naming the order number of the one open
+    // purchase invoice: exact_amount 40 + client_name_partial 10 = 50 < 90.
+    const docTx = withSignedCamtMarker({
+      id: 1, status: "PROJECT", is_deleted: false, type: "C", amount: 25.2, date: "2026-10-18",
+      accounts_dimensions_id: BANK_DIMENSION_ID, accounts_id: BANK_ACCOUNT_ID, cl_currencies_id: "EUR",
+      bank_account_name: "Lux Express", ref_number: null, clients_id: null, description: "Lux Express 261018825247",
+    }, "DBIT");
+    const docInvoice = {
+      id: 5577728, status: "CONFIRMED", payment_status: "", number: "PI-28", clients_id: 4100, client_name: "Lux Express",
+      gross_price: 25.2, cl_currencies_id: "EUR", notes: "Ostukorvi/tellimuse nr: 261018825247", liability_accounts_id: 2310,
+    };
+    api.transactions.listAll.mockResolvedValue([docTx]);
+    api.transactions.get.mockResolvedValue({ ...docTx });
+    api.saleInvoices.listAll.mockResolvedValue([]);
+    api.purchaseInvoices.listAll.mockResolvedValue([docInvoice]);
+    api.transactions.update.mockImplementation(async (_id: number, body: Record<string, unknown>) => {
+      api.transactions.get.mockResolvedValue({ ...docTx, ...body });
+      return {};
+    });
+    api.transactions.confirm.mockImplementation(async () => {
+      api.transactions.get.mockResolvedValue({ ...docTx, clients_id: 4100, status: "CONFIRMED",
+        items: [{ relation_table: "purchase_invoices", relation_id: 5577728, amount: 25.2, base_amount: 25.2 }] });
+      api.journals.listAllWithPostings.mockResolvedValue([{ id: 902, operation_type: "TRANSACTION", operations_id: 1, registered: true, clients_id: 4100, postings: [
+        { accounts_id: BANK_ACCOUNT_ID, accounts_dimensions_id: BANK_DIMENSION_ID, type: "C", amount: 25.2 },
+        { accounts_id: 2310, type: "D", amount: 25.2 },
+      ] }]);
+      return {};
+    });
+    await runWithToolProfile("guided", async () => {
+      const dry = await call(handler("reconcile_bank_transactions"), { mode: "dry_run_auto_confirm" });
+      expect(dry.summary.status).toBe("ready_for_approval");
+      expect(dry.summary.counts).toMatchObject({ would_confirm: 1, document_reference_exact: 1, skipped: 0 });
+      expect((dry.summary.warnings ?? []).map(w => [w.code, w.item_id])).toContainEqual(["document_reference_exact", "1"]);
+      const next = dry.summary.next_action!;
+      expect(next.args).toEqual({ mode: "execute_auto_confirm", plan_handle: dry.summary.plan_handle });
+      expect(next.approval_required).toBe(true);
+      expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+      const exec = await call(handler("reconcile_bank_transactions"), next.args);
+      expect(exec.summary.status).toBe("completed");
+      expect(api.transactions.update).toHaveBeenCalledWith(1, { clients_id: 4100 });
+      expect(api.transactions.confirm.mock.calls.map((c: unknown[]) => [c[0], c[1]])).toEqual([
+        [1, [{ related_table: "purchase_invoices", related_id: 5577728, amount: 25.2 }]],
+      ]);
     });
   });
 

@@ -5,6 +5,7 @@ import { renderExactMatchPayload } from "./presenter.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
 import { createTestRuntimeSafetyContext } from "../../__fixtures__/runtime-safety.js";
 import { withSignedCamtMarker } from "../../__fixtures__/camt-marker.js";
+import { buildCamtDescriptionWithMetadata } from "../../camt/duplicate-identity.js";
 
 // The typed reconciliation operations are exercised through narrow api/plan
 // ports — NOT a mock McpServer. This pins prepare (zero mutations, issue plan)
@@ -600,6 +601,33 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
     expect(result.documentReferenceCandidates).toBeUndefined();
   });
 
+  // Sol review MINOR 1: a reference carried only inside the signed CAMT
+  // marker (br=, instr=) is not payment text.
+  it("does not suggest an invoice whose cart number appears only as the marker's bank reference (br=)", async () => {
+    const row = withSignedCamtMarker(cardTx(7, "subscription"), "DBIT", CART);
+    expect(row.description).toContain(`br=${CART}`);
+    const result = await suggest([row], [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)]);
+    expect(result.matches).toEqual([]);
+  });
+
+  it("does not suggest an invoice whose number appears only as the marker's instruction id (instr=)", async () => {
+    const description = buildCamtDescriptionWithMetadata("subscription", {
+      date: "2026-03-18", amount: 25.2, currency: "EUR", direction: "DBIT",
+      bank_reference: "BR-7", instruction_id: "4812345", description: "subscription",
+    });
+    expect(description).toContain("instr=4812345");
+    const row = { ...cardTx(7, "subscription"), description };
+    const result = await suggest([row], [ticketInvoice(701, null, "4812345")]);
+    expect(result.matches).toEqual([]);
+  });
+
+  it("suggests the same invoice when its number is in the visible payment text", async () => {
+    const result = await suggest([cardTx(7, "subscription 4812345")], [ticketInvoice(701, null, "4812345")]);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({
+      id: 701, confidence: 70, match_reasons: ["exact_amount", "document_reference"],
+    }));
+  });
+
   it("scores nothing extra without the notes line", async () => {
     const result = await suggest([cardTx(7, `Kaardimakse ostukorv ${CART}`)], [ticketInvoice(701, "Bus ticket")]);
     expect(result.matches).toEqual([]);
@@ -733,15 +761,21 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
     expect(outcome.value.matches[0]!.best_match.id).toBe(701);
   });
 
-  it("keeps the auto-confirm set unchanged at the default and a custom threshold", async () => {
+  it("adds only a uniquely referenced invoice's payment to the auto-confirm set (document_reference_exact)", async () => {
     const tx = [cardTx(7, `Kaardimakse ostukorv ${CART}`), refTx()];
     const line = `Ostukorvi/tellimuse nr: ${CART}`;
-    // With vs without the notes line: one invoice, two invoices sharing the
-    // cart number, and a partially paid invoice.
-    const variants: Array<[unknown[], unknown[]]> = [
-      [[ticketInvoice(701, line), rentInvoice()], [ticketInvoice(701, null), rentInvoice()]],
-      [[ticketInvoice(701, line), ticketInvoice(702, line), rentInvoice()], [ticketInvoice(701, null), ticketInvoice(702, null), rentInvoice()]],
-      [[{ ...ticketInvoice(701, line), payment_status: "PARTIALLY_PAID" }, rentInvoice()], [{ ...ticketInvoice(701, null), payment_status: "PARTIALLY_PAID" }, rentInvoice()]],
+    // [purchases with the notes line, expected confirms]: one invoice is
+    // admitted by the guarded rule; two invoices sharing the cart number and a
+    // partially paid invoice are not. Without the line nothing changes.
+    const variants: Array<[unknown[], number[]]> = [
+      [[ticketInvoice(701, line), rentInvoice()], [7, 2]],
+      [[ticketInvoice(701, line), ticketInvoice(702, line), rentInvoice()], [2]],
+      [[{ ...ticketInvoice(701, line), payment_status: "PARTIALLY_PAID" }, rentInvoice()], [2]],
+    ];
+    const withoutLine: unknown[][] = [
+      [ticketInvoice(701, null), rentInvoice()],
+      [ticketInvoice(701, null), ticketInvoice(702, null), rentInvoice()],
+      [{ ...ticketInvoice(701, null), payment_status: "PARTIALLY_PAID" }, rentInvoice()],
     ];
     for (const minConfidence of [undefined, 50, 80]) {
       const confirmIds = async (purchases: unknown[]) => {
@@ -750,11 +784,120 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
         if (!outcome.ok) throw new Error("prepare failed");
         return outcome.value.projection.confirms.map(row => row.transactionId);
       };
-      for (const [withLinePurchases, withoutLinePurchases] of variants) {
-        const withLine = await confirmIds(withLinePurchases);
-        expect(withLine).toEqual(await confirmIds(withoutLinePurchases));
-        expect(withLine).toEqual([2]);
-      }
+      for (const [purchases, expected] of variants) expect(await confirmIds(purchases)).toEqual(expected);
+      for (const purchases of withoutLine) expect(await confirmIds(purchases)).toEqual([2]);
     }
+    // Above 90 the rule is off.
+    const { operations } = setupDocRef(tx, [ticketInvoice(701, line), rentInvoice()]);
+    const strict = await operations.prepareExactConfirm({ minConfidence: 95, blockOnDuplicate: undefined });
+    expect(strict.ok && strict.value.projection.confirms.map(row => row.transactionId)).toEqual([2]);
+  });
+});
+
+// --- document_reference_exact (Lux, live-shaped 2026-10) ----------------------
+// Two EUR 25.20 card payments, each naming its order number; both purchase
+// invoices score 40 + 10 = 50 on both rows. No transaction client.
+describe("executeExactConfirm document_reference_exact", () => {
+  const LUX_CLIENT = 4100;
+  const luxTx = (id: number, orderNumber: string) => withSignedCamtMarker({
+    id, status: "PROJECT", is_deleted: false, type: "C", amount: 25.2, base_amount: 25.2, ref_number: null,
+    clients_id: null, date: "2026-10-18", accounts_dimensions_id: 9, accounts_id: 1020, cl_currencies_id: "EUR",
+    bank_account_name: "Lux Express", description: `Lux Express ${orderNumber}`,
+  }, "DBIT");
+  const luxInvoice = (id: number, orderNumber: string) => ({
+    id, number: `PI-${id % 100}`, clients_id: LUX_CLIENT, client_name: "Lux Express", gross_price: 25.2, base_gross_price: 25.2,
+    bank_ref_number: null, payment_status: "", status: "CONFIRMED", cl_currencies_id: "EUR",
+    notes: `Ostukorvi/tellimuse nr: ${orderNumber}`,
+  });
+  type LuxInvoice = ReturnType<typeof luxInvoice>;
+
+  function setupLux() {
+    const transactions = [luxTx(14377009, "261018825247"), luxTx(14377017, "261018825312")];
+    let purchases: LuxInvoice[] = [luxInvoice(5582125, "261018825312"), luxInvoice(5577728, "261018825247")];
+    const harness = setup({
+      transactions: {
+        invalidateListCache: vi.fn(),
+        listAll: vi.fn(async () => transactions),
+        get: vi.fn(async (id: number) => transactions.find(row => row.id === id)),
+        update: vi.fn().mockResolvedValue({}),
+        confirm: vi.fn().mockResolvedValue({}),
+        delete: vi.fn().mockResolvedValue({}),
+      },
+      saleInvoices: { invalidateListCache: vi.fn(), listAll: vi.fn().mockResolvedValue([]) },
+      purchaseInvoices: {
+        invalidateListCache: vi.fn(),
+        listAll: vi.fn(async () => purchases),
+        get: vi.fn(async (id: number) => purchases.find(row => row.id === id)),
+      },
+    });
+    return { ...harness, setPurchases: (next: LuxInvoice[]) => { purchases = next; } };
+  }
+
+  it("previews with zero writes, then confirms each payment against the invoice its order number names", async () => {
+    const { api, operations } = setupLux();
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    if (!dry.ok) throw new Error("prepare failed");
+    expect(dry.value.projection.confirms.map(c => [c.transactionId, c.invoiceId, c.confidence, c.autoConfirmRule, c.needsClientUpdate]))
+      .toEqual([[14377009, 5577728, 50, "document_reference_exact", true], [14377017, 5582125, 50, "document_reference_exact", true]]);
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+
+    const executed = await operations.executeExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined, planHandle: dry.value.planHandle });
+    expect(executed.ok).toBe(true);
+    expect(api.transactions.update.mock.calls).toEqual([[14377009, { clients_id: 4100 }], [14377017, { clients_id: 4100 }]]);
+    expect(api.transactions.confirm.mock.calls.map((call: unknown[]) => [call[0], call[1]])).toEqual([
+      [14377009, [{ related_table: "purchase_invoices", related_id: 5577728, amount: 25.2 }]],
+      [14377017, [{ related_table: "purchase_invoices", related_id: 5582125, amount: 25.2 }]],
+    ]);
+    // Never the third-party payer reassignment.
+    for (const call of api.transactions.confirm.mock.calls) expect(call[2]).not.toHaveProperty("reassignClientToInvoice");
+  });
+
+  it.each([
+    ["a changed order reference", () => [luxInvoice(5582125, "261018825399"), luxInvoice(5577728, "261018825247")]],
+    ["a removed order reference", () => [{ ...luxInvoice(5582125, "x"), notes: "Bussipilet" }, luxInvoice(5577728, "261018825247")]],
+    ["a newly competing invoice", () => [luxInvoice(5582125, "261018825312"), luxInvoice(5577728, "261018825247"), luxInvoice(5590001, "261018825247")]],
+  ])("treats %s between preview and execute as plan drift with zero writes", async (_label, next) => {
+    const { api, operations, setPurchases } = setupLux();
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    if (!dry.ok) throw new Error("prepare failed");
+    setPurchases(next());
+    const executed = operations.executeExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined, planHandle: dry.value.planHandle });
+    await expect(executed).rejects.toBeInstanceOf(ReconciliationOperationFailedError);
+    await executed.catch((error: unknown) => {
+      expect((error as ReconciliationOperationFailedError).failure.kind).toBe("plan_drift");
+    });
+    expect(api.transactions.update).not.toHaveBeenCalled();
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+  });
+
+  it("stops before registering when the order reference changes after the execute projection, reporting the client update truthfully", async () => {
+    const { api, operations, setPurchases } = setupLux();
+    const dry = await operations.prepareExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined });
+    if (!dry.ok) throw new Error("prepare failed");
+    // The first client write lands; the invoice notes change right after it.
+    api.transactions.update.mockImplementationOnce(async () => {
+      setPurchases([luxInvoice(5582125, "261018825312"), luxInvoice(5577728, "261018825999")]);
+      return {};
+    });
+    const executed = await operations.executeExactConfirm({ minConfidence: undefined, blockOnDuplicate: undefined, planHandle: dry.value.planHandle });
+    if (!executed.ok) throw new Error("execute failed");
+    expect(api.transactions.update).toHaveBeenCalledTimes(1);
+    expect(api.transactions.confirm).not.toHaveBeenCalled();
+    const report = executed.value.executionReport;
+    expect(report.command_partitions.completed.map(c => c.command_id)).toEqual(["recon-update-client-tx-14377009"]);
+    expect(report.stop_reason).toEqual(expect.objectContaining({ command_id: "recon-confirm-invoice-tx-14377009", code: "transaction_material_drift" }));
+    expect(report.mutation_may_have_occurred).toBe(true);
+  });
+
+  it("leaves suggestion scores unchanged", async () => {
+    const { operations } = setupLux();
+    const outcome = await operations.suggestMatches({ minConfidence: 30, blockOnDuplicate: undefined });
+    if (!outcome.ok) throw new Error("suggest failed");
+    // exact_amount 40 + client_name_partial 10 + document_reference 30 = 80.
+    expect(outcome.value.matches.map(row => [row.transaction_id, row.best_match.id, row.best_match.confidence])).toEqual([
+      [14377009, 5577728, 80],
+      [14377017, 5582125, 80],
+    ]);
   });
 });
