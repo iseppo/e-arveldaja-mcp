@@ -429,6 +429,39 @@ function withTruncationReport(rendered: string | undefined, cleanDescription: st
   };
 }
 
+// A card payment: "POS: <masked card>, <dd.mm.yyyy hh:mm:ss>, <merchant>\<address>\<city>\<postcode>   <country codes>  #<seq>".
+const CAMT_POS_HEAD_RE = /^POS: [^,\n]*, \d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}, /;
+
+/** The pre-#9 cut of a description that does not fit: the first `budget` characters. */
+function hardCutCamtDescription(text: string, budget: number): string {
+  return text.slice(0, budget).trimEnd();
+}
+
+/**
+ * Shortens a description that does not fit its budget, keeping what names the
+ * movement (#9). On a card payment the trailing `#seq` and country-code run go
+ * first, then the `\`-separated address segments from the end — never the
+ * merchant segment right after the timestamp. Then trailing ` | ` segments go.
+ * Only what is still too long is cut to the budget.
+ */
+export function trimCamtDescriptionToBudget(text: string, budget: number): string {
+  const fits = (value: string) => value.length <= budget;
+  if (fits(text)) return text;
+  let trimmed = text;
+  const pos = CAMT_POS_HEAD_RE.exec(trimmed);
+  if (pos) {
+    trimmed = trimmed.replace(/\s+#\d+$/, "").trimEnd();
+    if (!fits(trimmed)) trimmed = trimmed.replace(/\s+(?:[A-Z]{3})+$/, "").trimEnd();
+    while (!fits(trimmed) && trimmed.lastIndexOf("\\") >= pos[0].length) {
+      trimmed = trimmed.slice(0, trimmed.lastIndexOf("\\")).trimEnd();
+    }
+  }
+  while (!fits(trimmed) && trimmed.lastIndexOf(" | ") > 0) {
+    trimmed = trimmed.slice(0, trimmed.lastIndexOf(" | ")).trimEnd();
+  }
+  return hardCutCamtDescription(trimmed, budget);
+}
+
 /**
  * The description the CAMT import stores for an entry, with what it had to
  * give up. `omitCounterpartyIban` is set only by the import projection, after
@@ -439,6 +472,24 @@ export function renderCamtDescriptionDetailed(
   description: string | undefined,
   entry: CamtRenderEntry,
   options: { readonly omitCounterpartyIban?: boolean } = {},
+): CamtDescriptionRendering {
+  return renderCamtDescriptionWithCut(description, entry, options, trimCamtDescriptionToBudget);
+}
+
+/**
+ * What releases before #9 stored for an entry whose text does not fit: the
+ * same rendering, the text cut from the start. Kept only so those rows are
+ * still recognised on re-import (exact keys, marker signatures, lossy keys).
+ */
+export function renderCamtDescriptionLegacyCut(description: string | undefined, entry: CamtRenderEntry): string | undefined {
+  return renderCamtDescriptionWithCut(description, entry, {}, hardCutCamtDescription).description;
+}
+
+function renderCamtDescriptionWithCut(
+  description: string | undefined,
+  entry: CamtRenderEntry,
+  options: { readonly omitCounterpartyIban?: boolean },
+  cut: (text: string, budget: number) => string,
 ): CamtDescriptionRendering {
   const cleanDescription = markerSafeDescription(description);
   const v1 = buildCamtDescriptionWithMetadataV1(description, entry);
@@ -486,7 +537,7 @@ export function renderCamtDescriptionDetailed(
   // an identity field the sig covers.
   if (markerLength > TRANSACTION_DESCRIPTION_MAX_LENGTH) return { held: true };
   const budget = TRANSACTION_DESCRIPTION_MAX_LENGTH - markerLength - 1;
-  const storedText = budget > 0 && cleanDescription ? cleanDescription.slice(0, budget).trimEnd() || undefined : undefined;
+  const storedText = budget > 0 && cleanDescription ? cut(cleanDescription, budget) || undefined : undefined;
   return withTruncationReport(renderCamtMarkerForm(entry, shortest, storedText), cleanDescription);
 }
 
@@ -738,8 +789,9 @@ function storedTextIsRenderedDescription(stored: string | null | undefined, clea
   if (text === cleanDescription) return true;
   const budget = TRANSACTION_DESCRIPTION_MAX_LENGTH - marker.length - 1;
   if (budget <= 0 || cleanDescription.length <= budget) return false;
-  const rendered = cleanDescription.slice(0, budget).trimEnd();
-  return rendered.length > 0 && text === rendered;
+  // Today's trim (#9) or the plain cut of earlier releases, nothing broader.
+  return [trimCamtDescriptionToBudget(cleanDescription, budget), hardCutCamtDescription(cleanDescription, budget)]
+    .some(rendered => rendered.length > 0 && text === rendered);
 }
 
 /**
@@ -762,6 +814,8 @@ export function findMarkerSignatureMatches(
   const cleanDescription = markerSafeDescription(entry.description);
   const signatures = new Set([
     extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadata(entry.description, entry)).entry_sig,
+    // What a release before #9 stored for a text that does not fit.
+    extractCamtDescriptionMetadata(renderCamtDescriptionLegacyCut(entry.description, entry)).entry_sig,
     // What a release before #64 stored for this entry, with and without `instr=`.
     extractCamtDescriptionMetadata(buildCamtDescriptionWithMetadataV1(entry.description, entry)).entry_sig,
     extractCamtDescriptionMetadata(renderCamtDescriptionV1(entry.description, entry)).entry_sig,
@@ -898,8 +952,8 @@ function existingDuplicateKeysByKind(
 /**
  * One exact key per rendering this entry could have been stored as,
  * independent of today's ownership evidence: the current rendering, the V1
- * rendering (a release before #64), and the full-text `x=i` rendering, whose
- * row reads back without an IBAN.
+ * rendering (a release before #64), the full-text `x=i` rendering, whose
+ * row reads back without an IBAN, and the plain cut of a release before #9.
  */
 function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: string): Array<{ key: string; lossy: boolean }> {
   const cleanDescription = markerSafeDescription(entry.description);
@@ -909,6 +963,8 @@ function currentExistingDuplicateKeys(entry: ParsedCamtEntry, bankReferenceKey: 
     ...(current.held ? [] : [{ description: current.description, ibanOmitted: false }]),
     { description: buildCamtDescriptionWithMetadataV1(entry.description, entry), ibanOmitted: false },
     ...(ibanOmitted !== undefined ? [{ description: ibanOmitted, ibanOmitted: true }] : []),
+    // A release before #9 cut a text that does not fit from the start.
+    ...(current.held ? [] : [{ description: renderCamtDescriptionLegacyCut(entry.description, entry), ibanOmitted: false }]),
   ];
   const lossyByKey = new Map<string, boolean>();
   for (const rendering of renderings) {
