@@ -65,6 +65,32 @@ it("retains actual own client update when material drifts on readback", async ()
   expect(f.http.patch.mock.calls.map((call: any[]) => call[0])).toEqual(["/transactions/1"]);
 });
 
+// Sol review MINOR 2: the final invoice reread after the client update.
+it("refuses registration when the invoice's order references change after the client update, reporting the update", async () => {
+  const f = fixture();
+  f.afterClientWrite.mockImplementation(() => f.changeInvoice({ notes: "Ostukorvi/tellimuse nr: 261018825247" }));
+  await expect(f.run()).rejects.toMatchObject({ category: "transaction_material_drift", invoice_key: "purchase_invoices:51",
+    mutation_occurred: true, register_attempted: false,
+    known_objects: [{ entity_type: "transaction", entity_id: 1, outcome: "updated" }],
+    client_update: { from: 7, to: 42, outcome: "updated" } });
+  expect(f.http.patch.mock.calls.map((call: unknown[]) => call[0])).toEqual(["/transactions/1"]);
+});
+
+it("refuses registration when the invoice drifts on its second read without a client update", async () => {
+  const f = fixture();
+  f.changeTx({ clients_id: 42 });
+  f.options.expectedTransaction = snapshotBankTransaction({ id: 1, status: "PROJECT", type: "C", amount: 108,
+    base_amount: 100, currency_rate: 1.08, cl_currencies_id: "USD", date: "2026-10-18", clients_id: 42,
+    accounts_id: 1020, accounts_dimensions_id: 9, ref_number: "REF1" });
+  f.afterInvoiceRead.mockImplementation((read: number) => {
+    if (read === 2) f.changeInvoice({ notes: "Ostukorvi/tellimuse nr: 261018825247" });
+  });
+  await expect(f.run()).rejects.toMatchObject({ category: "transaction_material_drift", invoice_key: "purchase_invoices:51",
+    mutation_occurred: false, register_attempted: false });
+  expect(f.afterInvoiceRead).toHaveBeenCalledTimes(2);
+  expect(f.http.patch).not.toHaveBeenCalled();
+});
+
 it("constrains missing-client auto-fill to the reviewed target too", async () => {
   const f = fixture();
   f.changeTx({ clients_id: null });

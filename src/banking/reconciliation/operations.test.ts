@@ -5,6 +5,7 @@ import { renderExactMatchPayload } from "./presenter.js";
 import { MutationIndeterminateError } from "../../mutation-outcome.js";
 import { createTestRuntimeSafetyContext } from "../../__fixtures__/runtime-safety.js";
 import { withSignedCamtMarker } from "../../__fixtures__/camt-marker.js";
+import { buildCamtDescriptionWithMetadata } from "../../camt/duplicate-identity.js";
 
 // The typed reconciliation operations are exercised through narrow api/plan
 // ports — NOT a mock McpServer. This pins prepare (zero mutations, issue plan)
@@ -598,6 +599,33 @@ describe("suggestMatches document_reference_candidates (okt 2026 finding 5)", ()
     }));
     expect(result.matches[0]!.distribution).toEqual({ related_table: "purchase_invoices", related_id: 701, amount: 25.2 });
     expect(result.documentReferenceCandidates).toBeUndefined();
+  });
+
+  // Sol review MINOR 1: a reference carried only inside the signed CAMT
+  // marker (br=, instr=) is not payment text.
+  it("does not suggest an invoice whose cart number appears only as the marker's bank reference (br=)", async () => {
+    const row = withSignedCamtMarker(cardTx(7, "subscription"), "DBIT", CART);
+    expect(row.description).toContain(`br=${CART}`);
+    const result = await suggest([row], [ticketInvoice(701, `Ostukorvi/tellimuse nr: ${CART}`)]);
+    expect(result.matches).toEqual([]);
+  });
+
+  it("does not suggest an invoice whose number appears only as the marker's instruction id (instr=)", async () => {
+    const description = buildCamtDescriptionWithMetadata("subscription", {
+      date: "2026-03-18", amount: 25.2, currency: "EUR", direction: "DBIT",
+      bank_reference: "BR-7", instruction_id: "4812345", description: "subscription",
+    });
+    expect(description).toContain("instr=4812345");
+    const row = { ...cardTx(7, "subscription"), description };
+    const result = await suggest([row], [ticketInvoice(701, null, "4812345")]);
+    expect(result.matches).toEqual([]);
+  });
+
+  it("suggests the same invoice when its number is in the visible payment text", async () => {
+    const result = await suggest([cardTx(7, "subscription 4812345")], [ticketInvoice(701, null, "4812345")]);
+    expect(result.matches[0]!.best_match).toEqual(expect.objectContaining({
+      id: 701, confidence: 70, match_reasons: ["exact_amount", "document_reference"],
+    }));
   });
 
   it("scores nothing extra without the notes line", async () => {

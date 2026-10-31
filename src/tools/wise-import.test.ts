@@ -8757,6 +8757,7 @@ describe("wise card client from confirmed history (live Anthropic shape, 2026-10
   it.each([
     ["deactivated", { id: ANTHROPIC, name: "Anthropic, PBC", is_active: false, deactivated_date: "2026-09-01" }],
     ["deleted", { id: ANTHROPIC, name: "Anthropic, PBC", is_deleted: true }],
+    ["deactivated by date only", { id: ANTHROPIC, name: "Anthropic, PBC", deactivated_date: "2026-09-01" }],
   ])("assigns nothing when the historical client is now %s", async (_label, client) => {
     const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history, [{ id: 77, name: "Wise" }, client]);
     const dry = parseWiseResponse(await setup.handler({ ...args, execute: false }));
@@ -8773,6 +8774,9 @@ describe("wise card client from confirmed history (live Anthropic shape, 2026-10
   it.each([
     ["the historical client is deactivated", (setup: ReturnType<typeof setupWiseTool>) => {
       setup.api.clients.listAll.mockResolvedValue([{ id: 77, name: "Wise" }, { id: ANTHROPIC, name: "Anthropic, PBC", is_active: false }]);
+    }],
+    ["the historical client is deactivated by date only", (setup: ReturnType<typeof setupWiseTool>) => {
+      setup.api.clients.listAll.mockResolvedValue([{ id: 77, name: "Wise" }, { id: ANTHROPIC, name: "Anthropic, PBC", deactivated_date: "2026-09-20" }]);
     }],
     ["the history changes client", (setup: ReturnType<typeof setupWiseTool>) => {
       setup.api.transactions.listAll.mockResolvedValue([...history, earlier(14044560, "2026-08-20", 2010999)]);

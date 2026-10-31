@@ -13,7 +13,7 @@ import {
 } from "./match-score.js";
 import { transactionCurrency } from "./amount-resolution.js";
 import { normalizeCompanyName } from "../../company-name.js";
-import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint, stripCamtDescriptionMetadata } from "../../camt/duplicate-identity.js";
+import { extractCamtDescriptionMetadata, isTrustedCamtDescriptionMetadata, legacyTruncatedCamtMarkerHint } from "../../camt/duplicate-identity.js";
 import { documentReferenceOnTransaction } from "./document-reference.js";
 import type {
   ExactConfirmClientResolution,
@@ -192,9 +192,8 @@ function documentReferenceHits(
   tx: Transaction,
   openPurchases: readonly PurchaseInvoice[],
 ): Array<{ inv: PurchaseInvoice; matchedReference: string }> {
-  const visibleText = stripCamtDescriptionMetadata(tx.description ?? undefined);
   return openPurchases
-    .map(inv => ({ inv, matchedReference: documentReferenceOnTransaction(visibleText, inv) }))
+    .map(inv => ({ inv, matchedReference: documentReferenceOnTransaction(tx.description, inv) }))
     .filter((hit): hit is { inv: PurchaseInvoice; matchedReference: string } => hit.matchedReference !== undefined)
     .sort((a, b) => a.inv.id! - b.inv.id!);
 }

@@ -966,6 +966,37 @@ describe("classification operations — a document-reference candidate is never 
     });
   });
 
+  // Sol review MINOR 1: only the visible payment text names a document; the
+  // reference inside the signed CAMT marker (br=, instr=) never does.
+  it("classifies a payment whose cart number appears only as the marker's bank reference (br=)", async () => {
+    const tx = withSignedCamtMarker(cardTx("subscription"), "DBIT", CART);
+    expect(tx.description).toContain(`br=${CART}`);
+    const { operations } = setup(tx);
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (!analysis.ok) return;
+    expect(analysis.value.invoiceMatched).toEqual([]);
+    expect(analysis.value.totalUnmatched).toBe(1);
+  });
+
+  it("classifies a payment whose order number appears only as the marker's instruction id (instr=)", async () => {
+    const description = buildCamtDescriptionWithMetadata("subscription", {
+      date: "2026-03-18", amount: 25.2, currency: "EUR", direction: "DBIT",
+      bank_reference: "BR-43", instruction_id: "4812345", description: "subscription",
+    });
+    expect(description).toContain("instr=4812345");
+    const tx = { ...cardTx("subscription"), description };
+    const { operations } = makeOperations({
+      transactionRows: [tx], transactionDetails: { 43: tx }, clientRows: [],
+      purchaseArticles: ARTS, accounts: ACCS, purchaseInvoiceRows: [{ ...TICKET, notes: "Ostukorvi/tellimuse nr: 4812345" }],
+    } as unknown as AccountingWorkflowApiOptions);
+    const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });
+    expect(analysis.ok).toBe(true);
+    if (!analysis.ok) return;
+    expect(analysis.value.invoiceMatched).toEqual([]);
+    expect(analysis.value.totalUnmatched).toBe(1);
+  });
+
   it("still classifies the same exact-amount payment when its description carries no reference of that invoice", async () => {
     const { operations } = setup(cardTx("Kaardimakse 18.03.2026 Tallinn"));
     const analysis = await operations.analyzeUnmatched({ accountsDimensionsId: 100 });

@@ -86,6 +86,15 @@ describe("resolveWiseCardClientFromHistory", () => {
     expect(resolveWiseCardClientFromHistory(row, [...threeMonths, longName], WISE_DIMENSION)).toBeUndefined();
   });
 
+  // Sol review MINOR 3: a short current merchant against a historical name
+  // at the 100-character cap that normalizes to the same merchant.
+  it("resolves nothing when a matching historical name reaches the 100-character cap", () => {
+    const capped = `${MERCHANT}${" ".repeat(100 - MERCHANT.length)}`;
+    expect(capped).toHaveLength(100);
+    const rows = [...threeMonths, history(14044560, "2026-08-20", { bank_account_name: capped })];
+    expect(resolveWiseCardClientFromHistory(cardRow(), rows, WISE_DIMENSION)).toBeUndefined();
+  });
+
   it("depends on the row's own date: a payment before the first history resolves nothing", () => {
     expect(resolveWiseCardClientFromHistory(cardRow({ createdOn: "2026-06-10 09:00:00", finishedOn: "2026-06-10 09:00:00" }), threeMonths, WISE_DIMENSION)).toBeUndefined();
     expect(resolveWiseCardClientFromHistory(cardRow({ createdOn: "2026-06-20 09:00:00", finishedOn: "2026-06-20 09:00:00" }), threeMonths, WISE_DIMENSION)).toBe(2010417);
