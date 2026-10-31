@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-10-31
+
 ### Fixed
 
 - **A duplicate transfer row gets its booking checked again just before deletion.** Before, the journal's sides or amounts could change between the plan check and the delete without being noticed. Details: opt-in `delete_proposed_mirrors` rechecks, against fresh data and right before each delete, that the journal still moves the row's EUR amount on the row's bank side of its own dimension and the opposite side on the target, that both rows are plain EUR, the own-origin evidence (fresh bank accounts) and that the counterpart is not signed in the row's direction; a failed check stops with `mirror_journal_drift` and nothing is deleted. The proposal and the execute check share one helper (`hasMirrorPostingEvidence`); an unsigned counterpart is still accepted.
