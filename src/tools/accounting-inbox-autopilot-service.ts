@@ -800,7 +800,7 @@ function summarizeAutopilotToolResult(
           [row.transaction_id],
           `PROJECT transaction ${row.transaction_id} looks like the mirror of confirmed transaction ${row.mirror_proposal!.counterpart_transaction_id}, `
             + `already booked by journal ${row.mirror_proposal!.journal_id} (evidence: ${row.mirror_proposal!.evidence.join(", ")}).`,
-          `Report only: verify against both bank statements, then delete transaction ${row.transaction_id} only after the owner explicitly approves (delete_transaction, available on the standard/full profile). Reconcile never deletes it.`,
+          `Report only: verify against both bank statements. To delete transaction ${row.transaction_id}, re-run the inter-account dry run with delete_proposed_mirrors: true, review the deletion it puts in the plan, and execute that plan with the same arguments only after the owner explicitly approves. Reconcile never deletes it on its own.`,
         )),
         ...match.errors.map(row => transferFollowUp(
           row.code ?? "inter_account_error",

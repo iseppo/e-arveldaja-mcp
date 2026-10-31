@@ -1712,7 +1712,14 @@ class ClassificationOperationsImpl implements ClassificationOperations {
             group => typeof group === "object" && group !== null && !Array.isArray(group) && (group as Record<string, PlanData>).bookable === true,
           ).length ?? 0,
         },
-        commands: [{ id: "bank-classification-apply", category: "bank_classification_apply", reviewProjection: { groups: groups.length, history_distributions: historyDistributions.size } }],
+        // One reviewable command per group, carrying the effects the fresh
+        // fingerprint computed, so get_execution_plan_page shows what approval
+        // covers. Review-only data: execute still re-derives and compares.
+        commands: groups.map((group, index) => ({
+          id: `bank-classification-group-${index + 1}`,
+          category: "bank_classification_apply",
+          reviewProjection: classificationGroupReview(group, (fingerprint.groups as PlanData[])[index], ledgerCheck, historyCheck),
+        })),
         counts: { groups: groups.length },
         totals: {},
         exclusions: [],
@@ -1724,6 +1731,36 @@ class ClassificationOperationsImpl implements ClassificationOperations {
 
     return ok({ mode, dryRun, summary, results, ...(planHandle !== undefined ? { planHandle } : {}) });
   }
+}
+
+/** Public review projection of one apply group: each transaction's fresh state
+ * and its booking effect (purchase invoice or history distribution, including a
+ * client set first), without the material snapshot the fingerprint binds. */
+function classificationGroupReview(
+  group: ClassifiedTransactionGroupResult,
+  fingerprintGroup: PlanData | undefined,
+  ledgerCheck: Record<string, string> | "unavailable" | null,
+  historyCheck: Record<string, PlanData> | "unavailable" | null,
+): PlanData {
+  const fp = (fingerprintGroup ?? {}) as Record<string, PlanData>;
+  const transactions = Array.isArray(fp.transactions) ? fp.transactions as PlanData[] : [];
+  return stripUndefinedDeep({
+    category: group.category,
+    apply_mode: group.apply_mode,
+    counterparty: group.display_counterparty,
+    bookable: fp.bookable ?? null,
+    ...(ledgerCheck === "unavailable" ? { ledger_check: "unavailable" } : {}),
+    ...(historyCheck === "unavailable" && group.apply_mode === "account_distribution" ? { history_distributions: "unavailable" } : {}),
+    transactions: transactions.map(entry => {
+      const { material: _material, ...state } = entry as Record<string, PlanData>;
+      const key = String(state.id);
+      return {
+        ...state,
+        ...(ledgerCheck !== null && ledgerCheck !== "unavailable" && ledgerCheck[key] !== undefined ? { ledger_check: ledgerCheck[key] } : {}),
+        ...(historyCheck !== null && historyCheck !== "unavailable" && key in historyCheck ? { history_distribution: historyCheck[key] ?? null } : {}),
+      };
+    }),
+  }) as PlanData;
 }
 
 export function createClassificationOperations(

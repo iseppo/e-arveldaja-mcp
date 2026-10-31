@@ -1226,6 +1226,34 @@ describe("registerPrompts", () => {
     expect(text).toContain(GUIDED_INTER_ACCOUNT_NEXT_ACTION);
   });
 
+  it("routes mirror deletions, ledger-check codes, Wise account choice and classification review safely (2026-10-31 review)", async () => {
+    const recon = await getPromptText(setupPromptServer(), "reconcile-bank", { mode: "auto" });
+    // F1: no bare delete_transaction shortcut for a proposed mirror.
+    expect(recon).toContain("Never delete a mirror with a direct `delete_transaction`.");
+    expect(recon).toContain("re-run the dry run with `delete_proposed_mirrors: true`");
+    // F7: an unfound/ambiguous registration journal is not a client mismatch.
+    expect(recon).toContain("do not reassign the client on this code alone");
+
+    const guidedWise = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "import-wise", { file_path: "/tmp/wise.csv" });
+    // F3: never promise a "unique Wise" pick; keep a supplied dimension; stop without Wise.
+    expect(guidedWise).not.toContain("a unique Wise bank account is chosen automatically");
+    expect(guidedWise).not.toContain("`accounts_dimensions_id` only when the tool asked for it");
+    expect(guidedWise).toContain("pass it on every call");
+    expect(guidedWise).toContain("if no Wise bank account is configured, stop and say so rather than picking another bank");
+    // F9: page the existing plan's reviews before suggesting another profile.
+    expect(guidedWise).toContain('"section": "reviews", "detail": "full"');
+
+    const classify = await getPromptText(setupPromptServer(), "classify-unmatched", { accounts_dimensions_id: 55 });
+    // F5: manual confirms only for review-only history groups.
+    expect(classify).toContain('a group with `apply_mode: "review_only"` whose `suggested_booking.source` is `transaction_history`');
+    expect(classify).toContain("book it only through steps 3–5 (reviewed dry run and plan), never with `confirm_transaction`");
+    // F6: the paged plan carries the per-group effects.
+    expect(classify).toContain("`history_distribution` for an account-distribution row");
+    // F8: compact exclusion warnings are capped.
+    const guidedClassify = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "classify-unmatched", { accounts_dimensions_id: 55 });
+    expect(guidedClassify).toContain("name at most 5 per warning");
+  });
+
   // The reviewed mirror-deletion choice is part of the execute arguments: an
   // execute without it drifts, and one that drops it would delete nothing.
   const INTER_ACCOUNT_SAME_ARGUMENTS = "Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` as the dry run, or the plan is refused with `plan_drift`.";
