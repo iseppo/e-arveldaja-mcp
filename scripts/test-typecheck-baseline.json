@@ -1,6 +1,6 @@
 {
   "by_code": {
-    "ANY": 1525,
+    "ANY": 1522,
     "UNTYPED_PAYLOAD": 181
   },
   "errors": {
@@ -231,7 +231,7 @@
       "UNTYPED_PAYLOAD": 56
     },
     "src/tools/lightyear-investments.test.ts": {
-      "ANY": 338
+      "ANY": 335
     },
     "src/tools/pdf-workflow.test.ts": {
       "ANY": 15
@@ -298,6 +298,6 @@
       "ANY": 9
     }
   },
-  "total": 1706,
+  "total": 1703,
   "version": 1
 }

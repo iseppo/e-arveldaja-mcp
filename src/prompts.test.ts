@@ -905,7 +905,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("Extraction and validation use `cl_currencies_id`; booking uses `currency`");
     expect(text).toContain("For non-EUR invoices, include `currency`, `currency_rate`, and, when known, `base_gross_price`");
     expect(text).toContain("candidate_invoice_number_matches");
-    expect(text).toContain("If source document upload fails after invoice creation, the draft invoice is invalidated.");
+    expect(text).toContain("If source document upload fails after invoice creation, the tool attempts to invalidate the draft invoice");
     expect(text).toContain("auto_create: false");
     expect(text).toContain("auto_create: true");
     expect(text).toContain("calendar-day difference between `invoice_date` and `due_date`");
@@ -945,6 +945,19 @@ describe("registerPrompts", () => {
     expect(suggestBranch).toBeGreaterThan(-1);
     expect(approvalStop).toBeGreaterThan(suggestBranch);
     expect(creationCall).toBeGreaterThan(approvalStop);
+  });
+
+  it("carries the historical payable account through book-invoice history, approval and creation", () => {
+    const text = readPromptSurface("workflows/book-invoice.md");
+    // Guided booking-binding prepare, approval card, history reuse, standard approval card and create args.
+    expect(text).toContain("`liability_accounts_id` (the invoice-level payable account");
+    expect(text).toContain("the payable account (`liability_accounts_id`), reference number and IBAN");
+    expect(text).toContain("- the invoice-level payable account `liability_accounts_id` of the same past invoice");
+    expect(text).toContain("- The payable account (`liability_accounts_id`)");
+    expect(text).toContain("- `liability_accounts_id`: the approved payable account");
+    // Failed-upload cleanup is reported as attempted, not guaranteed.
+    expect(text).not.toContain("the draft invoice is invalidated.");
+    expect(text).toContain("attempts to invalidate the draft invoice");
   });
 
   it("puts validation evidence and material-warning acknowledgement on the book-invoice approval card (P09)", () => {
@@ -1249,6 +1262,12 @@ describe("registerPrompts", () => {
     expect(text).toContain("`dry_run: false` REQUIRES the `plan_handle`");
     // Trades bind BOTH the statement and the capital-gains sources.
     expect(text).toContain("binds BOTH the statement CSV and the capital-gains CSV");
+    // Earlier duplicate drafts are reviewed separately, never folded into the confirm call.
+    expect(text).toContain("pending_duplicate_journals");
+    expect(text).toContain("never add them to the confirm call on your own");
+    // Confirmation runs the server's <=500-id batches and inspects each result.
+    expect(text).toContain("run every approved `next_actions` batch as given");
+    expect(text).not.toContain("call `batch_confirm_journals` with exactly those ids");
   });
 
   it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
@@ -1274,5 +1293,13 @@ describe("registerPrompts", () => {
     expect(lower).toContain("name-only lookup does not");
     expect(lower).toContain("does not fetch a vat number");
     expect(text).not.toContain("create a new one anyway");
+    // A registry-code hit passes the own-company self-identity check first.
+    expect(text).toContain("`self_match_blocked: true`");
+    expect(text).toContain("call `resolve_supplier` with `reg_code` and `auto_create: false`");
+    // Step 3 found:true exits before creation.
+    const foundBranch = text.indexOf("- `found: true`: the supplier already exists");
+    const createStep = text.indexOf("## Step 6: Create the supplier");
+    expect(foundBranch).toBeGreaterThan(-1);
+    expect(createStep).toBeGreaterThan(foundBranch);
   });
 });
