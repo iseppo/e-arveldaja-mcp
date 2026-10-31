@@ -56,9 +56,55 @@ describe("month-end close safety (core prompt review 2026-10-30)", () => {
 describe("VAT threshold exclusions (core prompt review 2026-10-30)", () => {
   it("asks about excluded turnover and re-runs with taxable_turnover_adjustment", () => {
     const body = render("vat-registration-threshold", "standard");
-    expect(body).toContain("Before concluding `exceeded`, `needs_manual_review` or `approaching`, ask the user whether any sale invoices are fixed-asset disposals or have a non-Estonian place of supply");
-    expect(body).toContain("re-run with `taxable_turnover_adjustment` (negative to exclude, positive to add) and report both runs");
+    expect(body).toContain("Before concluding `exceeded`, `needs_manual_review` or `approaching`, also ask whether any sale invoices are fixed-asset disposals or have a non-Estonian place of supply");
+    expect(body).toContain("re-run with `taxable_turnover_adjustment` (negative to exclude, positive to add), conclude from the re-run's `status`, and report both runs");
     expect(body).toContain("at least 80% of the threshold");
+  });
+});
+
+describe("control prompt review 2026-10-31", () => {
+  it("asks about turnover outside confirmed sale invoices before concluding ok too (VAT threshold)", () => {
+    const body = render("vat-registration-threshold", "standard");
+    expect(body).toContain("Before concluding ANY status other than `already_registered` (`ok` included), ask whether there is taxable or 0% turnover without a confirmed sale invoice");
+  });
+
+  it("runs an undated supplier + invoice-number duplicate lookup before offering a purchase-invoice confirm (month-end)", () => {
+    const standard = render("month-end-close", "standard");
+    expect(standard).toContain("call `detect_duplicate_purchase_invoice` with that draft's `clients_id` and `invoice_number` and NO dates");
+    expect(standard).toContain("one whose undated lookup returns any other invoice id");
+    expect(standard.indexOf("NO dates")).toBeLessThan(standard.indexOf("offer `confirm_purchase_invoice`"));
+  });
+
+  it.each(["month-end-close", "company-overview"])("%s refreshes guided reports with fresh:true after UI changes", name => {
+    const guided = render(name, "guided");
+    expect(guided).toContain("pass `fresh: true` on the first `run_accounting_report` call");
+    expect(guided).not.toContain("may lag those edits");
+  });
+
+  it.each(["standard", "guided"] as const)("company overview checks drafts in every month of the period on %s", profile => {
+    const body = render("company-overview", profile);
+    expect(body).toContain("reads the unconfirmed counts for EVERY calendar month of the selected period");
+    expect(body).toContain("each YYYY-MM of the selected period in turn");
+    expect(body).not.toContain("the reporting date's YYYY-MM");
+  });
+
+  it("treats the owner-expense continuation as a draft and offers registration per profile", () => {
+    const standard = render("prepare-accounting-review-action", "standard");
+    expect(standard).toContain("creates the journal as an unconfirmed draft");
+    expect(standard).toContain("`journal_entry.api_response.created_object_id`");
+    expect(standard).toContain("ask for explicit approval to register it, then call `confirm_journal` for that one journal");
+    const guided = render("prepare-accounting-review-action", "guided");
+    expect(guided).toContain("creates the journal as an unconfirmed draft");
+    expect(guided).toContain("No tool on this profile registers a journal");
+    expect(guided).not.toContain("confirm_journal");
+  });
+
+  it.each(["standard", "guided"] as const)("accounting inbox requires the owning tool's preview for a plan handle on %s", profile => {
+    const body = render("accounting-inbox", profile);
+    expect(body).not.toContain("do not repeat them unless the user asks");
+    expect(body).toContain("run its owning tool's own preview (the call that returns the `plan_handle`) unless that handle was already supplied");
+    expect(body).toContain("follow `workflow.recommended_next_action` on standard/full and `workflow.next_action` on guided");
+    expect(body).toContain("`delete_proposed_mirrors: true`, explicit owner approval of the planned deletion");
   });
 });
 

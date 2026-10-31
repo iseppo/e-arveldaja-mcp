@@ -193,6 +193,7 @@ const CREDENTIAL_TOOL_VARIANTS: readonly PromptVariant[] = [
   { name: "credential-tools", advertisedTools: ["import_apikey_credentials", "list_stored_credentials", "remove_stored_credentials"] },
   { name: "no-credential-tools", advertisedTools: ["get_setup_instructions"], unlessTools: ["import_apikey_credentials"] },
 ];
+const PREPARE_REVIEW_ACTION_VARIANTS: readonly PromptVariant[] = surfaceVariants("confirm_journal", "inspect_accounting_record");
 const RECONCILE_VARIANTS: readonly PromptVariant[] = [
   ...surfaceVariants("confirm_transaction", "reconcile_bank_transactions"),
   { name: "alignment-report", advertisedTools: ["run_accounting_report"] },
@@ -289,7 +290,7 @@ const PROMPT_DEFINITIONS = [
     setupOptions: undefined,
     featurePredicate: enabled,
     requiredTools: ["continue_accounting_workflow"],
-    variants: NO_VARIANTS,
+    variants: PREPARE_REVIEW_ACTION_VARIANTS,
   },
   {
     name: "book-invoice",

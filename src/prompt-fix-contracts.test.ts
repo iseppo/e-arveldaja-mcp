@@ -43,7 +43,9 @@ describe("P01/P03-P08 rendered business instructions", () => {
       expect(body).toContain("PRESENCE of `unconfirmed_sale_invoices`, even when its count is zero");
       expect(body).toContain("`ready_to_close: false` always means HAS BLOCKERS");
       expect(body).toContain("Coverage:");
-      expect(body).not.toContain("`fresh: true`");
+      // Only the guided report façade takes `fresh` (cleared on its first call after UI edits).
+      if (profile === "guided" || profile === "guided-sales") expect(body).toContain("pass `fresh: true` on the first `run_accounting_report` call");
+      else expect(body).not.toContain("`fresh: true`");
       if (profile === "standard" || profile === "full") {
         expect(body).toContain("offer `confirm_sale_invoice`");
         expect(body).not.toContain("`manage_sale_invoice`");
