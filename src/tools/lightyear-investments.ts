@@ -3447,6 +3447,8 @@ export type LightyearTradesPayload = Partial<LightyearDraftConfirmationFields> &
   duplicate_refs: Array<{ reference: string | undefined; ticker: string; date: string }>;
   results: Array<Record<string, unknown>>;
   accounts: { investment: number; broker: number; gain: number; loss: number; fee: number };
+  /** How this tool books fees (fixed policy; `account` is the resolved fee account). */
+  fee_policy: { trade_fee: "expensed"; fx_conversion_fee: "expensed"; account: number; cost_basis: "fee_exclusive" };
   warnings?: string[];
   /** Counts of FX warnings left out: rows already booked, or tickers skipped. Only when > 0. */
   suppressed_warnings?: LightyearSuppressedWarnings;
@@ -3494,6 +3496,7 @@ function renderTradesPayload(input: TradesRenderInput): LightyearTradesPayload {
       loss: projection.accounts.loss,
       fee: projection.accounts.fee,
     },
+    fee_policy: { trade_fee: "expensed", fx_conversion_fee: "expensed", account: projection.accounts.fee, cost_basis: "fee_exclusive" },
     ...(projection.warnings.length > 0 && { warnings: projection.warnings }),
     ...(projection.suppressedWarnings !== undefined &&
       projection.suppressedWarnings.already_booked + projection.suppressedWarnings.skipped_ticker > 0

@@ -6130,4 +6130,13 @@ describe("Lightyear trade warnings for rows that still matter (#7)", () => {
     })).content[0]!.text);
     expect(payload).not.toHaveProperty("suppressed_warnings");
   });
+
+  it("states the fee policy with the resolved fee account (#15)", async () => {
+    mockedReadFile.mockResolvedValue(PLAN_BUY_CSV());
+    const { handler } = setupLightyearTool("book_lightyear_trades");
+    const payload = parseToolPayload<lightyearInvestments.LightyearTradesPayload>((await handler({
+      file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120,
+    })).content[0]!.text);
+    expect(payload.fee_policy).toEqual({ trade_fee: "expensed", fx_conversion_fee: "expensed", account: 8335, cost_basis: "fee_exclusive" });
+  });
 });
