@@ -1031,10 +1031,16 @@ function isSupplierLabel(text: string): boolean {
 
 // Estonian association / foundation legal forms (#5b): an apartment
 // association ("Näidise tn 1 korteriühistu") is the registered supplier, not
-// the management company in its footer. Case-sensitive, so the pronoun "sa"
-// is never the foundation abbreviation SA.
+// the management company in its footer. The abbreviations are case-sensitive
+// and only in an entity-name position (leading "SA Näidise Fond" or trailing
+// "Näidise KÜ"), so prose such as "Kas SA tead" is never a legal form.
 const ESTONIAN_NONPROFIT_FORM_RE =
-  /(?<![\p{L}\d])(?:KÜ|SA|MTÜ|TÜ|[Kk]orteriühistu|[Hh]ooneühistu|[Ss]ihtasutus|[Mm]ittetulundusühing|[Tt]ulundusühistu|KORTERIÜHISTU|HOONEÜHISTU|SIHTASUTUS|MITTETULUNDUSÜHING|TULUNDUSÜHISTU)(?![\p{L}\d])/u;
+  /(?<![\p{L}\d])(?:[Kk]orteriühistu|[Hh]ooneühistu|[Ss]ihtasutus|[Mm]ittetulundusühing|[Tt]ulundusühistu|KORTERIÜHISTU|HOONEÜHISTU|SIHTASUTUS|MITTETULUNDUSÜHING|TULUNDUSÜHISTU)(?![\p{L}\d])|^(?:KÜ|SA|MTÜ|TÜ)\s+\p{Lu}|(?<=\p{L}[\p{L}.,]*\s+)(?:KÜ|SA|MTÜ|TÜ)\s*$/u;
+
+// A buyer or property-manager block ("Maksja:", "Haldaja:"): an association
+// or foundation named there is not the supplier (#5b).
+const NONPROFIT_EXCLUDED_ROLE_LABEL_RE =
+  /^(?:maksja|ostja|arve\s+saaja|saaja|klient|buyer|bill\s+to|invoice\s+to|recipient|client|haldaja|haldur|haldus|valitseja|administrator|manager|property\s+manager)\b/iu;
 
 function cleanSupplierCandidate(raw: string): string | undefined {
   let candidate = raw
@@ -2937,7 +2943,12 @@ function extractSupplierNameFromLayout(
     )[0];
 }
 
-function extractSupplierNameFromText(text: string, fallbackFileName: string, ownCompanyName?: string): string | undefined {
+function extractSupplierNameFromText(
+  text: string,
+  fallbackFileName: string,
+  ownCompanyName?: string,
+  supplierRegCode?: string,
+): string | undefined {
   const clean = (raw: string) => cleanSupplierCandidateExcludingOwn(raw, ownCompanyName);
   const rows = text
     .split(/\r?\n/)
@@ -3034,25 +3045,43 @@ function extractSupplierNameFromText(text: string, fallbackFileName: string, own
     }
     return candidate;
   };
-  // Uppercase association/foundation abbreviations (SA, KÜ, TÜ) are matched
-  // case-sensitively, outside the case-insensitive companyPattern.
-  const isCompanyLine = (candidate: string) => companyPattern.test(candidate) || ESTONIAN_NONPROFIT_FORM_RE.test(candidate);
+  // The general legal forms qualify a line anywhere; the association and
+  // foundation forms (#5b) only on the line that carries the selected supplier
+  // registry code's labelled occurrence, or the line directly above it, and
+  // never inside a buyer or property-manager block. Several such lines, or no
+  // selected code, leave today's choice.
+  const generalCompanyPattern = /\b(OÜ|OU|AS|MTÜ|FIE|UAB|SIA|LLC|LTD|GMBH|OY|AB|INC|LIMITED|TMI)(?![A-Za-zÀ-ž0-9])/i;
+  const inExcludedRole = (index: number) =>
+    [index, index - 1, index - 2].some(at => at >= 0 && NONPROFIT_EXCLUDED_ROLE_LABEL_RE.test(rows[at]!.line));
+  const anchoredNonprofitRows = new Set<number>();
+  if (supplierRegCode) {
+    rows.forEach((row, index) => {
+      if (![...row.line.matchAll(REG_CODE_LABEL_RE)].some(match => match[1] === supplierRegCode)) return;
+      for (const at of [index - 1, index]) {
+        const candidate = at >= 0 ? clean(rows[at]!.line) : undefined;
+        if (candidate && ESTONIAN_NONPROFIT_FORM_RE.test(candidate) && !inExcludedRole(at)) anchoredNonprofitRows.add(at);
+      }
+    });
+  }
+  const promotedNonprofitRow = anchoredNonprofitRows.size === 1 ? [...anchoredNonprofitRows][0] : undefined;
+  const isCompanyLine = (candidate: string, index: number) =>
+    generalCompanyPattern.test(candidate) || index === promotedNonprofitRow;
   const buyerSectionIndex = lines.findIndex(line => BUYER_OR_RECIPIENT_SECTION_RE.test(line));
   const searchRows = rows.slice(0, buyerSectionIndex >= 0 ? Math.max(buyerSectionIndex + 1, 1) : Math.min(rows.length, 12));
-  for (const row of searchRows) {
+  for (const [index, row] of searchRows.entries()) {
     const candidate = clean(row.line);
     if (
       candidate &&
       candidate.length <= 80 &&
-      (isCompanyLine(candidate) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
+      (isCompanyLine(candidate, index) || /^[A-ZÄÖÜÕ0-9][A-ZÄÖÜÕ0-9 '&().,-]{4,}$/.test(candidate))
     ) {
       return trimToLegalFormColumn(row.raw, candidate);
     }
   }
 
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     const candidate = clean(row.line);
-    if (candidate && isCompanyLine(candidate)) {
+    if (candidate && isCompanyLine(candidate, index)) {
       return trimToLegalFormColumn(row.raw, candidate);
     }
   }
@@ -3076,8 +3105,9 @@ export function extractSupplierNameWithNotes(
   fallbackFileName: string,
   textItems?: readonly LayoutTextItem[],
   ownCompanyName?: string,
+  supplierRegCode?: string,
 ): SupplierNameExtractionResult {
-  const textName = extractSupplierNameFromText(text, fallbackFileName, ownCompanyName);
+  const textName = extractSupplierNameFromText(text, fallbackFileName, ownCompanyName, supplierRegCode);
   if (!textItems || textItems.length === 0) {
     return textName !== undefined ? { name: textName } : {};
   }
@@ -4418,7 +4448,9 @@ export function extractReceiptFieldsFromText(
     : sourceOptions;
   const pdfIdentifiers = extractPdfIdentifiers(text, options);
   const { invoice_date, due_date, invoice_date_unlabelled } = extractDates(text);
-  const extractedSupplier = extractSupplierNameWithNotes(text, fileName, options?.textItems, options?.ownCompanyName);
+  const extractedSupplier = extractSupplierNameWithNotes(
+    text, fileName, options?.textItems, options?.ownCompanyName, pdfIdentifiers.supplier_reg_code,
+  );
   // A page-column identity block (e.g. a footer) names the supplier only when
   // nothing else did: no supplier reg code or VAT, and the name is the file
   // name stand-in or the block's own entity. Its entity must also be named by

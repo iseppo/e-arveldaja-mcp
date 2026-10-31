@@ -5230,27 +5230,71 @@ describe("#5 the year is never the invoice total", () => {
 });
 
 describe("#5b supplier name from the registered association, not the manager footer", () => {
+  // The association/foundation forms promote a line only next to the selected
+  // supplier registry code, so these run the full extraction.
+  const supplierOf = (lines: string[], file = "a.pdf") => extractReceiptFieldsFromText(lines.join("\n"), file).supplier_name;
+
   it("an apartment association heading the invoice beats the management company in the footer", () => {
     const text = [
       "Tallinn, Näidise tn 1 korteriühistu                                   Arve number M000000001",
-      "Reg. kood: 80000000     KMKR: EE100000001                             Kuupäev 07.10.2026",
+      "Reg. kood: 80000008     KMKR: EE100000001                             Kuupäev 07.10.2026",
       "Maksja:",
       "Mari Maasikas",
       "Remondifond                    m²          59.00     0.3000         17.70",
       "Arve summa € 17,70",
       "Haldur: Test Haldur test@example.invalid",
       "Haldus OÜ",
-    ].join("\n");
-    expect(extractSupplierName(text, "a.pdf")).toBe("Tallinn, Näidise tn 1 korteriühistu");
+    ];
+    expect(supplierOf(text)).toBe("Tallinn, Näidise tn 1 korteriühistu");
   });
 
   it("foundations count as registered suppliers too; the pronoun 'sa' does not", () => {
-    expect(extractSupplierName(["SA Näidise Fond", "Reg. kood: 90000000", "Arve nr 1", "Kokku 10,00 €"].join("\n"), "b.pdf")).toBe("SA Näidise Fond");
+    expect(supplierOf(["SA Näidise Fond", "Reg. kood: 90000009", "Arve nr 1", "Kokku 10,00 €"], "b.pdf")).toBe("SA Näidise Fond");
     expect(extractSupplierName(["Kas sa tead, et arve summa", "Näidis OÜ", "Kokku 10,00 €"].join("\n"), "c.pdf")).toBe("Näidis OÜ");
   });
 
+  it("uppercase prose 'SA' is no legal form, even above the supplier code", () => {
+    expect(supplierOf(["Kas SA tead, et arve summa", "Reg. kood: 10000001", "Näidis OÜ", "Kokku 10,00 €"], "u.pdf")).toBe("Näidis OÜ");
+  });
+
   it("keeps a supplier AS above its own registry code", () => {
-    expect(extractSupplierName(["Näidis Teenused AS", "Reg. kood: 10000001", "Arve nr 5", "Kokku 10,00 €"].join("\n"), "d.pdf")).toBe("Näidis Teenused AS");
+    expect(supplierOf(["Näidis Teenused AS", "Reg. kood: 10000001", "Arve nr 5", "Kokku 10,00 €"], "d.pdf")).toBe("Näidis Teenused AS");
+  });
+
+  it("manager first: a foundation under 'Haldaja:' never replaces the supplier", () => {
+    const text = [
+      "Haldaja:",
+      "SA Näidise Haldus",
+      "Õige Teenused OÜ",
+      "Reg. kood: 10000001",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "m.pdf")).toBe("Õige Teenused OÜ");
+  });
+
+  it("manager first with its own code: the administrator block is excluded", () => {
+    const text = [
+      "Haldaja:",
+      "SA Näidise Haldus",
+      "Reg. kood: 90000015",
+      "Õige Teenused OÜ",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "m2.pdf")).toBe("Õige Teenused OÜ");
+  });
+
+  it("buyer first: an association under 'Maksja:' never replaces the supplier", () => {
+    const text = [
+      "Maksja:",
+      "Näidise tn 2 korteriühistu",
+      "Reg. kood: 80000020",
+      "Õige Teenused OÜ",
+      "Teenus 10,00",
+      "Kokku 10,00 €",
+    ];
+    expect(supplierOf(text, "b2.pdf")).toBe("Õige Teenused OÜ");
   });
 
   it("role: a buyer association and a manager footer never replace the supplier-block entity", () => {
@@ -5259,11 +5303,11 @@ describe("#5b supplier name from the registered association, not the manager foo
       "Reg. kood: 10000001",
       "Maksja:",
       "Näidise tn 2 korteriühistu",
-      "Reg. kood: 80000002",
+      "Reg. kood: 80000020",
       "Teenus 10,00",
       "Kokku 10,00 €",
-      "Haldus OÜ, Reg. kood 10000003",
-    ].join("\n");
-    expect(extractSupplierName(text, "e.pdf")).toBe("Näidis Teenused OÜ");
+      "Haldus OÜ, Reg. kood 10000018",
+    ];
+    expect(supplierOf(text, "e.pdf")).toBe("Näidis Teenused OÜ");
   });
 });
