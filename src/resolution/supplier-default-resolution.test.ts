@@ -296,6 +296,17 @@ describe("matchSupplier — deactivated clients (#12)", () => {
     ).status).toBe("ambiguous");
   });
 
+  it("a deactivated client of the same legal person is review before relaxed matching picks another legal form", () => {
+    const outcome = matchSupplier(
+      [
+        makeClient({ id: 504, name: "Alpha OÜ", is_active: false }),
+        makeClient({ id: 505, name: "Alpha AS" }),
+      ],
+      { supplier_name: "Alpha OÜ" },
+    );
+    expect(outcome).toMatchObject({ kind: "review", code: "supplier_client_deactivated", client: { id: 504 } });
+  });
+
   it("the live API shape without is_active / deactivated_date is a live client", () => {
     const client = makeClient({ id: 503, name: "Live Shape OÜ", code: "16800003" });
     delete client.is_active;

@@ -186,6 +186,12 @@ export function matchSupplier(
         reason: `${identityMatches.length} active clients are the same legal person by name — resolve the supplier manually (by registry code or VAT number).`,
       };
     }
+    // A deactivated client that is the same legal person by name stops the
+    // relaxed tiers: they fold legal forms, so they could otherwise hand the
+    // invoice to another entity ("Alpha OÜ" deactivated → live "Alpha AS").
+    const deactivatedIdentity = clients.find(client =>
+      !client.is_deleted && !isLiveClient(client) && !isSelfClient(client) && sameCompanyIdentity(supplierName, client.name));
+    if (deactivatedIdentity) return deactivatedReview(deactivatedIdentity, "name");
 
     const normalizedSupplierName = normalizeCompanyName(supplierName);
     if (normalizedSupplierName && normalizedSupplierName.length >= 4) {

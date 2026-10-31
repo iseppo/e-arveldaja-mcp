@@ -1364,6 +1364,37 @@ describe("receipt batch — supplier from a footer identity block (Telia live mi
     expect(createClient).not.toHaveBeenCalled();
   });
 
+  it("a deactivated exact supplier is reviewed at execute, never resolved to another legal form (#12)", async () => {
+    const actual = await vi.importActual<typeof import("../tools/supplier-resolution.js")>("../tools/supplier-resolution.js");
+    vi.mocked(resolveSupplierInternal).mockImplementation(actual.resolveSupplierInternal);
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Alpha OÜ", invoice_number: "INV-1", invoice_date: "2026-03-20", due_date: "2026-03-20",
+      total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", description: "Service", raw_text: "Alpha OÜ",
+    } as never);
+    const inactive = { ...client, id: 811, name: "Alpha OÜ", code: undefined, is_active: false };
+    const liveOtherForm = { ...client, id: 812, name: "Alpha AS", code: undefined };
+    const { api, spies } = makeApi();
+    primeClients(api, [], [inactive, liveOtherForm]);
+    const createClient = vi.fn();
+    (api as unknown as { clients: Record<string, unknown> }).clients.create = createClient;
+    const ops = makeOperations(api);
+    const dryRun = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dryRun.ok) throw new Error("dry run failed");
+    expect(dryRun.value.results[0]!.status).toBe("needs_review");
+    const outcome = await ops.runBatch({
+      ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dryRun.value.manifest, planHandle: dryRun.value.planHandles?.create,
+    });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.supplier_resolution).toMatchObject({ code: "supplier_client_deactivated" });
+    expect(result.supplier_resolution?.client).toBeUndefined();
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    expect(createClient).not.toHaveBeenCalled();
+  });
+
   it("a letterhead-named supplier with its own footer codes (Tech Tatami shape) is not held as footer-derived", async () => {
     vi.mocked(parseDocument).mockResolvedValue(documentWith(
       ["Näidis Side AS", "Reg nr: 10000018", "KMKR nr: EE100000010", "Aadress: Tänav 1-2", "Eesti Vabariik"],
