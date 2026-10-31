@@ -340,6 +340,12 @@ describe("runAccountingInboxDryRunPipeline", () => {
     const mirror = reviews[3]!;
     expect(mirror.summary).toContain("mirror of confirmed transaction 30");
     expect(mirror.recommendation).toContain("only after the owner explicitly approves");
+    // Mirror cleanup is plan-gated through reconcile_bank_transactions on every
+    // profile (guided included), never a profile change.
+    expect(mirror.recommendation).toContain("reconcile_bank_transactions mode='inter_account_dry_run' with delete_proposed_mirrors: true");
+    expect(mirror.recommendation).toContain("mode='execute_inter_account' with the returned plan_handle and the same arguments");
+    expect(mirror.recommendation).not.toContain("standard/full");
+    expect(mirror.recommendation).not.toContain("never deletes");
     // An already-handled row without a mirror proposal is never offered for deletion.
     expect(reviews.some(item => item.summary.includes("33"))).toBe(false);
     expect(new Set(reviews.map(item => item.id)).size).toBe(5);
