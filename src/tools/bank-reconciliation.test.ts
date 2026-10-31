@@ -4561,11 +4561,28 @@ describe("reconcile_inter_account_transfers: CAMT marker IBAN (F4)", () => {
         expect(payload.already_handled).toEqual([expect.objectContaining({
           transaction_id: 5002, existing_journal_id: 9001,
           mirror_proposal: expect.objectContaining({ counterpart_transaction_id: 5001, journal_id: 9001, evidence: expect.any(Array) }),
-          next_action: { tool: "delete_transaction", args: { id: 5002 }, approval_required: true },
+          // Never the bare delete_transaction shortcut: deletion goes through a
+          // fresh dry run that re-proves the mirror and binds it into a plan.
+          next_action: {
+            tool: "reconcile_bank_transactions",
+            args: { mode: "inter_account_dry_run", delete_proposed_mirrors: true },
+            approval_required: false,
+          },
         })]);
+        expect(payload.already_handled[0]!.reason).not.toContain("delete_transaction");
       }
       expect(api.transactions.delete).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
+    });
+
+    it("routes the mirror deletion through a fresh dry run carrying the same matching args", async () => {
+      const { handler } = setup([counterpart(), camtRow(5002)]);
+      const dry = parseToolPayload<ReconInterAccountPayload>((await handler({ max_date_gap: 3, target_accounts_dimensions_id: 300 })).content[0]!.text);
+      expect(proposals(dry)[0]!.next_action).toEqual({
+        tool: "reconcile_bank_transactions",
+        args: { mode: "inter_account_dry_run", max_date_gap: 3, target_accounts_dimensions_id: 300, delete_proposed_mirrors: true },
+        approval_required: false,
+      });
     });
 
     // Live 2026-10-30: guided had no delete_transaction, so proposed mirrors

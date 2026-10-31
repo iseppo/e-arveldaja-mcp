@@ -2,8 +2,8 @@
   "profile": "guided",
   "measurement": {
     "toolCount": 19,
-    "toolsListBytes": 34658,
-    "descriptionsBytes": 4910,
+    "toolsListBytes": 34719,
+    "descriptionsBytes": 4971,
     "inputSchemasBytes": 25116,
     "largestTool": {
       "name": "process_accounting_document",
@@ -430,7 +430,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Unified bank-statement entry point. Auto-detects CAMT.053 XML vs Wise transaction-history CSV from the file content and imports it. Use mode='prepare' (default) to preview a dry run and get a plan handle, mode='execute' to create the reviewed transactions, or mode='show_details' to page the full per-row result. If the bank account dimension is unique it is resolved automatically.",
+      "description": "Unified bank-statement entry point. Auto-detects CAMT.053 XML vs Wise transaction-history CSV from the file content and imports it. Use mode='prepare' (default) to preview a dry run and get a plan handle, mode='execute' to create the reviewed transactions, or mode='show_details' to page the full per-row result. If the bank account dimension is unique it is resolved automatically; for a Wise CSV only when that account is identified as Wise.",
       "execution": {
         "taskSupport": "forbidden"
       },

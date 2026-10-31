@@ -905,7 +905,7 @@ describe("registerPrompts", () => {
     expect(text).toContain("Extraction and validation use `cl_currencies_id`; booking uses `currency`");
     expect(text).toContain("For non-EUR invoices, include `currency`, `currency_rate`, and, when known, `base_gross_price`");
     expect(text).toContain("candidate_invoice_number_matches");
-    expect(text).toContain("If source document upload fails after invoice creation, the draft invoice is invalidated.");
+    expect(text).toContain("If source document upload fails after invoice creation, the tool attempts to invalidate the draft invoice");
     expect(text).toContain("auto_create: false");
     expect(text).toContain("auto_create: true");
     expect(text).toContain("calendar-day difference between `invoice_date` and `due_date`");
@@ -945,6 +945,21 @@ describe("registerPrompts", () => {
     expect(suggestBranch).toBeGreaterThan(-1);
     expect(approvalStop).toBeGreaterThan(suggestBranch);
     expect(creationCall).toBeGreaterThan(approvalStop);
+  });
+
+  it("carries the historical payable account through book-invoice history, approval and creation", () => {
+    const text = readPromptSurface("workflows/book-invoice.md");
+    // Guided booking-binding prepare, approval card, history reuse, standard approval card and create args.
+    expect(text).toContain("`liability_accounts_id` (the invoice-level payable account");
+    expect(text).toContain("the payable account (`liability_accounts_id`), reference number and IBAN");
+    expect(text).toContain("- the invoice-level payable account `liability_accounts_id` of the same past invoice");
+    expect(text).toContain("- The payable account (`liability_accounts_id`)");
+    expect(text).toContain("- `liability_accounts_id`: the approved payable account");
+    // The reading-enabled guided route shows the payable account and makes a departure an explicit choice.
+    expect(text).toContain("when `payable_account.departs_from_history` is true, name the history account and get the user's explicit choice before approval");
+    // Failed-upload cleanup is reported as attempted, not guaranteed.
+    expect(text).not.toContain("the draft invoice is invalidated.");
+    expect(text).toContain("attempts to invalidate the draft invoice");
   });
 
   it("puts validation evidence and material-warning acknowledgement on the book-invoice approval card (P09)", () => {
@@ -1226,6 +1241,34 @@ describe("registerPrompts", () => {
     expect(text).toContain(GUIDED_INTER_ACCOUNT_NEXT_ACTION);
   });
 
+  it("routes mirror deletions, ledger-check codes, Wise account choice and classification review safely (2026-10-31 review)", async () => {
+    const recon = await getPromptText(setupPromptServer(), "reconcile-bank", { mode: "auto" });
+    // F1: no bare delete_transaction shortcut for a proposed mirror.
+    expect(recon).toContain("Never delete a mirror with a direct `delete_transaction`.");
+    expect(recon).toContain("re-run the dry run with `delete_proposed_mirrors: true`");
+    // F7: an unfound/ambiguous registration journal is not a client mismatch.
+    expect(recon).toContain("do not reassign the client on this code alone");
+
+    const guidedWise = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "import-wise", { file_path: "/tmp/wise.csv" });
+    // F3: never promise a "unique Wise" pick; keep a supplied dimension; stop without Wise.
+    expect(guidedWise).not.toContain("a unique Wise bank account is chosen automatically");
+    expect(guidedWise).not.toContain("`accounts_dimensions_id` only when the tool asked for it");
+    expect(guidedWise).toContain("pass it on every call");
+    expect(guidedWise).toContain("if no Wise bank account is configured, stop and say so rather than picking another bank");
+    // F9: page the existing plan's reviews before suggesting another profile.
+    expect(guidedWise).toContain('"section": "reviews", "detail": "full"');
+
+    const classify = await getPromptText(setupPromptServer(), "classify-unmatched", { accounts_dimensions_id: 55 });
+    // F5: manual confirms only for review-only history groups.
+    expect(classify).toContain('a group with `apply_mode: "review_only"` whose `suggested_booking.source` is `transaction_history`');
+    expect(classify).toContain("book it only through steps 3–5 (reviewed dry run and plan), never with `confirm_transaction`");
+    // F6: the paged plan carries the per-group effects.
+    expect(classify).toContain("`history_distribution` for an account-distribution row");
+    // F8: compact exclusion warnings are capped.
+    const guidedClassify = await getPromptText(setupPromptServer({ toolProfile: "guided" }), "classify-unmatched", { accounts_dimensions_id: 55 });
+    expect(guidedClassify).toContain("name at most 5 per warning");
+  });
+
   // The reviewed mirror-deletion choice is part of the execute arguments: an
   // execute without it drifts, and one that drops it would delete nothing.
   const INTER_ACCOUNT_SAME_ARGUMENTS = "Pass the same `target_accounts_dimensions_id` / `max_date_gap` / `delete_proposed_mirrors` as the dry run, or the plan is refused with `plan_drift`.";
@@ -1249,6 +1292,14 @@ describe("registerPrompts", () => {
     expect(text).toContain("`dry_run: false` REQUIRES the `plan_handle`");
     // Trades bind BOTH the statement and the capital-gains sources.
     expect(text).toContain("binds BOTH the statement CSV and the capital-gains CSV");
+    // Earlier duplicate drafts are reviewed separately, never folded into the confirm call.
+    expect(text).toContain("pending_duplicate_journals");
+    expect(text).toContain("never add them to the confirm call on your own");
+    expect(text).toContain("an entry with `snapshot_mismatch`");
+    expect(text).toContain("never ask approval for it as a matching draft");
+    // Confirmation runs the server's <=500-id batches and inspects each result.
+    expect(text).toContain("run every approved `next_actions` batch as given");
+    expect(text).not.toContain("call `batch_confirm_journals` with exactly those ids");
   });
 
   it("keeps shipped classify-unmatched markdown prompts aligned with filtered dry runs", () => {
@@ -1274,5 +1325,13 @@ describe("registerPrompts", () => {
     expect(lower).toContain("name-only lookup does not");
     expect(lower).toContain("does not fetch a vat number");
     expect(text).not.toContain("create a new one anyway");
+    // A registry-code hit passes the own-company self-identity check first.
+    expect(text).toContain("`self_match_blocked: true`");
+    expect(text).toContain("call `resolve_supplier` with `reg_code` and `auto_create: false`");
+    // Step 3 found:true exits before creation.
+    const foundBranch = text.indexOf("- `found: true`: the supplier already exists");
+    const createStep = text.indexOf("## Step 6: Create the supplier");
+    expect(foundBranch).toBeGreaterThan(-1);
+    expect(createStep).toBeGreaterThan(foundBranch);
   });
 });

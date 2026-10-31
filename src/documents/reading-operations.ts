@@ -173,6 +173,8 @@ export interface VerifyDocumentResult {
   booking?: PlanRecord;
   bookingNotes?: ReadingBookingNotes;
   dimensionChoiceRequired?: BookingSuggestionCore["dimension_conflicts"];
+  /** The payable account the booking writes and the supplier history's (present when a booking source exists). */
+  payableAccount?: ReadingPayableAccount;
   /** Set when the server could not suggest booking items: the client repeats verify with `items`. */
   bookingItemsRequired?: true;
   /** Set when the history template's item title carries a date or names goods this document does not print: the client repeats verify with `item_title`. */
@@ -518,8 +520,33 @@ export function readingNonVatItems(items: unknown, values: AcceptedValues, sourc
   };
 }
 
-/** Where the booking items come from: the caller's items, or the server's one-item template (amounts from the values). */
-export type ReadingItemsSource = { items: unknown } | { template: PurchaseInvoiceItem };
+/**
+ * Where the booking items come from: the caller's items, or the server's one-item template (amounts from the values)
+ * with the invoice-level payable account of the history invoice it was copied from.
+ */
+export type ReadingItemsSource = { items: unknown } | { template: PurchaseInvoiceItem; liabilityAccountsId?: number };
+
+/**
+ * The invoice-level payable account the reading booking writes, next to the supplier's latest confirmed invoice's.
+ * `departs_from_history` is true when they differ: the approval card shows it as an explicitly reviewed departure.
+ */
+export interface ReadingPayableAccount {
+  liability_accounts_id: number;
+  history_liability_accounts_id: number | null;
+  departs_from_history: boolean;
+}
+
+/** The payable account a booking writes: the caller's, else the history template's, else the default 2310. */
+function readingLiabilityAccount(source: ReadingItemsSource, input: Pick<ReadingBookingInput, "liabilityAccountsId"> | undefined): number {
+  return input?.liabilityAccountsId ?? ("template" in source ? source.liabilityAccountsId : undefined) ?? DEFAULT_LIABILITY_ACCOUNT;
+}
+
+function readingPayableAccount(source: ReadingItemsSource, input: Pick<ReadingBookingInput, "liabilityAccountsId"> | undefined, suggestion: BookingSuggestionCore): ReadingPayableAccount {
+  const booked = readingLiabilityAccount(source, input);
+  const history = suggestion.past_invoices[0]?.liability_accounts_id;
+  const historyId = typeof history === "number" ? history : null;
+  return { liability_accounts_id: booked, history_liability_accounts_id: historyId, departs_from_history: historyId !== null && historyId !== booked };
+}
 
 export type ReadingBookingNotes = Pick<BookingSuggestionCore, "tax_notes" | "dimension_notes" | "history_notes">;
 function decisionNotes(suggestion: BookingSuggestionCore): ReadingBookingNotes {
@@ -539,8 +566,10 @@ function requiredDimensionChoices(suggestion: BookingSuggestionCore, source: Rea
 /** The caller's items, else the supplier's one-item history template; undefined when the server has nothing to suggest. */
 export async function resolveItemsSource(api: ApiContext, supplierClientId: number, input: ReadingBookingInput | undefined, suggestion?: BookingSuggestionCore): Promise<ReadingItemsSource | undefined> {
   if (input?.items !== undefined) return { items: input.items };
-  const template = suggestedItemTemplate(suggestion ?? await computeBookingSuggestion(api, { clients_id: supplierClientId, description: currentDescription(input) }));
-  return template ? { template } : undefined;
+  const basis = suggestion ?? await computeBookingSuggestion(api, { clients_id: supplierClientId, description: currentDescription(input) });
+  const template = suggestedItemTemplate(basis);
+  const liability = basis.past_invoices[0]?.liability_accounts_id;
+  return template ? { template, ...(typeof liability === "number" ? { liabilityAccountsId: liability } : {}) } : undefined;
 }
 
 export interface ReadingBookingResult {
@@ -587,7 +616,7 @@ export async function buildReadingBooking(
     items,
     ...(isVatReg ? { vatPrice: values.vat ?? 0 } : nonDeductible ? { vatPrice: values.vat! } : {}),
     ...(values.gross !== null ? { grossPrice: values.gross } : {}),
-    ...(input?.liabilityAccountsId !== undefined ? { liabilityAccountsId: input.liabilityAccountsId } : {}),
+    liabilityAccountsId: readingLiabilityAccount(itemsSource, input),
     ...(knownIban ? { bankAccountNo: knownIban } : {}),
     ...(paymentReference !== undefined ? { refNumber: paymentReference } : {}),
     ...(orderReferenceNote !== undefined ? { notes: orderReferenceNote } : {}),
@@ -752,7 +781,7 @@ function deferredBookingBasis(source: ReadingItemsSource, input: ReadingBookingI
   return {
     supplier_name: supplierName,
     vat_registered: isVatReg,
-    liability_accounts_id: input?.liabilityAccountsId ?? DEFAULT_LIABILITY_ACCOUNT,
+    liability_accounts_id: readingLiabilityAccount(source, input),
     bank_account_no: knownIban ? desandboxText(knownIban) : null,
     ref_number: paymentReference ?? null,
     notes: orderReferenceNote ?? null,
@@ -1080,6 +1109,7 @@ class ReadingDocumentOperations {
       let knownIban: string | undefined;
       let bookingNotes: ReadingBookingNotes | undefined;
       let dimensionChoiceRequired: BookingSuggestionCore["dimension_conflicts"] = [];
+      let payableAccount: ReadingPayableAccount | undefined;
       const bookingDeferred = ratesDeferredForLostDate(packet, values.invoice_date);
       // The printed payment reference (viitenumber) is bound into the booking; several distinct ones bind nothing.
       const reference = printedPaymentReference(packet);
@@ -1095,6 +1125,7 @@ class ReadingDocumentOperations {
         bookingNotes = decisionNotes(suggestion);
         itemsSource = await resolveItemsSource(this.api, supplierClient.id, input.booking, suggestion);
         dimensionChoiceRequired = requiredDimensionChoices(suggestion, itemsSource);
+        if (itemsSource) payableAccount = readingPayableAccount(itemsSource, input.booking, suggestion);
         if (dimensionChoiceRequired.length) holds.push({ code: "reading_dimension_choice_required" });
         // A gross the owner still has to type cannot be booked yet, and a lost date leaves the VAT rate, the non-VAT
         // form, the journal date and the term unknown: no booking is built or bound at verify (Step 0).
@@ -1140,6 +1171,7 @@ class ReadingDocumentOperations {
         ...(supplierClient?.id !== undefined ? { supplier: { clientId: supplierClient.id, name: supplierClient.name } } : {}),
         ...(booking?.effective ? { booking: booking.effective.fingerprint } : {}),
         ...(bookingNotes ? { bookingNotes } : {}),
+        ...(payableAccount ? { payableAccount } : {}),
         ...(dimensionChoiceRequired.length ? { dimensionChoiceRequired } : {}),
         ...(supplierClient?.id !== undefined && (!itemsSource || dimensionChoiceRequired.length) ? { bookingItemsRequired: true as const } : {}),
         ...(paymentReferenceNote !== undefined ? { paymentReferenceNote } : {}),
@@ -1205,7 +1237,7 @@ class ReadingDocumentOperations {
         sourceIdentities: [{ ...snapshot.identity } as unknown as PlanRecord],
         liveSnapshot: { source_sha256: packet.source_sha256, packet_digest: packet.packet_digest },
         commands: [
-          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: { ...(bookingBasis ? bookingBasis as unknown as PlanRecord : booking!.effective!.fingerprint), decision_notes: bookingNotes as unknown as PlanRecord } },
+          { id: "reading-document-create", category: "purchase_invoice_create", reviewProjection: { ...(bookingBasis ? bookingBasis as unknown as PlanRecord : booking!.effective!.fingerprint), decision_notes: bookingNotes as unknown as PlanRecord, ...(payableAccount ? { payable_account: payableAccount as unknown as PlanRecord } : {}) } },
           { id: "reading-document-upload", category: "purchase_invoice_upload", reviewProjection: { file_name: material.fileName, source_sha256: material.source_sha256 } },
         ],
         counts: { rows: card.rows.length },

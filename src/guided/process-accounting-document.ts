@@ -369,6 +369,7 @@ function renderVerify(result: VerifyDocumentResult) {
         note: BOOKING_AFTER_TYPED_DATE_NOTE,
       },
     } : {}),
+    ...(result.payableAccount ? { payable_account: result.payableAccount } : {}),
     ...(result.dimensionChoiceRequired ? { dimension_choice_required: result.dimensionChoiceRequired } : {}),
     ...(result.bookingItemsRequired ? { booking_items_required: true } : {}),
     ...(result.itemTitleRequired ? { item_title_required: true, ...(result.itemTitleReason ? { item_title_required_reason: result.itemTitleReason } : {}) } : {}),
@@ -379,7 +380,7 @@ function renderVerify(result: VerifyDocumentResult) {
     ...(result.releasedMarker ? { released_marker: result.releasedMarker } : {}),
     ...(result.planHandle ? { plan_handle: result.planHandle } : {}),
     next_step: result.status === "ready"
-      ? "Review all booking_review.decision_notes with the card and exact booking model. Show look_here and every card row to the operator and ask each question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
+      ? "Review all booking_review.decision_notes with the card and exact booking model. Show the payable account (payable_account); when payable_account.departs_from_history is true, name the history account and get the owner's explicit choice before approval. Show look_here and every card row to the operator and ask each question. After explicit approval, call mode='create' with this plan_handle, the same file and owner_answers for every row (an empty object when there are no rows)."
       : result.releasedMarker
         ? "The marker is released. Call mode='verify' again with the same file and objects, without release_indeterminate: the duplicate scans re-run uncached before a plan_handle is issued."
       : result.indeterminateMarker

@@ -47,7 +47,7 @@ Official EMTA sources:
    - `needs_manual_review`: threshold depends on non-incidental finance, insurance, or real-estate turnover
    - `approaching`: counted turnover is at least 80% of the threshold; monitor the next invoices and turnover buckets
    - `ok`: no threshold issue from supplied data
-5. The tool counts every confirmed sale invoice. Before concluding `exceeded`, `needs_manual_review` or `approaching`, ask the user whether any sale invoices are fixed-asset disposals or have a non-Estonian place of supply (for example B2B services to businesses in other EU countries), and whether there is taxable turnover without sale invoices. If so, re-run with `taxable_turnover_adjustment` (negative to exclude, positive to add) and report both runs.
+5. The tool counts only confirmed sale invoices, so an `ok` can hide turnover it never saw. Before concluding ANY status other than `already_registered` (`ok` included), ask whether there is taxable or 0% turnover without a confirmed sale invoice (sales without an invoice, unconfirmed invoices, invoices issued outside e-arveldaja). Before concluding `exceeded`, `needs_manual_review` or `approaching`, also ask whether any sale invoices are fixed-asset disposals or have a non-Estonian place of supply (for example B2B services to businesses in other EU countries). If an answer changes the amounts, re-run with `taxable_turnover_adjustment` (negative to exclude, positive to add), conclude from the re-run's `status`, and report both runs.
 6. If `needs_manual_review`, ask the user to classify the relevant turnover as incidental or non-incidental before concluding registration duty.
 
 ## Output

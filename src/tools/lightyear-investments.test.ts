@@ -15,6 +15,8 @@ import { HttpError } from "../http-client.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
 import { toolMetadataText } from "../__fixtures__/tool-metadata.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
+import { parseToolPayload } from "../__fixtures__/mcp-response.js";
+import type { Journal } from "../types/api.js";
 
 const { registerLightyearTools, tradeFeeInEur, withinProceedsTolerance, LEGACY_DISTRIBUTION_FETCH_BUDGET } = lightyearInvestments;
 
@@ -639,11 +641,11 @@ describe("lightyear investments tools", () => {
     const payload = parseMcpResponse(result.content[0]!.text) as any;
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(payload.duplicates_skipped).toBe(1);
-    expect(payload.unconfirmed_journal_ids).toEqual([77]);
-    expect(payload.next_actions).toEqual([expect.objectContaining({
-      tool: "batch_confirm_journals",
-      args: { ids: [77], reason: expect.any(String) },
-    })]);
+    // An earlier draft was not reviewed by this run: reported, never put in the confirm call.
+    expect(payload.unconfirmed_journal_ids).toBeUndefined();
+    expect(payload.next_actions).toBeUndefined();
+    expect(payload.pending_duplicate_journal_ids).toEqual([77]);
+    expect(payload.pending_duplicate_journals[0]).toMatchObject({ journal_id: 77, effective_date: "2026-03-10" });
   });
 
   it("reviews a trade whose bare-reference journal is dated on the settlement day instead of booking it again", async () => {
@@ -2976,8 +2978,9 @@ describe("H17 distribution currency and EUR provenance", () => {
     const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
     expect(api.journals.create).not.toHaveBeenCalled();
     expect(payload.duplicates_skipped).toBe(1);
-    expect(payload.unconfirmed_journal_ids).toEqual([9]);
-    expect(payload.next_actions[0].args).toEqual({ ids: [9], reason: expect.any(String) });
+    expect(payload.unconfirmed_journal_ids).toBeUndefined();
+    expect(payload.next_actions).toBeUndefined();
+    expect(payload.pending_duplicate_journal_ids).toEqual([9]);
   });
 
   it("H17 coverage applies exact mixed in-file duplicate and reviewed-result formulas", async () => {
@@ -3052,16 +3055,68 @@ describe("H17 distribution currency and EUR provenance", () => {
     expect(run.api.journals.create).not.toHaveBeenCalled();
   });
 
-  it("names an earlier unregistered draft on a zero-bookable statement", async () => {
+  it("reports an earlier unregistered draft with its postings but keeps it out of the confirm list", async () => {
     mockedReadFile.mockResolvedValue(buildStatementCsv([
       ["01/03/2026", "DRAFT-USD", "", "", "Dividend", "0", "USD", "0", "9", "0", "0", "9", "0"],
     ]));
+    // The earlier draft books 12.34 (not the statement's 9): this run never
+    // reviewed it, so it must not be offered for confirmation as-is.
     const { handler } = setupLightyearTool("book_lightyear_distributions", {
-      journals: [{ id: 41, document_number: "LY:DRAFT-USD", effective_date: "2026-03-01", is_deleted: false, registered: false }],
+      journals: [{
+        id: 41, document_number: "LY:DRAFT-USD", effective_date: "2026-03-01", is_deleted: false, registered: false,
+        postings: [
+          { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount: 12.34 },
+          { accounts_id: 8330, accounts_dimensions_id: null, type: "C", amount: 12.34 },
+        ],
+      }],
     });
-    const payload = parseMcpResponse((await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text) as any;
-    expect(payload).toMatchObject({ bookable_distributions: 0, review_required: 0, duplicates_skipped: 1, pending_duplicate_journal_ids: [41] });
-    expect(payload.next_actions[0]).toMatchObject({ tool: "batch_confirm_journals", args: { ids: [41] } });
+    const payload = parseToolPayload<lightyearInvestments.LightyearDraftConfirmationFields & { bookable_distributions: number; duplicates_skipped: number }>(
+      (await handler({ file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false })).content[0]!.text,
+    );
+    expect(payload).toMatchObject({ bookable_distributions: 0, duplicates_skipped: 1, pending_duplicate_journal_ids: [41] });
+    expect(payload.unconfirmed_journal_ids).toBeUndefined();
+    expect(payload.next_actions).toBeUndefined();
+    expect(payload.pending_duplicate_journals).toHaveLength(1);
+    const draft = payload.pending_duplicate_journals![0]!;
+    expect(draft).toMatchObject({ journal_id: 41, effective_date: "2026-03-01" });
+    expect(draft.reference).toContain("DRAFT-USD");
+    expect(draft.postings).toEqual([
+      { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount: 12.34, base_amount: null, cl_currencies_id: null },
+      { accounts_id: 8330, accounts_dimensions_id: null, type: "C", amount: 12.34, base_amount: null, cl_currencies_id: null },
+    ]);
+    expect(payload.note).toContain("not in the confirm list");
+  });
+
+  it.each([
+    ["book_lightyear_distributions", ["01/03/2026", "OR-1", "", "", "Dividend", "0", "EUR", "0", "9", "0", "0", "9", "0"]],
+    ["book_lightyear_trades", ["01/03/2026 11:51:35", "OR-1", "VUAA", "IE00BK5BQT80", "Buy", "1.000000000", "EUR", "9.000000000", "9.00", "", "0.00", "9.00", ""]],
+  ] as const)("holds an earlier draft whose current detail no longer claims the statement reference (%s)", async (tool, row) => {
+    mockedReadFile.mockResolvedValue(buildStatementCsv([[...row]]));
+    // The list says draft 41 is LY:OR-1 on March 1; its current detail is
+    // LY:OTHER on April 1 with matching postings. The review must not show the
+    // list's identity next to the detail's postings as a matching draft.
+    const run = setupLightyearTool(tool, {
+      journals: [{ id: 41, document_number: "LY:OR-1", effective_date: "2026-03-01", title: "list title", is_deleted: false, registered: false }],
+    });
+    run.api.journals.get = vi.fn(async () => ({
+      id: 41, document_number: "LY:OTHER", effective_date: "2026-04-01", title: "detail title", is_deleted: false, registered: false,
+      postings: [
+        { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount: 9 },
+        { accounts_id: 8320, accounts_dimensions_id: null, type: "C", amount: 9 },
+      ],
+    }));
+    const args = tool === "book_lightyear_trades"
+      ? { file_path: "/tmp/lightyear.csv", investment_account: 1550, broker_account: 1120, skip_tickers: "none", dry_run: false }
+      : { file_path: "/tmp/lightyear.csv", broker_account: 1120, income_account: 8320, dry_run: false };
+    const payload = parseToolPayload<lightyearInvestments.LightyearDraftConfirmationFields>((await run.handler(args)).content[0]!.text);
+    expect(run.api.journals.create).not.toHaveBeenCalled();
+    expect(payload.next_actions).toBeUndefined();
+    expect(payload.pending_duplicate_journals).toHaveLength(1);
+    const draft = payload.pending_duplicate_journals![0]!;
+    expect(draft).toMatchObject({ journal_id: 41, effective_date: "2026-04-01", postings: null, snapshot_mismatch: "reference_changed" });
+    expect(draft.document_number).toContain("LY:OTHER");
+    expect(draft.title).toContain("detail title");
+    expect(payload.note).toContain("snapshot_mismatch");
   });
 
   it("bounds legacy-check detail fetches and reviews rows it could not check", async () => {
@@ -5783,24 +5838,39 @@ describe("draftConfirmationFields", () => {
     expect(typeof args.reason === "string" && args.reason.length >= 1 && args.reason.length <= 500).toBe(true);
   });
 
-  it("offers earlier unregistered drafts when every row was skipped as a duplicate", () => {
-    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicateIds: [7, 8] }) as any;
-    expect(fields.unconfirmed_journal_ids).toEqual([7, 8]);
+  const pendingDraft = (id: number): lightyearInvestments.LightyearPendingDuplicateJournal => ({
+    journal_id: id, reference: `OR-${id}`, effective_date: "2026-01-02", document_number: `LY:OR-${id}`, title: null, postings: null, postings_unavailable: true,
+  });
+
+  it("reports earlier unregistered drafts separately and never puts them in the confirm call", () => {
+    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicates: [pendingDraft(7), pendingDraft(8)] });
+    expect(fields.unconfirmed_journal_ids).toBeUndefined();
+    expect(fields.next_actions).toBeUndefined();
     expect(fields.pending_duplicate_journal_ids).toEqual([7, 8]);
-    expect(fields.next_actions[0].args).toEqual({ ids: [7, 8], reason });
-    expect(fields.note).toContain("still unregistered drafts");
+    expect(fields.pending_duplicate_journals?.map(j => j.journal_id)).toEqual([7, 8]);
+    expect(fields.note).toContain("were listed as unregistered drafts");
+  });
+
+  it("confirms only the journals this run created when earlier drafts are also pending", () => {
+    const fields = lightyearInvestments.draftConfirmationFields(
+      [{ status: "created", journal_id: 5 }],
+      { reason, pendingDuplicates: [pendingDraft(7)] },
+    );
+    expect(fields.unconfirmed_journal_ids).toEqual([5]);
+    expect(fields.next_actions?.map(a => a.args.ids)).toEqual([[5]]);
+    expect(fields.pending_duplicate_journal_ids).toEqual([7]);
   });
 
   it("returns no confirm call when nothing was created and no drafts are pending", () => {
-    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicateIds: [] }) as any;
+    const fields = lightyearInvestments.draftConfirmationFields([], { reason, pendingDuplicates: [] });
     expect(fields.next_actions).toBeUndefined();
     expect(fields.unconfirmed_journal_ids).toBeUndefined();
   });
 });
 
-describe("findUnregisteredJournalIdsByRef", () => {
+describe("loadPendingDuplicateJournals", () => {
   const base = { is_deleted: false, postings: [] } as const;
-  it("returns only unregistered journals matching LY:{ref} or a same-date raw ref", () => {
+  it("returns only unregistered journals matching LY:{ref} or a same-date raw ref", async () => {
     const journals = [
       { ...base, id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", registered: false },
       { ...base, id: 2, document_number: "LY:OR-2", effective_date: "2026-01-03", registered: true },
@@ -5808,14 +5878,67 @@ describe("findUnregisteredJournalIdsByRef", () => {
       { ...base, id: 4, document_number: "OR-4", effective_date: "2026-02-01", registered: false },
       { ...base, id: 5, document_number: "LY:OR-5", effective_date: "2026-01-05", registered: false, is_deleted: true },
     ] as any;
-    const ids = lightyearInvestments.findUnregisteredJournalIdsByRef(journals, [
+    const get = vi.fn(async (id: number) => ({
+      ...journals.find((j: { id: number }) => j.id === id), postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }],
+    }));
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [
       { reference: "OR-1", date: "2026-01-02" },
       { reference: "OR-2", date: "2026-01-03" },
       { reference: "OR-3", date: "2026-01-04" },
       { reference: "OR-4", date: "2026-01-06" },
       { reference: "OR-5", date: "2026-01-05" },
     ]);
-    expect(ids).toEqual([1, 3]);
+    expect(pending.map(j => j.journal_id)).toEqual([1, 3]);
+    // The list omitted postings, so each draft's detail was read.
+    expect(get.mock.calls.map(c => c[0])).toEqual([1, 3]);
+    expect(pending[0]!.postings).toEqual([
+      { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount: 5, base_amount: null, cl_currencies_id: null },
+    ]);
+  });
+
+  it.each([
+    [{ registered: true }, "registered_since_listing"],
+    [{ is_deleted: true }, "deleted_since_listing"],
+    [{ document_number: "LY:OR-9" }, "reference_changed"],
+    [{ document_number: "OR-1", effective_date: "2026-01-03" }, "reference_changed"],
+  ] as const)("holds a draft whose detail differs from the list entry (%o)", async (change, code) => {
+    const journals: Journal[] = [{ id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", registered: false, is_deleted: false, postings: [] }];
+    const get = vi.fn(async () => ({ ...journals[0], ...change, postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }] }));
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [{ reference: "OR-1", date: "2026-01-02" }]);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ journal_id: 1, postings: null, snapshot_mismatch: code });
+    expect(pending[0]!.postings_unavailable).toBeUndefined();
+  });
+
+  it("takes date, document number and title from the same detail snapshot as the postings", async () => {
+    const journals: Journal[] = [{ id: 1, document_number: "LY:OR-1", effective_date: "2026-01-02", title: "old", registered: false, is_deleted: false, postings: [] }];
+    const get = vi.fn(async () => ({ ...journals[0], effective_date: "2026-01-05", title: "new", postings: [{ accounts_id: 1120, type: "D" as const, amount: 5 }] }));
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(api, journals, [{ reference: "OR-1", date: "2026-01-02" }]);
+    expect(pending[0]).toMatchObject({ effective_date: "2026-01-05" });
+    expect(pending[0]!.title).toContain("new");
+    expect(pending[0]!.snapshot_mismatch).toBeUndefined();
+  });
+
+  it("marks postings unavailable when the detail read fails or the budget is spent", async () => {
+    const count = lightyearInvestments.PENDING_DUPLICATE_DETAIL_LIMIT + 1;
+    const journals = Array.from({ length: count }, (_, i) => ({
+      id: i + 1, document_number: `LY:OR-${i + 1}`, effective_date: "2026-01-02", registered: false, is_deleted: false, postings: [],
+    }));
+    const get = vi.fn(async (id: number) => {
+      if (id === 1) throw new Error("boom");
+      return { ...journals[id - 1]!, postings: [{ accounts_id: 1120, type: "D" as const, amount: 1 }] };
+    });
+    const api = { journals: { get } } as unknown as Parameters<typeof lightyearInvestments.loadPendingDuplicateJournals>[0];
+    const pending = await lightyearInvestments.loadPendingDuplicateJournals(
+      api, journals, journals.map(j => ({ reference: j.document_number.slice(3), date: j.effective_date })),
+    );
+    expect(get).toHaveBeenCalledTimes(lightyearInvestments.PENDING_DUPLICATE_DETAIL_LIMIT);
+    expect(pending[0]).toMatchObject({ journal_id: 1, postings: null, postings_unavailable: true });
+    expect(pending[1]!.postings).not.toBeNull();
+    expect(pending[count - 1]).toMatchObject({ journal_id: count, postings: null, postings_unavailable: true });
   });
 });
 

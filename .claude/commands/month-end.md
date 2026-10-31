@@ -46,7 +46,7 @@ If the user says they recently changed data in the e-arveldaja web UI or asks fo
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:guided -->
 Capability condition for `guided`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `run_accounting_report`, and none of these is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-Reports read through a short-lived cache (a few minutes): if the user just changed data in the e-arveldaja web UI, say the figures may lag those edits briefly.
+If the user says they recently changed data in the e-arveldaja web UI or asks for fresh numbers, pass `fresh: true` on the first `run_accounting_report` call (it clears this company's cached data first); the later calls need no refresh.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:guided -->
 
 ## Step 1: Run the checklist
@@ -72,6 +72,8 @@ Run this before offering any purchase-invoice action. Call `detect_duplicate_pur
 - `date_to`: last day of the month
 
 Report `exact_duplicates` (same supplier + invoice number) and `suspicious_same_amount_date` (same supplier + amount + date with different numbers).
+
+This dated scan filters by invoice date, so it misses an older invoice entered again with a journal date in this month. Before offering to confirm any purchase-invoice draft, also call `detect_duplicate_purchase_invoice` with that draft's `clients_id` and `invoice_number` and NO dates: any `candidate_invoice_number_matches` item whose `id` differs from the draft's own id is an exact duplicate of it (a booked copy or another draft), and `candidate_invalidated_matches` shows an earlier voided attempt.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->
 
 ## Step 3: Flag blocking issues
@@ -94,7 +96,7 @@ Inline actions per blocker type:
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_START:standard -->
 Capability condition for `standard`: inspect the connected MCP server's advertised tool list before this section. Run this section only when every named tool is advertised: `month_end_close_checklist`. Otherwise skip this section and continue with the surrounding workflow. Never call a missing tool to probe capability.
 
-- Purchase invoices: a draft listed in `exact_duplicates` / `suspicious_same_amount_date`, or one a document workflow left held, is NOT confirmed here — route it back to the **Book Invoice** workflow (or offer `delete_purchase_invoice` if the user confirms it is a duplicate). For any other draft, show supplier, invoice number, net/VAT/gross, whether a source document is attached (`get_purchase_invoice`) and the Step 2 result, then offer `confirm_purchase_invoice` for that one invoice.
+- Purchase invoices: call `get_purchase_invoice` for the draft and run the Step 2 undated supplier + invoice-number lookup for it. A draft listed in `exact_duplicates` / `suspicious_same_amount_date`, one whose undated lookup returns any other invoice id, or one a document workflow left held, is NOT confirmed here — route it back to the **Book Invoice** workflow (or offer `delete_purchase_invoice` if the user confirms it is a duplicate). For any other draft, show supplier, invoice number, net/VAT/gross, whether a source document is attached and both Step 2 results, then offer `confirm_purchase_invoice` for that one invoice.
 - Journals: call `get_journal`, show its number and postings (account, debit/credit, amount), then offer `confirm_journal` for that one journal.
 - Transactions: prefer the **Reconcile Bank** workflow for unmatched rows. A row whose distribution goes to another own bank account is an inter-account transfer: use `reconcile_inter_account_transfers`, never `confirm_transaction`. For other single rows with a known distribution, offer `confirm_transaction` with `block_on_duplicate: true`.
 <!-- E_ARVELDAJA_CAPABILITY_CONDITION_END:standard -->

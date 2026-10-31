@@ -2199,6 +2199,20 @@ describe("create_owner_expense_reimbursement", () => {
     expect(metadata).not.toContain("restricted categories ask for confirmation");
   });
 
+  it("reports the created journal as an unconfirmed draft, not as booked", async () => {
+    for (const vatRegistered of [false, true]) {
+      setup(vatRegistered);
+      const data = parseResult(await tools.get("create_owner_expense_reimbursement")!({
+        owner_client_id: 1, effective_date: "2026-06-01", description: "Taxi",
+        net_amount: 100, vat_rate: 0, expense_account: 5000,
+      }));
+      const id = ((data.journal_entry as Record<string, unknown>).api_response as { created_object_id: number }).created_object_id;
+      expect(data.note).toContain(`Draft journal ${id} created, not yet confirmed`);
+      expect(data.note).toContain("confirm_journal");
+      expect(data.note).not.toContain("Expense booked");
+    }
+  });
+
   it("rejects a non-positive net_amount instead of booking an empty/reversed journal", async () => {
     setup(false);
     const cb = tools.get("create_owner_expense_reimbursement")!;

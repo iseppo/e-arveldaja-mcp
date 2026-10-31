@@ -311,7 +311,7 @@ describe("runAccountingInboxDryRunPipeline", () => {
         skippedAlreadyHandled: [
           { transaction_id: 31, amount: 100, date: "2026-03-02", source_account: "LHV", existing_journal_id: 901, reason: "Already journalized from the other account side",
             mirror_proposal: { counterpart_transaction_id: 30, journal_id: 901, evidence: ["counterparty_iban_is_source_account"] },
-            next_action: { tool: "delete_transaction", args: { id: 31 }, approval_required: true } },
+            next_action: { tool: "reconcile_bank_transactions", args: { mode: "inter_account_dry_run", delete_proposed_mirrors: true }, approval_required: false } },
           { transaction_id: 33, amount: 50, date: "2026-03-03", source_account: "LHV", existing_journal_id: 902, reason: "Already journalized" },
         ],
         ambiguousRefless: [
@@ -340,6 +340,13 @@ describe("runAccountingInboxDryRunPipeline", () => {
     const mirror = reviews[3]!;
     expect(mirror.summary).toContain("mirror of confirmed transaction 30");
     expect(mirror.recommendation).toContain("only after the owner explicitly approves");
+    // Mirror cleanup is plan-gated through reconcile_bank_transactions on every
+    // profile (guided included), never a profile change.
+    expect(mirror.recommendation).toContain("reconcile_bank_transactions mode='inter_account_dry_run' with delete_proposed_mirrors: true");
+    expect(mirror.recommendation).toContain("mode='execute_inter_account' with the returned plan_handle and the same arguments");
+    expect(mirror.recommendation).not.toContain("standard/full");
+    expect(mirror.recommendation).not.toContain("never deletes");
+    expect(mirror.recommendation).not.toContain("delete_transaction");
     // An already-handled row without a mirror proposal is never offered for deletion.
     expect(reviews.some(item => item.summary.includes("33"))).toBe(false);
     expect(new Set(reviews.map(item => item.id)).size).toBe(5);

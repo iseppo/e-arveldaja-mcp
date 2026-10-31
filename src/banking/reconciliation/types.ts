@@ -279,7 +279,13 @@ export interface SkippedAlreadyHandledRow {
   /** Report-only: positive evidence that this PROJECT row mirrors the
    * journal's confirmed counterpart. Never deleted automatically. */
   mirror_proposal?: { counterpart_transaction_id: number; journal_id: number; evidence: string[] };
-  next_action?: { tool: "delete_transaction"; args: { id: number }; approval_required: true };
+  /** A fresh dry run that re-proves the mirror and binds its deletion into a
+   * reviewable plan; never a bare delete_transaction on stale evidence. */
+  next_action?: {
+    tool: "reconcile_bank_transactions";
+    args: { mode: "inter_account_dry_run"; max_date_gap?: number; target_accounts_dimensions_id?: number; delete_proposed_mirrors: true };
+    approval_required: false;
+  };
   /** Execute only: the plan's opt-in proposed-mirror deletion completed. */
   mirror_deleted?: boolean;
 }

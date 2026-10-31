@@ -9,9 +9,13 @@ import { withSignedCamtMarker } from "../__fixtures__/camt-marker.js";
 import { logAudit } from "../audit-log.js";
 import {
   BANK_CLASSIFICATION_PLAN_DOMAIN,
+  CLASSIFICATION_REVIEW_CHUNK_SIZE,
   createClassificationOperations,
+  type ClassificationGroupReviewProjection,
 } from "./classification-operations.js";
-import { wrapUntrustedOcr } from "../mcp-json.js";
+import { createExecutionPlanPageHandler } from "../plan-tools.js";
+import { desandboxAllStrings } from "../external-text-renderer.js";
+import { parseMcpResponse, wrapUntrustedOcr } from "../mcp-json.js";
 import { HttpError } from "../http-client.js";
 import { renderApplyClassificationsCompact, renderClassificationAnalysisCompact } from "./classification-presenter.js";
 import {
@@ -448,6 +452,67 @@ describe("classification operations — P0-2 plan binding", () => {
     if (!outcome.ok) return;
     expect(outcome.value.planHandle).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(outcome.value.results[0]!.status).toBe("dry_run_preview");
+  });
+
+  it("the stored plan exposes each group's per-transaction effects for paged approval review", async () => {
+    const { operations, ctx } = makeSaasOperations();
+    const handle = await dryRunHandle(operations, [saasGroup()]);
+    const plan = ctx.planStore.inspect(handle);
+    // One reviewable command per group, carrying the effects the dry run computed
+    // (supplier, invoice, accounts/VAT, amounts) — not just a group count.
+    expect(plan.commands).toEqual([expect.objectContaining({
+      id: "bank-classification-group-1-part-1",
+      category: "bank_classification_apply",
+      reviewProjection: expect.objectContaining({
+        group: 1, part: 1, parts: 1, group_transactions: 1,
+        category: "saas_subscriptions",
+        apply_mode: "purchase_invoice",
+        transactions: [expect.objectContaining({
+          id: 42, status: "PROJECT", amount: 25, currency: "EUR", date: "2026-03-22", clients_id: 7,
+          booking: expect.objectContaining({
+            supplier_client_id: 7, invoice_number: "AUTO-TX-42", purchase_account_id: 5230,
+            liability_account_id: 2310, gross_amount: 25,
+          }),
+        })],
+      }),
+    })]);
+  });
+
+  it("a 45-transaction group pages to completion through the standard and guided page handlers", async () => {
+    const txs = Array.from({ length: 45 }, (_, i) => withSignedCamtMarker({ ...SAAS_TX_UNSIGNED, id: 1000 + i, amount: 25 + i, description: `OpenAI subscription ${i}` }, "DBIT"));
+    const { operations, ctx } = makeOperations({
+      transactionRows: txs,
+      transactionDetails: Object.fromEntries(txs.map(tx => [tx.id, tx])),
+      clientRows: [SAAS_CLIENT],
+      purchaseArticles: SAAS_ARTICLES,
+      accounts: SAAS_ACCOUNTS,
+      purchaseInvoiceRows: SAAS_HISTORY_ROWS,
+      purchaseInvoiceDetails: SAAS_HISTORY_DETAILS,
+    });
+    const groups = [saasGroup({ transactions: txs, total_amount: txs.reduce((sum, tx) => sum + tx.amount, 0) })];
+    const handle = await dryRunHandle(operations, groups);
+    const secret = new Uint8Array(32).fill(7);
+    for (const profile of ["standard", "guided"] as const) {
+      const handler = createExecutionPlanPageHandler(ctx, { cursorSecret: secret, profile });
+      const projections: ClassificationGroupReviewProjection[] = [];
+      let cursor: string | undefined;
+      do {
+        const result = await handler({ plan_handle: handle, section: "commands", ...(profile === "guided" ? { detail: "full" as const } : {}), ...(cursor ? { cursor } : {}) });
+        expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+        const page = desandboxAllStrings(parseMcpResponse((result.content[0] as { text: string }).text)) as { commands: Array<{ review_data: string }>; next_cursor: string | null };
+        projections.push(...page.commands.map(command => JSON.parse(command.review_data) as ClassificationGroupReviewProjection));
+        cursor = page.next_cursor ?? undefined;
+      } while (cursor);
+      expect(projections.map(p => [p.group, p.part, p.parts, p.group_transactions])).toEqual(
+        [1, 2, 3, 4, 5].map(part => [1, part, 5, 45]),
+      );
+      expect(projections.every(p => p.transactions.length <= CLASSIFICATION_REVIEW_CHUNK_SIZE)).toBe(true);
+      const reviewed = projections.flatMap(p => p.transactions);
+      expect(reviewed.map(tx => tx.id)).toEqual(txs.map(tx => tx.id));
+      expect(reviewed.every(tx => tx.booking !== null && typeof tx.booking === "object")).toBe(true);
+    }
+    // Reading every part neither consumes the handle nor weakens execute.
+    expect(ctx.planStore.inspect(handle).commands).toHaveLength(5);
   });
 
   it("execute_apply books using the REAL dry-run plan handle (happy path)", async () => {
@@ -1377,7 +1442,7 @@ describe("classification operations — ledger context (F6)", () => {
     it("proposes the account and dimension with its evidence and books it after one reviewed plan", async () => {
       const history = kassaHistory([[1010, 391], [1010, 391]]);
       const rows = payments();
-      const { api, operations } = ledgerOperations({
+      const { api, operations, ctx } = ledgerOperations({
         rows: [...rows, ...history.transactions], journals: history.journals, accounts: KASSA_ACCOUNTS, allowWrites: true,
       });
       api.transactions.update.mockImplementation(async (id: number, data: Record<string, unknown>) => {
@@ -1416,6 +1481,12 @@ describe("classification operations — ledger context (F6)", () => {
       ]);
       expect(api.transactions.update).not.toHaveBeenCalled();
       expect(api.transactions.confirm).not.toHaveBeenCalled();
+      // The paged plan carries the same account, dimension and client transition.
+      const reviewed = ctx.planStore.inspect(dry.value.planHandle!).commands[0]!.reviewProjection as unknown as ClassificationGroupReviewProjection;
+      expect(reviewed.transactions.map(tx => [tx.id, tx.history_distribution])).toEqual([
+        [61, expect.objectContaining({ account_id: 1010, dimension_id: 391, amount: 19, clients_id: 77, set_clients_id: false })],
+        [62, expect.objectContaining({ account_id: 1010, dimension_id: 391, amount: 25, clients_id: 77, set_clients_id: true })],
+      ]);
 
       // Without the reviewed plan nothing is written.
       const unplanned = await operations.applyClassifications({ classificationsJson, execute: true });

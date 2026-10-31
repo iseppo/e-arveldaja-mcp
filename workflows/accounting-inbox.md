@@ -62,6 +62,7 @@ A receipt follow-up saying "journal(s) N already reference its invoice number" i
 
 If an item under `autopilot.needs_accountant_review` includes:
 - `recommendation`: present that first as the default compliant handling; a recommendation that deletes or invalidates a row is carried out only after the owner explicitly approves that row
+- a proposed mirror row (a PROJECT transaction already journalized from the other own account): use the **Reconcile Bank** workflow — a fresh `reconcile_bank_transactions` `mode: "inter_account_dry_run"` with `delete_proposed_mirrors: true`, explicit owner approval of the planned deletion, then the execute call with the returned `plan_handle` and unchanged arguments. This works on every profile
 - `compliance_basis`: summarize it briefly in plain language
 - `follow_up_questions`: ask only those questions that the payload itself did not already answer
 - `resolver_input`: pass that object as `review_item_json` to `continue_accounting_workflow` with `action: "resolve_review"` before inventing your own follow-up plan
@@ -73,9 +74,10 @@ If `autopilot.next_question` is present, use it as the first follow-up question 
 
 ### Step 4: Continue with the recommended dry-run steps
 
-The autopilot already ran the safe default dry-run steps.
-- do not repeat them unless the user asks
-- continue from the next unresolved item
+The autopilot already ran the safe default dry-run steps, but those inbox previews mint no execution handle (`plan_handle`), so they cannot be executed or approved as they are.
+- do not repeat a preview only to re-read it; continue from the next unresolved item
+- to carry out a step, run its owning tool's own preview (the call that returns the `plan_handle`) unless that handle was already supplied: follow `workflow.recommended_next_action` on standard/full and `workflow.next_action` on guided
+- show that concrete preview's plan, and pass its `plan_handle` to the execute call only after the user approves that plan
 - use more specific workflows only for focused follow-up
 - do not run any mutating mode (`create`, `execute`, `create_and_confirm`, …) without explicit approval
 

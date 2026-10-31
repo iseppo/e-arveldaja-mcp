@@ -37,7 +37,7 @@ Treat the tool response as the source of truth:
 
 ### Owner-paid expense receipts
 
-A `receipt_review` item classified `owner_paid_expense_reimbursement` is booked by the server as one owner-payable journal. It needs these answers under `review_item_json.item.owner_expense`:
+A `receipt_review` item classified `owner_paid_expense_reimbursement` is booked by the server as one owner-payable DRAFT journal; registration is a separate step. It needs these answers under `review_item_json.item.owner_expense`:
 
 - required: `owner_client_id` (the owner's client id), `effective_date` (YYYY-MM-DD), `description`, `net_amount` (EUR, without VAT), `vat_rate` (decimal fraction, e.g. 0.24; 0 when there is no VAT), `expense_account`, `payable_account` (the account holding the debt to the owner; the server default is 2110, but it is never assumed here — confirm it or name the company's account; an account with per-person dimensions such as 1360 cannot be booked this way)
 - `question_answers`: one decision per review question, keyed by the `question_id` that `missing_answers` gives for it: `true`, `false`, or `{ "answer": true|false, "note": "..." }`. The `note` is kept as context only and is never read as the decision. A plain text answer is not accepted and leaves the question open, so turn the user's reply into `true` or `false`. What an answer does is fixed by the server for each question:
@@ -52,4 +52,11 @@ Steps:
 
 1. Call `action: "prepare_action"`. With `status="needs_answers"`, ask only the `unresolved_questions`; `missing_answers` names the `owner_expense` field for each answer (`question_answers.<question_id>` for a review question). Add the answers to `item.owner_expense` and call `prepare_action` again with the updated item.
 2. With `status="ready_for_approval"`, show `proposed_action.booking_preview` (date, amounts, VAT split, accounts, postings) and ask for explicit approval.
-3. After approval, call `continue_accounting_workflow` with `action: "execute_review_action"`, the same `review_item_json`, and the returned `plan_handle`. A `plan_drift` error means the item or the live books changed: prepare again. A retry of an already-booked document-numbered receipt returns the existing journal instead of booking twice.
+3. After approval, call `continue_accounting_workflow` with `action: "execute_review_action"`, the same `review_item_json`, and the returned `plan_handle`. This creates the journal as an unconfirmed draft: until it is registered, neither the expense nor the owner debt is in the ledger or the reports, so do not call the expense booked yet. A `plan_drift` error means the item or the live books changed: prepare again. A retry of an already-booked document-numbered receipt returns the existing journal (`booking_status: "duplicate"`) instead of booking twice.
+4. Take the journal id from `journal_entry.api_response.created_object_id` and read the journal back.
+<!-- E_ARVELDAJA_FEATURE_START:standard -->
+   Call `get_journal` with that id and show its number, `registered` status and postings. If it is not registered, ask for explicit approval to register it, then call `confirm_journal` for that one journal.
+<!-- E_ARVELDAJA_FEATURE_END:standard -->
+<!-- E_ARVELDAJA_FEATURE_START:guided -->
+   Call `inspect_accounting_record` with `entity: "journals"` and that id, and show its `registered` status. No tool on this profile registers a journal: when it is not registered, report the draft journal id and status, and tell the user the `standard` or `full` profile (`EARVELDAJA_PROFILE`) confirms it inline; the web UI is the fallback.
+<!-- E_ARVELDAJA_FEATURE_END:guided -->

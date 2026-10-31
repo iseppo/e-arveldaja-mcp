@@ -2005,19 +2005,111 @@ function resolveExistingRefs(
   return result;
 }
 
+/** Max journal detail GETs spent on loading earlier drafts' postings. */
+export const PENDING_DUPLICATE_DETAIL_LIMIT = 50;
+
 /**
- * Ids of existing, still-unregistered journals for the given refs. A rerun
- * skips these refs as duplicates, so without this the earlier drafts would
- * stay invisible and the broker balance would keep disagreeing.
+ * An earlier, still-unregistered journal that claims a statement reference
+ * this run skipped as a duplicate. This run did not create or review it, so it
+ * is reported with its own date and postings for comparison with the
+ * statement row — never merged into the confirm list.
  */
-export function findUnregisteredJournalIdsByRef(
+export interface LightyearPendingDuplicateJournal {
+  journal_id: number;
+  /** Statement reference the journal claims (sandboxed CSV text). */
+  reference: string;
+  effective_date: string;
+  /** Sandboxed: may carry CSV-origin text. */
+  document_number: string | null;
+  /** Sandboxed: may carry CSV-origin text. */
+  title: string | null;
+  postings: Array<{
+    accounts_id: number;
+    accounts_dimensions_id: number | null;
+    type: "D" | "C" | null;
+    amount: number;
+    base_amount: number | null;
+    cl_currencies_id: string | null;
+  }> | null;
+  /** Postings could not be loaded (detail budget or read failure); read the journal with get_journal. */
+  postings_unavailable?: true;
+  /**
+   * The journal's current detail no longer matches the list entry that made it
+   * a pending draft for `reference` (it was registered, deleted, or its
+   * document number no longer claims the reference). The entry shows the
+   * current detail and `postings: null`; it is held — never offered for
+   * approval as a matching draft.
+   */
+  snapshot_mismatch?: LightyearPendingDuplicateMismatch;
+}
+
+export type LightyearPendingDuplicateMismatch = "registered_since_listing" | "deleted_since_listing" | "reference_changed";
+
+/**
+ * Earlier unregistered drafts for the skipped duplicate refs, with their
+ * postings (fetched per journal when the list omitted them, bounded by
+ * PENDING_DUPLICATE_DETAIL_LIMIT). A failed or over-budget read leaves
+ * `postings: null` with `postings_unavailable` rather than failing the run.
+ */
+export async function loadPendingDuplicateJournals(
+  api: ApiContext,
   allJournals: readonly Journal[],
   lookups: LightyearRefLookup[],
-): number[] {
-  const ids = matchJournalsByRef(allJournals, lookups)
-    .filter(match => !match.journal.registered && typeof match.journal.id === "number")
-    .map(match => match.journal.id as number);
-  return [...new Set(ids)];
+): Promise<LightyearPendingDuplicateJournal[]> {
+  const seen = new Set<number>();
+  const matches: Array<{ reference: string; journal: Journal }> = [];
+  for (const match of matchJournalsByRef(allJournals, lookups)) {
+    const id = match.journal.id;
+    if (match.journal.registered || typeof id !== "number" || seen.has(id)) continue;
+    seen.add(id);
+    matches.push(match);
+  }
+  let budget = PENDING_DUPLICATE_DETAIL_LIMIT;
+  const out: LightyearPendingDuplicateJournal[] = [];
+  for (const { reference, journal } of matches) {
+    // Every field of an entry comes from ONE snapshot: the list entry when it
+    // already carries postings, otherwise the journal's current detail. A
+    // detail that no longer is an unregistered draft claiming `reference` is
+    // held rather than shown with the list entry's identity.
+    let snapshot: Journal = journal;
+    let detailed: Journal | undefined = journal.postings && journal.postings.length > 0 ? journal : undefined;
+    let mismatch: LightyearPendingDuplicateMismatch | undefined;
+    if (detailed === undefined && budget > 0) {
+      budget--;
+      try {
+        detailed = await api.journals.get(journal.id as number);
+      } catch {
+        detailed = undefined;
+      }
+      if (detailed !== undefined) {
+        snapshot = detailed;
+        if (detailed.is_deleted) mismatch = "deleted_since_listing";
+        else if (detailed.registered) mismatch = "registered_since_listing";
+        else if (!matchJournalsByRef([detailed], lookups).some(m => m.reference === reference)) mismatch = "reference_changed";
+      }
+    }
+    const postings = mismatch !== undefined ? undefined : detailed?.postings?.filter(p => !p.is_deleted).map(p => ({
+      accounts_id: p.accounts_id,
+      accounts_dimensions_id: p.accounts_dimensions_id ?? null,
+      type: p.type ?? null,
+      amount: p.amount,
+      base_amount: p.base_amount ?? null,
+      cl_currencies_id: p.cl_currencies_id ?? null,
+    }));
+    const hasPostings = postings !== undefined && postings.length > 0;
+    out.push({
+      journal_id: journal.id as number,
+      reference: wrapUntrustedOcr(reference) ?? reference,
+      effective_date: snapshot.effective_date,
+      document_number: snapshot.document_number ? wrapUntrustedOcr(String(snapshot.document_number)) ?? null : null,
+      title: snapshot.title ? wrapUntrustedOcr(snapshot.title) ?? null : null,
+      postings: hasPostings ? postings : null,
+      ...(mismatch !== undefined
+        ? { snapshot_mismatch: mismatch }
+        : hasPostings ? {} : { postings_unavailable: true as const }),
+    });
+  }
+  return out;
 }
 
 function matchJournalsByRef(
@@ -3238,39 +3330,66 @@ function distributionsReviewCommands(projection: DistributionsProjection): Light
  * Booked Lightyear journals are drafts: balances and reports count registered
  * journals only, so until they are confirmed the broker account silently
  * disagrees with the statement. Name the created ids and the confirm call.
+ *
+ * Earlier drafts for rows this run skipped as duplicates were neither created
+ * nor reviewed here, so they are reported separately (with postings) and kept
+ * out of `unconfirmed_journal_ids` and `next_actions`: confirming one needs its
+ * own comparison with the statement row and explicit approval.
  */
+export interface LightyearDraftConfirmationFields {
+  unconfirmed_journal_ids?: number[];
+  pending_duplicate_journal_ids?: number[];
+  pending_duplicate_journals?: LightyearPendingDuplicateJournal[];
+  note: string;
+  next_actions?: Array<{
+    tool: "batch_confirm_journals";
+    args: { ids: number[]; reason: string };
+    why: string;
+  }>;
+}
+
 export function draftConfirmationFields(
   results: Array<Record<string, unknown>>,
-  opts: { reason: string; pendingDuplicateIds?: number[] },
-): Record<string, unknown> {
+  opts: { reason: string; pendingDuplicates?: LightyearPendingDuplicateJournal[] },
+): LightyearDraftConfirmationFields {
   const createdIds = results
     .filter(r => r.status === "created" && typeof r.journal_id === "number")
     .map(r => r.journal_id as number);
-  const pendingIds = (opts.pendingDuplicateIds ?? []).filter(id => !createdIds.includes(id));
-  const ids = [...createdIds, ...pendingIds];
-  if (ids.length === 0) return { note: "No new journal entries were created and no earlier Lightyear drafts are pending." };
+  const pending = (opts.pendingDuplicates ?? []).filter(j => !createdIds.includes(j.journal_id));
+  const pendingIds = pending.map(j => j.journal_id);
+  if (createdIds.length === 0 && pendingIds.length === 0) {
+    return { note: "No new journal entries were created and no earlier Lightyear drafts are pending." };
+  }
   const parts: string[] = [];
   if (createdIds.length > 0) {
-    parts.push(`${createdIds.length} journal entr${createdIds.length === 1 ? "y was" : "ies were"} created as DRAFTS.`);
+    parts.push(`${createdIds.length} journal entr${createdIds.length === 1 ? "y was" : "ies were"} created as DRAFTS. Balances and reports exclude drafts until they are registered — offer the user to confirm them now.`);
   } else {
     parts.push("No new journal entries were created.");
   }
   if (pendingIds.length > 0) {
-    parts.push(`${pendingIds.length} earlier journal entr${pendingIds.length === 1 ? "y" : "ies"} for rows skipped as duplicates ${pendingIds.length === 1 ? "is" : "are"} still unregistered drafts.`);
+    const one = pendingIds.length === 1;
+    parts.push(`${pendingIds.length} earlier journal entr${one ? "y" : "ies"} for rows skipped as duplicates ${one ? "was" : "were"} listed as unregistered draft${one ? "" : "s"} (pending_duplicate_journals). This run did not create or review ${one ? "it" : "them"}, so ${one ? "it is" : "they are"} not in the confirm list: compare each draft's date, accounts, dimensions and amounts with its statement row, and confirm only after the user approves that draft.`);
+  }
+  const held = pending.filter(j => j.snapshot_mismatch !== undefined).length;
+  if (held > 0) {
+    parts.push(`${held} of them changed after the journal list was read (snapshot_mismatch: registered, deleted, or no longer claiming the statement reference) and ${held === 1 ? "is" : "are"} held: do not ask approval for ${held === 1 ? "it" : "them"} as a matching draft — re-run the import after checking ${held === 1 ? "it" : "them"} with get_journal.`);
   }
   // batch_confirm_journals takes at most 500 ids per call.
   const batches: number[][] = [];
-  for (let i = 0; i < ids.length; i += 500) batches.push(ids.slice(i, i + 500));
+  for (let i = 0; i < createdIds.length; i += 500) batches.push(createdIds.slice(i, i + 500));
   return {
-    unconfirmed_journal_ids: ids,
-    ...(pendingIds.length > 0 ? { pending_duplicate_journal_ids: pendingIds } : {}),
-    note:
-      `${parts.join(" ")} Balances and reports exclude drafts until they are registered — offer the user to confirm them now.`,
-    next_actions: batches.map(batch => ({
-      tool: "batch_confirm_journals",
-      args: { ids: batch, reason: opts.reason },
-      why: "Register the Lightyear journals so the broker and investment balances include them.",
-    })),
+    ...(createdIds.length > 0 ? { unconfirmed_journal_ids: createdIds } : {}),
+    ...(pendingIds.length > 0 ? { pending_duplicate_journal_ids: pendingIds, pending_duplicate_journals: pending } : {}),
+    note: parts.join(" "),
+    ...(batches.length > 0
+      ? {
+          next_actions: batches.map(batch => ({
+            tool: "batch_confirm_journals" as const,
+            args: { ids: batch, reason: opts.reason },
+            why: "Register the Lightyear journals so the broker and investment balances include them.",
+          })),
+        }
+      : {}),
   };
 }
 
@@ -3280,7 +3399,7 @@ interface TradesRenderInput {
   planHandle?: string;
   executionReport?: PlanExecutionReport;
   createdByIndex?: LightyearCreatedByIndex;
-  pendingDuplicateIds?: number[];
+  pendingDuplicates?: LightyearPendingDuplicateJournal[];
 }
 
 function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> {
@@ -3327,7 +3446,7 @@ function renderTradesPayload(input: TradesRenderInput): Record<string, unknown> 
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     ...(dryRun
       ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
-      : draftConfirmationFields(results, { reason: "Confirm Lightyear trade journals booked by book_lightyear_trades.", pendingDuplicateIds: input.pendingDuplicateIds })),
+      : draftConfirmationFields(results, { reason: "Confirm Lightyear trade journals booked by book_lightyear_trades.", pendingDuplicates: input.pendingDuplicates })),
   };
 }
 
@@ -3337,7 +3456,7 @@ interface DistributionsRenderInput {
   planHandle?: string;
   executionReport?: PlanExecutionReport;
   createdByIndex?: LightyearCreatedByIndex;
-  pendingDuplicateIds?: number[];
+  pendingDuplicates?: LightyearPendingDuplicateJournal[];
 }
 
 function renderDistributionsPayload(input: DistributionsRenderInput): Record<string, unknown> {
@@ -3386,7 +3505,7 @@ function renderDistributionsPayload(input: DistributionsRenderInput): Record<str
     ...(input.executionReport !== undefined ? { execution_report: input.executionReport } : {}),
     ...(dryRun
       ? { note: "Set dry_run=false and pass the plan_handle from this reviewed dry run to create journal entries. The plan handle is not approval — review the plan first." }
-      : draftConfirmationFields(results, { reason: "Confirm Lightyear distribution journals booked by book_lightyear_distributions.", pendingDuplicateIds: input.pendingDuplicateIds })),
+      : draftConfirmationFields(results, { reason: "Confirm Lightyear distribution journals booked by book_lightyear_distributions.", pendingDuplicates: input.pendingDuplicates })),
   };
 }
 
@@ -3896,7 +4015,7 @@ export function registerLightyearTools(
       return {
         content: [{ type: "text", text: toMcpJson(renderTradesPayload({
           mode: "EXECUTED", projection, executionReport, createdByIndex,
-          pendingDuplicateIds: findUnregisteredJournalIdsByRef(guard.journals, projection.duplicates),
+          pendingDuplicates: await loadPendingDuplicateJournals(api, guard.journals, projection.duplicates),
         })) }],
       };
     }
@@ -3973,7 +4092,7 @@ export function registerLightyearTools(
         const reviewed = rows.filter(d => !routed.alreadyBooked(d));
         // Earlier drafts for already-booked rows still count for nothing in
         // balances; name them as the plan-bound execute path does.
-        const pendingIds = findUnregisteredJournalIdsByRef(journals, booked.map(d => ({ reference: d.reference, date: d.date })));
+        const pending = await loadPendingDuplicateJournals(api, journals, booked.map(d => ({ reference: d.reference, date: d.date })));
         const results = reviewed.map(d => sandboxResultRow(distributionManualResult(d, routed.reviewCandidates)));
         return {
           content: [{ type: "text" as const, text: toMcpJson({
@@ -3985,8 +4104,8 @@ export function registerLightyearTools(
             duplicates_skipped: booked.length,
             results,
             ...(outWarnings.length > 0 && { warnings: outWarnings }),
-            ...(pendingIds.length > 0
-              ? draftConfirmationFields(results, { reason: "Confirm Lightyear distribution journals booked by book_lightyear_distributions.", pendingDuplicateIds: pendingIds })
+            ...(pending.length > 0
+              ? draftConfirmationFields(results, { reason: "Confirm Lightyear distribution journals booked by book_lightyear_distributions.", pendingDuplicates: pending })
               : {
                   note: mode === "DRY_RUN"
                     ? "No bookable distributions. Nothing to create."
@@ -4161,7 +4280,7 @@ export function registerLightyearTools(
       return {
         content: [{ type: "text", text: toMcpJson(renderDistributionsPayload({
           mode: "EXECUTED", projection, executionReport, createdByIndex,
-          pendingDuplicateIds: findUnregisteredJournalIdsByRef(guard.journals, projection.duplicates),
+          pendingDuplicates: await loadPendingDuplicateJournals(api, guard.journals, projection.duplicates),
         })) }],
       };
     }

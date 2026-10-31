@@ -1772,8 +1772,17 @@ export async function runInterAccountMatching(
       (mirrorReviewJournalClaims.get(proposal.journal_id) ?? 0);
     if (claimants !== 1) continue;
     row.mirror_proposal = proposal;
-    row.next_action = { tool: "delete_transaction", args: { id: row.transaction_id }, approval_required: true };
-    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements, then delete it with delete_transaction only after the owner explicitly approves; reconcile never deletes it automatically.`;
+    row.next_action = {
+      tool: "reconcile_bank_transactions",
+      args: {
+        mode: "inter_account_dry_run",
+        ...(input.maxDateGap !== undefined ? { max_date_gap: input.maxDateGap } : {}),
+        ...(target_accounts_dimensions_id !== undefined ? { target_accounts_dimensions_id } : {}),
+        delete_proposed_mirrors: true,
+      },
+      approval_required: false,
+    };
+    row.reason = `Already journalized from the other account side: journal #${proposal.journal_id} books confirmed transaction ${proposal.counterpart_transaction_id}, and this PROJECT row is its likely mirror. Verify against the bank statements; to delete it, re-run the inter-account dry run with delete_proposed_mirrors: true (next_action), review the deletion it puts in the plan, and execute that plan with the same arguments only after the owner explicitly approves; reconcile never deletes it automatically.`;
     if (deleteProposedMirrors) {
       // Opt-in: the reviewed plan carries this deletion; execute re-verifies it.
       mirrorDeleteActions.push({
