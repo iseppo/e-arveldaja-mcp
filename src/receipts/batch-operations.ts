@@ -57,6 +57,7 @@ import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from ".
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
+import { groupByDigest } from "../file-digest-groups.js";
 // These pure guards + rule-target resolvers stay in receipt-inbox.ts (several
 // are exported for pdf-workflow / own-company-identity / unit tests, and the
 // rule-target resolvers are shared with the classification path). Importing them
@@ -899,6 +900,11 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
 
       const bankTransactions = await Promise.all(selectedTransactions.map(tx => this.api.transactions.get(tx.id!)));
 
+      // Byte-identical files: the newest (then lowest path) is processed, the rest are skipped copies.
+      const fileCopies = groupByDigest(snapshot.files.map((entry, index) => ({
+        index, path: entry.relative_path, modifiedAt: entry.file.modified_at, digest: entry.sha256,
+      })));
+
       // One per-file pass. In dry_run / projection mode it is side-effect-free
       // (createAndMaybeMatchPurchaseInvoice returns a preview before any write),
       // so it doubles as the read-only fingerprint pass at execute.
@@ -912,6 +918,20 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         for (let index = 0; index < snapshot.files.length; index++) {
           const fileSnapshot = snapshot.files[index]!;
           await reportProgress(index, snapshot.files.length);
+          const keptIndex = fileCopies[index]!.duplicate_of;
+          if (keptIndex !== undefined) {
+            // A byte-identical copy: never extracted or booked. Its
+            // classification is filled from the kept file after the loop.
+            const keptPath = snapshot.files[keptIndex]!.relative_path;
+            results.push({
+              file: fileSnapshot.file,
+              classification: "unclassifiable",
+              status: "skipped_duplicate",
+              duplicate_file_of: keptPath,
+              notes: ["Skipped: byte-identical copy of another file in this batch (duplicate_file_of); only that file is processed."],
+            });
+            continue;
+          }
           results.push(await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,
@@ -925,7 +945,10 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             previousResults: results,
           }));
         }
-        return results;
+        return results.map((result, index) => {
+          const keptIndex = fileCopies[index]!.duplicate_of;
+          return keptIndex === undefined ? result : { ...result, classification: results[keptIndex]!.classification };
+        });
       };
 
       const finish = (results: ReceiptBatchFileResult[], dryRun: boolean, planHandles?: ReceiptBatchResult["planHandles"]): OperationOutcome<ReceiptBatchResult> => {

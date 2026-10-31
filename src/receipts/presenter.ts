@@ -168,6 +168,7 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
     ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
     ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
     ...(row.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),
+    ...(row.duplicate_file_of !== undefined ? { duplicate_file_of: row.duplicate_file_of } : {}),
     ...(createdInvoice !== undefined ? { created_invoice: pickKeys(createdInvoice, ["id", "number", "status", "confirmed"]) } : {}),
     ...(row.bank_partial !== undefined ? { bank_partial: row.bank_partial } : {}),
     ...(row.creation_partial !== undefined ? { creation_partial: row.creation_partial } : {}),

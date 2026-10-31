@@ -1162,6 +1162,7 @@ describe("receipt inbox tool status handling", () => {
           possible_duplicate_review: 0,
           referenced_by_journal_review: 0,
           dry_run_preview: 1,
+          duplicate_file_count: 0,
         },
         workflowSummary: "Receipt approval preview",
         sanitizedResults: [{ status: "dry_run_preview" }],

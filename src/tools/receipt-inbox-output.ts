@@ -13,6 +13,9 @@ import type { ReceiptBatchFileResult } from "./receipt-inbox-types.js";
 // instructions embedded in a scanned receipt.
 export function sanitizeReceiptResultForOutput(result: ReceiptBatchFileResult): ReceiptBatchFileResult {
   let next = result;
+  if (next.duplicate_file_of !== undefined) {
+    next = { ...next, duplicate_file_of: wrapUntrustedOcr(next.duplicate_file_of) ?? next.duplicate_file_of };
+  }
 
   if (next.extracted) {
     const { raw_text, description, supplier_name, field_provenance, extraction_notes } = next.extracted;

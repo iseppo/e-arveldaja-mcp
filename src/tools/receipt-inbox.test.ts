@@ -680,6 +680,7 @@ describe("buildReceiptBatchSummary", () => {
       possible_duplicate_review: 1,
       referenced_by_journal_review: 1,
       dry_run_preview: 1,
+      duplicate_file_count: 0,
     });
     expect(buildReceiptBatchWorkflowSummary(summary)).toBe(
       "Receipt dry run would create 1 purchase invoice(s), match 1, skip 1 duplicate(s), leave 3 in review (1 possible duplicate(s) of booked payments) (1 already referenced by a journal), and fail 1.",

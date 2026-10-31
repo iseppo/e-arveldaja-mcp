@@ -24,6 +24,7 @@ import {
   resolveReviewItemPlan,
   sandboxReviewFields,
   scanWorkspaceFiles,
+  type InboxLightyearFilePayload,
 } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
 import * as auditLogModule from "../audit-log.js";
@@ -4812,6 +4813,30 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     expect(files.every(file => file.file_ref === undefined)).toBe(true);
     expect(prepared.user_summary).toContain("Lightyear tools are not enabled in this profile");
     expect(desandboxText(JSON.stringify(payload))).not.toMatch(/(parse|book)_lightyear_|lightyear_portfolio_summary/);
+  });
+
+  it("#3 lists a byte-identical copy once: the copy gets no file_ref and points to the kept file", async () => {
+    const workspace = await lightyearWorkspace();
+    await writeFile(join(workspace, "LightyearCapitalGainsStatement-LY-FIXTURE (1).csv"), LIGHTYEAR_GAINS_CSV);
+    // A statement copy too: each kind keeps its own file.
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), `﻿${LIGHTYEAR_STATEMENT_CSV}`);
+    // The newest file is kept: make the "(1)" copies older.
+    const older = new Date("2026-01-01T00:00:00Z");
+    for (const name of ["LightyearCapitalGainsStatement-LY-FIXTURE (1).csv", "AccountStatement-LY-FIXTURE (1).csv"]) await utimes(join(workspace, name), older, older);
+    const { prepared } = await scan(workspace);
+    const files = prepared.detected_inputs.lightyear_files as InboxLightyearFilePayload[];
+    const byName = new Map(files.map((file, index) => [desandboxText(file.display_name), { file, index }]));
+    const keptGains = byName.get("LightyearCapitalGainsStatement-LY-FIXTURE.csv")!;
+    const copyGains = byName.get("LightyearCapitalGainsStatement-LY-FIXTURE (1).csv")!;
+    expect(copyGains.file).toMatchObject({ coverage: "duplicate", duplicate_of: keptGains.index });
+    expect(copyGains.file.file_ref).toBeUndefined();
+    expect(keptGains.file.stands_in_for).toEqual([copyGains.index]);
+    expect(typeof keptGains.file.file_ref).toBe("string");
+    expect(files.filter(file => file.coverage === "duplicate")).toHaveLength(2);
+    expect(files.filter(file => typeof file.file_ref === "string")).toHaveLength(2);
+    expect(new Set(files.filter(file => file.file_ref !== undefined).map(file => file.kind))).toEqual(new Set(["account_statement", "capital_gains"]));
+    expect(prepared.user_summary).toContain("of which 2 identical copies of another export");
+    expect(prepared).not.toHaveProperty("lightyear_analysis");
   });
 
   it("does not change the steps of an existing CAMT/Wise workspace", async () => {

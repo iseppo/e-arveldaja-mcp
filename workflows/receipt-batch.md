@@ -59,7 +59,7 @@ Review:
 
 Group the preview by status:
 - `result.execution.results` entries with `status="dry_run_preview"`: show extracted supplier, invoice number, amounts, booking suggestion, and bank match. The purchase invoice has NOT been created yet. The document has NOT been uploaded yet. The invoice has NOT been confirmed yet.
-- `result.execution.skipped` entries with `status="skipped_duplicate"`: show the duplicate match and reason
+- `result.execution.skipped` entries with `status="skipped_duplicate"`: show the duplicate match and reason. An entry with `duplicate_file_of` is a byte-identical copy of that file in the same folder (`summary.duplicate_file_count`): it was not read or booked, only the named file is
 - `result.execution.needs_review`: show the file, classification, missing fields, `llm_fallback`, notes, and `review_guidance` when present. A row with `possible_duplicate_journal_ids` is held because the same cash outflow may already be booked by those journals: do not create it in this batch; if it is a separate payment, book that one document through the book-invoice flow (`extract_pdf_invoice`, then `create_purchase_invoice_from_pdf`). A row with `referencing_journal_ids` is held because those journals already carry its invoice number in their document number or title: do not create it; if a journal is this document's booking, attach the document to it (`attach_document` with `entity_type: "journal"`). Start with `review_guidance.recommendation`, summarize `review_guidance.compliance_basis` in plain language, and ask only `review_guidance.follow_up_questions` that are still unresolved.
 - `result.execution.errors`: show the file and exact error
 <!-- E_ARVELDAJA_FEATURE_END:standard -->

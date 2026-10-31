@@ -7,7 +7,7 @@ import type {
   ReceiptBatchSummary,
 } from "./receipt-inbox-types.js";
 
-type ResultWithStatus = Pick<ReceiptBatchFileResult, "status" | "possible_duplicate_journal_ids" | "referencing_journal_ids">;
+type ResultWithStatus = Pick<ReceiptBatchFileResult, "status" | "possible_duplicate_journal_ids" | "referencing_journal_ids" | "duplicate_file_of">;
 type WorkflowReceiptResult = Pick<ReceiptBatchFileResult, "status" | "llm_fallback"> & object;
 
 function countStatus(results: ResultWithStatus[], status: ReceiptBatchStatus): number {
@@ -40,6 +40,7 @@ export function buildReceiptBatchSummary(options: {
       result.status === "needs_review" && (result.referencing_journal_ids?.length ?? 0) > 0
     ).length,
     dry_run_preview: countStatus(options.results, "dry_run_preview"),
+    duplicate_file_count: options.results.filter(result => result.duplicate_file_of !== undefined).length,
   };
 }
 

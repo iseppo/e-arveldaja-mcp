@@ -26,6 +26,7 @@ import type { ReceiptApprovedManifestEntry } from "./types.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
+import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
 
 // The typed operation is exercised DIRECTLY (no mock McpServer): narrow api / fs
 // / OCR ports only. These pin the staged-approval invariants the refactor must
@@ -135,7 +136,8 @@ function primeFilesystem(): void {
       mtime: new Date("2026-03-20T10:00:00.000Z"),
     } as never;
   });
-  vi.mocked(readFile).mockResolvedValue(Buffer.from("receipt pdf") as never);
+  // Distinct bytes per file: byte-identical receipts are skipped as copies (#3).
+  vi.mocked(readFile).mockImplementation(async (path) => Buffer.from(`receipt pdf ${String(path)}`) as never);
   vi.mocked(resolveFilePath).mockImplementation((path) => path);
   vi.mocked(getAllowedRoots).mockReturnValue(["/tmp"]);
   vi.mocked(validateFilePath).mockImplementation(async (path) => path as string);
@@ -303,7 +305,7 @@ describe("actual attachment transport through approved receipt batch plans", () 
     expect(executed.ok).toBe(true); if (!executed.ok) throw new Error("execution failed");
     expect(executed.value.results[0]).toMatchObject({ status: config.bank === false ? "created" : "matched", created_invoice: { id: fake.id, confirmed: true, uploaded_document: true } });
     const put = fake.calls.find(c => c.method === "PUT")!;
-    expect(Buffer.from(put.body.contents, "base64")).toEqual(Buffer.from("receipt pdf"));
+    expect(Buffer.from(put.body.contents, "base64").toString()).toMatch(/^receipt pdf \S*receipt\.pdf$/);
     expect(fake.calls.filter(c => c.method === "GET" && c.path.endsWith("/document_user"))).toHaveLength(1);
     expect(fake.read()).toMatchObject({ base_document_files_id: fake.fileId, net_price: config.isVatRegistered ? config.net : config.gross, vat_price: config.isVatRegistered ? config.vat : 0, gross_price: config.gross, status: "CONFIRMED" });
     if (config.bank === false) expect(fake.api.transactions.confirm).not.toHaveBeenCalled();
@@ -411,6 +413,31 @@ describe("P01 bound supplier identity and public pager", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ relative_path: "first.pdf", supplier_client_id: 7, invoice_number: "INV-ONE", bank_confirmation: { transaction_id: 42, client_transition: null, distribution: { invoice_reference: "receipt:0:future_purchase_invoice", amount: 124 } } });
     expect(rows[1]).toMatchObject({ relative_path: "second.pdf", supplier_client_id: 8, invoice_number: "INV-TWO", bank_confirmation: { transaction_id: 43, client_transition: { from: null, to: 8 }, distribution: { invoice_reference: "receipt:1:future_purchase_invoice", amount: 124 } } });
+  });
+
+  it("#3 processes a byte-identical receipt copy once: the copy is skipped with duplicate_file_of and never booked", async () => {
+    vi.mocked(readdir).mockResolvedValue([{ name: "first.pdf", isFile: () => true }, { name: "first (1).pdf", isFile: () => true }] as never);
+    vi.mocked(readFile).mockResolvedValue(Buffer.from("same receipt pdf") as never);
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({ supplier_name: "Supplier OU", invoice_number: "INV-ONE", invoice_date: "2026-03-20", total_net: 100, total_vat: 24, total_gross: 124, currency: "EUR", raw_text: "ignored", description: "Service" } as never);
+    const { api, spies } = makeApi();
+    const ops = makeOperations(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error(dry.error.code);
+    // Same modified_at: the lowest path ("first (1).pdf" < "first.pdf") is kept.
+    const [kept, copy] = dry.value.results;
+    expect(kept).toMatchObject({ status: "dry_run_preview", file: { name: "first (1).pdf" } });
+    expect(kept!.duplicate_file_of).toBeUndefined();
+    expect(copy).toMatchObject({ status: "skipped_duplicate", file: { name: "first.pdf" }, duplicate_file_of: "first (1).pdf", classification: kept!.classification });
+    expect(copy!.extracted).toBeUndefined();
+    expect(vi.mocked(parseDocument)).toHaveBeenCalledTimes(1);
+    expect(dry.value.summary).toMatchObject({ skipped_duplicate: 1, duplicate_file_count: 1, dry_run_preview: 1 });
+    // The wrapped kept path is what leaves the server.
+    expect(sanitizeReceiptResultForOutput(copy!).duplicate_file_of).toMatch(/^<<UNTRUSTED_OCR_START:[0-9a-f]{32}>>\nfirst \(1\)\.pdf\n/);
+
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    if (!executed.ok) throw new Error(executed.error.code);
+    expect(spies.createAndSetTotals).toHaveBeenCalledTimes(1);
+    expect(executed.value.results[1]).toMatchObject({ status: "skipped_duplicate", duplicate_file_of: "first (1).pdf" });
   });
 
   it.each(["invoice_vat_no", "cl_code_country"] as const)("exposes and binds new supplier %s without inventing a future ID", async field => {

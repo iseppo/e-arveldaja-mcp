@@ -167,6 +167,12 @@ export interface ReceiptBatchFileResult {
     matched_invoice_id?: number;
     ambiguity_reason?: string;
   };
+  /**
+   * Set on a byte-identical copy (same sha256) of another file in this batch:
+   * the kept file's relative path (wrapped at output). The copy is
+   * `skipped_duplicate`, never extracted or booked.
+   */
+  duplicate_file_of?: string;
   notes: string[];
   error?: string;
   review_guidance?: ReviewGuidance;
@@ -188,6 +194,8 @@ export interface ReceiptBatchSummary {
   /** needs_review rows held because a live journal already references the invoice number. */
   referenced_by_journal_review: number;
   dry_run_preview: number;
+  /** skipped_duplicate rows that are byte-identical copies of another file in the batch. */
+  duplicate_file_count: number;
 }
 export interface ReceiptBankPartial {
   transaction_id: number;

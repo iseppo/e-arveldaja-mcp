@@ -11,7 +11,7 @@ import { getToolExposureConfig, type ToolExposureConfig } from "../config.js";
 import { currentToolProfile, isGuidedProfile, isProfileUnavailableBlocker, isToolVisibleForProfile, projectActionForCurrentProfile, remapGuidedBankFacade } from "../tool-profile.js";
 import { parseCSV } from "../csv.js";
 import { receiptInboxReviewItem } from "../receipts/presenter.js";
-import { EXPECTED_STATEMENT_HEADERS, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
+import { EXPECTED_STATEMENT_HEADERS, LIGHTYEAR_MAX_CSV_SIZE, REQUIRED_GAINS_HEADERS } from "./lightyear-investments.js";
 import { uniqueActivePostingDimensions } from "../wise/preflight.js";
 import { arrayAt, isRecord, numberAt, recordAt, stringArrayAt, stringAt } from "../record-utils.js";
 import { batch, mutate, readOnly } from "../annotations.js";
@@ -49,6 +49,7 @@ import { captureFileInputSnapshot, type FileInputSnapshot } from "../file-input-
 import { CAMT_MAX_FILE_SIZE, normalizeAccountIdentity } from "../camt/executor.js";
 import { camtDateDay, countCamtStatements, preflightCamt053Xml } from "../camt/parser.js";
 import { groupCamtStatementFiles, type CamtStatementFingerprint } from "../camt/statement-duplicates.js";
+import { groupByDigest, type DigestedFile } from "../file-digest-groups.js";
 import {
   buildBankDimensionCandidates,
   normalizeIban,
@@ -128,6 +129,8 @@ interface CamtOverlapSummary {
 
 /** Bounds the inbox CAMT hash/parse pass (actual bytes read). */
 const CAMT_ANALYSIS_BUDGET = Object.freeze({ maxFiles: 40, maxBytes: 32 * 1024 * 1024 });
+/** Same bound for hashing detected Lightyear CSVs; over it, no copy is recognised. */
+const LIGHTYEAR_ANALYSIS_BUDGET = CAMT_ANALYSIS_BUDGET;
 
 interface ReceiptFolderCandidate {
   path: string;
@@ -179,6 +182,8 @@ interface PreparedInboxData {
   camtDigestBindings: Map<string, string>;
   wiseFiles: InboxFileCandidate[];
   lightyearFiles: LightyearFileCandidate[];
+  /** True when the Lightyear files were too many/large to hash: no copy is recognised. */
+  lightyearAnalysisBudgetExceeded: boolean;
   receiptFolders: ReceiptFolderCandidate[];
   defaults: ReturnType<typeof buildBankDefaults>;
   steps: RecommendedStep[];
@@ -533,6 +538,71 @@ interface LightyearFileCandidate {
   path: string;
   modified_at: string;
   size_bytes: number;
+  /** Set on a byte-identical copy (same kind) of lightyear_files[duplicate_of]. */
+  duplicate_of?: number;
+  /** Set on a kept file: the lightyear_files indices of its byte-identical copies. */
+  stands_in_for?: number[];
+}
+
+/** A detected Lightyear export as accounting_inbox reports it under detected_inputs.lightyear_files. */
+export type InboxLightyearFilePayload = {
+  kind: LightyearFileCandidate["kind"];
+  display_path: string;
+  display_name: string;
+  /** Absent on a copy (`coverage: "duplicate"`) and when the Lightyear tools are not visible. */
+  file_ref?: string;
+  coverage?: "duplicate";
+  duplicate_of?: number;
+  stands_in_for?: number[];
+  modified_at: string;
+  size_bytes: number;
+};
+
+/**
+ * Hash the detected Lightyear CSVs (the Lightyear tools' own bounded reader)
+ * and mark byte-identical copies of the same kind, so only the kept file gets a
+ * file_ref. Bounded like the CAMT analysis: over budget, nothing is marked.
+ */
+async function analyzeInboxLightyearFiles(
+  lightyearFiles: LightyearFileCandidate[],
+  runtimeSafetyContext: RuntimeSafetyContext,
+): Promise<{ files: LightyearFileCandidate[]; budgetExceeded: boolean }> {
+  const budget = LIGHTYEAR_ANALYSIS_BUDGET;
+  if (lightyearFiles.length > budget.maxFiles) return { files: lightyearFiles, budgetExceeded: true };
+  const digested: DigestedFile[] = [];
+  let bytesRead = 0;
+  for (const [index, file] of lightyearFiles.entries()) {
+    if (bytesRead + file.size_bytes > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
+    let snapshot: FileInputSnapshot;
+    try {
+      snapshot = await captureFileInputSnapshot({ file_path: file.path }, {
+        runtimeSafetyContext,
+        operation: file.kind === "account_statement"
+          ? FILE_REFERENCE_OPERATIONS.lightyearStatement
+          : FILE_REFERENCE_OPERATIONS.lightyearGains,
+        allowedExtensions: [".csv"],
+        maxSize: LIGHTYEAR_MAX_CSV_SIZE,
+      });
+    } catch {
+      continue; // not hashed; the file keeps its file_ref
+    }
+    bytesRead += snapshot.identity.size_bytes;
+    if (bytesRead > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
+    // Copies are only ever of the same kind.
+    digested.push({ index, path: file.path, modifiedAt: file.modified_at, digest: `${file.kind}:${snapshot.identity.digest_sha256}` });
+  }
+  const grouped = new Map(groupByDigest(digested).map(info => [info.index, info]));
+  return {
+    files: lightyearFiles.map((file, index) => {
+      const info = grouped.get(index);
+      return {
+        ...file,
+        ...(info?.duplicate_of !== undefined ? { duplicate_of: info.duplicate_of } : {}),
+        ...(info?.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
+      };
+    }),
+    budgetExceeded: false,
+  };
 }
 
 /**
@@ -571,12 +641,13 @@ function publicLightyearFile(
   file: LightyearFileCandidate,
   runtimeSafetyContext: RuntimeSafetyContext,
   toolsVisible: boolean,
-): Record<string, unknown> {
+): InboxLightyearFilePayload {
   return {
     kind: file.kind,
     display_path: sandboxExternalText(file.path),
     display_name: sandboxExternalText(file.name),
-    ...(toolsVisible
+    // A byte-identical copy gets no file_ref: the kept file stands in for it.
+    ...(toolsVisible && file.duplicate_of === undefined
       ? {
           file_ref: runtimeSafetyContext.fileReferenceStore.issue({
             canonicalPath: file.path,
@@ -587,6 +658,8 @@ function publicLightyearFile(
           }),
         }
       : {}),
+    ...(file.duplicate_of !== undefined ? { coverage: "duplicate" as const, duplicate_of: file.duplicate_of } : {}),
+    ...(file.stands_in_for !== undefined ? { stands_in_for: file.stands_in_for } : {}),
     modified_at: file.modified_at,
     size_bytes: file.size_bytes,
   };
@@ -922,7 +995,9 @@ function lightyearSummarySentence(files: LightyearFileCandidate[], toolsVisible:
   if (files.length === 0) return undefined;
   const statements = files.filter(file => file.kind === "account_statement").length;
   const gains = files.length - statements;
-  const found = `Found ${files.length} Lightyear export(s) (${statements} account statement(s), ${gains} capital-gains file(s))`;
+  const copies = files.filter(file => file.duplicate_of !== undefined).length;
+  const found = `Found ${files.length} Lightyear export(s) (${statements} account statement(s), ${gains} capital-gains file(s))` +
+    (copies > 0 ? `, of which ${copies} identical cop${copies === 1 ? "y" : "ies"} of another export (use the kept file only)` : "");
   return toolsVisible
     ? `${found}; book them with the lightyear-booking workflow (parse_lightyear_statement, then book_lightyear_trades / book_lightyear_distributions dry run). Overlapping statement periods are de-duplicated by the LY: reference.`
     : `${found}. Lightyear tools are not enabled in this profile (EARVELDAJA_DISABLE_LIGHTYEAR or a guided profile).`;
@@ -1400,6 +1475,7 @@ function buildPreparedInboxPayload(
       lightyear_files: prepared.lightyearFiles.map(file => publicLightyearFile(file, runtimeSafetyContext, lightyearVisible)),
     },
     camt_overlap: prepared.camtOverlap,
+    ...(prepared.lightyearAnalysisBudgetExceeded ? { lightyear_analysis: "budget_exceeded" as const } : {}),
     defaults: {
       live_api_defaults_available: prepared.liveApiDefaultsAvailable,
       suggested_bank_dimension_id: prepared.defaults.suggested_bank_dimension_id,
@@ -1471,7 +1547,8 @@ async function prepareAccountingInbox(
     detectCamtFiles(files),
     detectWiseCsvFiles(files),
   ]);
-  const lightyearFiles = await detectLightyearCsvFiles(files, wiseFiles);
+  const lightyearAnalysis = await analyzeInboxLightyearFiles(await detectLightyearCsvFiles(files, wiseFiles), runtimeSafetyContext);
+  const lightyearFiles = lightyearAnalysis.files;
   const camtAnalysis = await analyzeInboxCamtFiles(detectedCamtFiles, runtimeSafetyContext);
   const camtFiles = camtAnalysis.files;
   const receiptFolders = detectReceiptFolders(files);
@@ -1504,6 +1581,7 @@ async function prepareAccountingInbox(
     camtDigestBindings: camtAnalysis.bindings,
     wiseFiles,
     lightyearFiles,
+    lightyearAnalysisBudgetExceeded: lightyearAnalysis.budgetExceeded,
     receiptFolders,
     defaults,
     steps,

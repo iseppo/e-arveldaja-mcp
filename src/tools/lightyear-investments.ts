@@ -54,7 +54,8 @@ import { isStrictDate } from "../strict-date.js";
 import { findDuplicatePostingsInJournals } from "../bank-posting-duplicate-guard.js";
 import type { Account, AccountDimension, Journal } from "../types/api.js";
 
-const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
+export const LIGHTYEAR_MAX_CSV_SIZE = 10 * 1024 * 1024; // 10 MB
+const MAX_CSV_SIZE = LIGHTYEAR_MAX_CSV_SIZE;
 
 // Standard-chart fallbacks for Lightyear Interest ("Intressitulu hoiustelt") and
 // fund Distribution ("Tulu fondiosakute ümberhindlusest") rows; name-resolved first.
