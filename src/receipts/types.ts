@@ -66,6 +66,8 @@ export interface ReceiptBatchRunInput {
    * replayed / out-of-scope / expired handle, or one minted for the other effect
    * (create vs create_and_confirm), fails closed with zero mutation. */
   readonly planHandle?: string;
+  /** Dry run of a folder reference: bound privately as the plan's `source_paths[0]` (#13). */
+  readonly sourceBinding?: { readonly [key: string]: string };
 }
 
 export interface ReceiptScanRunInput {

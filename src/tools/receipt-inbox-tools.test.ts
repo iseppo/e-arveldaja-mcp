@@ -10,7 +10,7 @@ import {
 } from "./receipt-inbox-files.js";
 import { buildReceiptBatchWorkflow } from "./receipt-inbox-summary.js";
 import { wrapUntrustedOcr } from "../mcp-json.js";
-import { parseMcpResponse } from "../__fixtures__/mcp-response.js";
+import { parseMcpResponse, parseToolPayload } from "../__fixtures__/mcp-response.js";
 import { logAudit } from "../audit-log.js";
 import { HttpError } from "../http-client.js";
 import { MutationIndeterminateError } from "../mutation-outcome.js";
@@ -2094,6 +2094,65 @@ describe("receipt inbox tool status handling", () => {
     expect(payload.summary.failed).toBe(1);
     expect(payload.summary.skipped).toBe(0);
     expect(api.purchaseInvoices.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  describe("receipt folder reference outlives its TTL within a reviewed plan (#13)", () => {
+    const MINUTE = 60_000;
+    async function reviewedFolderPlan() {
+      const folder = createReceiptFolder({});
+      const context = createTestRuntimeSafetyContext();
+      const fileRef = context.fileReferenceStore.issue({ canonicalPath: folder, kind: "directory", operation: FILE_REFERENCE_OPERATIONS.receipt });
+      const setup = setupReceiptTool("process_receipt_batch", context);
+      context.advanceTime(5 * MINUTE);
+      const dry = parseToolPayload<{ approved_manifest: unknown[]; plan_handles: { create: string } }>((await setup.handler({
+        file_ref: fileRef, accounts_dimensions_id: 100, execution_mode: "dry_run",
+      })).content[0]!.text);
+      context.advanceTime(7 * MINUTE);
+      const execute = (ref = fileRef) => setup.handler({
+        file_ref: ref, accounts_dimensions_id: 100, execution_mode: "create",
+        approved_manifest: dry.approved_manifest, plan_handle: dry.plan_handles.create,
+      });
+      return { folder, context, fileRef, execute };
+    }
+
+    it("an expired folder ref executes through the path the plan bound", async () => {
+      const { folder, execute } = await reviewedFolderPlan();
+      try {
+        const payload = parseToolPayload<{ error?: string; mode?: string }>((await execute()).content[0]!.text);
+        expect(payload.error).toBeUndefined();
+        expect(payload.mode).toBe("EXECUTED");
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
+
+    it("a ref purged by a later issue still executes through the bound path", async () => {
+      const { folder, context, execute } = await reviewedFolderPlan();
+      try {
+        context.fileReferenceStore.issue({ canonicalPath: folder, kind: "directory", operation: FILE_REFERENCE_OPERATIONS.receipt });
+        const payload = parseToolPayload<{ error?: string; mode?: string }>((await execute()).content[0]!.text);
+        expect(payload.error).toBeUndefined();
+        expect(payload.mode).toBe("EXECUTED");
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
+
+    it("a scope change or a different ref never falls back", async () => {
+      const { folder, context, execute } = await reviewedFolderPlan();
+      try {
+        const refused = (ref?: string) => execute(ref).then(
+          result => (result as { isError?: boolean }).isError === true ? "error" : "executed",
+          (error: Error) => error.message,
+        );
+        // An unknown ref string (not the one the plan bound) is never replaced by the bound path.
+        expect(await refused("A".repeat(43))).toContain("invalid");
+        context.setScope({ connectionGeneration: 1 });
+        expect(await refused()).not.toBe("executed");
+      } finally {
+        rmSync(folder, { recursive: true, force: true });
+      }
+    });
   });
 
   it("process_receipt_batch binds create to the approved manifest instead of re-scanning (H15)", async () => {

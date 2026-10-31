@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { assertRuntimeSafetyContext, type RuntimeSafetyContext } from "../runtime-safety-context.js";
 import { FILE_REFERENCE_OPERATIONS, FileReferenceStoreError, MAX_ACTIVE_FILE_REFERENCES } from "../file-reference-store.js";
 import { sandboxExternalText } from "../external-text-renderer.js";
@@ -1161,9 +1161,42 @@ export function registerReceiptInboxTools(
   // error fragment it must sandbox in a note goes through this adapter-owned wrap.
   const classificationOperations = createClassificationOperations(api, runtimeSafetyContext, wrapUntrustedOcr);
 
-  async function resolveReceiptFolder(folderPath?: string, fileRef?: string): Promise<{
+  /**
+   * #13: the folder reference a reviewed plan bound (`source_paths[0]`). An
+   * expired ref, or one the store purged since (it then reads as invalid), is
+   * replaced by the bound path ONLY when the presented ref is byte-equal to the
+   * bound one; scope, operation and kind mismatches never fall back. The live,
+   * in-scope plan (`boundSourcePath`) proves connection and TTL; the later
+   * consume re-checks it and the manifest digests prove the bytes.
+   */
+  function resolveFolderReference(fileRef: string, binding: unknown): string {
+    try {
+      return runtimeSafetyContext.fileReferenceStore.resolve(fileRef, {
+        kind: "directory",
+        operation: FILE_REFERENCE_OPERATIONS.receipt,
+      });
+    } catch (error) {
+      const bound = typeof binding === "object" && binding !== null && !Array.isArray(binding)
+        ? binding as Record<string, unknown>
+        : undefined;
+      if (
+        error instanceof FileReferenceStoreError &&
+        (error.code === "file_reference_expired" || error.code === "file_reference_invalid") &&
+        bound !== undefined && bound.file_ref === fileRef && bound.kind === "directory" &&
+        bound.operation === FILE_REFERENCE_OPERATIONS.receipt &&
+        typeof bound.canonical_path === "string" && isAbsolute(bound.canonical_path)
+      ) {
+        return bound.canonical_path;
+      }
+      throw error;
+    }
+  }
+
+  async function resolveReceiptFolder(folderPath?: string, fileRef?: string, binding?: unknown): Promise<{
     path: string;
     expectedCanonicalPath?: string;
+    /** Dry run of a folder reference: what the plan binds privately for execute. */
+    sourceBinding?: { readonly [key: string]: string };
     revalidateAtPointOfUse(): Promise<string>;
   }> {
     const hasPath = folderPath !== undefined;
@@ -1175,26 +1208,21 @@ export function registerReceiptInboxTools(
     if (hasReference && (typeof fileRef !== "string" || fileRef.length === 0)) {
       throw new FileReferenceStoreError("file_reference_data_invalid");
     }
-    const selected = hasReference
-      ? runtimeSafetyContext.fileReferenceStore.resolve(fileRef!, {
-          kind: "directory",
-          operation: FILE_REFERENCE_OPERATIONS.receipt,
-        })
-      : folderPath!;
+    const selected = hasReference ? resolveFolderReference(fileRef!, binding) : folderPath!;
     const validated = await validateReceiptFolderPath(selected);
     if (hasReference && validated !== selected) {
       throw new FileReferenceStoreError("file_reference_path_changed");
     }
     return {
       path: validated,
-      ...(hasReference ? { expectedCanonicalPath: selected } : {}),
+      ...(hasReference
+        ? {
+            expectedCanonicalPath: selected,
+            sourceBinding: { file_ref: fileRef!, operation: FILE_REFERENCE_OPERATIONS.receipt, kind: "directory", canonical_path: selected },
+          }
+        : {}),
       async revalidateAtPointOfUse() {
-        const current = hasReference
-          ? runtimeSafetyContext.fileReferenceStore.resolve(fileRef!, {
-              kind: "directory",
-              operation: FILE_REFERENCE_OPERATIONS.receipt,
-            })
-          : folderPath!;
+        const current = hasReference ? resolveFolderReference(fileRef!, binding) : folderPath!;
         const currentValidated = await validateReceiptFolderPath(current);
         if (hasReference && (current !== selected || currentValidated !== selected)) {
           throw new FileReferenceStoreError("file_reference_path_changed");
@@ -1383,13 +1411,20 @@ export function registerReceiptInboxTools(
     plan_handle?: string;
     detail: ReceiptBatchDetail;
   }): Promise<{ ok: true; fullObj: Record<string, unknown>; compactInput: ReceiptBatchCompactInput } | { ok: false; error: CallToolResult }> {
-    const receiptFolder = await resolveReceiptFolder(args.folder_path, args.file_ref);
-    const workflowFolderPath = receiptFolder.path;
     const { mode: executionMode, legacyExecuteCreate } = resolveReceiptBatchExecutionMode(
       args.execute,
       args.execution_mode,
     );
     const dryRun = executionMode === "dry_run";
+    // On execute, an expired folder ref may resolve to the path the reviewed plan bound.
+    const receiptFolder = await resolveReceiptFolder(
+      args.folder_path,
+      args.file_ref,
+      !dryRun && args.file_ref !== undefined && args.plan_handle !== undefined
+        ? runtimeSafetyContext.planStore.boundSourcePath(args.plan_handle, 0)
+        : undefined,
+    );
+    const workflowFolderPath = receiptFolder.path;
     // M09: the active company's identity feeds the #22 self-match guard. If a
     // PRESENT invoice_info endpoint fails transiently, fail closed BEFORE any
     // snapshot/mutation instead of booking with weakened protection.
@@ -1424,6 +1459,7 @@ export function registerReceiptInboxTools(
       directoryAccessOptions: directoryAccessOptions(receiptFolder.expectedCanonicalPath),
       ...(ownCompanyIdentity.invoiceCompanyName !== undefined ? { ownCompanyName: ownCompanyIdentity.invoiceCompanyName } : {}),
       ...(args.plan_handle !== undefined ? { planHandle: args.plan_handle } : {}),
+      ...(dryRun && receiptFolder.sourceBinding !== undefined ? { sourceBinding: receiptFolder.sourceBinding } : {}),
     });
     if (!outcome.ok) {
       return { ok: false, error: toolError({ error: outcome.error.message, category: outcome.error.code }) };

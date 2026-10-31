@@ -1131,7 +1131,11 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             totals: {},
             exclusions: [],
             reviews,
-            privatePayload: { schema: "receipt_batch_v1", execution_effect: effect },
+            privatePayload: {
+              schema: "receipt_batch_v1",
+              execution_effect: effect,
+              ...(input.sourceBinding !== undefined ? { source_paths: [input.sourceBinding] } : {}),
+            },
           };
           return this.runtimeSafetyContext.planStore.issue(RECEIPT_BATCH_PLAN_DOMAIN, planInput);
         };
