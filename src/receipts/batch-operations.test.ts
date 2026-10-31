@@ -1120,6 +1120,37 @@ describe("receipt batch — unresolved supplier duplicate check (live smoke 0.29
     expect(spies.createAndSetTotals).not.toHaveBeenCalled();
   });
 
+  it("#4a needs_review names the invoice it may already be booked as (unresolved supplier)", async () => {
+    primeUnresolvedSupplier();
+    const { api } = apiWithInvoices([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.already_booked_candidates).toEqual([
+      { invoice_id: 5501110, reason: "invoice_number_any_supplier", gross_price: 90 },
+    ]);
+  });
+
+  it("#4a an early review (fields missing for auto-booking) also carries the candidates; status unchanged", async () => {
+    vi.mocked(extractReceiptFieldsFromText).mockReturnValue({
+      supplier_name: "Anthropic, PBC @anthropic", invoice_number: "60E2BBAF-0027", currency: "EUR", raw_text: "ignored",
+    } as never);
+    const { api, spies } = apiWithInvoices([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    const result = outcome.value.results[0]!;
+    expect(result.status).toBe("needs_review");
+    expect(result.already_booked_candidates?.map(candidate => candidate.invoice_id)).toEqual([5501110]);
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+  });
+
+  it("#4a a receipt with no matching invoice gets no candidates, and non-review rows never do", async () => {
+    primeUnresolvedSupplier("OTHER-1");
+    const { api } = apiWithInvoices([booked]);
+    const outcome = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!outcome.ok) throw new Error("runBatch failed");
+    expect(outcome.value.results[0]!.already_booked_candidates).toBeUndefined();
+  });
+
   it("matches despite separator differences in the invoice number", async () => {
     primeUnresolvedSupplier("60E2BBAF 0027");
     const { api } = apiWithInvoices([booked]);

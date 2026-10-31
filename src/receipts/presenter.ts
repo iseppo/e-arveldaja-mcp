@@ -165,6 +165,7 @@ export function receiptReference(row: PublicReceiptRow): PublicReceiptRow {
     ...(duplicateCandidates !== undefined && duplicateCandidates.length > 0
       ? { duplicate_candidates: duplicateCandidates.map(candidate => ({ invoice_id: candidate.invoice_id })) }
       : {}),
+    ...(row.already_booked_candidates !== undefined ? { already_booked_candidates: row.already_booked_candidates } : {}),
     ...(row.possible_duplicate_journal_ids !== undefined ? { possible_duplicate_journal_ids: row.possible_duplicate_journal_ids } : {}),
     ...(row.referencing_journal_ids !== undefined ? { referencing_journal_ids: row.referencing_journal_ids } : {}),
     ...(row.journal_reference_scan_unavailable ? { journal_reference_scan_unavailable: true } : {}),

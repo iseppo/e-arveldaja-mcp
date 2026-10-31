@@ -534,6 +534,7 @@ function everyStatusBatch(): ReceiptBatchResult {
       }),
       fileResult(7, "needs_review", {
         duplicate_candidates: [{ invoice_id: 6007, invoice_number: "INV-7", client_id: 3, client_name: "Other OÜ", create_date: "2026-03-01" }],
+        already_booked_candidates: [{ invoice_id: 6007, reason: "invoice_number_any_supplier", gross_price: 12.5 }],
       }),
       { ...fileResult(8, "failed"), extracted: undefined, error: "PDF text extraction failed" },
       fileResult(9, "needs_review", { extracted: { raw_text: "   " } as any }),
@@ -630,6 +631,7 @@ describe("renderReceiptBatchFull — compact detail (default)", () => {
     expect(find(out.execution.needs_review, "receipt-5.pdf").referenced_invoice).toMatchObject({ matched: false, invoice_number: expect.stringMatching(OCR) });
     expect(find(out.execution.needs_review, "receipt-6.pdf").possible_duplicate_journal_ids).toEqual([28427570]);
     expect(find(out.execution.needs_review, "receipt-7.pdf").duplicate_candidates).toEqual([{ invoice_id: 6007 }]);
+    expect(find(out.execution.needs_review, "receipt-7.pdf").already_booked_candidates).toEqual([{ invoice_id: 6007, reason: "invoice_number_any_supplier", gross_price: 12.5 }]);
     // workflow.needs_review is the actionable review list: guidance + notes kept.
     const held = find(out.workflow.needs_review, "receipt-6.pdf");
     expect(held.review_guidance.recommendation).toContain("do not create");

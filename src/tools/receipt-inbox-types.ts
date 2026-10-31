@@ -94,6 +94,13 @@ export interface InvoiceDuplicateMatch {
   gross_price?: number;
 }
 
+/** An existing purchase invoice a needs_review receipt may already be booked as (ids and amounts only). */
+export interface AlreadyBookedCandidate {
+  invoice_id: number;
+  reason: InvoiceDuplicateMatch["reason"] | "invoice_number_any_supplier";
+  gross_price?: number;
+}
+
 /** A live purchase invoice of ANY supplier whose number equals the receipt's. */
 export interface InvoiceNumberCandidate {
   invoice_id: number;
@@ -122,6 +129,8 @@ export interface ReceiptBatchFileResult {
   booking_suggestion?: BookingSuggestion;
   duplicate_match?: InvoiceDuplicateMatch;
   duplicate_candidates?: InvoiceNumberCandidate[];
+  /** needs_review only: existing purchase invoices this receipt may already be booked as. */
+  already_booked_candidates?: AlreadyBookedCandidate[];
   /** Journals that may already book this receipt's cash outflow; the row is held as needs_review. */
   possible_duplicate_journal_ids?: number[];
   /** Live journals whose document_number or title already carries this invoice number; the row is held as needs_review. */

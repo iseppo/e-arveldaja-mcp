@@ -3,7 +3,8 @@ import type { PurchaseInvoice, Transaction } from "../types/api.js";
 import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
 import type { InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { scoreTransactionToInvoice } from "./receipt-extraction.js";
-import type { InvoiceDuplicateMatch, InvoiceNumberCandidate, TransactionMatchCandidate } from "./receipt-inbox-types.js";
+import type { ExtractedReceiptFields } from "./receipt-extraction.js";
+import type { AlreadyBookedCandidate, InvoiceDuplicateMatch, InvoiceNumberCandidate, TransactionMatchCandidate } from "./receipt-inbox-types.js";
 
 const POSSIBLE_MATCH_THRESHOLD = 70;
 
@@ -121,4 +122,30 @@ export function findInvoiceNumberMatchesAnySupplier(
       ...(invoice.gross_price !== undefined ? { gross_price: invoice.gross_price } : {}),
       create_date: invoice.create_date,
     }));
+}
+
+/**
+ * Existing purchase invoices a receipt may already be booked as: with a
+ * resolved supplier client and complete fields, the supplier-scoped duplicate
+ * lookup; otherwise live invoices of any supplier with the same number. A hint
+ * for review only — it never changes a receipt's status.
+ */
+export function findAlreadyBookedCandidates(
+  invoices: PurchaseInvoice[],
+  extracted: Partial<Pick<ExtractedReceiptFields, "invoice_number" | "invoice_date" | "total_gross">>,
+  resolvedClientId: number | undefined,
+): AlreadyBookedCandidate[] {
+  const { invoice_number: invoiceNumber, invoice_date: invoiceDate, total_gross: gross } = extracted;
+  if (resolvedClientId !== undefined && invoiceNumber && invoiceDate && gross !== undefined) {
+    const match = findDuplicateInvoice(invoices, resolvedClientId, invoiceNumber, invoiceDate, gross);
+    if (match) {
+      return [{ invoice_id: match.invoice_id, reason: match.reason, ...(match.gross_price !== undefined ? { gross_price: match.gross_price } : {}) }];
+    }
+  }
+  if (!invoiceNumber) return [];
+  return findInvoiceNumberMatchesAnySupplier(invoices, invoiceNumber).map(candidate => ({
+    invoice_id: candidate.invoice_id,
+    reason: "invoice_number_any_supplier" as const,
+    ...(candidate.gross_price !== undefined ? { gross_price: candidate.gross_price } : {}),
+  }));
 }

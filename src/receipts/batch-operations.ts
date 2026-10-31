@@ -51,7 +51,7 @@ import {
   prepareReceiptBatchSnapshot,
   scanReceiptFolderInternal,
 } from "../tools/receipt-inbox-files.js";
-import { findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
+import { findAlreadyBookedCandidates, findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from "../tools/receipt-inbox-booking.js";
 import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
@@ -295,6 +295,13 @@ function buildNeedsReviewResult(
     }),
     notes,
   };
+}
+
+/** #4(a): every needs_review receipt names the existing invoices it may already be booked as. */
+function withAlreadyBookedCandidates(context: ReceiptProcessingContext, result: ReceiptBatchFileResult): ReceiptBatchFileResult {
+  if (result.status !== "needs_review" || result.extracted === undefined) return result;
+  const candidates = findAlreadyBookedCandidates(context.purchaseInvoices, result.extracted, result.supplier_resolution?.client?.id);
+  return candidates.length > 0 ? { ...result, already_booked_candidates: candidates } : result;
 }
 
 // ---------------------------------------------------------------------------
@@ -932,7 +939,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             });
             continue;
           }
-          results.push(await processSingleReceipt(this.api, context, fileSnapshot, {
+          results.push(withAlreadyBookedCandidates(context, await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,
             ownIbans,
@@ -943,7 +950,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             dryRun,
             consumedTransactionIds,
             previousResults: results,
-          }));
+          })));
         }
         return results.map((result, index) => {
           const keptIndex = fileCopies[index]!.duplicate_of;
