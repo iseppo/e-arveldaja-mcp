@@ -2,9 +2,9 @@
   "profile": "full",
   "measurement": {
     "toolCount": 146,
-    "toolsListBytes": 172371,
+    "toolsListBytes": 172836,
     "descriptionsBytes": 23982,
-    "inputSchemasBytes": 113156,
+    "inputSchemasBytes": 113621,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -4509,6 +4509,12 @@
             "description": "Expense account number (e.g. 5000, 6000)",
             "type": "number"
           },
+          "expense_account_dimension_id": {
+            "description": "Dimension ID of the expense account; required when that account has dimensions",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
+          },
           "net_amount": {
             "description": "Net amount (without VAT)",
             "type": "number"
@@ -4522,6 +4528,12 @@
           "payable_account": {
             "description": "Payable to owner account (default 2110)",
             "type": "number"
+          },
+          "payable_account_dimension_id": {
+            "description": "Dimension ID of the payable account (e.g. the owner's own dimension); required when that account has dimensions — the default 2110 often has one per lender",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991,
+            "type": "integer"
           },
           "vat_account": {
             "description": "Input VAT account (default 1510)",

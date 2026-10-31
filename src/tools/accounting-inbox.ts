@@ -2394,7 +2394,7 @@ const OWNER_EXPENSE_ANSWER_QUESTIONS: Readonly<Record<string, string>> = {
   net_amount: "What is the net amount without VAT, in EUR (net_amount)?",
   vat_rate: "What VAT rate is on the receipt, as a decimal fraction (vat_rate, e.g. 0.24; 0 when there is no VAT)?",
   expense_account: "Which expense account should be debited (expense_account)?",
-  payable_account: `Which account holds the debt to the owner (payable_account)? The server default is ${DEFAULT_OWNER_PAYABLE_ACCOUNT}; confirm it or name the company's owner-payable account. An account with per-person dimensions (such as 1360) cannot be booked through this continuation.`,
+  payable_account: `Which account holds the debt to the owner (payable_account)? The server default is ${DEFAULT_OWNER_PAYABLE_ACCOUNT}; confirm it or name the company's owner-payable account. When that account has dimensions (one per person or lender, such as 1360), also give payable_account_dimension_id.`,
 };
 
 const OWNER_EXPENSE_VAT_ANSWER_QUESTION =
@@ -2513,6 +2513,8 @@ function readOwnerExpenseAnswers(reviewItem: Record<string, unknown>, followUpQu
   const deductible_vat_amount = numberAt(oe, "deductible_vat_amount");
   const vat_account = numberAt(oe, "vat_account");
   const document_number = stringAt(oe, "document_number");
+  const expense_account_dimension_id = numberAt(oe, "expense_account_dimension_id");
+  const payable_account_dimension_id = numberAt(oe, "payable_account_dimension_id");
 
   return {
     missing,
@@ -2530,15 +2532,28 @@ function readOwnerExpenseAnswers(reviewItem: Record<string, unknown>, followUpQu
       ...(deductible_vat_amount !== undefined ? { deductible_vat_amount } : {}),
       ...(vat_account !== undefined ? { vat_account } : {}),
       ...(document_number !== undefined ? { document_number } : {}),
+      ...(expense_account_dimension_id !== undefined ? { expense_account_dimension_id } : {}),
+      ...(payable_account_dimension_id !== undefined ? { payable_account_dimension_id } : {}),
     },
   };
 }
 
-// The projection posts the owner payable without a dimension; the API rejects a
-// dimension-less posting on an account that has per-person dimensions (1360).
-async function payableAccountHasDimensions(api: ApiContext, payableAccount: number): Promise<boolean> {
-  const dimensions = await api.readonly.getAccountDimensions();
-  return dimensions.some(dimension => dimension.accounts_id === payableAccount && dimension.is_deleted !== true);
+// An account with dimensions takes entries only on one of them. When the answers
+// name such an account without its dimension, ask for it (listing the account's
+// dimensions) instead of preparing a journal the API would refuse.
+async function missingDimensionAnswers(api: ApiContext, params: OwnerExpenseReimbursementParams): Promise<OwnerExpenseMissingAnswer[]> {
+  const dimensions = (await api.readonly.getAccountDimensions({ fresh: true })).filter(dimension => dimension.is_deleted !== true);
+  const missing: OwnerExpenseMissingAnswer[] = [];
+  const ask = (account: number, given: number | undefined, field: string, role: string) => {
+    if (given !== undefined) return;
+    const own = dimensions.filter(dimension => dimension.accounts_id === account);
+    if (own.length === 0) return;
+    const listed = own.map(dimension => `${dimension.id} (${dimension.title_est ?? dimension.title_eng ?? "untitled"})`).join(", ");
+    missing.push({ field, question: `Account ${account} (${role}) has dimensions, so the entry must name one. Which dimension (${field})? Dimensions of ${account}: ${listed}.` });
+  };
+  ask(params.expense_account, params.expense_account_dimension_id, "expense_account_dimension_id", "expense");
+  ask(params.payable_account ?? DEFAULT_OWNER_PAYABLE_ACCOUNT, params.payable_account_dimension_id, "payable_account_dimension_id", "debt to the owner");
+  return missing;
 }
 
 // The drift-binding fingerprint IS the resolved effective journal projection —
@@ -2575,6 +2590,7 @@ function ownerExpenseBookingPreview(projection: OwnerExpenseJournalProjection): 
     expense_account: p.expense_account,
     expense_debit_amount: p.expense_debit_amount,
     payable_account: p.payable_account,
+    payable_account_dimension_id: p.payable_account_dimension_id,
     total: p.total,
     vat_registered_company: p.vat_registered,
     postings: p.postings.map(posting => ({
@@ -2660,12 +2676,8 @@ async function buildOwnerExpenseContinuationPrepareResponse(
   if (answers.missing.length > 0 || answers.blocked.length > 0 || params === undefined) {
     return needsAnswers(answers.missing, answers.blocked);
   }
-  if (await payableAccountHasDimensions(api, params.payable_account!)) {
-    return needsAnswers([{
-      field: "payable_account",
-      question: `Account ${params.payable_account} has per-person dimensions, which this continuation cannot post. Which dimension-less owner-payable account should hold the debt (default ${DEFAULT_OWNER_PAYABLE_ACCOUNT})? For a per-person account, book the journal manually with the owner's dimension instead.`,
-    }]);
-  }
+  const dimensionAnswers = await missingDimensionAnswers(api, params);
+  if (dimensionAnswers.length > 0) return needsAnswers(dimensionAnswers);
   const projected = await computeOwnerExpenseJournalProjection(api, params);
   if (!projected.ok) return projected.error;
   const normalizedArgs = ownerExpenseProjectionFingerprint(projected.projection);
