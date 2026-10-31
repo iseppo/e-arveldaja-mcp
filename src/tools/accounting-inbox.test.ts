@@ -3332,6 +3332,7 @@ ${entryXml}
     expect(payload.missing_answers).toEqual([expect.objectContaining({ field: "payable_account_dimension_id" })]);
     expect(payload.missing_answers[0].question).toContain("1360");
     expect(payload.missing_answers[0].question).toContain("555");
+    expect(vi.mocked(api.readonly.getAccountDimensions)).toHaveBeenCalledWith({ fresh: true });
     expect(runtime.planStore.activeCount).toBe(before);
     expect(vi.mocked(api.journals.create)).not.toHaveBeenCalled();
   });

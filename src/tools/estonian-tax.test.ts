@@ -2278,6 +2278,16 @@ describe("create_owner_expense_reimbursement", () => {
       expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
     });
 
+    it("does not reuse an earlier same-document draft on another person's dimension", async () => {
+      setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION]);
+      const withDoc = { ...base, document_number: "R-3" };
+      await tools.get("create_owner_expense_reimbursement")!({ ...withDoc, payable_account_dimension_id: 12637384 });
+      const retry = await tools.get("create_owner_expense_reimbursement")!({ ...withDoc, payable_account_dimension_id: 12637385 });
+      expect(isError(retry)).toBe(true);
+      expect(errorText(retry)).toContain("owner_expense_journal_conflict");
+      expect(vi.mocked(api.journals.create)).toHaveBeenCalledTimes(1);
+    });
+
     it("reuses an earlier same-document draft that books exactly the approved lines", async () => {
       setupWithDimensions([LOAN_DIMENSION, OWNER_DIMENSION]);
       const withDoc = { ...base, document_number: "R-2", payable_account_dimension_id: 12637385 };
