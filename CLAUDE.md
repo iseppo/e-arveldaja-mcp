@@ -477,6 +477,14 @@ legitimate identical payments are possible).
   warning is suppressed as an FX mismatch), and on `execute` the per-dimension
   closing balance is persisted to `statement-balances.json` in the accounting
   bundle (bundle mode only; skipped with a note under single-file rules mode).
+- **Receipt attachment digests**: every successful purchase-invoice document
+  upload (receipt batch, PDF / document booking, `attach_document`) records
+  `{ sha256, entity_id, … }` in `receipt-attachment-digests.json` in the same
+  bundle (connection-stamped, `src/connection-scoped-bundle-store.ts`; off in
+  single-file rules mode). A record is a hint only: `receipt_batch` reports a
+  file `already_attached` only after a fresh read of the invoice and a SHA-256
+  of its current `document_user` bytes (≤ 20 downloads per run, incl. a dry-run
+  backfill for invoices named by the receipt's number).
 
 ## Architecture
 

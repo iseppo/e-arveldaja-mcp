@@ -9,7 +9,8 @@ import { wrapUntrustedOcr } from "../mcp-json.js";
 import { normalizeCompanyName } from "../company-name.js";
 import { snapshotBankTransaction } from "../banking/transaction-material-snapshot.js";
 import { normalizeVatValue } from "../document-identifiers.js";
-import { normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
+import { isInvalidatedPurchaseInvoice, normalizeInvoiceNumberForComparison } from "../purchase-invoice-status.js";
+import { findAttachedInvoice, newAttachmentCheckBudget, verifyCurrentAttachment, type AttachedInvoice } from "./already-booked.js";
 import { parseDocument } from "../document-parser.js";
 import {
   type ExtractionConfidenceSignals,
@@ -41,6 +42,7 @@ import {
 import { buildReceiptReviewGuidance } from "../estonian-accounting-guidance.js";
 import { getPurchaseArticlesWithVat } from "../tools/purchase-vat-defaults.js";
 import {
+  type InvoiceDuplicateMatch,
   type ReceiptBatchExecutionMode,
   type ReceiptBatchFileResult,
   type ReceiptFileInfo,
@@ -54,7 +56,7 @@ import {
 import { findAlreadyBookedCandidates, findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
 import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from "../tools/receipt-inbox-booking.js";
-import { buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
+import { ALREADY_BOOKED_STATUSES, buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
 import { groupByDigest } from "../file-digest-groups.js";
@@ -362,6 +364,98 @@ interface ProcessSingleReceiptOptions {
   dryRun: boolean;
   consumedTransactionIds: Set<number>;
   previousResults: ReceiptBatchFileResult[];
+  /** #4(b): the invoice whose current attachment is exactly this file, if proven fresh. */
+  findAttached?: (snapshot: ReceiptFileSnapshot, invoiceNumber: string | undefined) => Promise<AttachedInvoice | undefined>;
+  /** Mutation pass: the create command the reviewed plan approved for this file. */
+  approvedCreate?: ApprovedCreateCommand;
+}
+
+/** The create-command identity bound by the reviewed plan (B2 mutation binding). */
+interface ApprovedCreateCommand {
+  invoice_number: string | null;
+  gross_amount: number | null;
+  supplier_client_id: number | null;
+  supplier_name: string | null;
+}
+
+function createCommandOf(result: Pick<ReceiptBatchFileResult, "extracted" | "supplier_resolution">): ApprovedCreateCommand {
+  return {
+    invoice_number: result.extracted?.invoice_number ?? null,
+    gross_amount: result.extracted?.total_gross ?? null,
+    supplier_client_id: result.supplier_resolution?.client?.id ?? null,
+    supplier_name: result.supplier_resolution?.client?.name ?? result.supplier_resolution?.preview_client?.name ?? null,
+  };
+}
+
+/**
+ * The existing duplicate-skip decision for a same-supplier invoice match: an
+ * ambiguous number or supplier id, a footer-only supplier without number+gross
+ * agreement, and a credit/refund word or signed amount stay in review.
+ */
+function duplicateDecision(
+  extracted: ExtractedReceiptFields,
+  signals: { credit_word_present?: boolean; signed_amount_present?: boolean },
+  duplicate: InvoiceDuplicateMatch,
+): { kind: "skip" } | { kind: "review"; note: string } {
+  // An ambiguous invoice number, or a client resolved from a contested
+  // supplier id, may match the wrong existing invoice: a real, unbooked
+  // invoice must not be skipped on it, so it is reviewed.
+  if (extracted.invoice_number_ambiguous || extracted.supplier_identifier_ambiguous) {
+    return {
+      kind: "review",
+      note: `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the document labels ` +
+        (extracted.invoice_number_ambiguous
+          ? "several different invoice numbers; verify which is this invoice's number before skipping or booking it."
+          : "several different supplier registry codes or VAT numbers; verify the supplier before skipping or booking it."),
+    };
+  }
+  // A footer-derived supplier is a suggestion: skip only on the same
+  // invoice number AND the same gross, never on number or amount alone.
+  if (
+    extracted.supplier_from_footer_block &&
+    !(duplicate.reason === "supplier_invoice_number" &&
+      duplicate.gross_price !== undefined &&
+      extracted.total_gross !== undefined &&
+      Math.abs(duplicate.gross_price - extracted.total_gross) < 0.01)
+  ) {
+    return {
+      kind: "review",
+      note: `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the supplier was read only from a footer ` +
+        "identity block and the invoice number and gross do not both match; verify before skipping or booking it.",
+    };
+  }
+  if (signals.credit_word_present || signals.signed_amount_present) {
+    return {
+      kind: "review",
+      note: `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but a credit/refund word or signed amount ` +
+        "means this cannot be decided as an ordinary duplicate; review the document before skipping or booking it.",
+    };
+  }
+  return { kind: "skip" };
+}
+
+/**
+ * #4(c) / Q11: an ordinary duplicate (the existing skip decision) whose match is
+ * the ONLY live invoice of the resolved supplier with the same number, invoice
+ * date and gross (±0.01).
+ */
+function likelyAlreadyBookedMatch(
+  context: ReceiptProcessingContext,
+  extracted: ExtractedReceiptFields,
+  signals: { credit_word_present?: boolean; signed_amount_present?: boolean },
+  resolvedClientId: number | undefined,
+): InvoiceDuplicateMatch | undefined {
+  if (resolvedClientId === undefined || !extracted.invoice_number || !extracted.invoice_date || extracted.total_gross === undefined) return undefined;
+  const duplicate = findDuplicateInvoice(context.purchaseInvoices, resolvedClientId, extracted.invoice_number, extracted.invoice_date, extracted.total_gross);
+  if (!duplicate || duplicateDecision(extracted, signals, duplicate).kind !== "skip") return undefined;
+  const number = normalizeInvoiceNumberForComparison(extracted.invoice_number);
+  const exact = context.purchaseInvoices.filter(invoice =>
+    invoice.clients_id === resolvedClientId &&
+    !isInvalidatedPurchaseInvoice(invoice) &&
+    normalizeInvoiceNumberForComparison(invoice.number) === number &&
+    invoice.create_date === extracted.invoice_date &&
+    Math.abs((invoice.gross_price ?? Number.NaN) - extracted.total_gross!) < 0.01);
+  return exact.length === 1 && exact[0]!.id === duplicate.invoice_id ? duplicate : undefined;
 }
 
 async function processSingleReceipt(
@@ -411,6 +505,22 @@ async function processSingleReceipt(
     const inferredSupplierCountry = inferSupplierCountry(extracted);
     const summarize = () => summarizeInvoiceExtraction(extracted, signals, "extracted.raw_text", inferredSupplierCountry);
     const llmFallback = summarize();
+
+    // #4(b): a file whose exact bytes are an existing invoice's current
+    // attachment is already booked: decided before supplier resolution and
+    // before any write, in every mode.
+    const attached = options.findAttached ? await options.findAttached(snapshot, extracted.invoice_number) : undefined;
+    if (attached) {
+      return {
+        file,
+        classification,
+        status: "already_attached",
+        extracted,
+        llm_fallback: llmFallback,
+        already_attached_to: attached,
+        notes: [`Already attached: these exact file bytes are the current document of purchase invoice ${attached.invoice_id}; nothing created.`],
+      };
+    }
 
     if (file.file_type !== "pdf") {
       notes.push("Image receipt OCR-parsed with LiteParse.");
@@ -501,6 +611,23 @@ async function processSingleReceipt(
       });
     }
 
+    // #4(c): an ordinary same-supplier duplicate with an exact number, date
+    // and gross match is reported as likely already booked instead of being
+    // held for review on a later, unrelated question.
+    const likelyBooked = () => {
+      const match = likelyAlreadyBookedMatch(context, extracted, signals, supplierResolution.client?.id);
+      return match === undefined ? undefined : {
+        file,
+        classification,
+        status: "likely_already_booked" as const,
+        extracted,
+        llm_fallback: summarize(),
+        supplier_resolution: supplierResolution,
+        duplicate_match: match,
+        notes: [`Likely already booked as purchase invoice ${match.invoice_id} (same supplier, invoice number, date and gross); nothing created.`],
+      };
+    };
+
     if (supplierCountryNeedsReview(supplierResolution)) {
       const fallback = summarize();
       notes.push("Supplier country could not be inferred from IBAN, VAT number, or OCR country text. Manual review required before booking.");
@@ -577,6 +704,8 @@ async function processSingleReceipt(
     }
 
     if (!bookingSuggestion) {
+      const early = likelyBooked();
+      if (early) return early;
       const fallback = summarize();
       notes.push("Could not find a purchase article / account suggestion for this receipt.");
       maybeAddLlmFallbackNote(notes, fallback);
@@ -612,35 +741,9 @@ async function processSingleReceipt(
         extracted.invoice_date,
         extracted.total_gross,
       );
-      // An ambiguous invoice number, or a client resolved from a contested
-      // supplier id, may match the wrong existing invoice: a real, unbooked
-      // invoice must not be skipped on it, so it is reviewed.
-      if (duplicate && (extracted.invoice_number_ambiguous || extracted.supplier_identifier_ambiguous)) {
-        notes.push(
-          `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the document labels ` +
-          (extracted.invoice_number_ambiguous
-            ? "several different invoice numbers; verify which is this invoice's number before skipping or booking it."
-            : "several different supplier registry codes or VAT numbers; verify the supplier before skipping or booking it."),
-        );
-        return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
-          supplier_resolution: supplierResolution,
-          booking_suggestion: bookingSuggestion,
-          duplicate_match: duplicate,
-        });
-      }
-      // A footer-derived supplier is a suggestion: skip only on the same
-      // invoice number AND the same gross, never on number or amount alone.
-      if (
-        duplicate &&
-        extracted.supplier_from_footer_block &&
-        !(duplicate.reason === "supplier_invoice_number" &&
-          duplicate.gross_price !== undefined &&
-          Math.abs(duplicate.gross_price - extracted.total_gross) < 0.01)
-      ) {
-        notes.push(
-          `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but the supplier was read only from a footer ` +
-          "identity block and the invoice number and gross do not both match; verify before skipping or booking it.",
-        );
+      const decision = duplicate ? duplicateDecision(extracted, signals, duplicate) : undefined;
+      if (duplicate && decision?.kind === "review") {
+        notes.push(decision.note);
         return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
           supplier_resolution: supplierResolution,
           booking_suggestion: bookingSuggestion,
@@ -648,17 +751,6 @@ async function processSingleReceipt(
         });
       }
       if (duplicate) {
-        if (signals.credit_word_present || signals.signed_amount_present) {
-          notes.push(
-            `Possible duplicate of purchase invoice ${duplicate.invoice_id} (${duplicate.reason}), but a credit/refund word or signed amount ` +
-            "means this cannot be decided as an ordinary duplicate; review the document before skipping or booking it.",
-          );
-          return buildNeedsReviewResult(file, classification, extracted, summarize(), notes, {
-            supplier_resolution: supplierResolution,
-            booking_suggestion: bookingSuggestion,
-            duplicate_match: duplicate,
-          });
-        }
         return {
           file,
           classification,
@@ -723,6 +815,22 @@ async function processSingleReceipt(
         supplier_resolution: supplierResolution,
         booking_suggestion: bookingSuggestion,
       });
+    }
+
+    // B2 mutation binding: the file is created only with the command the
+    // reviewed plan approved; anything else stops before any supplier write.
+    if (options.approvedCreate !== undefined &&
+        canonicalPlanJson(createCommandOf({ extracted, supplier_resolution: supplierResolution }) as unknown as PlanData) !==
+          canonicalPlanJson(options.approvedCreate as unknown as PlanData)) {
+      return {
+        file,
+        classification,
+        status: "failed",
+        extracted,
+        supplier_resolution: supplierResolution,
+        notes: [...notes, "plan_drift: this file's create command (supplier, invoice number or gross) differs from the reviewed plan; nothing was written for it. Re-run the dry run."],
+        error: "plan_drift: create command differs from the reviewed plan",
+      };
     }
 
     let materializedSupplierResolution = supplierResolution;
@@ -919,9 +1027,16 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
         executionMode: ReceiptBatchExecutionMode,
         dryRun: boolean,
         legacyExecuteCreate: boolean,
+        // #4: `backfill` only in the reviewed dry run; `approved` (mutation pass)
+        // = the execute projection's per-file results, which equal the plan.
+        loopOptions: { backfill: boolean; approved?: ReadonlyMap<string, ReceiptBatchFileResult> },
       ): Promise<ReceiptBatchFileResult[]> => {
         const consumedTransactionIds = new Set<number>();
         const results: ReceiptBatchFileResult[] = [];
+        const attachmentBudget = newAttachmentCheckBudget();
+        const findAttached = (fileSnapshot: ReceiptFileSnapshot, invoiceNumber: string | undefined) =>
+          findAttachedInvoice(this.api, context.purchaseInvoices, fileSnapshot.sha256, invoiceNumber,
+            { backfill: loopOptions.backfill, budget: attachmentBudget });
         for (let index = 0; index < snapshot.files.length; index++) {
           const fileSnapshot = snapshot.files[index]!;
           await reportProgress(index, snapshot.files.length);
@@ -939,6 +1054,20 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             });
             continue;
           }
+          const approved = loopOptions.approved?.get(`${fileSnapshot.relative_path}\n${fileSnapshot.sha256}`);
+          if (approved !== undefined && ALREADY_BOOKED_STATUSES.has(approved.status)) {
+            // An approved exclusion is never created, resolved or uploaded,
+            // even if its evidence disappeared after the execute projection;
+            // the next dry run re-decides it.
+            const stillAttached = approved.status !== "already_attached" || (approved.already_attached_to !== undefined &&
+              await verifyCurrentAttachment(this.api, approved.already_attached_to.invoice_id, fileSnapshot.sha256) !== undefined);
+            results.push(stillAttached ? approved : {
+              ...approved,
+              exclusion_changed_after_review: true,
+              notes: [...approved.notes, "The attachment changed after review; nothing was created. Re-run the dry run to decide this file again."],
+            });
+            continue;
+          }
           results.push(withAlreadyBookedCandidates(context, await processSingleReceipt(this.api, context, fileSnapshot, {
             ownCompanyVat,
             ownCompanyRegistryCode,
@@ -950,6 +1079,8 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
             dryRun,
             consumedTransactionIds,
             previousResults: results,
+            findAttached,
+            ...(approved !== undefined && approved.status === "dry_run_preview" ? { approvedCreate: createCommandOf(approved) } : {}),
           })));
         }
         return results.map((result, index) => {
@@ -982,7 +1113,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       if (input.dryRun) {
         // Preview + mint ONE consume-once handle PER execution effect so a
         // `create` approval can never be replayed as `create_and_confirm`.
-        const results = await runLoop("dry_run", true, false);
+        const results = await runLoop("dry_run", true, false, { backfill: true });
         const mintHandle = (effect: ReceiptBatchExecutionMode): string => {
           const fingerprint = computeBatchFingerprint(results, input, snapshot, bankTransactions, effect);
           const reviews = receiptEffectReviews(fingerprint);
@@ -1023,7 +1154,7 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
       // effect. A changed bank dimension, date filter, execution effect, booking
       // rule, supplier/article/account/dimension, or live bank transaction all
       // change this fingerprint.
-      const projection = await runLoop("dry_run", true, false);
+      const projection = await runLoop("dry_run", true, false, { backfill: false });
       const freshFingerprint = computeBatchFingerprint(projection, input, snapshot, bankTransactions, input.executionMode);
 
       let storedPlan;
@@ -1039,7 +1170,9 @@ class ReceiptBatchOperationsImpl implements ReceiptBatchOperations {
 
       // Only now mutate. The manifest already bound the file bytes; the plan bound
       // the accounting effect.
-      const results = await runLoop(input.executionMode, false, input.legacyExecuteCreate);
+      const approved = new Map(projection.map((result, index) =>
+        [`${snapshot.files[index]!.relative_path}\n${snapshot.files[index]!.sha256}`, result]));
+      const results = await runLoop(input.executionMode, false, input.legacyExecuteCreate, { backfill: false, approved });
       return finish(results, false);
     } finally {
       await snapshot.cleanup();
@@ -1086,6 +1219,9 @@ function computeBatchFingerprint(
       file: result.file.name,
       classification: result.classification,
       status: result.status,
+      // #4: the reviewed exclusion and its evidence (execute must reproduce it).
+      already_attached_to: result.already_attached_to ?? null,
+      likely_booked_invoice_id: result.status === "likely_already_booked" ? result.duplicate_match?.invoice_id ?? null : null,
       supplier_client_id: result.supplier_resolution?.client?.id ?? null,
       supplier_name: result.supplier_resolution?.client?.name
         ?? result.supplier_resolution?.preview_client?.name

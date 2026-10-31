@@ -47,6 +47,8 @@ import {
   type RenderedDuplicatePostingSuspect,
 } from "../bank-posting-duplicate-guard.js";
 import { checkJournalReferences, formatJournalReferenceWarnings } from "../journal-reference-scan.js";
+import { log } from "../logger.js";
+import { recordReceiptAttachmentDigest, sha256OfBase64 } from "../receipts/attachment-digest-store.js";
 import { scanPurchaseIntakeDuplicates, withPurchaseInvoiceLock } from "../documents/purchase-invoice-lock.js";
 
 const MAX_INVOICE_DOCUMENT_SIZE = 50 * 1024 * 1024; // 50 MB
@@ -1099,6 +1101,12 @@ export async function uploadSourceDocumentOrInvalidate(
 ): Promise<string | undefined> {
   try {
     await api.purchaseInvoices.uploadDocument(invoiceId, fileName, contentsBase64);
+    // #4(b): remember which bytes this invoice carries (a hint; a store failure never fails the upload).
+    const digestNote = recordReceiptAttachmentDigest({
+      sha256: sha256OfBase64(contentsBase64), entity_id: invoiceId,
+      base_document_files_id: null, number: null, clients_id: null, gross_price: null,
+    });
+    if (digestNote !== undefined) log("warning", digestNote);
     return undefined;
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);

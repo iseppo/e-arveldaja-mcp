@@ -907,10 +907,15 @@ export function readBoundedBundleJson(path: string, label: string): unknown {
   return safeJsonParse(readFileSync(path, "utf8"), label);
 }
 
-export function resolveStatementBalanceStorePath(): string | null {
+/** Path of a JSON store file in the bundle dir; null in single-file legacy mode (no bundle dir). */
+export function resolveBundleStorePath(fileName: string): string | null {
   const storage = resolveStorage();
-  if (storage.mode === "file") return null;           // single-file legacy mode has no bundle dir
-  return resolve(storage.dir, "statement-balances.json");
+  if (storage.mode === "file") return null;
+  return resolve(storage.dir, fileName);
+}
+
+export function resolveStatementBalanceStorePath(): string | null {
+  return resolveBundleStorePath("statement-balances.json");
 }
 
 function sanitizeMarkdownCell(value: string | number | undefined): string {

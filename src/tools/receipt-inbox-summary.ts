@@ -41,7 +41,24 @@ export function buildReceiptBatchSummary(options: {
     ).length,
     dry_run_preview: countStatus(options.results, "dry_run_preview"),
     duplicate_file_count: options.results.filter(result => result.duplicate_file_of !== undefined).length,
+    ...optionalCount("already_attached", countStatus(options.results, "already_attached")),
+    ...optionalCount("likely_already_booked", countStatus(options.results, "likely_already_booked")),
   };
+}
+
+function optionalCount<K extends string>(key: K, count: number): Partial<Record<K, number>> {
+  return count > 0 ? { [key]: count } as Record<K, number> : {};
+}
+
+/** Statuses of files that are already in e-arveldaja and get no new invoice (#4). */
+export const ALREADY_BOOKED_STATUSES: ReadonlySet<ReceiptBatchStatus> = new Set(["already_attached", "likely_already_booked"]);
+
+function alreadyBookedSuffix(summary: ReceiptBatchSummary): string {
+  const parts = [
+    ...(summary.already_attached ? [`${summary.already_attached} already attached to an invoice`] : []),
+    ...(summary.likely_already_booked ? [`${summary.likely_already_booked} likely already booked`] : []),
+  ];
+  return parts.length > 0 ? ` (${parts.join(", ")}; nothing created for them)` : "";
 }
 
 export function possibleDuplicateReviewSuffix(count: number): string {
@@ -56,8 +73,8 @@ export function buildReceiptBatchWorkflowSummary(summary: ReceiptBatchSummary): 
   const review = `${summary.needs_review} in review${possibleDuplicateReviewSuffix(summary.possible_duplicate_review)}` +
     referencedByJournalReviewSuffix(summary.referenced_by_journal_review);
   return summary.dry_run
-    ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${review}, and fail ${summary.failed}.`
-    : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${review}, and failed ${summary.failed}.`;
+    ? `Receipt dry run would create ${summary.dry_run_preview} purchase invoice(s), match ${summary.matched}, skip ${summary.skipped_duplicate} duplicate(s), leave ${review}, and fail ${summary.failed}.${alreadyBookedSuffix(summary)}`
+    : `Receipt batch created ${summary.created} purchase invoice(s), matched ${summary.matched}, skipped ${summary.skipped_duplicate} duplicate(s), left ${review}, and failed ${summary.failed}.${alreadyBookedSuffix(summary)}`;
 }
 
 export function buildReceiptBatchWorkflow(options: {
@@ -108,7 +125,7 @@ export function buildReceiptBatchExecution(options: {
       result.status === "matched" ||
       result.status === "dry_run_preview"
     ),
-    skipped: options.sanitizedResults.filter(result => result.status === "skipped_duplicate"),
+    skipped: options.sanitizedResults.filter(result => result.status === "skipped_duplicate" || ALREADY_BOOKED_STATUSES.has(result.status)),
     errors: options.sanitizedResults.filter(result => result.status === "failed"),
     needs_review: options.sanitizedResults.filter(result => result.status === "needs_review"),
   });

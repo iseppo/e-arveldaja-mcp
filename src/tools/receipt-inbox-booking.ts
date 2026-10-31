@@ -20,6 +20,7 @@ import { amountConsistencyIssues, computeTermDays, extractOrderReferences, extra
 import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-reference-note.js";
 import { InvoiceCreationError, PurchaseInvoiceDraftVerificationError, PurchaseInvoiceTotalsCorrectionError, previewPurchaseInvoiceTotals } from "../api/purchase-invoices.api.js";
 import { sha256Hex } from "./receipt-inbox-files.js";
+import { recordReceiptAttachmentDigest } from "../receipts/attachment-digest-store.js";
 import type { SupplierResolution } from "./supplier-resolution.js";
 import { findBestTransactionMatch } from "./receipt-inbox-matching.js";
 import type {
@@ -563,6 +564,13 @@ export async function createAndMaybeMatchPurchaseInvoice(
         await api.purchaseInvoices.uploadDocument(createdInvoice.id, uploadFileName, contents);
         uploadedDocument = true;
         notes.push("Uploaded source document to created purchase invoice.");
+        // #4(b): remember which bytes this invoice carries (a hint; a store failure is a note only).
+        const digestNote = recordReceiptAttachmentDigest({
+          sha256: snapshot.sha256, entity_id: createdInvoice.id,
+          base_document_files_id: null, number: createdInvoice.number ?? null,
+          clients_id: createdInvoice.clients_id ?? null, gross_price: createdInvoice.gross_price ?? null,
+        });
+        if (digestNote !== undefined) notes.push(digestNote);
         logAudit({
           tool: "process_receipt_batch", action: "UPLOADED", entity_type: "purchase_invoice",
           entity_id: createdInvoice.id,

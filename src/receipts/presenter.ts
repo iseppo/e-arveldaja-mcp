@@ -7,6 +7,7 @@ import type { CompactReviewItem, CompactWarning } from "../operation-outcome.js"
 import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
 import { rawTextFallbackGuidance } from "../invoice-extraction-fallback.js";
 import {
+  ALREADY_BOOKED_STATUSES,
   buildReceiptBatchExecution,
   buildReceiptBatchWorkflow,
   buildReceiptBatchWorkflowSummary,
@@ -85,6 +86,18 @@ interface ReceiptBatchFullInput {
 }
 
 export type ReceiptBatchDetail = "compact" | "full";
+
+/** `detail: "compact"`: files already in e-arveldaja are left out of `results` and summarized here (#4). */
+export interface ReceiptAlreadyBookedSummary {
+  already_attached_count: number;
+  likely_already_booked_count: number;
+  /** The existing purchase invoice ids, in file order. */
+  ids: number[];
+}
+
+function alreadyBookedInvoiceId(row: ReceiptBatchFileResult): number | undefined {
+  return row.already_attached_to?.invoice_id ?? row.duplicate_match?.invoice_id;
+}
 
 type PublicReceiptRow = Record<string, unknown> & { status: ReceiptBatchFileResult["status"] };
 
@@ -237,9 +250,19 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
     : result.results.map(sanitizeReceiptResultForOutput);
   const publicRows = sanitizedResults.map((row, index) =>
     withPublicFile(row, input.publicFile(result.results[index]!.file)));
-  const outputResults = (input.detail ?? "compact") === "full"
+  const compact = (input.detail ?? "compact") !== "full";
+  const outputResults = !compact
     ? sanitizedResults
-    : publicRows.map((row, index) => compactReceiptRow(row, result.results[index]!));
+    : publicRows.map((row, index) => compactReceiptRow(row, result.results[index]!))
+      .filter((_row, index) => !ALREADY_BOOKED_STATUSES.has(result.results[index]!.status));
+  const alreadyBookedRows = result.results.filter(row => ALREADY_BOOKED_STATUSES.has(row.status));
+  const alreadyBooked: ReceiptAlreadyBookedSummary | undefined = compact && alreadyBookedRows.length > 0
+    ? {
+        already_attached_count: alreadyBookedRows.filter(row => row.status === "already_attached").length,
+        likely_already_booked_count: alreadyBookedRows.filter(row => row.status === "likely_already_booked").length,
+        ids: alreadyBookedRows.map(alreadyBookedInvoiceId).filter((id): id is number => id !== undefined),
+      }
+    : undefined;
   const responseManifest: Array<ReceiptApprovedManifestEntry | Record<string, unknown>> = projection !== undefined
     ? projection.manifest
     : result.manifest;
@@ -284,6 +307,7 @@ export function renderReceiptBatchFull(input: ReceiptBatchFullInput): Record<str
     ...(result.planHandles !== undefined ? { plan_handles: result.planHandles } : {}),
     skipped: projection !== undefined ? projection.skipped : scan.skipped,
     results: outputResults,
+    ...(alreadyBooked !== undefined ? { already_booked: alreadyBooked } : {}),
     execution: buildReceiptBatchExecution({
       mode,
       summary,
@@ -426,6 +450,8 @@ export function renderReceiptBatchCompact(input: ReceiptBatchCompactInput): { su
     failed: summary.failed,
     ocr_issues: ocrIssueCount,
     ...(dryRun ? {} : { confirmed: confirmedCount }),
+    ...(summary.already_attached ? { already_attached: summary.already_attached } : {}),
+    ...(summary.likely_already_booked ? { likely_already_booked: summary.likely_already_booked } : {}),
     ...(partialMutations > 0 ? { partial_mutations: partialMutations } : {}),
   };
 

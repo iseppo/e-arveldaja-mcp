@@ -24,9 +24,11 @@ import { parseMcpResponse } from "../mcp-json.js";
 import { stripSandboxMarkers } from "../sandbox-markers.js";
 import type { ReceiptApprovedManifestEntry } from "./types.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
-import { TEXT_HAZARD_EXPECTED, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
+import { TEXT_HAZARD_EXPECTED, parseOfLines, textHazardParse, type TextHazardFixture } from "../__fixtures__/document-reading/text-hazard-parses.js";
 import { firstText } from "../__fixtures__/mcp-result.js";
 import { sanitizeReceiptResultForOutput } from "../tools/receipt-inbox-output.js";
+import { receiptAttachmentDigestStore } from "./attachment-digest-store.js";
+import { createHash } from "crypto";
 
 // The typed operation is exercised DIRECTLY (no mock McpServer): narrow api / fs
 // / OCR ports only. These pin the staged-approval invariants the refactor must
@@ -2203,4 +2205,212 @@ describe("P2 E0: text hazards on the receipt_batch parse", () => {
       expect(vi.mocked(summarizeInvoiceExtraction).mock.calls[0]![1]).toMatchObject(TEXT_HAZARD_EXPECTED[kind]);
     },
   );
+});
+
+describe("#4 receipts already in e-arveldaja (attached bytes, exact earlier booking)", () => {
+  const sha = (text: string) => createHash("sha256").update(Buffer.from(text)).digest("hex");
+  const bytesOf = (name: string) => `receipt pdf ${FOLDER}/${name}`;
+  const FIELDS: Record<string, { invoice_number: string; total_gross: number; description: string; invoice_date?: string }> = {
+    "a.pdf": { invoice_number: "INV-A", total_gross: 50, description: "A-service" },
+    "b.pdf": { invoice_number: "INV-B", total_gross: 60, description: "B-service" },
+    "c.pdf": { invoice_number: "INV-C", total_gross: 65, description: "C-service" },
+    "c (1).pdf": { invoice_number: "INV-C", total_gross: 65, description: "C-service" },
+    "d.pdf": { invoice_number: "INV-D", total_gross: 70, description: "D-service" },
+  };
+  type Existing = { id: number; clients_id: number; number: string; create_date: string; gross_price: number; status: string; is_deleted: boolean; base_document_files_id: number | null };
+  const invoice801 = (): Existing => ({ id: 801, clients_id: 7, number: "INV-A", create_date: "2026-03-20", gross_price: 50, status: "CONFIRMED", is_deleted: false, base_document_files_id: 9801 });
+  const invoice802 = (): Existing => ({ id: 802, clients_id: 7, number: "INV-B", create_date: "2026-03-20", gross_price: 60, status: "CONFIRMED", is_deleted: false, base_document_files_id: null });
+
+  function primeFolder(names: string[], bytes: Record<string, string> = {}) {
+    vi.mocked(readdir).mockResolvedValue(names.map(name => ({ name, isFile: () => true })) as never);
+    vi.mocked(readFile).mockImplementation(async (path) => {
+      const name = String(path).split("/").pop()!;
+      return Buffer.from(bytes[name] ?? bytesOf(name)) as never;
+    });
+    vi.mocked(extractReceiptFieldsFromText).mockImplementation(((_text: string, fileName: string) => {
+      const fields = FIELDS[fileName]!;
+      return {
+        supplier_name: "Supplier OÜ", invoice_date: fields.invoice_date ?? "2026-03-20", due_date: "2026-03-20",
+        total_net: fields.total_gross, total_vat: 0, total_gross: fields.total_gross, currency: "EUR",
+        description: fields.description, invoice_number: fields.invoice_number, raw_text: "ignored",
+      };
+    }) as never);
+    // No booking suggestion for B: today that row is held for review.
+    vi.mocked(suggestBookingInternal).mockImplementation((async (_api: unknown, _context: unknown, _client: number, description: string) =>
+      description === "B-service" ? undefined : {
+        item: { custom_title: description, amount: 1, total_net_price: 1, cl_purchase_articles_id: 501, purchase_accounts_id: 5230 },
+        source: "fallback", suggested_purchase_article: { id: 501, name: "Software" },
+      }) as never);
+    vi.mocked(buildKeywordSuggestion).mockReturnValue(undefined as never);
+  }
+
+  /** makeApi plus existing invoices with attachments; `document(id, call)` may change bytes per call. */
+  function apiWith(existing: Existing[], document: (id: number, call: number) => string | undefined) {
+    const made = makeApi();
+    const invoices = made.api as unknown as { purchaseInvoices: Record<string, ReturnType<typeof vi.fn>> };
+    const originalGet = invoices.purchaseInvoices.get!.getMockImplementation() as (id: number) => Promise<unknown>;
+    const originalDocument = invoices.purchaseInvoices.getDocument!.getMockImplementation() as (id: number) => Promise<unknown>;
+    const calls = new Map<number, number>();
+    invoices.purchaseInvoices.listAll!.mockImplementation(async () => existing.map(entry => structuredClone(entry)));
+    invoices.purchaseInvoices.get!.mockImplementation(async (id: number) => {
+      const found = existing.find(entry => entry.id === id);
+      return found ? structuredClone(found) : originalGet(id);
+    });
+    invoices.purchaseInvoices.getDocument!.mockImplementation(async (id: number) => {
+      if (!existing.some(entry => entry.id === id)) return originalDocument(id);
+      const call = (calls.get(id) ?? 0) + 1;
+      calls.set(id, call);
+      const text = document(id, call);
+      if (text === undefined) throw new Error("404 No file found.");
+      return { name: "doc.pdf", contents: Buffer.from(text).toString("base64") };
+    });
+    return { ...made, getDocument: invoices.purchaseInvoices.getDocument! };
+  }
+
+  const seedRecord = (overrides: Partial<{ sha256: string; base_document_files_id: number | null; number: string | null }> = {}) =>
+    receiptAttachmentDigestStore.upsert([{
+      sha256: sha(bytesOf("a.pdf")), entity: "purchase_invoice", entity_id: 801, base_document_files_id: 9801,
+      number: "INV-A", clients_id: 7, gross_price: 50, recorded_at: "2026-10-01T00:00:00.000Z", ...overrides,
+    }]);
+
+  const statusByFile = (results: Array<{ file: { name: string }; status: string }>) =>
+    Object.fromEntries(results.map(result => [result.file.name, result.status]));
+
+  it("dry run: attached (backfilled), likely booked, byte copy and new file; execute creates only the new one", async () => {
+    primeFolder(["a.pdf", "b.pdf", "c.pdf", "c (1).pdf", "d.pdf"], { "c (1).pdf": bytesOf("c.pdf") });
+    const { api, spies, getDocument } = apiWith([invoice801(), invoice802()], () => bytesOf("a.pdf"));
+    const { ops } = makeOperationsWithContext(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(statusByFile(dry.value.results)).toEqual({
+      // Equal mtimes: the lowest path ("c (1).pdf") is the kept copy.
+      "a.pdf": "already_attached", "b.pdf": "likely_already_booked", "c (1).pdf": "dry_run_preview",
+      "c.pdf": "skipped_duplicate", "d.pdf": "dry_run_preview",
+    });
+    const a = dry.value.results.find(result => result.file.name === "a.pdf")!;
+    expect(a.already_attached_to).toEqual({ invoice_id: 801, base_document_files_id: 9801 });
+    const b = dry.value.results.find(result => result.file.name === "b.pdf")!;
+    expect(b.duplicate_match).toMatchObject({ invoice_id: 802, reason: "supplier_invoice_number" });
+    expect(dry.value.summary).toMatchObject({ already_attached: 1, likely_already_booked: 1, dry_run_preview: 2, needs_review: 0 });
+    // The backfill recorded the downloaded attachment for later runs.
+    expect(receiptAttachmentDigestStore.read()).toEqual([expect.objectContaining({ sha256: sha(bytesOf("a.pdf")), entity_id: 801, base_document_files_id: 9801 })]);
+    expect(getDocument).toHaveBeenCalledTimes(1);
+
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+    expect(statusByFile(executed.value.results)).toEqual({
+      "a.pdf": "already_attached", "b.pdf": "likely_already_booked", "c (1).pdf": "created",
+      "c.pdf": "skipped_duplicate", "d.pdf": "created",
+    });
+    const createdNumbers = spies.createAndSetTotals.mock.calls.map(call => (call[0] as { number: string }).number);
+    expect(createdNumbers.sort()).toEqual(["INV-C", "INV-D"]);
+    expect(spies.uploadDocument).toHaveBeenCalledTimes(2);
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    // Supplier creation was never requested for the excluded files.
+    expect(vi.mocked(resolveSupplierInternal).mock.calls.filter(call => call[3] === true)).toHaveLength(0);
+  });
+
+  it("a recorded digest is used after a fresh check of the invoice and its current bytes", async () => {
+    primeFolder(["a.pdf"]);
+    seedRecord();
+    const { api, getDocument } = apiWith([invoice801()], () => bytesOf("a.pdf"));
+    const dry = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).toBe("already_attached");
+    expect(getDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["attachment replaced (new file id)", { ...invoice801(), base_document_files_id: 9999 }, bytesOf("a.pdf")],
+    ["attachment removed", { ...invoice801(), base_document_files_id: null }, undefined],
+    ["same file id, other bytes", invoice801(), "other bytes"],
+    ["invoice number edited outside MCP", { ...invoice801(), number: "INV-A2" }, bytesOf("a.pdf")],
+    ["gross edited outside MCP", { ...invoice801(), gross_price: 51 }, bytesOf("a.pdf")],
+    ["invoice invalidated", { ...invoice801(), status: "INVALIDATED" }, bytesOf("a.pdf")],
+  ])("freshness: %s → the record is dropped and the file is processed normally", async (_label, current, bytes) => {
+    primeFolder(["a.pdf"]);
+    seedRecord();
+    const { api } = apiWith([current as Existing], () => bytes);
+    const dry = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).not.toBe("already_attached");
+    expect((receiptAttachmentDigestStore.read() ?? []).some(record => record.sha256 === sha(bytesOf("a.pdf")))).toBe(false);
+  });
+
+  it("excluded in the dry run, not at execute (attachment replaced in between) → plan_drift, zero writes", async () => {
+    primeFolder(["a.pdf"]);
+    seedRecord();
+    const { api, spies } = apiWith([invoice801()], (_id, call) => call === 1 ? bytesOf("a.pdf") : "replaced bytes");
+    const { ops } = makeOperationsWithContext(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).toBe("already_attached");
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    expect(executed.ok).toBe(false);
+    if (executed.ok) throw new Error("expected plan_drift");
+    expect(executed.error.code).toBe("plan_drift");
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it("evidence gone between the execute projection and mutation → still nothing written, exclusion_changed_after_review", async () => {
+    primeFolder(["a.pdf"]);
+    seedRecord();
+    // Calls 1 (dry run) and 2 (execute projection) see the attachment; the mutation-pass re-check does not.
+    const { api, spies } = apiWith([invoice801()], (_id, call) => call <= 2 ? bytesOf("a.pdf") : undefined);
+    const { ops } = makeOperationsWithContext(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create_and_confirm", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create_and_confirm });
+    if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+    expect(executed.value.results[0]).toMatchObject({ status: "already_attached", exclusion_changed_after_review: true });
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+    expect(spies.confirmWithTotals).not.toHaveBeenCalled();
+    expect(vi.mocked(resolveSupplierInternal).mock.calls.filter(call => call[3] === true)).toHaveLength(0);
+  });
+
+  it("an approved create whose command changes at mutation time stops before any supplier or invoice write", async () => {
+    primeFolder(["d.pdf"]);
+    const { api, spies } = apiWith([], () => undefined);
+    const supplier = (id: number) => ({
+      found: true, created: false, match_type: "exact_name",
+      client: { id, name: `Supplier ${id}`, is_supplier: true, is_client: false, cl_code_country: "EST", is_member: false,
+        send_invoice_to_email: false, send_invoice_to_accounting_email: false, is_deleted: false },
+    });
+    let lookups = 0;
+    vi.mocked(resolveSupplierInternal).mockImplementation((async () => supplier(++lookups <= 2 ? 7 : 8)) as never);
+    const { ops } = makeOperationsWithContext(api);
+    const dry = await ops.runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    const executed = await ops.runBatch({ ...baseRun, executionMode: "create", dryRun: false, approvedManifest: dry.value.manifest, planHandle: dry.value.planHandles!.create });
+    if (!executed.ok) throw new Error(`execute failed: ${executed.error.code}`);
+    expect(executed.value.results[0]).toMatchObject({ status: "failed", error: expect.stringContaining("plan_drift") });
+    expect(spies.createAndSetTotals).not.toHaveBeenCalled();
+    expect(spies.uploadDocument).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a credit word", "Kreeditarve viide K-1"],
+    ["a signed amount", "Allahindlus -5,00"],
+  ])("likely already booked never applies with %s: the receipt stays in review", async (_label, line) => {
+    primeFolder(["b.pdf"]);
+    vi.mocked(parseDocument).mockResolvedValue(parseOfLines(["Supplier OÜ", line, "Kokku 60,00"]));
+    const { api } = apiWith([invoice802()], () => undefined);
+    const dry = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).toBe("needs_review");
+  });
+
+  it.each([
+    ["another invoice number", { ...invoice802(), number: "INV-B9" }],
+    ["another invoice date", { ...invoice802(), create_date: "2026-03-21" }],
+    ["another gross (number match only)", { ...invoice802(), gross_price: 61 }],
+  ])("same supplier with %s is not likely already booked", async (_label, existing) => {
+    primeFolder(["b.pdf"]);
+    const { api } = apiWith([existing], () => undefined);
+    const dry = await makeOperations(api).runBatch({ ...baseRun, executionMode: "dry_run", dryRun: true });
+    if (!dry.ok) throw new Error("dry run failed");
+    expect(dry.value.results[0]!.status).toBe("needs_review");
+  });
 });

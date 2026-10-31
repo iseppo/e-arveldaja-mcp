@@ -1408,7 +1408,8 @@ function isReviewMachineEnum(key: string, value: string): boolean {
         value === "no_direct_action" ||
         // receipt_batch row statuses
         value === "matched" || value === "created" || value === "skipped_duplicate" ||
-        value === "needs_review" || value === "failed" || value === "dry_run_preview";
+        value === "needs_review" || value === "failed" || value === "dry_run_preview" ||
+        value === "already_attached" || value === "likely_already_booked";
     case "classification":
       return value === "purchase_invoice" || value === "payment_receipt" ||
         value === "owner_paid_expense_reimbursement" || value === "unclassifiable";

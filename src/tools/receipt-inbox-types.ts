@@ -38,7 +38,11 @@ export type ReceiptBatchStatus =
   | "skipped_duplicate"
   | "needs_review"
   | "failed"
-  | "dry_run_preview";
+  | "dry_run_preview"
+  /** #4(b): the file's exact bytes are the current attachment of an existing purchase invoice; nothing created. */
+  | "already_attached"
+  /** #4(c): an existing invoice of the same supplier with the same number, date and gross; nothing created. */
+  | "likely_already_booked";
 
 export interface ReceiptFileInfo {
   name: string;
@@ -182,6 +186,10 @@ export interface ReceiptBatchFileResult {
    * `skipped_duplicate`, never extracted or booked.
    */
   duplicate_file_of?: string;
+  /** `already_attached`: the invoice whose current attachment has these exact bytes (fresh check this run). */
+  already_attached_to?: { invoice_id: number; base_document_files_id: number };
+  /** Execute only: the reviewed exclusion no longer held at mutation time; nothing was created, the next dry run re-decides. */
+  exclusion_changed_after_review?: true;
   notes: string[];
   error?: string;
   review_guidance?: ReviewGuidance;
@@ -205,6 +213,10 @@ export interface ReceiptBatchSummary {
   dry_run_preview: number;
   /** skipped_duplicate rows that are byte-identical copies of another file in the batch. */
   duplicate_file_count: number;
+  /** Present when > 0: files already attached to an existing purchase invoice (#4b). */
+  already_attached?: number;
+  /** Present when > 0: files matching an existing invoice by supplier, number, date and gross (#4c). */
+  likely_already_booked?: number;
 }
 export interface ReceiptBankPartial {
   transaction_id: number;

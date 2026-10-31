@@ -11,6 +11,8 @@ import { prepareInvoiceDocumentUpload } from "./pdf-workflow.js";
 import type { BaseResource } from "../api/base-resource.js";
 import { HttpError } from "../http-client.js";
 import { toolError } from "../tool-error.js";
+import { log } from "../logger.js";
+import { recordReceiptAttachmentDigest, sha256OfBase64 } from "../receipts/attachment-digest-store.js";
 
 /**
  * The RIK e-Financials `document_user` endpoint (GET/PUT/DELETE
@@ -115,6 +117,14 @@ export function registerDocumentAttachmentTools(server: McpServer, api: ApiConte
       const upload = await prepareInvoiceDocumentUpload(file_path, undefined, file_name);
       try {
         const result = await resource.uploadDocument(id, upload.fileName, upload.contentsBase64);
+        // #4(b): a purchase invoice's attached bytes are remembered (a hint; a store failure is a warning only).
+        const digestNote = entity_type === "purchase_invoice"
+          ? recordReceiptAttachmentDigest({
+              sha256: sha256OfBase64(upload.contentsBase64), entity_id: id,
+              base_document_files_id: null, number: null, clients_id: null, gross_price: null,
+            })
+          : undefined;
+        if (digestNote !== undefined) log("warning", digestNote);
         logAudit({
           tool: "attach_document", action: "UPLOADED", entity_type: DOCUMENT_ENTITIES[entity_type].audit,
           entity_id: id,

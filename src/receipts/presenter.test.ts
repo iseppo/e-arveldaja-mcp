@@ -3,6 +3,7 @@ import {
   RECEIPT_DETAIL_HINT,
   renderReceiptBatchCompact,
   renderReceiptBatchFull,
+  type ReceiptAlreadyBookedSummary,
   type ReceiptBatchCompactInput,
   type ReceiptBatchDetail,
 } from "./presenter.js";
@@ -686,5 +687,37 @@ describe("renderReceiptBatchFull — full detail", () => {
     expect(out.results[0].raw_text_available).toBeUndefined();
     expect(out.execution.results[0].extracted.raw_text).toBeUndefined();
     expect(out.execution.results[0].supplier_resolution).toBeUndefined();
+  });
+});
+
+describe("#4 receipts already in e-arveldaja", () => {
+  const batch = () => makeBatch(1, {
+    extraRows: [
+      fileResult(1, "already_attached", { already_attached_to: { invoice_id: 801, base_document_files_id: 9801 } }),
+      fileResult(2, "likely_already_booked", { duplicate_match: { reason: "supplier_invoice_number", invoice_id: 802, invoice_number: "INV-2", create_date: "2026-03-01", gross_price: 124 } }),
+    ],
+  });
+
+  it("compact leaves them out of results and summarizes them; full lists them", () => {
+    const compact = renderFull(batch()) as { results: Array<{ status: string }>; already_booked: ReceiptAlreadyBookedSummary; summary: { already_attached: number; likely_already_booked: number }; execution: { skipped: Array<{ status: string }> } };
+    expect(compact.results.map(row => row.status)).toEqual(["dry_run_preview"]);
+    expect(compact.already_booked).toEqual({ already_attached_count: 1, likely_already_booked_count: 1, ids: [801, 802] });
+    expect(compact.summary).toMatchObject({ already_attached: 1, likely_already_booked: 1 });
+    expect(compact.execution.skipped.map(row => row.status)).toEqual(["already_attached", "likely_already_booked"]);
+    const full = renderFull(batch(), "full") as { results: Array<{ status: string }>; already_booked?: unknown };
+    expect(full.results.map(row => row.status)).toEqual(["dry_run_preview", "already_attached", "likely_already_booked"]);
+    expect(full.already_booked).toBeUndefined();
+  });
+
+  it("the guided compact counts them and its summary sentence names them", () => {
+    const { summary } = renderReceiptBatchCompact(compactInput(batch()));
+    expect(summary.counts).toMatchObject({ already_attached: 1, likely_already_booked: 1 });
+    expect(summary.message).toContain("1 already attached to an invoice, 1 likely already booked; nothing created for them");
+  });
+
+  it("without such rows the summary has no new keys", () => {
+    const summary = makeBatch(1).summary;
+    expect(summary).not.toHaveProperty("already_attached");
+    expect(summary).not.toHaveProperty("likely_already_booked");
   });
 });
