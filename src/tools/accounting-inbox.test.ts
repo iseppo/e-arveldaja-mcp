@@ -27,6 +27,7 @@ import {
   type InboxLightyearFilePayload,
 } from "./accounting-inbox.js";
 import { registerReceiptInboxTools } from "./receipt-inbox.js";
+import { registerLightyearTools } from "./lightyear-investments.js";
 import * as auditLogModule from "../audit-log.js";
 import {
   createAccountingWorkflowApi,
@@ -4928,6 +4929,35 @@ describe("accounting_inbox: Lightyear CSV exports", () => {
     expect(new Set(files.filter(file => file.file_ref !== undefined).map(file => file.kind))).toEqual(new Set(["account_statement", "capital_gains"]));
     expect(prepared.user_summary).toContain("of which 2 identical copies of another export");
     expect(prepared).not.toHaveProperty("lightyear_analysis");
+  });
+
+  it("#3 a kept statement changed after the scan cannot hide its copy's rows: its file_ref is refused", async () => {
+    const workspace = await lightyearWorkspace();
+    const secondRow = "15/09/2026 10:00:00,OR-FIXTURE2,FIXT,IE0000000001,Sell,1,EUR,11.00,11.00,,0.00,11.00,\n";
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), `${LIGHTYEAR_STATEMENT_CSV}${secondRow}`);
+    const older = new Date("2026-01-01T00:00:00Z");
+    await utimes(join(workspace, "AccountStatement-LY-FIXTURE (1).csv"), older, older);
+    const server = createMockToolServer();
+    const context = createTestRuntimeSafetyContext();
+    const api = createAccountingWorkflowApi({ bankAccounts: [fixtureBankAccount()], accountDimensions: [fixtureAccountDimension()] });
+    registerAccountingInboxTools(server, context, api, exposure(true));
+    registerLightyearTools(server, api, context);
+    const inbox = getRegisteredToolHandler(server, "accounting_inbox");
+    const parse = getRegisteredToolHandler(server, "parse_lightyear_statement");
+    const payload = parseMcpResponse((await runWithToolProfile("standard", () =>
+      inbox({ mode: "scan", workspace_path: workspace }))).content[0]!.text) as { detected_inputs: { lightyear_files: InboxLightyearFilePayload[] } };
+    const files = payload.detected_inputs.lightyear_files;
+    const kept = files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE.csv")!;
+    expect(files.find(file => desandboxText(file.display_name) === "AccountStatement-LY-FIXTURE (1).csv")).toMatchObject({ coverage: "duplicate" });
+    const before = await parse({ file_ref: kept.file_ref });
+    expect(parseMcpResponse(before.content[0]!.text)).toMatchObject({ total_rows: 2 });
+
+    // A valid, shorter statement that omits the second trade.
+    await writeFile(join(workspace, "AccountStatement-LY-FIXTURE.csv"), `${LIGHTYEAR_STATEMENT_CSV}`);
+    const outcome = await parse({ file_ref: kept.file_ref })
+      .then(result => parseMcpResponse(result.content[0]!.text) as unknown, (error: Error) => ({ thrown: error.message }));
+    expect(JSON.stringify(outcome)).toContain("no longer matches the reviewed source bytes");
   });
 
   it("#2 an account statement whose every row is in a larger one is superseded (no file_ref); equal rows keep one", async () => {

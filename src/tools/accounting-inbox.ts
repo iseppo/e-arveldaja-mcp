@@ -584,6 +584,12 @@ interface LightyearFileCandidate {
   superseded_by?: number;
   /** Set on a kept account statement: the indices of the statements it supersedes. */
   covers?: number[];
+  /**
+   * Private: the analysed digest of a kept file that stands in for copies or
+   * covers superseded statements. Its file_ref is bound to these bytes, so a
+   * changed kept file cannot hide rows of the files it replaced (like CAMT).
+   */
+  bound_sha256?: string;
 }
 
 /** A detected Lightyear export as accounting_inbox reports it under detected_inputs.lightyear_files. */
@@ -614,6 +620,7 @@ async function analyzeInboxLightyearFiles(
   const budget = LIGHTYEAR_ANALYSIS_BUDGET;
   if (lightyearFiles.length > budget.maxFiles) return { files: lightyearFiles, budgetExceeded: true };
   const digested: DigestedFile[] = [];
+  const sha256ByIndex = new Map<number, string>();
   // Account-statement rows as canonical JSON of the statement columns (a multiset).
   const rowIdentities = new Map<number, string[]>();
   let bytesRead = 0;
@@ -636,6 +643,7 @@ async function analyzeInboxLightyearFiles(
     if (bytesRead > budget.maxBytes) return { files: lightyearFiles, budgetExceeded: true };
     // Copies are only ever of the same kind.
     digested.push({ index, path: file.path, modifiedAt: file.modified_at, digest: `${file.kind}:${snapshot.identity.digest_sha256}` });
+    sha256ByIndex.set(index, snapshot.identity.digest_sha256);
     if (file.kind === "account_statement") {
       const rows = parseCSV(snapshot.text().replace(/^\uFEFF/, "")).slice(1)
         .map(row => row.slice(0, EXPECTED_STATEMENT_HEADERS.length).map(cell => cell.trim()))
@@ -661,6 +669,7 @@ async function analyzeInboxLightyearFiles(
         ...(info?.stands_in_for !== undefined ? { stands_in_for: info.stands_in_for } : {}),
         ...(superseded.has(index) ? { superseded_by: superseded.get(index)! } : {}),
         ...(covered.length > 0 ? { covers: covered } : {}),
+        ...(info?.stands_in_for !== undefined || covered.length > 0 ? { bound_sha256: sha256ByIndex.get(index)! } : {}),
       };
     }),
     budgetExceeded: false,
@@ -717,6 +726,7 @@ function publicLightyearFile(
             operation: file.kind === "account_statement"
               ? FILE_REFERENCE_OPERATIONS.lightyearStatement
               : FILE_REFERENCE_OPERATIONS.lightyearGains,
+            ...(file.bound_sha256 !== undefined ? { expectedSha256: file.bound_sha256 } : {}),
           }),
         }
       : {}),
