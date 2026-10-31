@@ -249,7 +249,8 @@ export function renderClassificationAnalysisCompact(
     unresolvedGroups.map(group => ({
       item_id: wrapUntrustedOcr(group.display_counterparty) ?? "",
       code: "needs_review",
-      message: `Group classified as ${group.category} needs manual review before booking (apply_mode ${group.apply_mode}).`,
+      // Unresolved bank history: the reason is server-authored (counts and account ids only).
+      message: `Group classified as ${group.category} needs manual review before booking (apply_mode ${group.apply_mode}).${group.suggested_booking.counterparty_history ? ` ${group.suggested_booking.reason}` : ""}`,
     })),
     "the standard/full profile lists every group; or narrow date_from/date_to to see them here.",
   );

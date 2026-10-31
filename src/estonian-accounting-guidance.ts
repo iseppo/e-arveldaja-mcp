@@ -353,6 +353,8 @@ export function buildClassificationReviewGuidance(params: {
   displayCounterparty: string;
   /** Set when the group's suggestion comes from the counterparty's booking history. */
   history?: { accountId: number; dimensionId: number | null; streak: number; historyTotal: number };
+  /** Set when unresolved bank history withheld the account guess: the server-authored reason. */
+  historyReviewReason?: string;
 }): ReviewGuidance | undefined {
   // The counterparty is bank-statement text a remitter controls (bank_account_name,
   // falling back to description), and it is interpolated into server-authored prose
@@ -363,6 +365,20 @@ export function buildClassificationReviewGuidance(params: {
   const displayCounterparty = wrapUntrustedOcr(
     capUntrustedText(params.displayCounterparty, 200).text,
   ) ?? params.displayCounterparty;
+  // Unresolved bank history replaces the category text too: it names no account,
+  // so the guidance asks for the substance instead of implying a guess.
+  if (params.historyReviewReason !== undefined) {
+    return {
+      recommendation: `Recommendation: ${params.historyReviewReason} Do not book it until the substance and source document of the transaction are clear.`,
+      compliance_basis: [
+        BASIS_RPS_DOCUMENT,
+        BASIS_RPS_SUBSTANCE,
+      ],
+      follow_up_questions: [
+        "What is this transaction's substance, and which source document supports it?",
+      ],
+    };
+  }
   // A history hint replaces the category text: the category guess (e.g. revenue
   // for any incoming row) contradicts how this counterparty was actually booked.
   if (params.history) {
