@@ -6,6 +6,7 @@ import { parseMcpResponse, UNTRUSTED_OCR_START_PREFIX, UNTRUSTED_OCR_END_PREFIX 
 import type { Journal, Account } from "../types/api.js";
 import { clearRuntimeCaches } from "../cache-control.js";
 import { makeAccount } from "../__fixtures__/accounting.js";
+import type { AccountBalancePayload, AccountDimensionBalancesPayload, BalanceGroupRow } from "./account-balance.js";
 
 // API-only fixture: the values below become normalized rows returned by the mock server.
 let apiOpeningFixture: Journal | null = null;
@@ -983,5 +984,130 @@ describe("compute_client_debt tool — opening balance folding", () => {
     expect(data.warnings).not.toEqual(
       expect.arrayContaining([expect.stringContaining("Opening balances applied")]),
     );
+  });
+});
+
+describe("opening/closing with date_from and per-client groups (#16)", () => {
+  const LOAN = 1410;
+  const LOAN_ACCOUNT = { id: LOAN, name_est: "Antud laenud", name_eng: "Loans granted", balance_type: "D" };
+  const C_LOAN = { id: LOAN, name_est: "Saadud laenud", name_eng: "Loans received", balance_type: "C" };
+  const DIM = 501;
+  const BORROWER_A = 335326;
+  const BORROWER_B = 231870;
+
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "balance-window-")); process.env.EARVELDAJA_RULES_DIR = dir; resetApiOpening(); });
+  afterEach(() => { delete process.env.EARVELDAJA_RULES_DIR; resetApiOpening(); rmSync(dir, { recursive: true, force: true }); });
+
+  const loanPosting = (type: "D" | "C", amount: number) => ({ ...posting(LOAN, type, amount), accounts_dimensions_id: DIM });
+  const handlers = (journals: Journal[], account = LOAN_ACCOUNT) => {
+    const api = {
+      journals: { listAllWithPostings: vi.fn().mockResolvedValue(withApiOpening(journals)) },
+      readonly: {
+        getAccount: vi.fn().mockResolvedValue(account),
+        getAccounts: vi.fn().mockResolvedValue([]),
+        getAccountDimensions: vi.fn().mockResolvedValue([{ id: DIM, accounts_id: LOAN, title_est: "Laen" }]),
+      },
+    } as unknown as Parameters<typeof registerAccountBalanceTools>[1];
+    registerAccountBalanceTools({} as Parameters<typeof registerAccountBalanceTools>[0], api);
+    const call = async (name: string, args: Record<string, unknown>) =>
+      parseMcpResponse((await capturedHandlers[name]!(args)).content[0]!.text);
+    return {
+      balance: async (args: Record<string, unknown>) =>
+        await call("compute_account_balance", { account_id: LOAN, ...args }) as AccountBalancePayload & { groups: BalanceGroupRow[]; code?: string },
+      dims: async (args: Record<string, unknown>) =>
+        await call("compute_account_dimension_balances", { account_id: LOAN, ...args }) as AccountDimensionBalancesPayload & { groups: BalanceGroupRow[]; dimensions: BalanceGroupRow[] },
+    };
+  };
+
+  // Two borrowers on one loan dimension, plus an interest-free fix-up journal without a client.
+  const loanJournals = [
+    journal({ id: 1, effective_date: "2026-01-10", clients_id: BORROWER_A, postings: [loanPosting("D", 12_000)] }),
+    journal({ id: 2, effective_date: "2026-03-05", clients_id: BORROWER_B, postings: [loanPosting("D", 1_500)] }),
+    journal({ id: 3, effective_date: "2026-08-20", clients_id: BORROWER_A, postings: [loanPosting("C", 1_718.92)] }),
+    journal({ id: 4, effective_date: "2026-09-01", clients_id: null, postings: [loanPosting("D", 40)] }),
+  ];
+
+  it("splits a shared loan account by borrower on both tools; a journal without a client is its own row", async () => {
+    const { balance, dims } = handlers(loanJournals);
+    const expected = [
+      expect.objectContaining({ clients_id: null, label: "no client on journal", balance: 40 }),
+      expect.objectContaining({ clients_id: BORROWER_B, balance: 1500 }),
+      expect.objectContaining({ clients_id: BORROWER_A, balance: 10_281.08 }),
+    ];
+    const whole = await balance({ group_by: "client" });
+    expect(whole.balance).toBe(11_821.08);
+    expect(whole.groups).toEqual(expected);
+    expect(whole.client_attribution_note).toContain("third-party payer");
+    expect(whole.rounding_difference).toBeUndefined();
+    const split = await dims({ group_by: "client" });
+    expect(split.groups).toEqual(expected);
+    expect(split.dimensions).toBeUndefined();
+    expect(split.total).toBe(whole.balance);
+    const both = await dims({ group_by: "dimension_client" });
+    expect(both.groups.map((row: BalanceGroupRow) => [row.dimension_id, row.clients_id])).toEqual([[DIM, null], [DIM, BORROWER_B], [DIM, BORROWER_A]]);
+  });
+
+  it("group_by client cannot be combined with clients_id", async () => {
+    const result = await handlers(loanJournals).balance({ group_by: "client", clients_id: BORROWER_A });
+    expect(result.code).toBe("group_by_client_conflict");
+  });
+
+  it("date_from mid-year: opening + period = closing = the balance without dates; balance stays the period figure", async () => {
+    const { balance, dims } = handlers(loanJournals);
+    const all = await balance({});
+    const windowed = await balance({ date_from: "2026-07-01" });
+    expect(windowed).toMatchObject({
+      balance: -1_678.92, debit_total: 40, credit_total: 1_718.92, entry_count: 2,
+      opening_balance_at_date_from: 13_500, period_debit: 40, period_credit: 1_718.92, period_net: -1_678.92, closing_balance: 11_821.08,
+    });
+    expect(windowed.closing_balance).toBe(all.balance);
+    const byDim = await dims({ date_from: "2026-07-01" });
+    expect(byDim).toMatchObject({ total: -1_678.92, opening_balance_at_date_from: 13_500, closing_balance: 11_821.08 });
+    expect(byDim.dimensions[0]).toMatchObject({ dimension_id: DIM, balance: -1_678.92, opening_balance_at_date_from: 13_500, closing_balance: 11_821.08 });
+    // Without date_from nothing new appears.
+    expect(all.opening_balance_at_date_from).toBeUndefined();
+    expect((await dims({})).opening_balance_at_date_from).toBeUndefined();
+  });
+
+  it("an API INITIAL dated before date_from is in the opening figure, and the warning says so", async () => {
+    seedApiOpening({ openingDate: "2025-12-31", accounts: [{ code: String(LOAN), debit: 2_000, credit: 0 }, { code: "2900", debit: 0, credit: 2_000 }] });
+    const windowed = await handlers(loanJournals).balance({ date_from: "2026-07-01" });
+    expect(windowed).toMatchObject({ opening_balance_at_date_from: 15_500, closing_balance: 13_821.08, balance: -1_678.92 });
+    expect(windowed.warnings).toEqual(expect.arrayContaining([expect.stringContaining("is before date_from: it is in opening_balance_at_date_from")]));
+  });
+
+  it("an opening-only group shows opening = closing and a zero period", async () => {
+    const { dims } = handlers(loanJournals);
+    const result = await dims({ group_by: "client", date_from: "2026-07-01" });
+    expect(result.groups.find((row: BalanceGroupRow) => row.clients_id === BORROWER_B)).toMatchObject({
+      balance: 0, entry_count: 0, period_debit: 0, period_credit: 0, period_net: 0, opening_balance_at_date_from: 1_500, closing_balance: 1_500,
+    });
+  });
+
+  it.each([
+    ["D", LOAN_ACCOUNT, "D", "C"],
+    ["C", C_LOAN, "C", "D"],
+  ] as const)("rounds closing once from raw sums on a %s-type account (opening 1.005 / period 0.004 → 1.00)", async (_label, account, openingSide, periodSide) => {
+    const journals = [
+      journal({ id: 1, effective_date: "2026-01-10", postings: [loanPosting(openingSide, 1.005)] }),
+      journal({ id: 2, effective_date: "2026-08-10", postings: [loanPosting(periodSide, 0.004)] }),
+    ];
+    const { balance, dims } = handlers(journals, account);
+    expect((await balance({ date_from: "2026-07-01" })).closing_balance).toBe(1.00);
+    expect((await dims({ date_from: "2026-07-01" })).closing_balance).toBe(1.00);
+    expect((await balance({})).balance).toBe(1.00);
+  });
+
+  it("states the rounding difference when the rounded group rows do not add up to the rounded total", async () => {
+    const journals = [1, 2, 3].map(id => journal({ id, effective_date: "2026-08-10", clients_id: id, postings: [loanPosting("D", 0.006)] }));
+    const { balance, dims } = handlers(journals);
+    const whole = await balance({ group_by: "client", date_from: "2026-07-01" });
+    expect(whole.balance).toBe(0.02);
+    expect(whole.groups.map((row: BalanceGroupRow) => row.balance)).toEqual([0.01, 0.01, 0.01]);
+    expect(whole.rounding_difference).toEqual([{ field: "balance", amount: -0.01 }, { field: "closing_balance", amount: -0.01 }]);
+    const split = await dims({ group_by: "client" });
+    expect(split.total).toBe(0.02);
+    expect(split.rounding_difference).toEqual([{ field: "balance", amount: -0.01 }]);
   });
 });

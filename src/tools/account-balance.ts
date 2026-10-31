@@ -222,10 +222,147 @@ function unattributedOpeningBalanceWarning(
   return `The API INITIAL opening balance of account ${accountId} (as of ${opening.openingDate}) includes ${roundMoney(net).toFixed(2)} EUR (debit minus credit) that could not be attributed to a dimension, so it is NOT in this dimension-scoped figure. Correct the INITIAL posting dimensions in e-arveldaja.`;
 }
 
+/** Opening/period/closing figures of one group or account when a date window starts at `date_from` (#16). */
+export interface WindowedBalanceFigures {
+  opening_balance_at_date_from: number;
+  period_debit: number;
+  period_credit: number;
+  period_net: number;
+  closing_balance: number;
+}
+
+/** One row of a per-client or per-dimension-and-client balance breakdown (#16). */
+export interface BalanceGroupRow extends Partial<WindowedBalanceFigures> {
+  dimension_id?: number | null;
+  title?: string;
+  clients_id?: number | null;
+  label?: string;
+  balance: number;
+  debit_total: number;
+  credit_total: number;
+  entry_count: number;
+  unregistered_entry_count?: number;
+}
+
+/** Σ(rounded group figure) differs from the rounded account figure by `amount` (display rounding only). */
+export interface BalanceRoundingDifference {
+  field: "balance" | "opening_balance_at_date_from" | "closing_balance";
+  amount: number;
+}
+
+export interface AccountBalancePayload extends Partial<WindowedBalanceFigures> {
+  account_id: number;
+  account_name: string;
+  balance_type: string;
+  balance: number;
+  debit_total: number;
+  credit_total: number;
+  entry_count: number;
+  accounts_dimensions_id?: number;
+  clients_id?: number;
+  date_from?: string;
+  date_to?: string;
+  group_by?: "client";
+  groups?: BalanceGroupRow[];
+  rounding_difference?: BalanceRoundingDifference[];
+  client_attribution_note?: string;
+  entries?: BalanceDetail[];
+  unregistered_drafts?: object;
+  cache?: Record<string, unknown>;
+  warnings: string[];
+}
+
+export interface AccountDimensionBalancesPayload extends Partial<Pick<WindowedBalanceFigures, "opening_balance_at_date_from" | "closing_balance">> {
+  account_id: number;
+  account_name: string;
+  balance_type: string;
+  group_by?: "client" | "dimension_client";
+  dimensions?: BalanceGroupRow[];
+  groups?: BalanceGroupRow[];
+  total: number;
+  rounding_difference?: BalanceRoundingDifference[];
+  client_attribution_note?: string;
+  unregistered_drafts?: object;
+  cache?: Record<string, unknown>;
+  date_from?: string;
+  date_to?: string;
+  warnings: string[];
+}
+
+const NO_CLIENT_LABEL = "no client on journal";
+const CLIENT_ATTRIBUTION_NOTE =
+  "Client rows follow the journal header client (clients_id). A payment someone else made on a client's behalf (a third-party payer) " +
+  "counts under the client named on that journal, and journals without a client are in the clients_id null row; check the journals before treating a row as one person's debt.";
+
+interface RawWindow { openingDebit: number; openingCredit: number; debit: number; credit: number; count: number }
+
+const emptyWindow = (): RawWindow => ({ openingDebit: 0, openingCredit: 0, debit: 0, credit: 0, count: 0 });
+
+/** Adds one posting: before `dateFrom` it is opening, otherwise period. Raw sums; round only on output. */
+function addToWindow(window: RawWindow, row: { date: string; type: "D" | "C"; amount: number }, dateFrom: string | undefined): void {
+  if (dateFrom && row.date < dateFrom) {
+    if (row.type === "D") window.openingDebit += row.amount; else window.openingCredit += row.amount;
+    return;
+  }
+  if (row.type === "D") window.debit += row.amount; else window.credit += row.amount;
+  window.count++;
+}
+
+const signedNet = (balanceType: string, debit: number, credit: number) => balanceType === "D" ? debit - credit : credit - debit;
+
+/** Each figure is rounded once from its own raw accumulator — closing = round(raw opening + raw period). */
+function windowFigures(window: RawWindow, balanceType: string): WindowedBalanceFigures {
+  return {
+    opening_balance_at_date_from: roundMoney(signedNet(balanceType, window.openingDebit, window.openingCredit)),
+    period_debit: roundMoney(window.debit),
+    period_credit: roundMoney(window.credit),
+    period_net: roundMoney(signedNet(balanceType, window.debit, window.credit)),
+    closing_balance: roundMoney(signedNet(balanceType, window.openingDebit + window.debit, window.openingCredit + window.credit)),
+  };
+}
+
+function groupRowFigures(window: RawWindow, balanceType: string, dateFrom: string | undefined): Omit<BalanceGroupRow, "dimension_id" | "title" | "clients_id" | "label"> {
+  return {
+    balance: roundMoney(signedNet(balanceType, window.debit, window.credit)),
+    debit_total: roundMoney(window.debit),
+    credit_total: roundMoney(window.credit),
+    entry_count: window.count,
+    ...(dateFrom ? windowFigures(window, balanceType) : {}),
+  };
+}
+
+const clientFields = (clientId: number | null) => clientId === null ? { clients_id: null, label: NO_CLIENT_LABEL } : { clients_id: clientId };
+
+/** The rounded account figure minus Σ rounded group figures, per field, when they differ. */
+function roundingDifferences(
+  rows: BalanceGroupRow[],
+  totals: Partial<Record<BalanceRoundingDifference["field"], number>>,
+): BalanceRoundingDifference[] {
+  const differences: BalanceRoundingDifference[] = [];
+  for (const field of ["balance", "opening_balance_at_date_from", "closing_balance"] as const) {
+    const total = totals[field];
+    if (total === undefined) continue;
+    const amount = roundMoney(total - rows.reduce((sum, row) => sum + (row[field] ?? 0), 0));
+    if (amount !== 0) differences.push({ field, amount });
+  }
+  return differences;
+}
+
+const byNullableId = (a: number | null | undefined, b: number | null | undefined) => (a ?? -1) - (b ?? -1);
+
+/** With `date_from`, an INITIAL dated before it is in the opening figure, not "left out". */
+function openingBeforeWindowWarnings(warnings: string[], opening: OpeningBalanceJournal | null, dateFrom: string | undefined, included: boolean): string[] {
+  if (!opening || !dateFrom || !included || opening.openingDate >= dateFrom) return warnings;
+  const outside = `API INITIAL opening balance (as of ${opening.openingDate}) is outside this date range and is not included in these figures.`;
+  return warnings.map(warning => warning === outside
+    ? `API INITIAL opening balance (as of ${opening.openingDate}) is before date_from: it is in opening_balance_at_date_from and closing_balance, not in the period figures.`
+    : warning);
+}
+
 export function registerAccountBalanceTools(server: McpServer, api: ApiContext): void {
 
   registerTool(server, "compute_account_balance",
-    "Compute account balance from journal postings with optional client/dimension/date filters.",
+    "Compute account balance from journal postings with optional client/dimension/date filters. With date_from, `balance` / `debit_total` / `credit_total` are the period figures; `opening_balance_at_date_from`, `period_net` and `closing_balance` give the balance before the window and at its end. `group_by: \"client\"` adds per-client rows (journal header client; journals without one form a clients_id null row).",
     {
       account_id: coerceId.describe("Account id from list_accounts. In the RIK chart the id is the account number itself (e.g. 2110, 8900)."),
       accounts_dimensions_id: coerceId.optional().describe("Filter to one dimension (sub-account) of the account, e.g. the Wise dimension of 1020. Dimension id from list_account_dimensions; must belong to account_id."),
@@ -233,10 +370,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
       include_entries: z.boolean().optional().describe("Include individual entries in response (default false)"),
+      group_by: z.enum(["client"]).optional().describe("\"client\": also return per-client rows (by journal header client) next to the unchanged totals. Not combinable with clients_id."),
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Account Balance" },
-    async ({ account_id, accounts_dimensions_id, clients_id, date_from, date_to, include_entries, fresh }) => {
+    async ({ account_id, accounts_dimensions_id, clients_id, date_from, date_to, include_entries, group_by, fresh }) => {
+      if (group_by !== undefined && clients_id !== undefined) {
+        return toolError({
+          error: "group_by \"client\" splits the account by client; it cannot be combined with clients_id. Pass one or the other.",
+          code: "group_by_client_conflict",
+        });
+      }
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const [{ journals: allJournals, journalsFromApi, opening }, dimensions] = await Promise.all([
         loadJournalsWithOpeningBalance(api),
@@ -263,7 +407,36 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         : undefined;
       if (unattributedOpening) baseWarnings.push(unattributedOpening);
 
-      const summary = {
+      // Opening/closing (#16): every posting up to date_to, split at date_from, from raw amounts.
+      const balanceType = result.account?.balance_type ?? "D";
+      const windowEntries = date_from
+        ? (await computeAccountBalance(api, account_id, clients_id, undefined, date_to, allJournals, accounts_dimensions_id)).entries
+        : result.entries;
+      const accountWindow = emptyWindow();
+      const clientWindows = new Map<number | null, RawWindow>();
+      for (const entry of windowEntries) {
+        addToWindow(accountWindow, entry, date_from);
+        if (group_by === "client") {
+          const key = entry.clients_id ?? null;
+          const window = clientWindows.get(key) ?? emptyWindow();
+          addToWindow(window, entry, date_from);
+          clientWindows.set(key, window);
+        }
+      }
+      const windowed = date_from ? windowFigures(accountWindow, balanceType) : undefined;
+      const groups: BalanceGroupRow[] | undefined = group_by === "client"
+        ? [...clientWindows.entries()]
+          .sort(([a], [b]) => byNullableId(a, b))
+          .map(([clientId, window]) => ({ ...clientFields(clientId), ...groupRowFigures(window, balanceType, date_from) }))
+        : undefined;
+      const groupRounding = groups
+        ? roundingDifferences(groups, { balance: result.balance, ...(windowed && { opening_balance_at_date_from: windowed.opening_balance_at_date_from, closing_balance: windowed.closing_balance }) })
+        : [];
+      const warnings = clients_id === undefined
+        ? withOpeningBalanceJournalStatus(baseWarnings, opening, date_from, date_to)
+        : clientScopedOpeningBalanceWarnings(baseWarnings, opening, clients_id, date_from, date_to);
+
+      const summary: AccountBalancePayload = {
         account_id,
         account_name: result.account ? `${result.account.name_est} / ${result.account.name_eng}` : "Unknown",
         balance_type: result.account?.balance_type ?? "?",
@@ -271,6 +444,9 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         debit_total: roundMoney(result.debitTotal),
         credit_total: roundMoney(result.creditTotal),
         entry_count: result.entries.length,
+        ...windowed,
+        ...(groups && { group_by: "client" as const, groups, client_attribution_note: CLIENT_ATTRIBUTION_NOTE }),
+        ...(groupRounding.length > 0 && { rounding_difference: groupRounding }),
         ...(accounts_dimensions_id !== undefined && { accounts_dimensions_id }),
         ...(clients_id !== undefined && { clients_id }),
         ...(date_from && { date_from }),
@@ -283,9 +459,7 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
           entries: result.entries.map(e => ({ ...e, title: wrapUntrustedOcr(e.title) ?? e.title })),
         }),
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
-        warnings: clients_id === undefined
-          ? withOpeningBalanceJournalStatus(baseWarnings, opening, date_from, date_to)
-          : clientScopedOpeningBalanceWarnings(baseWarnings, opening, clients_id, date_from, date_to),
+        warnings: openingBeforeWindowWarnings(warnings, opening, date_from, clients_id === undefined || opening?.journal.clients_id === clients_id),
       };
 
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
@@ -293,15 +467,17 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
   );
 
   registerTool(server, "compute_account_dimension_balances",
-    "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
+    "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account. `group_by` \"client\" or \"dimension_client\" splits by journal header client instead (e.g. the borrowers of a shared loan account; journals without a client form a clients_id null row). With date_from, each row and the account also carry opening_balance_at_date_from and closing_balance.",
     {
       account_id: coerceId.describe("Account id (e.g. 1020). Required. In the RIK chart the id is the account number."),
       date_from: z.string().optional().describe("Start date (YYYY-MM-DD)"),
       date_to: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      group_by: z.enum(["dimension", "client", "dimension_client"]).optional().describe("Row grouping: \"dimension\" (default), \"client\" (journal header client) or \"dimension_client\"."),
       fresh: z.boolean().optional().describe("Clear cached API/reference data first."),
     },
     { ...readOnly, title: "Compute Account Balances by Dimension" },
-    async ({ account_id, date_from, date_to, fresh }) => {
+    async ({ account_id, date_from, date_to, group_by, fresh }) => {
+      const grouping = group_by ?? "dimension";
       const cacheClear = fresh ? clearRuntimeCaches() : undefined;
       const [{ journals: allJournals, journalsFromApi, opening }, account, dimensions] = await Promise.all([
         loadJournalsWithOpeningBalance(api),
@@ -310,15 +486,16 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       ]);
       const balanceType = account?.balance_type ?? "D";
 
-      const groups = new Map<number | null, { debit: number; credit: number; count: number }>();
-      let rawDebit = 0;
-      let rawCredit = 0;
-      for (const row of listAccountDimensionPostings(allJournals, account_id, { dateFrom: date_from, dateTo: date_to })) {
-        const key = row.accounts_dimensions_id;
-        const g = groups.get(key) ?? { debit: 0, credit: 0, count: 0 };
-        if (row.type === "D") { g.debit += row.amount; rawDebit += row.amount; }
-        else { g.credit += row.amount; rawCredit += row.amount; }
-        g.count++;
+      // Postings up to date_to; with date_from the earlier ones are the opening figure (#16).
+      const groups = new Map<string, { dimensionId: number | null; clientId: number | null; window: RawWindow }>();
+      const accountWindow = emptyWindow();
+      const keyOf = (dimensionId: number | null, clientId: number | null) =>
+        grouping === "dimension" ? `${dimensionId}` : grouping === "client" ? `${clientId}` : `${dimensionId}|${clientId}`;
+      for (const row of listAccountDimensionPostings(allJournals, account_id, { dateTo: date_to })) {
+        const key = keyOf(row.accounts_dimensions_id, row.clients_id);
+        const g = groups.get(key) ?? { dimensionId: row.accounts_dimensions_id, clientId: row.clients_id, window: emptyWindow() };
+        addToWindow(g.window, row, date_from);
+        addToWindow(accountWindow, row, date_from);
         groups.set(key, g);
       }
 
@@ -326,33 +503,42 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
       const drafts = unregisteredDraftsOutput(draftScan);
       // A dimension holding only drafts still gets a zero-balance row, so the
       // draft count shows where the missing amounts will land.
-      for (const dimId of draftScan.by_dimension.keys()) {
-        if (!groups.has(dimId)) groups.set(dimId, { debit: 0, credit: 0, count: 0 });
+      if (grouping === "dimension") {
+        for (const dimId of draftScan.by_dimension.keys()) {
+          if (!groups.has(keyOf(dimId, null))) groups.set(keyOf(dimId, null), { dimensionId: dimId, clientId: null, window: emptyWindow() });
+        }
       }
 
       const titleById = new Map<number, string>();
       for (const d of dimensions) if (d.id !== undefined) titleById.set(d.id, d.title_est);
+      const dimensionFields = (dimId: number | null) => ({
+        dimension_id: dimId,
+        title: dimId === null
+          ? "(määramata)"
+          : (wrapUntrustedOcr(titleById.get(dimId) ?? `#${dimId}`) ?? `#${dimId}`),
+      });
 
-      const rows = [...groups.entries()]
-        .map(([dimId, g]) => ({
-          dimension_id: dimId,
-          title: dimId === null
-            ? "(määramata)"
-            : (wrapUntrustedOcr(titleById.get(dimId) ?? `#${dimId}`) ?? `#${dimId}`),
-          balance: roundMoney(balanceType === "D" ? g.debit - g.credit : g.credit - g.debit),
-          debit_total: roundMoney(g.debit),
-          credit_total: roundMoney(g.credit),
-          entry_count: g.count,
-          ...(draftScan.by_dimension.has(dimId) && { unregistered_entry_count: draftScan.by_dimension.get(dimId) }),
-        }))
-        .sort((a, b) => (a.dimension_id ?? -1) - (b.dimension_id ?? -1));
+      const rows: BalanceGroupRow[] = [...groups.values()]
+        .sort((a, b) => grouping === "client" ? byNullableId(a.clientId, b.clientId) : byNullableId(a.dimensionId, b.dimensionId) || byNullableId(a.clientId, b.clientId))
+        .map(({ dimensionId, clientId, window }) => ({
+          ...(grouping !== "client" && dimensionFields(dimensionId)),
+          ...(grouping !== "dimension" && clientFields(clientId)),
+          ...groupRowFigures(window, balanceType, date_from),
+          ...(grouping === "dimension" && draftScan.by_dimension.has(dimensionId) && { unregistered_entry_count: draftScan.by_dimension.get(dimensionId) }),
+        }));
 
-      // `total` MUST come from the raw unrounded rawDebit/rawCredit accumulators
-      // with roundMoney applied once here — never by summing the per-dimension
-      // rounded `balance` rows, or per-row rounding drift breaks the
-      // reconciliation invariant with compute_account_balance (same single-round
-      // rationale as computeAccountBalance above).
-      const total = roundMoney(balanceType === "D" ? rawDebit - rawCredit : rawCredit - rawDebit);
+      // `total` MUST come from the raw unrounded accumulators with roundMoney
+      // applied once here — never by summing the per-group rounded `balance`
+      // rows, or per-row rounding drift breaks the reconciliation invariant
+      // with compute_account_balance (same single-round rationale as
+      // computeAccountBalance above). When the rounded rows do not add up,
+      // rounding_difference states by how much.
+      const total = roundMoney(signedNet(balanceType, accountWindow.debit, accountWindow.credit));
+      const windowed = date_from ? windowFigures(accountWindow, balanceType) : undefined;
+      const rounding = roundingDifferences(rows, {
+        balance: total,
+        ...(windowed && { opening_balance_at_date_from: windowed.opening_balance_at_date_from, closing_balance: windowed.closing_balance }),
+      });
 
       const dimensionWarnings = drafts.warning ? [drafts.warning] : [];
       if (opening) {
@@ -367,17 +553,21 @@ export function registerAccountBalanceTools(server: McpServer, api: ApiContext):
         }
       }
 
-      const summary = {
+      const summary: AccountDimensionBalancesPayload = {
         account_id,
         account_name: account ? `${account.name_est} / ${account.name_eng}` : "Unknown",
         balance_type: account?.balance_type ?? "?",
-        dimensions: rows,
+        ...(grouping === "dimension"
+          ? { dimensions: rows }
+          : { group_by: grouping, groups: rows, client_attribution_note: CLIENT_ATTRIBUTION_NOTE }),
         total,
+        ...(windowed && { opening_balance_at_date_from: windowed.opening_balance_at_date_from, closing_balance: windowed.closing_balance }),
+        ...(rounding.length > 0 && { rounding_difference: rounding }),
         ...(drafts.unregistered_drafts && { unregistered_drafts: drafts.unregistered_drafts }),
         ...(date_from && { date_from }),
         ...(date_to && { date_to }),
         ...cacheClearMetadata(cacheClear),
-        warnings: withOpeningBalanceJournalStatus(dimensionWarnings, opening, date_from, date_to),
+        warnings: openingBeforeWindowWarnings(withOpeningBalanceJournalStatus(dimensionWarnings, opening, date_from, date_to), opening, date_from, true),
       };
       return { content: [{ type: "text", text: toMcpJson(summary) }] };
     }

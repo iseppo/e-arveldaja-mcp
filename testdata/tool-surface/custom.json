@@ -2,9 +2,9 @@
   "profile": "custom",
   "measurement": {
     "toolCount": 85,
-    "toolsListBytes": 94351,
-    "descriptionsBytes": 12260,
-    "inputSchemasBytes": 61697,
+    "toolsListBytes": 95344,
+    "descriptionsBytes": 12862,
+    "inputSchemasBytes": 62082,
     "largestTool": {
       "name": "import_wise_transactions",
       "bytes": 5627
@@ -2035,7 +2035,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Compute account balance from journal postings with optional client/dimension/date filters.",
+      "description": "Compute account balance from journal postings with optional client/dimension/date filters. With date_from, `balance` / `debit_total` / `credit_total` are the period figures; `opening_balance_at_date_from`, `period_net` and `closing_balance` give the balance before the window and at its end. `group_by: \"client\"` adds per-client rows (journal header client; journals without one form a clients_id null row).",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2071,6 +2071,13 @@
             "description": "Clear cached API/reference data first.",
             "type": "boolean"
           },
+          "group_by": {
+            "description": "\"client\": also return per-client rows (by journal header client) next to the unchanged totals. Not combinable with clients_id.",
+            "enum": [
+              "client"
+            ],
+            "type": "string"
+          },
           "include_entries": {
             "description": "Include individual entries in response (default false)",
             "type": "boolean"
@@ -2091,7 +2098,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account.",
+      "description": "Break an account's balance down per dimension (e.g. each bank sub-account of 1020 Arvelduskontod: LHV, Wise, Lightyear), including API INITIAL opening balances. Returns one row per dimension plus a total that equals compute_account_balance for the same account. `group_by` \"client\" or \"dimension_client\" splits by journal header client instead (e.g. the borrowers of a shared loan account; journals without a client form a clients_id null row). With date_from, each row and the account also carry opening_balance_at_date_from and closing_balance.",
       "execution": {
         "taskSupport": "forbidden"
       },
@@ -2116,6 +2123,15 @@
           "fresh": {
             "description": "Clear cached API/reference data first.",
             "type": "boolean"
+          },
+          "group_by": {
+            "description": "Row grouping: \"dimension\" (default), \"client\" (journal header client) or \"dimension_client\".",
+            "enum": [
+              "dimension",
+              "client",
+              "dimension_client"
+            ],
+            "type": "string"
           }
         },
         "required": [
