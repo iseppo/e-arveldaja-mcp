@@ -8795,6 +8795,40 @@ describe("wise card client from confirmed history (live Anthropic shape, 2026-10
     expectNoWiseMutations(setup.api);
   });
 
+  // The window after the execute projection: the change lands on the fresh
+  // read the create itself is guarded by, so the digest still matches.
+  it.each([
+    ["an older payment to the merchant is confirmed with another client", "transactions" as const,
+      () => [...history, earlier(14044560, "2026-08-20", 2010999)]],
+    ["the historical client is deactivated", "clients" as const,
+      () => [{ id: 77, name: "Wise" }, { id: ANTHROPIC, name: "Anthropic, PBC", is_active: false }]],
+  ])("stops the row before creating it when %s right before the create", async (_label, resource, changed) => {
+    // Count the reads a clean execute makes before its create.
+    const baseline = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history);
+    let readsBeforeCreate = -1;
+    const baselineCreate = baseline.api.transactions.create.getMockImplementation();
+    baseline.api.transactions.create.mockImplementation(async (...createArgs: unknown[]) => {
+      readsBeforeCreate = baseline.api[resource].listAll.mock.calls.length;
+      return baselineCreate!(...createArgs);
+    });
+    await runApprovedWiseImport(baseline, args);
+    expect(readsBeforeCreate).toBeGreaterThan(0);
+
+    const setup = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history);
+    const reviewed = parseWiseResponse(await setup.handler({ ...args, execute: false }));
+    clearWiseCallHistory(setup.api);
+    const original = setup.api[resource].listAll.getMockImplementation();
+    setup.api[resource].listAll.mockImplementation(async (...listArgs: unknown[]) =>
+      setup.api[resource].listAll.mock.calls.length >= readsBeforeCreate ? changed() : original!(...listArgs));
+    const executed = parseWiseResponse(await setup.handler({
+      ...args, execute: true, approved_command_digest: reviewed.approved_command_digest, plan_handle: reviewed.plan_handle,
+    }));
+    expect(setup.api.transactions.create).not.toHaveBeenCalled();
+    expect(executed.execution.errors).toEqual([
+      { wise_id: "CARD_TRANSACTION-3001", reason: expect.stringContaining("Stale client precondition") },
+    ]);
+  });
+
   it("keeps an exact-name client and an exact-name ambiguity authoritative over history", async () => {
     const exact = setupCard([card("CARD_TRANSACTION-3001", "2026-09-17")], history, [...liveClients, { id: 555, name: MERCHANT }]);
     const exactDry = parseWiseResponse(await exact.handler({ ...args, execute: false }));
