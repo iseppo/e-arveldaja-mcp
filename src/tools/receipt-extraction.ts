@@ -311,6 +311,8 @@ export interface ExtractedReceiptFields {
   total_gross_conflict?: boolean;
   /** Explicit-label conflicts plus amountConsistencyIssues of the final totals; any code holds automatic booking. */
   amount_consistency_issues?: string[];
+  /** The document prints a per-rate VAT breakdown (a non-taxed subtotal and a rated one); see detectMixedVatRates (#5c). */
+  mixed_vat_rates?: MixedVatRates;
   /** Two or more distinct ticket numbers: the file holds several documents, one gross cannot book them. */
   multiple_documents_in_file?: boolean;
   /** The buyer block names another legal entity and none of the active company's identifiers. */
@@ -4242,6 +4244,76 @@ export function snapVatRate(netAmount: number, vatAmount: number, rates: readonl
   return rates.find(rate => Math.abs(netAmount * rate / 100 - vatAmount) <= tolerance);
 }
 
+/** One printed line of a per-rate VAT breakdown: `rate` null = the non-taxed subtotal ("Käibemaksuta"). */
+export interface MixedVatRateLine {
+  rate: number | null;
+  net: number;
+  /** The line's VAT: 0 for the non-taxed line; the printed document VAT for the only rated line; absent when not printed. */
+  vat?: number;
+}
+
+/** `proven`: the printed lines add up to the printed VAT and gross, so the document can be booked one item per line. */
+export interface MixedVatRates {
+  lines: MixedVatRateLine[];
+  proven: boolean;
+}
+
+const MIXED_VAT_AMOUNT = String.raw`(?:€|eur)?\s*(-?\d[\d ]*[.,]\d{2})\s*(?:€|eur)?\s*$`;
+// The label is at the end of a line that prints no other money figure before it (a table row
+// "Remondifond … 17.70 0.00 KM-ta 17.70" is an item, not the subtotal).
+const MIXED_VAT_ZERO_LINE_RE = new RegExp(String.raw`(?:^|\s)(?:käibemaksuta|km-ta)\s*:?\s*` + MIXED_VAT_AMOUNT, "i");
+const MIXED_VAT_RATED_LINE_RE = new RegExp(String.raw`(?:^|\s)käibemaksuga\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%\s*:?\s*` + MIXED_VAT_AMOUNT, "i");
+const MIXED_VAT_MONEY_BEFORE_RE = /\d[.,]\d{2}(?!\d)/;
+
+/**
+ * A per-rate VAT breakdown printed under an invoice (#5c): a non-taxed subtotal line, one or more
+ * "Käibemaksuga NN%" subtotal lines, next to the labelled VAT and gross. Proven only when the
+ * subtotals plus the VAT equal the gross (±0.02), there is exactly one rated line, its rate is in
+ * force on the invoice date and subtotal × rate equals the printed VAT (±0.02), and the net is the
+ * gross minus the VAT. No number is changed; undefined when no such block is printed.
+ */
+export function detectMixedVatRates(
+  text: string,
+  fields: Pick<ExtractedReceiptFields, "total_net" | "total_vat" | "total_gross" | "invoice_date">,
+): MixedVatRates | undefined {
+  const zero: number[] = [];
+  const rated: Array<{ rate: number; net: number }> = [];
+  for (const line of text.split(/\r?\n/)) {
+    const zeroMatch = MIXED_VAT_ZERO_LINE_RE.exec(line);
+    const ratedMatch = zeroMatch ? null : MIXED_VAT_RATED_LINE_RE.exec(line);
+    const match = zeroMatch ?? ratedMatch;
+    if (!match || MIXED_VAT_MONEY_BEFORE_RE.test(line.slice(0, match.index))) continue;
+    const net = parseAmount(match[match.length - 1]!, line, text);
+    if (net === undefined) continue;
+    if (zeroMatch) zero.push(net);
+    else rated.push({ rate: Number(ratedMatch![1]!.replace(",", ".")), net });
+  }
+  if (zero.length === 0 || rated.length === 0) return undefined;
+  const { total_vat: vat, total_gross: gross, total_net: net } = fields;
+  const onlyRated = rated.length === 1 ? rated[0]! : undefined;
+  const lines: MixedVatRateLine[] = [
+    ...zero.map(amount => ({ rate: null, net: amount, vat: 0 })),
+    ...rated.map(line => ({ rate: line.rate, net: line.net, ...(onlyRated && vat !== undefined ? { vat } : {}) })),
+  ];
+  const subtotal = [...zero, ...rated.map(line => line.net)].reduce((sum, amount) => sum + amount, 0);
+  const proven = vat !== undefined && gross !== undefined && net !== undefined && onlyRated !== undefined &&
+    Math.abs(roundMoney(subtotal + vat) - gross) <= AMOUNT_TRIO_TOLERANCE &&
+    Math.abs(roundMoney(gross - vat) - net) <= AMOUNT_TRIO_TOLERANCE &&
+    vatRatesInForceOn(fields.invoice_date).includes(onlyRated.rate) &&
+    Math.abs(roundMoney(onlyRated.net * onlyRated.rate / 100) - vat) <= AMOUNT_TRIO_TOLERANCE;
+  return { lines, proven };
+}
+
+/** "non-taxed 37.32 + 24 % 125.13 (VAT 30.02)" — numbers only, safe to show unwrapped. */
+export function mixedVatRateLinesText(lines: readonly MixedVatRateLine[]): string {
+  return lines.map(line => line.rate === null
+    ? `non-taxed ${line.net.toFixed(2)}`
+    : `${line.rate} % ${line.net.toFixed(2)}${line.vat !== undefined ? ` (VAT ${line.vat.toFixed(2)})` : ""}`).join(" + ");
+}
+
+/** Codes a proven breakdown explains: its non-taxed subtotal is not the net, and its VAT is not one rate of the whole net. */
+const MIXED_VAT_EXPLAINED_CODES = new Set(["explicit_trio_mismatch", "explicit_net_overridden", "vat_rate_implausible"]);
+
 /**
  * Plausibility of the FINAL extracted totals (a receipt SOURCE check, never
  * applied to operator-reviewed booking totals). Codes:
@@ -4447,10 +4519,12 @@ export function extractReceiptFieldsFromText(
       registryCode: options.ownCompanyRegistryCode,
     })
     : undefined;
+  const mixedVatRates = detectMixedVatRates(text, { ...amountFields, invoice_date });
   const amountIssues = [...new Set([
     ...(explicitAmountConflicts ?? []),
     ...amountConsistencyIssues({ ...amountFields, invoice_date }),
-  ])];
+    ...(mixedVatRates && !mixedVatRates.proven ? ["mixed_vat_rate_review"] : []),
+  ])].filter(code => !mixedVatRates?.proven || !MIXED_VAT_EXPLAINED_CODES.has(code));
   const extractionNotes = [
     ...(amountNotes ?? []),
     ...(supplierResult.extraction_notes ?? []),
@@ -4478,6 +4552,7 @@ export function extractReceiptFieldsFromText(
     ...(fieldProvenance.length > 0 ? { field_provenance: fieldProvenance } : {}),
     ...(extractionNotes && extractionNotes.length > 0 ? { extraction_notes: extractionNotes } : {}),
     ...(amountIssues.length > 0 ? { amount_consistency_issues: amountIssues } : {}),
+    ...(mixedVatRates ? { mixed_vat_rates: mixedVatRates } : {}),
     ...(hasMultipleTicketNumbers(text) ? { multiple_documents_in_file: true } : {}),
     ...(buyerBlockSignal ? { [buyerBlockSignal]: true } : {}),
     ...(invoiceNumberAmbiguous ? { invoice_number_ambiguous: true } : {}),

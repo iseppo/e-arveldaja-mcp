@@ -29,7 +29,7 @@ import { isForeignVatShape, isValidEeRegistryCode, isValidEeVatNumber, type Layo
 import { CREATION_GATING_EXTRACTION_SIGNALS, CREATION_GATING_SIGNAL_WARNINGS, summarizeInvoiceExtraction, type InvoiceExtractionFallback } from "../invoice-extraction-fallback.js";
 import { checkCurrencyEquivalent, type CurrencyEquivalentWarning } from "../currency-equivalent-check.js";
 import { resolveSupplierDefault } from "../resolution/supplier-default-resolution.js";
-import { computeMinOcrConfidence, detectCurrencyEquivalentAmbiguity, extractOrderReferences, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
+import { computeMinOcrConfidence, mixedVatRateLinesText, detectCurrencyEquivalentAmbiguity, extractOrderReferences, extractReceiptFieldsFromText, inferSupplierCountry, toIsoDate, type FieldProvenance, type ExtractedReceiptFields } from "./receipt-extraction.js";
 import { resolveSupplierInternal, type SupplierResolution } from "./supplier-resolution.js";
 import { resolveOwnCompanyIdentifiers } from "./own-company-identity.js";
 import { buildExtractionConfidenceSignals } from "./receipt-inbox.js";
@@ -588,6 +588,9 @@ export function registerPdfWorkflowTools(server: McpServer, api: ApiContext, run
         }
         if (signals.vat_rate_implausible) {
           warnings.push("vat_rate_implausible: the extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking.");
+        }
+        if (extracted.mixed_vat_rates?.proven) {
+          warnings.push(`mixed_vat_rates: the document prints a VAT breakdown by rate (${mixedVatRateLinesText(extracted.mixed_vat_rates.lines)}); book one item per line: the non-taxed line at rate "-", the rated line last.`);
         }
         for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
           if (signals[signal]) warnings.push(`${signal}: ${CREATION_GATING_SIGNAL_WARNINGS[signal]}`);

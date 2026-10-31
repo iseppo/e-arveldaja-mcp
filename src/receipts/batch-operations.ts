@@ -55,7 +55,7 @@ import {
 } from "../tools/receipt-inbox-files.js";
 import { findAlreadyBookedCandidates, findDuplicateInvoice, findInvoiceNumberMatchesAnySupplier } from "../tools/receipt-inbox-matching.js";
 import { loadOwnIbans } from "../tools/own-company-identity.js";
-import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItem } from "../tools/receipt-inbox-booking.js";
+import { createAndMaybeMatchPurchaseInvoice, prepareReceiptInvoiceItems } from "../tools/receipt-inbox-booking.js";
 import { ALREADY_BOOKED_STATUSES, buildReceiptBatchSummary } from "../tools/receipt-inbox-summary.js";
 import { checkCurrencyEquivalent } from "../currency-equivalent-check.js";
 import { textHazardSignals } from "../tools/document-text-hazards.js";
@@ -803,7 +803,7 @@ async function processSingleReceipt(
     // createAndSetTotals' totals rules) run BEFORE the supplier is
     // materialized, so a receipt they hold causes no write of any kind.
     // createAndMaybeMatchPurchaseInvoice repeats them before its own create.
-    const preparedAmounts = prepareReceiptInvoiceItem(
+    const preparedAmounts = prepareReceiptInvoiceItems(
       context,
       extracted,
       bookingSuggestion,

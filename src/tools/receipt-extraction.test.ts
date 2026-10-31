@@ -3356,7 +3356,7 @@ describe("receipt amounts — VAT own-line priority and gross labels", () => {
     expect(amounts.total_vat).toBe(4.95);
   });
 
-  it("KÜ-like mixed-rate invoice: 'Arve summa' is the gross and the mixed rate is held", () => {
+  it("KÜ-like mixed-rate invoice: 'Arve summa' is the gross and the proven mixed rate is a breakdown, not a warning (#5c)", () => {
     const text = [
       "Arve nr 2026/09",
       "Kuupäev 01.09.2026",
@@ -3367,7 +3367,8 @@ describe("receipt amounts — VAT own-line priority and gross labels", () => {
     ].join("\n");
     const result = extractReceiptFieldsFromText(text, "ku-arve.pdf");
     expect(result.total_gross).toBe(192.47);
-    expect(result.amount_consistency_issues).toContain("vat_rate_implausible");
+    expect(result.amount_consistency_issues).toBeUndefined();
+    expect(result.mixed_vat_rates).toEqual({ lines: [{ rate: null, net: 28.88, vat: 0 }, { rate: 24, net: 131.93, vat: 31.66 }], proven: true });
   });
 });
 

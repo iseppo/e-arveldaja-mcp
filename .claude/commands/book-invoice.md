@@ -180,6 +180,7 @@ If there is no suitable basis either way, call `list_purchase_articles` or ask t
 - Take the VAT-registration status from step 1 into account.
 - Honor any `tax_notes` from step 7 here: an entertainment note means input VAT is non-deductible; a passenger-car note caps deduction at 50%.
 - For normal domestic invoices, keep the VAT treatment shown on the document.
+- A `mixed_vat_rates` warning (extraction `mixed_vat_rates.proven: true`) means the document prints a VAT breakdown by rate, for example a non-taxed repair-fund line next to a 24 % line. For a VAT-registered company book one item per printed line: the non-taxed line first at `vat_rate_dropdown: "-"` (no input VAT, same cost account), the rated line last at its rate; the invoice `vat_price` and `gross_price` stay the printed totals. A non-VAT company keeps the folded single item. A breakdown that does not add up is `mixed_vat_rate_review`: check the document before booking.
 - Do not infer reverse charge from country alone; use explicit invoice wording or confirmed same-kind supplier history, otherwise ask.
 - Estonian reverse-charge rules cover several distinct cases, including EU B2B services with place of supply in Estonia, non-EU services with place of supply in Estonia, intra-community acquisitions of goods, and certain domestic construction/scrap schemes.
 - Reuse a confirmed prior VAT treatment from `suggest_booking` when it clearly fits the same supplier and same kind of transaction.

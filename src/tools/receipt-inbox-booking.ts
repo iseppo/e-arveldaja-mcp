@@ -14,7 +14,7 @@ import { MutationIndeterminateError, describeMutationCause, classifyMutationFail
 import { HttpError } from "../http-client.js";
 import type { CreatePurchaseInvoiceData, PurchaseInvoice, PurchaseInvoiceItem, Transaction } from "../types/api.js";
 import { type ApiContext, tagNotes } from "./crud-tools.js";
-import { applyPurchaseVatDefaults } from "./purchase-vat-defaults.js";
+import { applyPurchaseVatDefaults, normalizeVatRate } from "./purchase-vat-defaults.js";
 import type { BookingSuggestion, ExtractedReceiptFields, InvoiceSummaryForMatching } from "./receipt-extraction.js";
 import { amountConsistencyIssues, computeTermDays, extractOrderReferences, extractPaymentReferences, snapVatRate } from "./receipt-extraction.js";
 import { appendOrderReferenceNote, orderReferenceNoteLine } from "../order-reference-note.js";
@@ -158,6 +158,22 @@ export function prepareReceiptInvoiceItem(
   bookingSuggestion: BookingSuggestion,
   description: string,
 ): { ok: true; item: PurchaseInvoiceItem; grossTotal: number } | { ok: false; notes: string[] } {
+  const prepared = prepareReceiptInvoiceItems(context, extracted, bookingSuggestion, description);
+  return prepared.ok ? { ok: true, item: prepared.items[0]!, grossTotal: prepared.grossTotal } : prepared;
+}
+
+/**
+ * The items of an automatic receipt booking (#5c): one per printed VAT-rate line when the
+ * extraction proved a mixed-rate breakdown and the company is VAT-registered — the non-taxed
+ * line first at rate "-", the rated line last (createAndSetTotals puts the VAT residue on the
+ * last row); otherwise the single synthetic item. The checks of prepareReceiptInvoiceItem apply.
+ */
+export function prepareReceiptInvoiceItems(
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+  extracted: ExtractedReceiptFields,
+  bookingSuggestion: BookingSuggestion,
+  description: string,
+): { ok: true; items: PurchaseInvoiceItem[]; grossTotal: number } | { ok: false; notes: string[] } {
   const itemNetAmount = extracted.total_net
     ?? (extracted.total_gross !== undefined && extracted.total_vat !== undefined
       ? roundMoney(extracted.total_gross - extracted.total_vat)
@@ -166,11 +182,13 @@ export function prepareReceiptInvoiceItem(
     return { ok: false, notes: ["Could not derive reliable net/gross totals for invoice creation."] };
   }
 
-  const vatRate = resolveReceiptVatRateDropdown(extracted, itemNetAmount, bookingSuggestion.item);
+  // A proven breakdown explains a VAT that is no single rate of the whole net.
+  const mixedVatRates = extracted.mixed_vat_rates?.proven ? extracted.mixed_vat_rates : undefined;
+  const vatRate = mixedVatRates ? {} : resolveReceiptVatRateDropdown(extracted, itemNetAmount, bookingSuggestion.item);
   const sourceIssues = [...new Set([
     ...(extracted.amount_consistency_issues ?? []),
     ...amountConsistencyIssues({ ...extracted, total_net: itemNetAmount }),
-  ])];
+  ])].filter(code => !mixedVatRates || code !== "vat_rate_implausible");
   if (sourceIssues.length > 0) {
     return {
       ok: false,
@@ -185,6 +203,10 @@ export function prepareReceiptInvoiceItem(
 
   if (vatRate.review && context.isVatRegistered) {
     return { ok: false, notes: [vatRate.review] };
+  }
+
+  if (mixedVatRates && context.isVatRegistered) {
+    return prepareMixedVatRateItems(context, extracted, bookingSuggestion, description, mixedVatRates, extracted.total_gross);
   }
 
   const item = buildSyntheticItem(
@@ -209,7 +231,43 @@ export function prepareReceiptInvoiceItem(
   if (!totalsPreview.ok) {
     return { ok: false, notes: [`Held (${totalsPreview.code}): ${totalsPreview.message}`] };
   }
-  return { ok: true, item, grossTotal: extracted.total_gross };
+  return { ok: true, items: [item], grossTotal: extracted.total_gross };
+}
+
+function prepareMixedVatRateItems(
+  context: Pick<ReceiptProcessingContext, "isVatRegistered" | "purchaseArticlesWithVat">,
+  extracted: ExtractedReceiptFields,
+  bookingSuggestion: BookingSuggestion,
+  description: string,
+  mixedVatRates: NonNullable<ExtractedReceiptFields["mixed_vat_rates"]>,
+  grossTotal: number,
+): { ok: true; items: PurchaseInvoiceItem[]; grossTotal: number } | { ok: false; notes: string[] } {
+  const review = (reason: string) => ({
+    ok: false as const,
+    notes: [`Held (mixed_vat_rate_review): ${reason} Book this document with one item per VAT rate (process_accounting_document).`],
+  });
+  if (bookingSuggestion.item.reversed_vat_id !== undefined && bookingSuggestion.item.reversed_vat_id !== null) {
+    return review("the booking suggestion is reverse charge, which a per-rate breakdown of charged VAT contradicts.");
+  }
+  // Non-taxed lines first, the rated line last: the VAT residue lands on the last row.
+  const ordered = [...mixedVatRates.lines].sort((a, b) => (a.rate === null ? 0 : 1) - (b.rate === null ? 0 : 1));
+  const items = ordered.map(line => buildSyntheticItem(
+    bookingSuggestion, description, line.net, context.purchaseArticlesWithVat, true, line.rate === null ? "-" : String(line.rate),
+  ));
+  // Q14: the non-taxed line stays rate "-" (no input VAT) after the VAT defaults.
+  if (ordered.some((line, index) => line.rate === null && normalizeVatRate(items[index]!.vat_rate_dropdown) !== "-")) {
+    return review("the VAT defaults would make the non-taxed line taxable.");
+  }
+  const totalsPreview = previewPurchaseInvoiceTotals(
+    { items, cl_currencies_id: "EUR" } as CreatePurchaseInvoiceData,
+    extracted.total_vat,
+    grossTotal,
+    true,
+  );
+  if (!totalsPreview.ok) {
+    return { ok: false, notes: [`Held (${totalsPreview.code}): ${totalsPreview.message}`] };
+  }
+  return { ok: true, items, grossTotal };
 }
 
 export async function createAndMaybeMatchPurchaseInvoice(
@@ -269,7 +327,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
   const description = extracted.description_source === "generated" && supplier?.name
     ? `Expense from ${supplier.name}`
     : extracted.description ?? `Expense from ${supplierName}`;
-  const prepared = prepareReceiptInvoiceItem(
+  const prepared = prepareReceiptInvoiceItems(
     context,
     extracted,
     bookingSuggestion,
@@ -279,7 +337,6 @@ export async function createAndMaybeMatchPurchaseInvoice(
     notes.push(...prepared.notes);
     return { notes, status: "needs_review" };
   }
-  const item = prepared.item;
 
   const invoiceDraft: InvoiceSummaryForMatching = {
     clients_id: supplierId,
@@ -445,7 +502,7 @@ export async function createAndMaybeMatchPurchaseInvoice(
     cl_currencies_id: invoiceCurrency,
     liability_accounts_id: bookingSuggestion.suggested_liability_account_id ?? DEFAULT_LIABILITY_ACCOUNT,
     bank_ref_number: extracted.ref_number, bank_account_no: extracted.supplier_iban,
-    notes: tagNotes(invoiceNotes), items: [item],
+    notes: tagNotes(invoiceNotes), items: prepared.items,
   };
   let uploadedDocument = false;
   const describe = (cause: unknown) => {

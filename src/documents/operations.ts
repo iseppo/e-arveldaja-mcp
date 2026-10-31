@@ -19,6 +19,7 @@ import { parseDocument } from "../document-parser.js";
 import {
   computeMinOcrConfidence,
   extractOrderReferences,
+  mixedVatRateLinesText,
   extractReceiptFieldsFromText,
   inferSupplierCountry,
   type ExtractedReceiptFields,
@@ -551,6 +552,9 @@ class AccountingDocumentOperationsImpl implements AccountingDocumentOperations {
       }
       if (signals.vat_rate_implausible) {
         warnings.push({ code: "vat_rate_implausible", message: "The extracted VAT matches no VAT rate in force on the invoice date (or the document mixes rates); verify the VAT before booking." });
+      }
+      if (extracted.mixed_vat_rates?.proven) {
+        warnings.push({ code: "mixed_vat_rates", message: `The document prints a VAT breakdown by rate (${mixedVatRateLinesText(extracted.mixed_vat_rates.lines)}); book one item per line: the non-taxed line at rate "-", the rated line last.` });
       }
       for (const signal of CREATION_GATING_EXTRACTION_SIGNALS) {
         if (!signals[signal]) continue;
