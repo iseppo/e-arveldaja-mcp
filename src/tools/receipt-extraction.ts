@@ -1351,10 +1351,18 @@ const EXCHANGE_RATE_LABEL_VALUE_RE =
 
 // Owner rule (#5): a bare four-digit 2000-2100 token is a year, never an
 // amount: no decimal part, not part of a date ("07.10.2026", "2026-10-07",
-// "10/2026") or a longer number, and no currency mark next to it. "2 026,00 €",
-// "2026.00" and "€ 2026" stay amounts.
-const BARE_YEAR_TOKEN_RE =
-  /(?<![\d.,/-])(?<!(?:€|\$|£|\beur)\s*)(?:20\d\d|2100)(?!\d|[.,/-]\d|\s*(?:€|\$|£|eur\b))/giu;
+// "10/2026") or a longer number, and no currency mark next to it. A currency
+// mark is a symbol or a supported currency code, also across label
+// punctuation ("Total EUR: 2026", "Total (EUR) 2026"), and a monetary dash
+// ("2026,-") marks an integer amount. "2 026,00 €", "2026.00", "€ 2026" and
+// "Kokku 2026,- €" stay amounts.
+const YEAR_TOKEN_CURRENCY_MARK =
+  `(?:[€$£¥]|\\b(?:${RECEIPT_CURRENCY_PATTERNS.map(currency => currency.code).join("|")})\\b)`;
+const BARE_YEAR_TOKEN_RE = new RegExp(
+  `(?<![\\d.,/-])(?<!${YEAR_TOKEN_CURRENCY_MARK}[\\s:=()]*)(?:20\\d\\d|2100)` +
+    `(?!\\d|[.,/-]\\d|[.,]-|\\s*${YEAR_TOKEN_CURRENCY_MARK})`,
+  "giu",
+);
 
 /** Blank bare year tokens so a period header ("perioodi september 2026") yields no amount. */
 function blankBareYearTokens(line: string): string {

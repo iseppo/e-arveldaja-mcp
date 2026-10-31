@@ -5219,6 +5219,14 @@ describe("#5 the year is never the invoice total", () => {
     expect(extractReceiptFieldsFromText(["Näidis OÜ", "Teenus 2 026,00 €", "Kokku 2 026,00 €"].join("\n"), "big.pdf").total_gross).toBe(2026);
     expect(extractReceiptFieldsFromText(["Näidis OÜ", "Kokku EUR 2026.00"].join("\n"), "big2.pdf").total_gross).toBe(2026);
   });
+
+  it("an integer total next to a currency code or a monetary dash stays a candidate", () => {
+    const total = (lastLine: string) =>
+      extractReceiptFieldsFromText(["Näidis OÜ", "Total services EUR 100.00", lastLine].join("\n"), "integer.pdf").total_gross;
+    expect(total("Total EUR: 2026")).toBe(2026);
+    expect(total("Total (EUR) 2026")).toBe(2026);
+    expect(total("Kokku 2026,- €")).toBe(2026);
+  });
 });
 
 describe("#5b supplier name from the registered association, not the manager footer", () => {
