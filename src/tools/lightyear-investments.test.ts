@@ -866,23 +866,55 @@ describe("lightyear investments tools", () => {
     ];
     const gainsRows = [["13/07/2026 10:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "10", "900", "1005", "105"]];
     for (const rows of [[...convB, ...convA, sellB, sellA], [...convB, ...convA, sellA, sellB]]) {
-      const statement = buildStatementCsv(rows);
-      const gains = buildCapitalGainsCsv(gainsRows);
-      let reads = 0;
-      mockedReadFile.mockImplementation(async () => (reads++ === 0 ? statement : gains) as unknown as Awaited<ReturnType<typeof readFile>>);
-      const { handler } = setupLightyearTool("book_lightyear_trades");
-      const payload = parseMcpResponse((await handler({
-        file_path: "/tmp/lightyear.csv", capital_gains_file: "/tmp/gains.csv",
-        investment_account: 1550, broker_account: 1120, dry_run: true,
-      })).content[0]!.text) as { results: Array<{ reference?: string; status?: string; cost_basis?: number }>; warnings?: string[] };
-      const a = payload.results.find(r => r.reference?.includes("OR-SAMESECA"));
-      const b = payload.results.find(r => r.reference?.includes("OR-SAMESECB"));
-      expect(a?.status).toBe("skipped");
-      expect(b?.status).not.toBe("skipped");
-      expect(b?.cost_basis).toBe(900);
+      await expectOnlyBOwnsRow(rows, gainsRows);
+    }
+  });
+
+  it("holds both same-second sells when the gains row's quantity tolerance covers each of them", async () => {
+    // A 10 and B 10.0000015 differ by more than the 1e-6 quantity tolerance, but a
+    // gains row of 10.00000075 lies within it of both: two owners, so neither may
+    // take it by identity, in either order.
+    const sellA = ["13/07/2026 10:00:00", "OR-OVLPA", "AMD", "US0079031078", "Sell", "10", "USD", "110", "1100.00", "", "0", "1100.00", ""];
+    const sellB = ["13/07/2026 10:00:00", "OR-OVLPB", "AMD", "US0079031078", "Sell", "10.0000015", "USD", "110.55", "1105.50", "", "0", "1105.50", ""];
+    const conv = (ref: string, ts: string, eur: string, usd: string) => [
+      [ts, ref, "EUR", "", "Conversion", "", "EUR", "", eur, "1.1", "", eur, ""],
+      [ts, ref, "USD", "", "Conversion", "", "USD", "", `-${usd}`, "0.90909", "0", `-${usd}`, ""],
+    ];
+    const gainsRows = [["13/07/2026 10:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "10.00000075", "900", "1007", "107"]];
+    for (const rows of [
+      [...conv("CN-OVLPB", "13/07/2026 10:00:20", "1005.00", "1105.50"), ...conv("CN-OVLPA", "13/07/2026 10:00:10", "1000.00", "1100.00"), sellB, sellA],
+      [...conv("CN-OVLPB", "13/07/2026 10:00:20", "1005.00", "1105.50"), ...conv("CN-OVLPA", "13/07/2026 10:00:10", "1000.00", "1100.00"), sellA, sellB],
+    ]) {
+      const payload = await bookRows(rows, gainsRows);
+      for (const ref of ["OR-OVLPA", "OR-OVLPB"]) {
+        expect(payload.results.find(r => r.reference?.includes(ref))?.status).toBe("skipped");
+      }
       expect((payload.warnings ?? []).join("\n")).not.toContain("FIFO match by exact identity");
     }
   });
+
+  type SameSecondPayload = { results: Array<{ reference?: string; status?: string; cost_basis?: number }>; warnings?: string[] };
+  async function bookRows(rows: string[][], gainsRows: string[][]): Promise<SameSecondPayload> {
+    const statement = buildStatementCsv(rows);
+    const gains = buildCapitalGainsCsv(gainsRows);
+    let reads = 0;
+    mockedReadFile.mockImplementation(async () => (reads++ === 0 ? statement : gains) as unknown as Awaited<ReturnType<typeof readFile>>);
+    const { handler } = setupLightyearTool("book_lightyear_trades");
+    return parseMcpResponse((await handler({
+      file_path: "/tmp/lightyear.csv", capital_gains_file: "/tmp/gains.csv",
+      investment_account: 1550, broker_account: 1120, dry_run: true,
+    })).content[0]!.text) as SameSecondPayload;
+  }
+
+  async function expectOnlyBOwnsRow(rows: string[][], gainsRows: string[][]): Promise<void> {
+    const payload = await bookRows(rows, gainsRows);
+    const a = payload.results.find(r => r.reference?.includes("OR-SAMESECA"));
+    const b = payload.results.find(r => r.reference?.includes("OR-SAMESECB"));
+    expect(a?.status).toBe("skipped");
+    expect(b?.status).not.toBe("skipped");
+    expect(b?.cost_basis).toBe(900);
+    expect((payload.warnings ?? []).join("\n")).not.toContain("FIFO match by exact identity");
+  }
 
   it("drops the FIFO tolerance warning for a sell that is already booked", async () => {
     const statement = buildStatementCsv(realJuly13Rows());

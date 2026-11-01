@@ -3011,9 +3011,10 @@ function matchSellsToCapitalGains(
   for (const { sell, consideration } of outsideTolerance) {
     const identityRows = normalizedCurrency(sell.ccy) === "EUR" ? [] :
       gains.flatMap((gain, i) => (sameSellIdentity(gain, sell) ? [i] : []));
-    const competingSells = sells.filter(other => other.datetime.trim() === sell.datetime.trim() &&
-      other.ticker === sell.ticker && Math.abs(other.quantity - sell.quantity) < 0.000001).length;
-    const idx = identityRows.length === 1 && competingSells === 1 && !consumedGains.has(identityRows[0]!) ? identityRows[0]! : null;
+    // Owners are counted against the gains row itself: two sells whose quantities
+    // both fall within the row's tolerance, though not each other's, both own it.
+    const owners = identityRows.length === 1 ? sells.filter(other => sameSellIdentity(gains[identityRows[0]!]!, other)).length : 0;
+    const idx = identityRows.length === 1 && owners === 1 && !consumedGains.has(identityRows[0]!) ? identityRows[0]! : null;
     if (idx !== null && withinProceedsTolerance(consideration, gains[idx]!.proceeds_eur, 0.02, IDENTITY_PROCEEDS_RELATIVE_BOUND)) {
       const gain = gains[idx]!;
       warnings.push(
