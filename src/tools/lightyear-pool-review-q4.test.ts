@@ -21,6 +21,9 @@ const mockedResolveFileInput = vi.mocked(resolveFileInput);
 const ACCOUNTS = { investment_account: 1550, broker_account: 1120, gain_loss_account: 8330, loss_account: 8335, fee_account: 8335, fx_account: 8500 };
 
 let statementRows: string[][] = [];
+let gainsRows: string[][] = [];
+const GAINS_PATH = "/tmp/CapitalGainsStatement-TESTACCT1-2026.csv";
+const GAINS_HEADER = "Date,Ticker,Name,ISIN,Country,Asset Class,Fees (EUR),Quantity,Cost Basis (EUR),Proceeds (EUR),Capital Gains (EUR)";
 
 function tradesTool(options: Parameters<typeof setupPoolTool>[2] = {}) {
   return setupPoolTool<LightyearTradesPayload>("book_lightyear_trades", ACCOUNTS, options);
@@ -62,7 +65,11 @@ describe("book_lightyear_trades — Codex review of Q1–Q5 (2026-11-01)", () =>
     mockedResolveFileInput.mockReset();
     mockedResolveFileInput.mockImplementation(async (input: string) => ({ path: input }));
     mockedReadFileCapped.mockReset();
-    mockedReadFileCapped.mockImplementation(async () => Buffer.from(lightyearStatementCsv(statementRows), "utf8"));
+    gainsRows = [];
+    mockedReadFileCapped.mockImplementation(async (path: string) => Buffer.from(
+      path === GAINS_PATH ? `${GAINS_HEADER}\n${gainsRows.map(row => row.map(value => `"${value}"`).join(",")).join("\n")}\n` : lightyearStatementCsv(statementRows),
+      "utf8",
+    ));
   });
 
   describe("#1 an orphan conversion leg is never pool funding", () => {
@@ -129,6 +136,46 @@ describe("book_lightyear_trades — Codex review of Q1–Q5 (2026-11-01)", () =>
       expect(reviewCode(dry.payload, "OR-TESTNERR2")).toBe("usd_pool_prerequisite_failed");
       expect(exec.payload.created ?? 0).toBe(0);
       expect(poolEvents(env)).toEqual([]);
+    });
+  });
+
+  describe("#4 bookability is decided before the pool projection", () => {
+    it("opening 3 USD / €1, ECB 3: a $1 buy with a $0.99 fee rounds to a zero investment and is skipped without consuming the pool; the $1→€0.33 conversion stops (no D8500 €0.01 / C1020 €0.01)", async () => {
+      statementRows = [buy("14/04/2026 10:00:00", "OR-TESTZERO1", "1.00", "0.99"), ...convOut("14/04/2026 11:00:00", "CN-TESTZERO1", "1.00", "0", "0.33")];
+      const env = tradesTool({ pool: [poolOpening(300, 100, "3")], fetch: rateFetch("3") });
+      const { dry, exec } = await env.book();
+      expect(resultFor(dry.payload, "OR-TESTZERO1")).toMatchObject({ status: "skipped" });
+      expect(reviewCode(dry.payload, "OR-TESTZERO1")).toBe("trade_amount_conflict");
+      expect(resultFor(dry.payload, "CN-TESTZERO1")).toMatchObject({ status: "skipped" });
+      expect(reviewCode(dry.payload, "CN-TESTZERO1")).toBe("usd_pool_prerequisite_failed");
+      expect(journal(env, "CN-TESTZERO1")).toBeUndefined();
+      expect(env.created.flatMap(entry => entry.postings ?? []).filter(posting => posting.accounts_id === 8500)).toEqual([]);
+      expect(exec.payload.created ?? 0).toBe(0);
+      expect(poolEvents(env)).toEqual([]);
+    });
+
+    it("a sell kept in USD whose gains cost basis has no exact cent value is held before the projection; the later pool buy stops", async () => {
+      statementRows = [
+        ["14/04/2026 10:00:00", "OR-TESTCOST1", "AMD", "US0079031078", "Sell", "1", "USD", "1", "30.00", "0", "0", "30.00", "0"],
+        buy("14/04/2026 12:00:00", "OR-TESTCOST2", "1.00"),
+      ];
+      gainsRows = [["14/04/2026 10:00:00", "AMD", "AMD", "US0079031078", "United States", "equity", "0", "1", "100000000000000000", "10.00", "-99999999999999990"]];
+      const env = tradesTool({ pool: [poolOpening(300, 100, "3")], fetch: rateFetch("3") });
+      const { dry, exec } = await env.book({ capital_gains_file: GAINS_PATH });
+      expect(resultFor(dry.payload, "OR-TESTCOST1")).toMatchObject({ status: "skipped" });
+      expect(reviewCode(dry.payload, "OR-TESTCOST1")).toBe("trade_amount_conflict");
+      expect(reviewCode(dry.payload, "OR-TESTCOST2")).toBe("usd_pool_prerequisite_failed");
+      expect(exec.payload.created ?? 0).toBe(0);
+      expect(poolEvents(env)).toEqual([]);
+    });
+
+    it("control: without the zero buy the same conversion relieves €0.33 of the 3 USD / €1 pool with no FX and books no journal", async () => {
+      statementRows = convOut("14/04/2026 11:00:00", "CN-TESTZERO1", "1.00", "0", "0.33");
+      const env = tradesTool({ pool: [poolOpening(300, 100, "3")], fetch: rateFetch("3") });
+      const { dry } = await env.book();
+      expect(resultFor(dry.payload, "CN-TESTZERO1")).toMatchObject({ status: "would_record", pool: { kind: "conversion_out", relief_eur: 0.33 } });
+      expect(env.create).not.toHaveBeenCalled();
+      expect(poolEvents(env)).toMatchObject([{ ref: "CN-TESTZERO1", usd_cents: -100, eur_cents: -33 }]);
     });
   });
 });

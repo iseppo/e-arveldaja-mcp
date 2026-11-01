@@ -3451,6 +3451,7 @@ function poolCommandReadiness(
     if (conflictedRefs.has(reference)) held.set(reference, "reference_conflict");
     else if (ownRefCandidates.has(reference)) held.set(reference, "reference_journal_date_mismatch");
     else if (pooled.pool!.kind === "sell_in" && !gainsMap.has(reference)) held.set(reference, "pool_sell_gains_unmatched");
+    else if (pooled.pool!.kind === "sell_in" && moneyToSafeCents(gainsMap.get(reference)!.cost_basis_eur) === null) held.set(reference, "trade_amount_conflict");
     kept.push(pooled);
   }
   return { pool: kept, held };
@@ -4802,6 +4803,18 @@ function extractPoolConversions(rows: AccountStatementRow[], extraction: TradeEx
   });
 }
 
+/** A pool buy's EUR amounts from its converted part and the ECB value of its pool part; not ok when the investment rounds to ≤ 0. */
+function buyInvestmentCents(trade: InvestmentTrade, ecbCents: number):
+  | { ok: true; fxFee: number; total: number; fee: number; investment: number }
+  | { ok: false } {
+  const tradePool = trade.pool!;
+  const fxFee = moneyToSafeCents(trade.fx_fee_eur);
+  const total = tradePool.conv_eur_cents + ecbCents;
+  const fee = divideHalfUp(BigInt(tradePool.fee_usd_cents) * BigInt(total), BigInt(tradePool.gross_usd_cents));
+  const investment = total - fee;
+  return fxFee === null || investment <= 0 ? { ok: false } : { ok: true, fxFee, total, fee, investment };
+}
+
 /**
  * Value the USD-pool trades of a trades run (plan Q3, generalised C4):
  * - sell kept in USD: net and fee at the frozen ECB rate of the trade day
@@ -4902,6 +4915,9 @@ async function valuePoolTrades(params: {
       const grossCents = usdCentsToEurCents(tradePool.gross_usd_cents, rate);
       valueConflict = feeCents === null || grossCents === null || Math.abs(ecbCents + feeCents - grossCents) > 1;
     }
+    // Every bookability check that does not need the pool state runs before the projection, so a
+    // trade that would be skipped never consumes provisional pool state (Codex review of Q4, #4).
+    if (tradePool.kind === "buy_relief" && ecbCents !== null && !buyInvestmentCents(trade, ecbCents).ok) valueConflict = true;
     prepared.set(trade.reference, { trade, ecb: outcome.ok ? outcome.rate : null, ecbCents, feeCents });
     // Only a usd_pool_funded trade may be valued: an intrinsic pairing/conversion error
     // (invalid_conversion_pair, conversion_*_conflict, …) is a barrier, never a zero consideration.
@@ -4950,11 +4966,9 @@ async function valuePoolTrades(params: {
       continue;
     }
     const relief = projected.relief_eur_cents!;
-    const fxFee = moneyToSafeCents(trade.fx_fee_eur);
-    const total = tradePool.conv_eur_cents + ecbCents;
-    const fee = divideHalfUp(BigInt(tradePool.fee_usd_cents) * BigInt(total), BigInt(tradePool.gross_usd_cents));
-    const investment = total - fee;
-    if (fxFee === null || investment <= 0) { trade.fx_review_reason = fxReason("trade_amount_conflict"); continue; }
+    const amounts = buyInvestmentCents(trade, ecbCents);
+    if (!amounts.ok) { trade.fx_review_reason = fxReason("trade_amount_conflict"); continue; }
+    const { fxFee, total, fee, investment } = amounts;
     tradePool.valuation = {
       kind: "buy_relief", ecb,
       pool_ecb_eur_cents: ecbCents,
