@@ -256,6 +256,29 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
     expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_prerequisite_failed");
   });
 
+  it("a pool sell's gains row naming another ISIN is never its cost basis", async () => {
+    const otherIsin = [...S_GAIN];
+    otherIsin[3] = "US0000000001";
+    load([S, B], [otherIsin]);
+    const env = fcTool();
+    const dry = await env.run({ ...withGains, dry_run: true });
+    expect(resultFor(dry.payload, "OR-TESTFCS")).toMatchObject({ status: "skipped" });
+    expect(reviewCode(dry.payload, "OR-TESTFCS")).toBe("pool_sell_gains_unmatched");
+    expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_prerequisite_failed");
+  });
+
+  it("two same-second pool sells competing for one gains row: neither takes it, in any statement order", async () => {
+    const S2 = sell("10/04/2026 10:00:00", "OR-TESTFCS2", "100.10", "0.10");
+    for (const rows of [[S, S2, B], [S2, S, B]]) {
+      load(rows, [S_GAIN]);
+      const env = fcTool();
+      const dry = await env.run({ ...withGains, dry_run: true });
+      expect(reviewCode(dry.payload, "OR-TESTFCS")).toBe("pool_sell_gains_unmatched");
+      expect(reviewCode(dry.payload, "OR-TESTFCS2")).toBe("pool_sell_gains_unmatched");
+      expect(reviewCode(dry.payload, "OR-TESTFCB")).toBe("usd_pool_prerequisite_failed");
+    }
+  });
+
   it("T-FC3: with no pool key (account not in the file name) a pool sell is a review and nothing is written", async () => {
     load([S, B], [S_GAIN]);
     const env = fcTool();

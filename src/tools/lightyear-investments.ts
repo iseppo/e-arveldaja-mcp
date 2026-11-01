@@ -2945,29 +2945,37 @@ function matchSellsToCapitalGains(
   const consumedGains = new Set<number>();
   const outsideTolerance: Array<{ sell: InvestmentTrade; consideration: number }> = [];
 
+  // A sell kept in USD is valued at ECB, not Lightyear's rate (plan D3): it
+  // matches its gains row by identity — the exact statement date and time,
+  // ticker, quantity and no conflicting ISIN — never by proceeds. Decided first
+  // and only for the row's sole same-day owner, so no proceeds match and no
+  // statement order decides whose cost basis it is.
   for (const sell of sells) {
-    if (sell.pool?.kind === "sell_in") {
-      // A sell kept in USD is valued at ECB, not Lightyear's rate (plan D3): it
-      // matches its gains row by identity — the exact statement date and time,
-      // ticker and quantity — never by proceeds.
-      const identity: number[] = [];
-      for (let i = 0; i < gains.length; i++) {
-        const gain = gains[i]!;
-        if (consumedGains.has(i) || gain.date.trim() !== sell.datetime.trim() || gain.ticker !== sell.ticker) continue;
-        if (Math.abs(gain.quantity - sell.quantity) >= 0.000001) continue;
-        identity.push(i);
-      }
-      if (identity.length === 1) {
-        result.set(sell.reference, gains[identity[0]!]!);
-        consumedGains.add(identity[0]!);
-      } else if (identity.length > 1) {
-        warnings.push(
-          `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} at ${sell.datetime}): ` +
-          `${identity.length} gains rows match date and time+ticker+qty. Skipping — verify cost basis manually and book the journal by hand.`
-        );
-      }
-      continue;
+    if (sell.pool?.kind !== "sell_in") continue;
+    const identity = gains.flatMap((gain, i) => (sameSellIdentity(gain, sell) ? [i] : []));
+    const owners = identity.length === 1 ? sells.filter(other => sameDayCandidate(gains[identity[0]!]!, other)).length : 0;
+    if (identity.length === 1 && owners === 1 && !consumedGains.has(identity[0]!)) {
+      result.set(sell.reference, gains[identity[0]!]!);
+      consumedGains.add(identity[0]!);
+    } else if (identity.length > 1 || owners > 1) {
+      warnings.push(
+        `Ambiguous FIFO match for sell ${sell.reference} (${sell.ticker} x${sell.quantity} at ${sell.datetime}): ` +
+        (identity.length > 1
+          ? `${identity.length} gains rows match date and time+ticker+qty. `
+          : `another sell of that day, ticker and quantity could claim its gains row. `) +
+        `Skipping — verify cost basis manually and book the journal by hand.`
+      );
+    } else if (gains.some(gain => gain.date.trim() === sell.datetime.trim() && gain.ticker === sell.ticker &&
+      Math.abs(gain.quantity - sell.quantity) < 0.000001 && conflictingIsin(gain, sell))) {
+      warnings.push(
+        `FIFO candidate for sell ${sell.reference} (${sell.ticker} x${sell.quantity} at ${sell.datetime}) names another ISIN. ` +
+        `Skipping — verify cost basis manually and book the journal by hand.`
+      );
     }
+  }
+
+  for (const sell of sells) {
+    if (sell.pool?.kind === "sell_in") continue;
     const consideration = sellConsiderationEur(sell);
     const exactMatches: number[] = [];
     const tolerantMatches: number[] = [];
