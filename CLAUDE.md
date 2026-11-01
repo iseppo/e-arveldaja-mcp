@@ -580,6 +580,23 @@ All mutating API methods (`create`, `update`, `delete`, `confirm`, `deactivate`,
 - **Duplicate detection**: Journal `document_number` field stores `LY:{reference}` (e.g., `LY:OR-EVN9C76R7A`). A distribution row with no reference match but a non-`LY:` journal debiting the broker account/dimension with its net EUR amount within ±1 day goes to review (`possible_existing_journal`, `candidate_journal_ids`) — legacy hand bookings used generic numbers such as `reward`
 - **Dry run default**: Both `book_lightyear_trades` and `book_lightyear_distributions` default to `dry_run=true`
 
+### ECB reference rates (Lightyear FX)
+
+`src/fx/ecb-rates.ts` reads the ECB euro reference rates from
+`https://data-api.ecb.europa.eu/service/data/EXR/D.{CCY}.EUR.SP00.A?startPeriod=…&endPeriod=…&format=csvdata`
+(public, no credentials; HTTPS, fixed host, 10 s timeout, ≤ 64 KiB body, every row's `KEY`,
+`TIME_PERIOD` and `OBS_VALUE` checked; `OBS_VALUE` is foreign units per 1 EUR, kept as the
+published string). Rule: the observation dated on the requested day, else the most recent
+earlier one within 7 calendar days (weekends, TARGET holidays); today or later (Europe/Tallinn)
+is `ecb_rate_not_final`; no observation / network / HTTP error is `ecb_rate_unavailable`; a
+malformed answer is `ecb_response_invalid`. A rate is cached as final only when the same
+response holds a later day's observation (the ECB may correct a rate until the next one is
+published); otherwise the next resolve refetches. The cache is public data and survives
+`switch_connection`. Dry runs freeze every outcome they used — successes and failures — in the
+plan's private `fx_outcomes`; execute replays them with `replayFrozenFx` and never fetches
+(a key the plan never resolved is `fx_rate_unbound` → `plan_drift`). A failure is always a
+review row, never a guessed rate.
+
 ## Security Notes
 
 - File read operations (PDF, CSV) resolve symlinks via `realpath()` and re-check extensions
