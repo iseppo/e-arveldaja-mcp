@@ -71,13 +71,16 @@ function event(ref: string, day: string, kind: UsdPoolEvent["kind"], usd: number
   return {
     record: "event", pool_key: KEY, ref, ts: ts(day), kind, usd_cents: usd, eur_cents: eur,
     document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: brokerNet, state: "committed",
-    postings: brokerPostings(brokerNet), source_digest: sourceDigestOf(ref, ts(day)), recorded_at: "t",
+    postings: brokerPostings(brokerNet), source_digest: sourceDigestOf(ref, ts(day)), effective_date: JOURNAL_DATE, recorded_at: "t",
   };
 }
 
+/** Effective date of every {@link journal}; {@link event} records it as the approved date. */
+const JOURNAL_DATE = "2026-10-01";
+
 function journal(id: number, documentNumber: string, brokerNetCents: number, extra: Partial<Journal> = {}): Journal {
   return {
-    id, document_number: documentNumber, effective_date: "2026-10-01", registered: true, is_deleted: false,
+    id, document_number: documentNumber, effective_date: JOURNAL_DATE, registered: true, is_deleted: false,
     postings: [{ accounts_id: 1020, accounts_dimensions_id: 11, type: brokerNetCents >= 0 ? "D" : "C", amount: Math.abs(brokerNetCents) / 100 }],
     ...extra,
   };
@@ -198,6 +201,24 @@ describe("validateUsdPool", () => {
     }
   });
 
+  it("a journal-backed record without its approved effective date never validates (review r2 #2)", async () => {
+    // The Apr 1 USD100 / €80 distribution logged without a date, its journal moved to Jun 1: an April buy must not
+    // relieve €127.50 from it.
+    const april = eventOrder("OR-APR", ts("2026-04-20"));
+    const { effective_date: _omitted, ...undated } = event("DD-APR", "2026-04-01", "distribution_in", 10000, 8000, 1);
+    for (const day of ["2026-06-01", "2026-04-01"]) {
+      expect(await base([opening(10000, 9000, "2026-03-31"), undated], [journal(1, "LY:DD-APR", 8000, { effective_date: day })], { until: april, newRecords: [april] }))
+        .toEqual({ ok: false, code: "usd_pool_event_mismatch", detail: "LY:DD-APR" });
+    }
+    const reval: UsdPoolCheckpoint = {
+      record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
+      usd_cents: 10000, eur_cents: 9015, fx_cents: 14, journal_id: 9, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
+      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), recorded_at: "t",
+    };
+    expect(await base([opening(10000, 9001), reval], [journal(9, "LY-FX:CHZELUU:USD:2026-10-15", 14)]))
+      .toEqual({ ok: false, code: "usd_pool_chain_broken", detail: "LY-FX:CHZELUU:USD:2026-10-15" });
+  });
+
   it("an interleaved later distribution does not block an earlier buy, and is excluded from its state", async () => {
     const records = [opening(10000, 9000), event("D-1", "2026-10-01", "distribution_in", 10000, 8000, 1), event("D-30", "2026-10-30", "distribution_in", 10000, 10000, 2)];
     const until = eventOrder("OR-19", ts("2026-10-19"));
@@ -239,7 +260,7 @@ describe("validateUsdPool", () => {
     const reval: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10775, eur_cents: 9700, fx_cents: 14, journal_id: 9, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), recorded_at: "t",
+      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), effective_date: JOURNAL_DATE, recorded_at: "t",
     };
     const records = [opening(10000, 9000), event("IN-1", "2026-10-01", "distribution_in", 775, 686, 1), reval];
     const good = [journal(1, "LY:IN-1", 686), journal(9, "LY-FX:CHZELUU:USD:2026-10-15", 14)];
@@ -253,7 +274,7 @@ describe("validateUsdPool", () => {
     const reval: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10000, eur_cents: 9015, fx_cents: 14, journal_id: 9, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), recorded_at: "t",
+      rate: "1.1108", rate_date: "2026-10-15", postings: brokerPostings(14), effective_date: JOURNAL_DATE, recorded_at: "t",
     };
     const journals = [journal(9, "LY-FX:CHZELUU:USD:2026-10-15", 14)];
     expect((await base([opening(10000, 9001), reval], journals)).ok).toBe(true);
@@ -354,15 +375,42 @@ describe("recoverUsdPoolIntents", () => {
     expect(store.records.find(r => r.record === "event")).toMatchObject({ state: "committed", journal_id: 77 });
   });
 
-  it("a revaluation intent commits its checkpoint", async () => {
+  it("a pre-fix intent without its approved effective date is held, never committed (review r2 #2)", async () => {
+    // Opening 100 USD / €90; the Apr 1 USD100 / €80 distribution's journal was moved to Jun 1. Committing the date-less
+    // intent would let an April 150 USD buy relieve €127.50 from a journal that now counts only in June.
+    const dated = { ...event("DD-APR", "2026-04-01", "distribution_in", 10000, 8000, 0), journal_id: null, state: "intent" as const, effective_date: "2026-04-01" };
+    const { effective_date: _omitted, ...undated } = dated;
+    const store = memoryUsdPoolStore([opening(10000, 9000, "2026-03-31"), undated]);
+    for (const day of ["2026-06-01", "2026-04-01"]) {
+      expect(await recoverUsdPoolIntents(poolApi([journal(77, "LY:DD-APR", 8000, { effective_date: day })]), store, KEY))
+        .toEqual({ ok: false, code: "usd_pool_uncertain_outcome" });
+      expect(store.records.find(r => r.record === "event")).toMatchObject({ state: "intent", journal_id: null });
+    }
+    // A revaluation intent whose checkpoint lacks the date is held too.
     const checkpoint: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-30", ts: endOfDaySeconds("2026-10-30"),
       usd_cents: 10000, eur_cents: 8951, fx_cents: 54, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-30",
       rate: "1.1172", rate_date: "2026-10-30", postings: brokerPostings(54), recorded_at: "t",
     };
+    const reval = memoryUsdPoolStore([opening(10000, 8897), {
+      record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-30", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 54,
+      document_number: "LY-FX:CHZELUU:USD:2026-10-30", journal_id: null, journal_broker_net_cents: 54, state: "intent", checkpoint,
+      postings: brokerPostings(54), effective_date: JOURNAL_DATE, recorded_at: "t",
+    }]);
+    expect(await recoverUsdPoolIntents(poolApi([journal(5, "LY-FX:CHZELUU:USD:2026-10-30", 54)]), reval, KEY))
+      .toEqual({ ok: false, code: "usd_pool_uncertain_outcome" });
+    expect(reval.records.some(r => r.record === "checkpoint" && r.kind === "revaluation")).toBe(false);
+  });
+
+  it("a revaluation intent commits its checkpoint", async () => {
+    const checkpoint: UsdPoolCheckpoint = {
+      record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-30", ts: endOfDaySeconds("2026-10-30"),
+      usd_cents: 10000, eur_cents: 8951, fx_cents: 54, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-30",
+      rate: "1.1172", rate_date: "2026-10-30", postings: brokerPostings(54), effective_date: JOURNAL_DATE, recorded_at: "t",
+    };
     const store = memoryUsdPoolStore([opening(10000, 8897), {
       record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-30", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 54,
-      document_number: "LY-FX:CHZELUU:USD:2026-10-30", journal_id: null, journal_broker_net_cents: 54, state: "intent", checkpoint, postings: brokerPostings(54), recorded_at: "t",
+      document_number: "LY-FX:CHZELUU:USD:2026-10-30", journal_id: null, journal_broker_net_cents: 54, state: "intent", checkpoint, postings: brokerPostings(54), effective_date: JOURNAL_DATE, recorded_at: "t",
     }]);
     expect((await recoverUsdPoolIntents(poolApi([journal(5, "LY-FX:CHZELUU:USD:2026-10-30", 54)]), store, KEY)).ok).toBe(true);
     expect(store.records.filter(r => r.record === "event")).toHaveLength(0);
@@ -376,11 +424,11 @@ describe("recoverUsdPoolIntents — checkpoint write failure (review wpc 2)", ()
     const checkpoint: UsdPoolCheckpoint = {
       record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
       usd_cents: 10000, eur_cents: 9500, fx_cents: 500, journal_id: null, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-      rate: "1.0526", rate_date: "2026-10-15", postings: brokerPostings(500), recorded_at: "t",
+      rate: "1.0526", rate_date: "2026-10-15", postings: brokerPostings(500), effective_date: JOURNAL_DATE, recorded_at: "t",
     };
     const intent: UsdPoolEvent = {
       record: "event", pool_key: KEY, ref: "LY-FX:CHZELUU:USD:2026-10-15", ts: checkpoint.ts, kind: "revaluation", usd_cents: 0, eur_cents: 500,
-      document_number: "LY-FX:CHZELUU:USD:2026-10-15", journal_id: null, journal_broker_net_cents: 500, state: "intent", checkpoint, postings: brokerPostings(500), recorded_at: "t",
+      document_number: "LY-FX:CHZELUU:USD:2026-10-15", journal_id: null, journal_broker_net_cents: 500, state: "intent", checkpoint, postings: brokerPostings(500), effective_date: JOURNAL_DATE, recorded_at: "t",
     };
     const store = memoryUsdPoolStore([opening(10000, 9000, "2026-09-30", "1.1111111111"), intent]);
     const upsert = store.upsert.bind(store);
@@ -532,7 +580,7 @@ describe("validateUsdPool — canonical postings on every pool record (r1 #6)", 
   kinds.push(["revaluation", {
     record: "checkpoint", pool_key: KEY, kind: "revaluation", as_of: "2026-10-15", ts: endOfDaySeconds("2026-10-15"),
     usd_cents: 10000, eur_cents: 9054, fx_cents: 54, journal_id: 1, document_number: "LY-FX:CHZELUU:USD:2026-10-15",
-    rate: "1.1045", rate_date: "2026-10-15", postings: revaluation, recorded_at: "t",
+    rate: "1.1045", rate_date: "2026-10-15", postings: revaluation, effective_date: JOURNAL_DATE, recorded_at: "t",
   }, revaluation, p => p.map(x => x.accounts_id === 8500 ? { ...x, accounts_dimensions_id: 4 } : x), p => p.map(x => x.accounts_id === 8500 ? { ...x, accounts_id: 8530 } : x)]);
 
   const numberOf = (record: UsdPoolRecord) => record.document_number!;

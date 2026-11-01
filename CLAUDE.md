@@ -639,7 +639,8 @@ leftovers from the ledger and never recreates a journal. Every pool record carri
 (account, dimension, side, cents; the opening and journal-free records `[]`): readback, recovery and validation
 compare the journal's posting multiset with it, not only the broker net (a mismatch is `usd_pool_commit_deferred`,
 `usd_pool_uncertain_outcome`, `usd_pool_chain_broken`); a record without postings breaks the chain. Journal-backed records and
-revaluation checkpoints also carry the approved `effective_date`, checked the same way. Each statement-derived
+revaluation checkpoints also carry the approved `effective_date`, checked the same way; one without it never matches
+(recovery keeps such an intent, `usd_pool_uncertain_outcome`; journal-free records and the opening have none). Each statement-derived
 event carries a `source_digest` of its USD rows (time, type, ticker, quantity, gross/fee/net cents); a later
 statement covering that day that lacks the row, moves it or changes its amounts is `usd_pool_source_changed`. A row
 whose digest cannot be computed (an amount finer than a cent) is `usd_pool_source_unbound` — never logged, later

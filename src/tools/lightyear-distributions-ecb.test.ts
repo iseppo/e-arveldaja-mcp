@@ -367,7 +367,7 @@ describe("book_lightyear_distributions fx_source=ecb", () => {
       processA.upsert([{
         record: "event", pool_key: key, ref: "OR-TESTA20", ts: Date.parse("2026-10-20T12:00:00Z") / 1000, kind: "buy_relief",
         usd_cents: -5000, eur_cents: -4500, document_number: "LY:OR-TESTA20", journal_id: 7001, journal_broker_net_cents: -4500,
-        state: "committed", postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: 4500 }], source_digest: "fixture-source-digest", recorded_at: "t",
+        state: "committed", postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: 4500 }], source_digest: "fixture-source-digest", effective_date: "2026-10-20", recorded_at: "t",
       }]);
       expect(processB.read()).toHaveLength(1); // still stale outside the lock
       const exec = await env.run({ fx_source: "ecb", dry_run: false, plan_handle: dry.payload.plan_handle });

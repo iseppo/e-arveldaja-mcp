@@ -210,7 +210,7 @@ export async function simulateLightyearYear(params: SimulateParams): Promise<Sim
       id, document_number: documentNumber, effective_date: command.date, registered: true, is_deleted: false,
       postings: command.postings.map(posting => ({ ...posting })),
     } as Journal);
-    if (event) store.upsert([{ ...event, postings, state: "committed", journal_id: id, recorded_at: "rebuild" }]);
+    if (event) store.upsert([{ ...event, postings, effective_date: command.date, state: "committed", journal_id: id, recorded_at: "rebuild" }]);
     journals.push({ document_number: documentNumber, date: command.date, source, ...(event ? { pool_kind: event.kind } : {}), journal_free: false, postings });
   };
 

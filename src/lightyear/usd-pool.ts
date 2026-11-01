@@ -530,10 +530,11 @@ type JournalCheck = "ok" | "mismatch" | "postings" | "unregistered";
 export function journalMatchesPoolRecord(
   journal: Journal,
   key: Pick<PoolKey, "broker_account" | "broker_dimension_id">,
-  expect: { document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date?: string },
+  expect: { document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date: string | undefined },
 ): "ok" | "mismatch" | "postings" {
   if (journal.is_deleted === true || journal.document_number !== expect.document_number) return "mismatch";
-  if (expect.effective_date !== undefined && String(journal.effective_date ?? "").slice(0, 10) !== expect.effective_date) return "mismatch";
+  // A journal-backed record without its approved date proves nothing about when it counts (review r2 #2).
+  if (typeof expect.effective_date !== "string" || String(journal.effective_date ?? "").slice(0, 10) !== expect.effective_date) return "mismatch";
   if (journalBrokerNetCents(journal, key) !== expect.broker_net_cents) return "mismatch";
   if (!Array.isArray(expect.postings) || !samePostings(canonicalPoolPostings(journal.postings ?? []), expect.postings)) return "postings";
   return "ok";
@@ -542,7 +543,7 @@ export function journalMatchesPoolRecord(
 async function checkLoggedJournal(
   reader: JournalReader,
   key: PoolKey,
-  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date?: string },
+  expect: { journal_id: number | null; document_number: string | null; broker_net_cents: number; postings: readonly PoolPosting[] | undefined; effective_date: string | undefined },
   requireRegistered: boolean,
 ): Promise<JournalCheck> {
   if (expect.journal_id === null) return "mismatch";
@@ -586,6 +587,9 @@ export async function recoverUsdPoolIntents(api: ApiContext, store: UsdPoolStore
       continue;
     }
     if (matches.length !== 1) { unresolved = true; continue; }
+    // A journal exists: committing needs the approved effective date (a pre-fix intent has none; it stays, review r2 #2).
+    if (typeof intent.effective_date !== "string"
+      || (intent.kind === "revaluation" && intent.checkpoint?.effective_date !== intent.effective_date)) { unresolved = true; continue; }
     const journalId = matches[0]!.id!;
     let check: JournalCheck;
     try {

@@ -414,7 +414,7 @@ describe("book_lightyear_trades — USD sells kept in USD and pool-paid buys (pl
   const committedRelief = (ref: string, iso: string, usd: number, eur: number, journalId: number): { event: UsdPoolEvent; journal: Journal } => ({
     event: {
       record: "event", pool_key: OPENING.pool_key, ref, ts: Date.parse(iso) / 1000, kind: "buy_relief", usd_cents: -usd, eur_cents: -eur,
-      document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: -eur, state: "committed", source_digest: "fixture-source-digest", recorded_at: "t",
+      document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: -eur, state: "committed", source_digest: "fixture-source-digest", effective_date: iso.slice(0, 10), recorded_at: "t",
       postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "C", amount_cents: eur }, { accounts_id: 1550, accounts_dimensions_id: null, type: "D", amount_cents: eur }],
     },
     journal: {

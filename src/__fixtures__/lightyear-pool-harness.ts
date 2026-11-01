@@ -40,6 +40,9 @@ export function rateFetch(fallback = "1.1225", rates: Record<string, string> = {
   }) as FetchMock;
 }
 
+/** Effective date of every {@link poolJournal}; {@link poolDistribution} records it as the approved date. */
+export const FIXTURE_JOURNAL_DATE = "2026-01-01";
+
 /** Placeholder source digest for a logged event whose day the test statement does not cover. */
 export const FIXTURE_SOURCE_DIGEST = "fixture-source-digest";
 
@@ -60,7 +63,7 @@ export function poolOpening(usd: number, eur: number, rate: string, asOf = "2025
 export function poolDistribution(ref: string, iso: string, usd: number, eur: number, journalId: number, incomeAccount = 8320, sourceDigest = FIXTURE_SOURCE_DIGEST): UsdPoolEvent {
   return {
     record: "event", pool_key: POOL_KEY, ref, ts: Date.parse(iso) / 1000, kind: "distribution_in", usd_cents: usd, eur_cents: eur,
-    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", source_digest: sourceDigest,
+    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", source_digest: sourceDigest, effective_date: FIXTURE_JOURNAL_DATE,
     postings: [
       { accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount_cents: eur },
       { accounts_id: incomeAccount, accounts_dimensions_id: null, type: "C", amount_cents: eur },
@@ -71,7 +74,7 @@ export function poolDistribution(ref: string, iso: string, usd: number, eur: num
 
 export function poolJournal(id: number, ref: string, eurCents: number, incomeAccount = 8320): Journal {
   return {
-    id, document_number: `LY:${ref}`, effective_date: "2026-01-01", registered: true, is_deleted: false,
+    id, document_number: `LY:${ref}`, effective_date: FIXTURE_JOURNAL_DATE, registered: true, is_deleted: false,
     postings: [{ accounts_id: 1120, type: "D", amount: eurCents / 100 }, { accounts_id: incomeAccount, type: "C", amount: eurCents / 100 }],
   };
 }

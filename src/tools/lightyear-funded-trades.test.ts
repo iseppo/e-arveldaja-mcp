@@ -80,7 +80,7 @@ function opening(usd: number, eur: number, rate: string, asOf = "2026-09-30"): U
 function poolEvent(ref: string, iso: string, usd: number, eur: number, journalId: number, sourceRows: string[][] = DISTRIBUTIONS): UsdPoolEvent {
   return {
     record: "event", pool_key: KEY, ref, ts: Date.parse(iso) / 1000, kind: "distribution_in", usd_cents: usd, eur_cents: eur,
-    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", source_digest: sourceDigestOf(sourceRows, ref), recorded_at: "t",
+    document_number: `LY:${ref}`, journal_id: journalId, journal_broker_net_cents: eur, state: "committed", source_digest: sourceDigestOf(sourceRows, ref), effective_date: "2026-10-01", recorded_at: "t",
     postings: [{ accounts_id: 1120, accounts_dimensions_id: null, type: "D", amount_cents: eur }, { accounts_id: 8320, accounts_dimensions_id: null, type: "C", amount_cents: eur }],
   };
 }
